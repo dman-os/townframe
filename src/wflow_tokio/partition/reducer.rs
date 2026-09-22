@@ -68,11 +68,19 @@ pub fn start_tokio_partition_reducer(
     let fut = {
         let cancel_token = cancel_token.clone();
         async move {
-            let latest_entry_id_at_start = pcx
-                .log
-                .latest_idx()
-                .await
-                .wrap_err("error getting latest id from log")?;
+            debug!("reducer startup: reading latest log index");
+            // The pre-loop awaits are plain awaits: without selecting on the cancel
+            // token here, a cancel that lands while the reducer is starting leaves it
+            // parked, and `TokioPartitionReducerHandle::stop` can only time out and
+            // abort it (losing its final snapshot) instead of stopping it.
+            let latest_entry_id_at_start = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return eyre::Ok(()),
+                res = pcx.log.latest_idx() => {
+                    res.wrap_err("error getting latest id from log")?
+                }
+            };
+            debug!(latest_entry_id_at_start, "reducer startup: latest log index read");
             let replay_is_empty =
                 latest_entry_id_at_start == 0 || start_offset > latest_entry_id_at_start;
 
@@ -94,9 +102,17 @@ pub fn start_tokio_partition_reducer(
                 did_reschedule_after_replay: false,
             };
 
-            worker
-                .index_existing_effect_sources(start_offset, latest_entry_id_at_start)
-                .await?;
+            debug!(start_offset, latest_entry_id_at_start, "reducer startup: indexing existing effect sources");
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return eyre::Ok(()),
+                res = worker
+                    .index_existing_effect_sources(start_offset, latest_entry_id_at_start) =>
+                {
+                    res?
+                }
+            }
+            debug!("reducer startup: effect sources indexed");
 
             let log = pcx.log_ref();
             let mut stream = log.tail(start_offset);
@@ -105,7 +121,14 @@ pub fn start_tokio_partition_reducer(
 
             debug!("starting");
             if replay_is_empty {
-                worker.reschedule_effects_after_replay().await?;
+                debug!("reducer startup: rescheduling effects after replay");
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => return eyre::Ok(()),
+                    res = worker.reschedule_effects_after_replay() => {
+                        res?
+                    }
+                }
             }
             loop {
                 // Poll the stream with cancellation check
@@ -238,7 +261,12 @@ impl TokioPartitionReducer {
         start_offset: u64,
         latest_entry_id_at_start: u64,
     ) -> Res<()> {
-        if start_offset > latest_entry_id_at_start {
+        // `latest_entry_id_at_start` is 0 when the log is empty (`latest_idx`) and
+        // entry ids are 1-based (`start_offset` is `last_applied + 1`), so an empty
+        // range has nothing to index. Reading it with a live tail would park on the
+        // next entry instead: the reducer would never reach its loop, so a cancel
+        // could only be honoured by `stop`'s join timing out and aborting the task.
+        if latest_entry_id_at_start == 0 || start_offset > latest_entry_id_at_start {
             return Ok(());
         }
         let mut stream = self.log.tail(start_offset);

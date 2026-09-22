@@ -2065,7 +2065,7 @@ async fn memory_sync_large_gap_for_count(obj_count: usize, sync_mode: SyncMode) 
 const SPARSE_TOTAL: usize = 20_000;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn long_af_test_memory_sync_sparse_dirt_uses_bucket_work() -> Res<()> {
+async fn long_test_memory_sync_sparse_dirt_uses_bucket_work() -> Res<()> {
     const SHARED: usize = SPARSE_TOTAL - 3;
     let bucket = run_band_scenario("sparse", SPARSE_TOTAL, SHARED, SyncMode::Bucket).await?;
     let cursor = run_band_scenario("sparse", SPARSE_TOTAL, SHARED, SyncMode::CursorOnly).await?;
@@ -2214,7 +2214,7 @@ async fn long_test_memory_sync_large_gap_uses_bucket_catchup_10k() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn long_af_test_memory_sync_large_gap_uses_bucket_catchup_100k() -> Res<()> {
+async fn long_test_memory_sync_large_gap_uses_bucket_catchup_100k() -> Res<()> {
     memory_sync_large_gap_for_count(100_000, SyncMode::Bucket)
         .await
         .map(drop)

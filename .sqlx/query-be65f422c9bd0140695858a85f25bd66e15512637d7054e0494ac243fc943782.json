@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO big_repo_keyhive_admission_readers(scope_id, reader)\n             VALUES (?1, ?2)\n             ON CONFLICT(scope_id, reader) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "be65f422c9bd0140695858a85f25bd66e15512637d7054e0494ac243fc943782"
+}

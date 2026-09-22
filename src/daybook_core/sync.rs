@@ -39,6 +39,15 @@ struct SubductionProtocolHandler {
 }
 
 impl ProtocolHandler for SubductionProtocolHandler {
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            worker = "subduction-accept",
+            otel.kind = "server",
+            peer_id = tracing::field::Empty,
+        ),
+    )]
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let conn = self
             .big_repo
@@ -49,6 +58,8 @@ impl ProtocolHandler for SubductionProtocolHandler {
             )
             .await
             .map_err(|err| AcceptError::from_boxed(err.into()))?;
+        // The peer is only known once the connection is accepted.
+        tracing::Span::current().record("peer_id", tracing::field::display(&conn.peer_id));
         tracing::debug!(peer_id = %conn.peer_id, "subduction conn accepted");
         self.incoming_conn_tx.send(conn).ok();
         Ok(())
@@ -190,6 +201,7 @@ impl IrohSyncRepoStopToken {
 }
 
 impl IrohSyncRepo {
+    #[tracing::instrument(level = "debug", skip_all, err(Debug), fields(worker = "iroh-sync"))]
     pub async fn boot(
         rcx: Arc<RepoCtx>,
         config_repo: Arc<crate::config::ConfigRepo>,
@@ -224,7 +236,6 @@ impl IrohSyncRepo {
         // blocks `wait_for_full_sync` forever.
         let blob_inventory_permission_stop = crate::blobs::spawn_blob_inventory_permission_writer(
             Arc::clone(&rcx.blob_part_store),
-            Arc::clone(&rcx.sqlite_local_state_repo),
             Arc::clone(&rcx.big_repo),
             vec![
                 rcx.core_inventory_doc_id.clone(),
@@ -451,6 +462,7 @@ impl IrohSyncRepo {
         (doc, blob)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(worker = "sync-reconnect"))]
     async fn spawn_connect_known_devices_once(self: &Arc<Self>, trigger: &'static str) {
         let Ok(mut reconnect_task) = self.reconnect_task.try_lock() else {
             // if locked, someone else has already qued an reconnect task or
@@ -468,7 +480,16 @@ impl IrohSyncRepo {
         //     let _ = done.await;
         // }
         let repo = Arc::clone(self);
-        let handle = tokio::spawn(async move {
+        // The sweep is a sibling of whatever asked for it (the machine loop's
+        // periodic tick, a connection teardown), not a child of it: its span
+        // stays a root and is linked causally instead of nested.
+        let reconnect_span = tracing::debug_span!(
+            parent: None,
+            "sync_reconnect",
+            worker = "sync-reconnect",
+        );
+        reconnect_span.follows_from(tracing::Span::current());
+        let reconnect_fut = async move {
             let _cancelled = repo
                 .cancel_token
                 .clone()
@@ -480,10 +501,12 @@ impl IrohSyncRepo {
                     }
                 })
                 .await;
-        });
+        };
+        let handle = tokio::spawn(reconnect_fut.instrument(reconnect_span));
         *reconnect_task = Some(handle);
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err(Debug), fields(worker = "iroh-sync"))]
     async fn machine_loop(
         self: &Arc<Self>,
         mut big_sync_rx: tokio::sync::broadcast::Receiver<big_sync_core::SyncStatEvent>,
@@ -606,6 +629,12 @@ impl IrohSyncRepo {
         self.active_peers.write().await.clear();
         eyre::Ok(())
     }
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(peer_id = %conn.peer_id, otel.kind = "server"),
+    )]
     async fn handle_incoming_big_repo_conn(&self, conn: big_repo::BigRepoConnection) -> Res<()> {
         tracing::debug!(
             peer_id = %conn.peer_id,
@@ -799,6 +828,12 @@ impl IrohSyncRepo {
         self.blob_sync_worker.remove_peer(peer_id).await.ok();
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(peer_id = %req.requester_endpoint_id, otel.kind = "server"),
+    )]
     async fn handle_request_clone_provision(
         &self,
         req: bootstrap::RequestCloneProvisionReq,
@@ -908,6 +943,12 @@ impl IrohSyncRepo {
         Ok(())
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(peer_id = %endpoint_addr.id, otel.kind = "client"),
+    )]
     pub async fn connect_endpoint_addr(&self, endpoint_addr: iroh::EndpointAddr) -> Res<()> {
         self.ensure_repo_live()?;
 
@@ -1009,6 +1050,7 @@ impl IrohSyncRepo {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err(Debug), fields(otel.kind = "client"))]
     pub async fn connect_url(&self, source_url: &str) -> Res<iroh::EndpointAddr> {
         self.ensure_repo_live()?;
         let endpoint_addr = bootstrap::parse_clone_endpoint_addr(source_url)?;

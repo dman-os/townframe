@@ -11,7 +11,12 @@ use tokio_util::sync::CancellationToken;
 
 // observability support
 impl DrawerRepo {
-    #[tracing::instrument(skip(self, notif_rx, cancel_token))]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "drawer-notifs", doc_id = %self.drawer_doc_id),
+    )]
     pub(super) async fn notifs_loop(
         &self,
         mut notif_rx: UnboundedReceiver<Vec<BigRepoChangeNotification>>,

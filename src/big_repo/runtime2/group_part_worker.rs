@@ -13,7 +13,7 @@ use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
 use big_sync_core::concurrent_delta_walker::{
     ConcurrentDeltaRead, ConcurrentDeltaWalker, DeltaAck,
 };
-use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
 use big_sync_core::outbox::Outbox;
 use big_sync_core::revisioned_store::RevisionedStore;
 use future_form::Sendable;
@@ -51,15 +51,20 @@ pub fn spawn_group_part_worker(
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
     let run = Sendable::from_future(async move {
         let fut = async move {
-            let cursor = store.keyhive_group_part_cursor().await?;
-            store
-                .register_keyhive_admission_reader(
-                    crate::store::sqlite::KEYHIVE_ADMISSION_READER_GROUP_PART,
-                    cursor,
-                )
-                .await?;
+            let identity = crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_GROUP_PART;
+            let state = SqliteDeltaWalkerStateRepo::new(
+                store.sql.read_pool.clone(),
+                store.sql.write_pool.clone(),
+                identity.0,
+                identity.1,
+            )
+            .await?;
 
-            if cursor == 0 {
+            // The walker's durable revision is the authority on what has been
+            // reconciled: it advances only after every sink task for that prefix has
+            // completed, so the reconciliation it names is already durable.
+            let progress = state.progress().await?.upstream_revision;
+            if progress == 0 {
                 let initial_group_parts: HashSet<PartKey> = match scope.groups() {
                     None => store.list_parts().await?,
                     Some(groups) => groups.iter().cloned().collect(),
@@ -93,31 +98,12 @@ pub fn spawn_group_part_worker(
                             &group_agents,
                         )
                         .await?;
-                        store
-                            .reconcile_group_part_batch(&[reconciliation], 0, false)
-                            .await
+                        store.reconcile_group_part_batch(&[reconciliation]).await
                     }
                 });
                 drive_buffered(futs, INITIAL_BUILD_CONCURRENCY).await?;
-                store.reconcile_group_part_batch(&[], 0, true).await?;
             }
 
-            let state = {
-                let state = SqliteDeltaWalkerStateRepo::new(
-                    store.sql.read_pool.clone(),
-                    store.sql.write_pool.clone(),
-                    "big_repo.group_part",
-                    "admission",
-                )
-                .await?;
-                let progress = state.progress().await?.upstream_revision;
-                if progress == 0 && cursor > 0 {
-                    let mut transaction = state.begin().await?;
-                    transaction.advance_from(0, cursor).await?;
-                    transaction.commit().await?;
-                }
-                state
-            };
             let source = keyhive_admission::Store {
                 store: store.clone(),
                 timer,
@@ -163,7 +149,6 @@ pub fn spawn_group_part_worker(
 
 #[derive(Debug)]
 enum Cmd {
-    AdvanceCursor(u64),
     AnnounceSettled(u64),
 }
 
@@ -605,7 +590,6 @@ impl<'a> Worker<'a> {
             through: Some(through),
         } = ack
         {
-            self.outbox.push(Cmd::AdvanceCursor(through), ());
             self.outbox.push(Cmd::AnnounceSettled(through), ());
         }
         Ok(())
@@ -614,11 +598,6 @@ impl<'a> Worker<'a> {
     async fn drain_outbox(&mut self) -> Res<()> {
         while let Some((pending, cmd)) = self.outbox.front() {
             match cmd {
-                Cmd::AdvanceCursor(cursor) => {
-                    self.store
-                        .reconcile_group_part_batch(&[], *cursor, true)
-                        .await?;
-                }
                 Cmd::AnnounceSettled(seq) => {
                     tracing::debug!(
                         seq = *seq,
@@ -680,9 +659,7 @@ async fn run_task(
                 &GroupAgentsMemo::default(),
             )
             .await?;
-            store
-                .reconcile_group_part_batch(&[reconciliation], 0, false)
-                .await?;
+            store.reconcile_group_part_batch(&[reconciliation]).await?;
             Ok(TaskOutput::Reconciled)
         }
         Task::EnsurePart { part, .. } => {

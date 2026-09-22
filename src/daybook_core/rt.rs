@@ -228,6 +228,7 @@ impl Rt {
         format!("stage_ms={stage_ms} total_ms={total_ms}{from_app_start}")
     }
 
+    #[tracing::instrument(level = "debug", skip_all, err(Debug))]
     #[expect(clippy::too_many_arguments)]
     pub async fn boot(
         config: RtConfig,
@@ -864,7 +865,12 @@ impl Rt {
         })
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "rt-partition-watcher")
+    )]
     async fn keep_up_with_partition(&self) -> Res<()> {
         use futures::StreamExt;
 

@@ -97,6 +97,20 @@ impl ReplayPageTask {
     /// the client's own pacing choice; the responder caps it.
     pub const HOLD_MS: u32 = 15_000;
 
+    /// A round is one machine task, so its span is per task rather than per event: it
+    /// carries the machine task id, the peer the round talks to, how many targets it
+    /// pages, and the hold it asked for — the things a round that is parked waiting for
+    /// events is read by.
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, cx),
+        fields(
+            task_id = cx.task_id,
+            peer_id = %self.peer_id,
+            target_count = self.targets.len(),
+            hold_ms = self.hold_ms,
+        )
+    )]
     pub async fn run<K, PStore, Rpc, Rng>(
         self,
         cx: &mut TaskCtx<K, PStore, Rpc, Rng>,

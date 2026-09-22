@@ -37,6 +37,7 @@ pub struct RepoLockGuard {
 }
 
 impl RepoLockGuard {
+    #[tracing::instrument(level = "debug", skip_all, err(Debug), fields(worker = "repo-lock"))]
     pub async fn acquire(lock_path: PathBuf) -> Res<Self> {
         if let Some(parent) = lock_path.parent() {
             tokio::fs::create_dir_all(parent).await?;

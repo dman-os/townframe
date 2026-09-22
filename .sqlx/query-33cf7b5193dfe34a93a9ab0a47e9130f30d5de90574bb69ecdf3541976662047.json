@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MIN(COALESCE(p.upstream_revision, 0)) AS \"reader_floor: i64\"\n               FROM big_repo_keyhive_admission_readers r\n               LEFT JOIN delta_walker_progress p\n                 ON (p.namespace || '/' || p.consumer_id) = r.reader\n              WHERE r.scope_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "reader_floor: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "33cf7b5193dfe34a93a9ab0a47e9130f30d5de90574bb69ecdf3541976662047"
+}

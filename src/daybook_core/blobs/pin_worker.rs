@@ -36,6 +36,12 @@ pub(crate) const BLOB_PIN_PLUG_EVENTS_STATE_ID: &str = "@daybook/core/blob-pin-p
 /// interleave. The machines' stop handle rides the returned
 /// [`RepoStopToken`]. No public surface: observers read the inventory
 /// docs through the drawer.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    err(Debug),
+    fields(worker = "blob-pin-worker")
+)]
 pub(crate) async fn spawn_blob_pin_worker(
     drawer_repo: Arc<DrawerRepo>,
     sql: SqlCtx,
@@ -729,6 +735,12 @@ impl Worker {
     /// The blob-pin facet machine: a `ConcurrentDeltaWalker` over the facet-set
     /// source (Blob tag), keyed by branch, with per-branch inventory tasks.
     /// Mutable machine state lives as stack locals here.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "blob-pin-facet-machine", doc_id = %self.docs_inventory_doc_id),
+    )]
     async fn run_facet_machine(
         &mut self,
         facet_set_store: Arc<FacetSetRevisionStore>,
@@ -1029,6 +1041,12 @@ impl Worker {
         }
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "blob-pin-plug-events-machine", doc_id = %self.core_inventory_doc_id),
+    )]
     async fn run_plug_events_machine(
         &mut self,
         event_store: Arc<crate::plugs::PlugsConfigEventStore>,

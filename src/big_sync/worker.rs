@@ -446,7 +446,13 @@ pub fn spawn_big_sync_worker_with_options(
             Ok(())
         }
     };
-    let join_handle = tokio::task::spawn(async move { fut.await.unwrap() }.in_current_span());
+    // Everything this task does outside `machine_loop` — the shutdown path below in
+    // particular — would otherwise have no span at all, so the task gets one of its own
+    // naming the worker it belongs to. `or_current` keeps a caller's span as the parent
+    // when this one is disabled.
+    let span = tracing::debug_span!("big_sync_worker", worker = %label);
+    let join_handle =
+        tokio::task::spawn(async move { fut.await.unwrap() }.instrument(span.or_current()));
 
     Ok((
         BigSyncWorkerHandle { host_tx, stats_tx },
@@ -948,6 +954,7 @@ impl BigSyncWorker {
         tracing::debug!(task_id, "spawn machine task");
         let worker = MachineTaskWorker {
             task,
+            worker: self.label,
             part_store: Arc::clone(&self.part_store),
             rpc_clients: Arc::clone(&self.rpc_clients),
             bsm_tx: self.task_tx.clone(),
@@ -1012,6 +1019,7 @@ impl BigSyncWorker {
         );
         let worker = SyncTaskWorker {
             task: task.clone(),
+            worker: self.label,
             backend,
             host_tx: self.sync_tx.clone(),
             cancel_token: cancel_token.clone(),
@@ -1033,6 +1041,12 @@ impl BigSyncWorker {
 
 struct MachineTaskWorker {
     task: MachineTask,
+
+    /// The worker that spawned this task, stamped on the task's span. A machine task
+    /// carries no per-object id of its own, and its `task_id` is only unique within one
+    /// machine, so the label is what tells two workers' tasks apart.
+    worker: &'static str,
+
     part_store: SharedPartitionStore,
     rpc_clients: SharedRpcClients,
 
@@ -1044,7 +1058,11 @@ struct MachineTaskWorker {
 }
 
 impl MachineTaskWorker {
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(
+        name = "machine_task",
+        skip(self),
+        fields(task_id = self.task.id, worker = %self.worker)
+    )]
     async fn run(self) {
         let _cancelled = self
             .cancel_token
@@ -1091,6 +1109,12 @@ impl MachineTaskWorker {
 
 struct SyncTaskWorker {
     task: SyncTask,
+
+    /// The worker that spawned this task, stamped on the task's span. `task_id` is only
+    /// unique within one machine, and a process runs a worker per storage scope, so this
+    /// is what makes one task's retries greppable without mixing scopes.
+    worker: &'static str,
+
     backend: Arc<dyn SyncBackend>,
     host_tx: mpsc::Sender<BigSyncEvent>,
     cancel_token: CancellationToken,
@@ -1098,11 +1122,13 @@ struct SyncTaskWorker {
 
 impl SyncTaskWorker {
     #[tracing::instrument(
+        name = "sync_task",
         skip(self),
         fields(
             task_id = self.task.id,
             peer_id = %self.task.deets.peer_id,
             obj_id = %self.task.deets.obj_id,
+            worker = %self.worker,
         )
     )]
     async fn run(self) {

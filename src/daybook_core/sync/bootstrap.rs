@@ -180,7 +180,7 @@ async fn bind_bootstrap_endpoint(secret_key: Option<iroh::SecretKey>) -> Res<iro
     Ok(endpoint)
 }
 
-#[tracing::instrument(skip(source_url))]
+#[tracing::instrument(skip(source_url), fields(otel.kind = "client"))]
 pub async fn resolve_clone_info_from_url(source_url: &str) -> Res<CloneInfoResponse> {
     let endpoint_addr = parse_clone_endpoint_addr(source_url)?;
     let req = ResolveCloneInfoRpcReq {
@@ -212,7 +212,7 @@ pub async fn resolve_clone_info_from_url(source_url: &str) -> Res<CloneInfoRespo
     Ok(response)
 }
 
-#[tracing::instrument(skip(source_url))]
+#[tracing::instrument(skip(source_url), fields(otel.kind = "client"))]
 pub async fn request_clone_provision_from_url(
     source_url: &str,
     req: RequestCloneProvisionReq,

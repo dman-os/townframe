@@ -17,7 +17,7 @@ use big_sync_core::{ObjKey, PartKey};
 use futures::future::try_join_all;
 use futures::stream::{FuturesUnordered, StreamExt};
 use keyhive_core::access::Access;
-use rand::rngs::StdRng;
+use rand::{SeedableRng, rngs::StdRng};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::PathBuf,
@@ -713,7 +713,9 @@ impl StressFixture for BigRepoStressFixture {
         // quiescence barrier, but do not inject explicit Keyhive sync rounds
         // into the stress workload.
         for node in &live {
+            tracing::info!(peer = %node.peer_id(), group_id = %group.id(), "bootstrap quiescence begin");
             node.repo.wait_for_quiescence(None).await?;
+            tracing::info!(peer = %node.peer_id(), group_id = %group.id(), "bootstrap quiescence complete");
         }
         // Store each node's independently reconstructed local group. Sharing
         // the owner's in-process group handle across nodes bypasses the
@@ -726,10 +728,119 @@ impl StressFixture for BigRepoStressFixture {
                 .await
                 .ok_or_else(|| {
                     crate::ferr!(
-                        "editor {} reached bootstrap quiescence without the shared Keyhive group",
-                        editor.peer_id()
+                        "editor {} reached bootstrap quiescence without shared Keyhive group {}",
+                        editor.peer_id(),
+                        group.id()
                     )
-                })?;
+                });
+            let local_group = match local_group {
+                Ok(group) => group,
+                Err(error) => {
+                    let owner_events = group_owner.store.load_keyhive_events().await?;
+                    let owner_hashes = owner_events
+                        .iter()
+                        .map(|(hash, _)| *hash)
+                        .collect::<BTreeSet<_>>();
+                    let owner_keyhive = group_owner.repo.keyhive().clone_keyhive();
+                    let owner_identity = group_owner
+                        .repo
+                        .keyhive()
+                        .keyhive_peer_id()
+                        .to_identifier()?;
+                    let owner_visible = owner_keyhive
+                        .static_events_for_agent(owner_identity)
+                        .await
+                        .into_keys()
+                        .map(|digest| *digest.raw.as_bytes())
+                        .collect::<BTreeSet<_>>();
+                    for node in &live {
+                        let ledger = super::harness::keyhive::describe_ledger(&node.repo).await?;
+                        let has_group = node.repo.keyhive().get_group(group.id()).await.is_some();
+                        let local_events = node
+                            .store
+                            .load_keyhive_events()
+                            .await?
+                            .into_iter()
+                            .map(|(hash, _)| hash)
+                            .collect::<BTreeSet<_>>();
+                        let missing_owner_events = owner_hashes
+                            .difference(&local_events)
+                            .cloned()
+                            .collect::<BTreeSet<_>>();
+                        let peer_identity =
+                            node.repo.keyhive().keyhive_peer_id().to_identifier()?;
+                        let group_identity =
+                            keyhive_core::principal::identifier::Identifier::from(group.id());
+                        let owner_group_access = group_owner
+                            .repo
+                            .keyhive()
+                            .agent_access_on(&peer_identity, group_identity)
+                            .await;
+                        let peer_visible = owner_keyhive
+                            .static_events_for_agent(peer_identity)
+                            .await
+                            .into_keys()
+                            .map(|digest| *digest.raw.as_bytes())
+                            .collect::<BTreeSet<_>>();
+                        let mut group_grants = Vec::new();
+                        for (hash, bytes) in &owner_events {
+                            let event: keyhive_core::event::static_event::StaticEvent<Vec<u8>> =
+                                bincode::deserialize(bytes)?;
+                            if let keyhive_core::event::static_event::StaticEvent::Delegated(grant) =
+                                &event
+                                && grant.payload().delegate == peer_identity
+                                && group_owner.repo.keyhive().event_subject_id(event).await?
+                                    == crate::keyhive::EventSubject::Named(group_identity)
+                            {
+                                let prefix = hash.0[..4]
+                                    .iter()
+                                    .map(|byte| format!("{byte:02x}"))
+                                    .collect::<String>();
+                                group_grants.push((
+                                    prefix,
+                                    local_events.contains(hash),
+                                    owner_visible.contains(&hash.0),
+                                    peer_visible.contains(&hash.0),
+                                ));
+                            }
+                        }
+                        let missing_pair_events = missing_owner_events
+                            .iter()
+                            .filter(|hash| {
+                                let bytes = hash.0;
+                                owner_visible.contains(&bytes) && peer_visible.contains(&bytes)
+                            })
+                            .map(|hash| {
+                                hash.0[..4]
+                                    .iter()
+                                    .map(|byte| format!("{byte:02x}"))
+                                    .collect::<String>()
+                            })
+                            .collect::<Vec<_>>();
+                        let missing_owner_prefixes = missing_owner_events
+                            .iter()
+                            .map(|hash| {
+                                hash.0[..4]
+                                    .iter()
+                                    .map(|byte| format!("{byte:02x}"))
+                                    .collect::<String>()
+                            })
+                            .collect::<Vec<_>>();
+                        tracing::warn!(
+                            peer = %node.peer_id(),
+                            %ledger,
+                            has_group,
+                            group_id = %group.id(),
+                            ?owner_group_access,
+                            ?group_grants,
+                            ?missing_owner_prefixes,
+                            ?missing_pair_events,
+                            "bootstrap group distribution snapshot"
+                        );
+                    }
+                    return Err(error);
+                }
+            };
             let previous = self
                 .shared_edit_groups
                 .lock()
@@ -1250,6 +1361,159 @@ mod tests {
         .await
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn long_test_big_repo_offline_transfer_converges() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let config = BigRepoStressConfig::default();
+        let fixture = BigRepoStressFixture::new(config);
+        let world = Arc::new(());
+        let mut nodes = Vec::new();
+        for seed in 1..=4 {
+            nodes.push(Some(fixture.boot_node(Arc::clone(&world), seed).await?));
+        }
+        tracing::info!(stage = "bootstrap", "offline transfer stage begin");
+        fixture.prepare_cluster(&nodes).await?;
+        tracing::info!(stage = "bootstrap", "offline transfer stage complete");
+        // Positive control for the failure-only grant-hash probe: the owner's
+        // durable event log must contain a delegation to a known-good editor
+        // whose proof chain names this exact shared group.
+        let owner = nodes[0].as_ref().unwrap();
+        let editor = nodes[3].as_ref().unwrap();
+        let editor_identity = editor.repo.keyhive().keyhive_peer_id().to_identifier()?;
+        let group_id = fixture.shared_edit_group_id.lock().await.unwrap();
+        let group_identity = keyhive_core::principal::identifier::Identifier::from(group_id);
+        let mut found_grant = false;
+        for (_, bytes) in owner.store.load_keyhive_events().await? {
+            let event: keyhive_core::event::static_event::StaticEvent<Vec<u8>> =
+                bincode::deserialize(&bytes)?;
+            if let keyhive_core::event::static_event::StaticEvent::Delegated(grant) = &event
+                && grant.payload().delegate == editor_identity
+                && owner.repo.keyhive().event_subject_id(event).await?
+                    == crate::keyhive::EventSubject::Named(group_identity)
+            {
+                found_grant = true;
+                break;
+            }
+        }
+        assert!(
+            found_grant,
+            "owner's event log must identify the editor's shared-group grant"
+        );
+        for left in 0..nodes.len() {
+            for right in left + 1..nodes.len() {
+                fixture
+                    .connect_pair(
+                        nodes[left].as_ref().unwrap(),
+                        nodes[right].as_ref().unwrap(),
+                    )
+                    .await?;
+            }
+        }
+        let mut rng = StdRng::seed_from_u64(DEFAULT_STRESS_SEED);
+        let obj = stress_support::stress_obj(&mut rng);
+        fixture
+            .seed_new_obj(
+                nodes[0].as_ref().unwrap(),
+                &obj,
+                serde_json::json!({"step": 0}),
+            )
+            .await?;
+        tracing::info!(stage = "initial-alignment", "offline transfer stage begin");
+        fixture
+            .assert_cluster_alignment(&nodes.iter().flatten().collect::<Vec<_>>())
+            .await?;
+        tracing::info!(
+            stage = "initial-alignment",
+            "offline transfer stage complete"
+        );
+        let doc_id = fixture.doc_id(&obj).await?;
+        let initial_heads = fixture.collect_heads(nodes[3].as_ref().unwrap()).await?;
+        assert!(
+            !initial_heads[&doc_id].is_empty(),
+            "offline node must have the initial document"
+        );
+        tracing::info!(stage = "offline-mutations", %doc_id, "offline transfer stage begin");
+        let offline = nodes[3].take().unwrap();
+        let offline_peer = offline.peer_id();
+        let path = fixture
+            .node_paths
+            .lock()
+            .await
+            .get(&offline_peer)
+            .unwrap()
+            .clone();
+        offline.shutdown().await;
+        for node in nodes.iter().flatten() {
+            node.disconnect_peer(offline_peer.clone()).await?;
+        }
+        for step in 1..=3 {
+            fixture
+                .seed_obj(
+                    nodes[step - 1].as_ref().unwrap(),
+                    &obj,
+                    serde_json::json!({"step": step}),
+                )
+                .await?;
+        }
+        let new_obj = stress_support::stress_obj(&mut rng);
+        fixture
+            .seed_new_obj(
+                nodes[1].as_ref().unwrap(),
+                &new_obj,
+                serde_json::json!({"created_while_offline": true}),
+            )
+            .await?;
+        let new_doc_id = fixture.doc_id(&new_obj).await?;
+        tracing::info!(stage = "offline-mutations", %doc_id, %new_doc_id, "offline transfer stage complete");
+        let live_heads = fixture.collect_heads(nodes[0].as_ref().unwrap()).await?;
+        assert_ne!(
+            live_heads[&doc_id], initial_heads[&doc_id],
+            "offline transfer must create a new durable frontier"
+        );
+        tracing::info!(stage = "reopen", %doc_id, %new_doc_id, "offline transfer stage begin");
+        let reopened = Node::boot_with_config_and_hidden(
+            4,
+            "editor-4",
+            StorageConfig::Disk { path },
+            HashSet::from([crate::seds_part_id()]),
+        )
+        .await?;
+        assert_eq!(
+            reopened.peer_id(),
+            offline_peer,
+            "reopen must retain the durable identity"
+        );
+        let reopened_heads = fixture.collect_heads(&reopened).await?;
+        assert_eq!(
+            reopened_heads[&doc_id], initial_heads[&doc_id],
+            "offline node must not receive the transfer while stopped"
+        );
+        assert!(
+            reopened_heads[&new_doc_id].is_empty(),
+            "a document created while offline must be absent before reconnect"
+        );
+        nodes[3] = Some(reopened);
+        tracing::info!(stage = "reopen", %doc_id, %new_doc_id, "offline transfer stage complete");
+        tracing::info!(stage = "reconnect-and-align", %doc_id, %new_doc_id, "offline transfer stage begin");
+        for left in 0..nodes.len() {
+            for right in left + 1..nodes.len() {
+                fixture
+                    .connect_pair(
+                        nodes[left].as_ref().unwrap(),
+                        nodes[right].as_ref().unwrap(),
+                    )
+                    .await?;
+            }
+        }
+        fixture
+            .assert_cluster_alignment(&nodes.iter().flatten().collect::<Vec<_>>())
+            .await?;
+        tracing::info!(stage = "reconnect-and-align", %doc_id, %new_doc_id, "offline transfer stage complete");
+        for node in nodes.into_iter().flatten() {
+            fixture.stop_node(node).await?;
+        }
+        Ok(())
+    }
     #[tokio::test(flavor = "multi_thread")]
     async fn long_test_big_repo_tier10_stress_3_editor_1_relay_converges() -> Res<()> {
         let config = BigRepoStressConfig {

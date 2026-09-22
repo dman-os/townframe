@@ -173,27 +173,28 @@ where
         }
     }
 
-    /// Register this consumer's retention cursor: the admission-log floor that
+    /// Register this consumer as a retention reader: the admission-log floor that
     /// keeps this consumer's wake-ups alive.
     ///
-    /// Monotone by construction — registration keeps `MAX(seq, excluded.seq)`
-    /// — so a lower cursor cannot move the floor back. The reader id is derived
-    /// from the walker identity `(namespace, consumer_id)` that owns the
-    /// consumer's cursor, never passed in, so one consumer cannot acquire two
-    /// retention rows and two consumers cannot share one.
+    /// Registration carries no value. The floor is read from this consumer's own
+    /// walker progress row (`delta_walker_progress.upstream_revision`), joined to
+    /// the reader by the walker identity, so there is no second watermark that
+    /// could disagree with it — the reader id is derived from the walker identity
+    /// `(namespace, consumer_id)` that owns the consumer's progress, never passed
+    /// in, so one consumer cannot acquire two retention rows and two consumers
+    /// cannot share one.
     ///
-    /// This is *not* the walker's durable progress: it may lag it and must
-    /// never lead it. The payload here is read-time state, so a wake-up pruned
-    /// ahead of the consumer is not self-healing — the subject would stay stale
-    /// until some later event touched it again.
+    /// A registered consumer whose walker has no progress row pins the floor at
+    /// 0 until it starts: a wake-up pruned ahead of the consumer is not
+    /// self-healing, because the payload here is read-time state and the subject
+    /// would stay stale until some later event touched it again.
     pub async fn note_retention(
         &self,
         memory: &big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo,
-        cursor: u64,
     ) -> Res<()> {
         self.source
             .store
-            .register_keyhive_admission_reader(&memory.retention_reader_id(), cursor)
+            .register_keyhive_admission_reader(&memory.retention_reader_id())
             .await
     }
 
@@ -427,7 +428,9 @@ mod tests {
     use big_sync::delta_walker_state::{
         SqliteDeltaWalkerStateRepo, SqliteDeltaWalkerStateTransaction,
     };
-    use big_sync_core::delta_walker_state::{DeltaWalkerProgress, DeltaWalkerStateResult};
+    use big_sync_core::delta_walker_state::{
+        DeltaWalkerProgress, DeltaWalkerStateResult, DeltaWalkerStateTransaction,
+    };
     use big_sync_core::revisioned_store::contract::{
         RevisionedStoreContractHarness, assert_revisioned_store_contract,
     };
@@ -601,6 +604,21 @@ mod tests {
         )
         .await
         .expect("create delta walker state repo")
+    }
+
+    /// Advance a test walker's durable progress to `through`, the move the
+    /// production ack makes once a consumer's effects are durable.
+    async fn advance_walker(memory: &SqliteDeltaWalkerStateRepo, through: u64) {
+        let progress = memory
+            .progress()
+            .await
+            .expect("walker progress is readable")
+            .upstream_revision;
+        let mut tx = memory.begin().await.expect("begin walker transaction");
+        tx.advance_from(progress, through)
+            .await
+            .expect("advance walker progress");
+        tx.commit().await.expect("commit walker progress");
     }
 
     /// Counting spy for the consumer's walker state.
@@ -889,6 +907,15 @@ mod tests {
     /// completion becomes ready while a page is being resolved — the case that
     /// silently skipped a page's subjects and left the consumer's durable cursor
     /// behind the admission head forever.
+    ///
+    /// The parked state is built rather than raced into: which of the
+    /// resolution's awaits — the admission-head read, the hive lookups — are
+    /// ready is what decides whether a poll of the read returns while the page
+    /// sits in `staged`, and under load the whole page can resolve inside the
+    /// poll that reads it, so no poll count lands on the window reliably. One
+    /// raw read of the log leaves a cursor at the log head, past the page; the
+    /// reader under test is the state a cancelled read leaves behind — that page
+    /// parked in `staged`, nothing resolved.
     #[tokio::test]
     async fn a_cancelled_read_re_serves_its_page() {
         let harness = Harness::new().await;
@@ -898,43 +925,50 @@ mod tests {
         harness.admit(first_bytes).await;
         harness.admit(second_bytes).await;
 
-        // Poll the read a few times, drop it, and keep the attempt only if the
-        // drop landed while the page was parked mid-resolution. Later attempts
-        // give the log query longer to land, so the window is reached without the
-        // test having to observe the cursor through the read's own borrow.
-        for polls in 1..=32 {
-            let mut reader = harness
-                .stream()
-                .open(all_selector(&harness.memory), 0)
-                .await
-                .expect("open reader");
-            let mut read = Box::pin(reader.next(RevisionReadLimits::default()));
-            let mut delivered = false;
-            for _ in 0..polls {
-                if futures::poll!(read.as_mut()).is_ready() {
-                    delivered = true;
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-            drop(read);
-            if delivered || reader.staged.len() != 2 || !reader.ready.is_empty() {
-                continue;
-            }
+        let stream = harness.stream();
+        let mut log = stream
+            .source
+            .open((), 0)
+            .await
+            .expect("open the admission reader");
+        let RevisionRead::Entries { revision, entries } = log
+            .next(RevisionReadLimits::default())
+            .await
+            .expect("read the admitted page")
+        else {
+            panic!("the two admitted events are one page, not a replay boundary");
+        };
+        assert_eq!(
+            revision,
+            stream.latest_revision().await.expect("admission head"),
+            "the page read is the whole log, so the cursor it advanced to sits past \
+             everything a cancelled read could lose"
+        );
 
-            assert_eq!(
-                page(&mut reader)
-                    .await
-                    .iter()
-                    .map(|entry| entry.subject)
-                    .collect::<Vec<_>>(),
-                vec![AccessSubject::Group(first), AccessSubject::Group(second)],
-                "a read dropped while its page is parked must re-serve the whole page: \
-                 the log cursor is already past it"
-            );
-            return;
-        }
-        panic!("no drop landed on a parked page; the cancellation window is untested");
+        // The fields `open` fills, with the admission cursor already past the page
+        // and that page parked: nothing leaves `staged` until it is resolved, so
+        // this is exactly what a read dropped mid-resolution leaves behind.
+        let mut reader = KeyhiveAccessReader {
+            store: stream.source.clone(),
+            reader: log,
+            keyhive: harness.keyhive.clone(),
+            staged: VecDeque::from(entries),
+            ready: VecDeque::new(),
+            staged_revision: revision,
+            staged_computed_at: None,
+            memory: harness.memory.clone(),
+        };
+
+        assert_eq!(
+            page(&mut reader)
+                .await
+                .iter()
+                .map(|entry| entry.subject)
+                .collect::<Vec<_>>(),
+            vec![AccessSubject::Group(first), AccessSubject::Group(second)],
+            "a read dropped while its page is parked must re-serve the whole page: \
+             the log cursor is already past it"
+        );
     }
 
     #[tokio::test]
@@ -987,7 +1021,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retention_cursor_is_derived_and_monotone() {
+    async fn retention_registers_the_walker_identity_for_the_pruning_floor() {
         let harness = Harness::new().await;
         let stream = harness.stream();
         assert_eq!(
@@ -1005,14 +1039,24 @@ mod tests {
                 .await
                 .expect("tombstone event");
         }
+        // The floor is the walker's own progress row, so advancing the walker is
+        // what moves it; registering names the consumer and carries no value.
+        advance_walker(&harness.memory.inner, 3).await;
         stream
-            .note_retention(&harness.memory.inner, 3)
+            .note_retention(&harness.memory.inner)
             .await
-            .expect("register at the head");
-        stream
-            .note_retention(&harness.memory.inner, 0)
-            .await
-            .expect("a lower cursor is a no-op, not a regression");
+            .expect("register the reader");
+        assert_eq!(
+            harness
+                .memory
+                .inner
+                .progress()
+                .await
+                .expect("progress")
+                .upstream_revision,
+            3,
+            "registration cannot move the walker progress, which is the only monotone value"
+        );
         assert_eq!(
             harness
                 .store
@@ -1020,7 +1064,7 @@ mod tests {
                 .await
                 .expect("prune admitted events"),
             3,
-            "a cursor that moved back to zero would pin every row (watermark zero prunes nothing)"
+            "the floor follows the registered consumer's walker progress"
         );
     }
 
@@ -1040,12 +1084,14 @@ mod tests {
         }
         let stalled = state_repo(&harness._sql, "stalled").await;
         let ahead = state_repo(&harness._sql, "ahead").await;
+        advance_walker(&ahead, 3).await;
+        advance_walker(&stalled, 1).await;
         stream
-            .note_retention(&ahead, 3)
+            .note_retention(&ahead)
             .await
             .expect("register the caught-up reader");
         stream
-            .note_retention(&stalled, 1)
+            .note_retention(&stalled)
             .await
             .expect("register the stalled reader");
         assert_eq!(
@@ -1055,7 +1101,7 @@ mod tests {
                 .await
                 .expect("prune admitted events"),
             1,
-            "the minimum over registered readers is what prunes, and only one is registered here"
+            "the minimum over registered readers prunes: the stalled consumer pins it"
         );
         assert_eq!(
             harness
@@ -1065,12 +1111,9 @@ mod tests {
                 .expect("log")
                 .len(),
             2,
-            "a stalled registered consumer pins every row above its cursor"
+            "a stalled registered consumer pins every row above its walker progress"
         );
-        stream
-            .note_retention(&stalled, 2)
-            .await
-            .expect("the stalled reader advances");
+        advance_walker(&stalled, 2).await;
         assert_eq!(
             harness
                 .store
@@ -1078,7 +1121,7 @@ mod tests {
                 .await
                 .expect("prune admitted events"),
             1,
-            "the floor moves only when the registered cursor moves"
+            "the floor moves only when the stalled walker's progress moves"
         );
         assert_eq!(
             harness

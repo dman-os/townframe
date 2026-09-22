@@ -1069,11 +1069,23 @@ async fn tier6_two_path_revocation() -> crate::Res<()> {
 
 // ─── Offline stale writes after revocation ────────────────────────────────
 //
-// An editor with Edit access writes while offline. Before reconnecting, the
-// owner revokes the editor's access. When the editor reconnects, those stale
-// offline writes must not become visible to the owner (forward secrecy).
+// Under today's current-membership policy, an editor writes offline and the owner revokes
+// access before reconnecting. This test pins the current denial while the ignored causal
+// counterpart pins the intended acceptance of a write concurrent with revocation.
 #[tokio::test(flavor = "multi_thread")]
 async fn tier6_offline_stale_write_after_revoke() -> crate::Res<()> {
+    offline_revoke_scenario(false).await
+}
+
+// A write made offline while Edit is still locally valid is concurrent with the owner's
+// revocation. A causal policy must accept it; a write made after observing revocation is distinct.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires causal authorization of signed Sedimentree writes across revocation"]
+async fn tier6_concurrent_offline_write_survives_revoke() -> crate::Res<()> {
+    offline_revoke_scenario(true).await
+}
+
+async fn offline_revoke_scenario(accept_concurrent_write: bool) -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let mut pair = Pair::boot(146, 147, "Owner", "OfflineEditor").await?;
     let editor_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
@@ -1114,33 +1126,41 @@ async fn tier6_offline_stale_write_after_revoke() -> crate::Res<()> {
         .await??;
     drop(editor_handle);
 
+    tracing::info!(%doc_id, "revoke: Editor authored offline write before learning revocation");
     // Owner revokes the editor BEFORE reconnect.
     pair.left()
         .repo
         .revoke_doc_access(doc_id.clone(), editor_agent)
         .await?;
 
+    tracing::info!(%doc_id, "revoke: Owner revoked Edit");
     // --- Reconnect.
     pair.connect().await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
-    // Editor tries to sync the offline write. The transport may accept the
-    // bytes, but the owner's runtime must not materialise the stale content.
-    let sync_result = pair.right_conn().sync_doc_with_peer(doc_id.clone()).await;
-    match sync_result {
-        Ok(())
-        | Err(
-            crate::SyncDocError::Unauthorized
-            | crate::SyncDocError::NotFound
-            | crate::SyncDocError::Policy(_),
-        ) => {}
-        Err(err) => return Err(crate::ferr!("unexpected sync error: {err:?}")),
-    }
-
-    // Whether the sync returns Ok or Err, the owner must NOT see "stale" = "offline-write".
-    if sync_result.is_ok() {
-        pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
+    // Revoked Editor may be denied fetch access altogether. A policy denial for the signed
+    // offline write is also expected today; neither means that Owner accepted the write.
+    let sync_result = if accept_concurrent_write {
+        pair.left_conn().sync_doc_with_peer(doc_id.clone()).await
+    } else {
+        pair.right_conn().sync_doc_with_peer(doc_id.clone()).await
+    };
+    let sync_succeeded = sync_result.is_ok();
+    tracing::info!(%doc_id, ?sync_result, "revoke: post-reconnect sync receipt");
+    if accept_concurrent_write {
+        sync_result?;
+    } else {
+        match sync_result {
+            Ok(())
+            | Err(crate::SyncDocError::Unauthorized)
+            | Err(crate::SyncDocError::Policy(crate::SyncDocPolicyError::InsufficientAccess)) => {}
+            Err(error) => return Err(crate::ferr!("unexpected offline sync error: {error:?}")),
+        }
+        if sync_succeeded {
+            // A successful receipt alone does not say whether background sync already moved data.
+            pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
+        }
     }
     let owner_handle = pair
         .left()
@@ -1148,11 +1168,20 @@ async fn tier6_offline_stale_write_after_revoke() -> crate::Res<()> {
         .get_doc(&doc_id)
         .await?
         .into_ready(doc_id)?;
-    assert_ne!(
-        read_text(&owner_handle, "stale").await.as_deref(),
-        Some("offline-write"),
-        "owner must not see stale offline write after editor was revoked"
-    );
+    let stale_on_owner = read_text(&owner_handle, "stale").await;
+    if accept_concurrent_write {
+        assert_eq!(
+            stale_on_owner.as_deref(),
+            Some("offline-write"),
+            "concurrent write authored under Edit must survive a later revocation"
+        );
+    } else {
+        assert_ne!(
+            stale_on_owner.as_deref(),
+            Some("offline-write"),
+            "current-access policy must not admit the offline write after revocation"
+        );
+    }
     drop(owner_handle);
     drop(owner_doc);
     Ok(())
@@ -1423,14 +1452,25 @@ async fn tier6_concurrent_grant_revoke_causal() -> crate::Res<()> {
 
 // ─── Offline editor downgraded before reconnect ───────────────────────────
 //
-// An editor with Edit access writes a stale value while offline. The owner
-// downgrades the editor from Edit to Read (revoke + re-grant Read) before
-// the editor reconnects. After reconnect and sync:
-//   - The stale offline write must NOT be visible on the owner's side.
-//   - The editor can still read the pre-existing content (now Read-only).
-//   - The editor can no longer write new content (downgraded to Read).
+// An editor writes while offline. The owner downgrades Edit to Read before reconnection.
+// Today's current-membership policy denies the offline write; the ignored counterpart
+// requires causal authorization to preserve it. Both tests require previously accepted
+// content to remain readable and a new write after observing Read to fail locally.
 #[tokio::test(flavor = "multi_thread")]
 async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
+    offline_downgrade_scenario(false).await
+}
+
+// The offline write and the owner's revocation are concurrent: neither includes the other in
+// its causal past. Once commits carry an authorization witness, the owner's current membership
+// must not retroactively deny the write merely because the revocation arrived first.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires causal authorization of signed Sedimentree writes across revocation"]
+async fn tier6_concurrent_offline_write_survives_downgrade() -> crate::Res<()> {
+    offline_downgrade_scenario(true).await
+}
+
+async fn offline_downgrade_scenario(accept_concurrent_write: bool) -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let mut pair = Pair::boot(157, 158, "Owner", "Editor").await?;
     let editor_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
@@ -1475,12 +1515,25 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
         fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
             .await?;
     drop(_owner_sync);
+    let owner_before_downgrade = pair
+        .left()
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
+    assert_eq!(
+        read_text(&owner_before_downgrade, "valid").await.as_deref(),
+        Some("pre-downgrade"),
+        "Owner must have accepted the Editor's valid write before revoking Edit"
+    );
+    drop(owner_before_downgrade);
+    tracing::info!(%doc_id, "downgrade: pre-revocation Editor write accepted by Owner");
     drop(editor_handle);
 
     // --- Go offline.
     fixtures::go_offline(&mut pair).await?;
 
-    // Editor writes a stale value while offline (should not propagate).
+    // Editor writes while offline under its still-valid local Edit view.
     let stale_handle = pair
         .right()
         .repo
@@ -1494,6 +1547,7 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
         })
         .await??;
     drop(stale_handle);
+    tracing::info!(%doc_id, "downgrade: Editor authored offline write before learning revocation");
 
     // Owner downgrades Editor from Edit to Read (revoke + re-grant Read).
     pair.left()
@@ -1504,17 +1558,40 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
         .repo
         .grant_doc_access(doc_id.clone(), editor_agent.clone(), Access::Read)
         .await?;
+    tracing::info!(%doc_id, "downgrade: Owner revoked Edit and re-granted Read");
 
     // --- Reconnect.
     pair.connect().await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
-    // Editor syncs the doc — must work (now Read-only).
-    let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
-            .await?;
-
+    // A rejected offline write may surface on this explicit sync or on background sync.
+    // Only InsufficientAccess is expected here; a missing document or failed transport is not.
+    // The content already accepted before revocation must remain readable either way.
+    let editor_sync = pair.right_conn().sync_doc_with_peer(doc_id.clone()).await;
+    tracing::info!(%doc_id, ?editor_sync, "downgrade: Editor post-reconnect sync receipt");
+    if accept_concurrent_write {
+        editor_sync?;
+        // Pull the signed offline write into Owner after the downgrade. Current-access policy
+        // rejects it today; the future causal policy must accept this concurrent write.
+        pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
+    } else {
+        match editor_sync {
+            Ok(())
+            | Err(crate::SyncDocError::Policy(crate::SyncDocPolicyError::InsufficientAccess)) => {}
+            Err(error) => {
+                return Err(crate::ferr!(
+                    "unexpected post-downgrade sync error: {error:?}"
+                ));
+            }
+        }
+    }
+    let reader_doc = pair
+        .right()
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
     // Pre-existing content is still readable.
     assert_eq!(
         read_text(&reader_doc, "title").await.as_deref(),
@@ -1535,11 +1612,20 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
         .get_doc(&doc_id)
         .await?
         .into_ready(doc_id.clone())?;
-    assert_ne!(
-        read_text(&owner_check, "stale").await.as_deref(),
-        Some("offline-write"),
-        "stale offline write must not be visible on the owner's side after downgrade"
-    );
+    let stale_on_owner = read_text(&owner_check, "stale").await;
+    if accept_concurrent_write {
+        assert_eq!(
+            stale_on_owner.as_deref(),
+            Some("offline-write"),
+            "concurrent write authored under Edit must survive a later revocation"
+        );
+    } else {
+        assert_ne!(
+            stale_on_owner.as_deref(),
+            Some("offline-write"),
+            "current-access policy must not admit the offline write after downgrade"
+        );
+    }
     drop(owner_check);
 
     // Editor (now Read-only) cannot write new content.
@@ -1549,31 +1635,28 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
         .get_doc(&doc_id)
         .await?
         .into_ready(doc_id.clone())?;
+    assert_eq!(
+        pair.right()
+            .repo
+            .keyhive()
+            .agent_access_on(&right_agent_id(&pair), doc_identifier(doc_id.clone()))
+            .await,
+        Some(Access::Read),
+        "Editor must have observed the downgrade before testing a new write"
+    );
     let write_attempt = reader_check
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "attempt", "post-downgrade"))
                 .map_err(|err| crate::ferr!("post-downgrade write should fail: {err:?}"))
         })
         .await;
-    // The write may succeed locally but must not propagate; synchronize and
-    // verify the owner does not receive it.
-    if write_attempt.is_ok() {
-        pair.right_conn().sync_keyhive_with_peer().await?;
-        pair.left_conn().sync_keyhive_with_peer().await?;
-        pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
-        let owner_final = pair
-            .left()
-            .repo
-            .get_doc(&doc_id)
-            .await?
-            .into_ready(doc_id)?;
-        assert_ne!(
-            read_text(&owner_final, "attempt").await.as_deref(),
-            Some("post-downgrade"),
-            "downgraded editor's write must not reach the owner"
-        );
-        drop(owner_final);
-    }
+    let rejection = write_attempt.expect_err(
+        "a node that has observed Read access must reject a new local write before persisting it",
+    );
+    assert!(
+        format!("{rejection:?}").contains("local access is not writable"),
+        "new post-downgrade write must fail at the local access gate: {rejection:?}"
+    );
     drop(reader_check);
     drop(owner_doc);
     Ok(())

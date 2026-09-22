@@ -1,10 +1,22 @@
 use super::*;
 use sqlx::{QueryBuilder, Row};
 
-pub(crate) const KEYHIVE_ADMISSION_READER_GROUP_PART: &str = "group_part";
-pub(crate) const KEYHIVE_ADMISSION_READER_CAUSAL_CHECKPOINT: &str = "causal_checkpoint";
-pub(crate) const KEYHIVE_ADMISSION_READER_AUTOMERGE_FRONTIER: &str = "automerge_frontier";
-pub(crate) const KEYHIVE_ADMISSION_READER_PREKEY_JANITOR: &str = "prekey_janitor";
+/// The walker identities of the consumers that gate admission-log retention.
+///
+/// Each pair is the one place its consumer is named: it keys the consumer's
+/// `delta_walker_progress` row — which is the authoritative "reconciled through"
+/// value — and its `"{namespace}/{consumer_id}"` form (the format
+/// `SqliteDeltaWalkerStateRepo::retention_reader_id_of` builds) keys the retention
+/// registration that keeps the consumer's unprocessed admission rows from being
+/// pruned.
+pub(crate) const KEYHIVE_ADMISSION_CONSUMER_GROUP_PART: (&str, &str) =
+    ("big_repo.group_part", "admission");
+pub(crate) const KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT: (&str, &str) =
+    ("big_repo.causal_checkpoint", "admission");
+pub(crate) const KEYHIVE_ADMISSION_CONSUMER_AUTOMERGE_FRONTIER: (&str, &str) =
+    ("big_repo.automerge_frontier", "keyhive-admission");
+pub(crate) const KEYHIVE_ADMISSION_CONSUMER_PREKEY_JANITOR: (&str, &str) =
+    ("big_repo.prekey_janitor", "admission");
 
 impl SqliteBigRepoStore {
     /// All part IDs currently present in this store's scope.
@@ -285,62 +297,80 @@ impl SqliteBigRepoStore {
         Ok(())
     }
 
-    pub(crate) async fn register_keyhive_admission_reader(
-        &self,
-        reader: &str,
-        cursor: u64,
-    ) -> Res<()> {
+    /// Register `reader` as a consumer whose unprocessed admission rows must not
+    /// be pruned.
+    ///
+    /// Registration carries no value: the retention floor is read from the
+    /// consumer's `delta_walker_progress` row, so a registered consumer that has
+    /// not started (no progress row) pins the floor at 0 until it does.
+    /// Idempotent.
+    pub(crate) async fn register_keyhive_admission_reader(&self, reader: &str) -> Res<()> {
         sqlx::query!(
-            "INSERT INTO big_repo_keyhive_admission_readers(scope_id, reader, seq)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(scope_id, reader) DO UPDATE
-                 SET seq = MAX(seq, excluded.seq)",
+            "INSERT INTO big_repo_keyhive_admission_readers(scope_id, reader)
+             VALUES (?1, ?2)
+             ON CONFLICT(scope_id, reader) DO NOTHING",
             self.scope().id(),
-            reader,
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
+            reader
         )
         .execute(&self.sql.write_pool)
         .await?;
         Ok(())
     }
 
-    pub(crate) async fn advance_keyhive_admission_reader_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        reader: &str,
-        cursor: u64,
-    ) -> Res<()> {
-        sqlx::query!(
-            "INSERT INTO big_repo_keyhive_admission_readers(scope_id, reader, seq)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(scope_id, reader) DO UPDATE
-                 SET seq = MAX(seq, excluded.seq)",
-            self.scope().id(),
-            reader,
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
-        )
-        .execute(&mut **tx)
-        .await?;
+    /// Register every admission consumer this runtime runs, so pruning can never
+    /// outrun a consumer that exists but has not started yet.
+    ///
+    /// The retention floor [`Self::prune_admitted_events`] computes is a `MIN`
+    /// over **registered** readers only. The registry therefore has to be
+    /// complete before any maintenance run: a consumer that has not registered is
+    /// invisible to the floor, and its unprocessed admission events can be pruned
+    /// from under it. Registering all four identities here, once, before the
+    /// workers and the maintenance loop are spawned, makes the registry complete
+    /// by construction instead of depending on each worker's spawn ordering
+    /// against the maintenance timer. Idempotent.
+    pub(crate) async fn register_admission_consumers(&self) -> Res<()> {
+        for (namespace, consumer_id) in [
+            KEYHIVE_ADMISSION_CONSUMER_GROUP_PART,
+            KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT,
+            KEYHIVE_ADMISSION_CONSUMER_AUTOMERGE_FRONTIER,
+            KEYHIVE_ADMISSION_CONSUMER_PREKEY_JANITOR,
+        ] {
+            self.register_keyhive_admission_reader(
+                &big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo::retention_reader_id_of(
+                    namespace,
+                    consumer_id,
+                ),
+            )
+            .await?;
+        }
         Ok(())
     }
 
     #[cfg(test)]
-    pub(crate) async fn advance_keyhive_admission_reader(
+    /// The consumer's own "reconciled through" revision, read from the delta
+    /// walker's `delta_walker_progress` row (0 when the consumer has not started).
+    ///
+    /// This is the one value fences, observability and the retention floor read:
+    /// it is the row the consumer's ack commits inside the same transaction as its
+    /// effects, so no second watermark can lag it.
+    ///
+    /// Test-only: the harness fences (`test2::harness::fixtures`) are the only readers;
+    /// the production fences compare the hub's in-memory watermarks instead.
+    pub(crate) async fn admission_consumer_progress(
         &self,
-        reader: &str,
-        cursor: u64,
-    ) -> Res<()> {
-        sqlx::query!(
-            "UPDATE big_repo_keyhive_admission_readers
-                SET seq = MAX(seq, ?3)
-              WHERE scope_id = ?1 AND reader = ?2",
-            self.scope().id(),
-            reader,
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
+        namespace: &str,
+        consumer_id: &str,
+    ) -> Res<u64> {
+        let revision: i64 = sqlx::query_scalar!(
+            "SELECT COALESCE(MAX(upstream_revision), 0) AS \"revision!: i64\"
+               FROM delta_walker_progress
+              WHERE namespace = ?1 AND consumer_id = ?2",
+            namespace,
+            consumer_id
         )
-        .execute(&self.sql.write_pool)
+        .fetch_one(&self.sql.read_pool)
         .await?;
-        Ok(())
+        Ok(Self::u64_from_db(revision))
     }
 
     async fn archived_admission_floor(&self) -> Res<u64> {
@@ -366,20 +396,28 @@ impl SqliteBigRepoStore {
         Ok(Self::u64_from_db(floor))
     }
 
+    /// Prune the admission log up to the watermark no registered consumer needs.
+    ///
+    /// The reader floor is the minimum "reconciled through" revision over the
+    /// registered consumers, read from each one's `delta_walker_progress` row (the
+    /// walker commits it with the effects it covers, so it is the only writer). A
+    /// registered consumer whose progress row is absent — it registered but has
+    /// not started — reads as 0 and pins the floor there: history a consumer that
+    /// has not started cannot be told about must not be pruned from under it.
     pub(crate) async fn prune_admitted_events(&self) -> Res<u64> {
         let archive_floor = self.archived_admission_floor().await?;
         self.set_archived_through(archive_floor).await?;
         let reader_floor = sqlx::query!(
-            "SELECT MIN(seq) AS \"reader_floor: i64\"
-               FROM big_repo_keyhive_admission_readers
-              WHERE scope_id = ?1",
+            "SELECT MIN(COALESCE(p.upstream_revision, 0)) AS \"reader_floor: i64\"
+               FROM big_repo_keyhive_admission_readers r
+               LEFT JOIN delta_walker_progress p
+                 ON (p.namespace || '/' || p.consumer_id) = r.reader
+              WHERE r.scope_id = ?1",
             self.scope().id()
         )
         .fetch_one(&self.sql.read_pool)
         .await?;
-        let Some(reader_floor) = reader_floor.reader_floor else {
-            return Ok(0);
-        };
+        let reader_floor = reader_floor.reader_floor.unwrap_or_default();
         let watermark = archive_floor.min(Self::u64_from_db(reader_floor));
         if watermark == 0 {
             return Ok(0);

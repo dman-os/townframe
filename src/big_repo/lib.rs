@@ -8,6 +8,7 @@ mod interlude {
 use crate::interlude::*;
 use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
 use sqlx_utils_rs::SqlCtx;
+use tracing::Instrument;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1104,6 +1105,7 @@ impl BigRepo {
 /// Forward a runtime connection-end to the caller's `ConnFinishSignal`
 /// channel (used by the sync layer to release per-peer state when a
 /// connection drops, whether outbound or inbound).
+#[tracing::instrument(level = "debug", skip_all, fields(peer_id = %peer_id))]
 pub(crate) fn watch_connection_end(
     peer_id: PeerKey,
     closed_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1117,7 +1119,7 @@ pub(crate) fn watch_connection_end(
     let Some(end_signal_tx) = end_signal_tx else {
         return;
     };
-    drop(tasks.spawn(async move {
+    let watcher = async move {
         let (closed, result) = end_rx.await.unwrap_or_else(|_| {
             // The runtime stopped before its watcher fired; treat the
             // connection as ended without a transport error. Use the connection's
@@ -1133,7 +1135,8 @@ pub(crate) fn watch_connection_end(
                 err,
             })
             .ok();
-    }));
+    };
+    drop(tasks.spawn(watcher.instrument(tracing::Span::current())));
 }
 
 #[derive(Clone, educe::Educe)]

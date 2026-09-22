@@ -167,39 +167,20 @@ impl SqliteBigRepoStore {
         Ok(events)
     }
 
-    pub(crate) fn cursor_reader(&self, name: &str) -> String {
-        format!("{name}:{}", self.scope_id)
-    }
-
     pub(crate) async fn init_subduction_schema(&self) -> Result<(), SqliteBigRepoStoreError> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query!(
-            "INSERT OR IGNORE INTO cursors(reader, seq)
-           VALUES (?1, 0)",
-            self.cursor_reader("group_part")
-        )
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query!(
-            "INSERT OR IGNORE INTO cursors(reader, seq)
-           VALUES (?1, 0)",
-            self.cursor_reader("causal_checkpoint")
-        )
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
         self.backfill_causal_ciphertext_index().await?;
         Ok(())
     }
     /// Reconcile one bounded document batch transactionally.
     ///
-    /// Non-final worker batches leave the durable event cursor untouched so a
-    /// crash replays all derived updates safely before the cursor advances.
+    /// The batch writes part-domain state only: each part's `latest_cursor` and the
+    /// membership rows those transitions produce. It writes no consumer watermark —
+    /// the caller's delta walker commits the "reconciled through" revision itself
+    /// when the work this batch produced is acknowledged, so there is one writer of
+    /// that fact and it cannot disagree with the effects it names.
     pub(crate) async fn reconcile_group_part_batch(
         &self,
         mutations: &[GroupPartReconciliation],
-        event_cursor: u64,
-        advance_cursor: bool,
     ) -> Res<()> {
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut transitions = Vec::new();
@@ -534,67 +515,11 @@ impl SqliteBigRepoStore {
             .execute(&mut *tx)
             .await?;
         }
-        if advance_cursor {
-            sqlx::query!(
-                "UPDATE cursors SET seq = ?1 WHERE reader = ?2",
-                i64::try_from(event_cursor).expect(ERROR_IMPOSSIBLE),
-                self.cursor_reader("group_part")
-            )
-            .execute(&mut *tx)
-            .await?;
-            self.advance_keyhive_admission_reader_in_tx(
-                &mut tx,
-                crate::store::sqlite::KEYHIVE_ADMISSION_READER_GROUP_PART,
-                event_cursor,
-            )
-            .await?;
-        }
         tx.commit().await?;
 
         if !events.is_empty() {
             self.publish(events).await?;
         }
-        Ok(())
-    }
-
-    pub(crate) async fn keyhive_group_part_cursor(&self) -> Res<u64> {
-        let cursor: Option<i64> = sqlx::query_scalar!(
-            "SELECT seq FROM cursors WHERE reader = ?1",
-            self.cursor_reader("group_part")
-        )
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
-    }
-
-    pub(crate) async fn automerge_keyhive_cursor(&self) -> Res<u64> {
-        let cursor: Option<i64> = sqlx::query_scalar!(
-            "SELECT seq FROM cursors WHERE reader = ?1",
-            self.cursor_reader("automerge_keyhive")
-        )
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
-    }
-
-    pub(crate) async fn commit_automerge_keyhive_cursor(&self, cursor: u64) -> Res<()> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query!(
-            "INSERT INTO cursors(reader, seq) VALUES (?1, ?2)
-             ON CONFLICT(reader)
-             DO UPDATE SET seq = MAX(seq, excluded.seq)",
-            self.cursor_reader("automerge_keyhive"),
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
-        )
-        .execute(&mut *tx)
-        .await?;
-        self.advance_keyhive_admission_reader_in_tx(
-            &mut tx,
-            crate::store::sqlite::KEYHIVE_ADMISSION_READER_AUTOMERGE_FRONTIER,
-            cursor,
-        )
-        .await?;
-        tx.commit().await?;
         Ok(())
     }
 

@@ -113,6 +113,7 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         let cancellation = stop_registration.handle();
         let doc_id_for_span = doc_id.clone();
+        let generation = worker.generation;
         F::from_future(
             async move {
                 let result = futures::future::Abortable::new(
@@ -159,7 +160,8 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
             .instrument(tracing::info_span!(
                 parent: &parent_span,
                 "doc_worker mailbox loop",
-                %doc_id_for_span
+                doc_id = %doc_id_for_span,
+                task_id = generation
             )),
         )
     }
@@ -1260,9 +1262,10 @@ impl<F: FutureForm> DocWorker2<F> {
     /// reported. `reply: Some` resolves the caller's sync receipt; `None` is
     /// passive (fire-and-forget) routing.
     #[tracing::instrument(
+        level = "debug",
         skip_all,
         fields(
-            remote_peer_id = %peer_id,
+            peer_id = %peer_id,
             received_commits = commit_ids.len(),
             received_fragments = fragment_ids.len(),
         )

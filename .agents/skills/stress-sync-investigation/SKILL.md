@@ -363,6 +363,32 @@ isolation. Re-express the test as the contract the client actually follows:
 - register-then-check for a notification (`Notified::enable`) instead of checking then awaiting;
 - never add a sleep, and never widen an internal timeout to make a load failure disappear.
 
+
+## Bootstrap group missing after quiescence
+
+In `big_repo::test2::stress` a four-editor run can reach bootstrap quiescence while
+one editor has no shared group. A recorded failure showed owner/editor-1
+`logged=31 admitted=31`, editor-3 `logged=27 admitted=27 unapplied=[]`,
+and three of four editors had the group. Empty unapplied means the missing
+editor did not have unapplied *received* events; it does not prove whether
+the owner had sent the group's event. On failure the fixture now logs each
+node's group presence and owner-event hashes missing locally. Correlate those
+hashes with owner send selection and group creation before changing the
+quiescence fence or injecting an explicit pull. Seed
+`12799334514579800066` passed alone but failed under the original mixed soak;
+do not use a green isolated rerun as exoneration.
+
+## Offline-transfer test timed out under parallel load
+
+The new four-editor BigRepo offline-transfer test passed 25/25 by itself but
+timed out at 240s on iteration 2 of a full BigRepo+BigSync debug run.
+The captured trace showed bootstrap quiescence fences with 1–2 active
+Keyhive rounds during the first 24s, then mostly BigSync replay long polls
+until termination. That alone cannot identify which test await remained
+blocked. The test now emits begin/complete stages for bootstrap, initial
+alignment, offline mutations, reopen, and final reconnect/alignment; the
+bootstrap barrier also names each node. On the next failure find the last
+stage begin without its completion *before* inspecting subsystem traffic.
 ## Counting iterations in a stress run
 
 With fail-fast on, a `--stress-duration` run ends at the first failure; with everything green it runs
@@ -370,3 +396,7 @@ the whole duration. Count progress by the last test of each pass completing (`(N
 once per iteration) rather than by a `Summary` line, which only appears at the end or on failure.
 Do not combine `--no-fail-fast` with a long duration.
 
+
+## Signed write rejected after offline revocation
+
+In `tier6_offline_downgrade_stale_write_rejected`, Owner first accepts the Editor's `valid` write, then Editor writes `stale` offline before Owner revokes Edit and re-grants Read. Subduction verifies the Sedimentree signer (not the sender) and `subduction_keyhive::policy::authorize_put_with` checks **current** membership, not the grant at the write's causal point. An explicit sync can report `Policy(InsufficientAccess)` if it sees a denied signed object; a successful receipt can instead follow a background denial. Do not require `sync_doc_expect_ready` on that post-reconnect exchange or treat every policy error as expected. Check the earlier accepted value remains readable and that the later local write fails after Editor observes Read. The ignored `tier6_concurrent_offline_write_survives_{revoke,downgrade}` tests pin the intended future causal-authorization contract and must fail today. Rejection logs in Subduction now include `commit_id`/`fragment_id`; correlate those with write stages before concluding which object was denied.

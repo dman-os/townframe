@@ -12,6 +12,7 @@
 //! | `interrupted_sync_retry_succeeds` | A sync that fails due to closed connection can be retried after reconnect. |
 //! | `dropped_content_apply_fails_sync_receipt` | A round whose received content cannot be routed to a stopping doc worker fails the caller instead of reporting a success receipt. |
 //! | `keyhive_completion_defers_until_admission_watermark` | A keyhive completion whose admission watermark is ahead of the hub's admitted head is held until the admission event lands, so the follow-up reconciliation wait cannot observe a stale head. |
+//! | `quiescence_probe_fences_on_admission_head` | `wait_for_quiescence` stays parked while the group-part projection still owes admissions the hub had already incorporated when the probe started, and resolves once they are settled. |
 //!
 //! # Skipped-by-design
 //!
@@ -1394,5 +1395,85 @@ async fn tier9_quiescence_probe_restarts_over_coverage_routed_behind_it() -> cra
         }
     }
     drop(hold);
+    Ok(())
+}
+
+// ─── Quiescence must not resolve over admissions the probe fenced on ──────
+//
+// `wait_for_quiescence` must not return while the group-part projection still
+// owes work for admissions the hub had already incorporated when the probe
+// started. `admitted_head` (highest incorporated admission-log seq) and
+// `group_part_settled_seq` (highest the projection announced settled) are two
+// different watermarks: an admission is incorporated before the group-part
+// worker announces it settled. A probe that captured the announced watermark
+// compared the hub's field with itself and resolved immediately, so every
+// caller that reads a returned `wait_for_quiescence` as "the repository has no
+// work left" got a weaker guarantee than the fence reads as. The probe must
+// capture `admitted_head` and stay parked until a settle announcement covers
+// it.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_quiescence_probe_fences_on_the_admission_head_captured_at_start() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(211, 213, "Owner", "Reader").await?;
+    let repo = &pair.left().repo;
+
+    // Settle first, so the only thing that can hold the second wait is the
+    // fence under test.
+    repo.wait_for_quiescence(None).await?;
+
+    // The injection pins the fence, not a production path: the hub's
+    // `KeyhiveAdmissionAdvanced` arm is what raises `admitted_head`, and the
+    // group-part worker can only announce settlements for real admission-log
+    // entries. This seq is far above anything a freshly booted pair's admission
+    // log can reach, so it stays unsettled until this test announces it by
+    // hand. `inject_runtime2_evt_for_test` delivers it as a hub command that
+    // runs `handle_evt` inline, so `admitted_head` is already raised when the
+    // `WaitForQuiescence` command below is handled — no event-channel race.
+    const UNREACHABLE_ADMISSION_SEQ: u64 = 1_000_000;
+    repo.inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::KeyhiveAdmissionAdvanced {
+        seq: UNREACHABLE_ADMISSION_SEQ,
+    })
+    .await?;
+
+    let wait = repo.wait_for_quiescence(Some(utils_rs::scale_timeout(
+        std::time::Duration::from_secs(30),
+    )));
+    futures::pin_mut!(wait);
+    assert!(
+        futures::poll!(wait.as_mut()).is_pending(),
+        "the wait must park on the admission head it captured, not resolve against the settle \
+         watermark the projection had already announced"
+    );
+    // Causal, not time-based: the probe-barrier command is FIFO behind the
+    // `WaitForQuiescence` command the poll above sent, so a `Some(barrier)`
+    // answer proves the hub started a probe for this wait — and the wait is
+    // still parked while that probe's captured head is unsettled.
+    let barrier = repo.quiescence_probe_barrier_for_test().await?;
+    assert!(
+        barrier.is_some(),
+        "the wait must park on a live quiescence probe"
+    );
+    assert!(
+        futures::poll!(wait.as_mut()).is_pending(),
+        "the wait must stay parked while the probe's captured admissions are unsettled"
+    );
+
+    // The hub resolves the probe from its `GroupPartWorkerSettled` arm once the
+    // projection covers the head the probe captured, so the wait completes with
+    // no retry and no further event.
+    repo.inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::GroupPartWorkerSettled {
+        seq: UNREACHABLE_ADMISSION_SEQ,
+    })
+    .await?;
+    wait.as_mut().await?;
+
+    // The injected settlement equals the injected admission head, so the fence
+    // clears for good: a later probe captures that same head and finds it
+    // already settled instead of stranding on a watermark no worker will ever
+    // announce again.
+    repo.wait_for_quiescence(Some(utils_rs::scale_timeout(
+        std::time::Duration::from_secs(30),
+    )))
+    .await?;
     Ok(())
 }

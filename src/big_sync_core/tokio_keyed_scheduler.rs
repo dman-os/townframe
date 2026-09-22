@@ -246,6 +246,12 @@ where
         let task_id = task.id;
         let completion_tx = self.completion_tx.clone();
         let command = task.seed;
+        // The keyed work runs inside a span per physical task, so everything one key's
+        // current attempt logs is grouped under one id, and a retry or a replacement of
+        // that key is visibly a different span. The key itself cannot be named here:
+        // neither `K` nor the command `C` carries a `Debug` bound, and adding one would
+        // change this generic's public bounds for every crate that drives it.
+        let future = future.instrument(tracing::debug_span!("keyed_task", task_id).or_current());
         let handle = self.task_set.spawn(async move {
             let result = future.await;
             // Closing the receiver means the owning worker is shutting down;

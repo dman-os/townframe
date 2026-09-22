@@ -32,7 +32,6 @@
 use crate::interlude::*;
 
 use crate::blobs::blob_inventory_part_id_from_doc_id;
-use crate::local_state::SqliteLocalStateRepo;
 use crate::repos::RepoStopToken;
 use big_repo::keyhive_core::access::Access;
 use big_repo::keyhive_core::principal::identifier::Identifier;
@@ -43,7 +42,7 @@ use big_repo::{
 use big_sync::DeltaWalkerStateRepo as _;
 use big_sync::SqliteDeltaWalkerStateRepo;
 use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker, DeltaAck,
+    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
 };
 use big_sync_core::delta_walker_state::DeltaWalkerStateTransaction as _;
 use big_sync_core::revisioned_store::RevisionedStore as _;
@@ -77,9 +76,14 @@ const PERMISSION_TASK_BUDGET: usize = 8;
 /// fresh store is correct immediately rather than only after the first event.
 /// Seeding is idempotent (`set_part_members` is a full replacement), so a boot
 /// that finds the rows already correct rewrites the same rows.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    err(Debug),
+    fields(worker = "blob-inventory-permissions")
+)]
 pub(crate) async fn spawn_blob_inventory_permission_writer(
     part_store: SharedPartStore,
-    sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
     big_repo: SharedBigRepo,
     inventory_documents: Vec<DocumentId>,
     parent_cancel_token: CancellationToken,
@@ -87,9 +91,11 @@ pub(crate) async fn spawn_blob_inventory_permission_writer(
     let parts = inventory_parts(&inventory_documents)?;
     // ADR 013 §8, first step: seed before the reader can open.
     seed_inventory_parts(&part_store, big_repo.keyhive(), &parts).await?;
-    let sql = sqlite_local_state_repo
-        .ensure_sqlite_ctx(BLOB_INVENTORY_PERMISSION_STATE_ID)
-        .await?;
+    // A consumer of the big_repo admission log keeps its walker progress row in
+    // that log's database, because the retention floor is derived from those rows:
+    // a state file elsewhere would make the floor unrepresentable and let the two
+    // disagree across a crash with no ordering between them.
+    let sql = big_repo.sql_ctx();
     let state = SqliteDeltaWalkerStateRepo::new(
         sql.read_pool.clone(),
         sql.write_pool.clone(),
@@ -192,6 +198,12 @@ enum PermissionTaskOutput {
     Written,
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    err(Debug),
+    fields(worker = "blob-inventory-permissions-machine")
+)]
 async fn run_permission_machine(
     part_store: SharedPartStore,
     stream: KeyhiveAccessRevisionStore<SqliteDeltaWalkerStateRepo>,
@@ -225,13 +237,12 @@ async fn run_permission_machine(
         tx.advance_from(durable, resume).await?;
         tx.commit().await?;
     }
-    // ADR 013 §9: the retention cursor is the correctness mechanism that keeps
-    // this consumer's wake-ups from being pruned, so it is registered at the
-    // durable progress *before* the reader opens (the order the group-part
-    // worker registers its own reader in). It is monotone, so it may lag the
-    // walker and must never lead it — which the advance above preserves, since
-    // it moves the walker to the floor first and registers the floor after.
-    stream.note_retention(&state, resume).await?;
+    // ADR 013 §9: the retention registration is the correctness mechanism that
+    // keeps this consumer's wake-ups from being pruned. It carries no value — the
+    // floor is read from the walker progress row this advance has just moved to
+    // the archive floor — and it is registered before the reader opens, so no
+    // wake-up in the window the walker is about to read can be pruned in between.
+    stream.note_retention(&state).await?;
     let reader = stream
         .open(
             KeyhiveAccessSelector {
@@ -256,14 +267,7 @@ async fn run_permission_machine(
             biased;
             _ = cancel_token.cancelled() => return Ok(()),
             completion = tasks.next_completion() => {
-                on_task_completion(
-                    &stream,
-                    &state,
-                    &mut walker,
-                    &mut pending,
-                    completion?,
-                )
-                .await?;
+                on_task_completion(&mut walker, &mut pending, completion?).await?;
             }
             read = async {
                 if available == 0 {
@@ -376,15 +380,14 @@ async fn run_permission_task(
     Ok(PermissionTaskOutput::Written)
 }
 
-/// Ack a task whose write is already durable, and advance retention over it.
+/// Ack a task whose write is already durable.
 ///
-/// The completion is the only place a cursor moves, and it moves only for a
-/// task that reported `Written`: a store error leaves the entry unacked, the
-/// walker re-drives it from the durable cursor, and the error surfaces here
-/// rather than being swallowed.
+/// The completion is the only place the walker's progress moves, and it moves only
+/// for a task that reported `Written`: a store error leaves the entry unacked, the
+/// walker re-drives it from the durable revision, and the error surfaces here
+/// rather than being swallowed. The retention floor reads that same progress row,
+/// so acking is what advances retention over the write.
 async fn on_task_completion(
-    stream: &KeyhiveAccessRevisionStore<SqliteDeltaWalkerStateRepo>,
-    state: &SqliteDeltaWalkerStateRepo,
     walker: &mut ConcurrentDeltaWalker<
         '_,
         KeyhiveAccessRevisionStore<SqliteDeltaWalkerStateRepo>,
@@ -397,13 +400,7 @@ async fn on_task_completion(
     let task = completion.command;
     match completion.result {
         Ok(PermissionTaskOutput::Written) => {
-            let ack = walker.ack(task.key, task.cursor).await?;
-            if let DeltaAck::Accepted {
-                through: Some(through),
-            } = ack
-            {
-                stream.note_retention(state, through).await?;
-            }
+            walker.ack(task.key, task.cursor).await?;
             if pending
                 .get(&task.key)
                 .is_some_and(|existing| existing.cursor == task.cursor)
@@ -427,9 +424,9 @@ mod tests {
     use std::time::Duration;
 
     // The harness observes the machine through the machine's own state identity: progress
-    // and the sparse memory rows are keyed by `(namespace, consumer_id)`, and a test-local
-    // namespace would read a different sqlite file (`ensure_sqlite_ctx` opens one per id),
-    // so `durable_revision` would report 0 no matter what the machine settled.
+    // and the sparse memory rows are keyed by `(namespace, consumer_id)`, and the
+    // machine keeps that state in the big_repo database (its progress row is what the
+    // admission-log retention floor reads), so the harness reads the same context.
 
     /// A live BigRepo and a private blob part store, with no runtime attached
     /// beyond the repository's own workers.
@@ -437,7 +434,6 @@ mod tests {
     /// The store is private to the test rather than the repository's, so a test
     /// can fault-inject into it without touching the repository's own scope.
     struct Harness {
-        _temp: tempfile::TempDir,
         repo: SharedBigRepo,
         part_store: SharedPartStore,
         store_sql: SqlCtx,
@@ -445,7 +441,6 @@ mod tests {
         /// scope-erased trait object, and the rows `part_members_in` reads are keyed by
         /// `(scope, part_id)`, so the scope is resolved here and carried alongside.
         store_scope_id: i64,
-        local_state: Arc<SqliteLocalStateRepo>,
         state: SqliteDeltaWalkerStateRepo,
         teardown: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
     }
@@ -456,7 +451,6 @@ mod tests {
                 utils_rs::testing::load_envs_once();
                 utils_rs::testing::setup_tracing_once();
             });
-            let temp = tempfile::tempdir()?;
             let (repo, _big_sync, teardown) = boot_repo().await?;
             let store_sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
             let store_scope: Arc<str> = Arc::from("daybook-blobs-test");
@@ -475,11 +469,7 @@ mod tests {
                 &store_scope,
             )
             .await?;
-            let (local_state, local_state_stop) =
-                SqliteLocalStateRepo::boot(temp.path().join("local_state")).await?;
-            let sql = local_state
-                .ensure_sqlite_ctx(BLOB_INVENTORY_PERMISSION_STATE_ID)
-                .await?;
+            let sql = repo.sql_ctx();
             let state = SqliteDeltaWalkerStateRepo::new(
                 sql.read_pool.clone(),
                 sql.write_pool.clone(),
@@ -488,22 +478,17 @@ mod tests {
             )
             .await?;
             let teardown_future = Box::new(move || {
-                // Resolved before the async block so the block captures only `Send`
-                // values: the boxed teardown is not `Send` and crossing an await with it
-                // would stop the whole harness future from being `Send`.
-                let repo_teardown = teardown();
-                Box::pin(async move {
-                    local_state_stop.stop().await?;
-                    repo_teardown.await
-                }) as futures::future::BoxFuture<'static, Res<()>>
+                // `teardown()` already produces the boxed future the harness awaits, and
+                // resolving it outside any async block keeps the returned value the `Send`
+                // future alone: the boxed teardown itself is not `Send`, and holding it
+                // across an await would stop the whole harness future from being `Send`.
+                teardown()
             });
             Ok(Self {
-                _temp: temp,
                 repo,
                 part_store,
                 store_sql,
                 store_scope_id,
-                local_state,
                 state,
                 teardown: teardown_future,
             })
@@ -526,7 +511,6 @@ mod tests {
         async fn spawn(&self, documents: Vec<DocumentId>) -> Res<RepoStopToken> {
             spawn_blob_inventory_permission_writer(
                 Arc::clone(&self.part_store),
-                Arc::clone(&self.local_state),
                 Arc::clone(&self.repo),
                 documents,
                 CancellationToken::new(),
@@ -536,12 +520,10 @@ mod tests {
 
         async fn stop(self) -> Res<()> {
             let Harness {
-                _temp: _,
                 repo: _,
                 part_store: _,
                 store_sql: _,
                 store_scope_id: _,
-                local_state: _,
                 state: _,
                 teardown,
             } = self;
@@ -1015,7 +997,6 @@ mod tests {
         // store, state and repository they are derived from.
         let writer = spawn_blob_inventory_permission_writer(
             Arc::clone(&rcx.blob_part_store),
-            Arc::clone(&rcx.sqlite_local_state_repo),
             Arc::clone(&rcx.big_repo),
             vec![
                 rcx.core_inventory_doc_id.clone(),

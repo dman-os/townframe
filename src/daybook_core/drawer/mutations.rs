@@ -444,6 +444,24 @@ impl DrawerRepo {
         }
 
         let existing_branch_ref = self.get_branch_ref(&patch.id, branch_path).await?;
+        // Existence stays existence: the create/register guards above resolve a
+        // branch ref alone, so creating a branch whose name is taken is still
+        // refused as already existing even when this node cannot reach the old
+        // branch doc. But *using* the branch is not merely existence: a peer's
+        // delete revokes this repo's access to the branch doc on the keyhive
+        // channel, while the tombstone that drops the branch from the entry
+        // travels on the doc channel, so this node can still resolve the ref to a
+        // branch doc it can no longer reach. Letting the write through would reach
+        // the doc worker and be refused as a local access failure, which misstates
+        // the situation: this node is not losing permission on a live branch, the
+        // branch is gone as far as it can tell.
+        if let Some(branch_ref) = existing_branch_ref.as_ref()
+            && !self.branch_doc_reachable(&branch_ref.branch_doc_id).await?
+        {
+            return Err(DrawerError::BranchNotFound {
+                name: branch_path.to_string(),
+            });
+        }
         let heads = match (heads, existing_branch_ref.as_ref()) {
             (Some(selected_heads), _) => selected_heads,
             (None, Some(branch_ref)) => self

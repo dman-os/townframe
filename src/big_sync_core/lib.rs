@@ -2629,14 +2629,14 @@ impl BigSyncMachine {
                     part_id,
                     cursor,
                 } => {
-                    // Trim the hint from any in-flight sync task for this
-                    // object. An object-routed task is not obsolete at zero hints —
-                    // its route owes the content (see `SetPeer`) — so only a
-                    // part-routed task with nothing left to fetch stops here.
-                    let object_routed = peer_state.objects.contains(&obj_id);
+                    // Part hints and object subscriptions are independent routes. Keep
+                    // syncing with no part hints only while this peer still subscribes
+                    // to the object; otherwise the worker has no route left to serve.
+                    let object_subscribed = peer_state.objects.contains(&obj_id);
                     let stop_task = peer_state.sync_workers.get_mut(&obj_id).and_then(|worker| {
                         worker.part_hints.remove(&part_id);
-                        (worker.part_hints.is_empty() && !object_routed).then_some(worker.task_id)
+                        (worker.part_hints.is_empty() && !object_subscribed)
+                            .then_some(worker.task_id)
                     });
                     if let Some(task_id) = stop_task {
                         let worker = peer_state
@@ -2975,12 +2975,13 @@ impl BigSyncMachine {
                     );
                 }
                 BucketMachineCommand::RemoveObjFromParts { obj_id, part_id } => {
-                    // As in the cursor-strategy arm: an object-routed task stays
-                    // live at zero hints because its route owes the content.
-                    let object_routed = peer_state.objects.contains(&obj_id);
+                    // A zero-hint sync remains live only while the peer still
+                    // subscribes to the object, matching the cursor-strategy arm.
+                    let object_subscribed = peer_state.objects.contains(&obj_id);
                     let stop_task = peer_state.sync_workers.get_mut(&obj_id).and_then(|worker| {
                         worker.part_hints.remove(&part_id);
-                        (worker.part_hints.is_empty() && !object_routed).then_some(worker.task_id)
+                        (worker.part_hints.is_empty() && !object_subscribed)
+                            .then_some(worker.task_id)
                     });
                     if let Some(task_id) = stop_task {
                         let worker = peer_state
@@ -4566,6 +4567,129 @@ mod tests {
             .expect("removal must schedule a RemoveFromParts task");
         assert_ne!(removal.task_id, task_id);
         assert!(removal.part_hints.contains(&part));
+    }
+
+    #[test]
+    fn removal_keeps_sync_task_without_part_hints_while_object_is_subscribed() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let part = PartKey::random();
+        let obj = ObjKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
+            objects: [obj.clone()].into(),
+        }));
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
+                    cursor: 1,
+                    part_ids: vec![part.clone()],
+                    obj_id: obj.clone(),
+                    payload: serde_json::json!({"head": 1}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+        let task_id = machine.peers[&peer].sync_workers[&obj].task_id;
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::PartEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                    cursor: 2,
+                    part_id: part,
+                    obj_id: obj.clone(),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+
+        let worker = &machine.peers[&peer].sync_workers[&obj];
+        assert_eq!(worker.task_id, task_id);
+        assert!(worker.part_hints.is_empty());
+        assert!(!machine.drain_stop_queue().any(|stopped| stopped == task_id));
+    }
+
+    #[test]
+    fn removal_cancels_sync_task_after_object_subscription_is_removed() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let part = PartKey::random();
+        let obj = ObjKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
+            objects: [obj.clone()].into(),
+        }));
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
+                    cursor: 1,
+                    part_ids: vec![part.clone()],
+                    obj_id: obj.clone(),
+                    payload: serde_json::json!({"head": 1}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+        let task_id = machine.peers[&peer].sync_workers[&obj].task_id;
+
+        // Removing the object route alone leaves the part-routed worker active.
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
+            objects: Set::new(),
+        }));
+        assert_eq!(machine.peers[&peer].sync_workers[&obj].task_id, task_id);
+
+        {
+            let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::PartEvent::Removed(crate::rpc::ObjRemovedFromPart {
+                    cursor: 2,
+                    part_id: part.clone(),
+                    obj_id: obj.clone(),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+
+        assert!(!machine.peers[&peer].sync_workers.contains_key(&obj));
+        assert!(machine.drain_stop_queue().any(|stopped| stopped == task_id));
+        assert!(machine.peers[&peer].remove_workers.contains_key(&obj));
+
+        // The abandoned cursor claim must not suppress a redelivery if the object
+        // subscription is added back later.
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
+            objects: [obj.clone()].into(),
+        }));
+        let peer_state = machine.peers.get_mut(&peer).expect(ERROR_UNRECONIZED);
+        peer_state.cursor_machine.on_subscription_evt(
+            crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
+                cursor: 1,
+                part_ids: Vec::new(),
+                obj_id: obj,
+                payload: serde_json::json!({"head": 1}),
+            }),
+            &mut peer_state.cursors_cmd_buf,
+        );
+        assert!(
+            peer_state
+                .cursors_cmd_buf
+                .iter()
+                .any(|command| matches!(command, CursorMachineCommand::SyncObj { cursor: 1, .. }))
+        );
     }
 
     #[test]

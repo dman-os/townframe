@@ -880,13 +880,21 @@ impl DrawerRepo {
         Ok(None)
     }
 
+    /// Resolve a facet's write-point heads at exact branch heads.
+    ///
+    /// Returns `Ok(None)` when the doc/branch is not resolvable at `heads`
+    /// right now (no branch ref, handle not materialized, or heads missing
+    /// from the materialized doc). That is a transient materialization state,
+    /// not a missing document — callers defer their work (the doc-processor
+    /// driver parks on the materialization wake) instead of treating it as
+    /// fatal or classifying with incomplete data.
     pub async fn get_facet_heads_at_branch_heads(
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
         facet_key: &FacetKey,
-    ) -> Res<Vec<automerge::ChangeHash>> {
+    ) -> Res<Option<Vec<automerge::ChangeHash>>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
@@ -894,13 +902,15 @@ impl DrawerRepo {
             .resolve_handle_for_branch_heads(doc_id, branch_path, heads)
             .await?
         else {
-            eyre::bail!("doc not found");
+            return Ok(None);
         };
-        handle
-            .with_document_read(|am_doc| {
-                facet_recovery::recover_facet_heads_at(am_doc, facet_key, heads)
-            })
-            .await
+        Ok(Some(
+            handle
+                .with_document_read(|am_doc| {
+                    facet_recovery::recover_facet_heads_at(am_doc, facet_key, heads)
+                })
+                .await?,
+        ))
     }
 
     pub async fn get_facet_heads_at_branch(
@@ -917,7 +927,6 @@ impl DrawerRepo {
         };
         self.get_facet_heads_at_branch_heads(doc_id, branch_path, &branch_heads, facet_key)
             .await
-            .map(Some)
     }
 
     pub async fn facet_keys_touched_by_local_actor(
@@ -926,15 +935,18 @@ impl DrawerRepo {
         branch_path: &daybook_types::doc::BranchPath,
         heads: &ChangeHashSet,
         facet_keys: &[FacetKey],
-    ) -> Res<HashSet<FacetKey>> {
+    ) -> Res<Option<HashSet<FacetKey>>> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
+        // Same transient unresolvable state as `get_facet_heads_at_branch_heads`:
+        // callers defer rather than classify, so a local change is never
+        // mislabelled as remote and its processor trigger is not lost.
         let Some(handle) = self
             .resolve_handle_for_branch_heads(doc_id, branch_path, heads)
             .await?
         else {
-            return Ok(HashSet::new());
+            return Ok(None);
         };
         let branch_doc_id = handle.document_id();
         let local_user_path = self.local_user_path.clone();
@@ -982,9 +994,16 @@ impl DrawerRepo {
         let mut out = HashSet::new();
         for key in facet_keys {
             let local_actor_ids = local_actor_ids.clone();
-            let facet_heads = self
+            let Some(facet_heads) = self
                 .get_facet_heads_at_branch_heads(doc_id, branch_path, heads, key)
-                .await?;
+                .await?
+            else {
+                // The handle resolved a moment ago, so the branch ref
+                // vanished mid-call (drawer doc updated between the two
+                // resolves). Defer instead of classifying with a stale
+                // actor set.
+                return Ok(None);
+            };
             let is_local = handle
                 .with_document_read(|am_doc| {
                     for head in &facet_heads {
@@ -1001,7 +1020,7 @@ impl DrawerRepo {
                 out.insert(key.clone());
             }
         }
-        Ok(out)
+        Ok(Some(out))
     }
 
     /// ADR 007 §7: the write points (heads + author) of a facet between two

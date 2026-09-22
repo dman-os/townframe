@@ -256,6 +256,35 @@ impl big_sync::SyncBackend for BigRepoSyncBackend {
                 // frontier object through the existing Keyhive admission path,
                 // so this obsolete cursor may be settled without turning
                 // revocation into a retry storm.
+                //
+                // But NotAuthorized alone cannot distinguish a genuine
+                // revocation (settle) from a document this peer never held
+                // membership for: group-scoped membership events can be
+                // invisible to the peer pair-view sync (hunt11), so the grant
+                // simply has not been delivered yet. The reliable local
+                // signal is the document's own membership history: a
+                // processed revocation always sits on top of processed
+                // delegations, so an event-less document shell means the
+                // membership events are still in flight and settling the
+                // cursor here would convert membership-delivery lag into
+                // permanent silent content divergence. Keep the route
+                // unsettled (Stale) instead.
+                let membership_history = match repo
+                    .keyhive()
+                    .clone_keyhive()
+                    .get_document(kh_document)
+                    .await
+                {
+                    Some(document) => {
+                        let document = document.lock().await;
+                        !document.delegation_heads().is_empty()
+                            || !document.revocation_heads().is_empty()
+                    }
+                    None => false,
+                };
+                if !membership_history {
+                    return Ok(big_sync::SyncTaskRunOutcome::Stale);
+                }
                 return Ok(big_sync::SyncTaskRunOutcome::Completion(
                     big_sync_core::SyncTaskCompletion {
                         obj_id,

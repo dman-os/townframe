@@ -20,6 +20,7 @@ use crate::runtime2::{
     SyncDocAttempt, TaskSet,
 };
 use crate::store::sqlite::KeyhiveIncorporationSink;
+use tracing::Instrument;
 
 /// Period between archive/prune/WAL maintenance passes.
 pub(crate) const KEYHIVE_MAINTENANCE_INTERVAL: std::time::Duration =
@@ -1590,6 +1591,7 @@ where
 /// change. Cancelled via `cancel` (connection end) or when a newer connection
 /// for the same peer supersedes it. Best-effort: subscription failures are
 /// logged, never fatal to the connection.
+#[tracing::instrument(level = "debug", skip_all, fields(peer_id = %peer_id))]
 async fn spawn_keyhive_change_subscription(
     wiring: KeyhiveNotifWiring,
     peer_id: PeerKey,
@@ -1605,7 +1607,7 @@ async fn spawn_keyhive_change_subscription(
     }
     drop(cancels);
 
-    drop(tasks.spawn(async move {
+    let subscription = async move {
         let client = crate::rpc::IrohBigRepoRpcClient::new(endpoint, endpoint_addr);
         let mut changes = match client.subscribe_keyhive_changes(64).await {
             Ok(changes) => changes,
@@ -1655,7 +1657,8 @@ async fn spawn_keyhive_change_subscription(
                 }
             }
         }
-    }));
+    };
+    drop(tasks.spawn(subscription.instrument(tracing::Span::current())));
 }
 
 impl<S> crate::runtime2::TransportConnect<Sendable> for IrohTransportConnect<S>
@@ -2060,6 +2063,9 @@ impl subduction_core::sync_session::SyncSessionObserver for Runtime2EvtBridge {
 /// - `async_channel::Sender<Runtime2Evt>` — sender for external event injection.
 /// - [`Runtime2StopToken<Sendable, TokioTaskRuntime>`] — stop token.
 #[expect(clippy::too_many_arguments)]
+// `#[instrument]`'s injected fake-return binding trips `type_complexity`; the real signature is unchanged.
+#[allow(clippy::type_complexity)]
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn spawn_native_runtime2<S>(
     signer: subduction_crypto::signer::memory::MemorySigner,
     group_part_store: crate::store::sqlite::SqliteBigRepoStore,
@@ -2208,6 +2214,17 @@ where
             move |keyhive_peer_id, request_id, changed| {
                 let peer_id = PeerKey::new(*keyhive_peer_id.verifying_key());
                 let admitted_seq = watermark_store.admission_watermark();
+                // This observer is the only source of `KeyhiveSyncDone` for a round. A round that
+                // outlives its connection and gets its answer on the replacement connection either
+                // shows up here or never resolves at all, so this line is what distinguishes the
+                // two.
+                tracing::debug!(
+                    %peer_id,
+                    ?request_id,
+                    changed,
+                    admitted_seq,
+                    "keyhive sync-done observer fired"
+                );
                 if evt_tx
                     .try_send(crate::runtime2::Runtime2Evt::KeyhiveSyncDone {
                         peer_id: peer_id.clone(),
@@ -2305,6 +2322,12 @@ where
     let (handle, mut stop_token) =
         crate::runtime2::spawn_runtime2::<Sendable, crate::runtime2::TokioTaskRuntime>(config)?;
 
+    // Register every admission consumer before any worker or the maintenance
+    // loop is spawned: pruning takes a MIN over registered readers, so a
+    // consumer that has not registered yet is invisible to the floor and its
+    // unprocessed admission events could be pruned from under it.
+    group_part_store.register_admission_consumers().await?;
+
     // ── Background tasks (owned by child_tasks for reverse-order shutdown) ─
 
     // Subduction listener.
@@ -2317,7 +2340,11 @@ where
         group_part_group_scope,
     );
     stop_token.group_part_stop = Some(spawned_group_part.stop);
-    stop_token.worker_tasks.spawn(spawned_group_part.run)?;
+    stop_token.worker_tasks.spawn(Sendable::from_future(
+        spawned_group_part
+            .run
+            .instrument(tracing::info_span!("group_part_worker")),
+    ))?;
 
     let spawned_causal_checkpoint = crate::runtime2::spawn_causal_checkpoint_worker(
         group_part_store.clone(),
@@ -2328,9 +2355,11 @@ where
         causal_checkpoint_group_scope,
     );
     stop_token.causal_checkpoint_stop = Some(spawned_causal_checkpoint.stop);
-    stop_token
-        .worker_tasks
-        .spawn(spawned_causal_checkpoint.run)?;
+    stop_token.worker_tasks.spawn(Sendable::from_future(
+        spawned_causal_checkpoint
+            .run
+            .instrument(tracing::info_span!("causal_checkpoint_worker")),
+    ))?;
 
     // Prekey janitor: rotates the local agent's consumed prekeys. Driven by
     // the durable admission log (own cursor) so Add ops incorporated while
@@ -2341,7 +2370,11 @@ where
         Arc::clone(&timer),
     );
     stop_token.prekey_janitor_stop = Some(spawned_prekey_janitor.stop);
-    stop_token.worker_tasks.spawn(spawned_prekey_janitor.run)?;
+    stop_token.worker_tasks.spawn(Sendable::from_future(
+        spawned_prekey_janitor
+            .run
+            .instrument(tracing::info_span!("prekey_janitor_worker")),
+    ))?;
 
     let spawned_automerge_frontier = crate::runtime2::spawn_automerge_frontier_worker(
         group_part_store.clone(),
@@ -2354,26 +2387,30 @@ where
         automerge_frontier_group_scope,
     );
     stop_token.automerge_frontier_stop = Some(spawned_automerge_frontier.stop);
-    stop_token
-        .worker_tasks
-        .spawn(spawned_automerge_frontier.run)?;
+    stop_token.worker_tasks.spawn(Sendable::from_future(
+        spawned_automerge_frontier
+            .run
+            .instrument(tracing::info_span!("automerge_frontier_worker")),
+    ))?;
 
     stop_token.child_tasks.spawn({
         let listener = listener;
-        Sendable::from_future(async move {
+        let fut = async move {
             listener.await.unwrap();
             Ok(())
-        })
+        };
+        Sendable::from_future(fut.instrument(tracing::info_span!("subduction_listener")))
     })?;
 
     // Subduction manager.
     stop_token.child_tasks.spawn({
         let manager = manager;
-        Sendable::from_future(async move {
+        let fut = async move {
             // manager only returns abort signal on Subduction drop.
             manager.await.ok();
             Ok(())
-        })
+        };
+        Sendable::from_future(fut.instrument(tracing::info_span!("subduction_manager")))
     })?;
 
     // Keyhive maintenance: cache warming and archive compaction have
@@ -2383,7 +2420,7 @@ where
         let kh_proto = Arc::clone(&keyhive_protocol);
         stop_token.child_tasks.spawn({
             let timer = Arc::clone(&timer);
-            Sendable::from_future(async move {
+            let fut = async move {
                 loop {
                     timer.sleep(std::time::Duration::from_secs(2)).await;
                     kh_proto
@@ -2391,7 +2428,8 @@ where
                         .await
                         .map_err(|error| ferr!("keyhive cache refresh failed: {error}"))?;
                 }
-            })
+            };
+            Sendable::from_future(fut.instrument(tracing::info_span!("keyhive_cache_refresh_loop")))
         })?;
     }
     {
@@ -2402,7 +2440,7 @@ where
         );
         stop_token.child_tasks.spawn({
             let timer = Arc::clone(&timer);
-            Sendable::from_future(async move {
+            let fut = async move {
                 loop {
                     timer.sleep(KEYHIVE_MAINTENANCE_INTERVAL).await;
                     let result = async {
@@ -2417,7 +2455,8 @@ where
                         tracing::warn!(%error, "keyhive SQLite maintenance failed; continuing");
                     }
                 }
-            })
+            };
+            Sendable::from_future(fut.instrument(tracing::info_span!("keyhive_maintenance_loop")))
         })?;
     }
 
@@ -2427,9 +2466,11 @@ where
     // unwraps the dispatcher's result, so an unexpected error or panic brings
     // down the process.
     stop_token.keyhive_dispatcher_stop = Some(spawned_keyhive_dispatcher.stop);
-    stop_token
-        .worker_tasks
-        .spawn(spawned_keyhive_dispatcher.run)?;
+    stop_token.worker_tasks.spawn(Sendable::from_future(
+        spawned_keyhive_dispatcher
+            .run
+            .instrument(tracing::info_span!("keyhive_change_dispatcher")),
+    ))?;
 
     // BigEphemeral remains available for application-level transient topics.
     // Keyhive invalidations use the direct BigRepo RPC stream instead of this

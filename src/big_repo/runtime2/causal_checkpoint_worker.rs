@@ -1,19 +1,16 @@
 //! Maintains causal coverage for documents named by Keyhive admission events.
 //!
-//! The worker owns one admission walker, a bounded keyed task scheduler, and
-//! the serial cursor outbox. Admission decoding and document coverage are
-//! physical tasks; source settlement remains with the walker.
+//! The worker owns one admission walker and a bounded keyed task scheduler.
+//! Admission decoding and document coverage are physical tasks; the walker's own
+//! state commit is what records how far the consumer has reconciled.
 
 use crate::interlude::*;
 use crate::keyhive::BigKeyhiveHandle;
 use crate::runtime2::{WorkerGroupScope, keyhive_admission};
 use crate::store::sqlite::SqliteBigRepoStore;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDeltaRead, ConcurrentDeltaWalker, DeltaAck,
-};
-use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
-use big_sync_core::outbox::Outbox;
+use big_sync_core::concurrent_delta_walker::{ConcurrentDeltaRead, ConcurrentDeltaWalker};
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
 use big_sync_core::revisioned_store::RevisionedStore;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
@@ -50,15 +47,19 @@ pub fn spawn_causal_checkpoint_worker(
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
     let run = Sendable::from_future(async move {
         let fut = async move {
-            let cursor = store.causal_checkpoint_cursor().await?;
-            store
-                .register_keyhive_admission_reader(
-                    crate::store::sqlite::KEYHIVE_ADMISSION_READER_CAUSAL_CHECKPOINT,
-                    cursor,
-                )
-                .await?;
+            let identity = crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT;
+            let state = SqliteDeltaWalkerStateRepo::new(
+                store.sql.read_pool.clone(),
+                store.sql.write_pool.clone(),
+                identity.0,
+                identity.1,
+            )
+            .await?;
 
-            if cursor == 0 {
+            // The walker's durable revision is the authority on what has been
+            // reconciled, so a fresh consumer is the one at revision zero.
+            let progress = state.progress().await?.upstream_revision;
+            if progress == 0 {
                 for doc_obj in keyhive.document_ids().await {
                     if runtime.is_stopped() {
                         return Ok(());
@@ -78,22 +79,6 @@ pub fn spawn_causal_checkpoint_worker(
                 }
             }
 
-            let state = {
-                let state = SqliteDeltaWalkerStateRepo::new(
-                    store.sql.read_pool.clone(),
-                    store.sql.write_pool.clone(),
-                    "big_repo.causal_checkpoint",
-                    "admission",
-                )
-                .await?;
-                let progress = state.progress().await?.upstream_revision;
-                if progress == 0 && cursor > 0 {
-                    let mut transaction = state.begin().await?;
-                    transaction.advance_from(0, cursor).await?;
-                    transaction.commit().await?;
-                }
-                state
-            };
             let source = keyhive_admission::Store {
                 store: store.clone(),
                 timer,
@@ -116,7 +101,6 @@ pub fn spawn_causal_checkpoint_worker(
             )
             .await?;
             let worker = Worker {
-                store,
                 keyhive,
                 runtime,
                 scope,
@@ -125,7 +109,6 @@ pub fn spawn_causal_checkpoint_worker(
                     CONCURRENT_TASK_BUDGET,
                 ),
                 pending_admission: HashMap::new(),
-                outbox: Outbox::default(),
             };
             worker.machine_loop().await
         };
@@ -140,11 +123,6 @@ pub fn spawn_causal_checkpoint_worker(
         },
         run,
     }
-}
-
-#[derive(Debug)]
-enum Cmd {
-    AdvanceCursor(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -176,7 +154,6 @@ enum TaskOutput {
 }
 
 struct Worker<'a> {
-    store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
     scope: WorkerGroupScope,
@@ -188,7 +165,6 @@ struct Worker<'a> {
     >,
     tasks: big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler<FrontierKey, Task, TaskOutput>,
     pending_admission: HashMap<crate::DocumentId, SourceCursor>,
-    outbox: Outbox<Cmd, ()>,
 }
 
 impl<'a> Worker<'a> {
@@ -236,7 +212,6 @@ impl<'a> Worker<'a> {
                     }
                 }
             }
-            self.drain_outbox().await?;
             if tracing::enabled!(tracing::Level::DEBUG) {
                 tracing::debug!(
                     durable = self.admission.durable_revision(),
@@ -337,24 +312,9 @@ impl<'a> Worker<'a> {
     }
 
     async fn acknowledge_source(&mut self, source: SourceCursor) -> Res<()> {
-        if let DeltaAck::Accepted {
-            through: Some(through),
-        } = self.admission.ack(source.key, source.cursor).await?
-        {
-            self.outbox.push(Cmd::AdvanceCursor(through), ());
-        }
-        Ok(())
-    }
-
-    async fn drain_outbox(&mut self) -> Res<()> {
-        while let Some((pending, cmd)) = self.outbox.front() {
-            match cmd {
-                Cmd::AdvanceCursor(cursor) => {
-                    self.store.advance_causal_checkpoint_cursor(*cursor).await?;
-                }
-            }
-            let (_cmd, _unit) = self.outbox.complete(pending.id());
-        }
+        // The walker's ack commits the consumer's progress; there is no second
+        // watermark to write and so nothing here can lag it.
+        self.admission.ack(source.key, source.cursor).await?;
         Ok(())
     }
 }

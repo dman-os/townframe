@@ -28,10 +28,8 @@ use crate::runtime2::{GroupScopeHandle, WorkerGroupScope, keyhive_admission};
 use crate::store::sqlite::SqliteBigRepoStore;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
 use big_sync::{HostPartStore, LocalPartRevisionReader};
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDeltaRead, ConcurrentDeltaWalker, DeltaAck,
-};
-use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
+use big_sync_core::concurrent_delta_walker::{ConcurrentDeltaRead, ConcurrentDeltaWalker};
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
 use big_sync_core::outbox::Outbox;
 use big_sync_core::revisioned_store::{
     RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
@@ -112,30 +110,14 @@ pub fn spawn_automerge_frontier_worker(
             // including parts created after this boot), so no part
             // enumeration is frozen into the walker. The scope handle is
             // consulted live at event-processing and publish time.
-            let kh_read_cursor = store.automerge_keyhive_cursor().await?;
-            store
-                .register_keyhive_admission_reader(
-                    crate::store::sqlite::KEYHIVE_ADMISSION_READER_AUTOMERGE_FRONTIER,
-                    kh_read_cursor,
-                )
-                .await?;
-
-            let admission_state = {
-                let state = SqliteDeltaWalkerStateRepo::new(
-                    store.sql.read_pool.clone(),
-                    store.sql.write_pool.clone(),
-                    "big_repo.automerge_frontier",
-                    "keyhive-admission",
-                )
-                .await?;
-                let progress = state.progress().await?.upstream_revision;
-                if progress == 0 && kh_read_cursor > 0 {
-                    let mut transaction = state.begin().await?;
-                    transaction.advance_from(0, kh_read_cursor).await?;
-                    transaction.commit().await?;
-                }
-                state
-            };
+            let identity = crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_AUTOMERGE_FRONTIER;
+            let admission_state = SqliteDeltaWalkerStateRepo::new(
+                store.sql.read_pool.clone(),
+                store.sql.write_pool.clone(),
+                identity.0,
+                identity.1,
+            )
+            .await?;
             let admission_source = keyhive_admission::Store {
                 store: store.clone(),
                 timer: Arc::clone(&timer),
@@ -185,7 +167,6 @@ pub fn spawn_automerge_frontier_worker(
                 .subscribe_local_listener(LocalFilter { doc_id: None })
                 .await?;
             let worker = Worker {
-                store,
                 big_sync_store,
                 frontier_store,
                 runtime,
@@ -205,7 +186,6 @@ pub fn spawn_automerge_frontier_worker(
                 wake_docs: HashSet::new(),
             };
             tracing::debug!(
-                keyhive_admission_cursor = kh_read_cursor,
                 admission_durable_cursor = admission_durable,
                 part_durable_cursor = part_durable,
                 "AFW started"
@@ -235,7 +215,6 @@ enum Cmd {
         doc_id: crate::DocumentId,
         part_id: PartKey,
     },
-    AdvanceKhCursor(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -491,7 +470,6 @@ enum ConcurrentTaskOutput {
 }
 
 struct Worker<'a> {
-    store: SqliteBigRepoStore,
     big_sync_store: Arc<dyn HostPartStore>,
     frontier_store: Arc<dyn HostPartStore>,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
@@ -612,9 +590,6 @@ impl<'a> Worker<'a> {
                         .remove_obj_from_part(automerge_doc_obj_id(doc_id.clone()), part_id.clone())
                         .await?;
                 }
-                Cmd::AdvanceKhCursor(cursor) => {
-                    self.store.commit_automerge_keyhive_cursor(*cursor).await?;
-                }
             }
             let (_cmd, unit) = self.outbox.complete(pending.id());
             if let Some(source) = unit {
@@ -730,13 +705,6 @@ impl<'a> Worker<'a> {
             ack = ?ack,
             "AFW acknowledged source"
         );
-        if source.source == SourceKind::Admission
-            && let DeltaAck::Accepted {
-                through: Some(through),
-            } = ack
-        {
-            self.outbox.push(Cmd::AdvanceKhCursor(through), None);
-        }
         Ok(())
     }
 

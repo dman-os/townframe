@@ -75,15 +75,21 @@ impl SqliteDeltaWalkerStateRepo {
         &self.consumer_id
     }
 
+    /// The reader id a source log's retention registration for a consumer
+    /// identity must use.
+    ///
+    /// The `("namespace", "consumer_id")` pair IS the consumer identity — it
+    /// keys every row in this repo — so deriving the retention reader id from it
+    /// means one consumer cannot register two retention rows and two consumers
+    /// cannot share one, without either caller spelling the pair out.
+    pub fn retention_reader_id_of(namespace: &str, consumer_id: &str) -> String {
+        format!("{namespace}/{consumer_id}")
+    }
+
     /// The reader id a source log's retention registration for this consumer
     /// must use.
-    ///
-    /// The walker identity `(namespace, consumer_id)` IS the consumer identity
-    /// — it keys every row in this repo — so deriving the retention reader id
-    /// from it means one consumer cannot register two retention rows and two
-    /// consumers cannot share one, without either caller spelling the pair out.
     pub fn retention_reader_id(&self) -> String {
-        format!("{}/{}", self.namespace(), self.consumer_id())
+        Self::retention_reader_id_of(self.namespace(), self.consumer_id())
     }
 
     pub async fn begin(&self) -> DeltaWalkerStateResult<SqliteDeltaWalkerStateTransaction<'_>> {

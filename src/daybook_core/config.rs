@@ -183,6 +183,12 @@ impl ConfigRepo {
         Ok(tags.last().map(|tag| tag.actor_id.clone()))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "config-notifs", doc_id = %app_doc_id),
+    )]
     pub async fn load(
         big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
@@ -248,6 +254,12 @@ impl ConfigRepo {
         ))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "config-notifs", doc_id = %self.app_doc_id),
+    )]
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<

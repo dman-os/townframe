@@ -556,6 +556,165 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_branch_whose_branch_doc_access_is_revoked_leaves_the_listing_and_is_refused_as_unknown()
+-> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
+
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        let handle = big_repo.create_doc(doc).await?;
+        handle.document_id()
+    };
+
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        big_sync_host.store,
+        drawer_doc_id,
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_store_sql().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        entry_pool,
+        doc_pool,
+        None,
+    )
+    .await?;
+
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let doc_id = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(
+                title_key.clone(),
+                WellKnownFacet::TitleGeneric("Initial".into()).into(),
+            )]
+            .into(),
+            user_path: None,
+        })
+        .await?;
+
+    let main_heads = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing doc branches after add")?
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch")?
+        .clone();
+    let branch = BranchPathBuf::from("/stress/1");
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &branch,
+        BranchPath::new("main"),
+        &main_heads,
+        None,
+    )
+    .await?;
+
+    // Positive control: while the branch doc is reachable the branch is listed
+    // and a write to it succeeds, so the assertions below cannot pass vacuously.
+    let branch_heads = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing doc branches after replicated branch creation")?
+        .branches
+        .get("/stress/1")
+        .ok_or_eyre("replicated /stress/1 branch not listed while reachable")?
+        .clone();
+    repo.update_at_heads(
+        DocPatch {
+            id: doc_id.clone(),
+            facets_set: [(
+                title_key.clone(),
+                WellKnownFacet::TitleGeneric("reachable".into()).into(),
+            )]
+            .into(),
+            facets_remove: vec![],
+            user_path: None,
+        },
+        &branch,
+        Some(branch_heads.clone()),
+    )
+    .await?;
+
+    let branch_ref = repo
+        .get_branch_ref(&doc_id, &branch)
+        .await?
+        .ok_or_eyre("replicated /stress/1 branch ref missing")?;
+
+    // A peer's delete revokes this repo's drawer and content groups' access to the
+    // branch doc (`remove_branch_from_partitions_if_needed`) while the tombstone
+    // that drops the branch from the entry travels on the doc channel, so a peer
+    // that holds the revocation can still list the branch. A peer's membership is
+    // group-only, so the revocation alone removes its reachability; this node
+    // created the branch doc, so it also holds direct admin membership that no
+    // group revocation takes away. Drop both to reach the peer's local state: a
+    // branch doc this node cannot reach while the entry below still lists the
+    // branch.
+    repo.remove_branch_from_partitions_if_needed(
+        super::BranchKind::Replicated,
+        branch_ref.branch_doc_id.clone(),
+    )
+    .await?;
+    repo.big_repo
+        .revoke_doc_access(
+            branch_ref.branch_doc_id.clone(),
+            repo.big_repo.local_keyhive_agent().await?.clone(),
+        )
+        .await?;
+    assert!(
+        !repo.branch_doc_reachable(&branch_ref.branch_doc_id).await?,
+        "the revocation must leave this node unable to reach the branch doc",
+    );
+    // The incoherent state is real and unchanged: the entry still lists the
+    // branch because we did not delete it, while the resolved listing no longer
+    // does because this node can no longer reach its branch doc.
+    let entry = repo
+        .get_entry(&doc_id)
+        .await?
+        .ok_or_eyre("doc entry missing after revocation")?;
+    assert!(entry.branches.contains_key("/stress/1"));
+    let listed = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("doc branches missing after revocation")?;
+    assert!(!listed.branches.contains_key("/stress/1"));
+
+    // The write must be refused as an unknown branch, not as the doc worker's
+    // local access refusal (a listed branch the node cannot write is the bug).
+    let err = repo
+        .update_at_heads(
+            DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    title_key.clone(),
+                    WellKnownFacet::TitleGeneric("unreachable".into()).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            &branch,
+            Some(branch_heads),
+        )
+        .await
+        .expect_err("a write to a branch whose branch doc is unreachable must be refused");
+    assert!(
+        matches!(err, DrawerError::BranchNotFound { .. }),
+        "expected BranchNotFound, got {err:?}"
+    );
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn register_existing_doc_initializes_branch_system_facets() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
@@ -2078,7 +2237,8 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
             &main_heads,
             std::slice::from_ref(&note_key),
         )
-        .await?;
+        .await?
+        .expect("doc resolvable in test");
     assert!(
         touched.contains(&note_key),
         "expected Note facet change from user_path-scoped actor to count as local"

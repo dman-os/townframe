@@ -1,4 +1,5 @@
 use crate::{BigRepo, interlude::*};
+use tracing::Instrument;
 
 use big_sync_core::PeerKey;
 use iroh::endpoint::Connection;
@@ -111,6 +112,11 @@ pub struct BigRepoRpcProtocolHandler {
 }
 
 impl ProtocolHandler for BigRepoRpcProtocolHandler {
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(peer_id = tracing::field::Empty, otel.kind = "server")
+    )]
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let endpoint_id = conn.remote_id();
         let peer_id = match self.peer_map.read().expect(ERROR_MUTEX).lookup(endpoint_id) {
@@ -133,6 +139,7 @@ impl ProtocolHandler for BigRepoRpcProtocolHandler {
                 peer_id
             }
         };
+        tracing::Span::current().record("peer_id", tracing::field::display(&peer_id));
         loop {
             let msg = match irpc_iroh::read_request::<RepoSyncRpc>(&conn).await {
                 Ok(Some(msg)) => msg,
@@ -169,6 +176,7 @@ impl BigRepoRpcStopToken {
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn spawn_repo_rpc(
     big_repo: Arc<BigRepo>,
 ) -> Res<(BigRepoRpcHandle, BigRepoRpcStopToken)> {
@@ -179,7 +187,7 @@ pub async fn spawn_repo_rpc(
     let worker_subscription_tasks = Arc::clone(&subscription_tasks);
     let worker_cancel_token = cancel_token.clone();
 
-    let join_handle = tokio::spawn(async move {
+    let rpc_loop = async move {
         loop {
             tokio::select! {
                 biased;
@@ -198,7 +206,8 @@ pub async fn spawn_repo_rpc(
                 }
             }
         }
-    });
+    };
+    let join_handle = tokio::spawn(rpc_loop.instrument(tracing::info_span!("repo_rpc_loop")));
 
     Ok((
         BigRepoRpcHandle { rpc_tx, peer_map },
@@ -210,6 +219,7 @@ pub async fn spawn_repo_rpc(
     ))
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(peer_id = %peer_id, otel.kind = "server"))]
 async fn handle_rpc_message(
     big_repo: Arc<BigRepo>,
     subscription_tasks: &utils_rs::AbortableJoinSet,
@@ -232,11 +242,12 @@ async fn handle_rpc_message(
             let repo = Arc::clone(&big_repo);
             let cleanup_repo = Arc::clone(&big_repo);
             let peer_id_for_task = peer_id.clone();
-            match subscription_tasks.spawn(async move {
+            let cleanup = async move {
                 cancel.cancelled().await;
                 repo.unsubscribe_keyhive_changes(&peer_id_for_task, sub_id)
                     .await;
-            }) {
+            };
+            match subscription_tasks.spawn(cleanup.instrument(tracing::Span::current())) {
                 Ok(_) => {
                     tracing::debug!(%peer_id, "registered direct Keyhive change stream");
                 }
@@ -270,6 +281,11 @@ impl IrohBigRepoRpcClient {
         }
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(otel.kind = "client", capacity = capacity)
+    )]
     pub async fn subscribe_keyhive_changes(
         &self,
         capacity: usize,

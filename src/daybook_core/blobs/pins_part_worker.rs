@@ -23,6 +23,12 @@ pub const DOC_BLOB_PINS_LOCAL_STATE_ID: &str = "@daybook/core/doc-blob-pins-inde
 /// blob-pin facets of every document branch into the document's
 /// blob-inventory part. Private shared state; no public surface —
 /// observers read the `doc_blob_pins` SQLite projection or the part store.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    err(Debug),
+    fields(worker = "blob-pins-part-worker")
+)]
 pub(crate) async fn spawn_blob_pins_part_worker(
     part_store: SharedPartStore,
     sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
@@ -559,6 +565,12 @@ impl Worker {
     /// The keyed blob-pins-part machine: a `ConcurrentDeltaWalker` over the
     /// facet-set source, keyed by branch, with per-branch reconcile tasks.
     /// Mutable machine state lives as stack locals here.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "blob-pins-part-machine")
+    )]
     async fn run_facet_machine(
         &mut self,
         drawer: Arc<DrawerRepo>,

@@ -703,29 +703,59 @@ impl BigKeyhiveHandle {
         };
         let coparent_count = coparents.len();
         let keyhive = self.keyhive.as_ref();
-        let kh_doc_id = keyhive
-            .generate_doc(coparents, initial_content_heads)
-            .await
-            .map_err(|err| {
+        let kh_doc_id = match keyhive.generate_doc(coparents, initial_content_heads).await {
+            Ok(kh_doc_id) => kh_doc_id,
+            Err(err) => {
                 // A coparent's prekey is published by its own hive and only reaches us through
                 // sync, so this error means an individual we are about to co-sign with has no
                 // published prekey here yet. Either its publication is still in flight, or we
                 // never pulled it; it is logged rather than retried because a retry would hide
-                // the second case.
+                // the second case. Say which of the two it is rather than leaving the caller
+                // to guess.
                 if let keyhive_core::principal::document::GenerateDocError::MissingPrekeys(
                     missing,
                 ) = &err
                 {
-                    tracing::warn!(
-                        ?missing,
-                        coparent_count,
-                        "document creation has no published prekey for a coparent"
-                    );
+                    self.explain_missing_prekeys(missing, coparent_count, "create_doc")
+                        .await;
                 }
-                ferr!("failed creating keyhive document: {err}")
-            })?;
+                return Err(ferr!("failed creating keyhive document: {err}"));
+            }
+        };
         let hashes = self.persist_document_events(kh_doc_id, protocol).await?;
         Ok((DocumentId::new(kh_doc_id.to_bytes()), hashes))
+    }
+
+    /// Distinguish the two ways a coparent can have no prekey here, because they have different
+    /// owners. An individual that is not registered at all means its own prekey op never reached
+    /// us: the identifier travels in other principals' events (a delegation names the delegate),
+    /// but the node is only ever born from the individual's own op, so a member we learned about
+    /// from someone else's delegation is simply absent. A registered individual holding no prekey
+    /// ops is the other case, and not one the wire can produce: `Individual::new` builds the state
+    /// from the op that registers it, so an empty state is something we restored or pruned.
+    async fn explain_missing_prekeys(
+        &self,
+        missing: &keyhive_core::principal::individual::MissingPrekeys,
+        coparent_count: usize,
+        site: &'static str,
+    ) {
+        let keyhive_core::principal::individual::MissingPrekeys::NoPublishedPrekey(missing_id) =
+            missing;
+        let missing_id = **missing_id;
+        let detail = match self.keyhive.get_individual(missing_id).await {
+            None => "individual not registered locally: no op of its own was applied".to_owned(),
+            Some(individual) => format!(
+                "individual registered: held prekey ops={}",
+                individual.lock().await.prekey_ops().len()
+            ),
+        };
+        tracing::warn!(
+            %missing_id,
+            coparent_count,
+            site,
+            detail = %detail,
+            "document creation has no published prekey for a coparent"
+        );
     }
 
     pub(crate) async fn reserve_doc_id(
@@ -840,25 +870,25 @@ impl BigKeyhiveHandle {
             tail: content_heads.tail.into_iter().map(Vec::from).collect(),
         };
         let coparent_count = coparents.len();
-        let kh_doc_id = self
+        let kh_doc_id = match self
             .keyhive
             .generate_doc_with_reserved_signer(signing_key, coparents, initial_content_heads)
             .await
-            .map_err(|err| {
+        {
+            Ok(kh_doc_id) => kh_doc_id,
+            Err(err) => {
                 // Same reasoning as `create_doc`: a coparent prekey that has not reached us is
                 // a pull/publication question first, so record which individual is missing it.
                 if let keyhive_core::principal::document::GenerateDocError::MissingPrekeys(
                     missing,
                 ) = &err
                 {
-                    tracing::warn!(
-                        ?missing,
-                        coparent_count,
-                        "reserved document creation has no published prekey for a coparent"
-                    );
+                    self.explain_missing_prekeys(missing, coparent_count, "reserved")
+                        .await;
                 }
-                ferr!("failed creating keyhive document: {err}")
-            })?;
+                return Err(ferr!("failed creating keyhive document: {err}"));
+            }
+        };
         let hashes = self.persist_document_events(kh_doc_id, protocol).await?;
         Ok(hashes)
     }

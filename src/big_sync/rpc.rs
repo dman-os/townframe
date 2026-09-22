@@ -706,7 +706,13 @@ impl BigSyncRpcWorker {
             } else if store
                 .read_denied(replay_target_read_target(&entry.target), subscriber.clone())
                 .await
-                .unwrap()
+                .map_err(|error| {
+                    tracing::error!(
+                        error = ?error,
+                        "replay subscription addition access check failed"
+                    );
+                    RpcError::Internal
+                })?
             {
                 Some(TargetVerdict::Unauthorized)
             } else {
@@ -1183,12 +1189,27 @@ impl BigSyncRpcWorker {
 }
 
 impl BigSyncRpcWorker {
-    #[tracing::instrument(skip(self, msg))]
+    #[tracing::instrument(
+        skip(self, msg),
+        fields(
+            peer_id = tracing::field::Empty,
+            // The responder half of the wire protocol, so an OpenTelemetry export has to
+            // map this span to a server span.
+            otel.kind = "server",
+        )
+    )]
     async fn handle_rpc_message(
         &self,
         msg: BigSyncRpcMessage,
         authenticated_peer: Option<PeerKey>,
     ) {
+        // The caller is authenticated by the transport, so it is only known here, and a
+        // span field cannot be added after creation: it is declared empty above and
+        // filled in before any arm can log. An unauthenticated call leaves it unset,
+        // which is itself the finding.
+        if let Some(peer_id) = &authenticated_peer {
+            tracing::Span::current().record("peer_id", tracing::field::display(peer_id));
+        }
         match msg {
             BigSyncRpcMessage::PeerSummary(req) => {
                 let WithChannels { inner, tx, .. } = req;

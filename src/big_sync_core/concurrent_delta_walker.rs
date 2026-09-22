@@ -122,6 +122,16 @@ where
     /// Read at most `limit` source entries.  A source revision larger than the
     /// limit is returned over several calls, while its keyed dependencies are
     /// registered atomically on the first call.
+    ///
+    /// The span is the read's own: it carries the durable cursor the read resumes from and
+    /// the batch limit, which is what a stalled prefix has to be read against. The keys the
+    /// batch registers stay unrecorded — `K` carries no `Debug` bound, and widening it is a
+    /// change to a public generic that consumers outside this crate drive.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(limit = limit.get(), durable_revision = self.durable_revision)
+    )]
     pub async fn next(
         &mut self,
         limit: NonZeroUsize,
@@ -180,6 +190,16 @@ where
     /// Acknowledge the newest completed cursor for a key.  Completion of that
     /// cursor supersedes older pending cursors for the same key before the
     /// source watermark is drained.
+    ///
+    /// This is the per-key settle point, so its span is the one to read a key's progress
+    /// against: `cursor` is the cursor being acked and `durable_revision` is the prefix
+    /// that was durable when it arrived. The key itself stays unrecorded, for the same
+    /// reason as in [`Self::next`].
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(cursor = cursor, durable_revision = self.durable_revision)
+    )]
     pub async fn ack(
         &mut self,
         key: K,

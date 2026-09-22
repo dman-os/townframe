@@ -231,6 +231,12 @@ impl DrawerRepo {
         &self.meta_store_sql
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "drawer-notifs", doc_id = %drawer_doc_id),
+    )]
     #[expect(clippy::too_many_arguments)]
     pub async fn load(
         big_repo: SharedBigRepo,
@@ -436,6 +442,42 @@ impl DrawerRepo {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Whether this node can reach the branch's document at all. Deleting a
+    /// replicated branch revokes this repo's drawer and content groups' access to
+    /// that branch doc on the keyhive channel, while the tombstone that drops the
+    /// branch from the listing travels on the doc channel; the channels are
+    /// independent, so a peer can hold the revocation while still listing the
+    /// branch. Presenting or using a branch must consult this, so the two channels
+    /// cannot produce a branch that is listed and unwritable.
+    pub(crate) async fn branch_doc_reachable(&self, branch_doc_id: &DocumentId) -> Res<bool> {
+        use big_repo::keyhive_core::principal::{identifier::Identifier, public::Public};
+
+        // The write gate (`NativeBigRepoIo::has_doc_write_access`) derives its
+        // local identifier from this repo's peer key, and the local keyhive agent
+        // is looked up by that same peer id, so `id()` is that same identifier.
+        let local_ident = self.big_repo.local_keyhive_agent().await?.id();
+        // A branch doc key is a BigSync object key, which ADR 012 makes arbitrary
+        // bytes: a key that is not a valid verifying key names a document this
+        // node cannot reach, not a hard error.
+        let Ok(branch_doc_bytes) = branch_doc_id.to_bytes32() else {
+            return Ok(false);
+        };
+        let Ok(branch_doc_key) = ed25519_dalek::VerifyingKey::from_bytes(&branch_doc_bytes) else {
+            return Ok(false);
+        };
+        let branch_doc_ident = Identifier::from(branch_doc_key);
+        let keyhive = self.big_repo.keyhive();
+        let local_reachable = keyhive
+            .agent_access_on(&local_ident, branch_doc_ident)
+            .await
+            .is_some();
+        let public_reachable = keyhive
+            .agent_access_on(&Public.id(), branch_doc_ident)
+            .await
+            .is_some();
+        Ok(local_reachable || public_reachable)
     }
 
     pub(crate) fn content_actor_id(

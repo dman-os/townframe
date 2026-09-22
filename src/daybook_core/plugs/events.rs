@@ -46,11 +46,19 @@ impl PendingManifestWakes {
         }
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "plugs-manifest-wake", doc_id = tracing::field::Empty),
+    )]
     async fn watch(&mut self, drawer: &DrawerRepo, plug_id: &str, ref_url: &url::Url) -> Res<bool> {
         if self.registrations.contains_key(plug_id) {
             return Ok(false);
         }
         let parsed = crate::plugs::PlugsRepo::parse_enabled_ref(ref_url)?;
+        // The manifest doc is only known after parsing the enabled ref.
+        tracing::Span::current().record("doc_id", tracing::field::display(&parsed.doc_id));
         let branch_id = daybook_types::doc::BranchId(parsed.doc_id.to_string());
         let mut wake = drawer
             .subscribe_document_materialization(&branch_id)
@@ -59,11 +67,15 @@ impl PendingManifestWakes {
         self.next_id += 1;
         let plug_id = plug_id.to_owned();
         let task_plug_id = plug_id.clone();
-        let abort = self.watchers.spawn(async move {
+        // The watcher outlives this call, so it is instrumented with this
+        // span: its later lines name the worker and the manifest doc.
+        let wake_span = tracing::Span::current().or_current();
+        let wake_task = async move {
             wake.ready_changed()
                 .await
                 .map(|change| (task_plug_id, registration_id, change))
-        });
+        };
+        let abort = self.watchers.spawn(wake_task.instrument(wake_span));
         self.registrations.insert(plug_id, (registration_id, abort));
         Ok(true)
     }
@@ -374,6 +386,12 @@ impl RevisionedStoreReader<u64, PlugsConfigRevision, eyre::Report> for PlugsConf
 /// re-evaluates enabled-but-unreadable refs, emitting `PlugEnabled` for
 /// pending→active transitions (ADR 007 §6: pending resolution is exactly a
 /// new manual enablement, only the trigger differs).
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    err(Debug),
+    fields(worker = "plugs-config-consumer")
+)]
 pub(crate) async fn spawn_plugs_config_consumer(
     facet_set_store: Arc<FacetSetRevisionStore>,
     drawer: Arc<DrawerRepo>,
@@ -395,7 +413,10 @@ pub(crate) async fn spawn_plugs_config_consumer(
     ));
     let cancel_token = parent_cancel_token.child_token();
     let worker_cancel_token = cancel_token.clone();
-    let worker_handle = tokio::spawn(async move {
+    let worker_span = tracing::Span::current().or_current();
+    // The consumer's walker loop lives in this future, so it is instrumented
+    // at the spawn site: every line it logs names this worker.
+    let consumer = async move {
         let durable = state
             .progress()
             .await
@@ -454,7 +475,8 @@ pub(crate) async fn spawn_plugs_config_consumer(
                 }
             }
         }
-    });
+    };
+    let worker_handle = tokio::spawn(consumer.instrument(worker_span));
     Ok(crate::repos::RepoStopToken {
         cancel_token,
         worker_handle: Some(worker_handle),
@@ -494,6 +516,12 @@ async fn refresh_pending_manifest_wakes(
 /// (version/compat gates and rejections live in `record_known_manifest_doc`).
 /// This consumer only drives that recording — the derived cache and the
 /// pending→active resolution belong to the config event consumer above.
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    err(Debug),
+    fields(worker = "plugs-manifest-consumer")
+)]
 pub(crate) async fn spawn_facet_set_plugs_manifest_consumer(
     facet_set_store: Arc<FacetSetRevisionStore>,
     plugs_repo: Arc<PlugsRepo>,
@@ -526,6 +554,12 @@ pub(crate) async fn spawn_facet_set_plugs_manifest_consumer(
     })
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    err(Debug),
+    fields(worker = "plugs-manifest-consumer")
+)]
 async fn run_facet_set_plugs_manifest_consumer(
     facet_set_store: Arc<FacetSetRevisionStore>,
     plugs_repo: Arc<PlugsRepo>,

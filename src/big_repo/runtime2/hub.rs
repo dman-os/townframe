@@ -252,7 +252,24 @@ struct QuiescenceProbe {
     barrier_id: u64,
     activity_generation: u64,
     pending_docs: HashSet<DocumentId>,
-    group_part_settled_seq: u64,
+    /// Highest admission-log seq this probe requires the group-part projection
+    /// to have settled. Captured from the hub's `admitted_head` when the probe
+    /// starts, not from the watermark the projection had announced by then:
+    /// an admission is incorporated before the group-part worker announces it
+    /// settled, so fencing on the announced watermark would let the probe
+    /// resolve while the projection still owes work for admissions that were
+    /// already incorporated.
+    required_settled_seq: u64,
+}
+
+impl QuiescenceProbe {
+    /// Settle clause of the quiescence fence: the group-part projection still
+    /// owes this probe the admissions it captured at start. Both watermarks
+    /// only move forward and the worker settles admissions continuously, so
+    /// this clears without any timeout or retry.
+    fn settle_outstanding(&self, group_part_settled_seq: u64) -> bool {
+        group_part_settled_seq < self.required_settled_seq
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -319,11 +336,13 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::DocumentId>>,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("allocate_doc");
+        let fut = async move {
             let result = runtime_io.allocate_document(parents).await;
             resp.send(result).map_err(|_| ferr!(ERROR_CHANNEL))?;
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
 
     fn finalize_allocated_doc(
@@ -337,7 +356,8 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
             eyre::Result<crate::runtime2::types::LiveDocHandle>,
         >,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("finalize_allocated_doc", doc_id = %doc_id);
+        let fut = async move {
             let result = async {
                 let content_heads = nonempty::NonEmpty::from_vec(
                     initial_content
@@ -431,7 +451,8 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
             .await;
             resp.send(result).map_err(|_| ferr!(ERROR_CHANNEL))?;
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
 
     fn create_doc(
@@ -444,9 +465,11 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
             eyre::Result<crate::runtime2::types::LiveDocHandle>,
         >,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("create_doc", doc_id = tracing::field::Empty);
+        let fut = async move {
             match runtime_io.create_document(parents, content_heads).await {
                 Ok(doc_id) => {
+                    tracing::Span::current().record("doc_id", tracing::field::display(&doc_id));
                     match cmd_tx
                         .send(Runtime2Cmd::PutDoc {
                             doc_id,
@@ -471,7 +494,8 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 }
             }
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
 
     fn contains_sedimentree(
@@ -479,13 +503,15 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         sed_id: sedimentree_core::id::SedimentreeId,
         resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("contains_sedimentree", obj_id = %sed_id);
+        let fut = async move {
             let stored = runtime_io.contains_sedimentree(sed_id).await;
             resp.send(stored)
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
 
     fn has_local_doc_state(
@@ -494,7 +520,8 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         has_doc_worker: bool,
         resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("has_local_doc_state", doc_id = %doc_id);
+        let fut = async move {
             // The document id arrives from the sync backend, so its width is peer input:
             // derive the fixed-width sedimentree id fallibly and report the failure to the
             // caller's receipt instead of the hub loop.
@@ -513,7 +540,8 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
 
     fn inspect_stored_doc_blobs(
@@ -521,13 +549,15 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         sed_id: sedimentree_core::id::SedimentreeId,
         resp: futures::channel::oneshot::Sender<eyre::Result<Vec<Vec<u8>>>>,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("inspect_stored_doc_blobs", obj_id = %sed_id);
+        let fut = async move {
             let result = runtime_io.inspect_stored_doc_blobs(sed_id).await;
             resp.send(result)
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
 }
 
@@ -569,21 +599,30 @@ where
         let barrier_id = self.quiescence_barrier_ids;
         let generation = self.activity_generation;
         let doc_ids: Vec<_> = self.doc_workers.keys().cloned().collect();
-        let group_part_settled_seq = self.group_part_settled_seq;
+        // The probe fences on the highest admission the hub has incorporated
+        // (`admitted_head`), not on the watermark the group-part projection has
+        // announced by then: incorporation happens before the group-part worker
+        // announces that admission settled, so capturing the announced
+        // watermark would leave the settle clause comparing the hub's field
+        // with itself and resolve the probe before the projection caught up.
+        // The worker settles admissions continuously, so the captured target is
+        // always eventually reached.
+        let required_settled_seq = self.admitted_head;
         debug!(
             barrier_id,
             local_peer_id = %self.local_peer_id,
             activity_generation = generation,
             doc_workers = doc_ids.len(),
             pending_materialization = self.pending_materialization.len(),
-            group_part_settled_seq,
+            required_settled_seq,
+            group_part_settled_seq = self.group_part_settled_seq,
             "runtime2 quiescence probe started",
         );
         self.quiescence_probe = Some(QuiescenceProbe {
             barrier_id,
             activity_generation: generation,
             pending_docs: doc_ids.iter().cloned().collect(),
-            group_part_settled_seq,
+            required_settled_seq,
         });
         for doc_id in doc_ids {
             let (worker, lease) = self.doc_worker_handle(doc_id.clone())?;
@@ -627,7 +666,7 @@ where
             || self.tracked_in_flight > 0
             || !self.active_keyhive_syncs.is_empty()
             || !self.keyhive_waiters.is_empty()
-            || self.group_part_settled_seq < probe.group_part_settled_seq
+            || probe.settle_outstanding(self.group_part_settled_seq)
         {
             return Ok(());
         }
@@ -662,7 +701,12 @@ where
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(
+        level = "debug",
+        parent = &self.span,
+        skip(self),
+        fields(otel.kind = "server")
+    )]
     fn handle_cmd(&mut self, cmd: Runtime2Cmd) -> eyre::Result<()> {
         trace!(?cmd, "runtime2 command received");
         let control_only = matches!(
@@ -1235,8 +1279,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         let span = tracing::debug_span!(
             "keyhive_sync_round",
-            remote_peer_id = %peer_id,
-            request_nonce = request_id.nonce,
+            peer_id = %peer_id,
+            task_id = request_id.nonce,
         );
         F::from_future(
             async move {
@@ -1283,7 +1327,7 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 }
                 Ok(())
             }
-            .instrument(span),
+            .instrument(span.or_current()),
         )
     }
 
@@ -1296,7 +1340,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         removed: bool,
         member_is_document: bool,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("emit_membership_change", peer_id = %member_id);
+        let fut = async move {
             if runtime_io.is_document_membership_target(target).await? {
                 if removed {
                     change_manager.notify_document_access_revoked(
@@ -1336,7 +1381,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 )?;
             }
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
 
     fn forward_materialization_retry(
@@ -1346,7 +1392,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         evt_tx: async_channel::Sender<Runtime2Evt>,
         doc_id: DocumentId,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("forward_materialization_retry", doc_id = %doc_id);
+        let fut = async move {
             let status = result
                 .await
                 .map_err(|_| ferr!("materialization retry worker dropped its response"))?
@@ -1357,7 +1404,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
     fn release_lease(
         lease_rx: futures::channel::oneshot::Receiver<()>,
@@ -1365,7 +1413,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         doc_id: DocumentId,
         generation: u64,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("release_lease", doc_id = %doc_id, task_id = generation);
+        let fut = async move {
             lease_rx.await.ok();
             // A closed commands channel means the runtime is draining; the
             // lease bookkeeping is moot then.
@@ -1375,7 +1424,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 .inspect_err(|_| warn_loc!(ERROR_CHANNEL))
                 .ok();
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
     fn await_worker_fence(
         barrier_id: u64,
@@ -1383,7 +1433,9 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
         reply: futures::channel::oneshot::Receiver<()>,
         evt_tx: async_channel::Sender<Runtime2Evt>,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span =
+            tracing::debug_span!("await_worker_fence", doc_id = %doc_id, task_id = barrier_id);
+        let fut = async move {
             // The worker replies once its mailbox work has drained past the
             // fence. A dropped reply (worker evicted mid-fence) still acks:
             // `DocWorkerStopped` clears the doc from the probe anyway.
@@ -1394,12 +1446,14 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
     fn persist_prekey_state_snapshot(
         runtime_io: std::sync::Arc<dyn crate::runtime2::RuntimeIo<F>>,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("persist_prekey_state_snapshot");
+        let fut = async move {
             runtime_io
                 .persist_prekey_state()
                 .await
@@ -1407,7 +1461,8 @@ impl<F: FutureForm> HubBackgroundFuture<F> for F {
                     warn_loc!("persisting prekey state snapshot failed: {err:#}");
                 })
                 .map(|_| ())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
     fn track_work(
         kind: crate::runtime2::TrackedWorkKind,
@@ -1451,7 +1506,8 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
             )>,
         >,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("open_connection", peer_id = %peer);
+        let fut = async move {
             let dial_started = std::time::Instant::now();
             tracing::debug!(%peer, "dialing peer");
             let dial_result = connect.connect(peer.clone(), addr).await;
@@ -1510,7 +1566,9 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                             debug!(%watcher_peer, "runtime stopped before connection-lost event");
                         }
                         Ok(())
-                    }));
+                    }
+                    .instrument(tracing::Span::current())
+                    ));
                     if let Err(error) = watcher {
                         connect.close(handshake_peer, closed).await?;
                         resp.send(Err(error))
@@ -1541,7 +1599,8 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                 }
             }
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
 
     fn accept_connection_and_watch(
@@ -1560,9 +1619,12 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
             )>,
         >,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("accept_connection", peer_id = tracing::field::Empty);
+        let fut = async move {
             match connect.accept(incoming).await {
                 Ok((handshake_peer, closed, end_fut)) => {
+                    tracing::Span::current()
+                        .record("peer_id", tracing::field::display(&handshake_peer));
                     let (end_tx, end_rx) = futures::channel::oneshot::channel();
                     let watcher_closed = Arc::clone(&closed);
                     let watcher_peer = handshake_peer.clone();
@@ -1598,7 +1660,9 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                             debug!(%watcher_peer, "runtime stopped before connection-lost event");
                         }
                         Ok(())
-                    }));
+                    }
+                    .instrument(tracing::Span::current())
+                    ));
                     if let Err(error) = watcher {
                         resp.send(Err(error))
                             .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1628,7 +1692,8 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                 }
             }
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
 
     fn close_connection_async(
@@ -1638,7 +1703,8 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
         evt_tx: async_channel::Sender<Runtime2Evt>,
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> F::Future<'static, eyre::Result<()>> {
-        F::from_future(async move {
+        let span = tracing::debug_span!("close_connection", peer_id = %peer_id);
+        let fut = async move {
             let result = match connect.close(peer_id.clone(), closed).await {
                 Ok(Some(replacement)) => {
                     evt_tx
@@ -1658,7 +1724,8 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             Ok(())
-        })
+        };
+        F::from_future(fut.instrument(span.or_current()))
     }
 
     fn sync_doc_with_peer(
@@ -1670,9 +1737,9 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
     ) -> F::Future<'static, eyre::Result<()>> {
         let span = tracing::debug_span!(
             "document_sync",
-            request_nonce = request_id.nonce,
-            remote_peer_id = %peer_id,
-            document_id = %DocumentId::new(sed_id.as_bytes()),
+            task_id = request_id.nonce,
+            peer_id = %peer_id,
+            doc_id = %DocumentId::new(sed_id.as_bytes()),
         );
         F::from_future(
             async move {
@@ -1734,7 +1801,7 @@ impl<F: FutureForm, Tasks: crate::runtime2::TaskSet<F>> HubIoFutures<F, Tasks> f
                 }
                 Ok(())
             }
-            .instrument(span),
+            .instrument(span.or_current()),
         )
     }
 }
@@ -1807,7 +1874,7 @@ where
         self.handle_evt(evt)
     }
 
-    #[tracing::instrument(skip(self))]
+    #[tracing::instrument(level = "debug", parent = &self.span, skip(self))]
     fn handle_evt(&mut self, evt: Runtime2Evt) -> eyre::Result<()> {
         trace!(?evt, "runtime2 event received");
         match &evt {
@@ -1883,14 +1950,14 @@ where
         match evt {
             Runtime2Evt::SyncSessionObserved { cause, session } => {
                 let span = tracing::debug_span!(
+                    parent: &self.span,
                     "apply_sync_session",
-                    remote_peer_id = %session.peer_id,
-                    document_id = %DocumentId::new(session.sedimentree_id.as_bytes()),
+                    peer_id = %session.peer_id,
+                    doc_id = %DocumentId::new(session.sedimentree_id.as_bytes()),
                     kind = ?session.kind,
                 );
                 span.follows_from(cause);
-                let _entered = span.enter();
-                self.handle_sync_session_observed(session)?;
+                span.in_scope(|| self.handle_sync_session_observed(session))?;
             }
             Runtime2Evt::ConnEstablished { peer_id, closed } => {
                 self.handle_connection_established(peer_id, closed)?;
@@ -2231,11 +2298,13 @@ where
 
     /// Route an observed sync session to the relevant doc-worker.
     #[tracing::instrument(
+        level = "debug",
+        parent = &self.span,
         skip_all,
         fields(
             local_peer_id = %self.local_peer_id,
             doc_id = %DocumentId::new(session.sedimentree_id.as_bytes()),
-            remote_peer_id = %session.peer_id,
+            peer_id = %session.peer_id,
             kind = ?session.kind,
             received_commits = session.received_commit_ids.len(),
             received_fragments = session.received_fragment_ids.len(),
@@ -2449,7 +2518,12 @@ where
     /// Handle an established connection: register peer in `connected_peers`,
     /// then schedule the initial keyhive sync and start a round for any waiter
     /// that was queued before this event was processed.
-    #[tracing::instrument(skip_all, fields(local_peer_id = %self.local_peer_id, %peer_id))]
+    #[tracing::instrument(
+        level = "debug",
+        parent = &self.span,
+        skip_all,
+        fields(local_peer_id = %self.local_peer_id, %peer_id)
+    )]
     fn handle_connection_established(
         &mut self,
         peer_id: PeerKey,
@@ -2487,13 +2561,34 @@ where
             .keyhive_waiters
             .get(&peer_id)
             .is_some_and(|waiters| !waiters.waiters.is_empty());
+        if let Some(active) = self.active_keyhive_syncs.get(&peer_id) {
+            // A round that survived an earlier connection to this peer. A replacement connection
+            // registers here without a `ConnLost` for the old one, and the branch below starts a
+            // round only when connect-time syncing or a queued waiter asks for one — so a round
+            // started on the old connection can outlive every party that could answer it.
+            debug!(
+                %peer_id,
+                round_id = active.round_id,
+                ?active.request_id,
+                age_ms = active.started_at.elapsed().as_millis(),
+                admitted_waiters = active.admitted_ids.len(),
+                queued_waiters,
+                keyhive_sync_on_connect = self.keyhive_sync_on_connect,
+                "keyhive round from an earlier connection is still active at establishment"
+            );
+        }
         if self.keyhive_sync_on_connect || queued_waiters {
             self.start_keyhive_sync(peer_id)?;
         }
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, fields(local_peer_id = %self.local_peer_id, %peer_id))]
+    #[tracing::instrument(
+        level = "debug",
+        parent = &self.span,
+        skip_all,
+        fields(local_peer_id = %self.local_peer_id, %peer_id)
+    )]
     fn handle_connection_lost(
         &mut self,
         peer_id: PeerKey,
@@ -2533,6 +2628,19 @@ where
             Some(deets) if Arc::ptr_eq(&deets.closed, closed)
         );
         if !is_current {
+            if let Some(active) = self.active_keyhive_syncs.get(peer_id) {
+                // The registration belongs to a superseded connection, so its round is left
+                // alone on purpose (a replacement connection keeps it) — but a round started on
+                // the old connection has nothing left that can answer it.
+                debug!(
+                    %peer_id,
+                    round_id = active.round_id,
+                    ?active.request_id,
+                    age_ms = active.started_at.elapsed().as_millis(),
+                    reason,
+                    "superseded connection teardown left an active keyhive sync round"
+                );
+            }
             return false;
         }
         self.cancel_pending_keyhive_syncs(peer_id, reason);
@@ -2543,9 +2651,30 @@ where
     // ─── keyhive sync ──────────────────────────────────────────────────────
 
     /// Start a keyhive sync round with `peer_id` if not already active.
-    #[tracing::instrument(skip_all, fields(local_peer_id = %self.local_peer_id, %peer_id))]
+    #[tracing::instrument(
+        level = "debug",
+        parent = &self.span,
+        skip_all,
+        fields(local_peer_id = %self.local_peer_id, %peer_id)
+    )]
     fn start_keyhive_sync(&mut self, peer_id: PeerKey) -> eyre::Result<()> {
-        if self.active_keyhive_syncs.contains_key(&peer_id) {
+        if let Some(active) = self.active_keyhive_syncs.get(&peer_id) {
+            // A round that no completion, failure, or connection teardown retired keeps its peer
+            // pair out of sync: this early return is the only thing between a reconnect and a
+            // fresh round, so a stale round here is the whole symptom. Its age says whether it
+            // was started on a connection that has since been superseded.
+            debug!(
+                %peer_id,
+                round_id = active.round_id,
+                ?active.request_id,
+                age_ms = active.started_at.elapsed().as_millis(),
+                admitted_waiters = active.admitted_ids.len(),
+                pending_waiters = self
+                    .keyhive_waiters
+                    .get(&peer_id)
+                    .map_or(0, |waiters| waiters.waiters.len()),
+                "keyhive sync round already active; not starting another"
+            );
             return Ok(());
         }
         let admitted_ids = self
@@ -2973,7 +3102,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
     }
 
     /// Lazily spawn a doc-worker if none exists.
-    #[tracing::instrument(skip_all, fields(%doc_id))]
+    #[tracing::instrument(level = "debug", parent = &self.span, skip_all, fields(%doc_id))]
     fn spawn_doc_worker(&mut self, doc_id: DocumentId) -> eyre::Result<()> {
         if self.cmd_closed {
             debug!(%doc_id, "discarding doc worker spawn while shutting down");
@@ -3518,7 +3647,7 @@ impl<
                     Err(_) => Ok(()),
                 }
             }
-            .instrument(span),
+            .instrument(span.or_current()),
         )
     }
 }
@@ -3762,5 +3891,47 @@ mod tests {
                  TrackedWorkDone, got: {other:?}"
             ),
         }
+    }
+
+    /// `Runtime2Cmd::WaitForQuiescence` must not resolve while the group-part
+    /// projection still owes work for admissions the hub had already
+    /// incorporated when the probe started. Those are two different watermarks:
+    /// an admission is incorporated into `admitted_head` before the group-part
+    /// worker announces it settled, so the probe captures the incorporated head
+    /// and only a settle announcement covering it clears the fence. Capturing
+    /// the announced watermark instead made the clause compare the hub's field
+    /// with itself and resolve the probe immediately.
+    #[test]
+    fn quiescence_probe_waits_for_the_admission_head_captured_at_start() {
+        const SETTLED_AT_START: u64 = 4;
+        const ADMITTED_HEAD_AT_START: u64 = 9;
+
+        // The probe the hub starts while admission `ADMITTED_HEAD_AT_START` is
+        // outstanding: its target is the admission head, which sits above the
+        // watermark the projection had announced by then.
+        let probe = super::QuiescenceProbe {
+            barrier_id: 1,
+            activity_generation: 0,
+            pending_docs: std::collections::HashSet::new(),
+            required_settled_seq: ADMITTED_HEAD_AT_START,
+        };
+
+        assert!(
+            probe.settle_outstanding(SETTLED_AT_START),
+            "a probe started while admission {ADMITTED_HEAD_AT_START} is outstanding must keep \
+             waiting against the watermark {SETTLED_AT_START} the projection had already announced"
+        );
+
+        // The group-part worker settles admissions continuously, so the
+        // announcement covering the captured admission head clears the fence
+        // with no timeout, retry, or sleep.
+        assert!(
+            !probe.settle_outstanding(ADMITTED_HEAD_AT_START),
+            "the settle announcement for the captured admission head must clear the fence"
+        );
+        assert!(
+            !probe.settle_outstanding(ADMITTED_HEAD_AT_START + 1),
+            "settling past the captured admission head must also clear the fence"
+        );
     }
 }

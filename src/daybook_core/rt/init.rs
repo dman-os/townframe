@@ -68,6 +68,12 @@ impl crate::repos::Repo for InitRepo {
 }
 
 impl InitRepo {
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "init-notifs", doc_id = %app_doc_id),
+    )]
     pub async fn load(
         big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
@@ -145,6 +151,12 @@ impl InitRepo {
         format!("{plug_id}@{plug_version}/{init_key}")
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "init-notifs", doc_id = %self.app_am_handle.document_id()),
+    )]
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<

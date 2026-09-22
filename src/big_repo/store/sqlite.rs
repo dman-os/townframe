@@ -25,11 +25,10 @@ use sqlx_utils_rs::SqlCtx;
 use subduction_core::storage::traits::Storage;
 use subduction_crypto::{signed::Signed, verified_meta::VerifiedMeta};
 use tokio::sync::Notify;
-mod checkpoints;
 mod events;
 pub(crate) use events::{
-    KEYHIVE_ADMISSION_READER_AUTOMERGE_FRONTIER, KEYHIVE_ADMISSION_READER_CAUSAL_CHECKPOINT,
-    KEYHIVE_ADMISSION_READER_GROUP_PART, KEYHIVE_ADMISSION_READER_PREKEY_JANITOR,
+    KEYHIVE_ADMISSION_CONSUMER_AUTOMERGE_FRONTIER, KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT,
+    KEYHIVE_ADMISSION_CONSUMER_GROUP_PART, KEYHIVE_ADMISSION_CONSUMER_PREKEY_JANITOR,
 };
 mod ids;
 mod parts_cursors;
