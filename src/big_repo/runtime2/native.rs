@@ -371,7 +371,7 @@ where
                     &self.keyhive_protocol,
                     &self.keyhive_storage,
                     cgka_ops,
-                    local_secrets,
+                    local_secrets.into_iter().map(Some).collect(),
                 )
                 .await?;
             }
@@ -418,7 +418,7 @@ where
                         &self.keyhive_protocol,
                         &self.keyhive_storage,
                         vec![update_op],
-                        local_secret.into_iter().collect(),
+                        vec![local_secret],
                     )
                     .await?;
                 }
@@ -462,15 +462,8 @@ where
                 .await
                 .ok_or_else(|| ferr!("Keyhive document missing for causal checkpoint"))?;
 
-            if keyhive
-                .try_pcs_key_hash(Arc::clone(&kh_doc))
-                .await
-                .is_none()
-            {
-                let (update, local_secret) = match keyhive
-                    .force_pcs_update(Arc::clone(&kh_doc))
-                    .await
-                {
+            if keyhive.try_pcs_key_hash(kh_doc_id).await.is_none() {
+                let (update, local_secret) = match keyhive.force_pcs_update(kh_doc_id).await {
                     Ok(update) => update,
                     Err(EncryptError::UnableToPcsUpdate(
                         beekem::error::CgkaError::IdentifierNotFound,
@@ -494,7 +487,7 @@ where
                 .await?;
             }
 
-            let pcs_key_hash = match keyhive.try_pcs_key_hash(Arc::clone(&kh_doc)).await {
+            let pcs_key_hash = match keyhive.try_pcs_key_hash(kh_doc_id).await {
                 Some(pcs_key_hash) => pcs_key_hash,
                 None => {
                     // A concurrent task rotated/forked the CGKA between our
@@ -583,7 +576,7 @@ where
                     &self.keyhive_protocol,
                     &self.keyhive_storage,
                     update_op.into_iter().collect(),
-                    local_secret.into_iter().collect(),
+                    vec![local_secret],
                 )
                 .await?;
             }
@@ -607,11 +600,10 @@ where
         Sendable::from_future(async move {
             let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
             let keyhive = self.keyhive.clone_keyhive();
-            let Some(kh_doc) = keyhive.get_document(kh_doc_id).await else {
-                return Ok(None);
-            };
+            // A missing document and an underivable PCS key both come back as
+            // `None` from `try_pcs_key_hash`, so no lookup is needed here.
             Ok(keyhive
-                .try_pcs_key_hash(kh_doc)
+                .try_pcs_key_hash(kh_doc_id)
                 .await
                 .map(|hash| *hash.raw.as_bytes()))
         })
@@ -1080,7 +1072,7 @@ where
                             cannot = ?err.cannot.keys().collect::<Vec<_>>(),
                             "causal decrypt partially failed; deferring failed refs as blockers"
                         );
-                        err.progress
+                        *err.progress
                     }
                     Err(err) => {
                         return Err(ferr!(

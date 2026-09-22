@@ -246,11 +246,7 @@ async fn causal_coverage_deduplicates_per_epoch_and_rotates_at_unchanged_frontie
 
     let kh_doc_id = keyhive_document_id_for_big_repo_doc(doc_id.clone());
     let keyhive = repo.keyhive().clone_keyhive();
-    let kh_doc = keyhive
-        .get_document(kh_doc_id)
-        .await
-        .expect("created document must be present in Keyhive");
-    let (update, local_secret) = keyhive.force_pcs_update(kh_doc).await?;
+    let (update, local_secret) = keyhive.force_pcs_update(kh_doc_id).await?;
     crate::runtime2::support::persist_cgka_updates_durably(
         &repo.keyhive_protocol,
         &repo.keyhive_storage,
@@ -287,16 +283,11 @@ async fn startup_audit_repairs_update_persisted_without_checkpoint() -> Res<()> 
         .expect("failed seeding doc");
     let handle = repo.create_doc(doc).await?;
     let doc_id = handle.document_id();
-    let kh_doc = repo
-        .keyhive()
-        .clone_keyhive()
-        .get_document(keyhive_document_id_for_big_repo_doc(doc_id.clone()))
-        .await
-        .expect("created document must be present in Keyhive");
+    let kh_doc_id = keyhive_document_id_for_big_repo_doc(doc_id.clone());
     let (update, local_secret) = repo
         .keyhive()
         .clone_keyhive()
-        .force_pcs_update(kh_doc)
+        .force_pcs_update(kh_doc_id)
         .await?;
     crate::runtime2::support::persist_cgka_updates_durably(
         &repo.keyhive_protocol,

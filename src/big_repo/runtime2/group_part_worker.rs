@@ -975,8 +975,12 @@ mod tests {
         .expect("boot keyhive handle");
 
         let hive = keyhive.clone_keyhive();
-        let group = hive.generate_group(vec![]).await.expect("generate group");
-        let subject: Identifier = group.lock().await.group_id().into();
+        let group_id = hive.generate_group(vec![]).await.expect("generate group");
+        let subject: Identifier = group_id.into();
+        let group = hive
+            .get_group(group_id)
+            .await
+            .expect("generated group must be present in Keyhive");
         let member: BigKeyhiveAgent = hive
             .get_agent(subject)
             .await
@@ -984,7 +988,7 @@ mod tests {
         let update = hive
             .add_member_with_manual_content(
                 member,
-                &Membered::Group(KhGroupId::from(subject), Arc::clone(&group)),
+                &Membered::Group(KhGroupId::from(subject), group),
                 Access::Read,
                 BTreeMap::new(),
             )

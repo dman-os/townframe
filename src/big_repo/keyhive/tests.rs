@@ -214,12 +214,12 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         .await?;
     let keyhive = owner.clone_keyhive();
     let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
-    let doc = keyhive
-        .get_document(kh_doc_id)
-        .await
-        .ok_or_eyre("new document is missing")?;
+    assert!(
+        keyhive.get_document(kh_doc_id).await.is_some(),
+        "new document is missing"
+    );
     let encrypted = keyhive
-        .try_encrypt_content(doc, &initial_ref, &Vec::new(), b"initial")
+        .try_encrypt_content(kh_doc_id, &initial_ref, &Vec::new(), b"initial")
         .await?;
     if let Some(update) = encrypted.update_op().cloned() {
         persist_cgka_update_ops(&protocol, vec![update]).await?;
@@ -259,13 +259,13 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         .await?;
 
     let checkpoint_ref = vec![8; 32];
-    let doc = keyhive
-        .get_document(kh_doc_id)
-        .await
-        .ok_or_eyre("document disappeared before checkpoint")?;
+    assert!(
+        keyhive.get_document(kh_doc_id).await.is_some(),
+        "document disappeared before checkpoint"
+    );
     let checkpoint = keyhive
         .try_encrypt_content(
-            doc,
+            kh_doc_id,
             &checkpoint_ref,
             &vec![initial_ref.clone()],
             b"authority-checkpoint",
@@ -283,7 +283,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         &protocol,
         &storage,
         vec![update],
-        vec![local_secret],
+        vec![Some(local_secret)],
     )
     .await?;
     let restored = BigKeyhiveHandle::restore_from_storage_archive(owner_seed, &storage, listener)
@@ -292,13 +292,13 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
     restored.import_prekey_state(&storage).await?;
     subduction_keyhive::ingest_from_storage(restored.clone_keyhive().as_ref(), &storage).await?;
     let restored_keyhive = restored.clone_keyhive();
-    let restored_doc = restored_keyhive
-        .get_document(kh_doc_id)
-        .await
-        .ok_or_eyre("restored document is missing")?;
+    assert!(
+        restored_keyhive.get_document(kh_doc_id).await.is_some(),
+        "restored document is missing"
+    );
     restored_keyhive
         .try_encrypt_content(
-            restored_doc,
+            kh_doc_id,
             &vec![9; 32],
             &vec![checkpoint_ref],
             b"after-authority-change",

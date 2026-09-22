@@ -159,14 +159,14 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.11.0"
 autosurgeon = "0.13.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
+subduction_core = { path = "../subduction/subduction_core" }
+subduction_iroh = { path = "../subduction/subduction_iroh" }
+subduction_websocket = { path = "../subduction/subduction_websocket" }
+subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
+sedimentree_core = { path = "../subduction/sedimentree_core" }
+subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+subduction_crypto = { path = "../subduction/subduction_crypto" }
+subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 
 keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
 keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
@@ -269,24 +269,14 @@ clippy.let_underscore_untyped = "deny"
 rust.let_underscore_drop = "deny"
 # clippy.used_underscore_binding = "warn"
 
-# Local keyhive while its `static_membership_subject` addition is pending upstream: naming the
-# graph a static membership event was dispatched to must not require the delegate's installed
-# agent record, which a read-only replica is never sent. Remove this block and take the
-# published rev once the change is pinned.
-# Uncomment a block below to build against a fork's local working copy; both are parked
-# (commented) so the `rev` pins above are what CI and every other checkout resolves.
+# Subduction is taken straight from the local checkout by the path dependencies above: its own
+# workspace members depend on each other by path, so nothing has to negotiate versions and the graph
+# holds exactly one copy of each crate. Keyhive stays declared by `rev` and is redirected by the
+# patch below, because subduction's own keyhive dependency is a git edge at the pushed rev — only a
+# patch on the shared URL unifies that edge with ours onto the one local checkout.
 # Remember to re-check resolution after editing either block: a partial block silently
 # duplicates a crate across the local path and the pinned git source.
-# [patch."https://github.com/dman-os/keyhive"]
-# keyhive_core = { path = "../keyhive/keyhive_core" }
-# keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
-# beekem = { path = "../keyhive/beekem" }
-# [patch."https://github.com/dman-os/subduction"]
-# sedimentree_core = { path = "../subduction/sedimentree_core" }
-# subduction_core = { path = "../subduction/subduction_core" }
-# subduction_crypto = { path = "../subduction/subduction_crypto" }
-# subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
-# subduction_iroh = { path = "../subduction/subduction_iroh" }
-# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
-# subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
-# subduction_websocket = { path = "../subduction/subduction_websocket" }
+[patch."https://github.com/dman-os/keyhive"]
+keyhive_core = { path = "../keyhive/keyhive_core" }
+keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
+beekem = { path = "../keyhive/beekem" }

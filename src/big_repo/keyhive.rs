@@ -684,10 +684,15 @@ impl BigKeyhiveHandle {
         initial_content_heads: NonEmpty<[u8; 32]>,
         protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<(DocumentId, Vec<EventHash>)> {
+        // `generate_doc` addresses its coparents by id; build the peers anyway
+        // so each authority is still validated on the way through.
         let coparents = parents
             .into_iter()
             .map(BigKeyhiveAuthority::into_peer)
-            .collect::<Res<Vec<_>>>()?;
+            .collect::<Res<Vec<_>>>()?
+            .into_iter()
+            .map(|peer| peer.id())
+            .collect::<Vec<Identifier>>();
         let initial_content_heads = NonEmpty {
             head: initial_content_heads.head.to_vec(),
             tail: initial_content_heads
@@ -696,17 +701,31 @@ impl BigKeyhiveHandle {
                 .map(Vec::from)
                 .collect(),
         };
+        let coparent_count = coparents.len();
         let keyhive = self.keyhive.as_ref();
-        let doc = keyhive
+        let kh_doc_id = keyhive
             .generate_doc(coparents, initial_content_heads)
             .await
-            .map_err(|err| ferr!("failed creating keyhive document: {err}"))?;
-        let doc_id = {
-            let locked = doc.lock().await;
-            locked.doc_id().to_bytes()
-        };
-        let hashes = self.persist_document_events(&doc, protocol).await?;
-        Ok((DocumentId::new(doc_id), hashes))
+            .map_err(|err| {
+                // A coparent's prekey is published by its own hive and only reaches us through
+                // sync, so this error means an individual we are about to co-sign with has no
+                // published prekey here yet. Either its publication is still in flight, or we
+                // never pulled it; it is logged rather than retried because a retry would hide
+                // the second case.
+                if let keyhive_core::principal::document::GenerateDocError::MissingPrekeys(
+                    missing,
+                ) = &err
+                {
+                    tracing::warn!(
+                        ?missing,
+                        coparent_count,
+                        "document creation has no published prekey for a coparent"
+                    );
+                }
+                ferr!("failed creating keyhive document: {err}")
+            })?;
+        let hashes = self.persist_document_events(kh_doc_id, protocol).await?;
+        Ok((DocumentId::new(kh_doc_id.to_bytes()), hashes))
     }
 
     pub(crate) async fn reserve_doc_id(
@@ -820,12 +839,27 @@ impl BigKeyhiveHandle {
             head: content_heads.head.to_vec(),
             tail: content_heads.tail.into_iter().map(Vec::from).collect(),
         };
-        let doc = self
+        let coparent_count = coparents.len();
+        let kh_doc_id = self
             .keyhive
             .generate_doc_with_reserved_signer(signing_key, coparents, initial_content_heads)
             .await
-            .map_err(|err| ferr!("failed creating keyhive document: {err}"))?;
-        let hashes = self.persist_document_events(&doc, protocol).await?;
+            .map_err(|err| {
+                // Same reasoning as `create_doc`: a coparent prekey that has not reached us is
+                // a pull/publication question first, so record which individual is missing it.
+                if let keyhive_core::principal::document::GenerateDocError::MissingPrekeys(
+                    missing,
+                ) = &err
+                {
+                    tracing::warn!(
+                        ?missing,
+                        coparent_count,
+                        "reserved document creation has no published prekey for a coparent"
+                    );
+                }
+                ferr!("failed creating keyhive document: {err}")
+            })?;
+        let hashes = self.persist_document_events(kh_doc_id, protocol).await?;
         Ok(hashes)
     }
 
@@ -877,21 +911,19 @@ impl BigKeyhiveHandle {
             .await
     }
 
-    #[expect(clippy::type_complexity)]
     async fn persist_document_events(
         &self,
-        doc: &Arc<
-            futures::lock::Mutex<
-                keyhive_core::principal::document::Document<
-                    future_form::Sendable,
-                    MemorySigner,
-                    Vec<u8>,
-                    BigRepoKeyhiveListener,
-                >,
-            >,
-        >,
+        doc_id: KhDocumentId,
         protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<Vec<EventHash>> {
+        // Document creation answers with an id now, so resolve the shared
+        // handle here to read the ops the new document starts with.
+        let doc = self
+            .keyhive
+            .as_ref()
+            .get_document(doc_id)
+            .await
+            .ok_or_else(|| ferr!("keyhive document missing when persisting its initial events"))?;
         let (cgka_ops, delegations) = {
             let locked = doc.lock().await;
             (
@@ -922,17 +954,27 @@ impl BigKeyhiveHandle {
         parents: Vec<BigKeyhiveAuthority>,
         protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<(BigKeyhiveGroup, Vec<EventHash>)> {
+        // As in `create_doc`: validate through the peer, hand over the id.
         let coparents = parents
             .into_iter()
             .map(BigKeyhiveAuthority::into_peer)
-            .collect::<Res<Vec<_>>>()?;
+            .collect::<Res<Vec<_>>>()?
+            .into_iter()
+            .map(|peer| peer.id())
+            .collect::<Vec<Identifier>>();
         let keyhive = self.keyhive.as_ref();
-        let group = keyhive
+        let group_id = keyhive
             .generate_group(coparents)
             .await
             .map_err(|err| ferr!("error creating keyhive group: {err}"))?;
+        // `generate_group` answers with the id alone; read the shared handle
+        // back so the group can still be locked for its delegations.
+        let inner = keyhive
+            .get_group(group_id)
+            .await
+            .ok_or_else(|| ferr!("keyhive group missing after creating it"))?;
         let (id, delegations) = {
-            let locked = group.lock().await;
+            let locked = inner.lock().await;
             (
                 locked.group_id(),
                 locked
@@ -948,7 +990,7 @@ impl BigKeyhiveHandle {
                 hashes.push(hash);
             }
         }
-        Ok((BigKeyhiveGroup { id, inner: group }, hashes))
+        Ok((BigKeyhiveGroup { id, inner }, hashes))
     }
 
     pub(crate) async fn group_document_ids(&self, group: &BigKeyhiveGroup) -> BTreeSet<DocumentId> {

@@ -420,11 +420,11 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
         keyhive_core::principal::identifier::Identifier::from(verifying_key),
     );
     let remote_keyhive = pair.right().repo.keyhive().clone_keyhive();
-    let remote_doc = remote_keyhive
-        .get_document(kh_doc_id)
-        .await
-        .ok_or_else(|| crate::ferr!("clone is missing core Keyhive document"))?;
-    remote_keyhive.force_pcs_update(remote_doc).await?;
+    assert!(
+        remote_keyhive.get_document(kh_doc_id).await.is_some(),
+        "clone is missing core Keyhive document"
+    );
+    remote_keyhive.force_pcs_update(kh_doc_id).await?;
     pair.right().repo.wait_for_keyhive_reconciliation().await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;

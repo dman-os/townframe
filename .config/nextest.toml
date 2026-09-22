@@ -2,6 +2,18 @@
 slow-timeout = { period = "60s", terminate-after = 2 }
 # flaky-result = "fail"
 
+# Ordered first on purpose: nextest applies the first matching override, and these names also
+# match the `long_test` filter below.
+[[profile.default.overrides]]
+filter = 'test(/tier10_stress/)'
+slow-timeout = { period = "60s", terminate-after = 16 }
+
+# The tier10 stress topologies are in the same class as the `long_af_test` set: they drive real
+# iroh clusters, so their wall time is a function of how many other tests share the machine, not
+# of whether they are progressing. At full parallelism on a 16-core box they run ~5x their
+# isolated time (51s -> 240s+) and were being killed at the 240s `long_test` cap while still
+# converging; main hits the identical wall (measured: main TIMEOUT 240.029s, ours 240.048s), and
+# the `long_af_test_memory_sync_large_gap_*` pair was moved to this class for the same reason.
 [[profile.default.overrides]]
 filter = 'test(/long_test/)'
 slow-timeout = { period = "60s", terminate-after = 4 }

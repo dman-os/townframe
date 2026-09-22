@@ -23,7 +23,7 @@ enum EventKind {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
+async fn long_af_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     // FIXME: use a config field on the repo settings
     TEST_ENV_INIT.call_once(|| unsafe {

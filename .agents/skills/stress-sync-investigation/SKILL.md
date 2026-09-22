@@ -217,6 +217,19 @@ If logs show `creating doc` without `created doc`, correlate `Document::finish_g
 
 Fix by releasing `csprng` before group generation/prekey selection and reacquiring it only around operations that consume randomness. The regression test `document_generation_does_not_invert_active_and_csprng_locks` deterministically holds `active`, starts document generation, and proves `csprng` remains acquirable. Boundary tracing showed delegation insertion/listeners/rebuild all completed before the stall; do not misdiagnose this signature as a delegation-store deadlock.
 
+### Concurrent grants leave one content ref with no epoch key
+
+`tier6_conflicting_grants_different_peers` timing out at its 120s cap is one document looping
+forever: 12,956 `ApplySyncSession` messages for a single doc (the same three `CommitId`s) from
+18.2s to the cap, while `doc_worker: load_doc_snapshot: walk outcome … decrypted_count=3
+blocker_count=1` and `native: missing entry encryption key while materializing content_ref=[…]`
+(158 occurrences, one doc only) never resolve. The healing path retries the same doc
+(`ReconcileCausalCoverage`, `CHECKPOINTEPOCH`). The replay-page long-poll churn in the same log
+(thousands of `event_count=0 target_count=1 drained_count=1` responses ~200ms apart, each
+`supersede`ing the last) is the sync side of that same doc, not a separate fence: the parts are
+drained, so what is missing is the epoch key for one content ref. Correlate the blocked
+`content_ref` with the doc's derived epoch keys before chasing the pool or the replay loop.
+
 ### Empty prekey set aborts the whole CGKA operation
 
 `index to be in range` at `keyhive_core/src/principal/individual.rs` (`pick_prekey` ->

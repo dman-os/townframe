@@ -68,9 +68,15 @@ pub enum KeyhiveSyncOutcome {
 }
 
 /// A document's Keyhive encryption state cannot currently produce an application key.
+///
+/// The structural `Cgka::has_pcs_key` predicate that upstream #222 removed is deliberately not
+/// replaced here. Its replacement — whether this node can derive the PCS key right now — takes
+/// the document's lock and walks the tree to decrypt the root secret, which is not a price the
+/// commit-encryption success path should pay for a field only read when that path fails. A
+/// future investigation that needs the fact should instrument it where it is asked.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "document encryption key unavailable: {source} (document={document_id}, owner_secrets={owner_secret_count}, cgka_ops={cgka_operation_count}, has_pcs_key={has_pcs_key})"
+    "document encryption key unavailable: {source} (document={document_id}, owner_secrets={owner_secret_count}, cgka_ops={cgka_operation_count})"
 )]
 pub(crate) struct DocumentKeyUnavailable {
     #[source]
@@ -78,7 +84,6 @@ pub(crate) struct DocumentKeyUnavailable {
     pub(crate) document_id: crate::DocumentId,
     pub(crate) owner_secret_count: usize,
     pub(crate) cgka_operation_count: usize,
-    pub(crate) has_pcs_key: bool,
 }
 
 /// The doc-worker's IO contract. All methods are `F::Future<'_>` so the same

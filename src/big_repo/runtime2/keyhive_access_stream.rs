@@ -498,12 +498,16 @@ mod tests {
             member: &BigKeyhiveAgent,
         ) -> (Identifier, Vec<u8>) {
             let hive = self.keyhive.clone_keyhive();
-            let group = hive.generate_group(vec![]).await.expect("generate group");
-            let group_identifier: Identifier = group.lock().await.group_id().into();
+            let group_id = hive.generate_group(vec![]).await.expect("generate group");
+            let group_identifier: Identifier = group_id.into();
+            let group = hive
+                .get_group(group_id)
+                .await
+                .expect("generated group must be present in Keyhive");
             let update = hive
                 .add_member_with_manual_content(
                     member.clone(),
-                    &Membered::Group(KhGroupId::from(group_identifier), Arc::clone(&group)),
+                    &Membered::Group(KhGroupId::from(group_identifier), group),
                     Access::Read,
                     BTreeMap::new(),
                 )
@@ -517,8 +521,8 @@ mod tests {
         /// A group whose agent can be added elsewhere, with its identifier.
         async fn member_group(&self) -> (Identifier, BigKeyhiveAgent) {
             let hive = self.keyhive.clone_keyhive();
-            let group = hive.generate_group(vec![]).await.expect("generate group");
-            let identifier: Identifier = group.lock().await.group_id().into();
+            let group_id = hive.generate_group(vec![]).await.expect("generate group");
+            let identifier: Identifier = group_id.into();
             let agent = hive
                 .get_agent(identifier)
                 .await
@@ -759,22 +763,24 @@ mod tests {
     async fn cgka_operation_names_its_document() {
         let harness = Harness::new().await;
         let hive = harness.keyhive.clone_keyhive();
-        let doc = hive
+        let doc_id = hive
             .generate_doc(vec![], nonempty::NonEmpty::new(vec![0u8; 32]))
             .await
             .expect("generate document");
-        let doc_identifier: Identifier = doc.lock().await.doc_id().into();
+        let doc_identifier: Identifier = doc_id.into();
 
         // A real CGKA operation on that document: the share-key rotation the
         // causal-checkpoint path performs (`native.rs:471`), in the wire form
         // the admission log carries.
         let (operation, local_secret) = hive
-            .force_pcs_update(doc)
+            .force_pcs_update(doc_id)
             .await
             .expect("rotate the document's share key");
-        hive.import_local_cgka_secret(local_secret)
-            .await
-            .expect("retain the rotated share secret");
+        hive.import_local_cgka_secret(
+            local_secret.expect("rotating the share key mints a private leaf key"),
+        )
+        .await
+        .expect("retain the rotated share secret");
 
         assert_eq!(
             harness

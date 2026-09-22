@@ -506,11 +506,17 @@ async fn tier6_escalation_rejected() -> crate::Res<()> {
         .await
         .expect_err("grant through read-only node must be rejected");
     let err_str = err.to_string().to_lowercase();
+    // Keyhive's group access check names the condition rather than the category: the refusal comes
+    // back as `Escalation: wanted Edit, but only Read is justified`
+    // (keyhive_core/src/principal/group/error.rs), which states why the grant is refused without
+    // using any of the surrounding vocabulary.
     assert!(
         err_str.contains("authoriz")
             || err_str.contains("proof missing")
             || err_str.contains("access")
-            || err_str.contains("permission"),
+            || err_str.contains("permission")
+            || err_str.contains("escalation")
+            || err_str.contains("justified"),
         "error must be authorization-specific: {err}"
     );
 

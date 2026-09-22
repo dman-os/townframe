@@ -10,8 +10,8 @@ commit on top of it on a fork bookmark.
 
 | checkout | origin (ours) | upstream | pin today |
 |---|---|---|---|
-| `../keyhive` | `dman-os/keyhive` | `inkandswitch/keyhive` | `townframe-changes` at `d4bda7c7` |
-| `../subduction` | `dman-os/subduction` | `inkandswitch/subduction` | `feat/observer-sketch` at `643c4820` |
+| `../keyhive` | `dman-os/keyhive` | `inkandswitch/keyhive` | `townframe-changes` at `3afcd294` (base `dc51fe2c`; working-copy fix `6f4f712b`) |
+| `../subduction` | `dman-os/subduction` | `inkandswitch/subduction` | `feat/observer-sketch` at `53055ca5` (base `8984f900`) |
 
 Read `AGENTS.md` first. The VCS rules there apply to all three checkouts.
 

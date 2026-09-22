@@ -1,7 +1,7 @@
 use future_form::Local;
 use keyhive_core::{
     access::Access, keyhive::Keyhive, listener::no_listener::NoListener,
-    principal::membered::Membered, store::ciphertext::memory::MemoryCiphertextStore,
+    principal::membered::id::MemberedId, store::ciphertext::memory::MemoryCiphertextStore,
 };
 use keyhive_crypto::signer::memory::MemorySigner as KeyhiveMemorySigner;
 use nonempty::nonempty;
@@ -47,15 +47,16 @@ pub async fn cli() -> Res<()> {
 
     let doc_id = {
         let kh = alice_kh;
-        let doc = kh.generate_doc(vec![], nonempty![[0xAAu8; 32]]).await?;
-        let doc_id = doc.lock().await.doc_id();
+        // `generate_doc` hands back the `DocumentId` itself, and every call below takes that id in
+        // place of the document handle.
+        let doc_id = kh.generate_doc(vec![], nonempty![[0xAAu8; 32]]).await?;
         let doc_id_bytes = doc_id.to_bytes();
 
         // Encrypt BEFORE adding Bob (pre-grant)
         let pre_ref = [0x01u8; 32];
         let pre_content = b"pre-grant";
         let (enc_pre, key_pre) = kh
-            .try_encrypt_content_keyed(Arc::clone(&doc), &pre_ref, &vec![], pre_content)
+            .try_encrypt_content_keyed(doc_id, &pre_ref, &vec![], pre_content)
             .await?;
         let pre_ec = enc_pre.encrypted_content().clone();
         println!(
@@ -64,18 +65,14 @@ pub async fn cli() -> Res<()> {
         );
         pre_grant_enc = Some(pre_ec);
 
-        // Add Bob
-        let bob_agent = kh
-            .get_agent(bob_id.to_identifier()?)
+        // Add Bob. `add_member` resolves the agent id itself and fails for an unknown agent, so the
+        // lookup below is now only here to keep this demo's own message for that case.
+        let bob_ident = bob_id.to_identifier()?;
+        kh.get_agent(bob_ident)
             .await
             .ok_or_eyre("alice keyhive did not learn bob from contact card")?;
         let update = kh
-            .add_member(
-                bob_agent,
-                &Membered::Document(doc_id, Arc::clone(&doc)),
-                Access::Edit,
-                &[],
-            )
+            .add_member(bob_ident, MemberedId::DocumentId(doc_id), Access::Edit, &[])
             .await?;
         // E2EE branch: CGKA ops are fired to the event listener automatically.
         // No manual receive_cgka_op needed.
@@ -85,7 +82,7 @@ pub async fn cli() -> Res<()> {
         let post_ref = [0x02u8; 32];
         let post_content = b"post-grant";
         let (enc_post, key_post) = kh
-            .try_encrypt_content_keyed(Arc::clone(&doc), &post_ref, &vec![], post_content)
+            .try_encrypt_content_keyed(doc_id, &post_ref, &vec![], post_content)
             .await?;
         let post_ec = enc_post.encrypted_content().clone();
         println!(
@@ -221,8 +218,8 @@ async fn keyhive_from_seed(seed: u8) -> Res<DemoKeyhive> {
 }
 
 async fn exchange_contact_cards(left: &DemoKeyhive, right: &DemoKeyhive) -> Res<()> {
-    let left_card = left.contact_card().await?;
-    let right_card = right.contact_card().await?;
+    let left_card = left.generate_contact_card().await?;
+    let right_card = right.generate_contact_card().await?;
     left.receive_contact_card(&right_card).await?;
     right.receive_contact_card(&left_card).await?;
     Ok(())
