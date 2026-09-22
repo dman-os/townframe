@@ -6,9 +6,9 @@ use crate::SyncBackend;
 use crate::trap;
 
 use big_sync_core::{
-    BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, ObjId,
-    PartId, PeerId, SyncTask, SyncTaskCompletion, SyncTaskDeets, SyncTaskKind, TaskCtx, TaskId,
-    mpsc,
+    BigSyncEvent, BigSyncMachine, BigSyncMachineCommand, MachineTask, MachineTaskMsg, ObjKey,
+    PartKey, PeerKey, SyncMode, SyncTask, SyncTaskCompletion, SyncTaskDeets, SyncTaskKind, TaskCtx,
+    TaskId, mpsc,
 };
 use rand::{SeedableRng, rngs::StdRng};
 
@@ -24,24 +24,24 @@ pub struct BigSyncWorkerHandle {
 type SharedPartitionStore = Arc<dyn crate::part_store::HostPartStore>;
 type SharedPeerRpcClient = Arc<dyn crate::rpc::HostBigRpcClient>;
 type SharedWireRpcClient = Arc<dyn crate::rpc::WireBigSyncRpcClient>;
-type SharedRpcClients = Arc<std::sync::Mutex<HashMap<PeerId, SharedPeerRpcClient>>>;
+type SharedRpcClients = Arc<std::sync::Mutex<HashMap<PeerKey, SharedPeerRpcClient>>>;
 
 #[derive(Debug, thiserror::Error, displaydoc::Display, Serialize, Deserialize)]
 pub enum BigSyncWorkerError {
     /// Unknown backend {backend_id} set for part {part_id}
     UnknownBackend {
         backend_id: BackendId,
-        part_id: PartId,
+        part_id: PartKey,
     },
     /// Unknown backend {backend_id} set for object {obj_id:?}
     UnknownObjectBackend {
         backend_id: BackendId,
-        obj_id: ObjId,
+        obj_id: ObjKey,
     },
     /// Unknown peer {peer_id} in full sync waiter request
-    UnknownPeer { peer_id: PeerId },
+    UnknownPeer { peer_id: PeerKey },
     /// Unknown part {part_id} for peer {peer_id} in full sync waiter request
-    UnknownPart { peer_id: PeerId, part_id: PartId },
+    UnknownPart { peer_id: PeerKey, part_id: PartKey },
 }
 
 structstruck::strike! {
@@ -49,23 +49,27 @@ structstruck::strike! {
     #[educe(Debug)]
     enum BigSyncWorkerMsg {
         SetPeer {
-            peer_id: PeerId,
+            peer_id: PeerKey,
             #[educe(Debug(ignore))]
             client: SharedWireRpcClient,
             /// Partitions to sync from the peer
-            parts: HashMap<PartId, BackendId>,
+            parts: HashMap<PartKey, BackendId>,
             /// Objects to follow directly from the peer
-            objects: HashMap<ObjId, BackendId>,
+            objects: HashMap<ObjKey, BackendId>,
             resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>
         },
         RemovePeer {
-            peer_id: PeerId,
+            peer_id: PeerKey,
+            resp: tokio::sync::oneshot::Sender<()>,
+        },
+        SetReplayHoldMs {
+            hold_ms: u32,
             resp: tokio::sync::oneshot::Sender<()>,
         },
         WaitForFullSync {
             waiter_id: u64,
-            peer_ids: std::collections::HashSet<PeerId>,
-            part_ids: std::collections::HashSet<PartId>,
+            peer_ids: std::collections::HashSet<PeerKey>,
+            part_ids: std::collections::HashSet<PartKey>,
             resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>,
         },
         #[cfg(any(test, feature = "test-support"))]
@@ -76,6 +80,11 @@ structstruck::strike! {
         #[cfg(any(test, feature = "test-support"))]
         Snapshot {
             resp: tokio::sync::oneshot::Sender<WorkerSnapshot>,
+        },
+        #[cfg(any(test, feature = "test-support"))]
+        AdvanceClock {
+            delta: Duration,
+            resp: tokio::sync::oneshot::Sender<()>,
         },
     }
 }
@@ -96,25 +105,61 @@ pub struct StopToken {
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerSnapshot {
-    pub peer_parts: HashMap<PeerId, HashMap<PartId, BackendId>>,
-    pub full_sync_waiters: HashMap<u64, Vec<(PeerId, PartId)>>,
-    pub last_object_syncs: Vec<(PeerId, PartId, big_sync_core::ObjId, std::time::Instant)>,
+    pub label: &'static str,
+    pub peer_parts: HashMap<PeerKey, HashMap<PartKey, BackendId>>,
+    pub full_sync_waiters: HashMap<u64, Vec<(PeerKey, PartKey)>>,
+    pub last_object_syncs: Vec<(PeerKey, PartKey, big_sync_core::ObjKey, std::time::Instant)>,
     pub task_counts: TaskCounts,
     pub active_machine_tasks: usize,
     pub active_sync_tasks: usize,
     pub zombie_tasks: usize,
-    pub peer_part_sync_flags: Vec<(PeerId, PartId, bool, bool, bool, bool)>,
+    pub peer_part_sync_flags: Vec<(PeerKey, PartKey, bool, bool, bool, bool, bool)>,
+    pub replay_pages: Vec<String>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl WorkerSnapshot {
     pub fn is_idle(&self) -> bool {
-        self.task_counts.pending == 0
-            && self.task_counts.sync_spawn_queue == 0
-            && self.task_counts.machine_spawn_queue == 0
+        self.task_counts.delayed == 0
+            && self.task_counts.spawn_queue == 0
             && self.task_counts.stop_queue == 0
             && self.active_sync_tasks == 0
             && self.zombie_tasks == 0
+    }
+
+    /// Compares worker state for convergence waits without treating a continuously re-issued
+    /// long-poll's request/task identifiers as progress. The replay target verdicts and cursors
+    /// are reflected in the store snapshot; `replay_pages` is retained for diagnostics only.
+    pub fn convergence_eq(&self, other: &Self) -> bool {
+        self.label == other.label
+            && self.peer_parts == other.peer_parts
+            && self.full_sync_waiters == other.full_sync_waiters
+            && self.last_object_syncs == other.last_object_syncs
+            && self.task_counts == other.task_counts
+            && self.active_machine_tasks == other.active_machine_tasks
+            && self.active_sync_tasks == other.active_sync_tasks
+            && self.zombie_tasks == other.zombie_tasks
+            && self.peer_part_sync_flags == other.peer_part_sync_flags
+    }
+
+    /// Every term of [`Self::is_idle`] spelled out, for diagnosing a stalled idle
+    /// wait. `is_idle` collapses six counters into one bool, so a wait that times
+    /// out could only say "not idle" and never which term refused to clear.
+    pub fn idle_breakdown(&self) -> String {
+        format!(
+            "{{live={} delayed={} spawn_q={} stop_q={} | active_machine={} active_sync={} zombies={} | sync_flags={:?} | replay_pages={:?} | waiters={:?} | last_object_syncs={:?}}}",
+            self.task_counts.live,
+            self.task_counts.delayed,
+            self.task_counts.spawn_queue,
+            self.task_counts.stop_queue,
+            self.active_machine_tasks,
+            self.active_sync_tasks,
+            self.zombie_tasks,
+            self.peer_part_sync_flags,
+            self.replay_pages,
+            self.full_sync_waiters,
+            self.last_object_syncs,
+        )
     }
 }
 
@@ -138,17 +183,17 @@ impl BigSyncWorkerHandle {
 
     pub async fn set_peer(
         &self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         client: Arc<dyn crate::rpc::WireBigSyncRpcClient>,
-        parts: HashMap<PartId, BackendId>,
-        objects: HashMap<ObjId, BackendId>,
+        parts: HashMap<PartKey, BackendId>,
+        objects: HashMap<ObjKey, BackendId>,
     ) -> Res<()> {
         let part_count = parts.len();
         let object_count = objects.len();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.host_tx
             .send(BigSyncWorkerMsg::SetPeer {
-                peer_id,
+                peer_id: peer_id.clone(),
                 client,
                 parts,
                 objects,
@@ -161,11 +206,11 @@ impl BigSyncWorkerHandle {
         Ok(())
     }
 
-    pub async fn remove_peer(&self, peer_id: PeerId) -> Res<()> {
+    pub async fn remove_peer(&self, peer_id: PeerKey) -> Res<()> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.host_tx
             .send(BigSyncWorkerMsg::RemovePeer {
-                peer_id,
+                peer_id: peer_id.clone(),
                 resp: resp_tx,
             })
             .await
@@ -175,10 +220,27 @@ impl BigSyncWorkerHandle {
         Ok(())
     }
 
+    /// Shorten the live-lane replay hold (see [`big_sync_core::BigSyncMachine::set_replay_hold_ms`]).
+    ///
+    /// A test that waits for a settled cluster needs to observe a lane parked waiting for
+    /// events rather than wait out the production park. The default is unchanged.
+    pub async fn set_replay_hold_ms(&self, hold_ms: u32) -> Res<()> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.host_tx
+            .send(BigSyncWorkerMsg::SetReplayHoldMs {
+                hold_ms,
+                resp: resp_tx,
+            })
+            .await
+            .wrap_err(ERROR_CHANNEL)?;
+        resp_rx.await.wrap_err(ERROR_CHANNEL)?;
+        Ok(())
+    }
+
     pub async fn wait_for_full_sync(
         &self,
-        peer_ids: impl IntoIterator<Item = PeerId>,
-        part_ids: impl IntoIterator<Item = PartId>,
+        peer_ids: impl IntoIterator<Item = PeerKey>,
+        part_ids: impl IntoIterator<Item = PartKey>,
     ) -> Res<()> {
         let peer_ids: std::collections::HashSet<_> = peer_ids.into_iter().collect();
         let part_ids: std::collections::HashSet<_> = part_ids.into_iter().collect();
@@ -219,14 +281,36 @@ impl BigSyncWorkerHandle {
         resp_rx.await.wrap_err(ERROR_CHANNEL)
     }
 
+    /// Advance the machine's clock by `delta`, making due any work it paced for
+    /// later.
+    ///
+    /// The tick that normally does this is driven by the machine's own next deadline, so a
+    /// task paced by a multi-second backoff cannot be observed promptly without waiting that
+    /// backoff out in real time.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn advance_clock(&self, delta: Duration) -> Res<()> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.host_tx
+            .send(BigSyncWorkerMsg::AdvanceClock {
+                delta,
+                resp: resp_tx,
+            })
+            .await
+            .wrap_err(ERROR_CHANNEL)?;
+        resp_rx.await.wrap_err(ERROR_CHANNEL)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub async fn wait_for_idle(&self, timeout: Duration) -> Res<()> {
         let deadline = std::time::Instant::now() + timeout;
-        let mut last_snapshot = None;
+        let mut last_snapshot: Option<WorkerSnapshot> = None;
         loop {
             let snapshot = self.snapshot().await?;
             if snapshot.is_idle() {
-                if last_snapshot.as_ref().is_some_and(|prev| prev == &snapshot) {
+                if last_snapshot
+                    .as_ref()
+                    .is_some_and(|previous| previous.convergence_eq(&snapshot))
+                {
                     return Ok(());
                 }
                 last_snapshot = Some(snapshot);
@@ -235,8 +319,10 @@ impl BigSyncWorkerHandle {
             }
 
             if std::time::Instant::now() >= deadline {
+                let breakdown = self.snapshot().await?.idle_breakdown();
+                tracing::debug!(breakdown = %breakdown, "idle wait timed out");
                 return Err(ferr!(
-                    "timed out waiting for big_sync worker to become idle"
+                    "timed out waiting for big_sync worker to become idle: {breakdown}"
                 ));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -252,14 +338,20 @@ pub fn spawn_big_sync_worker(
     label: &'static str,
     scope_key: Arc<str>,
 ) -> Res<(BigSyncWorkerHandle, StopToken)> {
-    spawn_big_sync_worker_with_options(part_store, sync_backends, label, None, scope_key)
+    spawn_big_sync_worker_with_options(part_store, sync_backends, label, None, None, scope_key)
 }
 
+/// Spawn the sync worker with explicit options.
+///
+/// `default_sync_mode` is the strategy hint for parts with no per-part override;
+/// leaving it `None` keeps the built-in default (see [`SyncMode`]). This is the
+/// knob an embedder turns to opt into or out of the bucket path.
 pub fn spawn_big_sync_worker_with_options(
     part_store: SharedPartitionStore,
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
     label: &'static str,
     max_task_backoff: Option<Duration>,
+    default_sync_mode: Option<SyncMode>,
     scope_key: Arc<str>,
 ) -> Res<(BigSyncWorkerHandle, StopToken)> {
     let cancel_token = CancellationToken::new();
@@ -269,6 +361,9 @@ pub fn spawn_big_sync_worker_with_options(
     let mut machine = big_sync_core::BigSyncMachine::default();
     if let Some(backoff) = max_task_backoff {
         machine.set_max_task_backoff(backoff);
+    }
+    if let Some(sync_mode) = default_sync_mode {
+        machine.set_default_sync_mode(sync_mode);
     }
     let (host_tx, host_rx) = tokio::sync::mpsc::channel(64);
     let (sync_tx, sync_rx) = mpsc::bounded(64, "SyncWorkers".into(), "BigSyncMachine".into());
@@ -410,7 +505,7 @@ struct BigSyncWorker {
     full_sync_waiters: HashMap<u64, tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>>,
 
     tasks: HashMap<TaskId, TaskDeets>,
-    peers: HashMap<PeerId, PeerState>,
+    peers: HashMap<PeerKey, PeerState>,
     sync_tasks: HashMap<TaskId, ActiveSyncTaskDeets>,
     zombie_tasks: HashMap<TaskId, ZombieTaskDeets>,
     rpc_clients: SharedRpcClients,
@@ -418,12 +513,12 @@ struct BigSyncWorker {
 }
 
 struct PeerState {
-    parts: HashMap<PartId, BackendId>,
-    objects: HashMap<ObjId, BackendId>,
+    parts: HashMap<PartKey, BackendId>,
+    objects: HashMap<ObjKey, BackendId>,
 }
 
 impl PeerState {
-    fn resolve_sync_route(&self, task: &SyncTask) -> Option<(BackendId, Vec<PartId>)> {
+    fn resolve_sync_route(&self, task: &SyncTask) -> Option<(BackendId, Vec<PartKey>)> {
         let object_backend_id = (task.kind != SyncTaskKind::RemoveFromParts)
             .then(|| self.objects.get(&task.deets.obj_id).cloned())
             .flatten();
@@ -431,7 +526,7 @@ impl PeerState {
             return Some((backend_id, Vec::new()));
         }
 
-        let mut part_ids: Vec<_> = task.part_hints.iter().copied().collect();
+        let mut part_ids: Vec<_> = task.part_hints.iter().cloned().collect();
         part_ids.sort_unstable();
         part_ids.dedup();
         let mut backend_id = None;
@@ -479,11 +574,47 @@ struct ZombieTaskDeets {
 
 const MAX_ACTIVE_SYNC_TASKS: usize = 32;
 
+/// How long the loop may sleep while aborted tasks are still finishing.
+///
+/// `sweep_finished_zombies` in the loop tail reaps finished zombies, but a zombie's
+/// completion is not a select arm and so is not a wake source. Without this bound the loop
+/// could sleep through a completion and leave the zombie unreaped, which `is_idle` waits on.
+/// It preserves the guarantee the previous fixed-interval tick provided, and applies only
+/// while zombies are outstanding.
+const ZOMBIE_SWEEP_INTERVAL: Duration = Duration::from_millis(500);
+
+/// The longest the loop sleeps with nothing paced and nothing outstanding.
+///
+/// This is a safety net rather than a known periodic dependency: at complete idle it is one
+/// wake per minute where the previous fixed interval was two per second, and every other
+/// dependency in the loop tail is driven by an event one of the select arms waits on.
+/// The loop logs when it wakes on this ceiling with nothing due, so a dependency that is
+/// periodic without being expressed as a deadline shows up as a visible cadence rather than
+/// as silence.
+const IDLE_SLEEP_CEILING: Duration = Duration::from_secs(60);
+
 impl BigSyncWorker {
+    /// The instant the loop must wake next, or `None` when only an event can wake it.
+    ///
+    /// A zombie's completion is not a select arm, so the sweep in the loop tail needs a
+    /// bound to run against while aborted tasks are still finishing.
+    fn next_wake(&self) -> Option<std::time::Instant> {
+        let zombie_bound = (!self.zombie_tasks.is_empty())
+            .then(|| std::time::Instant::now() + ZOMBIE_SWEEP_INTERVAL);
+        match (self.machine.next_due(), zombie_bound) {
+            (Some(due), Some(bound)) => Some(due.min(bound)),
+            (due, bound) => due.or(bound),
+        }
+    }
+
     #[tracing::instrument(skip(self, shutdown), fields(worker = %self.label))]
     async fn machine_loop(&mut self, shutdown: Arc<BigRedToken>) -> Res<()> {
-        let mut janitor_tick = tokio::time::interval(Duration::from_millis(500));
         loop {
+            let next_due = self.next_wake();
+            let wake_at =
+                next_due.unwrap_or_else(|| std::time::Instant::now() + IDLE_SLEEP_CEILING);
+            let wake_timer = tokio::time::sleep_until(tokio::time::Instant::from_std(wake_at));
+            tokio::pin!(wake_timer);
             tokio::select! {
                 biased;
                 _ = self.cancel_token.cancelled() => {
@@ -511,7 +642,18 @@ impl BigSyncWorker {
                     debug!(worker = %self.label, ?msg, "big_sync worker received host msg");
                     self.handle_msg(msg).await?;
                 }
-                _ = janitor_tick.tick() => {
+                _ = &mut wake_timer => {
+                    if next_due.is_none() {
+                        // Nothing was paced and no zombie was outstanding when this
+                        // iteration went to sleep, so every other tail dependency is
+                        // event-driven: this wake is the safety net firing. A regular
+                        // cadence here means some dependency is periodic but is not
+                        // expressed as a deadline.
+                        debug!(
+                            worker = %self.label,
+                            "big sync worker woke on the idle ceiling with nothing due"
+                        );
+                    }
                     self.machine.handle_tick(std::time::Instant::now());
                 }
             };
@@ -575,22 +717,22 @@ impl BigSyncWorker {
                 objects,
                 resp,
             } => {
-                for (&part_id, backend_id) in &parts {
+                for (part_id, backend_id) in &parts {
                     if !self.sync_backends.contains_key(backend_id) {
                         resp.send(Err(BigSyncWorkerError::UnknownBackend {
                             backend_id: Arc::clone(backend_id),
-                            part_id,
+                            part_id: part_id.clone(),
                         }))
                         .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
                         return Ok(());
                     }
                 }
-                for (&obj_id, backend_id) in &objects {
+                for (obj_id, backend_id) in &objects {
                     if !self.sync_backends.contains_key(backend_id) {
                         resp.send(Err(BigSyncWorkerError::UnknownObjectBackend {
                             backend_id: Arc::clone(backend_id),
-                            obj_id,
+                            obj_id: obj_id.clone(),
                         }))
                         .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
@@ -598,14 +740,14 @@ impl BigSyncWorker {
                     }
                 }
                 self.rpc_clients.lock().expect(ERROR_MUTEX).insert(
-                    peer_id,
+                    peer_id.clone(),
                     Arc::new(crate::rpc::ScopedRpcClient {
                         scope_key: Arc::clone(&self.scope_key),
                         inner: client,
                     }) as SharedPeerRpcClient,
                 );
                 self.peers.insert(
-                    peer_id,
+                    peer_id.clone(),
                     PeerState {
                         parts: parts.clone(),
                         objects: objects.clone(),
@@ -614,7 +756,7 @@ impl BigSyncWorker {
                 let part_count = parts.len();
                 let object_count = objects.len();
                 let evt = BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
-                    peer_id,
+                    peer_id: peer_id.clone(),
                     parts: parts.into_keys().collect(),
                     objects: objects.into_keys().collect(),
                 });
@@ -627,10 +769,17 @@ impl BigSyncWorker {
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
                 self.peers.remove(&peer_id);
                 self.rpc_clients.lock().expect(ERROR_MUTEX).remove(&peer_id);
-                let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent { peer_id });
+                let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent {
+                    peer_id: peer_id.clone(),
+                });
                 self.machine.handle_evt(evt);
                 resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, "accept remove peer");
+            }
+            BigSyncWorkerMsg::SetReplayHoldMs { hold_ms, resp } => {
+                self.machine.set_replay_hold_ms(hold_ms);
+                resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
+                tracing::debug!(hold_ms, "accept set replay hold");
             }
             BigSyncWorkerMsg::WaitForFullSync {
                 waiter_id,
@@ -640,16 +789,18 @@ impl BigSyncWorker {
             } => {
                 for peer_id in &peer_ids {
                     let Some(peer_state) = self.peers.get(peer_id) else {
-                        resp.send(Err(BigSyncWorkerError::UnknownPeer { peer_id: *peer_id }))
-                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                            .ok();
+                        resp.send(Err(BigSyncWorkerError::UnknownPeer {
+                            peer_id: peer_id.clone(),
+                        }))
+                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                        .ok();
                         return Ok(());
                     };
                     for part_id in &part_ids {
                         if !peer_state.parts.contains_key(part_id) {
                             resp.send(Err(BigSyncWorkerError::UnknownPart {
-                                peer_id: *peer_id,
-                                part_id: *part_id,
+                                peer_id: peer_id.clone(),
+                                part_id: part_id.clone(),
                             }))
                             .inspect_err(|_| warn_loc!(ERROR_CALLER))
                             .ok();
@@ -680,10 +831,11 @@ impl BigSyncWorker {
             #[cfg(any(test, feature = "test-support"))]
             BigSyncWorkerMsg::Snapshot { resp } => {
                 let snapshot = WorkerSnapshot {
+                    label: self.label,
                     peer_parts: self
                         .peers
                         .iter()
-                        .map(|(&peer_id, peer_state)| (peer_id, peer_state.parts.clone()))
+                        .map(|(peer_id, peer_state)| (peer_id.clone(), peer_state.parts.clone()))
                         .collect(),
                     full_sync_waiters: self.machine.debug_full_sync_waiters(),
                     last_object_syncs: self.machine.debug_last_object_syncs(),
@@ -692,10 +844,20 @@ impl BigSyncWorker {
                     active_sync_tasks: self.sync_tasks.len(),
                     zombie_tasks: self.zombie_tasks.len(),
                     peer_part_sync_flags: self.machine.debug_peer_part_sync_flags(),
+                    replay_pages: self.machine.debug_replay_pages(),
                 };
                 resp.send(snapshot)
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            BigSyncWorkerMsg::AdvanceClock { delta, resp } => {
+                // Test-only: drive the machine's clock forward so work it paced for
+                // later becomes due now, instead of the test sleeping the pacing out.
+                // Production ticks stay real-time and 500ms granular; see
+                // `machine_loop`.
+                self.machine.handle_tick(std::time::Instant::now() + delta);
+                resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
             }
         }
         Ok(())
@@ -835,7 +997,13 @@ impl BigSyncWorker {
         );
         let cancel_token = self.cancel_token.child_token();
         let task_id = task.id;
-        tracing::trace!(
+        // Debug, not trace: this is the *positive* half of the scheduling question,
+        // and the two skip paths above report their negative verdicts at debug. A
+        // run filtered to debug that shows neither a skip nor a spawn for an object
+        // is therefore a real absence, instead of the absence of a level nobody
+        // enabled — which is exactly how a "no sync task was spawned" conclusion can
+        // be reached from a run that spawned tasks.
+        tracing::debug!(
             task_id,
             peer_id = %task.deets.peer_id,
             obj_id = %task.deets.obj_id,
@@ -896,9 +1064,9 @@ impl MachineTaskWorker {
                         .lock()
                         .expect(ERROR_MUTEX)
                         .iter()
-                        .map(|(&peer_id, client)| {
+                        .map(|(peer_id, client)| {
                             (
-                                peer_id,
+                                peer_id.clone(),
                                 trap::TrappedRpcClient {
                                     trap: trap.clone(),
                                     inner: Arc::clone(client),
@@ -953,10 +1121,14 @@ impl SyncTaskWorker {
             } = deets;
             let event = match kind {
                 SyncTaskKind::RemoveFromParts => {
-                    let mut parts: Vec<PartId> = part_hints.iter().copied().collect();
+                    let mut parts: Vec<PartKey> = part_hints.iter().cloned().collect();
                     parts.sort_unstable();
                     parts.dedup();
-                    match self.backend.remove_obj_from_parts(obj_id, parts).await {
+                    match self
+                        .backend
+                        .remove_obj_from_parts(obj_id.clone(), parts)
+                        .await
+                    {
                         Ok(()) => {
                             BigSyncEvent::RemoveCompleted(big_sync_core::RemoveCompletedEvent {
                                 task_id: _task_id,
@@ -973,11 +1145,11 @@ impl SyncTaskWorker {
                     }
                 }
                 SyncTaskKind::Sync => {
-                    let mut parts: Vec<PartId> = part_hints.iter().copied().collect();
+                    let mut parts: Vec<PartKey> = part_hints.iter().cloned().collect();
                     parts.sort_unstable();
                     let res = self
                         .backend
-                        .sync_obj(peer_id, obj_id, parts, remote_payload)
+                        .sync_obj(peer_id.clone(), obj_id.clone(), parts, remote_payload)
                         .await;
                     match res {
                         Ok(SyncTaskRunOutcome::Completion(completion)) => {
@@ -1038,10 +1210,10 @@ mod tests {
 
     #[test]
     fn empty_part_hints_require_an_explicit_peer_object_route() {
-        let peer_id = PeerId::random();
-        let obj_id = ObjId::random();
+        let peer_id = PeerKey::random();
+        let obj_id = ObjKey::random();
         let peer = PeerState {
-            parts: [(PartId::random(), Arc::from("backend"))].into(),
+            parts: [(PartKey::random(), Arc::from("backend"))].into(),
             objects: HashMap::new(),
         };
         let task = SyncTask {

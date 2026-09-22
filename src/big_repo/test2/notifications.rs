@@ -99,7 +99,7 @@ async fn tier7_doc_id_filter() -> crate::Res<()> {
         .left()
         .repo
         .subscribe_change_listener(ChangeFilter {
-            doc_id: Some(DocIdFilter::new(doc_a_id)),
+            doc_id: Some(DocIdFilter::new(doc_a_id.clone())),
             origin: None,
             path: Vec::new(),
         })
@@ -161,7 +161,7 @@ async fn tier7_path_prefix_filter() -> crate::Res<()> {
         .left()
         .repo
         .subscribe_change_listener(ChangeFilter {
-            doc_id: Some(DocIdFilter::new(doc_id)),
+            doc_id: Some(DocIdFilter::new(doc_id.clone())),
             origin: None,
             path: vec![autosurgeon::Prop::Key("title".into())],
         })
@@ -223,18 +223,19 @@ async fn tier7_origin_filter_remote() -> crate::Res<()> {
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Edit)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     let (_reg, mut rx) = pair
         .left()
         .repo
         .subscribe_change_listener(ChangeFilter {
-            doc_id: Some(DocIdFilter::new(doc_id)),
+            doc_id: Some(DocIdFilter::new(doc_id.clone())),
             origin: Some(OriginFilter::Remote),
             path: Vec::new(),
         })
@@ -403,21 +404,22 @@ async fn tier7_no_live_handle_remote_mutation() -> crate::Res<()> {
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Edit)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Reader materialises once so a doc worker is spawned in the runtime.
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // Subscribe on the reader side before dropping the handle.
     let (_reg, mut rx) = pair
         .right()
         .repo
         .subscribe_change_listener(ChangeFilter {
-            doc_id: Some(DocIdFilter::new(doc_id)),
+            doc_id: Some(DocIdFilter::new(doc_id.clone())),
             origin: Some(OriginFilter::Remote),
             path: Vec::new(),
         })
@@ -537,7 +539,7 @@ async fn tier7_repeated_sync_no_duplicate_notification() -> crate::Res<()> {
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Edit)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -547,7 +549,7 @@ async fn tier7_repeated_sync_no_duplicate_notification() -> crate::Res<()> {
         .left()
         .repo
         .subscribe_change_listener(ChangeFilter {
-            doc_id: Some(DocIdFilter::new(doc_id)),
+            doc_id: Some(DocIdFilter::new(doc_id.clone())),
             origin: None,
             path: Vec::new(),
         })
@@ -558,7 +560,8 @@ async fn tier7_repeated_sync_no_duplicate_notification() -> crate::Res<()> {
 
     // Reader writes a change.
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     reader_doc
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "phase", "reader-write"))
@@ -568,7 +571,7 @@ async fn tier7_repeated_sync_no_duplicate_notification() -> crate::Res<()> {
     drop(reader_doc);
 
     // First sync: delivers the change → notification fires.
-    pair.left_conn().sync_doc_with_peer(doc_id).await?;
+    pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.left().repo.wait_for_quiescence(None).await?;
     let first = recv_one(&mut rx).await;
     assert!(
@@ -609,7 +612,7 @@ async fn tier7_local_mutations_notification_batching() -> crate::Res<()> {
         .left()
         .repo
         .subscribe_change_listener(ChangeFilter {
-            doc_id: Some(DocIdFilter::new(doc_id)),
+            doc_id: Some(DocIdFilter::new(doc_id.clone())),
             origin: Some(OriginFilter::Local),
             path: Vec::new(),
         })
@@ -746,7 +749,7 @@ async fn tier7_listener_removal_before_mutation() -> crate::Res<()> {
         .left()
         .repo
         .subscribe_change_listener(ChangeFilter {
-            doc_id: Some(DocIdFilter::new(doc_id)),
+            doc_id: Some(DocIdFilter::new(doc_id.clone())),
             origin: None,
             path: Vec::new(),
         })
@@ -879,7 +882,7 @@ async fn tier7_nested_path_prefix_filter() -> crate::Res<()> {
         .left()
         .repo
         .subscribe_change_listener(ChangeFilter {
-            doc_id: Some(DocIdFilter::new(doc_id)),
+            doc_id: Some(DocIdFilter::new(doc_id.clone())),
             origin: None,
             path: vec![Prop::Key("config".into()), Prop::Key("theme".into())],
         })
@@ -991,20 +994,21 @@ async fn tier7_bidirectional_sync_origin_correctness() -> crate::Res<()> {
     // Grant Edit, sync both sides.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent, Access::Edit)
+        .grant_doc_access(doc_id.clone(), editor_agent, Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // Subscribe on both sides (doc already created, no bootstrap to drain).
     let (_reg_owner, mut owner_rx) = pair
         .left()
         .repo
         .subscribe_change_listener(ChangeFilter {
-            doc_id: Some(DocIdFilter::new(doc_id)),
+            doc_id: Some(DocIdFilter::new(doc_id.clone())),
             origin: None,
             path: Vec::new(),
         })
@@ -1013,7 +1017,7 @@ async fn tier7_bidirectional_sync_origin_correctness() -> crate::Res<()> {
         .right()
         .repo
         .subscribe_change_listener(ChangeFilter {
-            doc_id: Some(DocIdFilter::new(doc_id)),
+            doc_id: Some(DocIdFilter::new(doc_id.clone())),
             origin: None,
             path: Vec::new(),
         })
@@ -1065,8 +1069,8 @@ async fn tier7_bidirectional_sync_origin_correctness() -> crate::Res<()> {
     );
 
     // --- Sync both directions.
-    pair.left_conn().sync_doc_with_peer(doc_id).await?;
-    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.left().repo.wait_for_quiescence(None).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 
@@ -1145,7 +1149,7 @@ async fn tier7_local_mutation_quiescence_keyhive_state_and_notification() -> cra
     let doc_id = owner_doc.document_id();
 
     // Capture sedimentree heads before the mutation.
-    let pre_state = pair.left().repo.doc_head_state(doc_id).await?;
+    let pre_state = pair.left().repo.doc_head_state(doc_id.clone()).await?;
     let pre_sedimentree = Arc::clone(&pre_state.sedimentree_heads);
 
     // Subscribe before the mutation so the notification channel is live.
@@ -1153,7 +1157,7 @@ async fn tier7_local_mutation_quiescence_keyhive_state_and_notification() -> cra
         .left()
         .repo
         .subscribe_change_listener(ChangeFilter {
-            doc_id: Some(DocIdFilter::new(doc_id)),
+            doc_id: Some(DocIdFilter::new(doc_id.clone())),
             origin: None,
             path: Vec::new(),
         })
@@ -1171,7 +1175,7 @@ async fn tier7_local_mutation_quiescence_keyhive_state_and_notification() -> cra
     pair.left().repo.wait_for_quiescence(None).await?;
 
     // ── Keyhive state observation: sedimentree heads must have advanced ──
-    let post_state = pair.left().repo.doc_head_state(doc_id).await?;
+    let post_state = pair.left().repo.doc_head_state(doc_id.clone()).await?;
     assert_ne!(
         post_state.sedimentree_heads, pre_sedimentree,
         "sedimentree heads must advance after a local mutation"

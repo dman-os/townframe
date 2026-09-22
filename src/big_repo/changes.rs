@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 pub enum BigRepoChangeOrigin {
     Local,
     Remote {
-        peer_id: PeerId,
+        peer_id: PeerKey,
     },
     /// Materialization advanced because local keyhive state changed (a
     /// processed CGKA operation, delegation, revocation, or keyhive sync
@@ -170,24 +170,24 @@ pub enum BigRepoDomainNotification {
     /// A member was added to a group.
     MemberAddedToGroup {
         group_id: GroupId,
-        member_id: PeerId,
+        member_id: PeerKey,
         access: BigRepoAccess,
     },
     /// A member was removed from a group.
     MemberRemovedFromGroup {
         group_id: GroupId,
-        member_id: PeerId,
+        member_id: PeerKey,
     },
     /// A document's access control entry changed.
     DocumentAccessChanged {
         doc_id: DocumentId,
-        member_id: PeerId,
+        member_id: PeerKey,
         access: BigRepoAccess,
     },
     /// A member's access to a document was revoked.
     DocumentAccessRevoked {
         doc_id: DocumentId,
-        member_id: PeerId,
+        member_id: PeerKey,
     },
     /// A document's encryption key was rotated.
     DocumentKeyRotated { doc_id: DocumentId },
@@ -615,7 +615,7 @@ impl ChangeListenerManager {
     pub(super) fn notify_member_added_to_group(
         &self,
         group_id: GroupId,
-        member_id: PeerId,
+        member_id: PeerKey,
         access: BigRepoAccess,
     ) -> Res<()> {
         self.ensure_live()?;
@@ -632,7 +632,7 @@ impl ChangeListenerManager {
     pub(super) fn notify_member_removed_from_group(
         &self,
         group_id: GroupId,
-        member_id: PeerId,
+        member_id: PeerKey,
     ) -> Res<()> {
         self.ensure_live()?;
         self.domain_tx
@@ -647,7 +647,7 @@ impl ChangeListenerManager {
     pub(super) fn notify_document_access_changed(
         &self,
         doc_id: DocumentId,
-        member_id: PeerId,
+        member_id: PeerKey,
         access: BigRepoAccess,
     ) -> Res<()> {
         self.ensure_live()?;
@@ -664,7 +664,7 @@ impl ChangeListenerManager {
     pub(super) fn notify_document_access_revoked(
         &self,
         doc_id: DocumentId,
-        member_id: PeerId,
+        member_id: PeerKey,
     ) -> Res<()> {
         self.ensure_live()?;
         self.domain_tx
@@ -1326,15 +1326,15 @@ mod tests {
         let (doc_id, heads, patch) = make_change_fixture();
         let (registration, mut rx) = manager
             .subscribe_listener(ChangeFilter {
-                doc_id: Some(DocIdFilter::new(doc_id)),
+                doc_id: Some(DocIdFilter::new(doc_id.clone())),
                 origin: None,
                 path: Vec::new(),
             })
             .await?;
 
-        assert!(manager.has_change_listener_interest(doc_id, &BigRepoChangeOrigin::Local));
+        assert!(manager.has_change_listener_interest(doc_id.clone(), &BigRepoChangeOrigin::Local));
         drop(registration);
-        assert!(!manager.has_change_listener_interest(doc_id, &BigRepoChangeOrigin::Local));
+        assert!(!manager.has_change_listener_interest(doc_id.clone(), &BigRepoChangeOrigin::Local));
 
         manager.notify_doc_changed(doc_id, patch, heads, BigRepoChangeOrigin::Local)?;
         let closed = timeout(Duration::from_millis(250), rx.recv())
@@ -1361,7 +1361,7 @@ mod tests {
         // assuming anything about scheduler order.
         let (_registration, mut rx) = manager
             .subscribe_listener(ChangeFilter {
-                doc_id: Some(DocIdFilter::new(doc_id)),
+                doc_id: Some(DocIdFilter::new(doc_id.clone())),
                 origin: None,
                 path: Vec::new(),
             })
@@ -1376,7 +1376,7 @@ mod tests {
         // A batch admitted with no matching listener must not leak into a
         // listener that registers after the fence.
         let (late_doc_id, late_heads, _patch) = make_change_fixture();
-        manager.notify_doc_created(late_doc_id, late_heads)?;
+        manager.notify_doc_created(late_doc_id.clone(), late_heads)?;
         manager.fence_notifications(None).await?;
         let (_late_registration, mut late_rx) = manager
             .subscribe_listener(ChangeFilter {
@@ -1415,7 +1415,7 @@ mod tests {
         let (doc_id, heads, _patch) = make_change_fixture();
         let (_registration, mut rx) = manager
             .subscribe_listener(ChangeFilter {
-                doc_id: Some(DocIdFilter::new(doc_id)),
+                doc_id: Some(DocIdFilter::new(doc_id.clone())),
                 origin: None,
                 path: Vec::new(),
             })
@@ -1446,7 +1446,7 @@ mod tests {
         let (doc_id, heads, _) = make_change_fixture();
         let (registration, mut rx) = manager
             .subscribe_head_listener(HeadFilter {
-                doc_id: Some(DocIdFilter::new(doc_id)),
+                doc_id: Some(DocIdFilter::new(doc_id.clone())),
             })
             .await?;
 
@@ -1493,11 +1493,11 @@ mod tests {
         let (doc_id, heads, _) = make_change_fixture();
         let (_registration, mut rx) = manager
             .subscribe_local_listener(LocalFilter {
-                doc_id: Some(DocIdFilter::new(doc_id)),
+                doc_id: Some(DocIdFilter::new(doc_id.clone())),
             })
             .await?;
 
-        manager.notify_local_doc_created(doc_id, Arc::clone(&heads))?;
+        manager.notify_local_doc_created(doc_id.clone(), Arc::clone(&heads))?;
         let first_batch = recv_batch(&mut rx).await;
         assert!(matches!(
             first_batch.as_slice(),
@@ -1505,7 +1505,7 @@ mod tests {
             if *seen_doc_id == doc_id
         ));
 
-        manager.notify_local_doc_imported(doc_id, Arc::clone(&heads))?;
+        manager.notify_local_doc_imported(doc_id.clone(), Arc::clone(&heads))?;
         let second_batch = recv_batch(&mut rx).await;
         assert!(matches!(
             second_batch.as_slice(),
@@ -1514,21 +1514,21 @@ mod tests {
         ));
 
         let heads_for_ready = Arc::clone(&heads);
-        manager.notify_local_doc_heads_updated(doc_id, heads)?;
+        manager.notify_local_doc_heads_updated(doc_id.clone(), heads)?;
         let third_batch = recv_batch(&mut rx).await;
         assert!(matches!(
             third_batch.as_slice(),
             [BigRepoLocalNotification::DocHeadsUpdated { doc_id: seen_doc_id, .. }]
             if *seen_doc_id == doc_id
         ));
-        manager.notify_local_doc_materialization_pending(doc_id)?;
+        manager.notify_local_doc_materialization_pending(doc_id.clone())?;
         let fourth_batch = recv_batch(&mut rx).await;
         assert!(matches!(
             fourth_batch.as_slice(),
             [BigRepoLocalNotification::DocMaterializationPending { doc_id: seen_doc_id }]
             if *seen_doc_id == doc_id
         ));
-        manager.notify_local_doc_materialization_ready(doc_id, heads_for_ready)?;
+        manager.notify_local_doc_materialization_ready(doc_id.clone(), heads_for_ready)?;
         let fifth_batch = recv_batch(&mut rx).await;
         assert!(matches!(
             fifth_batch.as_slice(),
@@ -1544,15 +1544,15 @@ mod tests {
         let (doc_id, heads, _) = make_change_fixture();
         let (_registration, mut rx) = manager
             .subscribe_head_listener(HeadFilter {
-                doc_id: Some(DocIdFilter::new(doc_id)),
+                doc_id: Some(DocIdFilter::new(doc_id.clone())),
             })
             .await?;
 
         manager.notify_sedimentree_heads_changed(
-            doc_id,
+            doc_id.clone(),
             heads,
             BigRepoChangeOrigin::Remote {
-                peer_id: PeerId::new([42_u8; 32]),
+                peer_id: PeerKey::new([42_u8; 32]),
             },
         )?;
         let batch = recv_batch(&mut rx).await;
@@ -1573,28 +1573,28 @@ mod tests {
         let (doc_id, heads, patch) = make_change_fixture();
         let (remote_registration, mut remote_rx) = manager
             .subscribe_listener(ChangeFilter {
-                doc_id: Some(DocIdFilter::new(doc_id)),
+                doc_id: Some(DocIdFilter::new(doc_id.clone())),
                 origin: Some(OriginFilter::Remote),
                 path: Vec::new(),
             })
             .await?;
         let (bootstrap_registration, mut bootstrap_rx) = manager
             .subscribe_listener(ChangeFilter {
-                doc_id: Some(DocIdFilter::new(doc_id)),
+                doc_id: Some(DocIdFilter::new(doc_id.clone())),
                 origin: Some(OriginFilter::Bootstrap),
                 path: Vec::new(),
             })
             .await?;
 
         manager.notify_doc_changed(
-            doc_id,
+            doc_id.clone(),
             Arc::clone(&patch),
             Arc::clone(&heads),
             BigRepoChangeOrigin::Remote {
-                peer_id: PeerId::new([11_u8; 32]),
+                peer_id: PeerKey::new([11_u8; 32]),
             },
         )?;
-        manager.notify_doc_changed(doc_id, patch, heads, BigRepoChangeOrigin::Bootstrap)?;
+        manager.notify_doc_changed(doc_id.clone(), patch, heads, BigRepoChangeOrigin::Bootstrap)?;
 
         let remote_batch = recv_batch(&mut remote_rx).await;
         assert!(matches!(
@@ -1628,9 +1628,9 @@ mod tests {
 
         let doc_id = DocumentId::random();
         let group_id = GroupId::new([1u8; 32]);
-        let member_id = PeerId::new([2u8; 32]);
+        let member_id = PeerKey::new([2u8; 32]);
 
-        manager.notify_document_added_to_group(doc_id, group_id)?;
+        manager.notify_document_added_to_group(doc_id.clone(), group_id)?;
         let batch1 = recv_batch(&mut rx).await;
         assert!(matches!(
             batch1.as_slice(),
@@ -1639,7 +1639,7 @@ mod tests {
             }] if *d == doc_id && *g == group_id
         ));
 
-        manager.notify_member_added_to_group(group_id, member_id, BigRepoAccess::Read)?;
+        manager.notify_member_added_to_group(group_id, member_id.clone(), BigRepoAccess::Read)?;
         let batch2 = recv_batch(&mut rx).await;
         assert!(matches!(
             batch2.as_slice(),
@@ -1648,7 +1648,7 @@ mod tests {
             }] if *g == group_id && *m == member_id && *a == BigRepoAccess::Read
         ));
 
-        manager.notify_member_removed_from_group(group_id, member_id)?;
+        manager.notify_member_removed_from_group(group_id, member_id.clone())?;
         let batch3 = recv_batch(&mut rx).await;
         assert!(matches!(
             batch3.as_slice(),
@@ -1657,7 +1657,11 @@ mod tests {
             }] if *g == group_id && *m == member_id
         ));
 
-        manager.notify_document_access_changed(doc_id, member_id, BigRepoAccess::Relay)?;
+        manager.notify_document_access_changed(
+            doc_id.clone(),
+            member_id.clone(),
+            BigRepoAccess::Relay,
+        )?;
         let batch4 = recv_batch(&mut rx).await;
         assert!(matches!(
             batch4.as_slice(),
@@ -1666,7 +1670,7 @@ mod tests {
             }] if *d == doc_id && *m == member_id && *a == BigRepoAccess::Relay
         ));
 
-        manager.notify_document_removed_from_group(doc_id, group_id)?;
+        manager.notify_document_removed_from_group(doc_id.clone(), group_id)?;
         let batch_rem_group = recv_batch(&mut rx).await;
         assert!(matches!(
             batch_rem_group.as_slice(),
@@ -1675,7 +1679,7 @@ mod tests {
             }] if *d == doc_id && *g == group_id
         ));
 
-        manager.notify_document_access_revoked(doc_id, member_id)?;
+        manager.notify_document_access_revoked(doc_id.clone(), member_id.clone())?;
         let batch_rev = recv_batch(&mut rx).await;
         assert!(matches!(
             batch_rev.as_slice(),
@@ -1684,7 +1688,7 @@ mod tests {
             }] if *d == doc_id && *m == member_id
         ));
 
-        manager.notify_document_key_rotated(doc_id)?;
+        manager.notify_document_key_rotated(doc_id.clone())?;
         let batch5 = recv_batch(&mut rx).await;
         assert!(matches!(
             batch5.as_slice(),

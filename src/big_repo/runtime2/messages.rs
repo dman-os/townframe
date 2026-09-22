@@ -3,7 +3,7 @@
 
 use crate::DocumentId;
 use crate::interlude::*;
-use big_sync_core::PeerId;
+use big_sync_core::PeerKey;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicU64;
 /// fully closes.
 type ConnOpenResp = futures::channel::oneshot::Sender<
     eyre::Result<(
-        PeerId,
+        PeerKey,
         Arc<std::sync::atomic::AtomicBool>,
         futures::channel::oneshot::Receiver<(Arc<std::sync::atomic::AtomicBool>, eyre::Result<()>)>,
     )>,
@@ -130,7 +130,7 @@ pub enum Runtime2Cmd {
             futures::channel::oneshot::Sender<eyre::Result<Option<crate::runtime2::DocHeadState>>>,
     },
     OpenConn {
-        peer: PeerId,
+        peer: PeerKey,
         addr: Box<dyn std::any::Any + Send>,
         #[educe(Debug(ignore))]
         resp: ConnOpenResp,
@@ -141,7 +141,7 @@ pub enum Runtime2Cmd {
         resp: ConnOpenResp,
     },
     CloseConn {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         /// End flag of the specific connection being closed. Subduction
         /// tracks multiple connections per peer, so a close must identify
         /// WHICH connection it targets; the peer's registration is only
@@ -152,30 +152,15 @@ pub enum Runtime2Cmd {
     },
     SyncDocWithPeer {
         doc_id: DocumentId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         waiter_id: u64,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<
             Result<crate::runtime2::types::SyncDocReceipt, crate::runtime2::types::SyncDocError>,
         >,
     },
-    /// The doc-sync transport round finished successfully (no error).
-    ///
-    /// Sessions never resolve waiters (a rejected session must not look like
-    /// success); the round completion is the authoritative receipt resolution:
-    /// a worker reconsider over the fully-persisted tree.
-    DocSyncRoundDone {
-        request_id: subduction_core::connection::message::RequestId,
-    },
-    /// The doc-sync transport round failed; resolve the waiter (if any) with
-    /// this error.
-    DocSyncFailed {
-        request_id: subduction_core::connection::message::RequestId,
-        #[educe(Debug(ignore))]
-        error: crate::runtime2::types::SyncDocError,
-    },
     SyncKeyhiveWithPeer {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         waiter_id: u64,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
@@ -186,11 +171,11 @@ pub enum Runtime2Cmd {
     },
     CancelDocSyncWaiter {
         doc_id: DocumentId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         waiter_id: u64,
     },
     CancelKeyhiveSyncWaiter {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         waiter_id: u64,
     },
     RegisterDocLease {
@@ -222,6 +207,15 @@ pub enum Runtime2Cmd {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     },
+    /// Test-only: whether `peer_id` currently has a registered connection in
+    /// the hub. Lets a lifecycle test assert the deregistration invariant
+    /// directly instead of inferring it from an asynchronous sync failure.
+    #[cfg(test)]
+    HasConnectedPeer {
+        peer_id: PeerKey,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
+    },
     InspectStoredDocBlobs {
         sed_id: sedimentree_core::id::SedimentreeId,
         #[educe(Debug(ignore))]
@@ -244,6 +238,63 @@ pub enum Runtime2Cmd {
     /// Resume event/command processing after a frozen `WaitForQuiescence`.
     /// No-op when the hub is not frozen.
     Unfreeze,
+    /// Test-only seam: stop handing events to the hub and queue them instead,
+    /// so a test can drive the command/event ordering directly.
+    ///
+    /// The hub polls commands before events (`select_biased!`), which is
+    /// invisible to a test unless it can hold event processing: a command whose
+    /// own spawned work already emitted its events then races them. `ResumeEvents`
+    /// reopens processing and replays the queued events in channel order, which
+    /// is the order they would have been handled in without the hold.
+    #[cfg(test)]
+    HoldEvents {
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<()>,
+    },
+    /// Test-only seam: reopen event processing and handle the events queued
+    /// since [`Runtime2Cmd::HoldEvents`], in channel order.
+    #[cfg(test)]
+    ResumeEvents {
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<()>,
+    },
+    /// Test-only seam: close the doc worker's mailbox for `doc_id` on the next
+    /// content-carrying sync-session apply route, reproducing the
+    /// worker-stopping race (handle resolved, then the receiver dropped)
+    /// deterministically.
+    #[cfg(test)]
+    FailNextContentApplyRoute {
+        doc_id: DocumentId,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<()>,
+    },
+    /// Test-only seam: deliver a synthetic keyhive sync completion for
+    /// `peer_id`'s active round, stamped one seq ahead of the hub's current
+    /// `admitted_head`. The reply carries that seq so the test can then inject
+    /// the matching admission event and prove the completion was deferred.
+    #[cfg(test)]
+    InjectKeyhiveCompletionForTest {
+        peer_id: PeerKey,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<eyre::Result<u64>>,
+    },
+    /// Test-only seam: hand an event directly to the hub's event handler,
+    /// bypassing the event channel so a test can drive event ordering
+    /// deterministically (no peer, no scheduler, no hold).
+    #[cfg(test)]
+    InjectRuntime2EvtForTest {
+        evt: Box<Runtime2Evt>,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
+    },
+    /// Test-only seam: report the currently active quiescence probe's barrier
+    /// id (`None` once resolved), so a test can assert a pending probe restarted
+    /// rather than resolving over work routed behind its fence.
+    #[cfg(test)]
+    QuiescenceProbeBarrierForTest {
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<Option<u64>>,
+    },
 }
 
 /// Events from background workers / keyhive listener / sync sessions / doc-workers.
@@ -255,25 +306,56 @@ pub enum Runtime2Evt {
         cause: tracing::Span,
         session: subduction_core::sync_session::SyncSession,
     },
+    /// The doc-sync transport round finished successfully (no error).
+    ///
+    /// Sessions never resolve waiters (a rejected session must not look like
+    /// success); the round completion is the authoritative receipt resolution:
+    /// a worker reconsider over the fully-persisted tree.
+    ///
+    /// It rides the event channel, not the command channel, because it is a
+    /// report *out of* the round's spawned work — and because the round emits
+    /// its [`Runtime2Evt::SyncSessionObserved`] into that channel before
+    /// returning, so channel order makes the receipt resolution follow the
+    /// session apply it must not overtake. A command would be polled first by
+    /// the hub (`select_biased!`), letting a loaded hub resolve a caller's
+    /// receipt for a round whose received content it had not applied yet;
+    /// `KeyhiveSyncDone` and `TrackedWorkDone` hold the same ordering rule.
+    DocSyncRoundDone {
+        request_id: subduction_core::connection::message::RequestId,
+    },
+    /// The doc-sync transport round failed; resolve the waiter (if any) with
+    /// this error. Emitted on the event channel for the same reason as
+    /// [`Runtime2Evt::DocSyncRoundDone`].
+    DocSyncFailed {
+        request_id: subduction_core::connection::message::RequestId,
+        #[educe(Debug(ignore))]
+        error: crate::runtime2::types::SyncDocError,
+    },
     ConnEstablished {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: Arc<std::sync::atomic::AtomicBool>,
     },
     ConnLost {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: Arc<std::sync::atomic::AtomicBool>,
         error: Option<String>,
     },
     KeyhiveSyncDone {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: subduction_keyhive::message::RequestId,
         changed: bool,
+        /// The store's admission watermark when the exchange was acknowledged:
+        /// the last admission-log seq durably committed before this completion.
+        /// The hub resolves the round's waiters only once its own
+        /// `admitted_head` has reached this seq, so a caller can never be told
+        /// "reconciled" while this round's admissions are still unprojected.
+        admitted_seq: u64,
     },
     /// Initiating a keyhive sync failed before the protocol could emit a
     /// completion event. The hub uses this to resolve the public waiter
     /// instead of allowing a network error to panic a child task.
     KeyhiveSyncFailed {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: subduction_keyhive::message::RequestId,
         error: String,
     },
@@ -283,7 +365,7 @@ pub enum Runtime2Evt {
     /// quiescence via `active_keyhive_syncs`. The notification itself is a
     /// hint, not the source of Keyhive state.
     KeyhiveChangeNotif {
-        peer_id: PeerId,
+        peer_id: PeerKey,
     },
     /// The durable incorporation-log head advanced: an incorporation hook
     /// appended a batch and everything through `seq` is now applied to the
@@ -385,7 +467,7 @@ pub enum DocWorkerMsg {
         _lease: crate::runtime2::DocWorkerInternalLease,
     },
     ApplySyncSession {
-        peer_id: PeerId,
+        peer_id: PeerKey,
         commit_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
         fragment_ids: Vec<sedimentree_core::loose_commit::id::CommitId>,
         /// Resolve the caller's sync receipt with the outcome. `None` for

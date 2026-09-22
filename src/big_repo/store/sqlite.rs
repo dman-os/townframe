@@ -1,18 +1,15 @@
 use crate::interlude::*;
 
-use big_sync::HostPartStore;
-use big_sync::open_sqlite_local_revision_reader;
-use big_sync::sqlite_core::{
-    EVENT_ADDED, EVENT_CHANGED, EVENT_REMOVED, MemberState, PendingSubscription, SUB_REPLAY_DONE,
-    SUB_REPLAYING_CLEAN, SqliteCore, encode_access,
-};
-use big_sync_core::part_store::{CursorIndex, ObjPayload};
+use big_sync::open_sqlite_revision_reader;
+use big_sync::sqlite_core::{EVENT_CHANGED, EVENT_REMOVED, MemberState, SqliteCore, encode_access};
+use big_sync::{HostPartStore, PartScope, PartStoreStats, ReadTarget};
+use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 use big_sync_core::rpc::{
     BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
     LeafBucketsError, LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary,
-    SubEvent, SubPartsRequest, SubscriptionTarget,
+    SubPartsRequest,
 };
-use big_sync_core::{BuckId, Byte32Id, Fingerprint, mpsc};
+use big_sync_core::{BuckId, ByteKey, Fingerprint};
 use futures::future::BoxFuture;
 use sedimentree_core::{
     blob::Blob,
@@ -72,52 +69,6 @@ pub(crate) enum TreeStorageMutation {
     DeleteAllFragments,
 }
 
-struct BigRepoSubscription {
-    sender: mpsc::Sender<SubEvent>,
-    principal: Option<PeerId>,
-    pending: Arc<PendingSubscription>,
-}
-
-#[derive(Default)]
-struct BigRepoSubscriptions {
-    by_part: HashMap<PartId, HashSet<Uuid>>,
-    parts_by_sub: HashMap<Uuid, HashSet<PartId>>,
-    by_obj: HashMap<ObjId, HashSet<Uuid>>,
-    objs_by_sub: HashMap<Uuid, HashSet<ObjId>>,
-    pending: HashSet<Uuid>,
-    live: HashSet<Uuid>,
-    subs: HashMap<Uuid, Arc<BigRepoSubscription>>,
-    /// Object/principal pairs whose fetch access was just revoked. The next
-    /// event for such a pair is delivered payload-free instead of dropped, so
-    /// the peer can discover the revocation: it attempts a sync, the serving
-    /// side rejects it at the wire with `Unauthorized`, and the peer settles
-    /// its cursor. Content delivery stays gated by fetch access — the notice
-    /// never carries an object payload.
-    revoked_fetch: HashSet<(ObjId, PeerId)>,
-}
-
-impl BigRepoSubscriptions {
-    fn remove(&mut self, sub_id: Uuid) {
-        self.pending.remove(&sub_id);
-        self.live.remove(&sub_id);
-        self.subs.remove(&sub_id);
-        if let Some(parts) = self.parts_by_sub.remove(&sub_id) {
-            for part_id in parts {
-                if let Some(subs) = self.by_part.get_mut(&part_id) {
-                    subs.remove(&sub_id);
-                }
-            }
-        }
-        if let Some(obj_ids) = self.objs_by_sub.remove(&sub_id) {
-            for obj_id in obj_ids {
-                if let Some(subs) = self.by_obj.get_mut(&obj_id) {
-                    subs.remove(&sub_id);
-                }
-            }
-        }
-    }
-}
-
 /// One node's Keyhive ingestion ledger.
 ///
 /// `logged` counts events that reached the raw event log, `admitted` those
@@ -135,21 +86,31 @@ pub(crate) struct KeyhiveEventLedger {
 #[derive(Clone)]
 pub struct SqliteBigRepoStore {
     core: SqliteCore,
-    bus: Arc<std::sync::RwLock<BigRepoSubscriptions>>,
-    hidden_parts: Arc<HashSet<PartId>>,
+    hidden_parts: Arc<HashSet<PartKey>>,
     /// Transaction-scoped sedimentree projection cache (see [`TreeCache`]).
     tree_cache: Arc<std::sync::Mutex<TreeCache>>,
     local_revision_wakeups: Arc<Notify>,
+    /// Last admission-log seq committed to this scope's store, bumped inside
+    /// [`append_admitted_events`](Self::append_admitted_events) — the single
+    /// durable admission choke point. A keyhive sync completion stamps this
+    /// into its event so the hub can enforce, without a DB round-trip, that the
+    /// round's admissions are reflected in its own `admitted_head` before it
+    /// resolves waiters.
+    ///
+    /// Zero until the first append in this process, matching the hub's
+    /// `admitted_head` initialization, so a completion that admitted nothing
+    /// new still resolves immediately.
+    admission_watermark: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BigSyncStoreSnapshot {
-    pub objects: Vec<(ObjId, Option<serde_json::Value>)>,
-    pub memberships: Vec<(PartId, ObjId, i64, i64)>,
-    pub pending_memberships: Vec<(PartId, ObjId)>,
-    pub part_cursors: Vec<(PartId, i64)>,
-    pub peer_part_cursors: Vec<(PeerId, PartId, i64)>,
+    pub objects: Vec<(ObjKey, Option<serde_json::Value>)>,
+    pub memberships: Vec<(PartKey, ObjKey, i64, i64)>,
+    pub pending_memberships: Vec<(PartKey, ObjKey)>,
+    pub part_cursors: Vec<(PartKey, i64)>,
+    pub peer_part_cursors: Vec<(PeerKey, PartKey, i64)>,
     pub keyhive_event_count: i64,
     pub keyhive_event_bytes: i64,
     pub local_cgka_secret_count: usize,
@@ -302,11 +263,19 @@ impl SqliteBigRepoStore {
 
 #[derive(Debug, Clone)]
 pub(crate) struct GroupPartReconciliation {
-    pub(crate) doc: ObjId,
-    pub(crate) agents: HashMap<PeerId, keyhive_core::access::Access>,
-    pub(crate) managed_group_parts: HashSet<PartId>,
-    pub(crate) desired_group_parts: HashSet<PartId>,
-    pub(crate) desired_global: bool,
+    pub(crate) doc: ObjKey,
+    /// The doc-level union of [`Self::part_agents`]: it decides whether the grant re-emit runs
+    /// — a principal that appeared in it since the last reconciliation may have missed the
+    /// membership touches that delivery-time filtering denied. Never written to a part row.
+    pub(crate) agents: HashMap<PeerKey, keyhive_core::access::Access>,
+    /// The agent set of each part the doc resides in — these are the access rows that
+    /// get written, so a principal of one group never receives another group's part.
+    pub(crate) part_agents: HashMap<PartKey, Arc<HashMap<PeerKey, keyhive_core::access::Access>>>,
+    /// The parts this reconciliation manages: a part the doc is currently in that is
+    /// managed but not desired is removed. `/seds` is in here like any other part
+    /// (decision 9).
+    pub(crate) managed_group_parts: HashSet<PartKey>,
+    pub(crate) desired_group_parts: HashSet<PartKey>,
 }
 
 /// Durable record of keyhive event *incorporation*.
@@ -459,12 +428,12 @@ impl SqliteBigRepoStore {
 
         let store = Self {
             core,
-            bus: default(),
             hidden_parts: Arc::new(config.hidden_parts),
             tree_cache: Arc::new(std::sync::Mutex::new(TreeCache::new(
                 TREE_CACHE_METADATA_CAPACITY,
             ))),
             local_revision_wakeups: Arc::new(Notify::new()),
+            admission_watermark: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         store.init_subduction_schema().await?;
         Ok(store)
@@ -474,368 +443,144 @@ impl SqliteBigRepoStore {
         SqliteCore::next_cursor(tx).await
     }
 
-    fn event_part_id(event: &SubEvent) -> Option<PartId> {
+    fn event_kind(event: &PartEvent) -> &'static str {
         match event {
-            SubEvent::Changed(_) => None,
-            SubEvent::Added(inner) => Some(inner.part_id),
-            SubEvent::Removed(inner) => Some(inner.part_id),
-            SubEvent::ReplayComplete => None,
-        }
-    }
-
-    fn event_kind(event: &SubEvent) -> &'static str {
-        match event {
-            SubEvent::Changed(_) => "changed",
-            SubEvent::Added(_) => "added",
-            SubEvent::Removed(_) => "removed",
-            SubEvent::ReplayComplete => "replay_complete",
+            PartEvent::Changed(_) => "changed",
+            PartEvent::Removed(_) => "removed",
         }
     }
 
     /// Payload-free description of an event, for diagnostics that must not
     /// spill object content into logs.
-    fn event_diagnostic(event: &SubEvent) -> (CursorIndex, Vec<PartId>) {
+    fn event_diagnostic(event: &PartEvent) -> (CursorIndex, Vec<PartKey>) {
         match event {
-            SubEvent::Changed(inner) => (inner.cursor, inner.part_ids.clone()),
-            SubEvent::Added(inner) => (inner.cursor, vec![inner.part_id]),
-            SubEvent::Removed(inner) => (inner.cursor, vec![inner.part_id]),
-            SubEvent::ReplayComplete => (CursorIndex::default(), Vec::new()),
+            PartEvent::Changed(inner) => (inner.cursor, inner.part_ids.clone()),
+            PartEvent::Removed(inner) => (inner.cursor, vec![inner.part_id.clone()]),
         }
     }
 
-    /// Strip object content from an event while keeping its identity and
-    /// cursor, so a peer that lost fetch access can act on the advance without
-    /// receiving payload bytes.
-    fn without_payload(event: SubEvent) -> SubEvent {
-        match event {
-            SubEvent::Changed(mut inner) => {
-                inner.payload = serde_json::Value::Null;
-                SubEvent::Changed(inner)
-            }
-            SubEvent::Added(mut inner) => {
-                inner.payload = serde_json::Value::Null;
-                SubEvent::Added(inner)
-            }
-            other => other,
-        }
-    }
-
-    /// Arm a single payload-free revocation notice for each principal that
-    /// just lost fetch access to `obj_id`.
-    pub(crate) fn arm_revocation_notices(
-        &self,
-        obj_id: ObjId,
-        principals: impl IntoIterator<Item = PeerId>,
-    ) {
-        let mut bus = self.bus.write().expect(ERROR_MUTEX);
-        for principal in principals {
-            bus.revoked_fetch.insert((obj_id, principal));
-        }
-    }
-
-    /// Consume a pending revocation notice for `(obj_id, principal)`.
-    fn take_revocation_notice(&self, obj_id: ObjId, principal: Option<PeerId>) -> bool {
-        let Some(principal) = principal else {
-            return false;
-        };
-        let mut bus = self.bus.write().expect(ERROR_MUTEX);
-        bus.revoked_fetch.remove(&(obj_id, principal))
-    }
-
-    async fn publish(&self, events: Vec<SubEvent>) -> Res<()> {
-        let mut promote = Vec::new();
-        let mut dispatch = Vec::new();
-        let mut recipients: HashMap<(Uuid, ObjId, CursorIndex, Option<PartId>), SubEvent> =
-            HashMap::new();
-        let mut push_recipient = |sub_id: Uuid, event: SubEvent| {
-            let (obj_id, cursor, part_id) = match &event {
-                SubEvent::Changed(inner) => (inner.obj_id, inner.cursor, None),
-                SubEvent::Added(inner) => (inner.obj_id, inner.cursor, Some(inner.part_id)),
-                SubEvent::Removed(inner) => (inner.obj_id, inner.cursor, Some(inner.part_id)),
-                SubEvent::ReplayComplete => unreachable!(),
-            };
-            recipients
-                .entry((sub_id, obj_id, cursor, part_id))
-                .and_modify(|existing| {
-                    if let (SubEvent::Changed(existing), SubEvent::Changed(new)) =
-                        (existing, &event)
-                    {
-                        existing.part_ids.extend(new.part_ids.iter().copied());
-                        existing.part_ids.sort_unstable();
-                        existing.part_ids.dedup();
-                        existing.payload = new.payload.clone();
-                    }
-                })
-                .or_insert(event);
-        };
-        {
-            let bus = self.bus.read().expect(ERROR_MUTEX);
-            for event in events {
-                if !matches!(event, SubEvent::ReplayComplete) {
-                    let (cursor, part_ids) = Self::event_diagnostic(&event);
-                    tracing::debug!(
-                        ?cursor,
-                        ?part_ids,
-                        event_kind = Self::event_kind(&event),
-                        "part-store published event",
-                    );
-                }
-                let obj_id = match &event {
-                    SubEvent::Changed(inner) => inner.obj_id,
-                    SubEvent::Added(inner) => inner.obj_id,
-                    SubEvent::Removed(inner) => inner.obj_id,
-                    SubEvent::ReplayComplete => continue,
-                };
-                let object_event = match &event {
-                    SubEvent::Changed(inner) => {
-                        Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                            cursor: inner.cursor,
-                            part_ids: Vec::new(),
-                            obj_id: inner.obj_id,
-                            payload: inner.payload.clone(),
-                        }))
-                    }
-                    SubEvent::Added(inner) => {
-                        Some(SubEvent::Changed(big_sync_core::rpc::ObjChanged {
-                            cursor: inner.cursor,
-                            part_ids: Vec::new(),
-                            obj_id: inner.obj_id,
-                            payload: inner.payload.clone(),
-                        }))
-                    }
-                    SubEvent::Removed(_) | SubEvent::ReplayComplete => None,
-                };
-                match &event {
-                    SubEvent::Changed(inner) => {
-                        for part_id in &inner.part_ids {
-                            if let Some(subs) = bus.by_part.get(part_id) {
-                                for &sub_id in subs {
-                                    let mut projected = event.clone();
-                                    if let SubEvent::Changed(inner) = &mut projected {
-                                        inner.part_ids = vec![*part_id];
-                                    }
-                                    push_recipient(sub_id, projected);
-                                }
-                            }
-                        }
-                    }
-                    SubEvent::Added(inner) => {
-                        if let Some(subs) = bus.by_part.get(&inner.part_id) {
-                            for &sub_id in subs {
-                                push_recipient(sub_id, event.clone());
-                            }
-                        }
-                    }
-                    SubEvent::Removed(inner) => {
-                        if let Some(subs) = bus.by_part.get(&inner.part_id) {
-                            for &sub_id in subs {
-                                push_recipient(sub_id, event.clone());
-                            }
-                        }
-                    }
-                    SubEvent::ReplayComplete => unreachable!(),
-                }
-                if let Some(object_event) = object_event
-                    && let Some(subs) = bus.by_obj.get(&obj_id)
-                {
-                    for &sub_id in subs {
-                        if matches!(&event, SubEvent::Added(inner)
-                            if bus.parts_by_sub
-                                .get(&sub_id)
-                                .is_some_and(|parts| parts.contains(&inner.part_id)))
-                        {
-                            continue;
-                        }
-                        push_recipient(sub_id, object_event.clone());
-                    }
-                }
-            }
-            for ((sub_id, obj_id, _, _), event) in recipients {
-                let Some(sub) = bus.subs.get(&sub_id) else {
-                    continue;
-                };
-                if bus.pending.contains(&sub_id) {
-                    if sub.pending.mark_dirty() {
-                        promote.push((sub_id, event, obj_id, sub.principal, sub.sender.clone()));
-                    }
-                    continue;
-                }
-                if !bus.live.contains(&sub_id) {
-                    continue;
-                }
-                dispatch.push((sub_id, event, obj_id, sub.principal, sub.sender.clone()));
-            }
-        }
-
-        let mut drop_subs = HashSet::new();
-        for (sub_id, event, obj_id, principal, sender) in dispatch {
-            // A policy-check failure must not masquerade as a denial: that
-            // would silently drop a deliverable event from a live subscriber.
-            let permitted = matches!(event, SubEvent::Removed(_))
-                || self
-                    .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
-                    .await?;
-            let event = if permitted {
-                event
-            } else if self.take_revocation_notice(obj_id, principal) {
-                let (cursor, part_ids) = Self::event_diagnostic(&event);
-                tracing::debug!(
-                    ?sub_id,
-                    ?obj_id,
-                    ?principal,
-                    ?cursor,
-                    ?part_ids,
-                    event_kind = Self::event_kind(&event),
-                    "part-store delivered payload-free revocation notice",
-                );
-                Self::without_payload(event)
-            } else {
-                let (cursor, part_ids) = Self::event_diagnostic(&event);
-                tracing::debug!(
-                    ?sub_id,
-                    ?obj_id,
-                    ?principal,
-                    ?cursor,
-                    ?part_ids,
-                    event_kind = Self::event_kind(&event),
-                    "part-store dropped live subscription event: subscriber lacks fetch access",
-                );
-                continue;
-            };
-            if sender.try_send(event).is_err() {
-                drop_subs.insert(sub_id);
-            }
-        }
-
-        for (sub_id, event, obj_id, principal, sender) in promote {
-            let permitted = matches!(event, SubEvent::Removed(_))
-                || self
-                    .is_event_permitted(Self::event_part_id(&event), obj_id, principal)
-                    .await?;
-            let event = if permitted {
-                Some(event)
-            } else if self.take_revocation_notice(obj_id, principal) {
-                let (cursor, part_ids) = Self::event_diagnostic(&event);
-                tracing::debug!(
-                    ?sub_id,
-                    ?obj_id,
-                    ?principal,
-                    ?cursor,
-                    ?part_ids,
-                    event_kind = Self::event_kind(&event),
-                    "part-store delivered payload-free revocation notice",
-                );
-                Some(Self::without_payload(event))
-            } else {
-                let (cursor, part_ids) = Self::event_diagnostic(&event);
-                tracing::debug!(
-                    ?sub_id,
-                    ?obj_id,
-                    ?principal,
-                    ?cursor,
-                    ?part_ids,
-                    event_kind = Self::event_kind(&event),
-                    "part-store dropped promoted subscription event: subscriber lacks fetch access",
-                );
-                None
-            };
-            let mut bus = self.bus.write().expect(ERROR_MUTEX);
-            let Some(sub) = bus.subs.get(&sub_id).cloned() else {
-                continue;
-            };
-            if bus.pending.remove(&sub_id) {
-                if sub.pending.state.load(std::sync::atomic::Ordering::Acquire) != SUB_REPLAY_DONE {
-                    bus.pending.insert(sub_id);
-                    continue;
-                }
-                bus.live.insert(sub_id);
-            }
-            if let Some(event) = event
-                && sender.try_send(event).is_err()
-            {
-                tracing::debug!(
-                    ?sub_id,
-                    ?obj_id,
-                    ?principal,
-                    "part-store removed subscription after promote send failure",
-                );
-                bus.remove(sub_id);
-            }
-        }
-
-        if !drop_subs.is_empty() {
-            let mut bus = self.bus.write().expect(ERROR_MUTEX);
-            for sub_id in drop_subs {
-                tracing::debug!(
-                    ?sub_id,
-                    "part-store removed subscription after dispatch send failure",
-                );
-                bus.remove(sub_id);
-            }
+    async fn publish(&self, events: Vec<PartEvent>) -> Res<()> {
+        // Events reach readers through the durable frontier: the write that produced
+        // them bumped the scope's revision, and this wake is what tells a waiting
+        // reader to look again. Nothing is routed and nobody is registered — a reader
+        // holds no subscription — so the only thing a publish owes anyone is the
+        // signal itself.
+        for event in events {
+            let (cursor, part_ids) = Self::event_diagnostic(&event);
+            tracing::debug!(
+                ?cursor,
+                ?part_ids,
+                event_kind = Self::event_kind(&event),
+                "part-store published event",
+            );
         }
         self.local_revision_wakeups.notify_waiters();
         Ok(())
     }
 
-    pub(crate) async fn is_event_permitted(
+    /// Filter an outbound event's candidate parts down to the parts `principal` may read;
+    /// `None` when unfiltered (trusted local subscriber). See
+    /// [`big_sync::PartScope`] — authorization and non-exposure are the same operation.
+    pub(crate) async fn permitted_parts(
         &self,
-        part_id: Option<PartId>,
-        obj_id: ObjId,
-        principal: Option<PeerId>,
-    ) -> Res<bool> {
-        let Some(peer) = principal else {
-            return Ok(true);
+        scope: PartScope,
+        obj_id: ObjKey,
+        principal: Option<PeerKey>,
+    ) -> Res<Option<Vec<PartKey>>> {
+        let Some(ref peer) = principal else {
+            return Ok(None);
         };
-        let peer_blob = Self::peer_blob(peer);
-        let access_level: Option<i64> = sqlx::query_scalar!(
-            "SELECT access_level
-             FROM big_sync_syncable
-             WHERE scope_id = ?1 AND obj_ref = (
-                 SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
-             ) AND principal_id = ?3",
-            self.scope_id,
-            Self::obj_blob(obj_id),
-            &peer_blob
-        )
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
-        let permitted = access_level
-            .map(|lvl| u8::try_from(lvl).expect(ERROR_IMPOSSIBLE))
-            .map(big_sync::sqlite_core::decode_access)
-            .is_some_and(|access| access.is_fetcher());
+        let peer_blob = Self::peer_blob(peer.clone());
+        let candidates: Vec<PartKey> = match scope {
+            // Resolve and filter in one query: the object's live parts that grant this
+            // principal access. An event that named nothing usable still delivers when
+            // the principal can read some part of it.
+            PartScope::FromObject => {
+                let readable = self.readable_parts_of_object(&obj_id, &peer_blob).await?;
+                tracing::trace!(
+                    ?obj_id,
+                    ?principal,
+                    part_count = readable.len(),
+                    "policy event permission",
+                );
+                return Ok(Some(readable));
+            }
+            PartScope::Part(part_id) => vec![part_id],
+            PartScope::AnyOf(part_ids) => part_ids,
+        };
+        let mut readable = Vec::with_capacity(candidates.len());
+        for part_id in candidates {
+            let access_level: Option<i64> = match self.core.find_part_ref(part_id.clone()).await? {
+                Some(part_ref) => {
+                    sqlx::query_scalar!(
+                        "SELECT access_level
+                         FROM big_sync_syncable
+                         WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
+                        self.scope_id,
+                        part_ref,
+                        &peer_blob
+                    )
+                    .fetch_optional(&self.sql.read_pool)
+                    .await?
+                }
+                None => None,
+            };
+            if access_level.is_some_and(is_fetch_access) {
+                readable.push(part_id);
+            }
+        }
         tracing::trace!(
-            ?part_id,
             ?obj_id,
             ?principal,
-            permitted,
+            part_count = readable.len(),
             "policy event permission",
         );
-        Ok(permitted)
+        Ok(Some(readable))
+    }
+
+    /// The parts containing `obj_id` that `peer_blob` may fetch-read, in key order.
+    ///
+    /// This is the `FromObject` resolution at the heart of decision 2: an event or a
+    /// subscription that names the object rather than a part resolves through the object's
+    /// real parts, which are the only ones an access row can name.
+    async fn readable_parts_of_object(
+        &self,
+        obj_id: &ObjKey,
+        peer_blob: &[u8],
+    ) -> Res<Vec<PartKey>> {
+        let rows = sqlx::query!(
+            "SELECT p.part_id AS 'part_id: Vec<u8>', s.access_level
+             FROM big_sync_members m
+             JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+             JOIN big_sync_syncable s ON s.part_ref = m.maybe_part_ref
+             WHERE m.scope_id = ?1
+               AND m.obj_ref = (
+                   SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
+               )
+               AND m.maybe_part_ref > 0
+               AND m.event_type != 2
+               AND s.scope_id = ?1
+               AND s.principal_id = ?3
+             ORDER BY p.part_id",
+            self.scope_id,
+            Self::obj_blob(obj_id.clone()),
+            peer_blob
+        )
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| is_fetch_access(row.access_level))
+            .map(|row| Self::part_from_blob(row.part_id))
+            .collect())
     }
 }
-fn obj_id_bounds_for_bucket(bucket_id: BuckId) -> (ObjId, Option<ObjId>) {
-    let prefix_bits = u32::from(bucket_id.level()) * u32::from(BuckId::BITS_PER_LEVEL);
-    debug_assert!(prefix_bits <= u16::BITS);
-    if prefix_bits == 0 {
-        return (ObjId(Byte32Id::new([0; 32])), None);
-    }
-    let shift = u16::BITS - prefix_bits;
-    let start_prefix = u32::from(bucket_id.index()) << shift;
-    let start = {
-        let mut bytes = [0; 32];
-        bytes[..2].copy_from_slice(&(start_prefix as u16).to_be_bytes());
-        ObjId(Byte32Id::new(bytes))
-    };
-    if prefix_bits == u16::BITS || bucket_id.index() == u16::MAX {
-        return (start, None);
-    }
-    let next_prefix = (u32::from(bucket_id.index()) + 1) << shift;
-    if next_prefix > u32::from(u16::MAX) {
-        return (start, None);
-    }
-    let mut bytes = [0; 32];
-    bytes[..2].copy_from_slice(&(next_prefix as u16).to_be_bytes());
-    (start, Some(ObjId(Byte32Id::new(bytes))))
+
+fn is_fetch_access(access_level: i64) -> bool {
+    u8::try_from(access_level)
+        .ok()
+        .map(big_sync::sqlite_core::decode_access)
+        .is_some_and(|access| access.is_fetcher())
 }
 
 #[derive(Debug, thiserror::Error)]

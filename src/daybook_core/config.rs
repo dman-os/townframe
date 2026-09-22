@@ -114,7 +114,7 @@ pub struct ConfigRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
     plug_repo: Arc<PlugsRepo>,
     local_actor_id: ActorId,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     repo_sql: crate::app::SqlCtx,
     cancel_token: CancellationToken,
     sync_config_lock: tokio::sync::Mutex<()>,
@@ -195,7 +195,7 @@ impl ConfigRepo {
         let app_doc_handle = big_repo
             .get_doc(&app_doc_id)
             .await?
-            .into_ready(app_doc_id)?;
+            .into_ready(app_doc_id.clone())?;
 
         let store_val = ConfigStore::load(&app_doc_handle).await?;
         let local_user_path =
@@ -410,7 +410,7 @@ impl ConfigRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<ConfigEvent>,
         live_origin: Option<&big_repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&PeerId>,
+        exclude_peer_id: Option<&PeerKey>,
     ) -> Res<()> {
         // Live notification path: local writes are emitted directly by mutators.
         // Historical replay passes `live_origin = None` and must not be skipped.
@@ -520,7 +520,7 @@ impl ConfigRepo {
             .big_repo
             .get_doc(&self.app_doc_id)
             .await?
-            .into_ready(self.app_doc_id)?;
+            .into_ready(self.app_doc_id.clone())?;
         let heads = handle.with_document_read(|doc| doc.get_heads()).await;
         Ok(Arc::from(heads))
     }
@@ -771,7 +771,7 @@ mod tests {
         let (plugs_repo, plugs_stop) = crate::plugs::PlugsRepo::load(
             Arc::clone(&big_repo),
             Arc::clone(&blobs_repo),
-            app_doc_id,
+            app_doc_id.clone(),
             local_user_path.clone(),
             Arc::clone(&sqlite_local_state_repo),
         )

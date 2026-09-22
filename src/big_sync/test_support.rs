@@ -2,9 +2,9 @@ use crate::interlude::*;
 use crate::part_store::HostPartStore;
 
 #[cfg(test)]
-use big_sync_core::ObjId;
+use big_sync_core::ObjKey;
 use big_sync_core::part_store::CursorIndex;
-use big_sync_core::{PartId, PeerId};
+use big_sync_core::{PartKey, PeerKey};
 
 use std::collections::BTreeMap;
 #[cfg(test)]
@@ -16,14 +16,16 @@ use std::future::Future;
 pub struct NetworkRestTarget {
     pub worker: crate::BigSyncWorkerHandle,
     pub store: Arc<dyn HostPartStore>,
-    pub peer_ids: Vec<PeerId>,
-    pub part_ids: Vec<PartId>,
+    pub peer_ids: Vec<PeerKey>,
+    pub part_ids: Vec<PartKey>,
 }
 
-async fn cursor_snapshot(targets: &[NetworkRestTarget]) -> Res<Vec<BTreeMap<PartId, CursorIndex>>> {
+async fn cursor_snapshot(
+    targets: &[NetworkRestTarget],
+) -> Res<Vec<BTreeMap<PartKey, CursorIndex>>> {
     let mut snapshots = Vec::with_capacity(targets.len());
     for target in targets {
-        let requested: HashSet<_> = target.part_ids.iter().copied().collect();
+        let requested: HashSet<_> = target.part_ids.iter().cloned().collect();
         let summaries = target
             .store
             .summarize_parts(requested)
@@ -61,13 +63,45 @@ where
                     stable_rounds,
                     "network-rest target sync begin"
                 );
-                target
-                    .worker
-                    .wait_for_full_sync(
-                        target.peer_ids.iter().copied(),
-                        target.part_ids.iter().copied(),
-                    )
-                    .await?;
+                let wait = target.worker.wait_for_full_sync(
+                    target.peer_ids.iter().cloned(),
+                    target.part_ids.iter().cloned(),
+                );
+                tokio::pin!(wait);
+                let mut next_snapshot = tokio::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    tokio::select! {
+                        result = &mut wait => {
+                            result?;
+                            break;
+                        }
+                        _ = tokio::time::sleep_until(next_snapshot) => {
+                            match target.worker.snapshot().await {
+                                Ok(snapshot) => tracing::warn!(
+                                    target_index,
+                                    worker = snapshot.label,
+                                    stable_rounds,
+                                    ?snapshot.peer_parts,
+                                    ?snapshot.full_sync_waiters,
+                                    ?snapshot.peer_part_sync_flags,
+                                    ?snapshot.replay_pages,
+                                    task_counts = ?snapshot.task_counts,
+                                    active_machine_tasks = snapshot.active_machine_tasks,
+                                    active_sync_tasks = snapshot.active_sync_tasks,
+                                    zombie_tasks = snapshot.zombie_tasks,
+                                    "network-rest target sync still waiting",
+                                ),
+                                Err(error) => tracing::warn!(
+                                    target_index,
+                                    stable_rounds,
+                                    ?error,
+                                    "network-rest target sync snapshot failed",
+                                ),
+                            }
+                            next_snapshot += Duration::from_secs(5);
+                        }
+                    }
+                }
                 tracing::info!(
                     target_index,
                     stable_rounds,
@@ -100,14 +134,14 @@ where
 #[cfg(test)]
 pub(crate) struct ObservedObjSnapshot {
     pub payload: Option<serde_json::Value>,
-    pub parts: BTreeSet<PartId>,
+    pub parts: BTreeSet<PartKey>,
 }
 
 #[derive(Debug, Clone)]
 #[cfg(test)]
 pub(crate) struct ObservedStoreSnapshot {
-    pub objs: BTreeMap<ObjId, ObservedObjSnapshot>,
-    pub peer_part_cursors: BTreeMap<(PeerId, PartId), CursorIndex>,
+    pub objs: BTreeMap<ObjKey, ObservedObjSnapshot>,
+    pub peer_part_cursors: BTreeMap<(PeerKey, PartKey), CursorIndex>,
 }
 
 #[cfg(test)]

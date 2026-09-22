@@ -11,23 +11,23 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct LeafBucketsTask {
-    pub peer_id: PeerId,
-    pub part_id: PartId,
+    pub peer_id: PeerKey,
+    pub part_id: PartKey,
     pub since: CursorIndex,
     pub buckets: Vec<LeafBucketRequest>,
 }
 
 #[derive(Debug)]
 pub struct LeafBucketsResult {
-    pub peer_id: PeerId,
+    pub peer_id: PeerKey,
     pub filtered_objs: Map<BuckId, BucketObjLeafPage>,
 }
 
 structstruck::strike! {
     #[structstruck::each[derive(Debug)]]
     pub struct LeafBucketsTaskError {
-        pub peer_id: PeerId,
-        pub part_id: PartId,
+        pub peer_id: PeerKey,
+        pub part_id: PartKey,
         pub _deets:
             pub enum LeafBucketsErrorDeets {
                 #![derive(thiserror::Error, displaydoc::Display)]
@@ -51,8 +51,8 @@ impl LeafBucketsTask {
         Rpc: BigSyncRpcClient<K>,
         Rng: rand::Rng,
     {
-        let peer_id = self.peer_id;
-        let part_id = self.part_id;
+        let peer_id = self.peer_id.clone();
+        let part_id = self.part_id.clone();
         self.run_run(cx)
             .await
             .map_err(|deets| LeafBucketsTaskError {
@@ -76,7 +76,7 @@ impl LeafBucketsTask {
         let seed = FingerprintSeed::new(cx.rng.next_u64(), cx.rng.next_u64());
         let response = peer_rpc
             .leaf_buckets(LeafBucketsRequest {
-                part_id: self.part_id,
+                part_id: self.part_id.clone(),
                 since: self.since,
                 buckets: self.buckets,
                 seed,
@@ -85,7 +85,7 @@ impl LeafBucketsTask {
             .await??;
         assert_eq!(seed, response.seed);
         let filtered = crate::bucket::filter_objects(
-            self.part_id,
+            self.part_id.clone(),
             response.bucks,
             response.seed,
             &cx.part_store,

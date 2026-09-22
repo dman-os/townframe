@@ -157,6 +157,28 @@ pub struct BigKeyhiveHandle {
     contact_card: Arc<keyhive_core::contact_card::ContactCard>,
     keyhive_peer_id: subduction_keyhive::KeyhivePeerId,
 }
+/// What an admitted Keyhive event names.
+///
+/// The difference between "names no graph" and "names a graph this hive cannot
+/// resolve *yet*" is load-bearing. The first is a property of the event: a
+/// prekey op changes which peers can be reached, not who is a member of what.
+/// The second is a property of this hive's ingest position and clears itself
+/// once the dependency lands — Keyhive classifies exactly it as a missing
+/// dependency (`ReceiveStaticDelegationError::is_missing_dependency`). A caller
+/// that takes the two for one thing either fails over a delivery race or drops
+/// an access change it cannot yet name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EventSubject {
+    /// The graph the event changes.
+    Named(Identifier),
+    /// The event names no graph, so it cannot change a closure.
+    Unnamed,
+    /// The event's proof chain is not resolvable here yet: the hive has not
+    /// applied a delegation the chain names. The event is early rather than
+    /// undecodable, and the caller retries once the missing link lands.
+    Unresolved,
+}
+
 // a background task. rename to new
 impl BigKeyhiveHandle {
     pub(crate) async fn new(seed: [u8; 32], listener: BigRepoKeyhiveListener) -> Res<Self> {
@@ -387,7 +409,11 @@ impl BigKeyhiveHandle {
 
     /// All agents (individuals + groups) who can reach this doc/group, with [`Access`].
     /// O(|transitive_members(target)|) — used for incremental per-target update.
-    pub async fn agents_for_membered(&self, id: Identifier) -> HashMap<[u8; 32], Access> {
+    ///
+    /// Keyed by keyhive [`Identifier`], not by its bytes: the identifier is the
+    /// identity every caller either already holds or must keep, and a byte key
+    /// throws that away for the callers that need it back.
+    pub async fn agents_for_membered(&self, id: Identifier) -> BTreeMap<Identifier, Access> {
         let keyhive = self.keyhive.as_ref();
         // Try document first, then group
         if let Some(doc) = keyhive.get_document(KhDocumentId::from(id)).await {
@@ -397,17 +423,77 @@ impl BigKeyhiveHandle {
             ))
             .await
             .into_iter()
-            .map(|(id, (_, access))| (id.to_bytes(), access))
+            .map(|(id, (_, access))| (id, access))
             .collect();
         }
         if let Some(group) = keyhive.get_group(KhGroupId::from(id)).await {
             return transitive_members_short_locked(Membered::Group(KhGroupId::from(id), group))
                 .await
                 .into_iter()
-                .map(|(id, (_, access))| (id.to_bytes(), access))
+                .map(|(id, (_, access))| (id, access))
                 .collect();
         }
-        HashMap::new()
+        BTreeMap::new()
+    }
+
+    /// Whether this hive holds a document node for `id`.
+    ///
+    /// The `Identifier`-addressed twin of [`Self::get_group`]: an id is a
+    /// membered subject when it names either, and a caller that resolves the
+    /// kind itself must ask in the same order `agents_for_membered` does.
+    pub(crate) async fn has_document(&self, id: Identifier) -> bool {
+        self.keyhive
+            .get_document(KhDocumentId::from(id))
+            .await
+            .is_some()
+    }
+
+    /// The graph an admitted event names, or why it names none.
+    ///
+    /// A `CgkaOperation` names its document; a `Delegated`/`Revoked` names the
+    /// graph Keyhive dispatched the operation to, which is the proof chain's
+    /// root issuer ([`SignedSubjectId`], consumed at `keyhive.rs:1980,2066`) and
+    /// *not* the immediate signer — the two differ whenever a non-root member
+    /// re-delegates, which is the hazard the group-part worker's
+    /// `delegation.issuer` proxy carries (B19).
+    ///
+    /// The wire form carries proof *digests* (`StaticDelegation::proof`), so
+    /// the chain is resolved through this hive's own graph: there is no
+    /// payload-only derivation, and the resolution here is the same one Keyhive
+    /// performs when it applies the event.
+    ///
+    /// Prekey events change which peers can be *reached*, not who is a member
+    /// of what, so they name no graph and cannot change a closure.
+    ///
+    /// The graph is named from the event's own proof chain and never from the
+    /// *delegate*: materializing the event needs the delegate's installed `Agent`
+    /// record, and a replica that only observes a graph is never sent one — measured
+    /// in the private-reader topology, where the delegate stayed unknown for at least
+    /// 77s and a decode that waited for it never ran. Naming the graph needs none of
+    /// that ([`Keyhive::static_membership_subject`]).
+    ///
+    /// An unresolvable chain is reported as [`EventSubject::Unresolved`] and not as a
+    /// failure: the event is early, its source row is not settled yet, and the caller
+    /// retries once the missing link lands. Anything else is an error.
+    pub(crate) async fn event_subject_id(&self, event: StaticEvent<Vec<u8>>) -> Res<EventSubject> {
+        Ok(match &event {
+            StaticEvent::PrekeysExpanded(_) | StaticEvent::PrekeyRotated(_) => {
+                EventSubject::Unnamed
+            }
+            StaticEvent::CgkaOperation(operation) => EventSubject::Named(Identifier::from(
+                ed25519_dalek::VerifyingKey::from(*operation.payload().doc_id()),
+            )),
+            // The proof chain's *root* issuer, not the immediate signer: the walk
+            // answers the chain head's issuer, which is the graph Keyhive dispatched
+            // the operation to. Using the immediate issuer is the B19 hazard and would
+            // name a non-membered id whenever a non-root member re-delegates.
+            StaticEvent::Delegated(_) | StaticEvent::Revoked(_) => {
+                match self.keyhive.static_membership_subject(&event).await {
+                    Some(subject) => EventSubject::Named(subject),
+                    None => EventSubject::Unresolved,
+                }
+            }
+        })
     }
 
     /// What [`Access`] does `agent` have on this doc/group? None if unreachable.
@@ -473,13 +559,13 @@ impl BigKeyhiveHandle {
         caps
     }
 
-    pub(crate) async fn document_ids(&self) -> Vec<big_sync_core::ObjId> {
+    pub(crate) async fn document_ids(&self) -> Vec<big_sync_core::ObjKey> {
         self.keyhive
             .documents()
             .lock()
             .await
             .keys()
-            .map(|id| big_sync_core::ObjId::new(id.to_bytes()))
+            .map(|id| big_sync_core::ObjKey::new(id.to_bytes()))
             .collect()
     }
 
@@ -489,7 +575,7 @@ impl BigKeyhiveHandle {
     ) -> Res<Vec<(Vec<u8>, [u8; 32])>> {
         let doc = self
             .keyhive
-            .get_document(keyhive_doc_id(doc_id)?)
+            .get_document(keyhive_doc_id(doc_id.clone())?)
             .await
             .ok_or_else(|| ferr!("keyhive document not found: {doc_id}"))?;
         Ok(doc
@@ -632,7 +718,7 @@ impl BigKeyhiveHandle {
         let doc_id = DocumentId::new(signing_key.verifying_key().to_bytes());
         let reservation = crate::keyhive_storage::DocReservation {
             magic: crate::keyhive_storage::DOC_RESERVATION_MAGIC,
-            doc_id: doc_id.into_bytes(),
+            doc_id: doc_id.to_bytes32()?,
             signing_key: signing_key.to_bytes(),
             parents: parents
                 .into_iter()
@@ -656,14 +742,14 @@ impl BigKeyhiveHandle {
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<()> {
         if storage
-            .load_doc_reservation(doc_id.into_bytes())
+            .load_doc_reservation(doc_id.to_bytes32()?)
             .await
             .map_err(|err| ferr!("failed loading document reservation: {err}"))?
             .is_none()
         {
             if self
                 .keyhive
-                .get_document(keyhive_doc_id(doc_id)?)
+                .get_document(keyhive_doc_id(doc_id.clone())?)
                 .await
                 .is_some()
             {
@@ -672,7 +758,7 @@ impl BigKeyhiveHandle {
             return Err(ferr!("no reservation and no keyhive document for {doc_id}"));
         }
         storage
-            .stage_doc_reservation(doc_id.into_bytes(), initial_content, initial_keys)
+            .stage_doc_reservation(doc_id.to_bytes32()?, initial_content, initial_keys)
             .await
             .map_err(|err| ferr!("failed staging initial document content: {err}"))
     }
@@ -692,9 +778,9 @@ impl BigKeyhiveHandle {
         protocol: &BigRepoKeyhiveProtocol,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<Vec<EventHash>> {
-        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
         let Some(reservation) = storage
-            .load_doc_reservation(doc_id.into_bytes())
+            .load_doc_reservation(doc_id.to_bytes32()?)
             .await
             .map_err(|err| ferr!("failed loading document id reservation: {err}"))?
         else {
@@ -714,7 +800,7 @@ impl BigKeyhiveHandle {
             return Ok(Vec::new());
         }
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&reservation.signing_key);
-        if signing_key.verifying_key().to_bytes() != doc_id.into_bytes() {
+        if signing_key.verifying_key().to_bytes() != doc_id.to_bytes32()? {
             return Err(ferr!(
                 "reserved signing key does not match document id {doc_id}"
             ));
@@ -752,13 +838,13 @@ impl BigKeyhiveHandle {
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<Vec<EventHash>> {
         let Some(_reservation) = storage
-            .load_doc_reservation(doc_id.into_bytes())
+            .load_doc_reservation(doc_id.to_bytes32()?)
             .await
             .map_err(|err| ferr!("failed loading document reservation: {err}"))?
         else {
             if self
                 .keyhive
-                .get_document(keyhive_doc_id(doc_id)?)
+                .get_document(keyhive_doc_id(doc_id.clone())?)
                 .await
                 .is_none()
             {
@@ -768,13 +854,13 @@ impl BigKeyhiveHandle {
         };
         let document_ids = self.group_document_ids(pending_group).await;
         let hashes = if document_ids.contains(&doc_id) {
-            self.revoke_group_from_doc(pending_group, doc_id, after_content, protocol)
+            self.revoke_group_from_doc(pending_group, doc_id.clone(), after_content, protocol)
                 .await?
         } else {
             Vec::new()
         };
         storage
-            .delete_doc_reservation(doc_id.into_bytes())
+            .delete_doc_reservation(doc_id.to_bytes32()?)
             .await
             .map_err(|err| ferr!("failed deleting document reservation: {err}"))?;
         Ok(hashes)
@@ -870,7 +956,7 @@ impl BigKeyhiveHandle {
             .document_ids_containing_group(group.id())
             .await
             .into_iter()
-            .map(|doc_id| DocumentId::new(*doc_id.as_bytes()))
+            .map(|doc_id| DocumentId::new(doc_id.as_bytes()))
             .collect()
     }
 
@@ -903,7 +989,7 @@ impl BigKeyhiveHandle {
         let affected_docs = update
             .cgka_ops
             .iter()
-            .map(|op| DocumentId::new(*op.payload().doc_id().as_bytes()))
+            .map(|op| DocumentId::new(op.payload().doc_id().as_bytes()))
             .collect();
         let mut hashes = persist_cgka_update_ops(protocol, update.cgka_ops).await?;
         if let Some(hash) = persist_delegation(protocol, update.delegation).await? {
@@ -923,7 +1009,7 @@ impl BigKeyhiveHandle {
     ) -> Res<Vec<EventHash>> {
         use keyhive_core::principal::membered::Membered;
         let agent = principal.into().into_agent();
-        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
         let kh = self.keyhive.as_ref();
         let doc = kh
             .get_document(kh_doc_id)
@@ -956,7 +1042,7 @@ impl BigKeyhiveHandle {
     ) -> Res<Vec<EventHash>> {
         use keyhive_core::principal::membered::Membered;
 
-        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
         let kh = self.keyhive.as_ref();
         let doc = kh
             .get_document(kh_doc_id)
@@ -1000,7 +1086,10 @@ impl BigKeyhiveHandle {
 }
 
 fn keyhive_doc_id(doc_id: DocumentId) -> Res<keyhive_core::principal::document::id::DocumentId> {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+    // A document key is a BigSync object key, which ADR 012 decision 1 makes arbitrary
+    // bytes: the keyhive identifier is a fixed-width consumer, so a wrong-width key is an
+    // error here rather than a panicking assertion.
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
         .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
     Ok(keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(vk),

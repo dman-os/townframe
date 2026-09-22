@@ -5,15 +5,17 @@
 //! the resulting durable frontier after the runner reconnects the full mesh.
 
 use super::harness::fixtures::wait_for_agent;
+use super::harness::log_nickname;
 use super::harness::topo::Node;
-use crate::{BigKeyhiveGroup, DocumentId, PeerId, Res, StorageConfig};
+use crate::{BigKeyhiveGroup, DocumentId, PeerKey, Res, StorageConfig};
 use am_utils_rs::codecs::ThroughJson;
 use big_sync::{
     HostPartStore,
     stress_support::{self, StressFixture},
 };
-use big_sync_core::{ObjId, PartId};
+use big_sync_core::{ObjKey, PartKey};
 use futures::future::try_join_all;
+use futures::stream::{FuturesUnordered, StreamExt};
 use keyhive_core::access::Access;
 use rand::rngs::StdRng;
 use std::{
@@ -24,8 +26,25 @@ use std::{
 };
 use tempfile::tempdir;
 use tokio::sync::Mutex;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 pub const DEFAULT_STRESS_SEED: u64 = 0xB1A0_5EED_5EED_0002;
+
+/// How often a settle barrier that is still outstanding reports which nodes hold it.
+const SETTLE_STALL_REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How many tracked documents one stall report names per node.
+const SETTLE_STALL_REPORT_DOCS: usize = 6;
+
+/// A key's display text, truncated to `limit` characters.
+///
+/// These diagnostics name ADR 012 keys, whose width is not fixed: a reserved textual key
+/// renders as its own text (`/seds` is six bytes), so a fixed *byte* offset panics on any
+/// key shorter than it. Truncating by characters bounds the same display for every key
+/// and cannot panic.
+fn key_prefix(key: &impl std::fmt::Display, limit: usize) -> String {
+    key.to_string().chars().take(limit).collect()
+}
 
 #[derive(Clone)]
 pub struct BigRepoStressConfig {
@@ -48,13 +67,13 @@ impl Default for BigRepoStressConfig {
 
 pub(crate) struct BigRepoStressFixture {
     config: BigRepoStressConfig,
-    shared_edit_groups: Arc<Mutex<HashMap<PeerId, BigKeyhiveGroup>>>,
+    shared_edit_groups: Arc<Mutex<HashMap<PeerKey, BigKeyhiveGroup>>>,
     shared_edit_group_id: Arc<Mutex<Option<keyhive_core::principal::group::id::GroupId>>>,
-    editor_peer_ids: Arc<Mutex<BTreeSet<PeerId>>>,
-    relay_peer_ids: Arc<Mutex<BTreeSet<PeerId>>>,
-    obj_doc_map: Arc<Mutex<HashMap<ObjId, DocumentId>>>,
+    editor_peer_ids: Arc<Mutex<BTreeSet<PeerKey>>>,
+    relay_peer_ids: Arc<Mutex<BTreeSet<PeerKey>>>,
+    obj_doc_map: Arc<Mutex<HashMap<ObjKey, DocumentId>>>,
     all_docs: Arc<Mutex<BTreeSet<DocumentId>>>,
-    node_paths: Arc<Mutex<HashMap<PeerId, PathBuf>>>,
+    node_paths: Arc<Mutex<HashMap<PeerKey, PathBuf>>>,
 }
 
 impl BigRepoStressFixture {
@@ -74,12 +93,12 @@ impl BigRepoStressFixture {
         node.label == "relay"
     }
 
-    async fn doc_id(&self, obj: &ObjId) -> Res<DocumentId> {
+    async fn doc_id(&self, obj: &ObjKey) -> Res<DocumentId> {
         self.obj_doc_map
             .lock()
             .await
             .get(obj)
-            .copied()
+            .cloned()
             .ok_or_else(|| crate::ferr!("stress object {obj:?} has no mapped document id"))
     }
 
@@ -90,7 +109,7 @@ impl BigRepoStressFixture {
     async fn collect_heads(&self, node: &Node) -> Res<BTreeMap<DocumentId, BTreeSet<[u8; 32]>>> {
         let mut result = BTreeMap::new();
         for doc_id in self.tracked_docs().await {
-            let state = node.repo.doc_head_state(doc_id).await?;
+            let state = node.repo.doc_head_state(doc_id.clone()).await?;
             result.insert(
                 doc_id,
                 state.sedimentree_heads.iter().map(|head| head.0).collect(),
@@ -99,10 +118,30 @@ impl BigRepoStressFixture {
         Ok(result)
     }
 
-    async fn collect_parts(&self, node: &Node) -> Res<BTreeMap<DocumentId, Vec<PartId>>> {
+    /// The heads published inside the object payload: what big_sync advertises to
+    /// peers and what the sync backend's convergence fast path compares. Distinct from
+    /// `sedimentree_heads`, which is the durable storage frontier.
+    async fn collect_payload_heads(
+        &self,
+        node: &Node,
+    ) -> Res<BTreeMap<DocumentId, BTreeSet<[u8; 32]>>> {
         let mut result = BTreeMap::new();
         for doc_id in self.tracked_docs().await {
-            let mut parts = node.store.obj_parts(doc_id).await?;
+            let heads = node
+                .repo
+                .doc_payload_heads(doc_id.clone())
+                .await?
+                .map(|heads| heads.iter().map(|head| head.0).collect())
+                .unwrap_or_default();
+            result.insert(doc_id, heads);
+        }
+        Ok(result)
+    }
+
+    async fn collect_parts(&self, node: &Node) -> Res<BTreeMap<DocumentId, Vec<PartKey>>> {
+        let mut result = BTreeMap::new();
+        for doc_id in self.tracked_docs().await {
+            let mut parts = node.store.obj_parts(doc_id.clone()).await?;
             parts.sort_unstable();
             result.insert(doc_id, parts);
         }
@@ -112,15 +151,17 @@ impl BigRepoStressFixture {
     async fn collect_peer_cursors(
         &self,
         node: &Node,
-        parts: &[PartId],
-    ) -> Res<BTreeMap<PeerId, BTreeMap<PartId, u64>>> {
+        parts: &[PartKey],
+    ) -> Res<BTreeMap<PeerKey, BTreeMap<PartKey, u64>>> {
         let mut result = BTreeMap::new();
         for peer_id in node.connected_peer_ids().await {
             let mut peer_cursors = BTreeMap::new();
             for part_id in parts {
                 peer_cursors.insert(
-                    *part_id,
-                    node.store.get_peer_part_cursor(peer_id, *part_id).await?,
+                    part_id.clone(),
+                    node.store
+                        .get_peer_part_cursor(peer_id.clone(), part_id.clone())
+                        .await?,
                 );
             }
             result.insert(peer_id, peer_cursors);
@@ -131,10 +172,10 @@ impl BigRepoStressFixture {
     /// not know reported as `unknown` rather than failing — a lagging node
     /// lacking a group-part is precisely what this diagnostic is meant to
     /// reveal (previously it error-returned and hid the real mismatch).
-    async fn collect_local_cursors(&self, node: &Node, parts: &[PartId]) -> Res<String> {
+    async fn collect_local_cursors(&self, node: &Node, parts: &[PartKey]) -> Res<String> {
         match node
             .store
-            .summarize_parts(parts.iter().copied().collect())
+            .summarize_parts(parts.iter().cloned().collect())
             .await?
         {
             Ok(summaries) => {
@@ -192,7 +233,7 @@ impl BigRepoStressFixture {
             .insert(node.peer_id(), group.clone());
         Ok(group)
     }
-    async fn sync_parts(&self) -> Vec<PartId> {
+    async fn sync_parts(&self) -> Vec<PartKey> {
         // The stress cluster is GLOBAL-free by design: the group part is the
         // sync primitive under test. Part selection is an explicit
         // code-level decision — everyone (editors and relay alike) listens on
@@ -203,23 +244,235 @@ impl BigRepoStressFixture {
         }
         parts.into_iter().collect()
     }
-    async fn available_sync_parts(&self, left: &Node, right: &Node) -> Res<Vec<PartId>> {
+    /// A compact `doc:stage` list for one node, capped so a report stays readable.
+    async fn doc_stage_summary(&self, node: &Node, docs: &BTreeSet<DocumentId>) -> String {
+        let mut stages = Vec::new();
+        for doc_id in docs.iter().take(SETTLE_STALL_REPORT_DOCS) {
+            let stage = node
+                .repo
+                .document_sync_snapshot(doc_id.clone())
+                .await
+                .map(|snapshot| format!("{:?}", snapshot.stage))
+                .unwrap_or_else(|error| format!("error({error})"));
+            stages.push(format!("{}:{stage}", key_prefix(doc_id, 12)));
+        }
+        if docs.len() > SETTLE_STALL_REPORT_DOCS {
+            stages.push(format!("+{}", docs.len() - SETTLE_STALL_REPORT_DOCS));
+        }
+        stages.join(",")
+    }
+
+    /// Name what a still-outstanding settle barrier is waiting for: which nodes have not
+    /// returned, their BigSync part cursors, and their per-document sync stage.
+    ///
+    /// The hub reports its own internal fence state while a quiescence wait is stalled;
+    /// this is the cross-node view, and unlike the hub's report it needs the fence to be
+    /// armed at the moment it is written rather than continuously pending.
+    async fn report_settle_stall(
+        &self,
+        phase: &str,
+        nodes: &[&Node],
+        parts: &[PartKey],
+        holding: &BTreeSet<usize>,
+    ) {
+        let tracked_docs = self.tracked_docs().await;
+        let mut per_node = Vec::with_capacity(nodes.len());
+        for (idx, node) in nodes.iter().enumerate() {
+            let cursors = self
+                .collect_local_cursors(node, parts)
+                .await
+                .unwrap_or_else(|error| format!("error({error})"));
+            per_node.push(format!(
+                "{}(holding={} cursors={cursors} docs={})",
+                log_nickname::nickname(&node.peer_id()),
+                holding.contains(&idx),
+                self.doc_stage_summary(node, &tracked_docs).await,
+            ));
+        }
+        tracing::warn!(
+            phase,
+            holding = ?holding,
+            nodes = %per_node.join(" "),
+            "cluster settle still pending",
+        );
+    }
+
+    /// Await one settle barrier on every node in parallel, reporting every
+    /// [`SETTLE_STALL_REPORT_INTERVAL`] while it is still outstanding.
+    ///
+    /// The waits stay unbounded: the report is evidence for a kill that arrives from
+    /// outside (a harness hard timeout), never a deadline of its own.
+    async fn await_settle_with_stall_report<F>(
+        &self,
+        phase: &str,
+        nodes: &[&Node],
+        parts: &[PartKey],
+        waits: Vec<F>,
+    ) -> Res<()>
+    where
+        F: std::future::Future<Output = Res<()>>,
+    {
+        assert_eq!(
+            waits.len(),
+            nodes.len(),
+            "a settle barrier needs exactly one wait per node"
+        );
+        let mut in_flight: FuturesUnordered<_> = waits
+            .into_iter()
+            .enumerate()
+            .map(|(idx, wait)| async move { (idx, wait.await) })
+            .collect();
+        let mut holding: BTreeSet<usize> = (0..nodes.len()).collect();
+        let mut tick = tokio::time::interval(SETTLE_STALL_REPORT_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first interval tick is immediate; the report belongs after a full interval.
+        tick.tick().await;
+        while !holding.is_empty() {
+            tokio::select! {
+                Some((idx, result)) = in_flight.next() => {
+                    holding.remove(&idx);
+                    result?;
+                }
+                _ = tick.tick() => {
+                    self.report_settle_stall(phase, nodes, parts, &holding).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn available_sync_parts(&self, left: &Node, right: &Node) -> Res<Vec<PartKey>> {
         let _left_and_right = (left, right);
         Ok(self.sync_parts().await)
     }
 }
 
+/// Short hex prefix of a sedimentree head: enough to tell two heads apart in a log line.
+fn short_head(head: &[u8; 32]) -> String {
+    head.iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Short rendering of a part key for a log line.
+fn short_part(part: &PartKey) -> String {
+    format!("{part:?}").chars().take(14).collect()
+}
+
+/// First-sight description of what moved between two settle rounds: per node, the documents
+/// whose sedimentree heads, part lists, or published payload heads differ, and in which
+/// direction. The settle fence proves the cluster stopped moving; when it cannot reach that
+/// proof this is the line that names the node and document still moving, so the stall does not
+/// have to be reconstructed from a raw debug log afterwards.
+fn settle_diff(left: &[BigRepoStressObservation], right: &[BigRepoStressObservation]) -> String {
+    let mut out = String::new();
+    for (index, (before, after)) in left.iter().zip(right).enumerate() {
+        if before == after {
+            continue;
+        }
+        let mut moved: Vec<String> = Vec::new();
+        let docs: BTreeSet<&DocumentId> = before
+            .sedimentree_heads
+            .keys()
+            .chain(before.parts.keys())
+            .chain(before.payload_heads.keys())
+            .chain(after.sedimentree_heads.keys())
+            .chain(after.parts.keys())
+            .chain(after.payload_heads.keys())
+            .collect();
+        for doc in docs {
+            let mut fields: Vec<String> = Vec::new();
+            match (
+                before.sedimentree_heads.get(doc),
+                after.sedimentree_heads.get(doc),
+            ) {
+                (None, Some(heads)) => fields.push(format!("sedimentree +{}", heads.len())),
+                (Some(heads), None) => fields.push(format!("sedimentree -{}", heads.len())),
+                (Some(before_heads), Some(after_heads)) if before_heads != after_heads => {
+                    let added: Vec<String> = after_heads
+                        .difference(before_heads)
+                        .map(short_head)
+                        .collect();
+                    let removed: Vec<String> = before_heads
+                        .difference(after_heads)
+                        .map(short_head)
+                        .collect();
+                    fields.push(format!(
+                        "sedimentree +{} -{}",
+                        added.join(","),
+                        removed.join(",")
+                    ));
+                }
+                _ => {}
+            }
+            match (before.payload_heads.get(doc), after.payload_heads.get(doc)) {
+                (None, Some(heads)) => fields.push(format!("payload +{}", heads.len())),
+                (Some(heads), None) => fields.push(format!("payload -{}", heads.len())),
+                (Some(before_heads), Some(after_heads)) if before_heads != after_heads => {
+                    let added: Vec<String> = after_heads
+                        .difference(before_heads)
+                        .map(short_head)
+                        .collect();
+                    let removed: Vec<String> = before_heads
+                        .difference(after_heads)
+                        .map(short_head)
+                        .collect();
+                    fields.push(format!(
+                        "payload +{} -{}",
+                        added.join(","),
+                        removed.join(",")
+                    ));
+                }
+                _ => {}
+            }
+            match (before.parts.get(doc), after.parts.get(doc)) {
+                (None, Some(parts)) => fields.push(format!("parts +{}", parts.len())),
+                (Some(parts), None) => fields.push(format!("parts -{}", parts.len())),
+                (Some(before_parts), Some(after_parts)) if before_parts != after_parts => {
+                    let added: Vec<String> = after_parts
+                        .iter()
+                        .filter(|part| !before_parts.contains(part))
+                        .map(short_part)
+                        .collect();
+                    let removed: Vec<String> = before_parts
+                        .iter()
+                        .filter(|part| !after_parts.contains(part))
+                        .map(short_part)
+                        .collect();
+                    fields.push(format!("parts +{} -{}", added.join(","), removed.join(",")));
+                }
+                _ => {}
+            }
+            if !fields.is_empty() {
+                moved.push(format!("{doc}: {}", fields.join(" ")));
+            }
+        }
+        if moved.is_empty() {
+            moved.push("outside the compared fields".to_string());
+        }
+        out.push_str(&format!("node={index} {} | ", moved.join("; ")));
+    }
+    if out.is_empty() {
+        "node count differs".to_string()
+    } else {
+        out
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BigRepoStressObservation {
     pub sedimentree_heads: BTreeMap<DocumentId, BTreeSet<[u8; 32]>>,
-    pub parts: BTreeMap<DocumentId, Vec<PartId>>,
+    pub parts: BTreeMap<DocumentId, Vec<PartKey>>,
+    /// Published payload heads per document, for comparing against the durable
+    /// `sedimentree_heads` of the same node.
+    pub payload_heads: BTreeMap<DocumentId, BTreeSet<[u8; 32]>>,
 }
 
 #[async_trait::async_trait]
 impl StressFixture for BigRepoStressFixture {
     type World = ();
     type Node = Node;
-    type StressObj = ObjId;
+    type StressObj = ObjKey;
     type Observation = BigRepoStressObservation;
 
     fn label(&self) -> &'static str {
@@ -250,7 +503,7 @@ impl StressFixture for BigRepoStressFixture {
             // is the sync primitive under test, and hiding GLOBAL exercises
             // the production relay design (large sets never pay global-sub
             // cost) end to end.
-            HashSet::from([crate::GLOBAL_PART_ID]),
+            HashSet::from([crate::seds_part_id()]),
         )
         .await?;
         self.node_paths.lock().await.insert(node.peer_id(), path);
@@ -295,6 +548,10 @@ impl StressFixture for BigRepoStressFixture {
         // visibility, so both directions agree by construction.
         let left_parts = self.available_sync_parts(left, right).await?;
         let right_parts = left_parts.clone();
+        // Part access is explicit on the serving side. This harness registers routes
+        // directly instead of going through `connect_with_parts`, so it grants them here.
+        left.allow_part_pull(right, &left_parts).await?;
+        right.allow_part_pull(left, &right_parts).await?;
         left.set_peer_parts(right, left_parts).await?;
         right.set_peer_parts(left, right_parts).await?;
         Ok(())
@@ -333,7 +590,10 @@ impl StressFixture for BigRepoStressFixture {
         // group-part membership index — per-doc grants would be an
         // anti-pattern.
 
-        self.obj_doc_map.lock().await.insert(*obj, doc_id);
+        self.obj_doc_map
+            .lock()
+            .await
+            .insert(obj.clone(), doc_id.clone());
         self.all_docs.lock().await.insert(doc_id);
         Ok(())
     }
@@ -378,10 +638,19 @@ impl StressFixture for BigRepoStressFixture {
         Ok(BigRepoStressObservation {
             sedimentree_heads: self.collect_heads(node).await?,
             parts: self.collect_parts(node).await?,
+            payload_heads: self.collect_payload_heads(node).await?,
         })
     }
 
-    fn peer_id(&self, node: &Self::Node) -> PeerId {
+    fn observation_diff(
+        &self,
+        left: &[BigRepoStressObservation],
+        right: &[BigRepoStressObservation],
+    ) -> String {
+        settle_diff(left, right)
+    }
+
+    fn peer_id(&self, node: &Self::Node) -> PeerKey {
         node.peer_id()
     }
 
@@ -417,7 +686,7 @@ impl StressFixture for BigRepoStressFixture {
             .create_group_with_parents(Vec::new())
             .await?;
         *self.shared_edit_group_id.lock().await = Some(group.id());
-        for peer_id in self.editor_peer_ids.lock().await.iter().copied() {
+        for peer_id in self.editor_peer_ids.lock().await.iter().cloned() {
             if peer_id == group_owner.peer_id() {
                 continue;
             }
@@ -434,7 +703,7 @@ impl StressFixture for BigRepoStressFixture {
         // group membership is the primitive that makes the relay subscribe to
         // and forward the group part.
         for relay_peer_id in self.relay_peer_ids.lock().await.iter() {
-            let relay_agent = wait_for_agent(&group_owner.repo, *relay_peer_id).await?;
+            let relay_agent = wait_for_agent(&group_owner.repo, relay_peer_id.clone()).await?;
             group_owner
                 .repo
                 .add_member_to_group(relay_agent, &group, Access::Relay)
@@ -491,7 +760,7 @@ impl StressFixture for BigRepoStressFixture {
         }
         let agent = node.repo.keyhive().keyhive_peer_id().to_identifier()?;
         let document = keyhive_core::principal::identifier::Identifier::from(
-            ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes())
+            ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
                 .expect("stress document id must be a verifying key"),
         );
         Ok(node
@@ -519,22 +788,34 @@ impl StressFixture for BigRepoStressFixture {
         // alignment observation runs against a genuinely settled snapshot
         // instead of racing that drift.
         let barrier_nodes: Vec<&Node> = nodes.to_vec();
-        try_join_all(
+        self.await_settle_with_stall_report(
+            "freeze",
+            &barrier_nodes,
+            &parts,
             barrier_nodes
                 .iter()
-                .map(|node| async { node.repo.wait_for_quiescence_freeze(None).await }),
+                .map(|node| async move { node.repo.wait_for_quiescence_freeze(None).await })
+                .collect(),
         )
         .await?;
-        try_join_all(
+        self.await_settle_with_stall_report(
+            "unfreeze",
+            &barrier_nodes,
+            &parts,
             barrier_nodes
                 .iter()
-                .map(|node| async { node.repo.unfreeze().await }),
+                .map(|node| async move { node.repo.unfreeze().await })
+                .collect(),
         )
         .await?;
-        try_join_all(
+        self.await_settle_with_stall_report(
+            "settle",
+            &barrier_nodes,
+            &parts,
             barrier_nodes
                 .iter()
-                .map(|node| async { node.repo.wait_for_quiescence(None).await }),
+                .map(|node| async move { node.repo.wait_for_quiescence(None).await })
+                .collect(),
         )
         .await?;
 
@@ -562,8 +843,8 @@ impl StressFixture for BigRepoStressFixture {
         // semantics.
         let tracked_docs = self.tracked_docs().await;
         let mut last_report = tokio::time::Instant::now();
-        let observations: Vec<(PeerId, BigRepoStressObservation)> = loop {
-            let observations: Vec<(PeerId, BigRepoStressObservation)> =
+        let observations: Vec<(PeerKey, BigRepoStressObservation)> = loop {
+            let observations: Vec<(PeerKey, BigRepoStressObservation)> =
                 try_join_all(nodes.iter().map(|node| async {
                     Ok::<_, crate::interlude::eyre::Report>((
                         node.peer_id(),
@@ -593,7 +874,7 @@ impl StressFixture for BigRepoStressFixture {
                             .count();
                         format!(
                             "{}:{synced}/{}",
-                            &peer_id.to_string()[..12],
+                            key_prefix(peer_id, 12),
                             tracked_docs.len()
                         )
                     })
@@ -619,24 +900,103 @@ impl StressFixture for BigRepoStressFixture {
                                     .get(doc_id)
                                     .cloned()
                                     .unwrap_or_default();
-                                format!("{}:{}", &peer_id.to_string()[..12], actual.len())
+                                format!(
+                                    "{}:heads={actual:?} payload={:?}",
+                                    key_prefix(peer_id, 12),
+                                    observation
+                                        .payload_heads
+                                        .get(doc_id)
+                                        .cloned()
+                                        .unwrap_or_default(),
+                                )
                             })
                             .collect();
                         (!differing.is_empty()).then(|| {
                             format!(
-                                "{}:ref={} [{}]",
-                                &doc_id.to_string()[..12],
-                                expected.len(),
+                                "{}:reference_heads={expected:?} [{}]",
+                                doc_id,
                                 differing.join(",")
                             )
                         })
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
+                let tracked_docs_ref = &tracked_docs;
+                let stage_detail = try_join_all(nodes.iter().map(|node| async move {
+                    Ok::<_, crate::interlude::eyre::Report>(format!(
+                        "{}={}",
+                        log_nickname::nickname(&node.peer_id()),
+                        self.doc_stage_summary(node, tracked_docs_ref).await,
+                    ))
+                }))
+                .await?
+                .join(" ");
+                // TEMP-DIAGNOSTIC: per-node sync-machine state. A head mismatch alone
+                // cannot say which part, strategy flag, or stalled object sync is holding
+                // the cluster apart; `waiters` names the exact (peer, part) full sync is
+                // still waiting on, and `last_synced` ages say which paths went silent.
+                let sync_state = try_join_all(nodes.iter().map(|node| async move {
+                    let snapshot = node.worker.snapshot().await?;
+                    let routes = snapshot
+                        .peer_parts
+                        .iter()
+                        .flat_map(|(peer, parts)| {
+                            parts.iter().map(move |(part, backend)| {
+                                format!(
+                                    "{}:{}=>{backend}",
+                                    key_prefix(peer, 8),
+                                    key_prefix(part, 10),
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let flags = snapshot
+                        .peer_part_sync_flags
+                        .iter()
+                        .map(
+                            |(peer, part, pending, multi, replay_done, cursor_active, unanswered)| {
+                                format!(
+                                    "{}:{}:pending={pending},multi={multi},replay_done={replay_done},cursor_active={cursor_active},unanswered={unanswered}",
+                                    key_prefix(peer, 8),
+                                    key_prefix(part, 10),
+                                )
+                            },
+                        )
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let last_synced = snapshot
+                        .last_object_syncs
+                        .iter()
+                        .map(|(peer, part, obj, at)| {
+                            format!(
+                                "{}:{}->{} age={:.1}s",
+                                key_prefix(peer, 8),
+                                key_prefix(part, 10),
+                                key_prefix(obj, 12),
+                                at.elapsed().as_secs_f64(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    Ok::<_, crate::interlude::eyre::Report>(format!(
+                        "{}[routes=[{routes}] flags=[{flags}] waiters={:?} last_synced=[{last_synced}] tasks={:?} machine={} sync={} zombies={}]",
+                        log_nickname::nickname(&node.peer_id()),
+                        snapshot.full_sync_waiters,
+                        snapshot.task_counts,
+                        snapshot.active_machine_tasks,
+                        snapshot.active_sync_tasks,
+                        snapshot.zombie_tasks,
+                    ))
+                }))
+                .await?
+                .join(" ");
                 tracing::info!(
                     converged,
                     per_node,
                     mismatch = mismatch_detail,
+                    stages = %stage_detail,
+                    sync_state = %sync_state,
                     "convergence poll",
                 );
                 last_report = tokio::time::Instant::now();
@@ -661,12 +1021,14 @@ impl StressFixture for BigRepoStressFixture {
         };
         let _reference_peer = observations
             .first()
-            .map(|(peer_id, _)| *peer_id)
+            .map(|(peer_id, _)| peer_id.clone())
             .expect("stress cluster must contain nodes");
         let _reference_heads = &observations[0].1.sedimentree_heads;
         let mut sedimentree_mismatches = Vec::new();
         for doc_id in &tracked_docs {
-            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes()) else {
+            let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(
+                &doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+            ) else {
                 continue;
             };
             let doc_identifier = keyhive_core::principal::identifier::Identifier::from(vk);
@@ -688,7 +1050,7 @@ impl StressFixture for BigRepoStressFixture {
             if active_peers.is_empty() {
                 continue;
             }
-            let reference_peer = active_peers[0].0;
+            let reference_peer = &active_peers[0].0;
             let expected = active_peers[0]
                 .1
                 .sedimentree_heads
@@ -750,14 +1112,14 @@ impl StressFixture for BigRepoStressFixture {
                     crate::DocLookup::PendingMaterialization => ("pending", None),
                     crate::DocLookup::Missing => ("missing", None),
                 };
-                documents.insert(*doc_id, materialization);
+                documents.insert(doc_id.clone(), materialization);
             }
             materialized_by_peer.push((node.peer_id(), documents));
         }
 
         let materialized_reference_peer = materialized_by_peer
             .first()
-            .map(|(peer_id, _)| *peer_id)
+            .map(|(peer_id, _)| peer_id.clone())
             .expect("stress cluster must contain an editor");
         let materialized_reference = &materialized_by_peer[0].1;
         let mut materialized_mismatches = Vec::new();
@@ -778,21 +1140,25 @@ impl StressFixture for BigRepoStressFixture {
                         .copied()
                         .find(|node| node.peer_id() == *peer_id)
                         .expect("materialization peer must have a node");
-                    let parts = node.store.obj_parts(*doc_id).await?;
+                    let parts = node.store.obj_parts(doc_id.clone()).await?;
                     let blob_lengths = node
                         .repo
-                        .inspect_stored_doc_blobs(*doc_id)
+                        .inspect_stored_doc_blobs(doc_id.clone())
                         .await?
                         .iter()
                         .map(Vec::len)
                         .collect::<Vec<_>>();
                     let agent_id = keyhive_core::principal::identifier::Identifier::from(
-                        ed25519_dalek::VerifyingKey::from_bytes(peer_id.as_bytes())
-                            .expect("stress peer id must be a verifying key"),
+                        ed25519_dalek::VerifyingKey::from_bytes(
+                            &peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                        )
+                        .expect("stress peer id must be a verifying key"),
                     );
                     let doc_identifier = keyhive_core::principal::identifier::Identifier::from(
-                        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-                            .expect("stress document id must be a verifying key"),
+                        ed25519_dalek::VerifyingKey::from_bytes(
+                            &doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                        )
+                        .expect("stress document id must be a verifying key"),
                     );
                     let access = node
                         .repo

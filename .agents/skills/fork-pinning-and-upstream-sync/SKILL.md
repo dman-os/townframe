@@ -100,3 +100,69 @@ Both directions are deliberate:
 - That job also enables nextest recording via `.config/nextest-user-ci.toml` and exports
   `nextest-run.zip` on failure. The artifact carries per-test stdout/stderr (middle-truncated) that
   the CI log would otherwise lose.
+
+## Parking instrumentation before a push
+
+The fix commit must sit directly on the pin, with instrumentation *off* the pushed branch (it is for
+you, not for CI). Park it on its own bookmark rather than leaving it orphaned: an orphan can be lost
+between sessions, and a bookmark makes the intent explicit.
+
+```bash
+cd ../subduction                        # or ../keyhive
+jj bookmark set instrumentation -r <instrumentation commit>
+jj describe -m "fix: <what the fix really does>"   # name the working-copy fix
+jj log -r '@|@-|instrumentation'        # pin -> fix, instrumentation beside it
+```
+
+If the fix was written on top of the instrumentation, rebase the *fix* down onto the pin — never
+advance the pin to reach the fix, because the pin is what townframe and CI compile:
+
+```bash
+jj new <pin rev> -m "fix: ..."
+jj restore --from <old fix commit> -- <paths the fix touches>
+jj abandon <old fix commit>
+```
+
+Verify the push shape with `jj log -r '::@' --limit 3`: first line is the fix, second is the pin. The
+operator pushes the pin bookmark (`jj bookmark set <pin book> -r @`); pushing needs credentials the
+agent does not hold.
+
+## When the fork will not build under its own patch
+
+A path patch compiles the fork's *working copy*, and that working copy can be ahead of the pin in ways
+that demand a newer sibling fork. Real case: subduction's HEAD called
+`keyhive_core::Keyhive::audit_state_generation()`, which the local `../keyhive` did not have, while
+the *pin* was self-consistent. Before touching the other fork, check whether the call exists at the
+pin:
+
+```bash
+jj file show -r <pin> path/to/file.rs | rg <method>
+```
+
+If it does not, the extra commits are the problem and basing the fix on the pin (above) resolves it
+without advancing anything.
+
+## Two ways a patch edit goes wrong
+
+- **A partial `[patch]` block silently duplicates crates.** Deleting one entry (e.g. `beekem`) left
+  the crate resolving from both the local path and the pinned git source; the symptom was
+  `expected beekem::operation::CgkaOperation, found a different beekem::operation::CgkaOperation`,
+  which reads like an API mismatch and is not. After editing a patch block, re-check resolution:
+  `cargo tree -p big_repo --duplicates | rg -A3 'keyhive|beekem|subduction'` must show exactly one
+  source per crate.
+- **A patch edit is a resolution change, not a source change.** Adding or removing a block
+  re-resolves the whole graph, so a warm build can pass while a cold one fails (or the reverse).
+  Expect a rebuild, and re-check the duplicates above whenever you touch the file.
+
+## The fork CI you are about to make red
+
+Both forks gate on clippy with `-D warnings`, so "the fix compiles" is not enough to push:
+
+- subduction: `cargo clippy --workspace --all-targets --all-features -- -D warnings`, plus a
+  per-crate wasm32 pass. `--all-targets` must *build*: pre-existing broken integration tests (a
+  changed `sync_with_peer` arity, for example) fail the job even though the library is fine.
+- keyhive: `cargo clippy --all-targets --features=test_utils -- -D warnings`, workspace-level — note
+  the feature set is `test_utils`, not `--all-features`.
+
+Run the exact command from `.github/workflows/quality.yml` before asking for a push, and put the
+pre-existing lint fixes in their own commit (`jj new -m "chore: ..."`) so the fix stays reviewable.

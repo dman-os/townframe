@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*)\n               FROM big_sync_members\n              WHERE scope_id = ?1\n                AND maybe_part_ref = (\n                    SELECT part_ref\n                      FROM big_sync_parts\n                     WHERE scope_id = ?1 AND part_id = ?2\n                )\n                AND txid > ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "09bac0ad0177b7b4ca41dc7dbefbab2cbf7574eafb90d770ae03ea43b401d83b"
+}

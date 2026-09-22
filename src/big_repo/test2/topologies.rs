@@ -26,6 +26,7 @@
 use super::harness::{Node, Topo, fixtures, keyhive as kh_snap, topo::ShutdownGuard};
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 // ─── Read helpers ───────────────────────────────────────────────────────────
 
 async fn assert_relay_only(
@@ -33,10 +34,13 @@ async fn assert_relay_only(
     relay: &super::harness::Node,
     doc_id: crate::DocumentId,
 ) -> crate::Res<()> {
-    let relay_vk = ed25519_dalek::VerifyingKey::from_bytes(relay.peer_id().as_bytes())
-        .map_err(|err| crate::ferr!("relay peer id is not a verifying key: {err}"))?;
-    let doc_vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-        .map_err(|err| crate::ferr!("document id is not a verifying key: {err}"))?;
+    let relay_vk = ed25519_dalek::VerifyingKey::from_bytes(
+        &relay.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+    )
+    .map_err(|err| crate::ferr!("relay peer id is not a verifying key: {err}"))?;
+    let doc_vk =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .map_err(|err| crate::ferr!("document id is not a verifying key: {err}"))?;
     let access = repo
         .keyhive()
         .agent_access_on(
@@ -46,16 +50,30 @@ async fn assert_relay_only(
         .await;
     assert_eq!(access, Some(Access::Relay));
     repo.wait_for_quiescence(None).await?;
-    // Global-part membership is written only by local group-part
-    // reconciliation (big-sync gossip drops GLOBAL_PART_ID), so a Relay-only
-    // holder must never record the doc there — regardless of markers synced
-    // from peers over the discovery partition.
-    assert!(
-        !relay
-            .obj_parts_contains(doc_id, crate::GLOBAL_PART_ID)
-            .await?,
-        "Relay-only access must not place the document in the readable global partition"
-    );
+    // `/seds` is the store's local index of the sedimentree trees this node has saved, so a
+    // Relay-only holder that pulls the document *is* listed there: it holds the heads and the
+    // encrypted fragments. That membership is local bookkeeping, not a readable set — what a
+    // peer may see through the partition is decided per event by the readability filter. The
+    // boundary this helper protects is therefore materialization: the relay must never walk its
+    // stored heads into a live document.
+    // Observe WITHOUT creating a document worker. `doc_head_state` acquires a worker and a
+    // lease to answer, and a live handle is itself a materialization driver — with the
+    // frontier worker disabled, an assert that used it would be measuring its own observation.
+    // The property is that content arriving for a peer holding only Relay access, with nothing
+    // driving it, does not become a live document; `inspect_doc_head_state` answers `None`
+    // when no worker exists, which is the strongest form of that.
+    if let Some(state) = repo.inspect_doc_head_state(doc_id).await? {
+        assert!(
+            state.materialized_heads.is_none(),
+            "a Relay-only holder must not materialize the document it relays: state={:?} sedimentree_heads={} materialized_heads={}",
+            state.state,
+            state.sedimentree_heads.len(),
+            state
+                .materialized_heads
+                .as_ref()
+                .map_or(0, |heads| heads.len()),
+        );
+    }
     Ok(())
 }
 
@@ -111,7 +129,7 @@ async fn assert_sedimentree_parity_nodes(
 ) -> crate::Res<()> {
     let mut baseline: Option<Vec<automerge::ChangeHash>> = None;
     for (idx, node) in nodes.iter().enumerate() {
-        let state = node.repo.doc_head_state(doc_id).await?;
+        let state = node.repo.doc_head_state(doc_id.clone()).await?;
         let mut heads: Vec<_> = state.sedimentree_heads.to_vec();
         heads.sort_by_key(|h| h.0);
         if let Some(ref base) = baseline {
@@ -163,7 +181,7 @@ async fn tier3_relay_replication() -> crate::Res<()> {
     let relay_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, relay_agent, Access::Relay)
+        .grant_doc_access(doc_id.clone(), relay_agent, Access::Relay)
         .await?;
 
     // Propagate keyhive inward so Alice (0) learns Bob (2)'s identity through Relay (1).
@@ -179,24 +197,27 @@ async fn tier3_relay_replication() -> crate::Res<()> {
     let bob_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(2)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, bob_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), bob_agent, Access::Read)
         .await?;
 
     // Propagate keyhive: A→R, then R→B.
     topo.topo_conn(0, 1).sync_keyhive_with_peer().await?;
     topo.topo_conn(1, 2).sync_keyhive_with_peer().await?;
-    assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id).await?;
+    assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id.clone()).await?;
 
     // R pulls the doc from A (stores parts, doesn't materialise).
-    sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id).await?;
+    sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id.clone()).await?;
     // Then B pulls from R and materialises.
-    let b_doc =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(2, 1), &topo.topo_node(2).repo, doc_id)
-            .await?;
+    let b_doc = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(2, 1),
+        &topo.topo_node(2).repo,
+        doc_id.clone(),
+    )
+    .await?;
     assert_eq!(read_title(&b_doc).await, "relay-doc");
 
     // Tier 0: sedimentree parity across all three nodes.
-    assert_sedimentree_parity_across(&topo, doc_id, &[0, 1, 2]).await?;
+    assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
     kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(2), doc_id).await?;
 
     drop(a_doc);
@@ -220,14 +241,35 @@ async fn tier3_pull_only_relay_does_not_materialize() -> crate::Res<()> {
     let relay_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, relay_agent, Access::Relay)
+        .grant_doc_access(doc_id.clone(), relay_agent, Access::Relay)
         .await?;
     topo.topo_conn(0, 1).sync_keyhive_with_peer().await?;
-    topo.topo_conn(1, 0).sync_doc_with_peer(doc_id).await?;
-    assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id).await?;
-    let relay_state = topo.topo_node(1).repo.doc_head_state(doc_id).await?;
-    assert!(!relay_state.sedimentree_heads.is_empty());
-    assert!(relay_state.materialized_heads.is_none());
+    topo.topo_conn(1, 0)
+        .sync_doc_with_peer(doc_id.clone())
+        .await?;
+    assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id.clone()).await?;
+    // The store indexes the trees this node has saved, so the relay that pulled the document is
+    // listed in its own `/seds` — access is not the criterion, holding the bytes is. That is
+    // precisely why the boundary is asserted by materialization above and not by membership.
+    assert!(
+        topo.topo_node(1)
+            .obj_parts_contains(doc_id.clone(), crate::seds_part_id())
+            .await?,
+        "a relay holding the sedimentree bytes is listed in its own `/seds` index"
+    );
+    // Same non-driving observation: the relay holds the tree's bytes (payload + indexed parts)
+    // and no worker is driving them into a document.
+    let relay_snapshot = topo
+        .topo_node(1)
+        .repo
+        .document_sync_snapshot(doc_id)
+        .await?;
+    assert!(relay_snapshot.payload_present);
+    assert_ne!(
+        relay_snapshot.stage,
+        crate::DocumentSyncStage::Materialized,
+        "a relay must not materialize a document it only holds"
+    );
     drop(owner_doc);
     Ok(())
 }
@@ -246,17 +288,27 @@ async fn tier3_read_only_relay_materializes_without_edit_access() -> crate::Res<
     let relay_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, relay_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), relay_agent, Access::Read)
         .await?;
     topo.topo_conn(0, 1).sync_keyhive_with_peer().await?;
-    let relay_doc =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(1, 0), &topo.topo_node(1).repo, doc_id)
-            .await?;
+    let relay_doc = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(1, 0),
+        &topo.topo_node(1).repo,
+        doc_id.clone(),
+    )
+    .await?;
     assert_eq!(read_title(&relay_doc).await, "read-only-relay");
-    let relay_vk = ed25519_dalek::VerifyingKey::from_bytes(topo.topo_node(1).peer_id().as_bytes())
-        .map_err(|err| crate::ferr!("relay peer id is not a verifying key: {err}"))?;
-    let doc_vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-        .map_err(|err| crate::ferr!("document id is not a verifying key: {err}"))?;
+    let relay_vk = ed25519_dalek::VerifyingKey::from_bytes(
+        &topo
+            .topo_node(1)
+            .peer_id()
+            .to_bytes32()
+            .expect(ERROR_IMPOSSIBLE),
+    )
+    .map_err(|err| crate::ferr!("relay peer id is not a verifying key: {err}"))?;
+    let doc_vk =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .map_err(|err| crate::ferr!("document id is not a verifying key: {err}"))?;
     assert_eq!(
         topo.topo_node(1)
             .repo
@@ -296,7 +348,7 @@ async fn tier3_line_replication() -> crate::Res<()> {
     let b_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, b_agent, Access::Relay)
+        .grant_doc_access(doc_id.clone(), b_agent, Access::Relay)
         .await?;
 
     // Propagate keyhive inward so Alice (0) learns Carol (2)'s identity through Bob (1).
@@ -312,24 +364,27 @@ async fn tier3_line_replication() -> crate::Res<()> {
     let carol_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(2)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, carol_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), carol_agent, Access::Read)
         .await?;
 
     // Propagate keyhive along the line.
     topo.topo_conn(0, 1).sync_keyhive_with_peer().await?;
     topo.topo_conn(1, 2).sync_keyhive_with_peer().await?;
-    assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id).await?;
+    assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id.clone()).await?;
 
     // B pulls the doc from A (stores parts, doesn't materialise).
-    sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id).await?;
+    sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id.clone()).await?;
     // Then C pulls from B and materialises.
-    let c_doc =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(2, 1), &topo.topo_node(2).repo, doc_id)
-            .await?;
+    let c_doc = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(2, 1),
+        &topo.topo_node(2).repo,
+        doc_id.clone(),
+    )
+    .await?;
     assert_eq!(read_title(&c_doc).await, "line-doc");
 
     // Tier 0: sedimentree parity across all three nodes.
-    assert_sedimentree_parity_across(&topo, doc_id, &[0, 1, 2]).await?;
+    assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
     kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(2), doc_id).await?;
 
     drop(a_doc);
@@ -355,18 +410,18 @@ async fn tier3_line_private_reader_keyhive_propagates_through_relay() -> crate::
     let reader_agent = fixtures::agent_of(&topo.topo_node(1).repo, topo.topo_node(2)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, relay_agent, Access::Relay)
+        .grant_doc_access(doc_id.clone(), relay_agent, Access::Relay)
         .await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
 
     topo.topo_conn(0, 1).sync_keyhive_with_peer().await?;
     topo.topo_conn(1, 2).sync_keyhive_with_peer().await?;
-    assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id).await?;
+    assert_relay_only(&topo.topo_node(1).repo, topo.topo_node(1), doc_id.clone()).await?;
 
-    sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id).await?;
+    sync_doc_no_materialize(topo.topo_conn(1, 0), doc_id.clone()).await?;
     let reader_doc =
         fixtures::sync_doc_expect_ready(topo.topo_conn(2, 1), &topo.topo_node(2).repo, doc_id)
             .await?;
@@ -400,11 +455,11 @@ async fn tier3_star_replication() -> crate::Res<()> {
     let leaf2_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(2)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, leaf1_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), leaf1_agent, Access::Read)
         .await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, leaf2_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), leaf2_agent, Access::Read)
         .await?;
 
     // Propagate keyhive hub→leaf1, hub→leaf2.
@@ -412,17 +467,24 @@ async fn tier3_star_replication() -> crate::Res<()> {
     topo.topo_conn(0, 2).sync_keyhive_with_peer().await?;
 
     // Leaves pull the doc from the hub.
-    let leaf1_doc_l =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(1, 0), &topo.topo_node(1).repo, doc_id)
-            .await?;
-    let leaf2_doc_l =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(2, 0), &topo.topo_node(2).repo, doc_id)
-            .await?;
+    let leaf1_doc_l = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(1, 0),
+        &topo.topo_node(1).repo,
+        doc_id.clone(),
+    )
+    .await?;
+    let leaf2_doc_l = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(2, 0),
+        &topo.topo_node(2).repo,
+        doc_id.clone(),
+    )
+    .await?;
     assert_eq!(read_title(&leaf1_doc_l).await, "star-doc");
     assert_eq!(read_title(&leaf2_doc_l).await, "star-doc");
 
-    assert_sedimentree_parity_across(&topo, doc_id, &[0, 1, 2]).await?;
-    kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(1), doc_id).await?;
+    assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
+    kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(1), doc_id.clone())
+        .await?;
     kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(2), doc_id).await?;
 
     drop(hub_doc);
@@ -456,11 +518,11 @@ async fn tier3_triangle_replication() -> crate::Res<()> {
     let c_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(2)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, b_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), b_agent, Access::Read)
         .await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, c_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), c_agent, Access::Read)
         .await?;
 
     // Sync keyhive along all edges.
@@ -469,17 +531,24 @@ async fn tier3_triangle_replication() -> crate::Res<()> {
     topo.topo_conn(2, 0).sync_keyhive_with_peer().await?;
 
     // B pulls from A, C pulls from A.
-    let b_doc =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(1, 0), &topo.topo_node(1).repo, doc_id)
-            .await?;
-    let c_doc =
-        fixtures::sync_doc_expect_ready(topo.topo_conn(2, 0), &topo.topo_node(2).repo, doc_id)
-            .await?;
+    let b_doc = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(1, 0),
+        &topo.topo_node(1).repo,
+        doc_id.clone(),
+    )
+    .await?;
+    let c_doc = fixtures::sync_doc_expect_ready(
+        topo.topo_conn(2, 0),
+        &topo.topo_node(2).repo,
+        doc_id.clone(),
+    )
+    .await?;
     assert_eq!(read_title(&b_doc).await, "triangle-doc");
     assert_eq!(read_title(&c_doc).await, "triangle-doc");
 
-    assert_sedimentree_parity_across(&topo, doc_id, &[0, 1, 2]).await?;
-    kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(1), doc_id).await?;
+    assert_sedimentree_parity_across(&topo, doc_id.clone(), &[0, 1, 2]).await?;
+    kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(1), doc_id.clone())
+        .await?;
     kh_snap::assert_document_snapshot_equal(topo.topo_node(0), topo.topo_node(2), doc_id).await?;
 
     drop(a_doc);
@@ -523,7 +592,7 @@ async fn tier3_partial_mesh_replication() -> crate::Res<()> {
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Read)
+        .grant_doc_access(doc_id.clone(), fixtures::public_agent(), Access::Read)
         .await?;
     a_b.sync_keyhive_with_peer().await?;
     b_c.sync_keyhive_with_peer().await?;
@@ -531,15 +600,15 @@ async fn tier3_partial_mesh_replication() -> crate::Res<()> {
 
     // Pull only along A→B→C→D; the D↔A edge is an alternate route that is
     // deliberately not used for this transfer.
-    b_a.sync_doc_with_peer(doc_id).await?;
-    c_b.sync_doc_with_peer(doc_id).await?;
-    let d_doc = fixtures::sync_doc_expect_ready(&d_c, &guard.node(3).repo, doc_id).await?;
+    b_a.sync_doc_with_peer(doc_id.clone()).await?;
+    c_b.sync_doc_with_peer(doc_id.clone()).await?;
+    let d_doc = fixtures::sync_doc_expect_ready(&d_c, &guard.node(3).repo, doc_id.clone()).await?;
     assert_eq!(read_title(&d_doc).await, "partial-mesh");
 
     let mut baseline = guard
         .node(0)
         .repo
-        .doc_head_state(doc_id)
+        .doc_head_state(doc_id.clone())
         .await?
         .sedimentree_heads
         .to_vec();
@@ -548,7 +617,7 @@ async fn tier3_partial_mesh_replication() -> crate::Res<()> {
         let mut heads = guard
             .node(idx)
             .repo
-            .doc_head_state(doc_id)
+            .doc_head_state(doc_id.clone())
             .await?
             .sedimentree_heads
             .to_vec();
@@ -592,12 +661,12 @@ async fn tier3_partition_then_heal() -> crate::Res<()> {
     // Grant B read access.
     let b_agent = fixtures::agent_of(&a.repo, b).await?;
     a.repo
-        .grant_doc_access(doc_id, b_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), b_agent, Access::Read)
         .await?;
     a_b_conn.sync_keyhive_with_peer().await?;
 
     // B materialises the initial doc.
-    let b_doc = fixtures::sync_doc_expect_ready(&b_a_conn, &b.repo, doc_id).await?;
+    let b_doc = fixtures::sync_doc_expect_ready(&b_a_conn, &b.repo, doc_id.clone()).await?;
     assert_eq!(read_title(&b_doc).await, "partition-start");
     drop(b_doc);
 
@@ -620,7 +689,7 @@ async fn tier3_partition_then_heal() -> crate::Res<()> {
     let b_a_conn2 = b.accepted_connection().await;
     a_b_conn2.sync_keyhive_with_peer().await?;
 
-    let b_doc2 = fixtures::sync_doc_expect_ready(&b_a_conn2, &b.repo, doc_id).await?;
+    let b_doc2 = fixtures::sync_doc_expect_ready(&b_a_conn2, &b.repo, doc_id.clone()).await?;
     let phase = b_doc2
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "phase")
@@ -642,7 +711,7 @@ async fn tier3_partition_then_heal() -> crate::Res<()> {
     );
 
     // Tier 0: sedimentree parity.
-    let a_state = a.repo.doc_head_state(doc_id).await?;
+    let a_state = a.repo.doc_head_state(doc_id.clone()).await?;
     let b_state = b.repo.doc_head_state(doc_id).await?;
     let (mut a_heads, mut b_heads) = (
         a_state.sedimentree_heads.to_vec(),
@@ -699,7 +768,7 @@ async fn tier3_duplicate_delivery_harmless() -> crate::Res<()> {
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Read)
+        .grant_doc_access(doc_id.clone(), fixtures::public_agent(), Access::Read)
         .await?;
 
     // Sync keyhive along all edges so the public-agent grant propagates.
@@ -717,7 +786,7 @@ async fn tier3_duplicate_delivery_harmless() -> crate::Res<()> {
         (&c_b, &b_c, 2usize, "c->b"),
         (&d_c, &c_d, 3usize, "d->c"),
     ] {
-        if let Err(err) = fetch_conn.sync_doc_with_peer(doc_id).await {
+        if let Err(err) = fetch_conn.sync_doc_with_peer(doc_id.clone()).await {
             let repaired_by = bisect_doc_fetch(
                 doc_id,
                 fetch_conn,
@@ -736,14 +805,14 @@ async fn tier3_duplicate_delivery_harmless() -> crate::Res<()> {
 
     // Path 2: A→D (direct).  This sends the same doc again.  D must
     // converge without duplication.
-    a_d.sync_doc_with_peer(doc_id).await?;
+    a_d.sync_doc_with_peer(doc_id.clone()).await?;
     guard.node(3).repo.wait_for_quiescence(None).await?;
 
     // All four nodes must have identical sedimentree heads.
     let mut baseline = guard
         .node(0)
         .repo
-        .doc_head_state(doc_id)
+        .doc_head_state(doc_id.clone())
         .await?
         .sedimentree_heads
         .to_vec();
@@ -752,7 +821,7 @@ async fn tier3_duplicate_delivery_harmless() -> crate::Res<()> {
         let mut heads = guard
             .node(idx)
             .repo
-            .doc_head_state(doc_id)
+            .doc_head_state(doc_id.clone())
             .await?
             .sedimentree_heads
             .to_vec();
@@ -825,11 +894,11 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     let b_agent = fixtures::agent_of(&node_a.repo, node_b).await?;
     node_a
         .repo
-        .grant_doc_access(doc_id, b_agent, Access::Relay)
+        .grant_doc_access(doc_id.clone(), b_agent, Access::Relay)
         .await?;
     node_a
         .repo
-        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Read)
+        .grant_doc_access(doc_id.clone(), fixtures::public_agent(), Access::Read)
         .await?;
 
     // Sync keyhive A↔B.
@@ -837,7 +906,7 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     b_a_conn.sync_keyhive_with_peer().await?;
 
     // B pulls the doc payload from A (stores encrypted parts).
-    sync_doc_no_materialize(&b_a_conn, doc_id).await?;
+    sync_doc_no_materialize(&b_a_conn, doc_id.clone()).await?;
 
     // Connect B ↔ C only after B has staged the payload and Keyhive events,
     // but BEFORE syncing Keyhive to C.
@@ -848,7 +917,7 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     // rejects the incoming payload because C has no local document policy;
     // the rejection must be structured and non-fatal.
     let policy_error = c_b_conn
-        .sync_doc_with_peer(doc_id)
+        .sync_doc_with_peer(doc_id.clone())
         .await
         .expect_err("missing local Keyhive document must reject the payload");
     assert!(matches!(
@@ -872,7 +941,7 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     b_c_conn.sync_keyhive_with_peer().await?;
     c_b_conn.sync_keyhive_with_peer().await?;
     // C must be able to materialize now.
-    let c_doc = fixtures::sync_doc_expect_ready(&c_b_conn, &node_c.repo, doc_id).await?;
+    let c_doc = fixtures::sync_doc_expect_ready(&c_b_conn, &node_c.repo, doc_id.clone()).await?;
     assert_eq!(
         read_title(&c_doc).await,
         "opposite-order",
@@ -880,7 +949,7 @@ async fn tier3_opposite_order_membership_payload() -> crate::Res<()> {
     );
 
     // Tier 0: sedimentree parity across the line.
-    assert_sedimentree_parity_nodes(&[node_a, node_b, node_c], doc_id).await?;
+    assert_sedimentree_parity_nodes(&[node_a, node_b, node_c], doc_id.clone()).await?;
     kh_snap::assert_document_snapshot_equal(node_a, node_c, doc_id).await?;
 
     drop(a_doc);
@@ -921,30 +990,53 @@ async fn tier3_store_and_forward_relay() -> crate::Res<()> {
     let owner_doc = guard.node(0).repo.create_doc(initial).await?;
     let doc_id = owner_doc.document_id();
 
-    // Grant R Relay access; grant Read via public agent for the future reader.
+    // Grant R Relay access, and grant the reader Read by its own agent. The relay is Relay-only,
+    // so it cannot open what it forwards: it holds the heads and the encrypted fragments. A
+    // grant to the *public* principal would instead make the document readable by anyone, and a
+    // readable document does materialize without an application handle — by design: received
+    // content is applied through a transient worker so overlap nodes can publish causal-key
+    // healing checkpoints (`hub.rs`, sync session apply route). Materialization-on-arrival is
+    // therefore not the boundary this topology pins; the boundary is that a Relay-only holder
+    // never opens what it forwards.
     let relay_agent = fixtures::agent_of(&guard.node(0).repo, guard.node(1)).await?;
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, relay_agent, Access::Relay)
+        .grant_doc_access(doc_id.clone(), relay_agent, Access::Relay)
         .await?;
+    let reader_card = guard.node(2).repo.local_keyhive_contact_card();
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Read)
+        .receive_keyhive_contact_card(&reader_card)
+        .await?;
+    let reader_agent = fixtures::agent_of(&guard.node(0).repo, guard.node(2)).await?;
+    guard
+        .node(0)
+        .repo
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
     a_r.sync_keyhive_with_peer().await?;
     // Verify the relay only has Relay access (no Read).
-    assert_relay_only(&guard.node(1).repo, guard.node(1), doc_id).await?;
+    assert_relay_only(&guard.node(1).repo, guard.node(1), doc_id.clone()).await?;
 
     // R pulls the initial doc from A (stores encrypted parts, doesn't
     // materialize because the relay only has Relay access).
-    sync_doc_no_materialize(&r_a, doc_id).await?;
+    sync_doc_no_materialize(&r_a, doc_id.clone()).await?;
     // R must NOT materialise.
-    let r_state = guard.node(1).repo.doc_head_state(doc_id).await?;
-    assert!(
-        r_state.materialized_heads.is_none(),
-        "relay must NOT materialise after first sync"
+    // R must NOT materialise — observed without driving. `doc_head_state` would acquire a worker
+    // and a live handle is itself a materialization driver, so with the frontier worker disabled
+    // this assert would be measuring its own observation.
+    let r_snapshot = guard
+        .node(1)
+        .repo
+        .document_sync_snapshot(doc_id.clone())
+        .await?;
+    assert_ne!(
+        r_snapshot.stage,
+        crate::DocumentSyncStage::Materialized,
+        "relay must NOT materialise after first sync: stage={:?}",
+        r_snapshot.stage
     );
 
     // Phase 2: owner writes an update while the reader is still absent.
@@ -955,7 +1047,7 @@ async fn tier3_store_and_forward_relay() -> crate::Res<()> {
         })
         .await??;
     // R pulls the update.
-    r_a.sync_doc_with_peer(doc_id).await?;
+    r_a.sync_doc_with_peer(doc_id.clone()).await?;
     guard.node(1).repo.wait_for_quiescence(None).await?;
 
     // Phase 3: reader connects to the relay.
@@ -965,7 +1057,8 @@ async fn tier3_store_and_forward_relay() -> crate::Res<()> {
     b_r.sync_keyhive_with_peer().await?;
 
     // Reader pulls the doc from the relay — must get both initial and update1.
-    let reader_doc = fixtures::sync_doc_expect_ready(&b_r, &guard.node(2).repo, doc_id).await?;
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(&b_r, &guard.node(2).repo, doc_id.clone()).await?;
     assert_eq!(
         read_text(&reader_doc, "phase").await.as_deref(),
         Some("update1"),
@@ -973,15 +1066,25 @@ async fn tier3_store_and_forward_relay() -> crate::Res<()> {
     );
 
     // Relay retains Relay-only access and sedimentree heads.
-    assert_relay_only(&guard.node(1).repo, guard.node(1), doc_id).await?;
-    let relay_state = guard.node(1).repo.doc_head_state(doc_id).await?;
-    assert!(!relay_state.sedimentree_heads.is_empty());
+    assert_relay_only(&guard.node(1).repo, guard.node(1), doc_id.clone()).await?;
+    // Non-driving again: bytes, not a worker.
+    let relay_snapshot = guard
+        .node(1)
+        .repo
+        .document_sync_snapshot(doc_id.clone())
+        .await?;
+    assert!(relay_snapshot.payload_present);
+    assert_ne!(
+        relay_snapshot.stage,
+        crate::DocumentSyncStage::Materialized,
+        "relay must still not have materialized the document it forwarded"
+    );
 
     // Sedimentree parity across all three nodes.
     let mut baseline = guard
         .node(0)
         .repo
-        .doc_head_state(doc_id)
+        .doc_head_state(doc_id.clone())
         .await?
         .sedimentree_heads
         .to_vec();
@@ -990,7 +1093,7 @@ async fn tier3_store_and_forward_relay() -> crate::Res<()> {
         let mut heads = guard
             .node(idx)
             .repo
-            .doc_head_state(doc_id)
+            .doc_head_state(doc_id.clone())
             .await?
             .sedimentree_heads
             .to_vec();
@@ -1052,15 +1155,15 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), fixtures::public_agent(), Access::Edit)
         .await?;
 
     for conn in [&a_b, &b_c, &c_d, &d_a] {
         conn.sync_keyhive_with_peer().await?;
     }
-    b_a.sync_doc_with_peer(doc_id).await?;
-    c_b.sync_doc_with_peer(doc_id).await?;
-    d_c.sync_doc_with_peer(doc_id).await?;
+    b_a.sync_doc_with_peer(doc_id.clone()).await?;
+    c_b.sync_doc_with_peer(doc_id.clone()).await?;
+    d_c.sync_doc_with_peer(doc_id.clone()).await?;
     for idx in 1..4 {
         guard.node(idx).repo.wait_for_quiescence(None).await?;
         let _h = guard
@@ -1068,14 +1171,14 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
             .repo
             .get_doc(&doc_id)
             .await?
-            .into_ready(doc_id)?;
+            .into_ready(doc_id.clone())?;
     }
     let c_doc = guard
         .node(2)
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
 
     // ── Partition: remove A↔B and C↔D ──────────────────────────────────
     guard
@@ -1128,21 +1231,21 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
 
     // Sync doc across A↔B and C↔D, then the existing B↔C and D↔A edges
     // will propagate everything to all nodes.
-    b_a2.sync_doc_with_peer(doc_id).await?;
-    a_b2.sync_doc_with_peer(doc_id).await?;
-    d_c2.sync_doc_with_peer(doc_id).await?;
-    c_d2.sync_doc_with_peer(doc_id).await?;
+    b_a2.sync_doc_with_peer(doc_id.clone()).await?;
+    a_b2.sync_doc_with_peer(doc_id.clone()).await?;
+    d_c2.sync_doc_with_peer(doc_id.clone()).await?;
+    c_d2.sync_doc_with_peer(doc_id.clone()).await?;
     for idx in 0..4 {
         guard.node(idx).repo.wait_for_quiescence(None).await?;
     }
     // Push C's edit to B (B↔C was never partitioned, so use b_c).
-    b_c.sync_doc_with_peer(doc_id).await?;
+    b_c.sync_doc_with_peer(doc_id.clone()).await?;
     guard.node(1).repo.wait_for_quiescence(None).await?;
     guard.node(2).repo.wait_for_quiescence(None).await?;
 
     // Second round of healing syncs.
     for conn in [&b_a2, &a_b2, &d_c2, &c_d2, &b_c, &c_b] {
-        conn.sync_doc_with_peer(doc_id).await?;
+        conn.sync_doc_with_peer(doc_id.clone()).await?;
     }
     for idx in 0..4 {
         guard.node(idx).repo.wait_for_quiescence(None).await?;
@@ -1165,7 +1268,7 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
             .repo
             .get_doc(&doc_id)
             .await?
-            .into_ready(doc_id)?;
+            .into_ready(doc_id.clone())?;
         assert_eq!(
             read_text(&handle, "owner_branch").await.as_deref(),
             Some("from-a")
@@ -1180,7 +1283,7 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
     let mut baseline = guard
         .node(0)
         .repo
-        .doc_head_state(doc_id)
+        .doc_head_state(doc_id.clone())
         .await?
         .sedimentree_heads
         .to_vec();
@@ -1189,7 +1292,7 @@ async fn tier3_partial_mesh_partition_heal() -> crate::Res<()> {
         let mut heads = guard
             .node(idx)
             .repo
-            .doc_head_state(doc_id)
+            .doc_head_state(doc_id.clone())
             .await?
             .sedimentree_heads
             .to_vec();
@@ -1227,15 +1330,15 @@ async fn bisect_grant_delivery(
     reader: &Node,
 ) -> crate::Res<Option<&'static str>> {
     let probe = std::time::Duration::from_secs(5);
-    if fixtures::reader_has_access_within(reader_repo, doc_id, probe).await? {
+    if fixtures::reader_has_access_within(reader_repo, doc_id.clone(), probe).await? {
         return Ok(Some("ordinary heal alone"));
     }
     owner_conn.sync_keyhive_with_peer().await?;
-    if fixtures::reader_has_access_within(reader_repo, doc_id, probe).await? {
+    if fixtures::reader_has_access_within(reader_repo, doc_id.clone(), probe).await? {
         return Ok(Some("owner-initiated round"));
     }
     reader_conn.sync_keyhive_with_peer().await?;
-    if fixtures::reader_has_access_within(reader_repo, doc_id, probe).await? {
+    if fixtures::reader_has_access_within(reader_repo, doc_id.clone(), probe).await? {
         return Ok(Some("reader-initiated round"));
     }
     let owner_again = owner.connect(reader).await?;
@@ -1287,7 +1390,7 @@ async fn tier3_late_peer_learns_grant_after_partition_heal() -> crate::Res<()> {
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
 
     let o_r2 = guard.node(0).connect(guard.node(1)).await?;
@@ -1298,7 +1401,7 @@ async fn tier3_late_peer_learns_grant_after_partition_heal() -> crate::Res<()> {
     let reader_repo = &guard.node(1).repo;
     let repaired_by = bisect_grant_delivery(
         reader_repo,
-        doc_id,
+        doc_id.clone(),
         &o_r2,
         &r_o2,
         guard.node(0),
@@ -1344,11 +1447,11 @@ async fn bisect_doc_fetch(
     reader: &Node,
 ) -> crate::Res<Option<&'static str>> {
     owner_sync_conn.sync_keyhive_with_peer().await?;
-    if fetch_conn.sync_doc_with_peer(doc_id).await.is_ok() {
+    if fetch_conn.sync_doc_with_peer(doc_id.clone()).await.is_ok() {
         return Ok(Some("owner-initiated round"));
     }
     fetch_conn.sync_keyhive_with_peer().await?;
-    if fetch_conn.sync_doc_with_peer(doc_id).await.is_ok() {
+    if fetch_conn.sync_doc_with_peer(doc_id.clone()).await.is_ok() {
         return Ok(Some("reader-initiated round"));
     }
     let owner_again = owner.connect(reader).await?;
@@ -1399,7 +1502,7 @@ async fn tier3_late_peer_learns_public_grant_after_partition_heal() -> crate::Re
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, fixtures::public_agent(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), fixtures::public_agent(), Access::Edit)
         .await?;
 
     let o_r2 = guard.node(0).connect(guard.node(1)).await?;

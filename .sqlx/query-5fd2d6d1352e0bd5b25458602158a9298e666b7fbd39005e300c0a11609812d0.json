@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT p.part_id, p.part_ref\n               FROM big_sync_parts p\n              WHERE p.scope_id = ?1\n                AND p.part_ref IN (\n                      SELECT maybe_part_ref\n                        FROM big_sync_members\n                       WHERE scope_id = ?1 AND obj_ref = ?2 AND maybe_part_ref > 0\n                      UNION\n                      SELECT part_ref\n                        FROM big_sync_pending_members\n                       WHERE scope_id = ?1 AND obj_ref = ?2\n                )",
+  "describe": {
+    "columns": [
+      {
+        "name": "part_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "part_id"
+          }
+        }
+      },
+      {
+        "name": "part_ref",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_parts",
+            "name": "part_ref"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5fd2d6d1352e0bd5b25458602158a9298e666b7fbd39005e300c0a11609812d0"
+}

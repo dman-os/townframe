@@ -344,19 +344,28 @@ async fn pull_required_partitions_via_big_sync_worker(
         doc_sync_backends,
         "daybook-docs",
         max_task_backoff,
+        // Bucket-diff, explicitly: this embedder used to opt out because the machine
+        // stalled in its offline-reopen path; `bucket_band_reconciles_after_offline_reopen`
+        // in big_repo now covers that path, so the band is on.
+        Some(big_sync::SyncMode::Bucket),
         Arc::from("daybook-core"),
     )?;
     let (blob_sync_worker, blob_sync_worker_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(blob_part_store),
         blob_sync_backends,
-        "daybook-blobs",
+        crate::repo::BLOB_SCOPE_KEY,
         max_task_backoff,
-        Arc::from("daybook-blobs"),
+        // Bucket-diff, explicitly: see the note on the docs worker above.
+        Some(big_sync::SyncMode::Bucket),
+        Arc::from(crate::repo::BLOB_SCOPE_KEY),
     )?;
     let (big_sync_rpc, big_sync_rpc_stop) =
         big_sync::rpc::spawn_big_sync_rpc(std::collections::HashMap::from([
             (Arc::from("daybook-core"), Arc::clone(partition_store) as _),
-            (Arc::from("daybook-blobs"), Arc::clone(blob_part_store) as _),
+            (
+                Arc::from(crate::repo::BLOB_SCOPE_KEY),
+                Arc::clone(blob_part_store) as _,
+            ),
         ]))
         .await?;
     let (repo_rpc, repo_rpc_stop_token) =
@@ -370,12 +379,12 @@ async fn pull_required_partitions_via_big_sync_worker(
         .accept(big_repo::rpc::REPO_SYNC_ALPN, repo_rpc.protocol_handler())
         .spawn();
 
-    let peer_id = PeerId::new(*bootstrap.endpoint_id.as_bytes());
+    let peer_id = PeerKey::new(*bootstrap.endpoint_id.as_bytes());
     let conn = big_repo
         .open_connection_iroh(
             endpoint.clone(),
             bootstrap.endpoint_addr.clone(),
-            peer_id,
+            peer_id.clone(),
             None,
         )
         .await?;
@@ -393,18 +402,23 @@ async fn pull_required_partitions_via_big_sync_worker(
     if !ready.initial {
         eyre::bail!("clone Keyhive subscription did not send its readiness event");
     }
-    tokio::time::timeout(timeout, big_repo.sync_keyhive_with_peer(peer_id))
+    tokio::time::timeout(timeout, big_repo.sync_keyhive_with_peer(peer_id.clone()))
         .await
         .map_err(|_| eyre::eyre!("timed out syncing keyhive during clone"))??;
-    let big_sync_rpc_client =
-        big_sync::rpc::IrohBigSyncRpcClient::new(endpoint.clone(), bootstrap.endpoint_addr.clone());
+    let big_sync_rpc_client = big_sync::rpc::BigSyncRpcClient::over_iroh(
+        endpoint.clone(),
+        bootstrap.endpoint_addr.clone(),
+    );
     let big_sync_rpc_client: Arc<dyn big_sync::rpc::WireBigSyncRpcClient> =
         Arc::new(big_sync_rpc_client);
 
-    let initial_partitions: HashMap<PartId, big_sync::BackendId> = [
-        (core_docs_partition_id, Arc::clone(&repo_backend_id)),
-        (content_docs_partition_id, Arc::clone(&repo_backend_id)),
-        (drawer_partition_id, Arc::clone(&repo_backend_id)),
+    let initial_partitions: HashMap<PartKey, big_sync::BackendId> = [
+        (core_docs_partition_id.clone(), Arc::clone(&repo_backend_id)),
+        (
+            content_docs_partition_id.clone(),
+            Arc::clone(&repo_backend_id),
+        ),
+        (drawer_partition_id.clone(), Arc::clone(&repo_backend_id)),
         // booted and loaded the blob stores; they are not part of the initial clone
         // barrier.
     ]
@@ -413,7 +427,7 @@ async fn pull_required_partitions_via_big_sync_worker(
 
     big_sync_worker
         .set_peer(
-            peer_id,
+            peer_id.clone(),
             Arc::clone(&big_sync_rpc_client),
             initial_partitions.clone(),
             HashMap::new(),
@@ -425,7 +439,12 @@ async fn pull_required_partitions_via_big_sync_worker(
     // no parts to register here; the seed's blob worker probes our blob scope
     // via the RPC registry and sees an empty store until then.
     blob_sync_worker
-        .set_peer(peer_id, big_sync_rpc_client, HashMap::new(), HashMap::new())
+        .set_peer(
+            peer_id.clone(),
+            big_sync_rpc_client,
+            HashMap::new(),
+            HashMap::new(),
+        )
         .await?;
 
     let timeout_result = tokio::time::timeout(timeout, async {
@@ -439,20 +458,20 @@ async fn pull_required_partitions_via_big_sync_worker(
             drawer_partition_id,
         ];
         big_sync_worker
-            .wait_for_full_sync(vec![peer_id], required_partitions)
+            .wait_for_full_sync(vec![peer_id.clone()], required_partitions)
             .await?;
 
         let mut bootstrap_docs = vec![
-            ("app", bootstrap.app_doc_id),
-            ("drawer", bootstrap.drawer_doc_id),
+            ("app", bootstrap.app_doc_id.clone()),
+            ("drawer", bootstrap.drawer_doc_id.clone()),
         ];
-        if let Some(config_doc_id) = bootstrap.config_doc_id {
+        if let Some(config_doc_id) = bootstrap.config_doc_id.clone() {
             bootstrap_docs.push(("config", config_doc_id));
         }
         for (role, doc_id) in bootstrap_docs {
             tracing::info!(%doc_id, role, "clone bootstrap document sync begin");
             big_repo
-                .sync_doc_with_peer(doc_id, peer_id)
+                .sync_doc_with_peer(doc_id.clone(), peer_id.clone())
                 .await
                 .wrap_err_with(|| {
                     format!("clone bootstrap failed syncing {role} document {doc_id}")
@@ -627,9 +646,9 @@ pub async fn clone_repo_init_from_url(
         crate::repo::globals::set_init_state(
             &sql,
             &crate::repo::globals::InitState::Created {
-                doc_id_app: bootstrap.app_doc_id,
-                doc_id_drawer: bootstrap.drawer_doc_id,
-                doc_id_config: bootstrap.config_doc_id,
+                doc_id_app: bootstrap.app_doc_id.clone(),
+                doc_id_drawer: bootstrap.drawer_doc_id.clone(),
+                doc_id_config: bootstrap.config_doc_id.clone(),
                 core_inventory_doc_id: None,
                 docs_inventory_doc_id: None,
             },

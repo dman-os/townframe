@@ -88,9 +88,13 @@ semver = { version = "1", features = ["serde"] }
 surelock = "0.1"
 
 #
+# collections
+
+#
 # encoding
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+postcard = { version = "1.1.3", features = ["alloc"] }
 serde_with = "3.16"
 multihash = "0.19.3"
 data-encoding = "2.10"
@@ -155,18 +159,18 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.11.0"
 autosurgeon = "0.13.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "53055ca5dba9476c38aeed40f7c0c12b6567e3a4" }
 
-keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "d4bda7c71db4efcdf988348478f1e802170a7ecd" }
-keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "d4bda7c71db4efcdf988348478f1e802170a7ecd" }
-beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "d4bda7c71db4efcdf988348478f1e802170a7ecd" }
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
+keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
+beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
@@ -264,3 +268,25 @@ clippy.let_underscore_must_use = "warn"
 clippy.let_underscore_untyped = "deny"
 rust.let_underscore_drop = "deny"
 # clippy.used_underscore_binding = "warn"
+
+# Local keyhive while its `static_membership_subject` addition is pending upstream: naming the
+# graph a static membership event was dispatched to must not require the delegate's installed
+# agent record, which a read-only replica is never sent. Remove this block and take the
+# published rev once the change is pinned.
+# Uncomment a block below to build against a fork's local working copy; both are parked
+# (commented) so the `rev` pins above are what CI and every other checkout resolves.
+# Remember to re-check resolution after editing either block: a partial block silently
+# duplicates a crate across the local path and the pinned git source.
+# [patch."https://github.com/dman-os/keyhive"]
+# keyhive_core = { path = "../keyhive/keyhive_core" }
+# keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
+# beekem = { path = "../keyhive/beekem" }
+# [patch."https://github.com/dman-os/subduction"]
+# sedimentree_core = { path = "../subduction/sedimentree_core" }
+# subduction_core = { path = "../subduction/subduction_core" }
+# subduction_crypto = { path = "../subduction/subduction_crypto" }
+# subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
+# subduction_iroh = { path = "../subduction/subduction_iroh" }
+# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
+# subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+# subduction_websocket = { path = "../subduction/subduction_websocket" }

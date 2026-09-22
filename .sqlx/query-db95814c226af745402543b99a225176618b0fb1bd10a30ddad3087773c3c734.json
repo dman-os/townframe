@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*)\n                       FROM big_sync_syncable\n                      WHERE scope_id = ?1\n                        AND part_ref = ?2\n                        AND principal_id = ?3\n                        AND changed_at > ?4",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "db95814c226af745402543b99a225176618b0fb1bd10a30ddad3087773c3c734"
+}

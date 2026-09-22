@@ -95,7 +95,7 @@ where
     /// Keyhive protocol handle — sync initiation, cache refresh, compaction.
     keyhive_protocol: BigRepoKeyhiveProtocol,
     /// Local peer identity.
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     /// Ownership for the legacy ephemeral switchboard task. Dropping the
     /// runtime2 hub drops this set and therefore shuts the switchboard down.
     ephemeral_tasks: Arc<utils_rs::AbortableJoinSet>,
@@ -623,7 +623,7 @@ where
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<usize>> {
         Sendable::from_future(async move {
             self.keyhive
-                .current_cgka_ops_count(DocumentId::new(*sed_id.as_bytes()))
+                .current_cgka_ops_count(DocumentId::new(sed_id.as_bytes()))
                 .await
         })
     }
@@ -670,11 +670,15 @@ where
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
         Sendable::from_future(async move {
             let local_ident = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(self.local_peer_id.as_bytes())
-                    .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &self.local_peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
             );
+            // The document id can be a peer-supplied object key routed to a worker, so it
+            // converts fallibly; the local peer id is this process's own 32-byte identity.
             let doc_ident = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
                     .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
             );
             let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
@@ -704,11 +708,13 @@ where
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<bool>> {
         Sendable::from_future(async move {
             let local_ident = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(self.local_peer_id.as_bytes())
-                    .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &self.local_peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .map_err(|_| ferr!("local peer id is not a valid verifying key"))?,
             );
             let doc_ident = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+                ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
                     .map_err(|_| ferr!("doc id is not a valid verifying key"))?,
             );
             let access = self.keyhive.agent_access_on(&local_ident, doc_ident).await;
@@ -1279,7 +1285,7 @@ where
         Sendable::from_future(async move {
             if !self
                 .storage
-                .contains_sedimentree_id(SedimentreeId::new(doc_id.into_bytes()))
+                .contains_sedimentree_id(SedimentreeId::new(doc_id.to_bytes32()?))
                 .await
                 .map_err(|err| ferr!("failed checking finalized sedimentree: {err}"))?
             {
@@ -1369,11 +1375,11 @@ where
 
     fn sync_keyhive_with_peer(
         &self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: subduction_keyhive::message::RequestId,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<KeyhiveSyncOutcome>> {
         Sendable::from_future(async move {
-            let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+            let kh_peer_id = KeyhivePeerId::from_bytes(peer_id.to_bytes32()?);
             match self
                 .keyhive_protocol
                 .initiate_sync_with_request(&kh_peer_id, request_id)
@@ -1392,13 +1398,21 @@ where
     fn sync_doc_with_peer(
         &self,
         sed_id: SedimentreeId,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<SyncDocAttempt>> {
         Sendable::from_future(async move {
-            // TEMP-HUNT: has_doc_fetch_access shortcircuit disabled — see below.
-            let doc_id = crate::DocumentId::new(*sed_id.as_bytes());
-            // match self.has_doc_fetch_access(doc_id).await {
+            let doc_id = crate::DocumentId::new(sed_id.as_bytes());
+            // The local fail-fast preflight is DISABLED. Enabling it makes a reader that
+            // has already applied a revocation answer `Policy(DocumentNotFound)` from its
+            // own Keyhive view, before the serving side gets to answer `Unauthorized` at
+            // the wire; whether the local gate should pre-empt the wire's answer is an
+            // open decision, so the gate stays off until that decision is made. The tier6
+            // revocation tests do not settle it: both boot with
+            // `Pair::boot_without_keyhive_notifs`, which keeps the reader's view stale on
+            // purpose, so they assert the wire-level answer without exercising this gate.
+            //
+            // match self.has_doc_fetch_access(doc_id.clone()).await {
             //     Ok(true) => {}
             //     Ok(false) => {
             //         debug!(%doc_id, %peer_id, "early fail-fast sync_doc_with_peer: local Keyhive does not know the document (no fetch access)"
@@ -1411,7 +1425,7 @@ where
             //         return Err(ferr!("has_doc_fetch_access error for doc {doc_id}: {err}"));
             //     }
             // }
-            let remote_peer_id = subduction_core::peer::id::PeerId::new(*peer_id.as_bytes());
+            let remote_peer_id = subduction_core::peer::id::PeerId::new(peer_id.to_bytes32()?);
             let result = self
                 .subduction
                 .sync_with_peer(
@@ -1524,7 +1538,7 @@ struct KeyhiveNotifWiring {
     /// Cancel token per peer; a new connection supersedes the previous
     /// subscription for the same peer.
     cancels: std::sync::Arc<
-        tokio::sync::Mutex<std::collections::HashMap<PeerId, tokio_util::sync::CancellationToken>>,
+        tokio::sync::Mutex<std::collections::HashMap<PeerKey, tokio_util::sync::CancellationToken>>,
     >,
 }
 
@@ -1538,7 +1552,7 @@ where
     pub(crate) subduction: Arc<BigRepoSubduction<S>>,
     pub(crate) signer: subduction_crypto::signer::memory::MemorySigner,
     pub(crate) nonce_cache: Arc<subduction_core::nonce_cache::NonceCache>,
-    pub(crate) local_peer_id: PeerId,
+    pub(crate) local_peer_id: PeerKey,
     pub(crate) ephemeral_backend: Arc<dyn BigEphemeralBackend>,
     pub(crate) keyhive_protocol: BigRepoKeyhiveProtocol,
     /// Live authenticated connections keyed by their end flag. Subduction
@@ -1586,7 +1600,7 @@ where
 /// logged, never fatal to the connection.
 async fn spawn_keyhive_change_subscription(
     wiring: KeyhiveNotifWiring,
-    peer_id: PeerId,
+    peer_id: PeerKey,
     endpoint: iroh::Endpoint,
     endpoint_addr: iroh::EndpointAddr,
     cancel: tokio_util::sync::CancellationToken,
@@ -1594,7 +1608,7 @@ async fn spawn_keyhive_change_subscription(
 ) {
     // Supersede any earlier subscription for the same peer (reconnect).
     let mut cancels = wiring.cancels.lock().await;
-    if let Some(previous) = cancels.insert(peer_id, cancel.clone()) {
+    if let Some(previous) = cancels.insert(peer_id.clone(), cancel.clone()) {
         previous.cancel();
     }
     drop(cancels);
@@ -1639,7 +1653,7 @@ async fn spawn_keyhive_change_subscription(
                         Ok(Some(_)) => {
                             wiring
                                 .evt_tx
-                                .send(crate::runtime2::Runtime2Evt::KeyhiveChangeNotif { peer_id })
+                                .send(crate::runtime2::Runtime2Evt::KeyhiveChangeNotif { peer_id: peer_id.clone() })
                                 .await
                                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                                 .ok();
@@ -1658,12 +1672,12 @@ where
 {
     fn connect(
         &self,
-        expected_peer: PeerId,
+        expected_peer: PeerKey,
         addr_blob: Box<dyn std::any::Any + Send>,
     ) -> <Sendable as FutureForm>::Future<
         'static,
         eyre::Result<(
-            PeerId,
+            PeerKey,
             std::sync::Arc<std::sync::atomic::AtomicBool>,
             <Sendable as FutureForm>::Future<'static, eyre::Result<()>>,
         )>,
@@ -1687,11 +1701,11 @@ where
                 endpoint_addr,
                 &signer,
                 subduction_core::handshake::audience::Audience::known(
-                    subduction_core::peer::id::PeerId::new(*expected_peer.as_bytes()),
+                    subduction_core::peer::id::PeerId::new(expected_peer.to_bytes32()?),
                 ),
             )
             .await?;
-            let peer_id = PeerId::new(*result.authenticated.peer_id().as_bytes());
+            let peer_id = PeerKey::new(result.authenticated.peer_id().as_bytes());
 
             // Register with subduction.
             subduction
@@ -1701,7 +1715,9 @@ where
 
             // Register with ephemeral backend.
             ephemeral_backend
-                .subscribe_peer(subduction_core::peer::id::PeerId::new(*peer_id.as_bytes()))
+                .subscribe_peer(subduction_core::peer::id::PeerId::new(
+                    peer_id.to_bytes32()?,
+                ))
                 .await;
 
             // Register with keyhive protocol.
@@ -1735,7 +1751,7 @@ where
                 let cancel = tokio_util::sync::CancellationToken::new();
                 spawn_keyhive_change_subscription(
                     wiring.clone(),
-                    peer_id,
+                    peer_id.clone(),
                     rpc_endpoint,
                     rpc_addr,
                     cancel.clone(),
@@ -1786,7 +1802,7 @@ where
     ) -> <Sendable as FutureForm>::Future<
         'static,
         eyre::Result<(
-            PeerId,
+            PeerKey,
             std::sync::Arc<std::sync::atomic::AtomicBool>,
             <Sendable as FutureForm>::Future<'static, eyre::Result<()>>,
         )>,
@@ -1794,7 +1810,7 @@ where
         let subduction = Arc::clone(&self.subduction);
         let signer = self.signer.clone();
         let nonce_cache = Arc::clone(&self.nonce_cache);
-        let local_peer_id = self.local_peer_id;
+        let local_peer_id = self.local_peer_id.clone();
         let ephemeral_backend = Arc::clone(&self.ephemeral_backend);
         let keyhive_protocol = Arc::clone(&self.keyhive_protocol);
         let conns = Arc::clone(&self.conns);
@@ -1814,11 +1830,12 @@ where
             // Capture before `accept_incoming` consumes the connection: the
             // subscription needs the remote endpoint id to derive its address.
             let remote_endpoint_id = conn.remote_id();
-            let subduction_peer_id =
-                subduction_core::peer::id::PeerId::new(*local_peer_id.as_bytes());
+            let subduction_peer_id = subduction_core::peer::id::PeerId::new(
+                local_peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+            );
             let result: IrohConnectResult =
                 accept_incoming(conn, &signer, nonce_cache.as_ref(), subduction_peer_id).await?;
-            let peer_id = PeerId::new(*result.authenticated.peer_id().as_bytes());
+            let peer_id = PeerKey::new(result.authenticated.peer_id().as_bytes());
 
             // Register with subduction.
             subduction
@@ -1828,7 +1845,9 @@ where
 
             // Register with ephemeral backend.
             ephemeral_backend
-                .subscribe_peer(subduction_core::peer::id::PeerId::new(*peer_id.as_bytes()))
+                .subscribe_peer(subduction_core::peer::id::PeerId::new(
+                    peer_id.to_bytes32()?,
+                ))
                 .await;
 
             // Register with keyhive protocol.
@@ -1874,7 +1893,7 @@ where
                     Some(remote_addr) => {
                         spawn_keyhive_change_subscription(
                             wiring.clone(),
-                            peer_id,
+                            peer_id.clone(),
                             endpoint.clone(),
                             remote_addr,
                             cancel.clone(),
@@ -1930,7 +1949,7 @@ where
 
     fn close(
         &self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> <Sendable as FutureForm>::Future<
         'static,
@@ -1941,7 +1960,7 @@ where
         let conns = Arc::clone(&self.conns);
         let keyhive_adapter_owner = Arc::clone(&self.keyhive_adapter_owner);
         Sendable::from_future(async move {
-            let peer_keyhive = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+            let peer_keyhive = KeyhivePeerId::from_bytes(peer_id.to_bytes32()?);
             let owns_adapter = keyhive_adapter_owner
                 .lock()
                 .expect(ERROR_MUTEX)
@@ -2178,19 +2197,31 @@ where
     );
     {
         // Route sync completion through the same ordered event channel as
-        // membership events. The Keyhive protocol invokes its sync observer
-        // after applying events; sharing the channel with the keyhive listener
-        // keeps `KeyhiveSyncDone` from overtaking a preceding delegation event
-        // (single FIFO channel).
+        // membership events.
+        //
+        // The durable incorporation sink is awaited *inside*
+        // `KeyhiveProtocol::handle_message` before the exchange is considered
+        // incorporated, and this observer runs in the same task after that
+        // call returns — so in the healthy path the `KeyhiveAdmissionAdvanced`
+        // for this exchange is enqueued ahead of `KeyhiveSyncDone`. That is an
+        // ordering *convenience*, not the guarantee: the hub does not rely on
+        // it. The completion carries the store's admission watermark
+        // (`admitted_seq`) and `finish_keyhive_sync` resolves the round's
+        // waiters only once `admitted_head` has reached it, so a dropped or
+        // reordered admission event can no longer let a caller be told
+        // "reconciled" while this round's admissions are still unprojected.
         let evt_tx = evt_tx.clone();
+        let watermark_store = group_part_store.clone();
         keyhive_handler = keyhive_handler.with_sync_done_observer(Arc::new(
             move |keyhive_peer_id, request_id, changed| {
-                let peer_id = PeerId::new(*keyhive_peer_id.verifying_key());
+                let peer_id = PeerKey::new(*keyhive_peer_id.verifying_key());
+                let admitted_seq = watermark_store.admission_watermark();
                 if evt_tx
                     .try_send(crate::runtime2::Runtime2Evt::KeyhiveSyncDone {
-                        peer_id,
+                        peer_id: peer_id.clone(),
                         request_id,
                         changed,
+                        admitted_seq,
                     })
                     .is_err()
                 {
@@ -2238,7 +2269,7 @@ where
         keyhive: keyhive.clone(),
         keyhive_storage: keyhive_storage.clone(),
         keyhive_protocol: Arc::clone(&keyhive_protocol),
-        local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
+        local_peer_id: PeerKey::new(local_peer_id.as_bytes()),
         ephemeral_tasks: Arc::new(utils_rs::AbortableJoinSet::new()),
     });
 
@@ -2246,7 +2277,7 @@ where
         subduction: Arc::clone(&subduction_handle),
         signer: connect_signer,
         nonce_cache: Arc::new(NonceCache::new(sync_policy.subduction_nonce_ttl)),
-        local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
+        local_peer_id: PeerKey::new(local_peer_id.as_bytes()),
         ephemeral_backend: Arc::clone(&ephemeral_backend),
         keyhive_protocol: Arc::clone(&keyhive_protocol),
         conns: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -2266,7 +2297,7 @@ where
 
     // ── Spawn runtime2 ───────────────────────────────────────────────────
     let config = crate::runtime2::Runtime2Config {
-        local_peer_id: PeerId::new(*local_peer_id.as_bytes()),
+        local_peer_id: PeerKey::new(local_peer_id.as_bytes()),
         runtime_io: Arc::clone(&native_io) as Arc<dyn crate::runtime2::RuntimeIo<Sendable>>,
         doc_io: Arc::clone(&native_io) as Arc<dyn crate::runtime2::DocIo<Sendable>>,
         sync_policy,
@@ -2288,7 +2319,7 @@ where
     let spawned_group_part = crate::runtime2::spawn_group_part_worker(
         group_part_store.clone(),
         keyhive.clone(),
-        PeerId::new(*local_peer_id.as_bytes()),
+        PeerKey::new(local_peer_id.as_bytes()),
         Arc::clone(&timer),
         evt_tx.clone(),
         group_part_group_scope,
@@ -2500,7 +2531,8 @@ mod tests {
                 &kh_protocol,
             )
             .await?;
-        let sed_id = sedimentree_core::id::SedimentreeId::new(*doc_id.as_bytes());
+        let sed_id =
+            sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
         let storage = MemoryStorage::new();
         let signer = MemorySigner::from_bytes(&[42; 32]);
 
@@ -2567,7 +2599,8 @@ mod tests {
                 &kh_protocol,
             )
             .await?;
-        let sed_id = sedimentree_core::id::SedimentreeId::new(*doc_id.as_bytes());
+        let sed_id =
+            sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
         let storage = MemoryStorage::new();
         let signer = MemorySigner::from_bytes(&[47; 32]);
 
@@ -2630,7 +2663,8 @@ mod tests {
                 &kh_protocol,
             )
             .await?;
-        let sed_id = sedimentree_core::id::SedimentreeId::new(*doc_id.as_bytes());
+        let sed_id =
+            sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
         let storage = MemoryStorage::new();
         let signer = MemorySigner::from_bytes(&[44; 32]);
         let h1 = sedimentree_core::loose_commit::id::CommitId::new([7; 32]);

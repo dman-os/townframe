@@ -5,6 +5,7 @@ use super::harness::topo::Node;
 use crate::{BigEphemeralEvent, BigEphemeralFilter, BigEphemeralSubscription, BigEphemeralTopic};
 use std::time::Duration;
 use tokio::time::timeout;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 /// Ephemeral delivery is fire-and-forget (see `subduction_ephemeral`'s
 /// design): a publish that races the subscriber's `Subscribe` — still queued
@@ -39,7 +40,9 @@ async fn tier9_ephemeral_roundtrip_between_two_nodes() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let mut pair = Pair::boot_disconnected(210, 211, "Publisher", "Subscriber").await?;
     let topic = BigEphemeralTopic::new([0xAB; 32]);
-    let sender = subduction_core::peer::id::PeerId::new(*pair.left().peer_id().as_bytes());
+    let sender = subduction_core::peer::id::PeerId::new(
+        pair.left().peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+    );
     let mut subscription = pair
         .right()
         .repo
@@ -67,8 +70,12 @@ async fn tier9_ephemeral_filters_topic_and_sender() -> crate::Res<()> {
     let mut pair = Pair::boot_disconnected(212, 213, "Publisher", "Subscriber").await?;
     let topic = BigEphemeralTopic::new([0xAC; 32]);
     let other_topic = BigEphemeralTopic::new([0xAD; 32]);
-    let sender = subduction_core::peer::id::PeerId::new(*pair.left().peer_id().as_bytes());
-    let other_sender = subduction_core::peer::id::PeerId::new(*pair.right().peer_id().as_bytes());
+    let sender = subduction_core::peer::id::PeerId::new(
+        pair.left().peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+    );
+    let other_sender = subduction_core::peer::id::PeerId::new(
+        pair.right().peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+    );
     let mut matching = pair
         .right()
         .repo

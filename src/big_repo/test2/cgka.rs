@@ -27,6 +27,7 @@ use super::harness::{Node, Pair, Topo, fixtures, keyhive as kh_snap};
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 async fn read_text(handle: &crate::BigDocHandle, key: &str) -> Option<String> {
     handle
@@ -70,7 +71,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
     // Admin belongs to the epoch the writer will retain while offline.
     writer
         .repo
-        .grant_doc_access(doc_id, admin_agent, Access::Admin)
+        .grant_doc_access(doc_id.clone(), admin_agent, Access::Admin)
         .await?;
     topo.topo_conn(1, 0).sync_keyhive_with_peer().await?;
     let (_writer_doc, admin_doc) = fixtures::sync_doc_bidirectional(
@@ -78,7 +79,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
         topo.topo_conn(1, 0),
         &writer.repo,
         &admin.repo,
-        doc_id,
+        doc_id.clone(),
     )
     .await?;
 
@@ -91,7 +92,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
 
     admin
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
     topo.topo_conn(2, 1).sync_keyhive_with_peer().await?;
     let (_admin_doc, reader_doc_before_offline_write) = fixtures::sync_doc_bidirectional(
@@ -99,7 +100,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
         topo.topo_conn(2, 1),
         &admin.repo,
         &reader.repo,
-        doc_id,
+        doc_id.clone(),
     )
     .await?;
 
@@ -123,7 +124,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
         &admin_to_writer,
         &writer.repo,
         &admin.repo,
-        doc_id,
+        doc_id.clone(),
     )
     .await?;
 
@@ -132,14 +133,14 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
         topo.topo_conn(2, 1),
         &admin.repo,
         &reader.repo,
-        doc_id,
+        doc_id.clone(),
     )
     .await?;
     fixtures::wait_for_network_rest([writer, admin, reader].as_slice()).await?;
     let settled_blob_counts = futures::future::try_join_all(
         [writer, admin, reader]
             .into_iter()
-            .map(|node| node.repo.inspect_stored_doc_blobs(doc_id)),
+            .map(|node| node.repo.inspect_stored_doc_blobs(doc_id.clone())),
     )
     .await?
     .into_iter()
@@ -149,7 +150,7 @@ async fn tier6_concurrent_member_add_and_offline_old_epoch_write_converges() -> 
     let replayed_blob_counts = futures::future::try_join_all(
         [writer, admin, reader]
             .into_iter()
-            .map(|node| node.repo.inspect_stored_doc_blobs(doc_id)),
+            .map(|node| node.repo.inspect_stored_doc_blobs(doc_id.clone())),
     )
     .await?
     .into_iter()
@@ -388,7 +389,8 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let clone_handle =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, core_doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, core_doc_id.clone())
+            .await?;
     clone_handle
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "clone_phase", "opened"))
@@ -411,8 +413,9 @@ async fn tier6_existing_governed_document_survives_grant_and_restart() -> crate:
         }
     };
     pair.connect().await?;
-    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&core_doc_id.into_bytes())
-        .map_err(|_| crate::ferr!("core document id is not a valid Ed25519 point"))?;
+    let verifying_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&core_doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .map_err(|_| crate::ferr!("core document id is not a valid Ed25519 point"))?;
     let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(verifying_key),
     );
@@ -453,19 +456,19 @@ async fn tier6_group_doc_grant_then_add_user() -> crate::Res<()> {
     let group = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group.clone(), Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
-    let before = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let before = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
 
     pair.left()
         .repo
         .add_member_to_group(member_agent, &group, Access::Read)
         .await?;
 
-    let after = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let after = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
 
     assert_ne!(
         before.cgka_operation_hashes, after.cgka_operation_hashes,
@@ -477,7 +480,8 @@ async fn tier6_group_doc_grant_then_add_user() -> crate::Res<()> {
 
     // History-inclusive: user reads content written before membership.
     let new_member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let title = new_member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "title")
@@ -527,28 +531,28 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
     let group = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_a_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_a_id.clone(), group.clone(), Access::Read)
         .await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_b_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_b_id.clone(), group.clone(), Access::Read)
         .await?;
 
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
-    let before_a = kh_snap::document_snapshot(&pair.left().repo, doc_a_id).await?;
-    let before_b = kh_snap::document_snapshot(&pair.left().repo, doc_b_id).await?;
+    let before_a = kh_snap::document_snapshot(&pair.left().repo, doc_a_id.clone()).await?;
+    let before_b = kh_snap::document_snapshot(&pair.left().repo, doc_b_id.clone()).await?;
     let blobs_before_a = pair
         .left()
         .repo
-        .inspect_stored_doc_blobs(doc_a_id)
+        .inspect_stored_doc_blobs(doc_a_id.clone())
         .await?
         .len();
     let blobs_before_b = pair
         .left()
         .repo
-        .inspect_stored_doc_blobs(doc_b_id)
+        .inspect_stored_doc_blobs(doc_b_id.clone())
         .await?
         .len();
 
@@ -558,8 +562,8 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
         .add_member_to_group(member_agent, &group, Access::Read)
         .await?;
 
-    let after_a = kh_snap::document_snapshot(&pair.left().repo, doc_a_id).await?;
-    let after_b = kh_snap::document_snapshot(&pair.left().repo, doc_b_id).await?;
+    let after_a = kh_snap::document_snapshot(&pair.left().repo, doc_a_id.clone()).await?;
+    let after_b = kh_snap::document_snapshot(&pair.left().repo, doc_b_id.clone()).await?;
 
     assert_ne!(
         before_a.cgka_operation_hashes, after_a.cgka_operation_hashes,
@@ -568,7 +572,7 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
     assert_eq!(
         pair.left()
             .repo
-            .inspect_stored_doc_blobs(doc_a_id)
+            .inspect_stored_doc_blobs(doc_a_id.clone())
             .await?
             .len(),
         blobs_before_a + 1,
@@ -577,7 +581,7 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
     assert_eq!(
         pair.left()
             .repo
-            .inspect_stored_doc_blobs(doc_b_id)
+            .inspect_stored_doc_blobs(doc_b_id.clone())
             .await?
             .len(),
         blobs_before_b + 1,
@@ -593,7 +597,8 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
 
     // Both documents must be readable by the new member.
     let reader_a =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_a_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_a_id.clone())
+            .await?;
     let tag_a = reader_a
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "tag")
@@ -611,7 +616,8 @@ async fn tier6_same_group_multiple_docs() -> crate::Res<()> {
     assert_eq!(tag_a.as_deref(), Some("doc-a"));
 
     let reader_b =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_b_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_b_id.clone())
+            .await?;
     let tag_b = reader_b
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "tag")
@@ -661,13 +667,13 @@ async fn tier6_nested_group_propagates_cgka() -> crate::Res<()> {
         .await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, outer.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), outer.clone(), Access::Read)
         .await?;
 
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
-    let before = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let before = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
 
     // Add the user to the inner group. The user should be seeded into the
     // document's CGKA through the inner → outer → doc chain.
@@ -676,7 +682,7 @@ async fn tier6_nested_group_propagates_cgka() -> crate::Res<()> {
         .add_member_to_group(member_agent, &inner, Access::Read)
         .await?;
 
-    let after = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let after = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
 
     assert_ne!(
         before.cgka_operation_hashes, after.cgka_operation_hashes,
@@ -688,7 +694,8 @@ async fn tier6_nested_group_propagates_cgka() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let title = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "title")
@@ -730,11 +737,11 @@ async fn tier6_multipath_dedup() -> crate::Res<()> {
     let beta = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, alpha.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), alpha.clone(), Access::Read)
         .await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, beta.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), beta.clone(), Access::Read)
         .await?;
 
     pair.left_conn().sync_keyhive_with_peer().await?;
@@ -745,7 +752,7 @@ async fn tier6_multipath_dedup() -> crate::Res<()> {
         .repo
         .add_member_to_group(member_agent.clone(), &alpha, Access::Read)
         .await?;
-    let after_alpha = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let after_alpha = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
     let count_after_alpha = after_alpha.cgka_operation_hashes.len();
 
     // Add the same user to beta. The CGKA must NOT add duplicate operations
@@ -754,7 +761,7 @@ async fn tier6_multipath_dedup() -> crate::Res<()> {
         .repo
         .add_member_to_group(member_agent, &beta, Access::Read)
         .await?;
-    let after_beta = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let after_beta = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
     let count_after_beta = after_beta.cgka_operation_hashes.len();
 
     assert!(
@@ -815,7 +822,7 @@ async fn tier6_history_inclusive_access() -> crate::Res<()> {
     let group = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group.clone(), Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -831,7 +838,8 @@ async fn tier6_history_inclusive_access() -> crate::Res<()> {
     // The user must be able to read the full history including content
     // written before they were added.
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let phase = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "phase")
@@ -878,7 +886,7 @@ async fn tier6_group_add_checkpoint() -> crate::Res<()> {
     let group = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group.clone(), Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -890,7 +898,7 @@ async fn tier6_group_add_checkpoint() -> crate::Res<()> {
 
     // The group add includes the structural CGKA operation and the
     // history-inclusive checkpoint's PCS update.
-    let after_add = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let after_add = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
     let ops_after_add = after_add.cgka_operation_hashes.len();
     assert!(ops_after_add > 0, "group add must leave CGKA state present");
 
@@ -903,7 +911,7 @@ async fn tier6_group_add_checkpoint() -> crate::Res<()> {
         })
         .await??;
 
-    let after_write = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let after_write = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
     let ops_after_write = after_write.cgka_operation_hashes.len();
     assert!(
         ops_after_write >= ops_after_add,
@@ -954,13 +962,13 @@ async fn tier6_structural_add_vs_checkpoint_update() -> crate::Res<()> {
     let group = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group.clone(), Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Baseline: CGKA ops after initial create + grant.
-    let baseline = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let baseline = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
     let baseline_count = baseline.cgka_operation_hashes.len();
 
     // Add member to group → should emit `Add` CGKA op(s).
@@ -968,7 +976,7 @@ async fn tier6_structural_add_vs_checkpoint_update() -> crate::Res<()> {
         .repo
         .add_member_to_group(member_agent, &group, Access::Read)
         .await?;
-    let after_add = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let after_add = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
     let after_add_count = after_add.cgka_operation_hashes.len();
 
     assert!(
@@ -985,7 +993,7 @@ async fn tier6_structural_add_vs_checkpoint_update() -> crate::Res<()> {
                 .map_err(|err| crate::ferr!("failed writing: {err:?}"))
         })
         .await??;
-    let after_write = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let after_write = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
     let after_write_count = after_write.cgka_operation_hashes.len();
 
     assert!(
@@ -1000,7 +1008,7 @@ async fn tier6_structural_add_vs_checkpoint_update() -> crate::Res<()> {
                 .map_err(|err| crate::ferr!("failed writing second: {err:?}"))
         })
         .await??;
-    let after_write2 = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let after_write2 = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
     let after_write2_count = after_write2.cgka_operation_hashes.len();
 
     // The second write may or may not produce ops depending on whether the
@@ -1061,11 +1069,11 @@ async fn tier6_multipath_strongest_access() -> crate::Res<()> {
     let group_read = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group_edit.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), group_edit.clone(), Access::Edit)
         .await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group_read.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group_read.clone(), Access::Read)
         .await?;
 
     pair.left_conn().sync_keyhive_with_peer().await?;
@@ -1085,7 +1093,8 @@ async fn tier6_multipath_strongest_access() -> crate::Res<()> {
 
     // Materialise: read the pre-grant content.
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let title = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "title")
@@ -1117,7 +1126,8 @@ async fn tier6_multipath_strongest_access() -> crate::Res<()> {
     // Sync the edit back to the owner and verify convergence.
     pair.right_conn().sync_keyhive_with_peer().await?;
     let owner_doc2 =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
     let note = owner_doc2
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "editor_note")
@@ -1181,7 +1191,7 @@ async fn tier6_grant_after_content_explicit_frontier() -> crate::Res<()> {
     let pre_grant_heads: BTreeSet<Vec<u8>> = pair
         .left()
         .repo
-        .doc_head_state(doc_id)
+        .doc_head_state(doc_id.clone())
         .await?
         .sedimentree_heads
         .iter()
@@ -1191,7 +1201,7 @@ async fn tier6_grant_after_content_explicit_frontier() -> crate::Res<()> {
     let group = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group.clone(), Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -1211,7 +1221,7 @@ async fn tier6_grant_after_content_explicit_frontier() -> crate::Res<()> {
         use keyhive_core::principal::document::id::DocumentId as KhDocId;
         use keyhive_core::principal::identifier::Identifier;
 
-        let bytes = doc_id.into_bytes();
+        let bytes: [u8; 32] = doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE);
         let vk = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
             .map_err(|_| crate::ferr!("doc_id invalid"))?;
         let kh_doc_id = KhDocId::from(Identifier::from(vk));
@@ -1250,7 +1260,8 @@ async fn tier6_grant_after_content_explicit_frontier() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let phase = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "phase")
@@ -1324,7 +1335,7 @@ async fn tier6_prekey_janitor_rotates_consumed_prekey_and_refills_pool() -> crat
     let group = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group.clone(), Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     let joiner_before = pair.right().repo.keyhive().prekeys().await;
@@ -1377,7 +1388,8 @@ async fn tier6_prekey_janitor_rotates_consumed_prekey_and_refills_pool() -> crat
     // have been openable at the time the janitor observed it (implicit: the
     // join materialized at all).
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let phase = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "phase")
@@ -1431,13 +1443,17 @@ async fn tier6_joiner_reads_history_via_snapshot_but_not_prejoin_epochs() -> cra
     let group = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group.clone(), Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Blobs written strictly before the join: the forward-secrecy set.
-    let prejoin_blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id).await?;
+    let prejoin_blobs = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
 
     pair.left()
         .repo
@@ -1458,7 +1474,8 @@ async fn tier6_joiner_reads_history_via_snapshot_but_not_prejoin_epochs() -> cra
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let phase = member_doc
         .with_document_read(|doc| {
             doc.get(automerge::ROOT, "phase")
@@ -1478,14 +1495,18 @@ async fn tier6_joiner_reads_history_via_snapshot_but_not_prejoin_epochs() -> cra
         Some("post-join"),
         "joiner must materialize the post-join write"
     );
-    kh_snap::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
+    kh_snap::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id.clone()).await?;
 
     // Forward secrecy: every blob written strictly before the join stays
     // undecryptable *directly* by the joiner — its epoch keys are not
     // reconstructable from the CGKA DAG because the joiner was not covered
     // by any wrap at those epochs.
     let joiner_keyhive = pair.right().repo.keyhive().clone_keyhive();
-    let postjoin_blobs = pair.left().repo.inspect_stored_doc_blobs(doc_id).await?;
+    let postjoin_blobs = pair
+        .left()
+        .repo
+        .inspect_stored_doc_blobs(doc_id.clone())
+        .await?;
     let prejoin_ids: std::collections::HashSet<_> = prejoin_blobs.iter().collect();
     let kh_doc = joiner_keyhive
         .get_document(kh_document_id(doc_id)?)
@@ -1539,7 +1560,7 @@ async fn tier6_joiner_reads_history_via_snapshot_but_not_prejoin_epochs() -> cra
 fn kh_document_id(
     doc_id: crate::DocumentId,
 ) -> crate::Res<keyhive_core::principal::document::id::DocumentId> {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
         .map_err(|err| crate::ferr!("doc_id is not a valid Ed25519 point: {err:?}"))?;
     Ok(keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(vk),

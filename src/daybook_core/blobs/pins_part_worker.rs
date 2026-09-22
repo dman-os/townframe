@@ -287,12 +287,27 @@ impl Ctx {
                     daybook_types::doc::WellKnownFacet::BlobPin(pin) => pin,
                     other => eyre::bail!("expected BlobPin facet, got {:?}", other.tag()),
                 };
-                delta
+                // A peer authors a `BlobPin` facet as it likes, and only a key
+                // that decodes to a blob digest names a blob this node can pin.
+                // Drop the route rather than failing the task: a task error is
+                // fatal to the machine.
+                if delta
                     .key
                     .facet_key
                     .id
                     .parse::<crate::blobs::BlobId>()
-                    .map_err(|_| ferr!("BlobPin facet id is not a valid blob id"))?;
+                    .is_err()
+                {
+                    tracing::warn!(
+                        facet_id = %delta.key.facet_key.id,
+                        "ignoring BlobPin facet whose key is not a blob id"
+                    );
+                    next.remove(&delta.key.facet_key.id);
+                    continue;
+                }
+                // The authored spelling stays the pin's identity: it is the
+                // facet key peers see, and both spellings key the same digest
+                // bytes in the part store.
                 next.insert(delta.key.facet_key.id.clone(), pin.length_octets);
             }
             prepared.push(PreparedBranchDelta {
@@ -398,7 +413,7 @@ impl Ctx {
         }
         for document_id in &documents {
             let part_id = crate::blobs::blob_inventory_part_id_from_doc_id(document_id);
-            self.part_store.ensure_part(part_id).await?;
+            self.part_store.ensure_part(part_id.clone()).await?;
             let old_hashes = before
                 .iter()
                 .filter(|((doc_id, _), _)| doc_id == document_id)
@@ -416,7 +431,7 @@ impl Ctx {
                 for (hash, length) in &branch.next {
                     self.part_store
                         .set_obj_payload(
-                            crate::blobs::blob_id_from_hash(hash),
+                            ObjKey::from(crate::blobs::blob_id_from_hash(hash)?),
                             serde_json::json!({ "lengthOctets": length }),
                         )
                         .await?;
@@ -424,12 +439,22 @@ impl Ctx {
             }
             for hash in new_hashes.difference(&old_hashes) {
                 self.part_store
-                    .add_obj_to_parts(crate::blobs::blob_id_from_hash(hash), vec![part_id])
+                    .add_obj_to_parts(
+                        ObjKey::from(crate::blobs::blob_id_from_hash(hash)?),
+                        vec![part_id.clone()],
+                    )
                     .await?;
             }
             for hash in old_hashes.difference(&new_hashes) {
+                // A key the projection carried from before pins were decoded as
+                // blob digests names no blob object: there is nothing to remove
+                // for it, and failing the task over it is fatal to the worker.
+                let Ok(blob_id) = crate::blobs::blob_id_from_hash(hash) else {
+                    tracing::warn!(blob_hash = %hash, "ignoring blob pin whose hash is not a blob id");
+                    continue;
+                };
                 self.part_store
-                    .remove_obj_from_part(crate::blobs::blob_id_from_hash(hash), part_id)
+                    .remove_obj_from_part(ObjKey::from(blob_id), part_id.clone())
                     .await?;
             }
         }
@@ -920,15 +945,15 @@ mod tests {
         wait_for_pin_row_count(&sql, &doc_id, 2).await?;
         assert_eq!(
             blob_part_store
-                .obj_parts(crate::blobs::blob_id_from_hash(&hash_1))
+                .obj_parts(ObjKey::from(crate::blobs::blob_id_from_hash(&hash_1)?))
                 .await?,
-            vec![part_id]
+            vec![part_id.clone()]
         );
         assert_eq!(
             blob_part_store
-                .obj_parts(crate::blobs::blob_id_from_hash(&hash_2))
+                .obj_parts(ObjKey::from(crate::blobs::blob_id_from_hash(&hash_2)?))
                 .await?,
-            vec![part_id]
+            vec![part_id.clone()]
         );
 
         let hashes = list_hashes_for_doc(&sql, &doc_id).await?;
@@ -954,15 +979,15 @@ mod tests {
         wait_for_pin_row_count(&sql, &doc_id, 1).await?;
         assert_eq!(
             blob_part_store
-                .obj_parts(crate::blobs::blob_id_from_hash(&hash_1))
+                .obj_parts(ObjKey::from(crate::blobs::blob_id_from_hash(&hash_1)?))
                 .await?,
-            vec![part_id]
+            vec![part_id.clone()]
         );
         assert_eq!(
             blob_part_store
-                .obj_parts(crate::blobs::blob_id_from_hash(&hash_2))
+                .obj_parts(ObjKey::from(crate::blobs::blob_id_from_hash(&hash_2)?))
                 .await?,
-            Vec::<PartId>::new()
+            Vec::<PartKey>::new()
         );
 
         let hashes_after_update = list_hashes_for_doc(&sql, &doc_id).await?;
@@ -1010,7 +1035,7 @@ mod tests {
         wait_for_pin_row_count(&sql, &doc_id, 1).await?;
         assert_eq!(
             blob_part_store
-                .obj_parts(crate::blobs::blob_id_from_hash(&hash_1))
+                .obj_parts(ObjKey::from(crate::blobs::blob_id_from_hash(&hash_1)?))
                 .await?,
             vec![part_id]
         );
@@ -1048,6 +1073,73 @@ mod tests {
         // physical membership.
         test_context.drawer_repo.del(&doc_id).await?;
         assert!(list_hashes_for_doc(&sql, &doc_id).await?.is_empty());
+
+        test_context.stop().await?;
+        Ok(())
+    }
+
+    /// A `BlobPin` facet key arrives from whoever authored the doc, so it can be
+    /// any text. A key that names no blob digest names no blob object: it must
+    /// be ignored (the machine treats a task error as fatal) and must never
+    /// become a part store object.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blob_pin_facet_key_that_is_not_a_digest_is_ignored() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let sql = test_context
+            .rt
+            .sqlite_local_state_repo
+            .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
+            .await?;
+        let blob_part_store = &test_context.rt.rcx.blob_part_store;
+
+        let control_hash = crate::blobs::BlobId::random().to_string();
+        let reserved_hash = "/etc/daybook-escape".to_string();
+
+        let doc_id = test_context
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [
+                    (
+                        FacetKey {
+                            tag: WellKnownFacetTag::BlobPin.into(),
+                            id: control_hash.clone(),
+                        },
+                        FacetRaw::from(WellKnownFacet::BlobPin(BlobPin { length_octets: 150 })),
+                    ),
+                    (
+                        FacetKey {
+                            tag: WellKnownFacetTag::BlobPin.into(),
+                            id: reserved_hash.clone(),
+                        },
+                        FacetRaw::from(WellKnownFacet::BlobPin(BlobPin { length_octets: 250 })),
+                    ),
+                ]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        let part_id = crate::blobs::blob_inventory_part_id_from_doc_id(&doc_id);
+        let control_obj = ObjKey::from(crate::blobs::blob_id_from_hash(&control_hash)?);
+        let reserved_obj = ObjKey::new(reserved_hash.as_bytes());
+
+        // The control object landing proves this doc's pins were reconciled.
+        loop {
+            if blob_part_store.obj_parts(control_obj.clone()).await? == vec![part_id.clone()] {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            blob_part_store.obj_parts(reserved_obj).await?,
+            Vec::<PartKey>::new(),
+            "a facet key that names no blob became a part store object"
+        );
+        assert_eq!(
+            list_hashes_for_doc(&sql, &doc_id).await?,
+            vec![control_hash]
+        );
 
         test_context.stop().await?;
         Ok(())

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT o.obj_id\n               FROM big_sync_objs o\n              WHERE o.scope_id = ?1\n                AND o.payload_json IS NOT NULL AND o.payload_json != ''\n                AND (?2 IS NULL OR o.obj_id > ?2)\n                AND NOT EXISTS (\n                    SELECT 1\n                      FROM big_sync_members m\n                     WHERE m.scope_id = o.scope_id\n                       AND m.obj_ref = o.obj_ref\n                       AND m.maybe_part_ref > 0\n                       AND m.event_type != ?3\n                )\n              ORDER BY o.obj_id\n              LIMIT ?4",
+  "describe": {
+    "columns": [
+      {
+        "name": "obj_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_objs",
+            "name": "obj_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0a840018076f4220be9dd9bf99d805255525cb6886b919a2b7bed37708565f37"
+}

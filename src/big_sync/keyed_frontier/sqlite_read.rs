@@ -24,6 +24,34 @@ pub(crate) trait SqliteReadSource: Clone + Send + Sync + 'static {
     fn read_pool(&self) -> &SqlitePool;
     fn changed(&self) -> &Notify;
 
+    /// Fetch a source page using a backend-specific conservative byte bound.
+    ///
+    /// `max_bytes` is a bound a source has to honour, not a hint it may drop: a caller that
+    /// passes a budget is asking for a page whose payload stays inside the replay read-ahead,
+    /// so an implementation that cannot measure a row's cost must still supply one. The page
+    /// takes at least one entry even when that entry alone exceeds the budget — a page that
+    /// returns nothing while rows still match loses the walk's position — so the bound is soft
+    /// by exactly that one entry.
+    ///
+    /// The returned revision is always the last complete revision selected. This is deliberately
+    /// separate from [`fetch_rows`]: the generic frontier reader remains a faithful row reader,
+    /// while SQLite can avoid materializing large JSON payloads beyond the replay read-ahead.
+    #[expect(clippy::type_complexity)]
+    fn fetch_rows_with_byte_budget<'a>(
+        &'a self,
+        selector: &'a Self::Selector,
+        after: FrontierRevision,
+        through: FrontierRevision,
+        max_entries: usize,
+        max_bytes: usize,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<(Vec<Self::Row>, FrontierRevision), SqliteReadError>>
+                + Send
+                + 'a,
+        >,
+    >;
+
     /// Return the source cursor represented by a selector's lower bound.
     /// Selectors with independent per-key bounds retain the shared cursor at
     /// zero; the collapsed `All` selector can initialize directly at its
@@ -68,6 +96,7 @@ struct SqliteReader<S: SqliteReadSource> {
     selector: S::Selector,
     initial_through: Option<FrontierRevision>,
     after: FrontierRevision,
+    max_read_bytes: Option<usize>,
 }
 
 async fn query_rows<S>(
@@ -92,10 +121,18 @@ async fn read_page<S>(
     after: FrontierRevision,
     through: FrontierRevision,
     max_entries: usize,
+    max_read_bytes: Option<usize>,
 ) -> Result<SqliteRows<S::Row>, SqliteReadError>
 where
     S: SqliteReadSource,
 {
+    if let Some(max_bytes) = max_read_bytes {
+        let (rows, through) = source
+            .fetch_rows_with_byte_budget(selector, after, through, max_entries, max_bytes)
+            .await?;
+        return Ok(SqliteRows { rows, through });
+    }
+
     let mut rows = query_rows(source, selector, after, through, None, Some(max_entries)).await?;
     if rows.len() < max_entries {
         return Ok(SqliteRows { rows, through });
@@ -121,6 +158,17 @@ pub(crate) async fn open_sqlite_reader<S>(
 where
     S: SqliteReadSource,
 {
+    open_sqlite_reader_with_byte_budget(source, selector, None).await
+}
+
+pub(crate) async fn open_sqlite_reader_with_byte_budget<S>(
+    source: S,
+    selector: S::Selector,
+    max_read_bytes: Option<usize>,
+) -> KeyedFrontierResult<Box<dyn KeyedFrontierReader<S::Key, S::Value>>>
+where
+    S: SqliteReadSource,
+{
     let initial_through = source.committed_revision().await.map_err(backend_error)?;
     let after = source.initial_after(&selector);
     Ok(Box::new(SqliteReader {
@@ -128,6 +176,7 @@ where
         selector,
         initial_through: Some(initial_through),
         after,
+        max_read_bytes,
     }))
 }
 
@@ -160,6 +209,7 @@ where
                     self.after,
                     current,
                     limits.max_entries.get(),
+                    self.max_read_bytes,
                 )
                 .await
                 .map_err(backend_error)?;
@@ -178,6 +228,7 @@ where
                 self.after,
                 phase_through,
                 limits.max_entries.get(),
+                self.max_read_bytes,
             )
             .await
             .map_err(backend_error)?;

@@ -13,7 +13,9 @@ pub use sqlite_generic::{
     SqliteFrontierCodec, SqliteFrontierSelector, SqliteKeyedFrontier,
     SqliteKeyedFrontierTransaction,
 };
-pub(crate) use sqlite_read::{SqliteReadError, SqliteReadSource, open_sqlite_reader};
+pub(crate) use sqlite_read::{
+    SqliteReadError, SqliteReadSource, open_sqlite_reader, open_sqlite_reader_with_byte_budget,
+};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod contract {

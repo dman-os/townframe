@@ -10,6 +10,8 @@
 //! | `duplicate_concurrent_sync_converges` | Two concurrent `sync_doc_with_peer` calls converge without duplicate state or errors. |
 //! | `reconnect_preserves_live_handles` | After connection loss + reconnect, previously acquired live handles remain valid and can read new content. |
 //! | `interrupted_sync_retry_succeeds` | A sync that fails due to closed connection can be retried after reconnect. |
+//! | `dropped_content_apply_fails_sync_receipt` | A round whose received content cannot be routed to a stopping doc worker fails the caller instead of reporting a success receipt. |
+//! | `keyhive_completion_defers_until_admission_watermark` | A keyhive completion whose admission watermark is ahead of the hub's admitted head is held until the admission event lands, so the follow-up reconciliation wait cannot observe a stale head. |
 //!
 //! # Skipped-by-design
 //!
@@ -24,6 +26,7 @@ use crate::SyncDocError;
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
 use std::sync::Arc;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -47,13 +50,13 @@ async fn read_text(handle: &crate::BigDocHandle, key: &str) -> Option<String> {
 /// Agent identifier for a node, for direct keyhive queries.
 fn agent_id(node: &Node) -> keyhive_core::principal::identifier::Identifier {
     let peer = node.peer_id();
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(peer.as_bytes())
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&peer.to_bytes32().expect(ERROR_IMPOSSIBLE))
         .expect("peer id must be a verifying key");
     keyhive_core::principal::identifier::Identifier::from(vk)
 }
 
 fn doc_identifier(doc_id: crate::DocumentId) -> keyhive_core::principal::identifier::Identifier {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
         .expect("doc id must be a verifying key");
     keyhive_core::principal::identifier::Identifier::from(vk)
 }
@@ -82,7 +85,7 @@ async fn tier9_closed_connection_errors_cleanly() -> crate::Res<()> {
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -163,7 +166,7 @@ async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
 
     // Sync keyhive to both Reader and Intruder.
@@ -174,7 +177,7 @@ async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
 
     // Reader can sync and materialise.
     let reader_doc = {
-        reader_owner_conn.sync_doc_with_peer(doc_id).await?;
+        reader_owner_conn.sync_doc_with_peer(doc_id.clone()).await?;
         guard.node(1).repo.wait_for_quiescence(None).await?;
         match guard.node(1).repo.get_doc(&doc_id).await? {
             crate::DocLookup::Ready(h) => h,
@@ -193,7 +196,7 @@ async fn tier9_unauthorized_peer_no_plaintext_leak() -> crate::Res<()> {
     drop(reader_doc);
 
     // Intruder must NOT materialise plaintext.
-    let intruder_sync = intruder_owner_conn.sync_doc_with_peer(doc_id).await;
+    let intruder_sync = intruder_owner_conn.sync_doc_with_peer(doc_id.clone()).await;
     match intruder_sync {
         Ok(()) => {
             let lookup = guard.node(2).repo.get_doc(&doc_id).await?;
@@ -297,15 +300,15 @@ async fn tier9_duplicate_concurrent_sync_converges() -> crate::Res<()> {
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     // Fire two concurrent doc syncs and wait for both.
     let (r1, r2) = tokio::join!(
-        pair.right_conn().sync_doc_with_peer(doc_id),
-        pair.right_conn().sync_doc_with_peer(doc_id),
+        pair.right_conn().sync_doc_with_peer(doc_id.clone()),
+        pair.right_conn().sync_doc_with_peer(doc_id.clone()),
     );
 
     // Both must succeed.
@@ -320,14 +323,14 @@ async fn tier9_duplicate_concurrent_sync_converges() -> crate::Res<()> {
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
     assert_eq!(
         read_text(&reader_doc, "title").await.as_deref(),
         Some("concurrent-base")
     );
 
     // Check head parity — state is not duplicated.
-    let left_state = pair.left().repo.doc_head_state(doc_id).await?;
+    let left_state = pair.left().repo.doc_head_state(doc_id.clone()).await?;
     let right_state = pair.right().repo.doc_head_state(doc_id).await?;
     assert_eq!(
         left_state.sedimentree_heads, right_state.sedimentree_heads,
@@ -359,13 +362,14 @@ async fn tier9_reconnect_preserves_live_handles() -> crate::Res<()> {
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&reader_doc, "title").await.as_deref(),
         Some("handle-persists")
@@ -418,6 +422,63 @@ async fn tier9_reconnect_preserves_live_handles() -> crate::Res<()> {
     Ok(())
 }
 
+// ─── Dropped content apply fails the sync receipt ─────────────────────────
+//
+// A sync round whose received content cannot reach the document worker (the
+// worker is stopping, so its unbounded mailbox is closed) must fail the caller.
+// Swallowing the send and letting the round completion resolve the waiter with
+// an empty reconsider would hand the caller a success receipt for content that
+// was never applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_dropped_content_apply_fails_sync_receipt() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(106, 107, "Owner", "Reader").await?;
+
+    let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "dropped-apply"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
+    // Reader materialises the document, so the round's reconsider would report
+    // a live `Ready` success rather than a cold `Stored`.
+    let reader_doc =
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+
+    // Owner produces content the Reader has not seen: the next sync carries it.
+    owner_doc
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "phase", "carried"))
+                .map_err(|err| crate::ferr!("failed owner edit: {err:?}"))
+        })
+        .await??;
+
+    // Make the next content-carrying apply on Reader's hub hit a closed
+    // doc-worker mailbox: the "worker stopped between resolving the handle and
+    // sending" race, forced deterministically.
+    pair.right()
+        .repo
+        .fail_next_content_apply_route(doc_id.clone())
+        .await?;
+
+    let receipt = pair
+        .right_conn()
+        .sync_doc_with_peer_receipt(doc_id.clone())
+        .await;
+    assert!(
+        matches!(&receipt, Err(SyncDocError::WorkerUnavailable)),
+        "a round whose content apply was dropped must fail the caller, got: {receipt:?}"
+    );
+
+    drop(reader_doc);
+    drop(owner_doc);
+    Ok(())
+}
+
 // ─── Interrupted sync retry succeeds ──────────────────────────────────────
 //
 // A document sync that fails because the connection was closed can be
@@ -438,7 +499,7 @@ async fn tier9_interrupted_sync_retry_succeeds() -> crate::Res<()> {
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -452,7 +513,7 @@ async fn tier9_interrupted_sync_retry_succeeds() -> crate::Res<()> {
     // Attempt sync on the now-closed connection — must fail with IoError.
     let fail_err = pair
         .left_conn()
-        .sync_doc_with_peer(doc_id)
+        .sync_doc_with_peer(doc_id.clone())
         .await
         .expect_err("sync on closed connection must fail");
     assert!(
@@ -546,7 +607,11 @@ async fn tier9_r2_relay_sync_materializes_in_transient_worker() -> crate::Res<()
     // Grant reader access, then sync keyhive so the reader has a decryption key.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            reader_agent,
+            keyhive_core::access::Access::Read,
+        )
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -554,13 +619,17 @@ async fn tier9_r2_relay_sync_materializes_in_transient_worker() -> crate::Res<()
     // Sync document content WITHOUT acquiring a live handle on the reader.
     // The runtime creates a transient worker to materialize and reconcile the
     // persisted session even though no public handle exists.
-    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 
     // Before any handle acquisition: the transient worker performed the cold
     // materialization path.
     assert!(
-        pair.right().repo.runtime.has_doc_worker(doc_id).await?,
+        pair.right()
+            .repo
+            .runtime
+            .has_doc_worker(doc_id.clone())
+            .await?,
         "sync session must create a transient doc-worker without a live handle"
     );
 
@@ -569,7 +638,7 @@ async fn tier9_r2_relay_sync_materializes_in_transient_worker() -> crate::Res<()
         pair.right()
             .repo
             .runtime
-            .contains_sedimentree_id(doc_id)
+            .contains_sedimentree_id(doc_id.clone())
             .await?,
         "encrypted content must be persisted after relay sync"
     );
@@ -627,14 +696,20 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
     let relay_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, relay_agent, keyhive_core::access::Access::Relay)
+        .grant_doc_access(
+            doc_id.clone(),
+            relay_agent,
+            keyhive_core::access::Access::Relay,
+        )
         .await?;
 
     // Propagate keyhive: Owner→Relay so relay learns the doc exists.
     topo.topo_conn(0, 1).sync_keyhive_with_peer().await?;
 
     // Relay pulls doc from Owner — stores encrypted blobs, can't decrypt.
-    topo.topo_conn(1, 0).sync_doc_with_peer(doc_id).await?;
+    topo.topo_conn(1, 0)
+        .sync_doc_with_peer(doc_id.clone())
+        .await?;
     topo.topo_node(1).repo.wait_for_quiescence(None).await?;
 
     // A transient worker exists after sync even without a live handle so key
@@ -643,7 +718,7 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
         topo.topo_node(1)
             .repo
             .runtime
-            .has_doc_worker(doc_id)
+            .has_doc_worker(doc_id.clone())
             .await?,
         "relay sync must create a transient doc-worker"
     );
@@ -651,7 +726,7 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
         topo.topo_node(1)
             .repo
             .runtime
-            .contains_sedimentree_id(doc_id)
+            .contains_sedimentree_id(doc_id.clone())
             .await?,
         "relay must have stored encrypted content"
     );
@@ -669,7 +744,7 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
         .topo_node(1)
         .repo
         .runtime
-        .doc_head_state(doc_id)
+        .doc_head_state(doc_id.clone())
         .await?;
     assert_eq!(
         state.state,
@@ -681,7 +756,11 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
     let relay_agent = fixtures::agent_of(&topo.topo_node(0).repo, topo.topo_node(1)).await?;
     topo.topo_node(0)
         .repo
-        .grant_doc_access(doc_id, relay_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            relay_agent,
+            keyhive_core::access::Access::Read,
+        )
         .await?;
 
     // Keyhive sync delivers the decryption key.
@@ -689,7 +768,9 @@ async fn tier9_r2_partial_decrypt_converges_after_upgrade() -> crate::Res<()> {
     topo.topo_node(1).repo.wait_for_quiescence(None).await?;
 
     // Re-sync the doc now that keys are available → must become Ready.
-    topo.topo_conn(1, 0).sync_doc_with_peer(doc_id).await?;
+    topo.topo_conn(1, 0)
+        .sync_doc_with_peer(doc_id.clone())
+        .await?;
     topo.topo_node(1).repo.wait_for_quiescence(None).await?;
 
     let lookup = topo.topo_node(1).repo.get_doc(&doc_id).await?;
@@ -726,10 +807,10 @@ async fn tier9_r2_keyhive_admission_publishes_rematerialized_frontier() -> crate
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent.clone(), Access::Relay)
+        .grant_doc_access(doc_id.clone(), reader_agent.clone(), Access::Relay)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
-    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
     assert!(matches!(
         pair.right().repo.get_doc(&doc_id).await?,
@@ -738,7 +819,7 @@ async fn tier9_r2_keyhive_admission_publishes_rematerialized_frontier() -> crate
 
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -750,7 +831,7 @@ async fn tier9_r2_keyhive_admission_publishes_rematerialized_frontier() -> crate
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
     let expected_payload = reader_doc
         .with_document_read(|doc| {
             serde_json::json!({
@@ -770,7 +851,7 @@ async fn tier9_r2_keyhive_admission_publishes_rematerialized_frontier() -> crate
             .right()
             .repo
             .frontier_part_store()
-            .obj_payload(crate::automerge_doc_obj_id(doc_id))
+            .obj_payload(crate::automerge_doc_obj_id(doc_id.clone()))
             .await?;
         if let Some(payload) = payload {
             break payload;
@@ -813,7 +894,7 @@ async fn tier9_r2_live_handle_missing_key_does_not_kill_worker() -> crate::Res<(
     pair.left()
         .repo
         .grant_doc_access(
-            doc_id,
+            doc_id.clone(),
             reader_agent.clone(),
             keyhive_core::access::Access::Read,
         )
@@ -821,15 +902,20 @@ async fn tier9_r2_live_handle_missing_key_does_not_kill_worker() -> crate::Res<(
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, reader_agent.clone())
+        .revoke_doc_access(doc_id.clone(), reader_agent.clone())
         .await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Relay)
+        .grant_doc_access(
+            doc_id.clone(),
+            reader_agent,
+            keyhive_core::access::Access::Relay,
+        )
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -840,7 +926,7 @@ async fn tier9_r2_live_handle_missing_key_does_not_kill_worker() -> crate::Res<(
                 .map_err(|err| crate::ferr!("failed writing owner update: {err:?}"))
         })
         .await??;
-    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 
     assert!(
@@ -873,8 +959,19 @@ async fn tier0_sync_diagnostics_do_not_create_worker() -> crate::Res<()> {
     let pair = Pair::boot(254, 255, "Left", "Right").await?;
     let doc_id = crate::DocumentId::random();
 
-    assert!(!pair.left().repo.runtime.has_doc_worker(doc_id).await?);
-    let snapshot = pair.left().repo.document_sync_snapshot(doc_id).await?;
+    assert!(
+        !pair
+            .left()
+            .repo
+            .runtime
+            .has_doc_worker(doc_id.clone())
+            .await?
+    );
+    let snapshot = pair
+        .left()
+        .repo
+        .document_sync_snapshot(doc_id.clone())
+        .await?;
     assert_eq!(snapshot.stage, crate::DocumentSyncStage::NotPersisted);
     assert_eq!(snapshot.head_state, None);
     assert!(!pair.left().repo.runtime.has_doc_worker(doc_id).await?);
@@ -904,7 +1001,11 @@ async fn tier9_r2_racing_handle_acquisition() -> crate::Res<()> {
     // Grant Read, sync keyhive fully — reader knows keys.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, keyhive_core::access::Access::Read)
+        .grant_doc_access(
+            doc_id.clone(),
+            reader_agent,
+            keyhive_core::access::Access::Read,
+        )
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -915,8 +1016,9 @@ async fn tier9_r2_racing_handle_acquisition() -> crate::Res<()> {
     let conn = pair.right_conn().clone();
     let repo = Arc::clone(&pair.right().repo);
 
+    let sync_doc_id = doc_id.clone();
     let sync_fut = async move {
-        conn.sync_doc_with_peer(doc_id).await?;
+        conn.sync_doc_with_peer(sync_doc_id).await?;
         repo.wait_for_quiescence(None).await
     };
     let get_fut = pair.right().repo.get_doc(&doc_id);
@@ -953,7 +1055,7 @@ async fn tier0_relay_never_creates_doc_worker_during_passive_sync_or_diagnostics
             .topo_node(1)
             .repo
             .runtime
-            .has_doc_worker(doc_id)
+            .has_doc_worker(doc_id.clone())
             .await?
     );
 
@@ -961,7 +1063,7 @@ async fn tier0_relay_never_creates_doc_worker_during_passive_sync_or_diagnostics
     let snapshot = topo
         .topo_node(1)
         .repo
-        .document_sync_snapshot(doc_id)
+        .document_sync_snapshot(doc_id.clone())
         .await?;
     assert_eq!(snapshot.stage, crate::DocumentSyncStage::NotPersisted);
     assert!(
@@ -1021,7 +1123,7 @@ async fn tier9_put_doc_occupancy_check_prevents_overwrite() -> crate::Res<()> {
     let heads = pair
         .left()
         .repo
-        .doc_head_state(doc_id)
+        .doc_head_state(doc_id.clone())
         .await?
         .sedimentree_heads;
     assert!(
@@ -1031,7 +1133,7 @@ async fn tier9_put_doc_occupancy_check_prevents_overwrite() -> crate::Res<()> {
 
     // Retrieve doc to verify it is loaded & occupied
     let retrieved = pair.left().repo.get_doc(&doc_id).await?;
-    let handle = retrieved.into_ready(doc_id)?;
+    let handle = retrieved.into_ready(doc_id.clone())?;
     assert_eq!(handle.document_id(), doc_id);
 
     drop(doc);
@@ -1048,7 +1150,7 @@ async fn tier9_watch_connection_end_abortable_join_set_cleanup() -> crate::Res<(
     let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (end_tx, end_rx) = futures::channel::oneshot::channel();
     let (signal_tx, _signal_rx) = tokio::sync::mpsc::unbounded_channel();
-    let peer_id = big_sync_core::PeerId::new([246u8; 32]);
+    let peer_id = big_sync_core::PeerKey::new([246u8; 32]);
 
     crate::watch_connection_end(
         peer_id,
@@ -1094,7 +1196,11 @@ async fn tier9_doc_worker_is_evicted_after_all_caller_leases_drop() -> crate::Re
     let owner_doc = pair.left().repo.create_doc(initial).await?;
     let doc_id = owner_doc.document_id();
     assert!(
-        pair.left().repo.runtime.has_doc_worker(doc_id).await?,
+        pair.left()
+            .repo
+            .runtime
+            .has_doc_worker(doc_id.clone())
+            .await?,
         "create_doc must spawn a doc worker"
     );
 
@@ -1105,7 +1211,7 @@ async fn tier9_doc_worker_is_evicted_after_all_caller_leases_drop() -> crate::Re
     loop {
         let has_worker = match tokio::time::timeout(
             deadline.saturating_duration_since(std::time::Instant::now()),
-            pair.left().repo.runtime.has_doc_worker(doc_id),
+            pair.left().repo.runtime.has_doc_worker(doc_id.clone()),
         )
         .await
         {
@@ -1121,5 +1227,172 @@ async fn tier9_doc_worker_is_evicted_after_all_caller_leases_drop() -> crate::Re
         );
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+    Ok(())
+}
+
+// ─── Keyhive completion cannot outrun its admission watermark ─────────────
+//
+// `sync_keyhive_with_peer` waits for the round, then for the group-part
+// projection to reach the admission watermark captured at that moment. If the
+// round resolved straight from its completion, a completion that arrived ahead
+// of the hub's `admitted_head` would let the caller return and immediately
+// capture a *stale* head, resolving reconciliation while this round's
+// admissions were never projected. The hub must hold the round until the
+// admission watermark catches up.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_keyhive_completion_defers_until_admission_watermark() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(199, 201, "Owner", "Reader").await?;
+    let peer = pair.right().peer_id();
+    let probe = crate::DocumentId::new([0u8; 32]);
+
+    // Settle first so the hold starts with no round in flight.
+    pair.left().repo.wait_for_quiescence(None).await?;
+
+    // Hold left's events so the round's real completion cannot land while the
+    // test drives the completion-before-admission inversion by hand.
+    let hold = pair.left().repo.hold_hub_events().await?;
+
+    let sync = pair.left().repo.sync_keyhive_with_peer(peer.clone());
+    futures::pin_mut!(sync);
+    assert!(
+        futures::poll!(sync.as_mut()).is_pending(),
+        "sync must park on its round"
+    );
+    // FIFO barrier: the hub has started the round and registered the waiter.
+    pair.left()
+        .repo
+        .contains_sedimentree_id(probe.clone())
+        .await?;
+
+    // A completion stamped one seq AHEAD of the hub's admitted head.
+    let admitted_seq = pair
+        .left()
+        .repo
+        .inject_keyhive_completion_for_test(peer.clone())
+        .await?;
+
+    // Let the projection catch up to that advanced watermark. A round that
+    // resolved from its completion alone would now finish reconciliation
+    // against the STALE head it captured, masking the missing admission — so
+    // this is exactly where the defect surfaces.
+    pair.left()
+        .repo
+        .inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::GroupPartWorkerSettled {
+            seq: admitted_seq,
+        })
+        .await?;
+    pair.left()
+        .repo
+        .contains_sedimentree_id(probe.clone())
+        .await?;
+    assert!(
+        futures::poll!(sync.as_mut()).is_pending(),
+        "the round must not resolve before its admission watermark is reached"
+    );
+    // Give the caller a full command round-trip to run through reconciliation.
+    pair.left()
+        .repo
+        .contains_sedimentree_id(probe.clone())
+        .await?;
+    assert!(
+        futures::poll!(sync.as_mut()).is_pending(),
+        "the round must not resolve before its admission watermark is reached"
+    );
+
+    // The admission event lands: the round may now finish, and the caller's
+    // reconciliation then captures the ADVANCED head.
+    pair.left()
+        .repo
+        .inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::KeyhiveAdmissionAdvanced {
+            seq: admitted_seq,
+        })
+        .await?;
+    // Poll once so the caller advances into reconciliation, then let that
+    // command round-trip complete.
+    assert!(futures::poll!(sync.as_mut()).is_pending());
+    pair.left().repo.contains_sedimentree_id(probe).await?;
+    match futures::poll!(sync.as_mut()) {
+        std::task::Poll::Ready(result) => {
+            result?;
+        }
+        std::task::Poll::Pending => {
+            panic!("sync must complete once the projection reaches the round's admission watermark")
+        }
+    }
+    drop(hold);
+    Ok(())
+}
+
+// ─── Quiescence must not resolve over work routed behind its fence ────────
+//
+// A worker's fence ack only covers work enqueued *before* the fence. A command
+// that routes work into a worker while a probe is pending (here
+// `EnsureCausalCoverage` → `ReconcileCausalCoverage`, enqueued by the
+// causal-checkpoint worker from a different sender and free to land behind the
+// probe) must count as activity so the probe restarts: the restarted fence is
+// enqueued after that work, and the worker necessarily runs the work before
+// acking. Otherwise the probe resolves, the caller returns, and the coverage
+// reconcile/publish runs afterwards — the caller snapshots state that is
+// self-consistent but behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_quiescence_probe_restarts_over_coverage_routed_behind_it() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let node = Node::boot(203, "Owner").await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "quiescence-coverage"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let doc = node.repo.create_doc(initial).await?;
+    let doc_id = doc.document_id();
+
+    // Hold events so the probe's fence acks cannot land while the coverage is
+    // routed behind the probe.
+    let hold = node.repo.hold_hub_events().await?;
+
+    let wait = node.repo.wait_for_quiescence(Some(utils_rs::scale_timeout(
+        std::time::Duration::from_secs(30),
+    )));
+    futures::pin_mut!(wait);
+    assert!(
+        futures::poll!(wait.as_mut()).is_pending(),
+        "quiescence wait must park on its probe"
+    );
+    let barrier_before = node.repo.quiescence_probe_barrier_for_test().await?;
+    assert!(
+        barrier_before.is_some(),
+        "a probe must be active with a live doc worker and held fence acks"
+    );
+
+    // Route coverage work into the doc worker while the probe is pending. The
+    // probe barrier query below is FIFO after this command, so it observes the
+    // hub's reaction to the routing.
+    let coverage = node.repo.runtime.ensure_causal_coverage(doc_id.clone());
+    futures::pin_mut!(coverage);
+    assert!(
+        futures::poll!(coverage.as_mut()).is_pending(),
+        "coverage must park on the worker's reconcile"
+    );
+    let barrier_after = node.repo.quiescence_probe_barrier_for_test().await?;
+    assert_ne!(
+        barrier_after, barrier_before,
+        "routing work to a doc worker must restart the pending probe, got barrier {barrier_after:?}"
+    );
+
+    // Release the probe. It may only resolve after the worker has run the
+    // coverage (its fence is enqueued behind it), so the reconcile's response
+    // is already available when the wait returns.
+    hold.resume().await?;
+    wait.as_mut().await?;
+    match futures::poll!(coverage.as_mut()) {
+        std::task::Poll::Ready(result) => {
+            result?;
+        }
+        std::task::Poll::Pending => {
+            panic!("quiescence returned before the coverage routed behind its fence ran")
+        }
+    }
+    drop(hold);
     Ok(())
 }

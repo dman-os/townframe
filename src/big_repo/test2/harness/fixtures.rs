@@ -7,17 +7,19 @@
 
 use super::log_nickname;
 use super::topo::{Node, Pair};
-use crate::{BigKeyhiveAgent, BigKeyhiveGroup, DocumentId, PeerId, Res};
+use crate::{BigKeyhiveAgent, BigKeyhiveGroup, DocumentId, PeerKey, Res};
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use subduction_keyhive::KeyhivePeerId;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 /// Look up `peer`'s agent in `repo`'s keyhive — a single call.
 ///
 /// Valid after [`Pair::boot`] has run the contact-card exchange. A `None` here
 /// means the keyhive sync did not actually deliver the agent — a bug.
 pub async fn agent_of(repo: &crate::BigRepo, peer: &Node) -> Res<BigKeyhiveAgent> {
-    let kh_peer_id = KeyhivePeerId::from_bytes(*peer.peer_id().as_bytes());
+    let kh_peer_id =
+        KeyhivePeerId::from_bytes(peer.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE));
     repo.keyhive()
         .get_agent_by_peer_id(&kh_peer_id)
         .await?
@@ -37,8 +39,8 @@ pub async fn agent_of(repo: &crate::BigRepo, peer: &Node) -> Res<BigKeyhiveAgent
 /// necessarily present the moment a connection is accepted. Callers that need
 /// the agent right after dialing must wait for it instead of assuming the
 /// exchange already ran. Bounded, so a genuine delivery failure still fails.
-pub async fn wait_for_agent(repo: &crate::BigRepo, peer_id: PeerId) -> Res<BigKeyhiveAgent> {
-    let kh_peer_id = KeyhivePeerId::from_bytes(*peer_id.as_bytes());
+pub async fn wait_for_agent(repo: &crate::BigRepo, peer_id: PeerKey) -> Res<BigKeyhiveAgent> {
+    let kh_peer_id = KeyhivePeerId::from_bytes(peer_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         if let Some(agent) = repo.keyhive().get_agent_by_peer_id(&kh_peer_id).await? {
@@ -69,8 +71,9 @@ pub fn public_agent() -> BigKeyhiveAgent {
 /// document-as-member delegation rather than treating the document as a plain
 /// individual agent.
 pub async fn document_agent(repo: &crate::BigRepo, doc_id: DocumentId) -> Res<BigKeyhiveAgent> {
-    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-        .map_err(|_| crate::ferr!("document id is not a valid Keyhive document id"))?;
+    let verifying_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .map_err(|_| crate::ferr!("document id is not a valid Keyhive document id"))?;
     let kh_doc_id = keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(verifying_key),
     );
@@ -112,10 +115,10 @@ pub async fn grant_and_propagate(
 ) -> Res<()> {
     pair.left()
         .repo
-        .grant_doc_access(doc_id, grantee.clone(), access)
+        .grant_doc_access(doc_id.clone(), grantee.clone(), access)
         .await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
-    assert_reader_has_access(&pair.right().repo, doc_id).await?;
+    assert_reader_has_access(&pair.right().repo, doc_id.clone()).await?;
     super::keyhive::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
     Ok(())
 }
@@ -132,10 +135,10 @@ pub async fn grant_group_and_propagate(
 ) -> Res<()> {
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), access)
+        .grant_doc_access(doc_id.clone(), group.clone(), access)
         .await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
-    assert_reader_has_access(&pair.right().repo, doc_id).await?;
+    assert_reader_has_access(&pair.right().repo, doc_id.clone()).await?;
     super::keyhive::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
     Ok(())
 }
@@ -151,10 +154,12 @@ pub(crate) async fn reader_has_access_within(
     timeout: std::time::Duration,
 ) -> Res<bool> {
     let peer = repo.local_peer_id();
-    let agent_key = ed25519_dalek::VerifyingKey::from_bytes(peer.as_bytes())
-        .map_err(|_| crate::ferr!("peer id is not a verifying key"))?;
-    let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-        .map_err(|_| crate::ferr!("document id is not a verifying key"))?;
+    let agent_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&peer.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .map_err(|_| crate::ferr!("peer id is not a verifying key"))?;
+    let doc_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .map_err(|_| crate::ferr!("document id is not a verifying key"))?;
     let agent = keyhive_core::principal::identifier::Identifier::from(agent_key);
     let document = keyhive_core::principal::identifier::Identifier::from(doc_key);
     let deadline = tokio::time::Instant::now() + timeout;
@@ -177,10 +182,12 @@ pub(crate) async fn reader_has_access_within(
 /// Assert the reader's keyhive reflects access on `doc_id` — single lookup.
 pub async fn assert_reader_has_access(repo: &crate::BigRepo, doc_id: DocumentId) -> Res<()> {
     let peer = repo.local_peer_id();
-    let agent_key = ed25519_dalek::VerifyingKey::from_bytes(peer.as_bytes())
-        .expect("peer id must be a verifying key");
-    let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-        .expect("document id must be a verifying key");
+    let agent_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&peer.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .expect("peer id must be a verifying key");
+    let doc_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .expect("document id must be a verifying key");
     let agent = keyhive_core::principal::identifier::Identifier::from(agent_key);
     let document = keyhive_core::principal::identifier::Identifier::from(doc_key);
     // Bounded: a grant that never propagates must name the node and the
@@ -194,7 +201,7 @@ pub async fn assert_reader_has_access(repo: &crate::BigRepo, doc_id: DocumentId)
             return Ok(());
         }
         let now = tokio::time::Instant::now();
-        let (_, known) = describe_keyhive_state(repo, doc_id).await;
+        let (_, known) = describe_keyhive_state(repo, doc_id.clone()).await;
         if now >= next_report {
             next_report = now + std::time::Duration::from_secs(5);
             tracing::warn!(
@@ -235,7 +242,7 @@ pub async fn sync_doc_expect_ready(
     repo: &Arc<crate::BigRepo>,
     doc_id: DocumentId,
 ) -> Res<crate::BigDocHandle> {
-    let receipt = conn.sync_doc_with_peer_receipt(doc_id).await?;
+    let receipt = conn.sync_doc_with_peer_receipt(doc_id.clone()).await?;
     tracing::debug!(?receipt.outcome, "document sync receipt captured in ready fixture");
     // Bounded, and the receipt outcome is carried into the failure: `Stored`
     // with a `None` access means the grant never reached this node, while
@@ -253,7 +260,7 @@ pub async fn sync_doc_expect_ready(
         let now = tokio::time::Instant::now();
         if now >= next_report {
             next_report = now + std::time::Duration::from_secs(5);
-            let (access, known) = describe_keyhive_state(repo, doc_id).await;
+            let (access, known) = describe_keyhive_state(repo, doc_id.clone()).await;
             let ledger = super::keyhive::describe_ledger(repo).await?;
             tracing::warn!(
                 %doc_id,
@@ -296,11 +303,11 @@ pub async fn sync_doc_bidirectional(
     repo_b: &Arc<crate::BigRepo>,
     doc_id: DocumentId,
 ) -> Res<(crate::BigDocHandle, crate::BigDocHandle)> {
-    conn_a_to_b.sync_doc_with_peer(doc_id).await?;
-    conn_b_to_a.sync_doc_with_peer(doc_id).await?;
+    conn_a_to_b.sync_doc_with_peer(doc_id.clone()).await?;
+    conn_b_to_a.sync_doc_with_peer(doc_id.clone()).await?;
     repo_a.wait_for_quiescence(None).await?;
     repo_b.wait_for_quiescence(None).await?;
-    let handle_a = expect_ready(repo_a, doc_id).await?;
+    let handle_a = expect_ready(repo_a, doc_id.clone()).await?;
     let handle_b = expect_ready(repo_b, doc_id).await?;
     Ok((handle_a, handle_b))
 }
@@ -325,7 +332,7 @@ pub async fn expect_ready(
         let now = tokio::time::Instant::now();
         if now >= next_report {
             next_report = now + std::time::Duration::from_secs(5);
-            let (access, known) = describe_keyhive_state(repo, doc_id).await;
+            let (access, known) = describe_keyhive_state(repo, doc_id.clone()).await;
             let ledger = super::keyhive::describe_ledger(repo).await?;
             tracing::warn!(
                 %doc_id,
@@ -358,11 +365,15 @@ pub(crate) async fn describe_keyhive_state(
     repo: &crate::BigRepo,
     doc_id: DocumentId,
 ) -> (Option<Access>, bool) {
-    let Ok(local) = ed25519_dalek::VerifyingKey::from_bytes(repo.local_peer_id().as_bytes()) else {
+    let Ok(local) = ed25519_dalek::VerifyingKey::from_bytes(
+        &repo.local_peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+    ) else {
         return (None, false);
     };
     let local = keyhive_core::principal::identifier::Identifier::from(local);
-    let Ok(doc) = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes()) else {
+    let Ok(doc) =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+    else {
         return (None, false);
     };
     let doc_ident = keyhive_core::principal::identifier::Identifier::from(doc);
@@ -371,7 +382,7 @@ pub(crate) async fn describe_keyhive_state(
     let known = keyhive
         .document_ids()
         .await
-        .contains(&big_sync_core::ObjId::new(doc_id.into_bytes()));
+        .contains(&big_sync_core::ObjKey::new(doc_id.as_bytes()));
     (access, known)
 }
 

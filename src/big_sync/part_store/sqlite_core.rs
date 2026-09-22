@@ -2,223 +2,10 @@ use crate::interlude::*;
 
 use big_sync_core::part_store::{CursorIndex, ObjPayload};
 use big_sync_core::rpc::{BUCKET_DEAD_FP_SEED, BUCKET_LIVE_FP_SEED, BucketSummary};
-use big_sync_core::{BuckId, Byte32Id, Fingerprint, ObjId, PartId, PeerId};
+use big_sync_core::{BuckId, ByteKey, Fingerprint, ObjKey, PartKey, PeerKey};
 
 use sqlx::{QueryBuilder, Row};
 use sqlx_utils_rs::SqlCtx;
-
-// ---------------------------------------------------------------------------
-// PendingSubscription — shared atomics-based state machine used by the
-// subscription replay → live handoff in both memory and SQLite stores.
-// ---------------------------------------------------------------------------
-
-pub const SUB_REPLAYING_CLEAN: u8 = 0;
-pub const SUB_REPLAYING_DIRTY: u8 = 1;
-pub const SUB_FINALIZING: u8 = 2;
-pub const SUB_REPLAY_DONE: u8 = 3;
-
-pub struct PendingSubscription {
-    pub state: std::sync::atomic::AtomicU8,
-}
-
-impl PendingSubscription {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            state: std::sync::atomic::AtomicU8::new(SUB_REPLAYING_CLEAN),
-        })
-    }
-
-    pub fn mark_dirty(&self) -> bool {
-        loop {
-            let state = self.state.load(std::sync::atomic::Ordering::Acquire);
-            match state {
-                SUB_REPLAYING_CLEAN | SUB_FINALIZING => {
-                    if self
-                        .state
-                        .compare_exchange(
-                            state,
-                            SUB_REPLAYING_DIRTY,
-                            std::sync::atomic::Ordering::AcqRel,
-                            std::sync::atomic::Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        return false;
-                    }
-                }
-                SUB_REPLAYING_DIRTY => return false,
-                SUB_REPLAY_DONE => return true,
-                _ => panic!("invalid subscription state {state}"),
-            }
-        }
-    }
-
-    pub fn begin_finalization(&self) -> bool {
-        self.state
-            .compare_exchange(
-                SUB_REPLAYING_CLEAN,
-                SUB_FINALIZING,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
-    }
-
-    pub fn become_ready(&self) -> bool {
-        self.state
-            .compare_exchange(
-                SUB_FINALIZING,
-                SUB_REPLAY_DONE,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
-    }
-}
-
-pub struct Subscription<T> {
-    pub id: uuid::Uuid,
-    pub sender: big_sync_core::mpsc::Sender<T>,
-    pub pending: Arc<PendingSubscription>,
-}
-
-pub struct ReplayBus<T> {
-    subs: std::sync::RwLock<HashMap<uuid::Uuid, Arc<Subscription<T>>>>,
-    pending: std::sync::RwLock<HashSet<uuid::Uuid>>,
-    live: std::sync::RwLock<HashSet<uuid::Uuid>>,
-    channel_name: Arc<str>,
-}
-
-impl<T> ReplayBus<T> {
-    pub fn new(channel_name: impl Into<Arc<str>>) -> Arc<Self> {
-        Arc::new(Self {
-            subs: std::sync::RwLock::new(HashMap::new()),
-            pending: std::sync::RwLock::new(HashSet::new()),
-            live: std::sync::RwLock::new(HashSet::new()),
-            channel_name: channel_name.into(),
-        })
-    }
-
-    pub fn register(&self) -> (Arc<Subscription<T>>, big_sync_core::mpsc::Receiver<T>) {
-        let (tx, rx) =
-            big_sync_core::mpsc::unbounded(Arc::clone(&self.channel_name), "caller".into());
-        let id = uuid::Uuid::new_v4();
-        let sub = Arc::new(Subscription {
-            id,
-            sender: tx,
-            pending: PendingSubscription::new(),
-        });
-        self.subs
-            .write()
-            .expect(ERROR_MUTEX)
-            .insert(id, Arc::clone(&sub));
-        self.pending.write().expect(ERROR_MUTEX).insert(id);
-        (sub, rx)
-    }
-
-    pub fn remove(&self, id: uuid::Uuid) {
-        self.subs.write().expect(ERROR_MUTEX).remove(&id);
-        self.pending.write().expect(ERROR_MUTEX).remove(&id);
-        self.live.write().expect(ERROR_MUTEX).remove(&id);
-    }
-
-    pub fn promote_to_live(&self, id: uuid::Uuid) {
-        let mut pending = self.pending.write().expect(ERROR_MUTEX);
-        let mut live = self.live.write().expect(ERROR_MUTEX);
-        if pending.remove(&id) {
-            live.insert(id);
-        }
-    }
-}
-
-impl<T: Clone + Send + 'static> ReplayBus<T> {
-    pub fn broadcast(&self, item: T) {
-        let mut dead = Vec::new();
-        {
-            // Snapshot the live set under the subs read lock (subs → live
-            // lock order, matching `remove`/`promote_to_live`) so no
-            // per-event id Vec is allocated.
-            let subs = self.subs.read().expect(ERROR_MUTEX);
-            let live = self.live.read().expect(ERROR_MUTEX);
-            for id in live.iter().copied() {
-                if let Some(sub) = subs.get(&id).cloned()
-                    && sub.sender.try_send(item.clone()).is_err()
-                {
-                    dead.push(id);
-                }
-            }
-        }
-        {
-            let subs = self.subs.read().expect(ERROR_MUTEX);
-            let pending = self.pending.read().expect(ERROR_MUTEX);
-            for id in pending.iter().copied() {
-                if let Some(sub) = subs.get(&id).cloned()
-                    && sub.pending.mark_dirty()
-                    && sub.sender.try_send(item.clone()).is_err()
-                {
-                    dead.push(id);
-                }
-            }
-        }
-        if !dead.is_empty() {
-            for id in dead {
-                self.remove(id);
-            }
-        }
-    }
-}
-
-pub async fn run_replay_loop<T, C, F, Fut>(
-    bus: Arc<ReplayBus<T>>,
-    sub: Arc<Subscription<T>>,
-    mut cursor: C,
-    mut fetch_page: F,
-) where
-    T: Clone + Send + 'static,
-    C: Copy + Send + 'static,
-    F: FnMut(C) -> Fut,
-    Fut: std::future::Future<Output = eyre::Result<(Vec<T>, Option<C>)>>,
-{
-    loop {
-        sub.pending
-            .state
-            .store(SUB_REPLAYING_CLEAN, std::sync::atomic::Ordering::Release);
-        let (items, next_cursor) = match fetch_page(cursor).await {
-            Ok(res) => res,
-            Err(err) => {
-                tracing::warn!(?err, "replay fetch_page failed; dropping subscription");
-                bus.remove(sub.id);
-                return;
-            }
-        };
-        let count = items.len();
-        for item in items {
-            if sub.sender.send(item).await.is_err() {
-                bus.remove(sub.id);
-                return;
-            }
-        }
-        // A page with no next cursor is the final page: finalize even if it
-        // carried items. Re-fetching the same cursor would resend duplicates
-        // forever.
-        let has_next = next_cursor.is_some();
-        if let Some(nc) = next_cursor {
-            cursor = nc;
-        }
-        if count != 0 && has_next {
-            continue;
-        }
-        if sub.pending.begin_finalization() {
-            if sub.pending.become_ready() {
-                bus.promote_to_live(sub.id);
-                return;
-            }
-        } else if sub.pending.become_ready() {
-            bus.promote_to_live(sub.id);
-            return;
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Stable Access encode / decode
@@ -268,7 +55,7 @@ impl BucketSummaryRow {
     pub fn apply_transition(
         &mut self,
         buck_id: BuckId,
-        obj_id: ObjId,
+        obj_id: ObjKey,
         cursor: CursorIndex,
         old: &MemberState,
         new: &MemberState,
@@ -281,7 +68,7 @@ impl BucketSummaryRow {
                 self.live_fp = self.live_fp.wrapping_sub(
                     Fingerprint::new(
                         &BUCKET_LIVE_FP_SEED,
-                        &("big-sync-bucket-live-v1", buck_id, obj_id, payload),
+                        &("big-sync-bucket-live-v1", buck_id, obj_id.clone(), payload),
                     )
                     .as_u64(),
                 );
@@ -291,7 +78,7 @@ impl BucketSummaryRow {
                 self.dead_fp = self.dead_fp.wrapping_sub(
                     Fingerprint::new(
                         &BUCKET_DEAD_FP_SEED,
-                        &("big-sync-bucket-dead-v1", buck_id, obj_id),
+                        &("big-sync-bucket-dead-v1", buck_id, obj_id.clone()),
                     )
                     .as_u64(),
                 );
@@ -334,7 +121,6 @@ pub enum MemberState {
     Dead,
 }
 
-pub const EVENT_ADDED: i64 = 0;
 pub const EVENT_CHANGED: i64 = 1;
 pub const EVENT_REMOVED: i64 = 2;
 
@@ -409,19 +195,19 @@ impl SqliteCore {
     // ID codecs (static helpers)
     // -----------------------------------------------------------------------
 
-    pub fn id_blob(id: Byte32Id) -> Vec<u8> {
+    pub fn id_blob(id: ByteKey) -> Vec<u8> {
         id.into_bytes().to_vec()
     }
 
-    pub fn part_blob(id: PartId) -> Vec<u8> {
+    pub fn part_blob(id: PartKey) -> Vec<u8> {
         Self::id_blob(id.0)
     }
 
-    pub fn obj_blob(id: ObjId) -> Vec<u8> {
+    pub fn obj_blob(id: ObjKey) -> Vec<u8> {
         Self::id_blob(id.0)
     }
 
-    pub fn peer_blob(id: PeerId) -> Vec<u8> {
+    pub fn peer_blob(id: PeerKey) -> Vec<u8> {
         Self::id_blob(id.0)
     }
 
@@ -441,16 +227,16 @@ impl SqliteCore {
         u64::from_ne_bytes(value.to_ne_bytes())
     }
 
-    pub fn part_from_blob(blob: Vec<u8>) -> PartId {
-        PartId(Byte32Id::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
+    pub fn part_from_blob(blob: Vec<u8>) -> PartKey {
+        PartKey::new(blob)
     }
 
-    pub fn obj_from_blob(blob: Vec<u8>) -> ObjId {
-        ObjId(Byte32Id::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
+    pub fn obj_from_blob(blob: Vec<u8>) -> ObjKey {
+        ObjKey::new(blob)
     }
 
-    pub fn peer_from_blob(blob: Vec<u8>) -> PeerId {
-        PeerId(Byte32Id::new(blob.try_into().expect(ERROR_IMPOSSIBLE)))
+    pub fn peer_from_blob(blob: Vec<u8>) -> PeerKey {
+        PeerKey::new(blob)
     }
 
     // -----------------------------------------------------------------------
@@ -460,7 +246,7 @@ impl SqliteCore {
     pub async fn ensure_part_ref(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        part_id: PartId,
+        part_id: PartKey,
     ) -> Res<i64> {
         let row = sqlx::query!(
             "INSERT INTO big_sync_parts(scope_id, part_id)
@@ -478,22 +264,25 @@ impl SqliteCore {
     pub async fn ensure_obj_ref(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        obj_id: ObjId,
+        obj_id: ObjKey,
     ) -> Res<i64> {
+        let buck_index = i64::from(BuckId::deepest_from_obj_key(&obj_id).index());
         let row = sqlx::query!(
-            "INSERT INTO big_sync_objs(scope_id, obj_id)
-             VALUES (?1, ?2)
-             ON CONFLICT(scope_id, obj_id) DO UPDATE SET obj_id = excluded.obj_id
+            "INSERT INTO big_sync_objs(scope_id, obj_id, buck_index)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(scope_id, obj_id) DO UPDATE SET obj_id = excluded.obj_id,
+                                                         buck_index = excluded.buck_index
              RETURNING obj_ref",
             self.scope_id,
-            Self::obj_blob(obj_id)
+            Self::obj_blob(obj_id),
+            buck_index
         )
         .fetch_one(&mut **tx)
         .await?;
         Ok(row.obj_ref)
     }
 
-    pub async fn find_part_ref(&self, part_id: PartId) -> Res<Option<i64>> {
+    pub async fn find_part_ref(&self, part_id: PartKey) -> Res<Option<i64>> {
         Ok(sqlx::query_scalar!(
             "SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?2",
             self.scope_id,
@@ -503,7 +292,7 @@ impl SqliteCore {
         .await?)
     }
 
-    pub async fn find_obj_ref(&self, obj_id: ObjId) -> Res<Option<i64>> {
+    pub async fn find_obj_ref(&self, obj_id: ObjKey) -> Res<Option<i64>> {
         Ok(sqlx::query_scalar!(
             "SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2",
             self.scope_id,
@@ -573,7 +362,7 @@ impl SqliteCore {
 
     pub async fn bucket_summary_for_path(
         &self,
-        part_id: PartId,
+        part_id: PartKey,
         path: BuckId,
     ) -> Res<BucketSummary> {
         let row = sqlx::query!(
@@ -624,8 +413,8 @@ impl SqliteCore {
     pub async fn load_member_state(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        part_id: PartId,
-        obj_id: ObjId,
+        part_id: PartKey,
+        obj_id: ObjKey,
     ) -> Res<MemberState> {
         let row = sqlx::query!(
             "SELECT members.event_type, objs.payload_json
@@ -670,15 +459,16 @@ impl SqliteCore {
     pub async fn apply_bucket_transition(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        part_id: PartId,
-        obj_id: ObjId,
+        part_id: PartKey,
+        obj_id: ObjKey,
         cursor: CursorIndex,
         old: &MemberState,
         new: &MemberState,
     ) -> Res<()> {
         let part_ref = self.ensure_part_ref(tx, part_id).await?;
+        let deepest = BuckId::deepest_from_obj_key(&obj_id);
         let bucket_ids: Vec<_> = (0..=self.bucket_depth)
-            .map(|level| BuckId::from_obj_id(level, &obj_id))
+            .map(|level| deepest.to_level(level))
             .collect();
         let mut query = QueryBuilder::<sqlx::Sqlite>::new(
             "SELECT buck_id, changed_at, live_count, dead_count, live_fp, dead_fp
@@ -714,7 +504,7 @@ impl SqliteCore {
         }
         for buck_id in bucket_ids {
             let mut summary = current.remove(&buck_id).unwrap_or_default();
-            summary.apply_transition(buck_id, obj_id, cursor, old, new);
+            summary.apply_transition(buck_id, obj_id.clone(), cursor, old, new);
             sqlx::query!(
                 "INSERT INTO big_sync_buckets(
                     scope_id, part_ref, buck_id, level, changed_at,

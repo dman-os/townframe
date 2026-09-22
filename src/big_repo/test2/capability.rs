@@ -19,6 +19,7 @@
 use super::harness::{Node, Pair, fixtures, keyhive as kh_snap, topo::ShutdownGuard};
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -66,7 +67,7 @@ async fn grant_and_sync(
     access: Access,
 ) -> crate::Res<crate::BigDocHandle> {
     let agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
-    fixtures::grant_and_propagate(pair, doc_id, &agent, access).await?;
+    fixtures::grant_and_propagate(pair, doc_id.clone(), &agent, access).await?;
     fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await
 }
 
@@ -74,15 +75,18 @@ async fn grant_and_sync(
 /// keyhive queries.
 fn right_agent_id(pair: &Pair) -> keyhive_core::principal::identifier::Identifier {
     let peer = pair.right().peer_id();
-    let bytes = peer.as_bytes();
+    let bytes: [u8; 32] = peer
+        .as_bytes()
+        .try_into()
+        .expect("peer id must be a verifying key");
     let vk =
-        ed25519_dalek::VerifyingKey::from_bytes(bytes).expect("peer id must be a verifying key");
+        ed25519_dalek::VerifyingKey::from_bytes(&bytes).expect("peer id must be a verifying key");
     keyhive_core::principal::identifier::Identifier::from(vk)
 }
 
 /// Document identifier for direct keyhive queries.
 fn doc_identifier(doc_id: crate::DocumentId) -> keyhive_core::principal::identifier::Identifier {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
         .expect("doc id must be a verifying key");
     keyhive_core::principal::identifier::Identifier::from(vk)
 }
@@ -102,7 +106,7 @@ async fn tier6_downgrade_edit_to_read() -> crate::Res<()> {
     let pair = Pair::boot(80, 81, "Owner", "Editor").await?;
 
     let (owner_doc, doc_id) = create_initial(&pair, "downgrade-base").await?;
-    let editor_doc = grant_and_sync(&pair, doc_id, Access::Edit).await?;
+    let editor_doc = grant_and_sync(&pair, doc_id.clone(), Access::Edit).await?;
     assert_eq!(read_title(&editor_doc).await, "downgrade-base");
 
     // Editor writes content (Edit access works).
@@ -116,7 +120,8 @@ async fn tier6_downgrade_edit_to_read() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     let owner_doc2 =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&owner_doc2, "phase").await.as_deref(),
         Some("editor-writes")
@@ -128,11 +133,11 @@ async fn tier6_downgrade_edit_to_read() -> crate::Res<()> {
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, reader_agent.clone())
+        .revoke_doc_access(doc_id.clone(), reader_agent.clone())
         .await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
 
     pair.left_conn().sync_keyhive_with_peer().await?;
@@ -140,7 +145,8 @@ async fn tier6_downgrade_edit_to_read() -> crate::Res<()> {
 
     // Reader can still materialise pre-existing content.
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc).await, "downgrade-base");
     assert_eq!(
         read_text(&reader_doc, "phase").await.as_deref(),
@@ -172,12 +178,15 @@ async fn tier6_downgrade_edit_to_read() -> crate::Res<()> {
         // propagate: sync back to owner and check.
         pair.right_conn().sync_keyhive_with_peer().await?;
         pair.left_conn().sync_keyhive_with_peer().await?;
-        let owner_sync = pair.left_conn().sync_doc_with_peer(doc_id).await;
+        let owner_sync = pair.left_conn().sync_doc_with_peer(doc_id.clone()).await;
         match owner_sync {
             Ok(()) => {
-                let owner_handle =
-                    fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id)
-                        .await?;
+                let owner_handle = fixtures::sync_doc_expect_ready(
+                    pair.left_conn(),
+                    &pair.left().repo,
+                    doc_id.clone(),
+                )
+                .await?;
                 // The owner should NOT see the "downgraded-try-write" status.
                 assert_ne!(
                     read_text(&owner_handle, "status").await.as_deref(),
@@ -200,7 +209,7 @@ async fn tier6_downgrade_edit_to_read() -> crate::Res<()> {
         .right()
         .repo
         .keyhive()
-        .agent_access_on(&right_agent_id(&pair), doc_identifier(doc_id))
+        .agent_access_on(&right_agent_id(&pair), doc_identifier(doc_id.clone()))
         .await;
     assert_eq!(
         acc,
@@ -239,7 +248,7 @@ async fn tier6_deep_chain_transitive_access() -> crate::Res<()> {
     // G1 has Read on doc.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, g1.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), g1.clone(), Access::Read)
         .await?;
 
     // G2 ∈ G1 (Read), user ∈ G2 (Read).
@@ -260,7 +269,7 @@ async fn tier6_deep_chain_transitive_access() -> crate::Res<()> {
         .left()
         .repo
         .keyhive()
-        .agent_access_on(&right_agent_id(&pair), doc_identifier(doc_id))
+        .agent_access_on(&right_agent_id(&pair), doc_identifier(doc_id.clone()))
         .await;
     assert!(
         has.is_some(),
@@ -274,7 +283,8 @@ async fn tier6_deep_chain_transitive_access() -> crate::Res<()> {
 
     // Verify user can materialise and read pre-grant content.
     let user_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&user_doc).await, "deep-chain");
 
     // Each intermediate group still exists and has access.
@@ -283,7 +293,7 @@ async fn tier6_deep_chain_transitive_access() -> crate::Res<()> {
         .left()
         .repo
         .keyhive()
-        .agent_access_on(&g1_ident, doc_identifier(doc_id))
+        .agent_access_on(&g1_ident, doc_identifier(doc_id.clone()))
         .await;
     assert!(g1_has.is_some(), "G1 must have access on the doc");
 
@@ -292,7 +302,7 @@ async fn tier6_deep_chain_transitive_access() -> crate::Res<()> {
         .left()
         .repo
         .keyhive()
-        .agent_access_on(&g2_ident, doc_identifier(doc_id))
+        .agent_access_on(&g2_ident, doc_identifier(doc_id.clone()))
         .await;
     assert!(
         g2_has_doc.is_some(),
@@ -334,18 +344,18 @@ async fn tier6_document_as_member() -> crate::Res<()> {
     drop(doc_b);
 
     // Resolve document B as a Keyhive agent.
-    let doc_b_agent = fixtures::document_agent(&pair.left().repo, doc_b_id).await?;
+    let doc_b_agent = fixtures::document_agent(&pair.left().repo, doc_b_id.clone()).await?;
 
     // Grant document B Read access to document A.
     pair.left()
         .repo
-        .grant_doc_access(doc_a_id, doc_b_agent, Access::Read)
+        .grant_doc_access(doc_a_id.clone(), doc_b_agent, Access::Read)
         .await?;
 
     // The right-side node is not directly a party to this grant, but the
     // owner side's keyhive must reflect the delegation.
     let doc_b_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&doc_b_id.into_bytes())
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_b_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .expect("doc id must be a verifying key"),
     );
     let doc_a_ident = doc_identifier(doc_a_id);
@@ -415,7 +425,7 @@ async fn tier6_delegate_before_define() -> crate::Res<()> {
     // Grant the group access.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group.clone(), Access::Read)
         .await?;
 
     pair.left_conn().sync_keyhive_with_peer().await?;
@@ -431,7 +441,8 @@ async fn tier6_delegate_before_define() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let member_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&member_doc).await, "delegate-before-define");
 
     kh_snap::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
@@ -474,23 +485,24 @@ async fn tier6_escalation_rejected() -> crate::Res<()> {
     let (owner_doc, doc_id) = create_initial(&pair, "escalation").await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc).await, "escalation");
 
     // Read-only node tries to grant Edit on the doc.
     // This must fail because the read-only node is not the owner and has no
     // delegation authority over the document.
-    let pre_state = kh_snap::document_snapshot(&pair.right().repo, doc_id).await?;
+    let pre_state = kh_snap::document_snapshot(&pair.right().repo, doc_id.clone()).await?;
     let err = pair
         .right()
         .repo
-        .grant_doc_access(doc_id, escalator_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), escalator_agent.clone(), Access::Edit)
         .await
         .expect_err("grant through read-only node must be rejected");
     let err_str = err.to_string().to_lowercase();
@@ -503,7 +515,7 @@ async fn tier6_escalation_rejected() -> crate::Res<()> {
     );
 
     // The document's keyhive state must not have changed.
-    let post_state = kh_snap::document_snapshot(&pair.right().repo, doc_id).await?;
+    let post_state = kh_snap::document_snapshot(&pair.right().repo, doc_id.clone()).await?;
     assert_eq!(
         pre_state, post_state,
         "document keyhive state must not change after rejected escalation"
@@ -511,14 +523,20 @@ async fn tier6_escalation_rejected() -> crate::Res<()> {
 
     // Escalator must not magically gain access.
     let esc_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(guard.node(0).peer_id().as_bytes())
-            .expect("peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(0)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("peer id must be a verifying key"),
     );
     let esc_has = pair
         .left()
         .repo
         .keyhive()
-        .agent_access_on(&esc_ident, doc_identifier(doc_id))
+        .agent_access_on(&esc_ident, doc_identifier(doc_id.clone()))
         .await;
     assert!(
         esc_has.is_none(),
@@ -575,11 +593,11 @@ async fn tier6_unauthorized_revocation_fails() -> crate::Res<()> {
     // Owner grants both readers Read access.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_a_agent.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_a_agent.clone(), Access::Read)
         .await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_b_agent.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_b_agent.clone(), Access::Read)
         .await?;
 
     pair.left_conn().sync_keyhive_with_peer().await?;
@@ -588,16 +606,17 @@ async fn tier6_unauthorized_revocation_fails() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let reader_a_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_a_doc).await, "unauth-revoke");
 
     // ReaderA tries to revoke ReaderB's access. This should fail because
     // ReaderA is not the document owner.
-    let pre_state = kh_snap::document_snapshot(&pair.right().repo, doc_id).await?;
+    let pre_state = kh_snap::document_snapshot(&pair.right().repo, doc_id.clone()).await?;
     let err = pair
         .right()
         .repo
-        .revoke_doc_access(doc_id, reader_b_agent.clone())
+        .revoke_doc_access(doc_id.clone(), reader_b_agent.clone())
         .await
         .expect_err("non-owner revocation must be rejected");
     let err_str = err.to_string().to_lowercase();
@@ -610,7 +629,7 @@ async fn tier6_unauthorized_revocation_fails() -> crate::Res<()> {
     );
 
     // State unchanged.
-    let post_state = kh_snap::document_snapshot(&pair.right().repo, doc_id).await?;
+    let post_state = kh_snap::document_snapshot(&pair.right().repo, doc_id.clone()).await?;
     assert_eq!(
         pre_state, post_state,
         "document keyhive state must not change after rejected revocation"
@@ -619,8 +638,14 @@ async fn tier6_unauthorized_revocation_fails() -> crate::Res<()> {
     // Both readers still have access.
     let a_ident = right_agent_id(&pair);
     let b_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(guard.node(0).peer_id().as_bytes())
-            .expect("peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(0)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("peer id must be a verifying key"),
     );
     let doc_kh_id = doc_identifier(doc_id);
     assert!(
@@ -667,12 +692,12 @@ async fn tier6_duplicate_grant_idempotent() -> crate::Res<()> {
     // First grant.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent.clone(), Access::Read)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
-    let after_first = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let after_first = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
     let cgka_after_first = after_first.cgka_operation_hashes.clone();
     let member_count_first = after_first.members.len();
 
@@ -681,14 +706,14 @@ async fn tier6_duplicate_grant_idempotent() -> crate::Res<()> {
     let _result = pair
         .left()
         .repo
-        .grant_doc_access(doc_id, reader_agent.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent.clone(), Access::Read)
         .await;
     // The grant may succeed (with a new checkpoint) or return an error
     // (already present). Either way the CGKA ops must not have grown.
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
-    let after_second = kh_snap::document_snapshot(&pair.left().repo, doc_id).await?;
+    let after_second = kh_snap::document_snapshot(&pair.left().repo, doc_id.clone()).await?;
     assert_eq!(
         after_second.cgka_operation_hashes, cgka_after_first,
         "duplicate grant must not add new CGKA operations"
@@ -701,7 +726,8 @@ async fn tier6_duplicate_grant_idempotent() -> crate::Res<()> {
 
     // Reader must still be able to read.
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc).await, "dup-grant");
 
     kh_snap::assert_document_snapshot_equal(pair.left(), pair.right(), doc_id).await?;
@@ -726,13 +752,14 @@ async fn tier6_revocation_preserves_prior_encrypted_content() -> crate::Res<()> 
     // Grant Edit, sync, and let the editor write content.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), editor_agent.clone(), Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     editor_doc
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "phase", "pre-revoke"))
@@ -742,7 +769,8 @@ async fn tier6_revocation_preserves_prior_encrypted_content() -> crate::Res<()> 
     pair.right_conn().sync_keyhive_with_peer().await?;
     // Sync the editor's write to the owner BEFORE revocation.
     let _owner_doc =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
 
     // Verify owner sees the pre-revoke content before revocation.
     assert_eq!(
@@ -756,7 +784,7 @@ async fn tier6_revocation_preserves_prior_encrypted_content() -> crate::Res<()> 
     // Revoke the editor.
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, editor_agent.clone())
+        .revoke_doc_access(doc_id.clone(), editor_agent.clone())
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -768,7 +796,7 @@ async fn tier6_revocation_preserves_prior_encrypted_content() -> crate::Res<()> 
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
     assert_eq!(
         read_text(&owner_recheck, "phase").await.as_deref(),
         Some("pre-revoke"),
@@ -808,13 +836,14 @@ async fn tier6_stale_revoked_proof_rejected() -> crate::Res<()> {
     // Grant Edit, sync, editor writes.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), editor_agent.clone(), Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     editor_doc
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "phase", "before-revoke"))
@@ -828,7 +857,7 @@ async fn tier6_stale_revoked_proof_rejected() -> crate::Res<()> {
     // Revoke the editor.
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, editor_agent.clone())
+        .revoke_doc_access(doc_id.clone(), editor_agent.clone())
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -840,10 +869,12 @@ async fn tier6_stale_revoked_proof_rejected() -> crate::Res<()> {
         .keyhive()
         .agent_access_on(
             &keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(pair.right().peer_id().as_bytes())
-                    .expect("peer id must be a verifying key"),
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &pair.right().peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .expect("peer id must be a verifying key"),
             ),
-            doc_identifier(doc_id),
+            doc_identifier(doc_id.clone()),
         )
         .await;
     assert!(has.is_none(), "revoked user must have no effective access");
@@ -870,7 +901,7 @@ async fn tier6_stale_revoked_proof_rejected() -> crate::Res<()> {
     if write_result.is_ok() {
         pair.right_conn().sync_keyhive_with_peer().await?;
         pair.left_conn().sync_keyhive_with_peer().await?;
-        let sync_result = pair.right_conn().sync_doc_with_peer(doc_id).await;
+        let sync_result = pair.right_conn().sync_doc_with_peer(doc_id.clone()).await;
         // Sync may fail entirely because the transport rejects encrypted
         // content from a revoked member, or it may succeed but the owner
         // won't apply the decrypted changes.
@@ -884,7 +915,7 @@ async fn tier6_stale_revoked_proof_rejected() -> crate::Res<()> {
             Err(err) => return Err(crate::ferr!("unexpected sync error: {err:?}")),
         }
         if sync_result.is_ok() {
-            pair.left_conn().sync_doc_with_peer(doc_id).await?;
+            pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
             let owner_handle = pair
                 .left()
                 .repo
@@ -937,12 +968,12 @@ async fn tier6_two_path_revocation() -> crate::Res<()> {
     // Path 1: direct grant to user.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, user_agent.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), user_agent.clone(), Access::Read)
         .await?;
     // Path 2: group G has Read, user is in G.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group.clone(), Access::Read)
         .await?;
     pair.left()
         .repo
@@ -956,7 +987,7 @@ async fn tier6_two_path_revocation() -> crate::Res<()> {
         pair.left()
             .repo
             .keyhive()
-            .agent_access_on(&right_agent_id(&pair), doc_identifier(doc_id))
+            .agent_access_on(&right_agent_id(&pair), doc_identifier(doc_id.clone()))
             .await
     };
 
@@ -967,14 +998,15 @@ async fn tier6_two_path_revocation() -> crate::Res<()> {
     );
 
     let user_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&user_doc).await, "two-path");
     drop(user_doc);
 
     // --- Revoke the DIRECT path (user removed from doc members).
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, user_agent.clone())
+        .revoke_doc_access(doc_id.clone(), user_agent.clone())
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -987,14 +1019,15 @@ async fn tier6_two_path_revocation() -> crate::Res<()> {
 
     // User can still read.
     let user_doc2 =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&user_doc2).await, "two-path");
     drop(user_doc2);
 
     // --- Revoke the GROUP path (G removed from doc members).
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, group.clone())
+        .revoke_doc_access(doc_id.clone(), group.clone())
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
@@ -1006,7 +1039,7 @@ async fn tier6_two_path_revocation() -> crate::Res<()> {
     );
 
     // Sync must not materialise.
-    let sync_result = pair.right_conn().sync_doc_with_peer(doc_id).await;
+    let sync_result = pair.right_conn().sync_doc_with_peer(doc_id.clone()).await;
     match sync_result {
         Ok(())
         | Err(
@@ -1049,13 +1082,14 @@ async fn tier6_offline_stale_write_after_revoke() -> crate::Res<()> {
     // Grant Edit, sync, editor syncs the initial doc.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), editor_agent.clone(), Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let _editor_sync =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     drop(_editor_sync);
 
     // --- Go offline.
@@ -1077,7 +1111,7 @@ async fn tier6_offline_stale_write_after_revoke() -> crate::Res<()> {
     // Owner revokes the editor BEFORE reconnect.
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, editor_agent)
+        .revoke_doc_access(doc_id.clone(), editor_agent)
         .await?;
 
     // --- Reconnect.
@@ -1087,7 +1121,7 @@ async fn tier6_offline_stale_write_after_revoke() -> crate::Res<()> {
 
     // Editor tries to sync the offline write. The transport may accept the
     // bytes, but the owner's runtime must not materialise the stale content.
-    let sync_result = pair.right_conn().sync_doc_with_peer(doc_id).await;
+    let sync_result = pair.right_conn().sync_doc_with_peer(doc_id.clone()).await;
     match sync_result {
         Ok(())
         | Err(
@@ -1100,7 +1134,7 @@ async fn tier6_offline_stale_write_after_revoke() -> crate::Res<()> {
 
     // Whether the sync returns Ok or Err, the owner must NOT see "stale" = "offline-write".
     if sync_result.is_ok() {
-        pair.left_conn().sync_doc_with_peer(doc_id).await?;
+        pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
     }
     let owner_handle = pair
         .left()
@@ -1140,12 +1174,13 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
     // --- Epoch 1: grant Edit, sync, editor writes pre-revoke content.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), editor_agent.clone(), Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
 
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&editor_doc, "phase").await.as_deref(),
         Some("epoch-1")
@@ -1161,12 +1196,14 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
     // Sync epoch-1 content to owner.
     pair.right_conn().sync_keyhive_with_peer().await?;
     let _owner_sync =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
     drop(_owner_sync);
 
     // Owner verifies pre-revoke content.
     let owner_before_revoke =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&owner_before_revoke, "note").await.as_deref(),
         Some("pre-revoke")
@@ -1176,7 +1213,7 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
     // --- Revoke the editor.
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, editor_agent.clone())
+        .revoke_doc_access(doc_id.clone(), editor_agent.clone())
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
 
@@ -1185,7 +1222,7 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
         .left()
         .repo
         .keyhive()
-        .agent_access_on(&right_agent_id(&pair), doc_identifier(doc_id))
+        .agent_access_on(&right_agent_id(&pair), doc_identifier(doc_id.clone()))
         .await;
     assert!(
         editor_has.is_none(),
@@ -1195,7 +1232,7 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
     // --- Regrant Edit (new epoch).
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), editor_agent.clone(), Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     // Keyhive completion and the incremental BigSync access-index refresh are
@@ -1204,7 +1241,8 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
     pair.right().repo.wait_for_quiescence(None).await?;
 
     let editor_regranted =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // Pre-revoke content remains readable after revocation+regrant.
     assert_eq!(
@@ -1224,9 +1262,10 @@ async fn tier6_regrant_after_revoke_new_epoch() -> crate::Res<()> {
     // Sync epoch-2 to the owner.
     pair.right_conn().sync_keyhive_with_peer().await?;
     let owner_epoch2 =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
-    let owner_state = pair.left().repo.doc_head_state(doc_id).await?;
-    let editor_state = pair.right().repo.doc_head_state(doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
+    let owner_state = pair.left().repo.doc_head_state(doc_id.clone()).await?;
+    let editor_state = pair.right().repo.doc_head_state(doc_id.clone()).await?;
     assert_eq!(
         read_text(&owner_epoch2, "phase").await.as_deref(),
         Some("epoch-2"),
@@ -1310,7 +1349,7 @@ async fn tier6_concurrent_grant_revoke_causal() -> crate::Res<()> {
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, alice_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), alice_agent.clone(), Access::Edit)
         .await?;
     guard.node(0).repo.wait_for_quiescence(None).await?;
 
@@ -1322,7 +1361,7 @@ async fn tier6_concurrent_grant_revoke_causal() -> crate::Res<()> {
     guard
         .node(0)
         .repo
-        .revoke_doc_access(doc_id, alice_agent)
+        .revoke_doc_access(doc_id.clone(), alice_agent)
         .await?;
     guard.node(0).repo.wait_for_quiescence(None).await?;
 
@@ -1339,8 +1378,14 @@ async fn tier6_concurrent_grant_revoke_causal() -> crate::Res<()> {
     // All three nodes must now agree: Alice has no access.
     let doc_id_kh = doc_identifier(doc_id);
     let alice_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(guard.node(1).peer_id().as_bytes())
-            .expect("Alice peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(1)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("Alice peer id must be a verifying key"),
     );
     for label in ["owner", "alice", "observer"] {
         let repo = match label {
@@ -1394,13 +1439,14 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
     // Grant Edit, sync.
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), editor_agent.clone(), Access::Edit)
         .await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
     let _editor_sync =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     drop(_editor_sync);
 
     // Editor writes a valid pre-downgrade value (synced to owner).
@@ -1409,7 +1455,7 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
     editor_handle
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "valid", "pre-downgrade"))
@@ -1420,7 +1466,8 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
     pair.right_conn().sync_keyhive_with_peer().await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     let _owner_sync =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
     drop(_owner_sync);
     drop(editor_handle);
 
@@ -1433,7 +1480,7 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
     stale_handle
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "stale", "offline-write"))
@@ -1445,11 +1492,11 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
     // Owner downgrades Editor from Edit to Read (revoke + re-grant Read).
     pair.left()
         .repo
-        .revoke_doc_access(doc_id, editor_agent.clone())
+        .revoke_doc_access(doc_id.clone(), editor_agent.clone())
         .await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, editor_agent.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), editor_agent.clone(), Access::Read)
         .await?;
 
     // --- Reconnect.
@@ -1459,7 +1506,8 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
 
     // Editor syncs the doc — must work (now Read-only).
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
 
     // Pre-existing content is still readable.
     assert_eq!(
@@ -1480,7 +1528,7 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
     assert_ne!(
         read_text(&owner_check, "stale").await.as_deref(),
         Some("offline-write"),
@@ -1494,7 +1542,7 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
     let write_attempt = reader_check
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "attempt", "post-downgrade"))
@@ -1506,7 +1554,7 @@ async fn tier6_offline_downgrade_stale_write_rejected() -> crate::Res<()> {
     if write_attempt.is_ok() {
         pair.right_conn().sync_keyhive_with_peer().await?;
         pair.left_conn().sync_keyhive_with_peer().await?;
-        pair.right_conn().sync_doc_with_peer(doc_id).await?;
+        pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
         let owner_final = pair
             .left()
             .repo
@@ -1553,7 +1601,7 @@ async fn tier6_group_membership_unsynced_doc() -> crate::Res<()> {
     let group = pair.left().repo.create_group_with_parents(vec![]).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, group.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), group.clone(), Access::Read)
         .await?;
     pair.left()
         .repo
@@ -1570,7 +1618,7 @@ async fn tier6_group_membership_unsynced_doc() -> crate::Res<()> {
         .left()
         .repo
         .keyhive()
-        .agent_access_on(&right_agent_id(&pair), doc_identifier(doc_id))
+        .agent_access_on(&right_agent_id(&pair), doc_identifier(doc_id.clone()))
         .await;
     assert!(
         reader_has.is_some(),
@@ -1587,7 +1635,8 @@ async fn tier6_group_membership_unsynced_doc() -> crate::Res<()> {
 
     // Now sync the doc to Reader — they should receive ALL content.
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&reader_doc, "phase").await.as_deref(),
         Some("postgrant"),
@@ -1656,7 +1705,7 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, g1.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), g1.clone(), Access::Read)
         .await?;
     guard
         .node(0)
@@ -1675,10 +1724,16 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
 
     // Verify Reader has Read (not Edit, not Admin).
     let reader_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(guard.node(1).peer_id().as_bytes())
-            .expect("peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(1)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("peer id must be a verifying key"),
     );
-    let doc_id_kh = doc_identifier(doc_id);
+    let doc_id_kh = doc_identifier(doc_id.clone());
     let access = guard
         .node(0)
         .repo
@@ -1693,7 +1748,7 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
 
     // Sync doc to Reader so they have a materialized handle (needed for
     // grant_doc_access to work).
-    reader_owner_conn.sync_doc_with_peer(doc_id).await?;
+    reader_owner_conn.sync_doc_with_peer(doc_id.clone()).await?;
     guard.node(1).repo.wait_for_quiescence(None).await?;
 
     // Capture snapshot before escalation attempts.
@@ -1701,7 +1756,7 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
         let kh = guard.node(0).repo.keyhive().clone_keyhive();
         let kh_doc = kh
             .get_document(keyhive_core::principal::document::id::DocumentId::from(
-                doc_identifier(doc_id),
+                doc_identifier(doc_id.clone()),
             ))
             .await
             .expect("doc in keyhive");
@@ -1720,14 +1775,14 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
     let _err1 = guard
         .node(1)
         .repo
-        .grant_doc_access(doc_id, observer_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), observer_agent.clone(), Access::Edit)
         .await
         .expect_err("Reader attempt to grant Edit must be rejected");
 
     let _revoke_res = guard
         .node(1)
         .repo
-        .revoke_doc_access(doc_id, observer_agent.clone())
+        .revoke_doc_access(doc_id.clone(), observer_agent.clone())
         .await;
 
     // Owner's keyhive must not see Reader with Edit or Admin (no escalation
@@ -1746,8 +1801,14 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
 
     // Observer must not have gained access through the Reader's attempt.
     let obs_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(guard.node(2).peer_id().as_bytes())
-            .expect("peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(2)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("peer id must be a verifying key"),
     );
     let obs_access = guard
         .node(0)
@@ -1764,7 +1825,7 @@ async fn tier6_read_through_nested_group_no_escalation() -> crate::Res<()> {
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, observer_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), observer_agent, Access::Read)
         .await?;
 
     let post_delegations: Vec<_> = {
@@ -1859,32 +1920,32 @@ async fn tier6_conflicting_grants_different_peers() -> crate::Res<()> {
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, alice_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), alice_agent.clone(), Access::Edit)
         .await?;
     guard
         .node(0)
         .repo
-        .grant_doc_access(doc_id, bob_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), bob_agent.clone(), Access::Edit)
         .await?;
 
     // Sync grant to Alice so she can re-grant (needs materialised handle).
     guard.node(0).repo.wait_for_quiescence(None).await?;
     owner_alice.sync_keyhive_with_peer().await?;
     alice_owner.sync_keyhive_with_peer().await?;
-    alice_owner.sync_doc_with_peer(doc_id).await?;
+    alice_owner.sync_doc_with_peer(doc_id.clone()).await?;
     guard.node(1).repo.wait_for_quiescence(None).await?;
 
     // Sync grant to Bob.
     owner_bob.sync_keyhive_with_peer().await?;
     bob_owner.sync_keyhive_with_peer().await?;
-    bob_owner.sync_doc_with_peer(doc_id).await?;
+    bob_owner.sync_doc_with_peer(doc_id.clone()).await?;
     guard.node(2).repo.wait_for_quiescence(None).await?;
 
     // Alice grants Charlie Edit.
     guard
         .node(1)
         .repo
-        .grant_doc_access(doc_id, charlie_agent.clone(), Access::Edit)
+        .grant_doc_access(doc_id.clone(), charlie_agent.clone(), Access::Edit)
         .await?;
     alice_charlie.sync_keyhive_with_peer().await?;
     charlie_alice.sync_keyhive_with_peer().await?;
@@ -1893,16 +1954,22 @@ async fn tier6_conflicting_grants_different_peers() -> crate::Res<()> {
     guard
         .node(2)
         .repo
-        .grant_doc_access(doc_id, charlie_agent.clone(), Access::Read)
+        .grant_doc_access(doc_id.clone(), charlie_agent.clone(), Access::Read)
         .await?;
     bob_charlie.sync_keyhive_with_peer().await?;
     charlie_bob.sync_keyhive_with_peer().await?;
 
     // Charlie's own keyhive must show Read access after receiving both paths.
-    let doc_id_kh = doc_identifier(doc_id);
+    let doc_id_kh = doc_identifier(doc_id.clone());
     let charlie_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(guard.node(3).peer_id().as_bytes())
-            .expect("peer id must be a verifying key"),
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &guard
+                .node(3)
+                .peer_id()
+                .to_bytes32()
+                .expect(ERROR_IMPOSSIBLE),
+        )
+        .expect("peer id must be a verifying key"),
     );
     let charlie_access = guard
         .node(3)
@@ -1930,7 +1997,7 @@ async fn tier6_conflicting_grants_different_peers() -> crate::Res<()> {
     );
 
     // Charlie can sync and materialise the doc.
-    charlie_alice.sync_doc_with_peer(doc_id).await?;
+    charlie_alice.sync_doc_with_peer(doc_id.clone()).await?;
     guard.node(3).repo.wait_for_quiescence(None).await?;
     let charlie_handle = guard
         .node(3)
@@ -1996,28 +2063,28 @@ async fn tier6_doc_as_member_two_hop_chain() -> crate::Res<()> {
     drop(doc_c);
 
     // Resolve document identities.
-    let doc_b_agent = fixtures::document_agent(&pair.left().repo, doc_b_id).await?;
-    let doc_c_agent = fixtures::document_agent(&pair.left().repo, doc_c_id).await?;
+    let doc_b_agent = fixtures::document_agent(&pair.left().repo, doc_b_id.clone()).await?;
+    let doc_c_agent = fixtures::document_agent(&pair.left().repo, doc_c_id.clone()).await?;
 
     // Hop 1: Grant Doc B Read on Doc A.
     pair.left()
         .repo
-        .grant_doc_access(doc_a_id, doc_b_agent, Access::Read)
+        .grant_doc_access(doc_a_id.clone(), doc_b_agent, Access::Read)
         .await?;
 
     // Hop 2: Grant Doc C Read on Doc B.
     pair.left()
         .repo
-        .grant_doc_access(doc_b_id, doc_c_agent, Access::Read)
+        .grant_doc_access(doc_b_id.clone(), doc_c_agent, Access::Read)
         .await?;
 
     // Identifiers for access checks.
     let doc_b_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&doc_b_id.into_bytes())
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_b_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .expect("doc id must be a verifying key"),
     );
     let doc_c_ident = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&doc_c_id.into_bytes())
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_c_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .expect("doc id must be a verifying key"),
     );
 
@@ -2026,7 +2093,7 @@ async fn tier6_doc_as_member_two_hop_chain() -> crate::Res<()> {
         .left()
         .repo
         .keyhive()
-        .agent_access_on(&doc_b_ident, doc_identifier(doc_a_id))
+        .agent_access_on(&doc_b_ident, doc_identifier(doc_a_id.clone()))
         .await;
     assert_eq!(
         doc_b_on_a,

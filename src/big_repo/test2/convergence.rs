@@ -37,7 +37,7 @@ async fn grant_and_sync(
     access: Access,
 ) -> crate::Res<crate::BigDocHandle> {
     let agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
-    fixtures::grant_and_propagate(pair, doc_id, &agent, access).await?;
+    fixtures::grant_and_propagate(pair, doc_id.clone(), &agent, access).await?;
     fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await
 }
 
@@ -46,12 +46,12 @@ async fn tier4_repeated_sync_is_idempotent() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(40, 41, "Owner", "Reader").await?;
     let (owner_doc, doc_id) = new_doc(&pair, "idempotent").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id, Access::Read).await?;
-    let before = pair.right().repo.doc_head_state(doc_id).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone(), Access::Read).await?;
+    let before = pair.right().repo.doc_head_state(doc_id.clone()).await?;
 
-    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
-    let after = pair.right().repo.doc_head_state(doc_id).await?;
+    let after = pair.right().repo.doc_head_state(doc_id.clone()).await?;
     assert_eq!(before.sedimentree_heads, after.sedimentree_heads);
     assert_eq!(before.materialized_heads, after.materialized_heads);
     heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
@@ -65,11 +65,11 @@ async fn tier4_new_data_breaks_convergence_then_restores_it() -> crate::Res<()> 
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(42, 43, "Owner", "Reader").await?;
     let (owner_doc, doc_id) = new_doc(&pair, "before-delta").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id, Access::Read).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone(), Access::Read).await?;
     let before = pair
         .left()
         .repo
-        .doc_head_state(doc_id)
+        .doc_head_state(doc_id.clone())
         .await?
         .sedimentree_heads;
 
@@ -82,7 +82,7 @@ async fn tier4_new_data_breaks_convergence_then_restores_it() -> crate::Res<()> 
     let during = pair
         .left()
         .repo
-        .doc_head_state(doc_id)
+        .doc_head_state(doc_id.clone())
         .await?
         .sedimentree_heads;
     assert_ne!(
@@ -92,7 +92,8 @@ async fn tier4_new_data_breaks_convergence_then_restores_it() -> crate::Res<()> 
 
     drop(reader_doc);
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&reader_doc, "phase").await.as_deref(),
         Some("new-data")
@@ -108,11 +109,11 @@ async fn tier4_delta_sync_advances_only_the_new_frontier() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(44, 45, "Owner", "Reader").await?;
     let (owner_doc, doc_id) = new_doc(&pair, "delta-base").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id, Access::Read).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone(), Access::Read).await?;
     let before = pair
         .right()
         .repo
-        .doc_head_state(doc_id)
+        .doc_head_state(doc_id.clone())
         .await?
         .sedimentree_heads;
 
@@ -125,7 +126,8 @@ async fn tier4_delta_sync_advances_only_the_new_frontier() -> crate::Res<()> {
     pair.left().repo.wait_for_quiescence(None).await?;
     drop(reader_doc);
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     let after = pair
         .right()
         .repo
@@ -150,7 +152,7 @@ async fn tier4_evicted_doc_can_sync_and_materialize_again() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(46, 47, "Owner", "Reader").await?;
     let (owner_doc, doc_id) = new_doc(&pair, "eviction").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id, Access::Read).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone(), Access::Read).await?;
     drop(reader_doc);
 
     owner_doc
@@ -175,7 +177,7 @@ async fn tier4_fork_then_merge_preserves_decryption() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let mut pair = Pair::boot(48, 49, "Owner", "Editor").await?;
     let (owner_doc, doc_id) = new_doc(&pair, "merge-base").await?;
-    let editor_doc = grant_and_sync(&pair, doc_id, Access::Edit).await?;
+    let editor_doc = grant_and_sync(&pair, doc_id.clone(), Access::Edit).await?;
     fixtures::go_offline(&mut pair).await?;
 
     owner_doc
@@ -194,14 +196,16 @@ async fn tier4_fork_then_merge_preserves_decryption() -> crate::Res<()> {
     pair.connect().await?;
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
-    pair.right_conn().sync_doc_with_peer(doc_id).await?;
-    pair.left_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
+    pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
     drop(owner_doc);
     let owner_doc =
-        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.left_conn(), &pair.left().repo, doc_id.clone())
+            .await?;
     drop(editor_doc);
     let editor_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(
         read_text(&owner_doc, "owner_branch").await.as_deref(),
         Some("kept")
@@ -229,7 +233,7 @@ async fn tier4_rapid_fire_then_idle_sync_converges_once() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(50, 51, "Owner", "Reader").await?;
     let (owner_doc, doc_id) = new_doc(&pair, "rapid").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id, Access::Read).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone(), Access::Read).await?;
     drop(reader_doc);
 
     for index in 0..6 {
@@ -241,12 +245,13 @@ async fn tier4_rapid_fire_then_idle_sync_converges_once() -> crate::Res<()> {
             .await??;
     }
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     drop(reader_doc);
-    let before = pair.right().repo.doc_head_state(doc_id).await?;
-    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    let before = pair.right().repo.doc_head_state(doc_id.clone()).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
-    let after = pair.right().repo.doc_head_state(doc_id).await?;
+    let after = pair.right().repo.doc_head_state(doc_id.clone()).await?;
     assert_eq!(before.sedimentree_heads, after.sedimentree_heads);
     let final_reader = pair
         .right()
@@ -274,11 +279,11 @@ async fn tier4_concurrent_edit_while_sync_in_flight() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(55, 56, "Owner", "Editor").await?;
     let (owner_doc, doc_id) = new_doc(&pair, "concurrent-sync").await?;
-    let editor_doc = grant_and_sync(&pair, doc_id, Access::Edit).await?;
+    let editor_doc = grant_and_sync(&pair, doc_id.clone(), Access::Edit).await?;
 
     // All three tasks run concurrently: a doc sync (left→right) while
     // both sides make independent local edits.
-    let sync_fut = pair.left_conn().sync_doc_with_peer(doc_id);
+    let sync_fut = pair.left_conn().sync_doc_with_peer(doc_id.clone());
     let left_edit_fut = owner_doc.with_document(|doc| {
         doc.transact(|tx| tx.put(automerge::ROOT, "field_a", "from_left"))
             .map_err(|err| crate::ferr!("owner concurrent edit failed: {err:?}"))
@@ -296,8 +301,8 @@ async fn tier4_concurrent_edit_while_sync_in_flight() -> crate::Res<()> {
     right_result??;
 
     // Follow-up sync to capture any edits that the in-flight sync missed.
-    pair.right_conn().sync_doc_with_peer(doc_id).await?;
-    pair.left_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
+    pair.left_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.left().repo.wait_for_quiescence(None).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
 
@@ -307,13 +312,13 @@ async fn tier4_concurrent_edit_while_sync_in_flight() -> crate::Res<()> {
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
     let editor_check = pair
         .right()
         .repo
         .get_doc(&doc_id)
         .await?
-        .into_ready(doc_id)?;
+        .into_ready(doc_id.clone())?;
 
     assert_eq!(
         read_text(&owner_check, "field_a").await.as_deref(),

@@ -1455,4 +1455,61 @@ mod tests {
         test_context.stop().await?;
         Ok(())
     }
+
+    /// A peer authors a `Blob` facet as it likes, and the facet's digest is what
+    /// the pin becomes: a reserved `/…` spelling names no blob and must not
+    /// become a pin (from which a path would later be built).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reserved_facet_blob_digest_never_becomes_a_pin() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let drawer = &test_context.drawer_repo;
+        let docs_inventory_doc_id = test_context.rt.rcx.docs_inventory_doc_id.to_string();
+        let reserved = "/etc/daybook-escape".to_string();
+
+        let control_blob_id = test_context
+            .rt
+            .blobs_repo
+            .put(b"reserved-spelling-control-blob")
+            .await?;
+        let control_hash = control_blob_id.to_string();
+
+        test_context
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Blob),
+                    FacetRaw::from(WellKnownFacet::Blob(Blob {
+                        mime: "application/octet-stream".to_string(),
+                        length_octets: 1234,
+                        digest: reserved.clone(),
+                        inline: None,
+                        urls: Some(vec![format!(
+                            "{}:///{control_hash}",
+                            crate::blobs::BLOB_SCHEME
+                        )]),
+                    })),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+
+        // The control pin proves this doc revision's pins were applied; the
+        // reserved digest is in the same revision and must not be among them.
+        wait_for_pin_presence(drawer, &docs_inventory_doc_id, &control_hash, true).await?;
+        let pins = inventory_blob_pins(drawer, &docs_inventory_doc_id).await?;
+        assert!(
+            pins.contains_key(&control_hash),
+            "control pin missing: {:?}",
+            pins.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !pins.contains_key(&reserved),
+            "a reserved digest spelling became a pin: {reserved:?}"
+        );
+
+        test_context.stop().await?;
+        Ok(())
+    }
 }
