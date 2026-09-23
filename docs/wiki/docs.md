@@ -1,44 +1,62 @@
-# Dictionary
+# Docs
 
-FIXME: the design in here is stale
+Documents are the main units of information of the system and have a unique ids.
 
-Here lies a roughly ordered description of the various concepts in daybook.
-Currently intended for contributors.
+## Why
 
-## Repo
+As a p2p system, we need to have a well bound and scoped data records that are easy to transfer across nodes and sync them under changes.
+CRDTs are a great way to ensure that large records are efficiently synced under multi-writers, hard partitions and other p2p hardships.
 
-In daybook, all of our documents go in a single repo.
-We can clone our repo on other devices to get access to our docs.
-Changes can be made on any replicas of the same repo, weather it is to add a new document or to modify an existing one.
-Daybook ensures then that these changes are synced to other replicas whenever a working connection between devices is established.
+Additionally, we want the documents to be self describing as much as possible to enable flexbility and indepenedent underestanding and evolution. 
+There might be a central authority available to adjuidicate schemas and meaning.
+This requires us to have stringent laws around keeping schema changes backward compatible since there's no way of rolling out breaking changes atomically to all nodes. 
 
-## Docs
-
-Documents are the main units of information in a repo and have a unique ids.
+## How
 
 ### Facets
 
-Documents are mainly made up of facets which are JSON objects describing the different pieces of the document.
+Documents are made up of facets which are JSON objects describing the different pieces of the document.
 Facets are stored in a map with unordered keys that have a format of `facet.tag/key-id`.
+
 The facet tag indicates expected schema of the value under that key.
-The key-id allows multiple facets of the same kind in the doc and is an untyped string.
+Tags are desigined to be reverse domain name notation similar to AT proto NSIDs.
+<!--TODO: specify design of how NSIDs are locked in-->
+
+The `key-id` allows multiple facets of the same `tag` in the doc.
+It is an untyped string.
 Using a convention for the id, like the plain default "main", allows for convergence when creating facets on different devices.
 For uniqueness, uuids can be used.
+The `key-id` can also contain fwd slashes and be a path like construct itself.
+
+Key-ids are expected to be valid utf-8 strings.
+To put non-utf-8 values, the escaping format from Go string literals is used.
+<!--TODO: elaborate how non-utf-8 escaping is used-->
+
+To clarify:
+- Facet: a real data record inside of a document
+- Facet schema: the shape description of the facet in JSON schema
+- Facet key: a key of a real facet inside of a document
+- Facet tag: the schema identification section of a facet key
+- Facekt key-id: the document unique id of a facet in a document
 
 Some examples of facets:
 ```js
 {
   "org.example.daybook.title/main": "hello world",
-  "org.example.daybook.path/main": "/hello.txt",
-  // all docs in the document drawer contain a dmeta facet
-  "org.example.daybook.dmeta/main": {
-    id: "<the id that the drawer knows it by>",
-    createdAt: "timestamp",
-    updatedAt: "timestamp",
-    // more metadata
-  }
+  "org.example.daybook.path/hi/hello.txt": {},
 }
 ```
+
+#### Facet schemas
+
+Facet shapes are defined by JSON Schema that is attached to their tag.
+
+Breaking changes to facet schemas are disallowed.
+If a breaking change is required, use a new facet tag instead.
+
+To make facet schemas more evolvable, the following advisories should be considered during design:
+- Use open enums to allow adding more variants
+- Use open unions 
 
 ### Automerge
 
@@ -72,42 +90,14 @@ If not, it can be discarded.
 Each branch is stored as a separate Automerge CRDT, sharing the same genesis change, which makes them different versions of the same logical document.
 
 Note that branches by convention have path based names.
-Any branches in the `/tmp` path will never leave that device.
+By design, branches in the `/tmp` path will never leave that device.
 All other branches are replicated.
 <!-- TODO: test branch deletions + drawer doc sync behavior -->
 <!-- TODO: branches in urls -->
 
-### Drawer
+### Dmeta
 
-The drawer is where we keep track of documents and their branches.
-It contains information like which automerge CRDT correspond to which branches.
-It's thus the gatekeeper for all docs whether it's reads or writes.
-We can read or update multiple facets at once from a single doc.
-
-When changing facets, we send in the full JSON value of the facet to the drawer.
-The drawer then creates the minimal set of operations needed to update the existing facet into the document.
-This is done in a single transaction to roll them into a single automerge change hash.
-Multiple facets can be updated at once and if so, will be put into a single transaction.
-
-### URLs
-
-```js
-const facetRef = new URL(
-  // NOTE: empty authority
-  "db+facet:///self/org.example.daybook.title/main?at=hash1|hash2",
-)
-```
-
-URLs can be used for intra or inter-doc facet references.
-As a special convention, `self` can be used instead of the document id to indicates that the reference is to the same doc containing the facet that holds the URL.
-
-We use change hash sets to refer to commit of the facet we're referring to.
-These can be put in the URL query params or be put in another field.
-
-If the heads set is empty, it's assumed that the referred to facet exists at the same change hash of the facet holding the reference. 
-I.e. part of the same transaction.
-This means that when updating a facet, if it previously had an empty hash set as a reference, unless the other facet is also being updated in that change, we must shift to a proper hash set reference.
-Changes that violate self references will be rejected.
+Every
 
 ### Blobs
 
@@ -133,22 +123,4 @@ We use the blob facet to manage references to this.
 ```
 <!-- TODO: oof, forgot base64 support for inline -->
 
-Blobs, similar to docs, are also synced to all devices and replicas of a repo.
-
-## Plugs
-
-A plug is a unit of features for daybook.
-A plug can contain things like:
-- Facet definitions
-- Wasm based workflow routines for code
-- Commands for routines that can be run on command
-- Processors for routines that run in response to changes
-- Local states for device specific sqlite databases
-
-All incoming facets must be defined by a plug first or will be rejected.
-More details can be found at the [plug manifest definitions](../src/daybook_core/plugs/manifest.rs).
-
-### Routines
-
-<!-- TODO: describe capabilites -->
-<!-- TODO: show example -->
+## factlist

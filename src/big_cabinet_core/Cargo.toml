@@ -1,0 +1,89 @@
+[package]
+name = "big_cabinet_core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "big_cabinet_core"
+path = "lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = ["manifest"]
+schemars = ["dep:schemars"]
+manifest = ["dep:garde", "dep:semver", "schemars"]
+
+[dependencies]
+#
+# internal
+api_utils_rs = { workspace = true, default-features = false }
+utils_rs = { workspace = true, default-features = false }
+am_utils_rs = { workspace = true }
+
+#
+# encoding
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+data-encoding.workspace = true
+# An instant is stored as seconds and written as RFC 3339, and jiff is what a schema in this tree
+# states one with.
+jiff = { version = "0.2", features = ["serde"] }
+# `facet::Extra` keeps the field order a peer sent; `serde_json::Map` is a `BTreeMap` here.
+indexmap = { version = "2", features = ["serde"] }
+schemars = { version = "1.2", features = [
+    "uuid1",
+    "semver1",
+    "url2",
+    "jiff02",
+    "indexmap2",
+], optional = true }
+
+#
+# error
+thiserror.workspace = true
+displaydoc.workspace = true
+
+#
+# ds
+garde = { workspace = true, optional = true }
+semver = { workspace = true, optional = true }
+
+#
+# automerge
+autosurgeon = { workspace = true, features = ["uuid"] }
+automerge = { workspace = true }
+
+#
+# ffi
+uniffi = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+#
+# macros
+pastey.workspace = true
+structstruck.workspace = true
+
+#
+# os
+addr.workspace = true
+blake3.workspace = true
+camino.workspace = true
+jsonpath-rust = "1.0.4"
+
+[dev-dependencies]
+# The declaration macro the facet tests exercise.
+macros = { path = "../macros" }
+# The bundle test validates against a real JSON Schema implementation rather than
+# asserting the shape of the document we assembled: hoisting is only correct if a
+# stock validator can still check a value against it. Already in the tree, no network.
+jsonschema = { version = "0.42.0", default-features = false }
+panproto-lens = "=0.74.4"
+panproto-mig = "=0.74.4"
+panproto-protocols = "=0.74.4"
+panproto-schema = "=0.74.4"
+panproto-vcs = "=0.74.4"
+tempfile.workspace = true

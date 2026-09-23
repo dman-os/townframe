@@ -1,0 +1,20 @@
+[package]
+name = "macros"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+proc-macro = true
+path = "lib.rs"
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+# `full` on top of the workspace's `extra-traits`: this crate parses whole `Item`s. Without it
+# `syn::Item`, `ItemStruct` and `ItemEnum` are compiled out, and the omission goes unnoticed
+# whenever another crate in the same cargo invocation unifies `full` in. Building `-p macros` on
+# its own is the check that catches it.
+syn = { workspace = true, features = ["full"] }

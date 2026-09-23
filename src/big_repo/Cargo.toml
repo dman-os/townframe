@@ -68,7 +68,6 @@ subduction_crypto = { workspace = true }
 subduction_iroh = { workspace = true }
 subduction_ephemeral = { workspace = true, features = ["std"] }
 subduction_keyhive = { workspace = true, features = ["runtime"] }
-subduction_redb_storage = { workspace = true }
 subduction_websocket = { workspace = true, features = ["tokio_base"] }
 keyhive_crypto.workspace = true
 keyhive_core.workspace = true
