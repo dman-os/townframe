@@ -1,0 +1,20 @@
+[package]
+name = "big_cabinet"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+#
+# internal
+utils_rs.workspace = true
+big_repo.workspace = true
+
+#
+# encoding
+atproto-dasl.workspace = true
