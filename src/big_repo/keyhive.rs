@@ -156,6 +156,18 @@ pub struct BigKeyhiveHandle {
     keyhive: Arc<BigKeyhiveKeyhive>,
     contact_card: Arc<keyhive_core::contact_card::ContactCard>,
     keyhive_peer_id: subduction_keyhive::KeyhivePeerId,
+    /// Test-only: when `Some`, [`Self::prekeys`] reports this set instead of folding the
+    /// local individual's current prekey ops.
+    ///
+    /// Exists so a test can put the *published view* into disagreement with the core's
+    /// prekey state, which is the one incoherence `prekey_janitor::refill_to_floor` cannot
+    /// expand its way out of. `rotate_op_count_for` exists for the same reason on the
+    /// rotation side: production has no path that desynchronises the two. Compiled out
+    /// entirely without `cfg(test)`, so a production build cannot set it.
+    #[cfg(test)]
+    pinned_prekey_view: Arc<
+        std::sync::Mutex<Option<std::collections::HashSet<keyhive_crypto::share_key::ShareKey>>>,
+    >,
 }
 /// What an admitted Keyhive event names.
 ///
@@ -191,6 +203,8 @@ impl BigKeyhiveHandle {
             keyhive: Arc::new(keyhive),
             contact_card: Arc::new(contact_card),
             keyhive_peer_id,
+            #[cfg(test)]
+            pinned_prekey_view: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -229,6 +243,8 @@ impl BigKeyhiveHandle {
             keyhive: Arc::new(restored),
             contact_card: Arc::new(contact_card),
             keyhive_peer_id,
+            #[cfg(test)]
+            pinned_prekey_view: Arc::new(std::sync::Mutex::new(None)),
         }))
     }
 
@@ -284,9 +300,22 @@ impl BigKeyhiveHandle {
     /// removals inline while iterating the ops map is order-dependent and
     /// resurrects rotated-out keys when the original Add happens to iterate
     /// after its Rotate.
+    ///
+    /// Test-only override: once [`Self::pin_published_prekeys`] has been called this
+    /// returns the pinned set, so a test can observe what a divergent view does to its
+    /// readers.
     pub(crate) async fn prekeys(
         &self,
     ) -> std::collections::HashSet<keyhive_crypto::share_key::ShareKey> {
+        #[cfg(test)]
+        if let Some(frozen) = self
+            .pinned_prekey_view
+            .lock()
+            .expect("pinned prekey view mutex is never poisoned")
+            .clone()
+        {
+            return frozen;
+        }
         use keyhive_core::principal::individual::op::KeyOp;
         let individual = self.keyhive.individual().await;
         let locked = individual.lock().await;
@@ -313,6 +342,30 @@ impl BigKeyhiveHandle {
             }
         }
         set
+    }
+
+    /// Test-only: pin the set [`Self::prekeys`] reports, so every later publication into
+    /// the core is invisible to it.
+    ///
+    /// This is the published-view half of the divergence `refill_to_floor` guards against:
+    /// the core keeps publishing prekeys while the set this caller reads does not move. A
+    /// booted handle starts one key *below* the floor (the production genesis publishes 7,
+    /// `Active::generate`), so the refill has exactly one slot to fill; the set is passed
+    /// explicitly so a test can name the view it wants — including one reporting fewer keys
+    /// than the core has published. That is the shape that used to spin the refill loop
+    /// forever, silently and with the durable cursor frozen behind it, so the loop now
+    /// crashes naming the divergence. Test-only for the same reason as `rotate_op_count_for`:
+    /// no production path can desynchronise the two, and the `cfg(test)` field cannot be set
+    /// in a production build.
+    #[cfg(test)]
+    pub(crate) fn pin_published_prekeys(
+        &self,
+        pinned: std::collections::HashSet<keyhive_crypto::share_key::ShareKey>,
+    ) {
+        *self
+            .pinned_prekey_view
+            .lock()
+            .expect("pinned prekey view mutex is never poisoned") = Some(pinned);
     }
 
     /// The local individual id of the active keyhive agent.

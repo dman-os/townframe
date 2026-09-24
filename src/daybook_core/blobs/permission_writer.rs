@@ -65,6 +65,137 @@ pub(crate) const BLOB_INVENTORY_PERMISSION_STATE_ID: &str =
 /// (ADR 013 open question 5 asks for a budget smaller than the pin worker's 64).
 const PERMISSION_TASK_BUDGET: usize = 8;
 
+/// Test-only record of one task submission to the keyed budget.
+///
+/// The two facts it carries are the property [`PERMISSION_TASK_BUDGET`] rests
+/// on: the key the machine submits is the watched *subject*, so several
+/// admissions naming one document merge into one task, and the budget bounds
+/// subjects rather than log progress.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct PermissionTaskSubmission {
+    key: AccessSubject,
+    /// The merged cursor the task carries — the admission position it acks when
+    /// it completes, never a key.
+    cursor: u64,
+    /// The keyed scheduler's physical task count immediately after the
+    /// submission. `replace` retires the key's previous attempt before spawning
+    /// this one, so a subject-keyed budget holds one task per subject however
+    /// many admissions arrive; keying by admission `seq` would add one task per
+    /// arrival instead.
+    active_tasks: usize,
+}
+
+/// Test-only hold gate on the permission machine's tasks.
+///
+/// A task parks here before it writes, so a test can keep the budget consumed
+/// while it drives further admissions for the same subject. Without the hold an
+/// attempt retires before the next arrival, and a subject-keyed budget is
+/// indistinguishable from one keyed by admission `seq`: both show a single
+/// running task, because the earlier attempt had already finished.
+///
+/// Zero-sized without `cfg(test)`: [`PermissionTaskGate::default`] is an unarmed
+/// gate and every method below is a no-op, so the machine pays nothing for it.
+#[derive(Clone, Default)]
+struct PermissionTaskGate {
+    #[cfg(test)]
+    inner: Option<Arc<PermissionTaskGateState>>,
+}
+
+#[cfg(test)]
+struct PermissionTaskGateState {
+    /// Every submission, in submission order.
+    submissions: std::sync::Mutex<Vec<PermissionTaskSubmission>>,
+    /// The highest admission cursor the machine has *read*, owned subject or
+    /// not, as a `watch`. A test waits on this to know an admission was seen
+    /// without polling: reaching a revision means the walker delivered every
+    /// entry up to it, so a submission for a watched subject in that range has
+    /// been made.
+    seen_cursor: tokio::sync::watch::Sender<u64>,
+    /// `true` once the test releases the gate. Carried as a `watch` so a parked
+    /// task cannot miss a release between checking and waiting.
+    released: tokio::sync::watch::Sender<bool>,
+}
+
+impl PermissionTaskGate {
+    /// An armed gate: tasks park in [`Self::hold`] until [`Self::release`].
+    #[cfg(test)]
+    fn armed() -> Self {
+        Self {
+            inner: Some(Arc::new(PermissionTaskGateState {
+                submissions: std::sync::Mutex::new(Vec::new()),
+                seen_cursor: tokio::sync::watch::channel(0).0,
+                released: tokio::sync::watch::channel(false).0,
+            })),
+        }
+    }
+
+    /// Record that the machine read the entry at `cursor`. A no-op without a
+    /// gate.
+    #[cfg_attr(not(test), allow(unused_variables))]
+    fn record_seen(&self, cursor: u64) {
+        #[cfg(test)]
+        if let Some(state) = &self.inner {
+            state.seen_cursor.send_replace(cursor);
+        }
+    }
+
+    /// Record one task submission. A no-op without a gate.
+    #[cfg_attr(not(test), allow(unused_variables))]
+    fn record_submission(&self, key: &AccessSubject, cursor: u64, active_tasks: usize) {
+        #[cfg(test)]
+        if let Some(state) = &self.inner {
+            {
+                let mut submissions = state.submissions.lock().expect(ERROR_MUTEX);
+                submissions.push(PermissionTaskSubmission {
+                    key: *key,
+                    cursor,
+                    active_tasks,
+                });
+            }
+            state.seen_cursor.send_replace(cursor);
+        }
+    }
+
+    /// Park the calling task until the gate is released. A no-op without a gate.
+    async fn hold(&self) {
+        #[cfg(test)]
+        if let Some(state) = &self.inner {
+            let mut released = state.released.subscribe();
+            if *released.borrow() {
+                return;
+            }
+            // The gate owns the sender for as long as this task holds the
+            // receiver, so the wait ends on release and not before it.
+            released
+                .wait_for(|released| *released)
+                .await
+                .expect("the gate outlives the tasks parked in it");
+        }
+    }
+
+    /// Release every parked task.
+    #[cfg(test)]
+    fn release(&self) {
+        if let Some(state) = &self.inner {
+            state.released.send_replace(true);
+        }
+    }
+
+    /// The submissions recorded so far, waiting until the machine has read the
+    /// admission at `cursor` (so any watched-subject entry up to that revision
+    /// has been merged and submitted).
+    #[cfg(test)]
+    async fn submissions_read_through(&self, cursor: u64) -> Vec<PermissionTaskSubmission> {
+        let state = self.inner.as_ref().expect("an armed gate");
+        let mut seen = state.seen_cursor.subscribe();
+        seen.wait_for(|seen| *seen >= cursor)
+            .await
+            .expect("the gate outlives the wait");
+        state.submissions.lock().expect(ERROR_MUTEX).clone()
+    }
+}
+
 /// Spawn the blob-inventory permission writer.
 ///
 /// `inventory_documents` is the watch set — today the repository's two
@@ -111,9 +242,18 @@ pub(crate) async fn spawn_blob_inventory_permission_writer(
     // task-panic-handler convention, so the future ends with `unwrap` rather
     // than a swallowed error.
     let worker_handle = tokio::spawn(async move {
-        run_permission_machine(part_store, stream, state, parts, worker_cancel_token)
-            .await
-            .unwrap();
+        // The gate is unarmed here: it exists so a test can hold a task in
+        // flight and observe the keyed budget.
+        run_permission_machine(
+            part_store,
+            stream,
+            state,
+            parts,
+            worker_cancel_token,
+            PermissionTaskGate::default(),
+        )
+        .await
+        .unwrap();
     });
     Ok(RepoStopToken {
         cancel_token,
@@ -210,6 +350,7 @@ async fn run_permission_machine(
     state: SqliteDeltaWalkerStateRepo,
     parts: BTreeMap<AccessSubject, PartKey>,
     cancel_token: CancellationToken,
+    gate: PermissionTaskGate,
 ) -> Res<()> {
     let durable = state.progress().await?.upstream_revision;
     // ADR 013 §9: a consumer whose cursor sits below the archive floor can never
@@ -292,6 +433,7 @@ async fn run_permission_machine(
                                 &mut tasks,
                                 &mut pending,
                                 delta,
+                                &gate,
                             )
                             .await?;
                         }
@@ -329,7 +471,13 @@ async fn on_delta(
     tasks: &mut TokioKeyedScheduler<AccessSubject, PermissionTask, PermissionTaskOutput>,
     pending: &mut HashMap<AccessSubject, PermissionTask>,
     delta: ConcurrentDelta<AccessSubject, KeyhiveAccessDelta>,
+    gate: &PermissionTaskGate,
 ) -> Res<()> {
+    // The machine has read this entry: recorded before the ownership check, so a
+    // test can wait on "the walker delivered through here" rather than on a
+    // submission (an entry for a subject this machine does not own is acked and
+    // submits nothing).
+    gate.record_seen(delta.cursor);
     let Some(part) = parts.get(&delta.entry.subject) else {
         walker.ack(delta.key, delta.cursor).await?;
         return Ok(());
@@ -356,9 +504,15 @@ async fn on_delta(
             agents: delta.entry.agents,
         },
     };
+    let submitted_key = task.key;
+    let submitted_cursor = task.cursor;
     pending.insert(task.key, task.clone());
-    let future = run_permission_task(Arc::clone(part_store), task.clone());
-    tasks.replace(task.key, task, future)?;
+    let future = run_permission_task(Arc::clone(part_store), task.clone(), gate.clone());
+    tasks.replace(submitted_key, task, future)?;
+    // The budget's key is the watched subject and the admission cursor rides on
+    // the task, so admissions naming one document replace that subject's keyed
+    // task rather than adding one task per admission.
+    gate.record_submission(&submitted_key, submitted_cursor, tasks.active_count());
     Ok(())
 }
 
@@ -372,7 +526,11 @@ async fn on_delta(
 async fn run_permission_task(
     part_store: SharedPartStore,
     task: PermissionTask,
+    gate: PermissionTaskGate,
 ) -> Res<PermissionTaskOutput> {
+    // Test seam: a parked task has not written yet, so a test that holds the
+    // budget observes the part rows before this attempt's effect.
+    gate.hold().await;
     let agents = peer_access_map(&task.agents);
     part_store
         .set_part_members(task.part.clone(), agents)
@@ -650,6 +808,19 @@ mod tests {
     /// A principal that is a member of nothing, for the refusal control.
     fn stranger() -> PeerKey {
         PeerKey::new([0xEE; 32])
+    }
+
+    /// The admission consumers registered against a log, read from the log's own
+    /// database — the rows `prune_admitted_events` takes its retention floor
+    /// from.
+    async fn registered_readers(sql: &SqlCtx) -> Res<Vec<String>> {
+        Ok(
+            sqlx::query_scalar::<_, String>(
+                "SELECT reader FROM big_repo_keyhive_admission_readers",
+            )
+            .fetch_all(&sql.read_pool)
+            .await?,
+        )
     }
 
     /// One document's own closure, in the sink's key space: the type hop the boot
@@ -1062,6 +1233,7 @@ mod tests {
             harness.state.clone(),
             parts,
             CancellationToken::new(),
+            PermissionTaskGate::default(),
         )
         .await
         .expect_err("a sink that cannot commit must surface as a machine error");
@@ -1076,6 +1248,201 @@ mod tests {
             "work the machine did not apply must stay unacked, so the walker re-drives it"
         );
 
+        harness.stop().await?;
+        Ok(())
+    }
+
+    /// The machine's cursor identity is its retention-reader id, and both live in
+    /// the log's own database.
+    ///
+    /// The retention floor `prune_admitted_events` computes is a `MIN` over
+    /// `big_repo_keyhive_admission_readers` joined to the walker's
+    /// `delta_walker_progress` row, so a machine that kept either half somewhere
+    /// else — a second SQLite file, a second consumer id — makes that floor
+    /// unrepresentable: the halves disagree across a crash with no ordering
+    /// between them, and the consumer silently loses the window it was never
+    /// told about (ADR 013 §9). This pins the shape for this consumer's identity:
+    /// registered exactly once, in the log's database, beside the progress row
+    /// the floor joins it to. The runtime's own four consumers are registered in
+    /// the same table, so the claim is per identity, not about the whole table.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_permission_machine_registers_exactly_one_retention_reader_for_its_scope() -> Res<()>
+    {
+        let harness = Harness::new().await?;
+        let inventory_doc = harness.create_doc().await?;
+        let part = blob_inventory_part_id_from_doc_id(&inventory_doc.to_string());
+        let log_sql = harness.repo.sql_ctx();
+        let stream = KeyhiveAccessRevisionStore::<SqliteDeltaWalkerStateRepo>::new(&harness.repo);
+        let head = stream.latest_revision().await?;
+        assert!(head > 0, "the fixture needs admitted events");
+
+        // The fixture boots the runtime's own admission consumers (`group_part`,
+        // `causal_checkpoint`, `automerge_frontier`, `prekey_janitor`), so the
+        // claim is about the machine's own identity: absent before it starts,
+        // registered exactly once after, in the log's database.
+        let machine_reader = harness.state.retention_reader_id();
+        assert!(
+            !registered_readers(&log_sql)
+                .await?
+                .contains(&machine_reader),
+            "the machine must not be registered before it starts"
+        );
+
+        let watch = harness.spawn(vec![inventory_doc.clone()]).await?;
+        harness.wait_for_revision(head).await?;
+        harness
+            .wait_for_members(&part, harness.expected(&inventory_doc).await?)
+            .await?;
+
+        assert_eq!(
+            machine_reader,
+            // Segments are `<namespace>/<consumer_id>` (`retention_reader_id_of`), and the
+            // machine builds its state repo as
+            // `SqliteDeltaWalkerStateRepo::new(.., BLOB_INVENTORY_PERMISSION_STATE_ID, "keyhive-access")`
+            // — the state id is the NAMESPACE and the log's own name is the consumer id.
+            // Not the other way round; this literal is the on-disk identity the retention
+            // row is registered under.
+            format!("{BLOB_INVENTORY_PERMISSION_STATE_ID}/keyhive-access"),
+            "the machine's cursor identity is its retention-reader id"
+        );
+        let readers = registered_readers(&log_sql).await?;
+        assert_eq!(
+            readers
+                .iter()
+                .filter(|reader| *reader == &machine_reader)
+                .count(),
+            1,
+            "the machine registers exactly one retention reader for its scope, in the \
+             log's database: {readers:?}"
+        );
+
+        // The floor joins the registration to `delta_walker_progress` by the same
+        // `(namespace, consumer_id)` pair, so the progress row has to be in the
+        // database the registration is in.
+        let progress: i64 = sqlx::query_scalar(
+            "SELECT upstream_revision FROM delta_walker_progress \
+              WHERE namespace = ?1 AND consumer_id = ?2",
+        )
+        .bind(harness.state.namespace())
+        .bind(harness.state.consumer_id())
+        .fetch_one(&log_sql.read_pool)
+        .await?;
+        assert_eq!(
+            progress as u64,
+            harness.durable_revision().await,
+            "the row the registration names is the walker's own progress"
+        );
+
+        watch.stop().await?;
+        harness.stop().await?;
+        Ok(())
+    }
+
+    /// The budget is keyed by watched subject, never by admission `seq`: several
+    /// admissions naming one document merge into that document's single keyed
+    /// task, and the admission cursor travels on the task instead of keying it.
+    ///
+    /// The hold is what makes this observable. Without it every attempt retires
+    /// before the next admission arrives, and a budget keyed by `seq` would look
+    /// identical — one running task, because the previous attempt had already
+    /// finished. Held in flight, a `seq`-keyed budget accumulates one running
+    /// task per admission, which is what the recorded running-task count pins;
+    /// the cursors then show that the submissions are successive read points of the
+    /// log rather than one admission observed repeatedly. A submitted cursor may
+    /// REPEAT: one read revision can deliver several deltas, so several submissions
+    /// of one subject can carry the same cursor.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_task_budget_keyed_by_subject_never_runs_two_tasks_for_one_subject() -> Res<()> {
+        let harness = Harness::new().await?;
+        let inventory_doc = harness.create_doc().await?;
+        let part = blob_inventory_part_id_from_doc_id(&inventory_doc.to_string());
+        let subject = AccessSubject::Document(doc_identifier(&inventory_doc)?);
+        let gate = PermissionTaskGate::armed();
+
+        let stream = KeyhiveAccessRevisionStore::<SqliteDeltaWalkerStateRepo>::new(&harness.repo);
+        // A second inert mapping over the same admission log, used for the fence below:
+        // `stream` is moved into the machine, and both instances read the same head.
+        let fence_stream =
+            KeyhiveAccessRevisionStore::<SqliteDeltaWalkerStateRepo>::new(&harness.repo);
+        let parts = inventory_parts(std::slice::from_ref(&inventory_doc))?;
+        let cancel_token = CancellationToken::new();
+        let machine = tokio::spawn({
+            let part_store = Arc::clone(&harness.part_store);
+            let state = harness.state.clone();
+            let gate = gate.clone();
+            let cancel_token = cancel_token.clone();
+            async move {
+                run_permission_machine(part_store, stream, state, parts, cancel_token, gate).await
+            }
+        });
+
+        // Four admissions that change the watched document's closure: grants and
+        // revocations of a group on it, each admitted on the document's own
+        // subject.
+        let granted = harness.repo.create_group_with_parents(Vec::new()).await?;
+        for grant in [true, false, true, false] {
+            if grant {
+                harness
+                    .repo
+                    .grant_doc_access(inventory_doc.clone(), granted.clone(), Access::Read)
+                    .await?;
+            } else {
+                harness
+                    .repo
+                    .revoke_doc_access(inventory_doc.clone(), granted.clone())
+                    .await?;
+            }
+        }
+
+        // Reading through the final head is the fence: the walker delivers every
+        // entry up to a revision it reaches, so every admission above was merged
+        // and submitted before this snapshot.
+        let admitted_through = fence_stream.latest_revision().await?;
+        let submissions = gate.submissions_read_through(admitted_through).await;
+        assert!(
+            submissions.len() >= 2,
+            "several admissions of the watched subject must submit, got {submissions:?}"
+        );
+        for submission in &submissions {
+            assert_eq!(
+                submission.key, subject,
+                "the budget's key is the watched subject, never the admission cursor"
+            );
+            assert_eq!(
+                submission.active_tasks, 1,
+                "one keyed task per subject: the later admission replaced the \
+                 subject's task instead of adding one — {submissions:?}"
+            );
+        }
+        let cursors: Vec<u64> = submissions.iter().map(|s| s.cursor).collect();
+        assert!(
+            cursors.windows(2).all(|pair| pair[0] <= pair[1]),
+            "a submitted cursor must never regress: the machine reads the log \
+             forwards — {cursors:?}"
+        );
+        // Consecutive duplicates collapse to one revision, which is what makes this a
+        // statement about how many read points the submissions span rather than about
+        // how many admissions exist. This is deliberately NOT `pair[0] < pair[1]`: the
+        // fixture's four grant/revoke ops arrive as `5,5,5,5` before later revisions'
+        // `6,7,8,9`, because one read revision can carry several deltas.
+        let mut revisions = cursors.clone();
+        revisions.dedup();
+        assert!(
+            revisions.len() >= 2,
+            "the submissions must span more than one read revision, or there is \
+             nothing whose task a later admission could have replaced, which would \
+             make the running-task count above vacuous — {cursors:?}"
+        );
+
+        // The held attempt is a real one: releasing it applies the newest closure
+        // to the part.
+        gate.release();
+        harness
+            .wait_for_members(&part, harness.expected(&inventory_doc).await?)
+            .await?;
+
+        cancel_token.cancel();
+        machine.await??;
         harness.stop().await?;
         Ok(())
     }

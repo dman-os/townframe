@@ -147,6 +147,7 @@ pub(crate) fn spawn_keyhive_dispatcher(
     protocol: BigRepoKeyhiveProtocol,
     store: SqliteBigRepoStore,
     timer: Arc<dyn Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
     notify: Arc<tokio::sync::Notify>,
     subscriptions: SubscriptionMap,
     policy: DebouncePolicy,
@@ -156,7 +157,7 @@ pub(crate) fn spawn_keyhive_dispatcher(
     };
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
     let run = Sendable::from_future(async move {
-        let fut = run_dispatcher(notify, protocol, store, timer, subscriptions, policy);
+        let fut = run_dispatcher(notify, protocol, store, timer, clock, subscriptions, policy);
         match futures::future::Abortable::new(fut, abort_registration).await {
             Ok(result) => result,
             Err(_) => Ok(()),
@@ -178,6 +179,7 @@ async fn run_dispatcher(
     protocol: BigRepoKeyhiveProtocol,
     store: SqliteBigRepoStore,
     timer: Arc<dyn Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
     subscriptions: SubscriptionMap,
     policy: DebouncePolicy,
 ) -> Res<()> {
@@ -189,11 +191,17 @@ async fn run_dispatcher(
     // peer delivery.
     let source = keyhive_admission::Store {
         store: store.clone(),
-        timer,
+        // The loop below waits on the same timer the admission reader polls
+        // with, so both cadences are driven by one seam.
+        timer: Arc::clone(&timer),
     };
     let mut reader = source.open((), store.admission_head().await?).await?;
     loop {
-        let deadline = batcher.next_deadline().map(tokio::time::Instant::from_std);
+        // The debounce ceiling and the loop's `now` come from the same injected
+        // clock the wait below uses, so the deadline it computes is the one it
+        // actually sleeps to (`ceiling - now` on the injected timer).
+        let deadline = batcher.next_deadline();
+        let now = clock.instant();
         tokio::select! {
             read = reader.next(RevisionReadLimits { max_entries: ADMISSION_BATCH }) => {
                 match read? {
@@ -204,18 +212,26 @@ async fn run_dispatcher(
                 }
             }
             _ = notify.notified() => {
-                let due = batcher.take_due(Instant::now());
+                let due = batcher.take_due(clock.instant());
                 deliver(&subscriptions, due).await;
             }
             _ = async {
                 if let Some(deadline) = deadline {
-                    tokio::time::sleep_until(deadline).await;
+                    // Wakes at the same instant `sleep_until(deadline)` did: the wait is
+                    // `deadline - now` on the injected timer, and the subtraction
+                    // saturates. A ceiling the clock has already passed therefore becomes a
+                    // zero-length wait — the same already-expired timer the wall-clock
+                    // version armed — so a due ceiling is still delivered on this iteration
+                    // and no loop turn is added.
+                    timer.sleep(deadline.saturating_duration_since(now)).await;
                 } else {
                     std::future::pending::<()>().await;
                 }
             } => {}
         }
-        let due = batcher.take_due(Instant::now());
+        // Read `now` fresh: the clock has moved during the wait, and due peers must
+        // be taken against the instant the loop actually woke at.
+        let due = batcher.take_due(clock.instant());
         deliver(&subscriptions, due).await;
     }
 }

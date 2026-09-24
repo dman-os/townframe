@@ -149,6 +149,60 @@ pub enum IrohSyncEvent {
     },
 }
 
+/// Records the order in which [`IrohSyncRepoStopToken::stop`] tears its children
+/// down.
+///
+/// A stop-order inversion is invisible in any single run — every child here
+/// stops successfully in any order, and the damage is a rare teardown race — so
+/// the ordering the code relies on is recorded rather than left to a comment.
+/// The comment on `blob_inventory_permission_stop` states the rule: the
+/// inventory writer serves the store the blob worker and the RPC server serve
+/// from, so it stops after both are down.
+///
+/// Zero-sized without `cfg(test)`: an unarmed recorder drops every record and
+/// the token pays nothing for it.
+#[derive(Clone, Default)]
+pub(crate) struct ShutdownOrder {
+    #[cfg(test)]
+    recorded: Option<Arc<std::sync::Mutex<Vec<&'static str>>>>,
+}
+
+impl ShutdownOrder {
+    /// A recorder that keeps what it is given. Armed in test builds only.
+    fn for_build() -> Self {
+        #[cfg(test)]
+        {
+            Self {
+                recorded: Some(Arc::new(std::sync::Mutex::new(Vec::new()))),
+            }
+        }
+        #[cfg(not(test))]
+        {
+            Self::default()
+        }
+    }
+
+    /// Record one child's teardown. A no-op without a recorder.
+    #[cfg_attr(not(test), allow(unused_variables))]
+    fn record(&self, child: &'static str) {
+        #[cfg(test)]
+        if let Some(recorded) = &self.recorded {
+            recorded.lock().expect(ERROR_MUTEX).push(child);
+        }
+    }
+
+    /// The children recorded so far, in teardown order.
+    #[cfg(test)]
+    pub(crate) fn recorded(&self) -> Vec<&'static str> {
+        self.recorded
+            .as_ref()
+            .expect("a recorder armed for the test build")
+            .lock()
+            .expect(ERROR_MUTEX)
+            .clone()
+    }
+}
+
 pub struct IrohSyncRepoStopToken {
     cancel_token: CancellationToken,
     worker_handle: JoinHandle<()>,
@@ -162,10 +216,18 @@ pub struct IrohSyncRepoStopToken {
     /// The blob-inventory access-row writer. It writes into the store the blob worker and the
     /// RPC server serve from, so it stops after both are down.
     blob_inventory_permission_stop: crate::repos::RepoStopToken,
+    /// The order the children above were stopped in. Zero-sized outside tests.
+    shutdown_order: ShutdownOrder,
     // partition_sync_store_stop_token: am_utils_rs::sync::store::SyncStoreStopToken,
 }
 
 impl IrohSyncRepoStopToken {
+    /// The teardown record this token writes as it stops its children.
+    #[cfg(test)]
+    pub(crate) fn shutdown_order(&self) -> ShutdownOrder {
+        self.shutdown_order.clone()
+    }
+
     pub async fn stop(self) -> Res<()> {
         self.cancel_token.cancel();
         let reconnect_handle = self.reconnect_task.lock().expect(ERROR_MUTEX).take();
@@ -178,10 +240,18 @@ impl IrohSyncRepoStopToken {
         }
         // pre light the stop signal to the full worker
         self.big_sync_worker_stop.stop().await?;
+        self.shutdown_order.record("big_sync_worker_stop");
         self.big_sync_rpc_stop.stop().await?;
+        self.shutdown_order.record("big_sync_rpc_stop");
         self.blob_sync_worker_stop.stop().await?;
+        self.shutdown_order.record("blob_sync_worker_stop");
         self.big_repo_rpc_stop_token.stop().await?;
+        self.shutdown_order.record("big_repo_rpc_stop_token");
+        // The inventory writer serves the store the blob worker and the RPC
+        // server serve from, so its stop is issued once both are down — and the
+        // record after it is what makes that order assertable.
         self.blob_inventory_permission_stop.stop().await?;
+        self.shutdown_order.record("blob_inventory_permission_stop");
         // Worker shutdown drains active repo connections; each connection stop can wait up to 5s.
         utils_rs::wait_on_handle_with_timeout(
             self.worker_handle,
@@ -388,6 +458,7 @@ impl IrohSyncRepo {
                 big_sync_worker_stop,
                 blob_sync_worker_stop,
                 blob_inventory_permission_stop,
+                shutdown_order: ShutdownOrder::for_build(),
             },
         ))
     }

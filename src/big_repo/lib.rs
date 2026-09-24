@@ -45,6 +45,11 @@ pub use runtime2::types::{
     SyncDocReceipt, WorkerGroupScope,
 };
 pub use runtime2::{DocHeadState, MaterializationState};
+// The test-seam accessors below take this event type in `pub` signatures, so it
+// has to be nameable from the crates whose tests drive those seams; the
+// `runtime2` module itself stays private.
+#[cfg(any(test, feature = "test-support"))]
+pub use runtime2::Runtime2Evt;
 mod store;
 pub use runtime2::{automerge_doc_obj_id, automerge_obj_to_doc_id};
 #[cfg(feature = "test-support")]
@@ -87,20 +92,20 @@ pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
 /// processing, so a failed assertion cannot leave the hub holding events (and
 /// with them the in-flight counter's release) for the rest of the process. A
 /// test that needs the replay to have happened calls [`Self::resume`].
-#[cfg(test)]
-pub(crate) struct HubEventsHold {
+#[cfg(any(test, feature = "test-support"))]
+pub struct HubEventsHold {
     runtime: runtime2::Runtime2Handle<future_form::Sendable>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl HubEventsHold {
-    pub(crate) async fn resume(&self) -> Res<()> {
+    pub async fn resume(&self) -> Res<()> {
         self.runtime.resume_events_for_test().await?;
         Ok(())
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for HubEventsHold {
     fn drop(&mut self) {
         self.runtime.resume_events_for_test_on_drop();
@@ -760,8 +765,8 @@ impl BigRepo {
     /// [`Runtime2Handle::hold_events_for_test`]). Returns a guard that reopens
     /// event processing when dropped, so an assertion failure cannot leave the
     /// hub holding events for the rest of the test process.
-    #[cfg(test)]
-    pub(crate) async fn hold_hub_events(&self) -> Res<HubEventsHold> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn hold_hub_events(&self) -> Res<HubEventsHold> {
         self.runtime.hold_events_for_test().await?;
         Ok(HubEventsHold {
             runtime: self.runtime.clone(),
@@ -772,8 +777,8 @@ impl BigRepo {
     /// next content-carrying sync-session apply, so that apply route fails
     /// while a later empty reconsider can still spawn a fresh worker. See
     /// [`Runtime2Handle::fail_next_content_apply_route_for_test`].
-    #[cfg(test)]
-    pub(crate) async fn fail_next_content_apply_route(&self, doc_id: DocumentId) -> Res<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn fail_next_content_apply_route(&self, doc_id: DocumentId) -> Res<()> {
         self.runtime
             .fail_next_content_apply_route_for_test(doc_id)
             .await?;
@@ -783,30 +788,30 @@ impl BigRepo {
     /// Test-only: whether `peer_id` currently has a registered connection in
     /// this repo's hub. Connection-lifecycle tests assert the deregistration
     /// invariant with this instead of inferring it from a sync failure.
-    #[cfg(test)]
-    pub(crate) async fn has_connected_peer(&self, peer_id: PeerKey) -> Res<bool> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn has_connected_peer(&self, peer_id: PeerKey) -> Res<bool> {
         self.runtime.has_connected_peer_for_test(peer_id).await
     }
 
     /// Test-only: deliver a synthetic keyhive sync completion for `peer_id`'s
     /// active round, stamped one seq ahead of the hub's admitted head. Returns
     /// the seq so the test can inject the matching admission event.
-    #[cfg(test)]
-    pub(crate) async fn inject_keyhive_completion_for_test(&self, peer_id: PeerKey) -> Res<u64> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn inject_keyhive_completion_for_test(&self, peer_id: PeerKey) -> Res<u64> {
         self.runtime
             .inject_keyhive_completion_for_test(peer_id)
             .await
     }
 
     /// Test-only: hand an event directly to the hub's event handler.
-    #[cfg(test)]
-    pub(crate) async fn inject_runtime2_evt_for_test(&self, evt: runtime2::Runtime2Evt) -> Res<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn inject_runtime2_evt_for_test(&self, evt: runtime2::Runtime2Evt) -> Res<()> {
         self.runtime.inject_runtime2_evt_for_test(evt).await
     }
 
     /// Test-only: the active quiescence probe's barrier id (`None` if resolved).
-    #[cfg(test)]
-    pub(crate) async fn quiescence_probe_barrier_for_test(&self) -> Res<Option<u64>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn quiescence_probe_barrier_for_test(&self) -> Res<Option<u64>> {
         self.runtime.quiescence_probe_barrier_for_test().await
     }
 
@@ -1379,10 +1384,17 @@ impl BigDocHandle {
         // Fast-fail on an invalidated handle before doing any work. The
         // authoritative rejection happens at the worker commit path; this
         // check only avoids running the mutation against a known-dead bundle.
-        if self.handle.bundle.is_broken() {
-            return Err(ferr!(
-                "document write rejected: handle invalidated by an earlier rejected commit; re-acquire the document"
-            ));
+        // The refusal is rendered by the same function the worker's commit gate
+        // uses, so it names the recorded reason: reporting a worker teardown as
+        // an earlier rejected commit is what made that failure unattributable.
+        if let Some(message) = self
+            .handle
+            .bundle
+            .broken_reason()
+            .map(runtime2::types::HandleValidity::Broken)
+            .and_then(runtime2::types::invalid_handle_message)
+        {
+            return Err(ferr!("{message}"));
         }
 
         // All automerge work happens under a short sync lock; nothing is held

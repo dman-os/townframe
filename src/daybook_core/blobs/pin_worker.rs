@@ -1530,4 +1530,241 @@ mod tests {
         test_context.stop().await?;
         Ok(())
     }
+
+    /// How many plugs still reference a blob, read from the plug-pin rows the
+    /// teardown deletes and the `remaining_count` gate counts.
+    async fn plug_pin_rows(sql: &SqlCtx, plug_id: &str) -> Res<i64> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM blob_pin_plug_state WHERE plug_id = ?1",
+        )
+        .bind(plug_id)
+        .fetch_one(&sql.write_pool)
+        .await?)
+    }
+
+    /// Every `(namespace, consumer_id)` pair that owns a delta-walker progress
+    /// row in the daybook database.
+    async fn walker_progress_identities(sql: &SqlCtx) -> Res<Vec<(String, String)>> {
+        Ok(sqlx::query_as::<_, (String, String)>(
+            "SELECT namespace, consumer_id FROM delta_walker_progress",
+        )
+        .fetch_all(&sql.read_pool)
+        .await?)
+    }
+
+    /// The plug-events walker's own durable progress row, read straight from the
+    /// table so the reader cannot create the row it is looking for.
+    async fn plug_events_progress_row(sql: &SqlCtx) -> Res<Option<u64>> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT upstream_revision FROM delta_walker_progress \
+              WHERE namespace = ?1 AND consumer_id = 'plug-events'",
+        )
+        .bind(BLOB_PIN_PLUG_EVENTS_STATE_ID)
+        .fetch_optional(&sql.read_pool)
+        .await?
+        .map(|progress| progress as u64))
+    }
+
+    /// The plug teardown is refcounted: dropping one plug's rows must not evict a
+    /// blob pin that another plug still references, and the eviction must happen
+    /// once the last reference is gone.
+    ///
+    /// `test_blob_pin_worker_plug_lifecycle` covers the single-plug case end to
+    /// end; the two-plug refcount is where a teardown that ignores
+    /// `remaining_count` silently unpins live data — the blob becomes evictable
+    /// while a plug still needs it. Both halves are asserted here: after the
+    /// first drop the row deletion is committed and the facet survives, after the
+    /// last drop the facet goes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_a_plug_pin_keeps_a_blob_another_plug_still_pins() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let drawer_repo = Arc::clone(&test_context.drawer_repo);
+        // The same resolution the worker does at spawn, so this context writes
+        // the facet to the document the running machine writes to.
+        let core_inventory_doc_id = Ctx::resolve_doc_id_for_branch(
+            &drawer_repo,
+            test_context.rt.rcx.core_inventory_doc_id.clone(),
+        )
+        .await?;
+        let docs_inventory_doc_id = Ctx::resolve_doc_id_for_branch(
+            &drawer_repo,
+            test_context.rt.rcx.docs_inventory_doc_id.clone(),
+        )
+        .await?;
+        let ctx = Ctx {
+            drawer_repo: Arc::clone(&drawer_repo),
+            sql: test_context.rt.rcx.sql.clone(),
+            core_inventory_doc_id: core_inventory_doc_id.clone(),
+            docs_inventory_doc_id,
+            inventory_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let watched_doc_id = core_inventory_doc_id.clone();
+        let hash = "refcounted-plug-blob".to_string();
+        let pins = HashMap::from([(hash.clone(), 64_u64)]);
+
+        // Two plugs referencing one blob, each through the production upsert.
+        ctx.apply_plug_pins("@test/refcount-a", pins.clone())
+            .await?;
+        ctx.apply_plug_pins("@test/refcount-b", pins.clone())
+            .await?;
+        assert!(
+            inventory_blob_pins(&drawer_repo, &watched_doc_id)
+                .await?
+                .contains_key(&hash),
+            "two plugs pinning one blob leave one pin facet"
+        );
+
+        ctx.drop_plug_pins("@test/refcount-a").await?;
+        {
+            let pins = inventory_blob_pins(&drawer_repo, &watched_doc_id).await?;
+            assert!(
+                pins.contains_key(&hash),
+                "a blob another plug still pins must survive the first plug's teardown: {:?}",
+                pins.keys().collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            plug_pin_rows(&ctx.sql, "@test/refcount-a").await?,
+            0,
+            "the dropped plug's rows are deleted and committed before the facet decision"
+        );
+        assert_eq!(
+            plug_pin_rows(&ctx.sql, "@test/refcount-b").await?,
+            1,
+            "the surviving plug's row is untouched"
+        );
+
+        ctx.drop_plug_pins("@test/refcount-b").await?;
+        assert!(
+            !inventory_blob_pins(&drawer_repo, &watched_doc_id)
+                .await?
+                .contains_key(&hash),
+            "the last plug's teardown evicts the pin"
+        );
+        assert_eq!(plug_pin_rows(&ctx.sql, "@test/refcount-b").await?, 0);
+
+        test_context.stop().await?;
+        Ok(())
+    }
+
+    /// The plug-events walker keeps its cursor in its own `(namespace,
+    /// consumer_id)` row and nothing else writes it: one durable writer per
+    /// consumer, so a second watermark cannot re-enter through a new identity.
+    ///
+    /// The facet machine's identity is a separate row — the two machines are
+    /// separate consumers — and a fresh construction of the plug-events identity
+    /// reads back exactly the row that is in the table, which is what a restart
+    /// resuming "at its own progress" means.
+    ///
+    /// Deliberately not asserted: *when* the machine has settled the revision it
+    /// consumed. That instant is only observable by polling the row until it
+    /// moves, and this suite asserts on state, not on elapsed wall clock; the
+    /// advancement itself is left uncovered here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_plug_events_walker_resumes_at_the_pin_workers_own_progress_row() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let sql = test_context.rt.rcx.sql.clone();
+        let core_inventory_doc_id = test_context.rt.rcx.core_inventory_doc_id.to_string();
+        let drawer = &test_context.drawer_repo;
+
+        let blob_id = test_context
+            .rt
+            .blobs_repo
+            .put(b"plug-events-walker-progress")
+            .await?;
+        let hash = blob_id.to_string();
+        let manifest = PlugManifest {
+            namespace: "test".into(),
+            name: "progress-plug".into(),
+            version: "0.1.0".parse().unwrap(),
+            title: "Progress Plug".into(),
+            desc: "drives the plug-events walker".into(),
+            facets: default(),
+            local_states: default(),
+            dependencies: default(),
+            routines: default(),
+            wflow_bundles: [(
+                "bundle1".into(),
+                Arc::new(WflowBundleManifest {
+                    keys: vec!["wflow1".into()],
+                    component_urls: vec![
+                        format!("{}:///{hash}", crate::blobs::BLOB_SCHEME)
+                            .parse()
+                            .unwrap(),
+                    ],
+                }),
+            )]
+            .into(),
+            views: default(),
+            commands: default(),
+            inits: default(),
+            processors: default(),
+        };
+        let doc_id = test_context.rt.plugs_repo.add(manifest).await?;
+        let ref_url: url::Url =
+            format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
+                .parse()?;
+        let consumed_before = plug_events_progress_row(&sql).await?.unwrap_or(0);
+        test_context.rt.plugs_repo.enable_plug(&ref_url).await?;
+
+        // The pin is written by the plug-events machine's own task, which creates
+        // its progress row before it processes anything, so the pin's appearance
+        // is what puts the row there to read. (`wait_for_pin_presence` is this
+        // module's existing convergence helper, already used by its other tests.)
+        wait_for_pin_presence(drawer, &core_inventory_doc_id, &hash, true).await?;
+
+        // Rows are `(namespace, consumer_id)`, and the machine builds its state repo as
+        // `SqliteDeltaWalkerStateRepo::new(.., BLOB_PIN_PLUG_EVENTS_STATE_ID, "plug-events")`:
+        // the state id is the NAMESPACE and `plug-events` is the consumer id. So this
+        // collects the namespaces that own the plug-events consumer id — exactly one
+        // namespace may, or two machines are writing the same consumer's progress.
+        let identities = walker_progress_identities(&sql).await?;
+        let plug_events_namespaces: Vec<String> = identities
+            .iter()
+            .filter(|identity| identity.1 == "plug-events")
+            .map(|identity| identity.0.clone())
+            .collect();
+        assert_eq!(
+            plug_events_namespaces,
+            vec![BLOB_PIN_PLUG_EVENTS_STATE_ID.to_string()],
+            "one namespace owns the plug-events consumer id: {identities:?}"
+        );
+        assert!(
+            identities
+                .iter()
+                .any(|identity| identity.1 == "facets"
+                    && identity.0 == BLOB_PIN_STATE_LOCAL_STATE_ID),
+            "the facet machine keeps its own namespace, not this one: {identities:?}"
+        );
+
+        // A restart constructs the state again and resumes at its own row: the
+        // state repo's reading and the table's contents are the same value, read
+        // in the same instant, and a durable revision never moves backwards.
+        let durable_row = plug_events_progress_row(&sql)
+            .await?
+            .expect("the machine's task created its progress row before it processed anything");
+        assert!(
+            durable_row >= consumed_before,
+            "a durable revision never moves backwards: was {consumed_before}, now {durable_row}"
+        );
+        let reopened = SqliteDeltaWalkerStateRepo::new(
+            sql.read_pool.clone(),
+            sql.write_pool.clone(),
+            BLOB_PIN_PLUG_EVENTS_STATE_ID,
+            "plug-events",
+        )
+        .await?;
+        assert_eq!(
+            reopened.retention_reader_id(),
+            "@daybook/core/blob-pin-plug-events/plug-events"
+        );
+        assert_eq!(
+            reopened.progress().await?.upstream_revision,
+            durable_row,
+            "a restart of the walker resumes at its own progress row"
+        );
+
+        test_context.stop().await?;
+        Ok(())
+    }
 }

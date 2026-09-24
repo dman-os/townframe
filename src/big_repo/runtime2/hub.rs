@@ -98,19 +98,20 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     /// A resolving `WaitForQuiescence { freeze: true }` freezes the hub.
     freeze_on_resolve: bool,
     /// Test-only: queue events instead of handling them (see
-    /// [`Runtime2Cmd::HoldEvents`]). Zero production cost — absent from
-    /// non-test builds along with its command arms.
-    #[cfg(test)]
+    /// [`Runtime2Cmd::HoldEvents`]). Absent from builds that neither test this
+    /// crate nor enable `test-support`, so production keeps zero cost from it;
+    /// the `test-support` gate is what lets another crate's tests reach it.
+    #[cfg(any(test, feature = "test-support"))]
     hold_events: bool,
     /// Test-only: the events queued while `hold_events` is set, replayed in
     /// channel order by [`Runtime2Cmd::ResumeEvents`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     held_events: Vec<Runtime2Evt>,
     /// Test-only: fail the next content-carrying sync-session apply route for
     /// this document by closing the worker's mailbox, reproducing the
     /// worker-stopping race deterministically (see
     /// [`Runtime2Cmd::FailNextContentApplyRoute`]).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     poisoned_content_apply: Option<DocumentId>,
     /// Set once the commands channel closes (the stop token dropped its
     /// sender); no new background work is admitted and the machine loop
@@ -730,7 +731,7 @@ where
         // The test-only event-hold seam performs no domain work, so it must not
         // restart a quiescence probe either; the same goes for the test-only
         // state/barrier queries.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let control_only = control_only
             || matches!(
                 &cmd,
@@ -1023,18 +1024,38 @@ where
             Runtime2Cmd::CancelKeyhiveSyncWaiter { peer_id, waiter_id } => {
                 self.cancel_pending_keyhive_sync(&peer_id, waiter_id);
             }
-            Runtime2Cmd::RegisterDocLease { doc_id, registered } => {
+            Runtime2Cmd::RegisterDocLease {
+                doc_id,
+                generation,
+                registered,
+            } => {
                 if !self.doc_workers.contains_key(&doc_id) {
                     self.spawn_doc_worker(doc_id.clone())?;
                 }
+                // A registration from a superseded incarnation is dropped: the
+                // counters belong to the worker that is alive now, and crediting
+                // the replacement would pin a count that only the dead
+                // generation could release (its release is rejected as stale),
+                // leaving an entry that can never be evicted. The sender is
+                // dropped unacked, which its worker tolerates.
                 if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-                    entry.local_handles += 1;
-                    entry.eviction_deadline = None;
-                    registered
-                        .send(())
-                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                        .ok();
+                    let current_generation = entry.generation;
+                    if apply_lease_registration(entry, generation) == LeaseChange::StaleGeneration {
+                        debug!(
+                            %doc_id,
+                            lease_generation = generation,
+                            current_generation,
+                            "ignoring stale doc lease registration from a superseded worker incarnation"
+                        );
+                    } else {
+                        registered
+                            .send(())
+                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                            .ok();
+                    }
                 }
+                // No entry: the runtime is shutting down and the spawn was
+                // discarded. The sender is dropped unacked.
             }
             Runtime2Cmd::ReleaseDocLease { doc_id, generation } => {
                 self.handle_release_doc_lease(doc_id, generation);
@@ -1061,13 +1082,13 @@ where
                     ),
                 )?;
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runtime2Cmd::HasDocWorker { doc_id, resp } => {
                 resp.send(Ok(self.doc_workers.contains_key(&doc_id)))
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runtime2Cmd::HasConnectedPeer { peer_id, resp } => {
                 resp.send(Ok(self.connected_peers.contains_key(&peer_id)))
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1085,13 +1106,13 @@ where
             Runtime2Cmd::Unfreeze => {
                 debug!(local_peer_id = %self.local_peer_id, "unfreeze: hub not frozen");
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runtime2Cmd::HoldEvents { resp } => {
                 self.hold_events = true;
                 debug!(local_peer_id = %self.local_peer_id, "holding hub event processing (test seam)");
                 resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runtime2Cmd::ResumeEvents { resp } => {
                 self.hold_events = false;
                 let held = std::mem::take(&mut self.held_events);
@@ -1105,7 +1126,7 @@ where
                 }
                 resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runtime2Cmd::FailNextContentApplyRoute { doc_id, resp } => {
                 self.poisoned_content_apply = Some(doc_id);
                 debug!(
@@ -1114,7 +1135,7 @@ where
                 );
                 resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runtime2Cmd::InjectKeyhiveCompletionForTest { peer_id, resp } => {
                 let result = match self.active_keyhive_syncs.get(&peer_id) {
                     Some(round) => {
@@ -1132,14 +1153,14 @@ where
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runtime2Cmd::InjectRuntime2EvtForTest { evt, resp } => {
                 let result = self.handle_evt(*evt);
                 resp.send(result)
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Runtime2Cmd::QuiescenceProbeBarrierForTest { resp } => {
                 resp.send(self.quiescence_probe.as_ref().map(|probe| probe.barrier_id))
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1866,7 +1887,7 @@ where
     /// [`Runtime2Cmd::ResumeEvents`]. One gate for the machine loop, so the
     /// hold covers every event path (including the shutdown drain).
     fn handle_or_hold_evt(&mut self, evt: Runtime2Evt) -> eyre::Result<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.hold_events {
             self.held_events.push(evt);
             return Ok(());
@@ -2412,7 +2433,7 @@ where
         // Test-only: close the resolved worker's mailbox so the send below
         // fails, standing in for the worker-stopping race that cannot be
         // reached deterministically from a test.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if content_carrying && self.poisoned_content_apply.as_ref() == Some(&doc_id) {
             self.poisoned_content_apply = None;
             worker.msg_tx.close();
@@ -3044,6 +3065,163 @@ where
 // DOC-WORKER LIFECYCLE
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ─── Doc-worker lease and eviction decisions ────────────────────────────────
+//
+// These are free functions over a `doc_id → DocWorkerEntry` map rather than
+// methods on the hub. The refcount rules they encode are the whole contract
+// between the hub and its callers — a live handle keeps its worker alive, a
+// lease belongs to the incarnation that took it, a respawn inherits the handles
+// of the incarnation it replaces — and keeping them free makes each rule
+// checkable without standing up a hub.
+
+/// Which refcount a lease command moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseRefcount {
+    /// [`DocWorkerEntry::local_handles`] — live caller handles.
+    Caller,
+    /// [`DocWorkerEntry::internal_leases`] — in-flight operations.
+    Internal,
+}
+
+/// Outcome of a lease command aimed at one worker entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseChange {
+    /// Applied to the current incarnation.
+    Applied,
+    /// The command named a superseded incarnation. The counters belong to the
+    /// worker that is alive now, so a stale command must not move them: a dead
+    /// generation's release would decrement a count it never took, and its
+    /// registration would pin a count only it could release.
+    StaleGeneration,
+}
+
+/// Apply a release to `entry`, identifying the incarnation by `generation`.
+fn apply_lease_release(
+    entry: &mut DocWorkerEntry,
+    generation: u64,
+    refcount: LeaseRefcount,
+) -> LeaseChange {
+    if entry.generation != generation {
+        return LeaseChange::StaleGeneration;
+    }
+    match refcount {
+        LeaseRefcount::Caller => {
+            entry.local_handles = entry
+                .local_handles
+                .checked_sub(1)
+                .expect("doc lease refcount underflow for active worker incarnation");
+        }
+        LeaseRefcount::Internal => {
+            entry.internal_leases = entry
+                .internal_leases
+                .checked_sub(1)
+                .expect("internal lease refcount underflow for active worker incarnation");
+        }
+    }
+    LeaseChange::Applied
+}
+
+/// Apply a caller-handle registration to `entry`, identifying the incarnation
+/// by `generation`, and clear the eviction deadline.
+///
+/// The registration is sent by the worker itself, so a mismatched generation
+/// means the entry was replaced after that worker booted. Crediting the
+/// replacement would leave it holding a count whose release is rejected as
+/// stale — a worker that can never be evicted.
+fn apply_lease_registration(entry: &mut DocWorkerEntry, generation: u64) -> LeaseChange {
+    if entry.generation != generation {
+        return LeaseChange::StaleGeneration;
+    }
+    entry.local_handles += 1;
+    entry.eviction_deadline = None;
+    LeaseChange::Applied
+}
+
+/// Arm the eviction deadline, or clear it while either refcount is non-zero.
+///
+/// Eviction needs BOTH counts at zero: a live caller handle must never see its
+/// worker go away, and an in-flight operation must never be cancelled
+/// underneath itself.
+fn arm_eviction_if_idle(
+    entry: &mut DocWorkerEntry,
+    now: std::time::Instant,
+    idle_ttl: std::time::Duration,
+) {
+    if entry.local_handles > 0 || entry.internal_leases > 0 {
+        entry.eviction_deadline = None;
+        return;
+    }
+    entry.eviction_deadline = Some(now + idle_ttl);
+}
+
+/// Install the entry that replaces a dead worker for `doc_id`, inheriting the
+/// lease counts of the incarnation it replaces.
+///
+/// Handles are owned by the hub, not by one worker incarnation: a caller's
+/// `LiveDocHandle` lease is keyed by `doc_id`. A replacement that started from
+/// zero would forget a handle that is still alive, so the new worker could be
+/// evicted under it — and that handle would go on pointing at the dead
+/// generation's bundle, which teardown already invalidated, yielding a refusal
+/// with no commit behind it. Inheriting the counts keeps such a handle tracked
+/// until it is released.
+fn install_replacement_entry(
+    doc_workers: &mut HashMap<DocumentId, DocWorkerEntry>,
+    doc_id: DocumentId,
+    mut replacement: DocWorkerEntry,
+    replaced: Option<&DocWorkerEntry>,
+) {
+    if let Some(stale) = replaced
+        && (stale.local_handles > 0 || stale.internal_leases > 0)
+    {
+        debug!(
+            %doc_id,
+            stale_generation = stale.generation,
+            replacement_generation = replacement.generation,
+            local_handles = stale.local_handles,
+            internal_leases = stale.internal_leases,
+            "replacing a doc worker that was still leased; carrying its counts over"
+        );
+        replacement.local_handles = stale.local_handles;
+        replacement.internal_leases = stale.internal_leases;
+        replacement.eviction_deadline = None;
+    }
+    doc_workers.insert(doc_id, replacement);
+}
+
+/// The expired doc-workers the janitor evicts now, disarming the deadline of
+/// every expired entry that still holds a lease.
+///
+/// A deadline is only armed while both counts are zero, so an expired entry that
+/// holds a lease means a lease was taken after the arming: disarm it and wait
+/// rather than evict, so an in-flight operation is never cancelled underneath
+/// itself.
+fn sweep_idle_doc_workers(
+    doc_workers: &mut HashMap<DocumentId, DocWorkerEntry>,
+    now: std::time::Instant,
+) -> Vec<DocumentId> {
+    let expired: Vec<DocumentId> = doc_workers
+        .iter()
+        .filter(|(_, entry)| {
+            entry
+                .eviction_deadline
+                .is_some_and(|deadline| deadline <= now)
+        })
+        .map(|(doc_id, _)| doc_id.clone())
+        .collect();
+    let mut evict = Vec::new();
+    for doc_id in expired {
+        let Some(entry) = doc_workers.get_mut(&doc_id) else {
+            continue;
+        };
+        if entry.local_handles > 0 || entry.internal_leases > 0 {
+            entry.eviction_deadline = None;
+            continue;
+        }
+        evict.push(doc_id);
+    }
+    evict
+}
+
 impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: TaskRuntime<F>>
     Runtime2Hub<F, R>
 {
@@ -3119,8 +3297,11 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             }
             return Ok(());
         }
-        // Stale entry: remove before re-creating.
-        self.doc_workers.remove(&doc_id);
+        // Stale entry: remove before re-creating. Keep it in hand so the
+        // replacement can inherit the lease counts of the worker it replaces —
+        // the handles it was serving belong to the hub, not to that
+        // incarnation.
+        let replaced = self.doc_workers.remove(&doc_id);
 
         let generation = self.next_doc_worker_generation;
         self.next_doc_worker_generation += 1;
@@ -3138,7 +3319,11 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         let stop = worker.stop;
         self.child_tasks.spawn(worker.run)?;
 
-        self.doc_workers.insert(
+        // A fresh entry starts unleased and armed for eviction; if it replaces
+        // a worker that died while a caller still held a handle, the counts are
+        // carried over and the deadline stays cleared.
+        install_replacement_entry(
+            &mut self.doc_workers,
             doc_id,
             DocWorkerEntry {
                 handle,
@@ -3150,6 +3335,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
                 ),
                 generation,
             },
+            replaced.as_ref(),
         );
         Ok(())
     }
@@ -3159,21 +3345,20 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
     /// Identifies worker incarnation by `generation`: stale releases from
     /// previous worker generations that were evicted or died are safely ignored.
     fn handle_release_doc_lease(&mut self, doc_id: DocumentId, generation: u64) {
-        if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            if entry.generation == generation {
-                entry.local_handles = entry
-                    .local_handles
-                    .checked_sub(1)
-                    .expect("doc lease refcount underflow for active worker incarnation");
-            } else {
-                debug!(
-                    %doc_id,
-                    lease_generation = generation,
-                    current_generation = entry.generation,
-                    "ignoring stale doc lease release for superseded worker incarnation"
-                );
-                return;
-            }
+        let Some(entry) = self.doc_workers.get_mut(&doc_id) else {
+            return;
+        };
+        let current_generation = entry.generation;
+        if apply_lease_release(entry, generation, LeaseRefcount::Caller)
+            == LeaseChange::StaleGeneration
+        {
+            debug!(
+                %doc_id,
+                lease_generation = generation,
+                current_generation,
+                "ignoring stale doc lease release for superseded worker incarnation"
+            );
+            return;
         }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
     }
@@ -3182,21 +3367,20 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
     ///
     /// Identifies worker incarnation by `generation` — see [`Self::handle_release_doc_lease`].
     fn handle_release_internal_lease(&mut self, doc_id: DocumentId, generation: u64) {
-        if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-            if entry.generation == generation {
-                entry.internal_leases = entry
-                    .internal_leases
-                    .checked_sub(1)
-                    .expect("internal lease refcount underflow for active worker incarnation");
-            } else {
-                debug!(
-                    %doc_id,
-                    lease_generation = generation,
-                    current_generation = entry.generation,
-                    "ignoring stale internal lease release for superseded worker incarnation"
-                );
-                return;
-            }
+        let Some(entry) = self.doc_workers.get_mut(&doc_id) else {
+            return;
+        };
+        let current_generation = entry.generation;
+        if apply_lease_release(entry, generation, LeaseRefcount::Internal)
+            == LeaseChange::StaleGeneration
+        {
+            debug!(
+                %doc_id,
+                lease_generation = generation,
+                current_generation,
+                "ignoring stale internal lease release for superseded worker incarnation"
+            );
+            return;
         }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
     }
@@ -3206,11 +3390,11 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         let Some(entry) = self.doc_workers.get_mut(&doc_id) else {
             return;
         };
-        if entry.local_handles > 0 || entry.internal_leases > 0 {
-            entry.eviction_deadline = None;
-            return;
-        }
-        entry.eviction_deadline = Some(self.clock.instant() + self.sync_policy.doc_worker_idle_ttl);
+        arm_eviction_if_idle(
+            entry,
+            self.clock.instant(),
+            self.sync_policy.doc_worker_idle_ttl,
+        );
     }
 
     /// Periodic eviction of idle doc-workers. Driven by the machine loop's
@@ -3310,9 +3494,10 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
     /// can cancel `sync_keyhive` safely because the waiter guard removes the
     /// waiter (so a cancelled call never cascades a follow-up round).
     ///
-    /// Tests: panic on `KEYHIVE_SYNC_ROUND_TIMEOUT` so a stress run surfaces a
-    /// round that no completion, protocol error, or connection loss retired
-    /// instead of hanging on it.
+    /// Tests: report on `KEYHIVE_SYNC_ROUND_TIMEOUT`, a shorter threshold, and
+    /// keep waiting. The test harness owns the failure clock, so a round that no
+    /// completion, protocol error, or connection loss retired is named in the log
+    /// (round, peer, waiting counts) rather than ending the run.
     fn report_unresolved_keyhive_round(&mut self, now: std::time::Instant) {
         #[cfg(any(test, feature = "test-support"))]
         let threshold = KEYHIVE_SYNC_ROUND_TIMEOUT;
@@ -3329,15 +3514,6 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             })
             .collect::<Vec<_>>();
 
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some((peer_id, report)) = unresolved.first() {
-            panic!(
-                "Keyhive sync round timed out without response, protocol error, or connection loss: peer={peer_id} request={:?} round={} elapsed_secs={} admitted_waiters={}",
-                report.request_id, report.round_id, report.elapsed_secs, report.admitted_waiters
-            );
-        }
-
-        #[cfg(not(any(test, feature = "test-support")))]
         for (peer_id, report) in unresolved {
             warn!(
                 %peer_id,
@@ -3360,31 +3536,10 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         let now = self.clock.instant();
         self.report_quiescence_stall(now);
         self.report_unresolved_keyhive_round(now);
-        let expired: Vec<DocumentId> = self
-            .doc_workers
-            .iter()
-            .filter(|(_, entry)| {
-                entry
-                    .eviction_deadline
-                    .is_some_and(|deadline| deadline <= now)
-            })
-            .map(|(doc_id, _)| doc_id.clone())
-            .collect();
-        for doc_id in expired {
-            // Eviction requires both lease counts to be zero (the deadline is
-            // only armed by `schedule_doc_worker_eviction_if_idle` in that
-            // case); guard anyway so an in-flight operation is never cancelled
-            // underneath itself.
-            let idle = self
-                .doc_workers
-                .get(&doc_id)
-                .is_some_and(|entry| entry.local_handles == 0 && entry.internal_leases == 0);
-            if !idle {
-                if let Some(entry) = self.doc_workers.get_mut(&doc_id) {
-                    entry.eviction_deadline = None;
-                }
-                continue;
-            }
+        // Both lease counts must be zero for eviction, so an in-flight
+        // operation is never cancelled underneath itself; an entry that expired
+        // while still leased has its deadline disarmed instead of being evicted.
+        for doc_id in sweep_idle_doc_workers(&mut self.doc_workers, now) {
             // Remove the entry *before* cancelling: the abort path of the
             // worker's mailbox loop does not emit `DocWorkerStopped` (that
             // event is only sent on normal mailbox completion), so a cancelled
@@ -3739,11 +3894,11 @@ where
         frozen: false,
         frozen_cmd_buffer: Vec::new(),
         freeze_on_resolve: false,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         hold_events: false,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         held_events: Vec::new(),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         poisoned_content_apply: None,
         cmd_closed: false,
         activity_generation: 0,
@@ -3932,6 +4087,246 @@ mod tests {
         assert!(
             !probe.settle_outstanding(ADMITTED_HEAD_AT_START + 1),
             "settling past the captured admission head must also clear the fence"
+        );
+    }
+
+    /// A doc-worker entry with the given refcounts whose mailbox is already
+    /// closed — the shape `spawn_doc_worker`'s stale-entry path is handed when a
+    /// worker's loop is gone but a caller still holds a handle.
+    fn leased_entry(
+        _doc_id: super::DocumentId,
+        generation: u64,
+        local_handles: usize,
+        internal_leases: usize,
+    ) -> super::DocWorkerEntry {
+        let (msg_tx, _msg_rx) = async_channel::unbounded::<super::DocWorkerMsg>();
+        let (abort, _registration) = futures::future::AbortHandle::new_pair();
+        super::DocWorkerEntry {
+            handle: super::DocWorkerHandle { msg_tx },
+            stop: crate::runtime2::DocWorkerStopToken { abort },
+            local_handles,
+            internal_leases,
+            eviction_deadline: None,
+            generation,
+        }
+    }
+
+    /// Handles are owned by the hub, not by one worker incarnation: a caller's
+    /// handle lease is keyed by `doc_id`, and it outlives the worker that first
+    /// served it. A respawn that started from zero would forget a handle that is
+    /// still alive, so the replacement could be evicted under it — leaving that
+    /// handle pointed at the dead generation's invalidated bundle, which then
+    /// refuses a write while claiming an earlier commit was rejected, of which
+    /// there was none.
+    #[test]
+    fn a_respawned_entry_inherits_the_outstanding_handle_count() {
+        let doc_id = super::DocumentId::new([0x11; 32]);
+        let replaced = leased_entry(doc_id.clone(), 1, 1, 0);
+        assert!(
+            replaced.handle.is_closed(),
+            "the replaced generation's mailbox is gone, so the stale path runs"
+        );
+
+        // `spawn_doc_worker` removes the stale entry and builds a replacement
+        // that starts unleased and armed for eviction. The counts of the
+        // incarnation being replaced must survive that.
+        let mut replacement = leased_entry(doc_id.clone(), 2, 0, 0);
+        let armed = std::time::Instant::now();
+        replacement.eviction_deadline = Some(armed);
+
+        let mut workers = std::collections::HashMap::new();
+        super::install_replacement_entry(
+            &mut workers,
+            doc_id.clone(),
+            replacement,
+            Some(&replaced),
+        );
+
+        let entry = workers.get(&doc_id).expect("replacement installed");
+        assert_eq!(entry.generation, 2, "a new incarnation is allocated");
+        assert_eq!(
+            entry.local_handles, 1,
+            "the live caller handle must stay tracked across the respawn"
+        );
+        assert_eq!(
+            entry.eviction_deadline, None,
+            "a still-leased replacement must not be evictable"
+        );
+
+        // An unleased respawn keeps the fresh, armed deadline.
+        let mut workers = std::collections::HashMap::new();
+        let mut unleased = leased_entry(doc_id.clone(), 3, 0, 0);
+        unleased.eviction_deadline = Some(armed);
+        super::install_replacement_entry(&mut workers, doc_id.clone(), unleased, None);
+        let entry = workers.get(&doc_id).expect("replacement installed");
+        assert_eq!(entry.local_handles, 0);
+        assert_eq!(entry.eviction_deadline, Some(armed));
+    }
+
+    /// A caller holding a handle keeps its worker alive past the idle TTL: the
+    /// deadline is disarmed, so the janitor cannot evict the worker out from
+    /// under the handle.
+    #[test]
+    fn a_live_handle_keeps_the_worker_past_its_idle_ttl() {
+        let doc_id = super::DocumentId::new([0x12; 32]);
+        let ttl = std::time::Duration::from_secs(60);
+        let armed = std::time::Instant::now();
+        let later = armed + ttl;
+
+        let mut workers = std::collections::HashMap::new();
+        let mut entry = leased_entry(doc_id.clone(), 1, 1, 0);
+        entry.eviction_deadline = Some(armed);
+        workers.insert(doc_id.clone(), entry);
+
+        let evicted = super::sweep_idle_doc_workers(&mut workers, later);
+        assert!(evicted.is_empty(), "a leased entry must not be evicted");
+        let entry = workers.get(&doc_id).expect("entry retained");
+        assert_eq!(entry.generation, 1, "the incarnation must be unchanged");
+        assert_eq!(
+            entry.eviction_deadline, None,
+            "the deadline that expired under a live lease must be disarmed"
+        );
+    }
+
+    /// Eviction requires BOTH refcounts to be zero — `&&`, not `||`.
+    #[test]
+    fn eviction_fires_only_when_both_refcounts_are_zero() {
+        let ttl = std::time::Duration::from_secs(60);
+        let armed = std::time::Instant::now();
+        let later = armed + ttl;
+
+        for (local_handles, internal_leases, expect_evicted) in [
+            (1usize, 0usize, false),
+            (0, 1, false),
+            (1, 1, false),
+            (0, 0, true),
+        ] {
+            let doc_id = super::DocumentId::new([0x13; 32]);
+            let mut workers = std::collections::HashMap::new();
+            let mut entry = leased_entry(doc_id.clone(), 1, local_handles, internal_leases);
+            entry.eviction_deadline = Some(armed);
+            workers.insert(doc_id.clone(), entry);
+
+            let evicted = super::sweep_idle_doc_workers(&mut workers, later);
+            assert_eq!(
+                evicted.contains(&doc_id),
+                expect_evicted,
+                "refcounts ({local_handles}, {internal_leases}) must {}be evicted",
+                if expect_evicted { "" } else { "not " }
+            );
+            if expect_evicted {
+                // Removing the entry is the janitor's job; the sweep only
+                // decides. The armed deadline it found is not cleared.
+                assert_eq!(workers[&doc_id].eviction_deadline, Some(armed));
+            } else {
+                assert_eq!(
+                    workers[&doc_id].eviction_deadline, None,
+                    "an expired but leased entry is disarmed, not evicted"
+                );
+            }
+        }
+    }
+
+    /// A release from a superseded incarnation must not move the current
+    /// entry's counters; the current incarnation's own release must apply.
+    #[test]
+    fn stale_generation_lease_release_is_ignored() {
+        let mut entry = leased_entry(super::DocumentId::new([0x14; 32]), 5, 2, 0);
+
+        assert_eq!(
+            super::apply_lease_release(&mut entry, 3, super::LeaseRefcount::Caller),
+            super::LeaseChange::StaleGeneration
+        );
+        assert_eq!(entry.local_handles, 2, "a stale release must not decrement");
+
+        assert_eq!(
+            super::apply_lease_release(&mut entry, 5, super::LeaseRefcount::Caller),
+            super::LeaseChange::Applied
+        );
+        assert_eq!(entry.local_handles, 1);
+    }
+
+    /// The two refcounts are separate: a release naming one must not move the
+    /// other, and each has its own generation guard.
+    #[test]
+    fn stale_generation_internal_lease_release_is_ignored() {
+        let mut entry = leased_entry(super::DocumentId::new([0x15; 32]), 5, 0, 2);
+
+        assert_eq!(
+            super::apply_lease_release(&mut entry, 4, super::LeaseRefcount::Internal),
+            super::LeaseChange::StaleGeneration
+        );
+        assert_eq!(entry.internal_leases, 2);
+        assert_eq!(
+            entry.local_handles, 0,
+            "an internal release must not move handles"
+        );
+
+        assert_eq!(
+            super::apply_lease_release(&mut entry, 5, super::LeaseRefcount::Internal),
+            super::LeaseChange::Applied
+        );
+        assert_eq!(entry.internal_leases, 1);
+    }
+
+    /// Dropping the last handle re-arms the deadline; taking a lease clears it.
+    #[test]
+    fn eviction_is_scheduled_when_the_last_handle_drops() {
+        let ttl = std::time::Duration::from_secs(60);
+        let now = std::time::Instant::now();
+
+        let mut entry = leased_entry(super::DocumentId::new([0x16; 32]), 1, 0, 0);
+        super::arm_eviction_if_idle(&mut entry, now, ttl);
+        assert_eq!(entry.eviction_deadline, Some(now + ttl));
+
+        entry.local_handles = 1;
+        super::arm_eviction_if_idle(&mut entry, now, ttl);
+        assert_eq!(
+            entry.eviction_deadline, None,
+            "a live handle disarms the deadline"
+        );
+
+        entry.local_handles = 0;
+        entry.internal_leases = 1;
+        super::arm_eviction_if_idle(&mut entry, now, ttl);
+        assert_eq!(
+            entry.eviction_deadline, None,
+            "an in-flight operation also disarms the deadline"
+        );
+    }
+
+    /// A registration that lands after the entry was replaced belongs to a
+    /// worker the hub no longer tracks. Crediting the replacement would pin a
+    /// count whose release is then discarded as stale, so the entry could never
+    /// reach eviction — a worker that leaks for the life of the process.
+    #[test]
+    fn a_late_lease_registration_is_not_credited_to_a_later_generation() {
+        let mut entry = leased_entry(super::DocumentId::new([0x17; 32]), 5, 0, 0);
+        let armed = std::time::Instant::now();
+        entry.eviction_deadline = Some(armed);
+
+        assert_eq!(
+            super::apply_lease_registration(&mut entry, 3),
+            super::LeaseChange::StaleGeneration
+        );
+        assert_eq!(
+            entry.local_handles, 0,
+            "a registration from a superseded generation must not increment"
+        );
+        assert_eq!(
+            entry.eviction_deadline,
+            Some(armed),
+            "a superseded generation must not disarm the deadline either"
+        );
+
+        assert_eq!(
+            super::apply_lease_registration(&mut entry, 5),
+            super::LeaseChange::Applied
+        );
+        assert_eq!(entry.local_handles, 1);
+        assert_eq!(
+            entry.eviction_deadline, None,
+            "a live handle clears the deadline"
         );
     }
 }

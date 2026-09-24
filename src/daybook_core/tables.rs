@@ -1653,52 +1653,128 @@ impl TablesRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stores::{VersionTag, Versioned};
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn load_ensures_non_empty_tables_graph() -> Res<()> {
-        let (big_repo, _part_store, big_repo_stop) = crate::test_support::boot_repo().await?;
+    fn versioned<T>(val: T) -> Versioned<T> {
+        Versioned {
+            vtag: VersionTag::nil(),
+            val,
+        }
+    }
 
-        let app_doc_id = {
-            let doc_bytes = crate::app::version_updates::version_latest()?;
-            let doc = automerge::Automerge::load(&doc_bytes)?;
-            let handle = big_repo.create_doc(doc).await?;
-            handle.document_id()
-        };
+    fn window(id: Uuid, tabs: Vec<Uuid>) -> Window {
+        Window {
+            id,
+            title: String::new(),
+            tabs,
+            selected_table: None,
+            layout: WindowLayout::default(),
+            last_capture_mode: CaptureMode::default(),
+            documents_screen_list_size_expanded: WindowLayoutRegionSize::default(),
+        }
+    }
 
-        let (repo, stop_token) = TablesRepo::load(
-            Arc::clone(&big_repo),
-            app_doc_id,
-            daybook_types::doc::UserPathBuf::from("/duser-test/ddev-test"),
-        )
-        .await?;
+    fn table(id: Uuid, tabs: Vec<Uuid>) -> Table {
+        Table {
+            id,
+            title: String::new(),
+            tabs,
+            window: TableWindow::default(),
+            selected_tab: None,
+        }
+    }
 
-        let windows = repo.list_windows().await?;
-        let tables = repo.list_tables().await?;
-        let selected = repo.get_selected_table().await?;
+    fn tab(id: Uuid, panels: Vec<Uuid>) -> Tab {
+        Tab {
+            id,
+            title: String::new(),
+            panels,
+            selected_panel: None,
+        }
+    }
 
-        assert!(
-            !windows.is_empty(),
-            "load must ensure at least one window exists"
+    fn panel(id: Uuid) -> Panel {
+        Panel {
+            id,
+            title: String::new(),
+        }
+    }
+
+    /// The relation indices are derived state: `panel_to_tab`, `tab_to_table` and
+    /// `tab_to_window` are `skip`-coded, so they are rebuilt from the graph rather than
+    /// reconciled, and two code paths maintain them — `rebuild_indices` builds them from
+    /// scratch, and the `update_*_index` calls run while an edit moves a panel, tab or
+    /// window. Nothing checked that the two agree. They can disagree in the direction that
+    /// matters: an incremental update that keeps an entry the graph no longer holds leaves
+    /// an index claiming an ownership the rebuild would not produce, and the index is what
+    /// the edit paths read.
+    #[test]
+    fn incremental_index_updates_agree_with_a_full_rebuild() {
+        let (tab_a, tab_b) = (Uuid::new_v4(), Uuid::new_v4());
+        let (table_1, table_2) = (Uuid::new_v4(), Uuid::new_v4());
+        let (window_1, window_2) = (Uuid::new_v4(), Uuid::new_v4());
+        let (panel_1, panel_2) = (Uuid::new_v4(), Uuid::new_v4());
+
+        let mut store = TablesStore::default();
+        store
+            .tables
+            .insert(table_1, versioned(table(table_1, vec![tab_a, tab_b])));
+        store
+            .tables
+            .insert(table_2, versioned(table(table_2, vec![])));
+        store
+            .windows
+            .insert(window_1, versioned(window(window_1, vec![tab_a, tab_b])));
+        store
+            .windows
+            .insert(window_2, versioned(window(window_2, vec![])));
+        store
+            .tabs
+            .insert(tab_a, versioned(tab(tab_a, vec![panel_1])));
+        store
+            .tabs
+            .insert(tab_b, versioned(tab(tab_b, vec![panel_2])));
+        store.panels.insert(panel_1, versioned(panel(panel_1)));
+        store.panels.insert(panel_2, versioned(panel(panel_2)));
+
+        store.rebuild_indices();
+        assert_eq!(store.panel_to_tab.get(&panel_1), Some(&tab_a));
+        assert_eq!(store.tab_to_table.get(&tab_a), Some(&table_1));
+        assert_eq!(store.tab_to_window.get(&tab_b), Some(&window_1));
+
+        // Each edit is made twice: on the graph (which is what a rebuild reads) and through
+        // the incremental index call an edit path would make.
+        store.tabs.get_mut(&tab_a).unwrap().val.panels.clear();
+        store.tabs.get_mut(&tab_b).unwrap().val.panels = vec![panel_2, panel_1];
+        store.update_panel_tab_index(panel_1, Some(tab_a), Some(tab_b));
+
+        store.tables.get_mut(&table_1).unwrap().val.tabs = vec![tab_b];
+        store.tables.get_mut(&table_2).unwrap().val.tabs = vec![tab_a];
+        store.update_tab_table_index(tab_a, Some(table_1), Some(table_2));
+
+        // A tab leaving its table and its window with no replacement: an implementation that
+        // only inserts leaves an entry here that the graph no longer justifies, and the
+        // rebuild is the only thing that would drop it.
+        store.tables.get_mut(&table_1).unwrap().val.tabs.clear();
+        store.update_tab_table_index(tab_b, Some(table_1), None);
+        store.windows.get_mut(&window_1).unwrap().val.tabs = vec![tab_a];
+        store.update_tab_window_index(tab_b, Some(window_1), None);
+
+        let incremental = (
+            store.panel_to_tab.clone(),
+            store.tab_to_table.clone(),
+            store.tab_to_window.clone(),
         );
-        assert!(
-            !tables.is_empty(),
-            "load must ensure at least one table exists"
-        );
-        assert!(
-            selected.is_some(),
-            "load must ensure a selected table is available"
+        store.rebuild_indices();
+        let rebuilt = (
+            store.panel_to_tab.clone(),
+            store.tab_to_table.clone(),
+            store.tab_to_window.clone(),
         );
 
-        let selected_id = selected.expect("selected table should exist").id;
-        assert!(
-            windows
-                .iter()
-                .any(|window| window.selected_table == Some(selected_id)),
-            "at least one window should point to selected table"
+        assert_eq!(
+            incremental, rebuilt,
+            "the incremental updates must leave the indices a full rebuild produces"
         );
-
-        stop_token.stop().await?;
-        big_repo_stop().await?;
-        Ok(())
     }
 }

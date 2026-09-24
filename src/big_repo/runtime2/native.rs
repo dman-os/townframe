@@ -2174,11 +2174,18 @@ where
     // admission-log changes. The notifier is only a wake-up hint.
     let keyhive_dispatcher_subscriptions: crate::runtime2::keyhive_dispatcher::SubscriptionMap =
         Arc::new(surelock::mutex::Mutex::new(std::collections::HashMap::new()));
+    // One timer and one clock serve every actor in this node — the hub, the
+    // dispatcher and the periodic workers — so a loop's wait and the `now` it
+    // ticks against can never come from two different time sources.
+    let timer: Arc<dyn crate::runtime2::Timer<Sendable>> = Arc::new(crate::runtime2::TokioTimer);
+    let clock: Arc<dyn crate::runtime2::Clock> =
+        Arc::new(subduction_ephemeral::clock::std_clock::StdClock);
     let (keyhive_dispatcher, spawned_keyhive_dispatcher) =
         crate::runtime2::keyhive_dispatcher::spawn_keyhive_dispatcher(
             Arc::clone(&keyhive_protocol),
             group_part_store.clone(),
-            Arc::new(crate::runtime2::TokioTimer),
+            Arc::clone(&timer),
+            Arc::clone(&clock),
             Arc::clone(&keyhive_dispatcher_notify),
             keyhive_dispatcher_subscriptions,
             utils_rs::batching::DebouncePolicy {
@@ -2300,10 +2307,6 @@ where
         }),
     });
 
-    let timer: Arc<dyn crate::runtime2::Timer<Sendable>> = Arc::new(crate::runtime2::TokioTimer);
-    let clock: Arc<dyn crate::runtime2::Clock> =
-        Arc::new(subduction_ephemeral::clock::std_clock::StdClock);
-
     // ── Spawn runtime2 ───────────────────────────────────────────────────
     let config = crate::runtime2::Runtime2Config {
         local_peer_id: PeerKey::new(local_peer_id.as_bytes()),
@@ -2336,6 +2339,7 @@ where
         keyhive.clone(),
         PeerKey::new(local_peer_id.as_bytes()),
         Arc::clone(&timer),
+        Arc::clone(&clock),
         evt_tx.clone(),
         group_part_group_scope,
     );
@@ -2351,6 +2355,7 @@ where
         keyhive.clone(),
         handle.clone(),
         Arc::clone(&timer),
+        Arc::clone(&clock),
         evt_tx.clone(),
         causal_checkpoint_group_scope,
     );
@@ -2381,6 +2386,8 @@ where
         Arc::new(group_part_store.clone()) as Arc<dyn big_sync::HostPartStore>,
         frontier_store,
         handle.clone(),
+        Arc::clone(&timer),
+        Arc::clone(&clock),
         evt_tx.clone(),
         Arc::clone(&change_manager),
         keyhive.clone(),

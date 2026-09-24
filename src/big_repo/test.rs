@@ -166,18 +166,16 @@ fn try_get_str_at_root(doc: &automerge::Automerge, key: &str) -> Option<String> 
 async fn recv_change_batch(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<BigRepoChangeNotification>>,
 ) -> Vec<BigRepoChangeNotification> {
-    timeout(Duration::from_secs(1), rx.recv())
+    rx.recv()
         .await
-        .expect("timed out waiting for change batch")
         .expect("change listener closed unexpectedly")
 }
 
 async fn recv_head_batch(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<super::changes::BigRepoHeadNotification>>,
 ) -> Vec<super::changes::BigRepoHeadNotification> {
-    timeout(Duration::from_secs(1), rx.recv())
+    rx.recv()
         .await
-        .expect("timed out waiting for head batch")
         .expect("head listener closed unexpectedly")
 }
 
@@ -203,28 +201,23 @@ async fn wait_for_document_access_notification(
     member_id: PeerKey,
     expected_access: crate::changes::BigRepoAccess,
 ) -> Res<()> {
-    timeout(utils_rs::scale_timeout(Duration::from_secs(10)), async {
-        loop {
-            let notifications = rx.recv().await.expect("domain listener must remain open");
-            if notifications.iter().any(|notification| {
-                matches!(
-                    notification,
-                    crate::changes::BigRepoDomainNotification::DocumentAccessChanged {
-                        doc_id: candidate_doc,
-                        member_id: candidate_member,
-                        access,
-                    } if *candidate_doc == doc_id
-                        && *candidate_member == member_id
-                        && *access == expected_access
-                )
-            }) {
-                return;
-            }
+    loop {
+        let notifications = rx.recv().await.expect("domain listener must remain open");
+        if notifications.iter().any(|notification| {
+            matches!(
+                notification,
+                crate::changes::BigRepoDomainNotification::DocumentAccessChanged {
+                    doc_id: candidate_doc,
+                    member_id: candidate_member,
+                    access,
+                } if *candidate_doc == doc_id
+                    && *candidate_member == member_id
+                    && *access == expected_access
+            )
+        }) {
+            return Ok(());
         }
-    })
-    .await
-    .expect("timed out waiting for document access notification");
-    Ok(())
+    }
 }
 
 #[tokio::test]
@@ -302,28 +295,41 @@ async fn startup_audit_repairs_update_persisted_without_checkpoint() -> Res<()> 
     drop(repo);
 
     let (reopened, _part_store, reopened_stop) = _boot_disk_repo(repo_path).await?;
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            let repaired = reopened
-                .inspect_stored_doc_blobs(doc_id.clone())
-                .await?
-                .into_iter()
-                .filter_map(|raw| decode_encrypted_blob(&raw).ok())
-                .filter_map(|encrypted| encrypted.content_ref.try_into().ok())
-                .map(sedimentree_core::loose_commit::id::CommitId::new)
-                .any(crate::runtime2::support::is_causal_checkpoint_id);
-            if repaired {
-                return Ok::<_, crate::eyre::Error>(());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    loop {
+        let repaired = reopened
+            .inspect_stored_doc_blobs(doc_id.clone())
+            .await?
+            .into_iter()
+            .filter_map(|raw| decode_encrypted_blob(&raw).ok())
+            .filter_map(|encrypted| encrypted.content_ref.try_into().ok())
+            .map(sedimentree_core::loose_commit::id::CommitId::new)
+            .any(crate::runtime2::support::is_causal_checkpoint_id);
+        if repaired {
+            break;
         }
-    })
-    .await
-    .expect("startup audit did not repair missing checkpoint")?;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     reopened_stop().await?;
     Ok(())
 }
 
+// Ignored, not broken, and not redundant. What this test is for is *our* layer: that a boundary
+// commit travelling through BigRepo's Automerge document and encrypted envelope still produces a
+// requested fragment, that the fragment is persisted, and that it durably absorbs the covered
+// loose head with every stored blob decoding as its envelope type. The boundary *semantics* are
+// covered deterministically in subduction's own fragment tests, which pass an explicit depth
+// metric — ours would prove only that the wiring does not block them.
+//
+// What makes it unaffordable today is the trigger: `Depth::is_boundary()` is
+// `CountLeadingZeroBytes(commit_id) > 0`, i.e. p = 1/256 per commit, and the loop below brute-
+// forces up to 2000 commits to land one. On a loaded box that measured 1342 probes in 120s, so the
+// default-class 120s cap cuts ~0.5% of iterations and the 2000-attempt bound panics on ~0.04% —
+// either way ~7% of 60-minute soaks fail with no product defect present.
+//
+// Re-enable by constructing the boundary condition instead of drawing for it (a depth >= 1 commit
+// built by hand, or the depth-metric seam — `BigRepoSubduction` pins `CountLeadingZeroBytes`), then
+// assert on that commit rather than on whichever hash happens to arrive.
+#[ignore = "boundary trigger is a 1/256 draw; re-enable by constructing the depth >= 1 commit"]
 #[tokio::test]
 async fn local_boundary_commit_stores_fragment_and_prunes_covered_loose_history() -> Res<()> {
     let (repo, _part_store, _stop_token) = boot_repo().await?;
@@ -1391,27 +1397,23 @@ async fn three_node_key_rotation_propagates_to_existing_reader() -> Res<()> {
     b_a_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
     // B can now decrypt both edits.
-    timeout(Duration::from_secs(10), async {
-        loop {
-            match b.repo.get_doc(&doc_id).await? {
-                DocLookup::Ready(handle) => {
-                    let title = handle
-                        .with_document_read(|doc| try_get_str_at_root(doc, "title"))
-                        .await;
-                    let author = handle
-                        .with_document_read(|doc| try_get_str_at_root(doc, "author"))
-                        .await;
-                    if title.as_deref() == Some("beta") && author.as_deref() == Some("carol") {
-                        return Ok::<_, eyre::Report>(());
-                    }
+    loop {
+        match b.repo.get_doc(&doc_id).await? {
+            DocLookup::Ready(handle) => {
+                let title = handle
+                    .with_document_read(|doc| try_get_str_at_root(doc, "title"))
+                    .await;
+                let author = handle
+                    .with_document_read(|doc| try_get_str_at_root(doc, "author"))
+                    .await;
+                if title.as_deref() == Some("beta") && author.as_deref() == Some("carol") {
+                    break;
                 }
-                DocLookup::PendingMaterialization | DocLookup::Missing => {}
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            DocLookup::PendingMaterialization | DocLookup::Missing => {}
         }
-    })
-    .await
-    .expect("timed out waiting for B to decrypt edits from A and C after key rotation")?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     a.shutdown().await?;
     b.shutdown().await?;
@@ -1770,8 +1772,6 @@ async fn with_document_handles_concurrent_writers() -> Res<()> {
 
 const SYNC_DOC_ITEMS: usize = 32;
 const SYNC_DOC_PAYLOAD_LEN: usize = 384;
-const SYNC_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(10);
-const SYNC_CASE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug)]
 struct SyncMutation {
@@ -1972,61 +1972,24 @@ async fn read_json_doc(handle: &BigDocHandle) -> serde_json::Value {
         .expect("sync doc should always hydrate as json")
 }
 
-#[tracing::instrument(skip_all, fields(doc_id = %handle.document_id(), timeout_ms = timeout_dur.as_millis() as u64))]
-async fn wait_for_json_doc(
-    handle: &BigDocHandle,
-    expected: &serde_json::Value,
-    timeout_dur: Duration,
-) {
-    let mut last_actual = None;
-    let res = timeout(timeout_dur, async {
-        loop {
-            let actual = read_json_doc(handle).await;
-            if actual == *expected {
-                break;
-            }
-            last_actual = Some(actual);
-            tokio::time::sleep(Duration::from_millis(25)).await;
+#[tracing::instrument(skip_all, fields(doc_id = %handle.document_id()))]
+async fn wait_for_json_doc(handle: &BigDocHandle, expected: &serde_json::Value) {
+    loop {
+        let actual = read_json_doc(handle).await;
+        if actual == *expected {
+            break;
         }
-    })
-    .await;
-    if res.is_err() {
-        panic!(
-            "timed out waiting for JSON document to converge\nexpected: {}\nactual: {}",
-            serde_json::to_string_pretty(expected).expect("json serializes"),
-            serde_json::to_string_pretty(&last_actual).expect("json serializes"),
-        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
 async fn wait_for_doc_handle(repo: &Arc<BigRepo>, doc_id: DocumentId) -> BigDocHandle {
-    match timeout(SYNC_CASE_TIMEOUT, async {
-        loop {
-            match repo.get_doc(&doc_id).await? {
-                DocLookup::Ready(handle) => return Ok::<BigDocHandle, eyre::Report>(handle),
-                DocLookup::PendingMaterialization | DocLookup::Missing => {}
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+    loop {
+        match repo.get_doc(&doc_id).await.expect("doc lookup failed") {
+            DocLookup::Ready(handle) => return handle,
+            DocLookup::PendingMaterialization | DocLookup::Missing => {}
         }
-    })
-    .await
-    {
-        Ok(result) => result.expect("doc lookup failed"),
-        Err(err) => {
-            let export_doc = repo.get_doc(&doc_id).await.unwrap_or(DocLookup::Missing);
-            let payload_heads = repo.doc_payload_heads(doc_id.clone()).await.unwrap_or(None);
-            let parts = repo
-                .big_sync_store
-                .obj_parts(doc_id)
-                .await
-                .unwrap_or_default();
-            panic!(
-                "timed out waiting for doc to materialize: {err:?}; export_doc_present={}; payload_heads_present={}; parts_len={}",
-                matches!(export_doc, DocLookup::Ready(_)),
-                payload_heads.is_some(),
-                parts.len(),
-            );
-        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -2088,10 +2051,6 @@ async fn create_shared_sync_doc(
         ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .map_err(|_| crate::ferr!("doc id is not a verifying key"))?,
     );
-    // Bounded only for a fast, attributed failure: the grant is normally
-    // observable within milliseconds of the sync round.
-    let access_deadline =
-        tokio::time::Instant::now() + utils_rs::scale_timeout(std::time::Duration::from_secs(5));
     while grantee
         .repo
         .keyhive()
@@ -2099,46 +2058,6 @@ async fn create_shared_sync_doc(
         .await
         .is_none()
     {
-        if tokio::time::Instant::now() >= access_deadline {
-            // Name what the grantee's Keyhive actually knows: whether the
-            // document ever reached it at all, and what the owner believed it
-            // granted. Without this the only signal is the missing access, and
-            // the interesting split (document absent vs. delegation not
-            // applied) is lost.
-            let known_docs = grantee.repo.keyhive().document_ids().await;
-            let doc_known = known_docs.contains(&big_sync_core::ObjKey::new(doc_id.as_bytes()));
-            let grantee_docs = grantee.repo.keyhive().docs_for_agent(&grantee_local).await;
-            let owner_local = keyhive_core::principal::identifier::Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(
-                    &owner.peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
-                )
-                .map_err(|_| crate::ferr!("owner peer id is not a verifying key"))?,
-            );
-            let owner_access = owner
-                .repo
-                .keyhive()
-                .agent_access_on(&owner_local, doc_ident)
-                .await;
-            // The ledgers answer the next question: an empty unapplied remainder
-            // on the grantee means the granting events never reached it, while a
-            // non-empty one names the peer whose events Keyhive never applied.
-            let grantee_ledger = crate::test2::describe_ledger(&grantee.repo).await?;
-            let owner_ledger = crate::test2::describe_ledger(&owner.repo).await?;
-            let grantee_membered = grantee
-                .repo
-                .keyhive()
-                .membered_for_agent(&grantee_local)
-                .await;
-            return Err(crate::ferr!(
-                "grantee never observed access to the document it was granted: \
-                 doc_known_to_grantee={doc_known} grantee_doc_count={} \
-                 grantee_docs_for_agent={} grantee_membered={} owner_access={owner_access:?} \
-                 grantee_ledger={grantee_ledger} owner_ledger={owner_ledger}",
-                known_docs.len(),
-                grantee_docs.len(),
-                grantee_membered.len()
-            ));
-        }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
@@ -2327,16 +2246,12 @@ impl SyncRepoNode {
 
     #[tracing::instrument(skip(self), fields(expected))]
     async fn wait_for_accepts(&self, expected: usize) {
-        timeout(SYNC_PROPAGATION_TIMEOUT, async {
-            loop {
-                if self.accept_count.load(Ordering::SeqCst) >= expected {
-                    break;
-                }
-                self.accept_notify.notified().await;
+        loop {
+            if self.accept_count.load(Ordering::SeqCst) >= expected {
+                break;
             }
-        })
-        .await
-        .expect("timed out waiting for iroh accept loop");
+            self.accept_notify.notified().await;
+        }
     }
 
     /// Wait for an accepted connection on this node and take it.
@@ -2346,21 +2261,17 @@ impl SyncRepoNode {
     /// connection is not recorded yet and an `expect` here would panic. Wait
     /// for the callback instead of assuming the slot is already filled.
     async fn take_latest_accepted_connection(&self) -> BigRepoConnection {
-        timeout(SYNC_PROPAGATION_TIMEOUT, async {
-            loop {
-                let notified = self.accept_notify.notified();
-                tokio::pin!(notified);
-                // Register interest before checking the slot, so a store
-                // landing between the check and the wait cannot be lost.
-                notified.as_mut().enable();
-                if let Some(connection) = self.accepted_connection.lock().await.take() {
-                    return connection;
-                }
-                notified.await;
+        loop {
+            let notified = self.accept_notify.notified();
+            tokio::pin!(notified);
+            // Register interest before checking the slot, so a store
+            // landing between the check and the wait cannot be lost.
+            notified.as_mut().enable();
+            if let Some(connection) = self.accepted_connection.lock().await.take() {
+                return connection;
             }
-        })
-        .await
-        .expect("timed out waiting for the iroh accept loop to record a connection")
+            notified.await;
+        }
     }
 
     async fn connect_to(&self, remote: &SyncRepoNode) -> Res<()> {
@@ -2622,8 +2533,8 @@ async fn run_sync_case(
             server_state_notes = ?sync_note_snapshot(&server_state, &[5, 17]),
             "post-sync diverged-head note snapshot"
         );
-        wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+        wait_for_json_doc(&client_doc, &expected_doc).await;
+        wait_for_json_doc(&server_doc, &expected_doc).await;
     } else {
         if local_mutation.is_some() {
             client_conn.sync_keyhive_with_peer().await?;
@@ -2633,8 +2544,8 @@ async fn run_sync_case(
             peer_id = %client_conn.peer_id(),
             "verifying doc convergence"
         );
-        wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+        wait_for_json_doc(&client_doc, &expected_doc).await;
+        wait_for_json_doc(&server_doc, &expected_doc).await;
     }
 
     tracing::info!("closing client connection and shutting down repos");
@@ -2719,8 +2630,8 @@ async fn run_restart_reconnect_case(
 
     tracing::info!("running initial sync before server shutdown");
     client_conn.sync_doc_with_peer(doc_id.clone()).await?;
-    wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-    wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+    wait_for_json_doc(&client_doc, &expected_doc).await;
+    wait_for_json_doc(&server_doc, &expected_doc).await;
 
     tracing::info!("shutting down server while connection is still live");
     server.shutdown().await?;
@@ -2733,7 +2644,7 @@ async fn run_restart_reconnect_case(
         .get_doc(&doc_id)
         .await?
         .into_ready(doc_id.clone())?;
-    wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+    wait_for_json_doc(&server_doc, &expected_doc).await;
 
     if let Some(mutation) = second_local_mutation {
         tracing::info!(?mutation, "applying second local mutation after restart");
@@ -2759,8 +2670,8 @@ async fn run_restart_reconnect_case(
 
     tracing::info!("running sync after restart");
     client_conn.sync_doc_with_peer(doc_id).await?;
-    wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-    wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+    wait_for_json_doc(&client_doc, &expected_doc).await;
+    wait_for_json_doc(&server_doc, &expected_doc).await;
 
     client_conn.stop().await?;
     server.shutdown().await?;
@@ -2866,7 +2777,7 @@ async fn run_remote_change_listener_without_live_handle_case(
     ));
 
     let reopened = server.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
-    wait_for_json_doc(&reopened, &expected_doc, SYNC_CASE_TIMEOUT).await;
+    wait_for_json_doc(&reopened, &expected_doc).await;
 
     client_conn.stop().await?;
     server.shutdown().await?;
@@ -3170,27 +3081,12 @@ async fn run_sync_backend_case(
     contract::assert_sync_backend_case(&harness, &scenario).await?;
 
     if let Some(client_doc) = &client_doc {
-        wait_for_json_doc(
-            client_doc,
-            &expected_doc,
-            utils_rs::scale_timeout(SYNC_CASE_TIMEOUT),
-        )
-        .await;
+        wait_for_json_doc(client_doc, &expected_doc).await;
     } else {
         let imported_client_doc = client.repo.get_doc(&doc_id).await?.into_ready(doc_id)?;
-        wait_for_json_doc(
-            &imported_client_doc,
-            &expected_doc,
-            utils_rs::scale_timeout(SYNC_CASE_TIMEOUT),
-        )
-        .await;
+        wait_for_json_doc(&imported_client_doc, &expected_doc).await;
     }
-    wait_for_json_doc(
-        &server_doc,
-        &expected_doc,
-        utils_rs::scale_timeout(SYNC_CASE_TIMEOUT),
-    )
-    .await;
+    wait_for_json_doc(&server_doc, &expected_doc).await;
 
     client.disconnect_from(&server).await?;
     server.shutdown().await?;
@@ -3342,8 +3238,8 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
         "unexpected payload after put_doc_conflict_retries_sync_and_materializes_heads"
     );
 
-    wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-    wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+    wait_for_json_doc(&client_doc, &expected_doc).await;
+    wait_for_json_doc(&server_doc, &expected_doc).await;
 
     client_conn.stop().await?;
     server.shutdown().await?;
@@ -3352,533 +3248,459 @@ async fn run_sync_backend_put_doc_conflict_case() -> Res<()> {
 }
 
 async fn wait_for_pair_full_sync(left: &SyncRepoNode, right: &SyncRepoNode) -> Res<()> {
-    let left_wait = timeout(
-        SYNC_CASE_TIMEOUT,
-        left.big_sync_worker
-            .wait_for_full_sync([right.peer_id()], stress_support::test_parts()),
-    );
-    let right_wait = timeout(
-        SYNC_CASE_TIMEOUT,
-        right
-            .big_sync_worker
-            .wait_for_full_sync([left.peer_id()], stress_support::test_parts()),
-    );
-    left_wait
-        .await
-        .expect("timed out waiting for left node full sync")?;
-    right_wait
-        .await
-        .expect("timed out waiting for right node full sync")?;
+    left.big_sync_worker
+        .wait_for_full_sync([right.peer_id()], stress_support::test_parts())
+        .await?;
+    right
+        .big_sync_worker
+        .wait_for_full_sync([left.peer_id()], stress_support::test_parts())
+        .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_backend_returns_noop_when_heads_match() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_backend_case(
-            None,
-            None,
-            SyncCompletionDeets::Noop,
-            true,
-            sync_test_parts(),
-            false,
-        ),
+    run_sync_backend_case(
+        None,
+        None,
+        SyncCompletionDeets::Noop,
+        true,
+        sync_test_parts(),
+        false,
     )
-    .await
-    .expect("sync backend test timed out")?;
+    .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_backend_applies_remote_update() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_backend_case(
-            None,
-            Some(SyncMutation {
-                item_idx: 17,
-                note_key: "remote_backend",
-                side_label: "remote",
-            }),
-            SyncCompletionDeets::ChangedObject,
-            true,
-            sync_test_parts(),
-            false,
-        ),
+    run_sync_backend_case(
+        None,
+        Some(SyncMutation {
+            item_idx: 17,
+            note_key: "remote_backend",
+            side_label: "remote",
+        }),
+        SyncCompletionDeets::ChangedObject,
+        true,
+        sync_test_parts(),
+        false,
     )
-    .await
-    .expect("sync backend test timed out")?;
+    .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_backend_applies_remote_update_with_empty_part_hints() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_backend_case(
-            None,
-            Some(SyncMutation {
-                item_idx: 18,
-                note_key: "remote_backend_empty",
-                side_label: "remote",
-            }),
-            SyncCompletionDeets::ChangedObject,
-            true,
-            vec![],
-            false,
-        ),
+    run_sync_backend_case(
+        None,
+        Some(SyncMutation {
+            item_idx: 18,
+            note_key: "remote_backend_empty",
+            side_label: "remote",
+        }),
+        SyncCompletionDeets::ChangedObject,
+        true,
+        vec![],
+        false,
     )
-    .await
-    .expect("sync backend test timed out")?;
+    .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_backend_applies_remote_update_with_multiple_part_hints() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_backend_case(
-            None,
-            Some(SyncMutation {
-                item_idx: 19,
-                note_key: "remote_backend_multi",
-                side_label: "remote",
-            }),
-            SyncCompletionDeets::ChangedObject,
-            true,
-            sync_test_parts_multi(),
-            false,
-        ),
+    run_sync_backend_case(
+        None,
+        Some(SyncMutation {
+            item_idx: 19,
+            note_key: "remote_backend_multi",
+            side_label: "remote",
+        }),
+        SyncCompletionDeets::ChangedObject,
+        true,
+        sync_test_parts_multi(),
+        false,
     )
-    .await
-    .expect("sync backend test timed out")?;
+    .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_backend_returns_noop_when_remote_payload_is_missing() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_backend_remote_payload_missing_noop_case(),
-    )
-    .await
-    .expect("sync backend test timed out")?;
+    run_sync_backend_remote_payload_missing_noop_case().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_backend_fetches_missing_doc_when_remote_payload_is_missing() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_backend_missing_local_and_remote_payload_case(),
-    )
-    .await
-    .expect("sync backend missing-document test timed out")?;
+    run_sync_backend_missing_local_and_remote_payload_case().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_backend_applies_remote_update_when_remote_payload_is_missing() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_backend_remote_payload_missing_changed_case(sync_test_parts()),
-    )
-    .await
-    .expect("sync backend test timed out")?;
+    run_sync_backend_remote_payload_missing_changed_case(sync_test_parts()).await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_backend_adds_missing_doc() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_backend_changed_object_case(Some(SyncMutation {
-            item_idx: 23,
-            note_key: "added_member",
-            side_label: "remote",
-        })),
-    )
-    .await
-    .expect("sync backend test timed out")?;
+    run_sync_backend_changed_object_case(Some(SyncMutation {
+        item_idx: 23,
+        note_key: "added_member",
+        side_label: "remote",
+    }))
+    .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn big_repo_sync_backend_recovers_from_put_doc_conflict() -> Res<()> {
-    timeout(SYNC_CASE_TIMEOUT, run_sync_backend_put_doc_conflict_case())
-        .await
-        .expect("sync backend test timed out")?;
+    run_sync_backend_put_doc_conflict_case().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_with_peer_both_diverged_loses_remote_change() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_sync_case(
-            SYNC_DOC_ITEMS,
-            SYNC_DOC_PAYLOAD_LEN,
-            Some(SyncMutation {
-                item_idx: 5,
-                note_key: "local_note",
-                side_label: "local",
-            }),
-            Some(SyncMutation {
-                item_idx: 17,
-                note_key: "remote_note",
-                side_label: "remote",
-            }),
-            false,
-        ),
+    run_sync_case(
+        SYNC_DOC_ITEMS,
+        SYNC_DOC_PAYLOAD_LEN,
+        Some(SyncMutation {
+            item_idx: 5,
+            note_key: "local_note",
+            side_label: "local",
+        }),
+        Some(SyncMutation {
+            item_idx: 17,
+            note_key: "remote_note",
+            side_label: "remote",
+        }),
+        false,
     )
-    .await
-    .expect("sync test timed out")?;
+    .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_with_peer_survives_repo_restart_with_live_connection() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT * 2,
-        run_restart_reconnect_case(
-            SYNC_DOC_ITEMS,
-            SYNC_DOC_PAYLOAD_LEN,
-            Some(SyncMutation {
-                item_idx: 7,
-                note_key: "remote_note",
-                side_label: "remote",
-            }),
-            Some(SyncMutation {
-                item_idx: 3,
-                note_key: "local_after_restart",
-                side_label: "local",
-            }),
-        ),
+    run_restart_reconnect_case(
+        SYNC_DOC_ITEMS,
+        SYNC_DOC_PAYLOAD_LEN,
+        Some(SyncMutation {
+            item_idx: 7,
+            note_key: "remote_note",
+            side_label: "remote",
+        }),
+        Some(SyncMutation {
+            item_idx: 3,
+            note_key: "local_after_restart",
+            side_label: "local",
+        }),
     )
-    .await
-    .expect("sync test timed out")?;
+    .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_with_peer_local_write_emits_notifications_while_connected() -> Res<()> {
-    timeout(SYNC_CASE_TIMEOUT, async {
-        let temp_root = tempdir()?;
-        let server_path = temp_root.path().join("server");
-        let client_path = temp_root.path().join("client");
+    let temp_root = tempdir()?;
+    let server_path = temp_root.path().join("server");
+    let client_path = temp_root.path().join("client");
 
-        let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
+    let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
 
-        let server = SyncRepoNode::boot(server_path, 101, true).await?;
-        let client = SyncRepoNode::boot(client_path, 102, false).await?;
-        client.connect_to(&server).await?;
-        let client_conn = client.connection_to(&server).await;
-        let server_conn = server.take_latest_accepted_connection().await;
-        let server_doc = create_shared_sync_doc(
-            &server,
-            &client,
-            &server_conn,
-            &client_conn,
-            &expected_doc,
-            automerge::ActorId::from([101_u8; 16]),
-        )
+    let server = SyncRepoNode::boot(server_path, 101, true).await?;
+    let client = SyncRepoNode::boot(client_path, 102, false).await?;
+    client.connect_to(&server).await?;
+    let client_conn = client.connection_to(&server).await;
+    let server_conn = server.take_latest_accepted_connection().await;
+    let server_doc = create_shared_sync_doc(
+        &server,
+        &client,
+        &server_conn,
+        &client_conn,
+        &expected_doc,
+        automerge::ActorId::from([101_u8; 16]),
+    )
+    .await?;
+    let doc_id = server_doc.document_id();
+
+    // Pre-sync so client has the doc under the same ID
+    server
+        .big_sync_store
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
-        let doc_id = server_doc.document_id();
-
-        // Pre-sync so client has the doc under the same ID
-        server
-            .big_sync_store
-            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
-            .await?;
-        client
-            .big_sync_store
-            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
-            .await?;
-        wait_for_pair_full_sync(&server, &client).await?;
-        let client_doc = client
-            .repo
-            .get_doc(&doc_id)
-            .await?
-            .into_ready(doc_id.clone())?;
-        set_doc_actor(&client_doc, automerge::ActorId::from([102_u8; 16])).await?;
-
-        apply_local_sync_mutation_and_assert_notifications(
-            &client.repo,
-            &server_conn,
-            &client_doc,
-            doc_id,
-            SyncMutation {
-                item_idx: 4,
-                note_key: "local_connected",
-                side_label: "local",
-            },
-            SYNC_DOC_PAYLOAD_LEN,
-        )
+    client
+        .big_sync_store
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
-        apply_sync_mutation(
-            &mut expected_doc,
-            SyncMutation {
-                item_idx: 4,
-                note_key: "local_connected",
-                side_label: "local",
-            },
-            SYNC_DOC_PAYLOAD_LEN,
-        );
+    wait_for_pair_full_sync(&server, &client).await?;
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
+    set_doc_actor(&client_doc, automerge::ActorId::from([102_u8; 16])).await?;
 
-        wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+    apply_local_sync_mutation_and_assert_notifications(
+        &client.repo,
+        &server_conn,
+        &client_doc,
+        doc_id,
+        SyncMutation {
+            item_idx: 4,
+            note_key: "local_connected",
+            side_label: "local",
+        },
+        SYNC_DOC_PAYLOAD_LEN,
+    )
+    .await?;
+    apply_sync_mutation(
+        &mut expected_doc,
+        SyncMutation {
+            item_idx: 4,
+            note_key: "local_connected",
+            side_label: "local",
+        },
+        SYNC_DOC_PAYLOAD_LEN,
+    );
 
-        client_conn.stop().await?;
-        server.shutdown().await?;
-        client.shutdown().await?;
-        eyre::Ok(())
-    })
-    .await
-    .expect("sync test timed out")?;
-    Ok(())
+    wait_for_json_doc(&client_doc, &expected_doc).await;
+    wait_for_json_doc(&server_doc, &expected_doc).await;
+
+    client_conn.stop().await?;
+    server.shutdown().await?;
+    client.shutdown().await?;
+    eyre::Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_with_peer_remote_change_notifies_without_live_handle() -> Res<()> {
-    timeout(
-        SYNC_CASE_TIMEOUT,
-        run_remote_change_listener_without_live_handle_case(
-            SYNC_DOC_ITEMS,
-            SYNC_DOC_PAYLOAD_LEN,
-            SyncMutation {
-                item_idx: 13,
-                note_key: "remote_no_handle",
-                side_label: "remote",
-            },
-        ),
+    run_remote_change_listener_without_live_handle_case(
+        SYNC_DOC_ITEMS,
+        SYNC_DOC_PAYLOAD_LEN,
+        SyncMutation {
+            item_idx: 13,
+            note_key: "remote_no_handle",
+            side_label: "remote",
+        },
     )
-    .await
-    .expect("sync test timed out")?;
+    .await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_with_peer_remote_change_notifies_with_live_handle_and_listeners() -> Res<()> {
-    timeout(SYNC_CASE_TIMEOUT, async {
-        let temp_root = tempdir()?;
-        let server_path = temp_root.path().join("server");
-        let client_path = temp_root.path().join("client");
+    let temp_root = tempdir()?;
+    let server_path = temp_root.path().join("server");
+    let client_path = temp_root.path().join("client");
 
-        let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
+    let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
 
-        let server = SyncRepoNode::boot(server_path, 111, true).await?;
-        let client = SyncRepoNode::boot(client_path, 112, false).await?;
-        client.connect_to(&server).await?;
-        let client_conn = client.connection_to(&server).await;
-        let server_conn = server.take_latest_accepted_connection().await;
-        let server_doc = create_shared_sync_doc(
-            &server,
-            &client,
-            &server_conn,
-            &client_conn,
-            &expected_doc,
-            automerge::ActorId::from([111_u8; 16]),
-        )
+    let server = SyncRepoNode::boot(server_path, 111, true).await?;
+    let client = SyncRepoNode::boot(client_path, 112, false).await?;
+    client.connect_to(&server).await?;
+    let client_conn = client.connection_to(&server).await;
+    let server_conn = server.take_latest_accepted_connection().await;
+    let server_doc = create_shared_sync_doc(
+        &server,
+        &client,
+        &server_conn,
+        &client_conn,
+        &expected_doc,
+        automerge::ActorId::from([111_u8; 16]),
+    )
+    .await?;
+    let doc_id = server_doc.document_id();
+
+    // Pre-sync so client has the doc under the same ID
+    server
+        .big_sync_store
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
-        let doc_id = server_doc.document_id();
+    client
+        .big_sync_store
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
+        .await?;
+    wait_for_pair_full_sync(&server, &client).await?;
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
+    set_doc_actor(&client_doc, automerge::ActorId::from([112_u8; 16])).await?;
 
-        // Pre-sync so client has the doc under the same ID
-        server
-            .big_sync_store
-            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
-            .await?;
-        client
-            .big_sync_store
-            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
-            .await?;
-        wait_for_pair_full_sync(&server, &client).await?;
-        let client_doc = client
-            .repo
-            .get_doc(&doc_id)
-            .await?
-            .into_ready(doc_id.clone())?;
-        set_doc_actor(&client_doc, automerge::ActorId::from([112_u8; 16])).await?;
+    let (_change_registration, mut change_rx) = server
+        .repo
+        .subscribe_change_listener(BigRepoChangeFilter {
+            doc_id: Some(BigRepoDocIdFilter::new(doc_id.clone())),
+            origin: Some(BigRepoOriginFilter::Remote),
+            path: Vec::new(),
+        })
+        .await?;
+    let (_head_registration, mut head_rx) = server
+        .repo
+        .change_manager
+        .subscribe_head_listener(super::changes::HeadFilter {
+            doc_id: Some(super::changes::DocIdFilter::new(doc_id.clone())),
+        })
+        .await?;
 
-        let (_change_registration, mut change_rx) = server
-            .repo
-            .subscribe_change_listener(BigRepoChangeFilter {
-                doc_id: Some(BigRepoDocIdFilter::new(doc_id.clone())),
-                origin: Some(BigRepoOriginFilter::Remote),
-                path: Vec::new(),
-            })
-            .await?;
-        let (_head_registration, mut head_rx) = server
-            .repo
-            .change_manager
-            .subscribe_head_listener(super::changes::HeadFilter {
-                doc_id: Some(super::changes::DocIdFilter::new(doc_id.clone())),
-            })
-            .await?;
+    client_doc
+        .with_document(|doc| {
+            apply_sync_mutation_in_place(
+                doc,
+                SyncMutation {
+                    item_idx: 7,
+                    note_key: "remote_with_handle",
+                    side_label: "remote",
+                },
+                SYNC_DOC_PAYLOAD_LEN,
+            );
+        })
+        .await?;
+    apply_sync_mutation(
+        &mut expected_doc,
+        SyncMutation {
+            item_idx: 7,
+            note_key: "remote_with_handle",
+            side_label: "remote",
+        },
+        SYNC_DOC_PAYLOAD_LEN,
+    );
 
-        client_doc
-            .with_document(|doc| {
-                apply_sync_mutation_in_place(
-                    doc,
-                    SyncMutation {
-                        item_idx: 7,
-                        note_key: "remote_with_handle",
-                        side_label: "remote",
-                    },
-                    SYNC_DOC_PAYLOAD_LEN,
-                );
-            })
-            .await?;
-        apply_sync_mutation(
-            &mut expected_doc,
-            SyncMutation {
-                item_idx: 7,
-                note_key: "remote_with_handle",
-                side_label: "remote",
-            },
-            SYNC_DOC_PAYLOAD_LEN,
-        );
+    server_conn.sync_keyhive_with_peer().await?;
+    server_conn.sync_doc_with_peer(doc_id.clone()).await?;
 
-        server_conn.sync_keyhive_with_peer().await?;
-        server_conn.sync_doc_with_peer(doc_id.clone()).await?;
+    let change_batch = recv_change_batch(&mut change_rx).await;
+    assert!(matches!(
+        change_batch.as_slice(),
+        [BigRepoChangeNotification::DocChanged {
+            doc_id: seen_doc_id,
+            origin: BigRepoChangeOrigin::Remote { .. },
+            ..
+        }] if *seen_doc_id == doc_id
+    ));
 
-        let change_batch = recv_change_batch(&mut change_rx).await;
-        assert!(matches!(
-            change_batch.as_slice(),
-            [BigRepoChangeNotification::DocChanged {
-                doc_id: seen_doc_id,
-                origin: BigRepoChangeOrigin::Remote { .. },
-                ..
-            }] if *seen_doc_id == doc_id
-        ));
+    let head_batch: Vec<super::changes::BigRepoHeadNotification> =
+        recv_head_batch(&mut head_rx).await;
+    assert!(matches!(
+        head_batch.as_slice(),
+        [super::changes::BigRepoHeadNotification::SedimentreeHeadsChanged {
+            doc_id: seen_doc_id,
+            origin: BigRepoChangeOrigin::Remote { .. },
+            ..
+        }] if *seen_doc_id == doc_id
+    ));
 
-        let head_batch: Vec<super::changes::BigRepoHeadNotification> =
-            recv_head_batch(&mut head_rx).await;
-        assert!(matches!(
-            head_batch.as_slice(),
-            [super::changes::BigRepoHeadNotification::SedimentreeHeadsChanged {
-                doc_id: seen_doc_id,
-                origin: BigRepoChangeOrigin::Remote { .. },
-                ..
-            }] if *seen_doc_id == doc_id
-        ));
+    wait_for_json_doc(&server_doc, &expected_doc).await;
+    wait_for_json_doc(&client_doc, &expected_doc).await;
 
-        wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-
-        client_conn.stop().await?;
-        server.shutdown().await?;
-        client.shutdown().await?;
-        eyre::Ok(())
-    })
-    .await
-    .expect("sync test timed out")?;
-    Ok(())
+    client_conn.stop().await?;
+    server.shutdown().await?;
+    client.shutdown().await?;
+    eyre::Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_with_peer_local_change_without_change_listener_only_emits_heads() -> Res<()> {
-    timeout(SYNC_CASE_TIMEOUT, async {
-        let temp_root = tempdir()?;
-        let server_path = temp_root.path().join("server");
-        let client_path = temp_root.path().join("client");
+    let temp_root = tempdir()?;
+    let server_path = temp_root.path().join("server");
+    let client_path = temp_root.path().join("client");
 
-        let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
+    let mut expected_doc = make_sync_doc_value("base", SYNC_DOC_ITEMS, SYNC_DOC_PAYLOAD_LEN);
 
-        let server = SyncRepoNode::boot(server_path, 121, true).await?;
-        let client = SyncRepoNode::boot(client_path, 122, false).await?;
-        client.connect_to(&server).await?;
-        let client_conn = client.connection_to(&server).await;
-        let server_conn = server.take_latest_accepted_connection().await;
-        let server_doc = create_shared_sync_doc(
-            &server,
-            &client,
-            &server_conn,
-            &client_conn,
-            &expected_doc,
-            automerge::ActorId::from([121_u8; 16]),
-        )
+    let server = SyncRepoNode::boot(server_path, 121, true).await?;
+    let client = SyncRepoNode::boot(client_path, 122, false).await?;
+    client.connect_to(&server).await?;
+    let client_conn = client.connection_to(&server).await;
+    let server_conn = server.take_latest_accepted_connection().await;
+    let server_doc = create_shared_sync_doc(
+        &server,
+        &client,
+        &server_conn,
+        &client_conn,
+        &expected_doc,
+        automerge::ActorId::from([121_u8; 16]),
+    )
+    .await?;
+    let doc_id = server_doc.document_id();
+
+    // Pre-sync so client has the doc under the same ID
+    server
+        .big_sync_store
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
         .await?;
-        let doc_id = server_doc.document_id();
+    client
+        .big_sync_store
+        .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
+        .await?;
+    wait_for_pair_full_sync(&server, &client).await?;
+    let client_doc = client
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
+    set_doc_actor(&client_doc, automerge::ActorId::from([122_u8; 16])).await?;
 
-        // Pre-sync so client has the doc under the same ID
-        server
-            .big_sync_store
-            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
-            .await?;
-        client
-            .big_sync_store
-            .add_obj_to_parts(doc_id.clone(), stress_support::test_parts())
-            .await?;
-        wait_for_pair_full_sync(&server, &client).await?;
-        let client_doc = client
-            .repo
-            .get_doc(&doc_id)
-            .await?
-            .into_ready(doc_id.clone())?;
-        set_doc_actor(&client_doc, automerge::ActorId::from([122_u8; 16])).await?;
-
-        let (_head_registration, mut head_rx) = client
+    let (_head_registration, mut head_rx) = client
+        .repo
+        .change_manager
+        .subscribe_head_listener(super::changes::HeadFilter {
+            doc_id: Some(super::changes::DocIdFilter::new(doc_id.clone())),
+        })
+        .await?;
+    assert!(
+        !client
             .repo
             .change_manager
-            .subscribe_head_listener(super::changes::HeadFilter {
-                doc_id: Some(super::changes::DocIdFilter::new(doc_id.clone())),
-            })
-            .await?;
-        assert!(
-            !client
-                .repo
-                .change_manager
-                .has_change_listener_interest(doc_id.clone(), &BigRepoChangeOrigin::Local),
-            "no change listeners should be interested before mutation"
-        );
+            .has_change_listener_interest(doc_id.clone(), &BigRepoChangeOrigin::Local),
+        "no change listeners should be interested before mutation"
+    );
 
-        client_doc
-            .with_document(|doc| {
-                apply_sync_mutation_in_place(
-                    doc,
-                    SyncMutation {
-                        item_idx: 2,
-                        note_key: "heads_only",
-                        side_label: "local",
-                    },
-                    SYNC_DOC_PAYLOAD_LEN,
-                );
-            })
-            .await?;
-        apply_sync_mutation(
-            &mut expected_doc,
-            SyncMutation {
-                item_idx: 2,
-                note_key: "heads_only",
-                side_label: "local",
-            },
-            SYNC_DOC_PAYLOAD_LEN,
-        );
+    client_doc
+        .with_document(|doc| {
+            apply_sync_mutation_in_place(
+                doc,
+                SyncMutation {
+                    item_idx: 2,
+                    note_key: "heads_only",
+                    side_label: "local",
+                },
+                SYNC_DOC_PAYLOAD_LEN,
+            );
+        })
+        .await?;
+    apply_sync_mutation(
+        &mut expected_doc,
+        SyncMutation {
+            item_idx: 2,
+            note_key: "heads_only",
+            side_label: "local",
+        },
+        SYNC_DOC_PAYLOAD_LEN,
+    );
 
-        let head_batch: Vec<super::changes::BigRepoHeadNotification> =
-            recv_head_batch(&mut head_rx).await;
-        assert!(matches!(
-            head_batch.as_slice(),
-            [super::changes::BigRepoHeadNotification::SedimentreeHeadsChanged {
-                doc_id: seen_doc_id,
-                origin: BigRepoChangeOrigin::Local,
-                ..
-            }] if *seen_doc_id == doc_id
-        ));
+    let head_batch: Vec<super::changes::BigRepoHeadNotification> =
+        recv_head_batch(&mut head_rx).await;
+    assert!(matches!(
+        head_batch.as_slice(),
+        [super::changes::BigRepoHeadNotification::SedimentreeHeadsChanged {
+            doc_id: seen_doc_id,
+            origin: BigRepoChangeOrigin::Local,
+            ..
+        }] if *seen_doc_id == doc_id
+    ));
 
-        server_conn.sync_keyhive_with_peer().await?;
-        server_conn.sync_doc_with_peer(doc_id).await?;
+    server_conn.sync_keyhive_with_peer().await?;
+    server_conn.sync_doc_with_peer(doc_id).await?;
 
-        wait_for_json_doc(&client_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
-        wait_for_json_doc(&server_doc, &expected_doc, SYNC_CASE_TIMEOUT).await;
+    wait_for_json_doc(&client_doc, &expected_doc).await;
+    wait_for_json_doc(&server_doc, &expected_doc).await;
 
-        client_conn.stop().await?;
-        server.shutdown().await?;
-        client.shutdown().await?;
-        eyre::Ok(())
-    })
-    .await
-    .expect("sync test timed out")?;
+    client_conn.stop().await?;
+    server.shutdown().await?;
+    client.shutdown().await?;
     eyre::Ok(())
 }

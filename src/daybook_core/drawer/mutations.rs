@@ -947,6 +947,24 @@ impl DrawerRepo {
                 name: to_branch.to_string(),
             }
         })?;
+        // Using the branch is not merely resolving its ref, exactly as for the write gate
+        // above: a peer's delete revokes this repo's access to the branch doc on the
+        // keyhive channel while the tombstone that drops the branch from the entry travels
+        // on the doc channel, so this node can still resolve the ref to a branch doc it can
+        // no longer reach. Merging through such a branch would reach the doc worker and be
+        // refused as a local access failure, which misstates the situation: this node is
+        // not losing permission on a live branch, the branch is gone as far as it can tell.
+        // The target is gated first because it is the branch this call mutates and the one
+        // resolved here; gating before the handle lookup also keeps an unreachable branch
+        // from being reported as a missing document.
+        if !self
+            .branch_doc_reachable(&to_branch_ref.branch_doc_id)
+            .await?
+        {
+            return Err(DrawerError::BranchNotFound {
+                name: to_branch.to_string(),
+            });
+        }
         let handle = self
             .get_handle_by_branch_doc_id(to_branch_ref.branch_doc_id.clone())
             .await?
@@ -958,6 +976,17 @@ impl DrawerRepo {
                 name: from_branch.to_string(),
             }
         })?;
+        // The source is a use site too: a merge reads the source branch's content to replay
+        // it into the target, so a source this node cannot reach cannot be merged from — the
+        // content is not this node's to read. Same reasoning as the target gate above.
+        if !self
+            .branch_doc_reachable(&from_branch_ref.branch_doc_id)
+            .await?
+        {
+            return Err(DrawerError::BranchNotFound {
+                name: from_branch.to_string(),
+            });
+        }
         let from_handle = self
             .get_handle_by_branch_doc_id(from_branch_ref.branch_doc_id.clone())
             .await?
@@ -1410,6 +1439,15 @@ impl DrawerRepo {
         let drawer_heads = self
             .drawer_doc_handle
             .with_document(|doc| {
+                // Test-only: refuse before the commit. The keyhive-channel
+                // revocation above has already been applied, so failing here pins
+                // the node in the window between the two channels and leaves
+                // nothing written: the entry still lists the branch, and a later
+                // delete can re-run by name.
+                #[cfg(test)]
+                if self.take_fail_next_drawer_doc_commit() {
+                    eyre::bail!("injected drawer-doc commit failure (test only)");
+                }
                 let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
                 new_entry.previous_version_heads = Some(current_drawer_heads);
 

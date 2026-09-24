@@ -45,6 +45,7 @@ pub fn spawn_group_part_worker(
     keyhive: BigKeyhiveHandle,
     local_peer_id: PeerKey,
     timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
     evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     scope: WorkerGroupScope,
 ) -> SpawnedGroupPartWorker<Sendable> {
@@ -106,7 +107,9 @@ pub fn spawn_group_part_worker(
 
             let source = keyhive_admission::Store {
                 store: store.clone(),
-                timer,
+                // The loop below sleeps on the same timer the admission reader
+                // polls with, so both cadences are driven by one seam.
+                timer: Arc::clone(&timer),
             };
             let durable = state.progress().await?.upstream_revision;
             let reader = source.open((), durable).await?;
@@ -126,6 +129,8 @@ pub fn spawn_group_part_worker(
                 tasks: big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler::new(
                     CONCURRENT_TASK_BUDGET,
                 ),
+                timer,
+                clock,
                 pending_sources: HashMap::new(),
                 pending_documents: HashMap::new(),
                 pending_group_parts: HashMap::new(),
@@ -220,6 +225,13 @@ struct Worker<'a> {
     admission: ConcurrentDeltaWalker<'a, keyhive_admission::Store, SqliteDeltaWalkerStateRepo, u64>,
     tasks:
         big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler<GroupPartKey, Task, TaskOutput>,
+    /// The loop's wait and its notion of "now" are both injected so a test can
+    /// own them and drive the timer arm without wall clock (see
+    /// [`crate::runtime2::tasks::manual_time`]). They must be injected together:
+    /// a loop that slept on one time source and ticked from another would
+    /// compute deadlines against a `now` it never actually waited on.
+    timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
     pending_sources: HashMap<u64, PendingSource>,
     pending_documents: HashMap<ObjKey, PendingDocument>,
     pending_group_parts: HashMap<PartKey, PendingGroupPart>,
@@ -234,6 +246,11 @@ impl<'a> Worker<'a> {
         loop {
             let available = CONCURRENT_TASK_BUDGET.saturating_sub(self.tasks.active_count());
             let next_deadline = self.tasks.next_deadline();
+            // Reads the arm's start instant and clones the timer out of `self` so
+            // the select arm below does not borrow the worker while other arms
+            // take it mutably.
+            let now = self.clock.instant();
+            let timer = Arc::clone(&self.timer);
             tokio::select! {
                 biased;
                 completion = self.tasks.next_completion() => {
@@ -241,12 +258,22 @@ impl<'a> Worker<'a> {
                 }
                 _ = async {
                     if let Some(deadline) = next_deadline {
-                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                        // Wakes at the same instant `sleep_until(deadline)` did: the
+                        // wait is `deadline - now` on the injected timer, and the
+                        // subtraction saturates. A deadline the clock has already passed
+                        // therefore becomes a zero-length wait — the same already-expired
+                        // timer the wall-clock version armed — so both the wake ordering
+                        // and the number of loop turns are unchanged.
+                        timer
+                            .sleep(deadline.saturating_duration_since(now))
+                            .await;
                     } else {
                         std::future::pending::<()>().await;
                     }
                 } => {
-                    self.tasks.tick(std::time::Instant::now())?;
+                    // Read `now` fresh: the clock has moved during the wait, and the
+                    // tick must observe the instant the loop actually woke at.
+                    self.tasks.tick(self.clock.instant())?;
                 }
                 admission = async {
                     if available == 0 {
@@ -916,12 +943,18 @@ mod tests {
     use crate::keyhive::BigKeyhiveAgent;
     use crate::keyhive_listener::BigRepoKeyhiveListener;
     use crate::keyhive_storage::BigRepoKeyhiveStorage;
+    use big_sync_core::BuckId;
+    use big_sync_core::revisioned_store::{
+        RevisionRead, RevisionReadLimits, RevisionedStoreReader,
+    };
     use keyhive_core::access::Access;
     use keyhive_core::event::Event;
     use keyhive_core::principal::group::id::GroupId as KhGroupId;
     use keyhive_core::principal::identifier::Identifier;
     use keyhive_core::principal::membered::Membered;
+    use sqlx_utils_rs::SqlCtx;
     use std::collections::BTreeMap;
+    use subduction_keyhive::storage::StorageHash;
 
     #[test]
     fn group_part_id_uses_sedimentree_namespace() {
@@ -999,6 +1032,64 @@ mod tests {
         assert!(
             affected.docs.is_empty(),
             "the group holds no documents, so no document is affected"
+        );
+    }
+
+    /// The machine loop's wait is the injected timer, and this drives the
+    /// admission read that loop is built on to say so: the read parks until the
+    /// timer's `IDLE_POLL` sleep completes, so a row admitted while it is parked
+    /// becomes visible exactly when time moves. If the loop went back to
+    /// `tokio::time::sleep`, `wait_until_armed` would never resolve and the hard
+    /// test timeout would be the only signal.
+    #[tokio::test]
+    async fn the_admission_read_waits_on_the_injected_timer_not_wall_clock() {
+        let sql = SqlCtx::memory().await.expect("create sqlite database");
+        let store = SqliteBigRepoStore::new(sql, "group-part-manual-time", BuckId::MAX_LEVEL)
+            .await
+            .expect("create sqlite big repo store");
+        let manual = crate::runtime2::tasks::manual_time::ManualTime::new();
+        // Binding the concrete handle first is required: `Arc::clone(&manual)` does not
+        // coerce, because the expected `Arc<dyn Timer<_>>` propagates into the call's
+        // argument and demands `&Arc<dyn Timer<_>>`. An unsized coercion applies at a
+        // binding, so the cast belongs on this second line.
+        let manual_timer: Arc<crate::runtime2::tasks::manual_time::ManualTime> =
+            Arc::clone(&manual);
+        let timer: Arc<dyn crate::runtime2::Timer<Sendable>> = manual_timer;
+        let source = keyhive_admission::Store {
+            store: store.clone(),
+            timer,
+        };
+        let mut reader = source.open((), 0).await.expect("open admission reader");
+        let limits = RevisionReadLimits::default();
+        assert!(
+            matches!(
+                reader.next(limits).await.expect("read replay boundary"),
+                RevisionRead::ReplayComplete { .. }
+            ),
+            "an empty log replays nothing"
+        );
+
+        // The next read finds nothing and parks in `timer.sleep(IDLE_POLL)`.
+        let parked = tokio::spawn(async move { reader.next(limits).await });
+        manual.wait_until_armed(1).await;
+
+        store
+            .save_keyhive_event(StorageHash::new([41; 32]), vec![41u8], None)
+            .await
+            .expect("save keyhive event");
+        store
+            .append_admitted_events(vec![StorageHash::new([41; 32])], None)
+            .await
+            .expect("append admitted event");
+        manual.advance(keyhive_admission::IDLE_POLL);
+
+        let read = parked
+            .await
+            .expect("reader task must not panic")
+            .expect("read the admitted row");
+        assert!(
+            matches!(read, RevisionRead::Entries { revision: 1, .. }),
+            "the row admitted during the wait is delivered once the timer's sleep completes: {read:?}"
         );
     }
 }

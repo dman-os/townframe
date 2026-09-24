@@ -196,6 +196,16 @@ pub struct DrawerRepo {
     current_heads: surelock::mutex::Mutex<ChangeHashSet>,
     drawer_doc_handle: big_repo::BigDocHandle,
     meta_store_sql: SqlCtx,
+    /// Test-only: fail the next `delete_branch` drawer-document commit before the
+    /// tombstone reaches the drawer doc. Deleting a replicated branch applies the
+    /// keyhive-channel revocation (`remove_branch_from_partitions_if_needed`) and
+    /// the doc-channel tombstone in two steps with no ordering between them, so a
+    /// failure at the commit is the only way a test can hold a node inside that
+    /// window; the end state alone cannot distinguish the order from an
+    /// interrupted pair of writes. Zero production cost — absent from non-test
+    /// builds.
+    #[cfg(test)]
+    fail_next_drawer_doc_commit: std::sync::atomic::AtomicBool,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
 }
 
@@ -229,6 +239,26 @@ impl DrawerRepo {
 
     pub fn meta_store_sql(&self) -> &SqlCtx {
         &self.meta_store_sql
+    }
+
+    /// Test-only: arm the next [`DrawerRepo::delete_branch`] drawer-doc commit to
+    /// fail before it commits, leaving the node in the window between the
+    /// keyhive-channel revocation and the doc-channel tombstone (see
+    /// [`DrawerRepo::fail_next_drawer_doc_commit`]). The flag is consumed by the
+    /// first delete that reaches the commit, so a test that asserts the failed
+    /// delete can then re-run it unchanged to exercise recovery.
+    #[cfg(test)]
+    pub(crate) fn fail_next_drawer_doc_commit_for_test(&self) {
+        self.fail_next_drawer_doc_commit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test-only: consume the flag armed by
+    /// [`DrawerRepo::fail_next_drawer_doc_commit_for_test`].
+    #[cfg(test)]
+    fn take_fail_next_drawer_doc_commit(&self) -> bool {
+        self.fail_next_drawer_doc_commit
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
     #[tracing::instrument(
@@ -295,6 +325,8 @@ impl DrawerRepo {
             current_heads: surelock::mutex::Mutex::new(initial_heads),
             drawer_doc_handle: drawer_am_handle,
             meta_store_sql: meta_db_pool,
+            #[cfg(test)]
+            fail_next_drawer_doc_commit: std::sync::atomic::AtomicBool::new(false),
             #[cfg(not(test))]
             plugs_repo: Some(Arc::clone(&plugs_repo)),
             #[cfg(test)]

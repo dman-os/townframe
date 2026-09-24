@@ -5436,4 +5436,227 @@ mod tests {
             "a part-routed worker with no hints left is obsolete"
         );
     }
+
+    /// Feed one object-changed fact into a part's cursor stream and let the machine
+    /// handle the commands it emits (the sync that owes the new cursor).
+    fn feed_part_changed(
+        machine: &mut BigSyncMachine,
+        peer: &PeerKey,
+        cursor: CursorIndex,
+        part_id: &PartKey,
+        obj_id: &ObjKey,
+    ) {
+        {
+            let peer_state = machine.peers.get_mut(peer).expect(ERROR_UNRECONIZED);
+            peer_state.cursor_machine.on_subscription_evt(
+                crate::rpc::PartEvent::Changed(crate::rpc::ObjChanged {
+                    cursor,
+                    part_ids: vec![part_id.clone()],
+                    obj_id: obj_id.clone(),
+                    payload: serde_json::json!({"head": cursor}),
+                }),
+                &mut peer_state.cursors_cmd_buf,
+            );
+        }
+        machine.drain_cursor_machine_cmds(peer.clone());
+    }
+
+    /// Deliver the completion of the sync that owes `obj_id`'s cursor lane, which is
+    /// what settles the cursor and reaches the next watermark.
+    fn complete_object_sync(
+        machine: &mut BigSyncMachine,
+        peer: &PeerKey,
+        task_id: TaskId,
+        obj_id: &ObjKey,
+    ) {
+        machine.handle_evt(BigSyncEvent::SyncCompleted(SyncCompletedEvent {
+            task_id,
+            peer_id: peer.clone(),
+            completion: SyncTaskCompletion {
+                obj_id: obj_id.clone(),
+                deets: SyncCompletionDeets::ChangedObject,
+            },
+        }));
+    }
+
+    /// A machine command *is* the driver's obligation to perform a durable write, and it
+    /// carries the machine's own contract (see [`BigSyncMachineCommand`]): commands are
+    /// performed one at a time, in order, and a failing command is not recoverable — the
+    /// machine has no entry point that retires a command without the write happening.
+    ///
+    /// Which half of "write before advance" this pins, and which half it cannot: the
+    /// in-memory `replay_cursor` advances when the command is *issued*, so an
+    /// implementation that advanced the durable cursor on issue rather than on ack would
+    /// still satisfy any assertion about the in-memory value. What is asserted here is
+    /// the property the durable side rests on — one reached watermark, one outstanding
+    /// write, retired only by an explicit ack.
+    #[test]
+    fn a_settled_watermark_owes_one_cursor_write_that_survives_until_it_is_acked() {
+        let (mut machine, peer, part) = replay_machine_with_one_part();
+        let obj = ObjKey::random();
+
+        feed_part_changed(&mut machine, &peer, 1, &part, &obj);
+        let task_id = machine.peers[&peer].sync_workers[&obj].task_id;
+        assert!(
+            machine.get_cmd().is_none(),
+            "scheduling the sync that owes the cursor owes the store nothing yet"
+        );
+
+        complete_object_sync(&mut machine, &peer, task_id, &obj);
+
+        let (ack_id, cmd) = machine
+            .get_cmd()
+            .expect("a settled watermark owes a durable write");
+        assert!(
+            matches!(
+                &cmd,
+                BigSyncMachineCommand::SetPartCursor { part_id, cursor, .. }
+                    if part_id == &part && *cursor == 1
+            ),
+            "the owed write is the watermark that was reached, got {cmd:?}"
+        );
+        assert_eq!(part_replay_cursor(&machine, &peer, &part), 1);
+
+        // The driver reading the command does not discharge it, and neither does a loop's
+        // worth of unrelated work: the write is still owed until it is acked. That is what
+        // makes a failed write loud instead of a silently skipped advance.
+        assert_eq!(
+            machine.get_cmd().expect("still owed").0,
+            ack_id,
+            "reading a command must not consume it"
+        );
+        machine.handle_tick(std::time::Instant::now());
+        machine.drain_stat_evts().for_each(drop);
+        assert_eq!(
+            machine
+                .get_cmd()
+                .expect("an unacked command survives the loop")
+                .0,
+            ack_id,
+            "unrelated driver work must not retire an unacked write"
+        );
+
+        machine.handle_cmd_success(ack_id);
+        let mut still_owed = Vec::new();
+        while let Some((id, cmd)) = machine.get_cmd() {
+            still_owed.push(cmd);
+            machine.handle_cmd_success(id);
+        }
+        assert!(
+            !still_owed
+                .iter()
+                .any(|cmd| matches!(cmd, BigSyncMachineCommand::SetPartCursor { .. })),
+            "one reached watermark is exactly one durable write"
+        );
+    }
+
+    /// The queue and the writes in flight are in one-to-one correspondence, so a driver
+    /// that acks a command it never performed would pop the queue while the store missed
+    /// the write — the two authorities drifting apart in silence. The machine refuses
+    /// that outright rather than accepting the ack.
+    #[test]
+    #[should_panic(expected = "success for a cmd that wasn't sent")]
+    fn a_cursor_ack_for_a_command_that_was_never_sent_panics() {
+        let mut machine = BigSyncMachine::default();
+        machine.handle_cmd_success(Uuid::new_v4());
+    }
+
+    /// Commands are performed serially and the machine serves the front of the queue, so
+    /// an ack for anything else is a driver bug that would reorder durable writes.
+    #[test]
+    #[should_panic(expected = "unexpected cmd success, cmds must be performed serially")]
+    fn an_out_of_order_cursor_ack_panics() {
+        let part_a = PartKey::random();
+        let part_b = PartKey::random();
+        let obj_a = ObjKey::random();
+        let obj_b = ObjKey::random();
+        let (mut machine, peer) = replay_machine_with_parts([part_a.clone(), part_b.clone()]);
+
+        feed_part_changed(&mut machine, &peer, 1, &part_a, &obj_a);
+        feed_part_changed(&mut machine, &peer, 1, &part_b, &obj_b);
+        let task_a = machine.peers[&peer].sync_workers[&obj_a].task_id;
+        let task_b = machine.peers[&peer].sync_workers[&obj_b].task_id;
+        complete_object_sync(&mut machine, &peer, task_a, &obj_a);
+        complete_object_sync(&mut machine, &peer, task_b, &obj_b);
+
+        assert_eq!(
+            machine.cmds.len(),
+            2,
+            "two settled watermarks owe two writes, in the order they were reached"
+        );
+        let second = machine.cmds[1].0;
+        machine.handle_cmd_success(second);
+    }
+
+    /// `AGENTS.md` records the big_sync↔keyhive race: a doc task may be scheduled before
+    /// the local keyhive has pulled the membership it needs, and the retry succeeds once
+    /// the pull lands — and explicitly forbids "fixing" it by parking, cancelling or
+    /// gating the retries. So a failed sync must *reschedule* its route, keeping the peer,
+    /// object and part hints, and it must be paced by the ladder rather than retried in a
+    /// tight loop. Before this test the whole `SyncFailed` path was untested.
+    #[test]
+    fn a_failed_object_sync_is_paced_on_the_retry_ladder_instead_of_dropped() {
+        let (mut machine, peer, part) = replay_machine_with_one_part();
+        let obj = ObjKey::random();
+        feed_part_changed(&mut machine, &peer, 1, &part, &obj);
+        // The driver picks up the first fact's sync; the failure below is about that task.
+        let initial: Vec<_> = machine.drain_sync_spawn_queue().collect();
+        assert_eq!(initial.len(), 1, "one fact spawns one sync");
+        let failed = machine.peers[&peer].sync_workers[&obj].task_id;
+        assert_eq!(
+            initial[0].id, failed,
+            "the worker records the task that was spawned"
+        );
+
+        machine.handle_evt(BigSyncEvent::SyncFailed(SyncFailedEvent {
+            task_id: failed,
+            peer_id: peer.clone(),
+            obj_id: obj.clone(),
+            err: eyre::eyre!("the coparent's membership has not been pulled yet"),
+        }));
+
+        let (retried_id, retried_hints) = {
+            let worker = machine
+                .peers
+                .get(&peer)
+                .and_then(|state| state.sync_workers.get(&obj))
+                .expect("a failed sync keeps its route: the pull may land later");
+            (worker.task_id, worker.part_hints.clone())
+        };
+        assert_ne!(retried_id, failed, "the failure re-issues the task");
+        assert_eq!(
+            retried_hints,
+            [part.clone()].into(),
+            "the route's parts survive the failure"
+        );
+        assert!(
+            !machine
+                .drain_stop_queue()
+                .any(|stopped| stopped == retried_id),
+            "a retry is not a stopped task"
+        );
+
+        // Paced, not busy: nothing may be spawned until the ladder's deadline comes due,
+        // and the machine tells the driver when that is.
+        assert!(
+            machine.drain_sync_spawn_queue().next().is_none(),
+            "a failure must not retry in the same tick"
+        );
+        let due = machine
+            .next_due()
+            .expect("the reschedule is paced on the retry ladder");
+        machine.handle_tick(due + Duration::from_millis(1));
+
+        let retried: Vec<_> = machine.drain_sync_spawn_queue().collect();
+        assert_eq!(retried.len(), 1, "one failure buys one retry, not a storm");
+        let retry = &retried[0];
+        assert_eq!(
+            retry.id, retried_id,
+            "the worker points at the respawned task"
+        );
+        assert_eq!(retry.kind, SyncTaskKind::Sync);
+        assert_eq!(retry.deets.peer_id, peer);
+        assert_eq!(retry.deets.obj_id, obj);
+        assert_eq!(retry.part_hints, [part.clone()].into());
+    }
 }

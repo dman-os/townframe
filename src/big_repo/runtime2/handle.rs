@@ -565,8 +565,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// carry stays unreleased, so no quiescence probe can resolve).
     /// `resume_events_for_test` reopens processing and replays them in channel
     /// order.
-    #[cfg(test)]
-    pub(crate) async fn hold_events_for_test(&self) -> eyre::Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn hold_events_for_test(&self) -> eyre::Result<()> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::HoldEvents { resp })
@@ -577,8 +577,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     /// Test-only seam: reopen event processing and handle the events queued
     /// since [`Runtime2Handle::hold_events_for_test`], in channel order.
-    #[cfg(test)]
-    pub(crate) async fn resume_events_for_test(&self) -> eyre::Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn resume_events_for_test(&self) -> eyre::Result<()> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::ResumeEvents { resp })
@@ -591,8 +591,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// reopen event processing from a `Drop`, so a failed assertion cannot
     /// leave the hub holding every later event (including the in-flight
     /// counter's release) for the rest of the test process.
-    #[cfg(test)]
-    pub(crate) fn resume_events_for_test_on_drop(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn resume_events_for_test_on_drop(&self) {
         let resume = self.cmd_tx.try_send(Runtime2Cmd::ResumeEvents {
             resp: futures::channel::oneshot::channel().0,
         });
@@ -632,8 +632,11 @@ impl<F: FutureForm> Runtime2Handle<F> {
         rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
     }
 
-    #[cfg(test)]
-    pub(crate) async fn has_doc_worker(&self, doc_id: DocumentId) -> eyre::Result<bool> {
+    #[cfg(any(test, feature = "test-support"))]
+    // Called only from test crates, so a `test-support`-without-`test` build sees it
+    // as unreferenced.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub async fn has_doc_worker(&self, doc_id: DocumentId) -> eyre::Result<bool> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::HasDocWorker { doc_id, resp })
@@ -645,8 +648,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// Test-only: whether `peer_id` currently has a registered connection in
     /// the hub. Lets a connection-lifecycle test assert the deregistration
     /// invariant directly instead of inferring it from a sync failure.
-    #[cfg(test)]
-    pub(crate) async fn has_connected_peer_for_test(&self, peer_id: PeerKey) -> eyre::Result<bool> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn has_connected_peer_for_test(&self, peer_id: PeerKey) -> eyre::Result<bool> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::HasConnectedPeer { peer_id, resp })
@@ -658,11 +661,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// Test-only: deliver a synthetic keyhive sync completion for `peer_id`'s
     /// active round, stamped one seq ahead of the hub's admitted head. Returns
     /// the seq so the test can inject the matching admission event.
-    #[cfg(test)]
-    pub(crate) async fn inject_keyhive_completion_for_test(
-        &self,
-        peer_id: PeerKey,
-    ) -> eyre::Result<u64> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn inject_keyhive_completion_for_test(&self, peer_id: PeerKey) -> eyre::Result<u64> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::InjectKeyhiveCompletionForTest { peer_id, resp })
@@ -673,8 +673,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     /// Test-only: hand an event directly to the hub's event handler, bypassing
     /// the event channel so a test can drive event ordering deterministically.
-    #[cfg(test)]
-    pub(crate) async fn inject_runtime2_evt_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn inject_runtime2_evt_for_test(
         &self,
         evt: crate::runtime2::Runtime2Evt,
     ) -> eyre::Result<()> {
@@ -690,8 +690,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
     }
 
     /// Test-only: the active quiescence probe's barrier id (`None` if resolved).
-    #[cfg(test)]
-    pub(crate) async fn quiescence_probe_barrier_for_test(&self) -> eyre::Result<Option<u64>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn quiescence_probe_barrier_for_test(&self) -> eyre::Result<Option<u64>> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::QuiescenceProbeBarrierForTest { resp })
@@ -703,8 +703,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// Test-only seam: close the doc worker's mailbox for `doc_id` on the next
     /// content-carrying sync-session apply, so the route fails the way the
     /// worker-stopping race would.
-    #[cfg(test)]
-    pub(crate) async fn fail_next_content_apply_route_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn fail_next_content_apply_route_for_test(
         &self,
         doc_id: DocumentId,
     ) -> eyre::Result<()> {

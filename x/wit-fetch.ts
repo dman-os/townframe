@@ -1,5 +1,7 @@
 #!/usr/bin/env -S deno run --allow-all
 
+// FIXME: remove generate-auth-types flag to a gen-types-btress-auth cmd
+
 import { $ } from "./utils.ts";
 
 const clean = $.argv.includes("--clean");

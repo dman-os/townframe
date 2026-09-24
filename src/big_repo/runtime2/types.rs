@@ -173,6 +173,110 @@ impl<T> DocLookup<T> {
 /// worker.
 static NEXT_BUNDLE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// Why a [`LiveDocBundle`] was invalidated.
+///
+/// A broken bundle cannot serve commits: its in-memory document may hold
+/// mutations that never persisted. Recording *which* event broke it is what
+/// lets the write gate report the real cause — it previously claimed an earlier
+/// rejected commit in every case, including a worker teardown where no commit
+/// had been rejected at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokenReason {
+    /// The doc-worker that owned the bundle went away (evicted, or its loop
+    /// exited). No commit was involved.
+    WorkerDropped,
+    /// A commit was rejected because the local principal no longer holds write
+    /// access to the document.
+    CommitRejectedNoWriteAccess,
+    /// A commit was rejected because its encrypted payload could not be
+    /// persisted: the document key was unavailable.
+    CommitRejectedKeyUnavailable,
+}
+
+impl BrokenReason {
+    /// The refusal handed back to a caller whose handle names an invalidated
+    /// bundle. Each reason names its own cause: one wording for all of them
+    /// claimed an earlier rejected commit even for a plain worker teardown,
+    /// where no commit had been rejected, which is what made a broken-handle
+    /// report unreadable.
+    pub(crate) fn refusal_message(self) -> &'static str {
+        match self {
+            Self::WorkerDropped => {
+                "document write rejected: the doc worker serving this handle was replaced; re-acquire the document"
+            }
+            Self::CommitRejectedNoWriteAccess => {
+                "document write rejected: handle invalidated by an earlier rejected commit (no write access); re-acquire the document"
+            }
+            Self::CommitRejectedKeyUnavailable => {
+                "document write rejected: handle invalidated by an earlier rejected commit (document key unavailable); re-acquire the document"
+            }
+        }
+    }
+}
+
+/// How a wait for CGKA materialization ended.
+///
+/// Deliberately not a `Result`: the wait has no failure mode of its own, and the
+/// one way it can end early — the bundle being invalidated while a waiter is
+/// parked — is the eviction race callers are expected to defer on. Modelling it
+/// as an error conflated the two: a caller propagating it turned an eviction
+/// into a task error while its own broken-bundle check deferred for the same
+/// event, so the outcome depended on which check observed the break first, and
+/// the error carried no cause. Here the cause rides along with the outcome, and a
+/// caller that does want to fail on a break can match [`Self::Broken`] and build
+/// its own error from the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializationOutcome {
+    /// The bundle reached at least the requested operation count.
+    Materialized,
+    /// The bundle was invalidated while waiting, and this is why.
+    Broken(BrokenReason),
+}
+
+/// Whether a commit may proceed against the bundle the worker serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandleValidity {
+    /// The commit names the served, healthy bundle.
+    Valid,
+    /// The commit names a different bundle: the handle predates a reload of the
+    /// document, or the worker serves no bundle at all.
+    StaleHandle,
+    /// The served bundle was invalidated, and this is why.
+    Broken(BrokenReason),
+}
+
+/// Classify a commit against the bundle the worker currently serves.
+///
+/// A broken bundle is classified broken even when the ids disagree: the handle
+/// points at a bundle that will never accept a commit, and the recorded reason
+/// is the actionable half of that fact.
+pub(crate) fn handle_validity(
+    served_bundle_id: Option<u64>,
+    bundle_id: u64,
+    broken_reason: Option<BrokenReason>,
+) -> HandleValidity {
+    match (broken_reason, served_bundle_id == Some(bundle_id)) {
+        (Some(reason), _) => HandleValidity::Broken(reason),
+        (None, true) => HandleValidity::Valid,
+        (None, false) => HandleValidity::StaleHandle,
+    }
+}
+
+/// The refusal to hand back for a commit that failed the handle-validity gate,
+/// or `None` when the commit may proceed.
+///
+/// The worker's commit gate and a handle's own fast-fail path both render their
+/// refusal through here, so the wording has exactly one definition.
+pub(crate) fn invalid_handle_message(validity: HandleValidity) -> Option<&'static str> {
+    match validity {
+        HandleValidity::Valid => None,
+        HandleValidity::StaleHandle => {
+            Some("document write rejected: commit from a stale handle; re-acquire the document")
+        }
+        HandleValidity::Broken(reason) => Some(reason.refusal_message()),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct CausalEpochState {
     epoch: Option<[u8; 32]>,
@@ -192,7 +296,7 @@ pub struct LiveDocBundle {
     #[educe(Debug(ignore))]
     partially_decrypted: std::sync::atomic::AtomicBool,
     #[educe(Debug(ignore))]
-    broken: std::sync::atomic::AtomicBool,
+    broken: std::sync::RwLock<Option<BrokenReason>>,
     #[educe(Debug(ignore))]
     causal_state: std::sync::RwLock<CausalEpochState>,
     #[educe(Debug(ignore))]
@@ -212,7 +316,7 @@ impl LiveDocBundle {
             doc_id,
             doc: surelock::mutex::Mutex::new(doc),
             partially_decrypted: std::sync::atomic::AtomicBool::new(partially_decrypted),
-            broken: std::sync::atomic::AtomicBool::new(false),
+            broken: std::sync::RwLock::new(None),
             causal_state: std::sync::RwLock::new(CausalEpochState {
                 epoch: causal_epoch,
                 cgka_ops_count,
@@ -226,17 +330,39 @@ impl LiveDocBundle {
         self.id
     }
 
-    /// Whether a commit from this bundle was rejected (no write access, key
-    /// unavailable, ...). A broken bundle must be re-acquired to reload the
-    /// last persisted state; further commits from it are rejected by the
-    /// worker.
+    /// Whether this bundle is invalid: a commit from it was rejected, or the
+    /// worker that owned it went away. A broken bundle must be re-acquired to
+    /// reload the last persisted state; further commits from it are rejected by
+    /// the worker.
     pub fn is_broken(&self) -> bool {
-        self.broken.load(std::sync::atomic::Ordering::Acquire)
+        self.broken
+            .read()
+            .expect("bundle broken-reason lock poisoned")
+            .is_some()
     }
 
-    pub(crate) fn mark_broken(&self) {
-        self.broken
-            .store(true, std::sync::atomic::Ordering::Release);
+    /// Why this bundle was invalidated, or `None` while it is healthy.
+    ///
+    /// The first reason recorded wins: it is the cause, and any later one (a
+    /// teardown that follows a rejected commit, say) is only a consequence.
+    /// Callers report this instead of guessing a cause.
+    pub(crate) fn broken_reason(&self) -> Option<BrokenReason> {
+        *self
+            .broken
+            .read()
+            .expect("bundle broken-reason lock poisoned")
+    }
+
+    pub(crate) fn mark_broken(&self, reason: BrokenReason) {
+        {
+            let mut current = self
+                .broken
+                .write()
+                .expect("bundle broken-reason lock poisoned");
+            if current.is_none() {
+                *current = Some(reason);
+            }
+        }
         self.barrier_notify.notify_waiters();
     }
 
@@ -290,15 +416,21 @@ impl LiveDocBundle {
     /// Await materialization against at least `target` CGKA operations.
     /// The count is per-document and monotonic for a shared Keyhive state, so
     /// it provides ordering without interpreting opaque KEM fingerprints.
-    pub async fn await_cgka_ops_count(&self, target: usize) -> Res<()> {
+    ///
+    /// The wait has no failure mode of its own: the only thing that can end it
+    /// early is the bundle being invalidated while parked, which is the eviction
+    /// race callers defer on. That case comes back as a value carrying its reason
+    /// rather than as an error, so a caller cannot mistake a break for a failure —
+    /// see [`MaterializationOutcome`].
+    pub async fn await_cgka_ops_count(&self, target: usize) -> MaterializationOutcome {
         loop {
             let notified = self.barrier_notify.notified();
             tokio::pin!(notified);
-            if self.is_broken() {
-                return Err(ferr!("doc bundle marked broken while awaiting CGKA state"));
+            if let Some(reason) = self.broken_reason() {
+                return MaterializationOutcome::Broken(reason);
             }
             if self.materialized_cgka_ops_count() >= target {
-                return Ok(());
+                return MaterializationOutcome::Materialized;
             }
             notified.await;
         }
@@ -581,18 +713,161 @@ mod tests {
             Some([1; 32]),
             1,
         ));
-        bundle
-            .await_cgka_ops_count(1)
-            .await
-            .expect("equal count should complete immediately");
+        assert_eq!(
+            bundle.await_cgka_ops_count(1).await,
+            MaterializationOutcome::Materialized,
+            "equal count should complete immediately"
+        );
 
         let waiting_bundle = std::sync::Arc::clone(&bundle);
         let waiter = tokio::spawn(async move { waiting_bundle.await_cgka_ops_count(2).await });
         tokio::task::yield_now().await;
         bundle.update_causal_state(Some([1; 32]), 3);
-        waiter
-            .await
-            .expect("count waiter task should not panic")
-            .expect("advanced count should release the waiter");
+        assert_eq!(
+            waiter.await.expect("count waiter task should not panic"),
+            MaterializationOutcome::Materialized,
+            "advanced count should release the waiter"
+        );
+    }
+
+    /// The wait must report a break *as a break*, with its cause. It used to
+    /// return an error that only said the bundle was marked broken, which a
+    /// caller propagating it turned into a task failure — for an event whose
+    /// other observer in the same worker deferred — and the cause was lost in
+    /// that path either way.
+    #[tokio::test]
+    async fn await_cgka_ops_count_reports_a_break_with_its_reason() {
+        // Broken before the wait starts: a bundle that will never materialize
+        // again must report the break instead of parking for a count it can no
+        // longer reach.
+        let broken = std::sync::Arc::new(LiveDocBundle::new(
+            DocumentId::new([8; 32]),
+            automerge::Automerge::new(),
+            false,
+            Some([1; 32]),
+            1,
+        ));
+        broken.mark_broken(BrokenReason::WorkerDropped);
+        assert_eq!(
+            broken.await_cgka_ops_count(2).await,
+            MaterializationOutcome::Broken(BrokenReason::WorkerDropped),
+            "a broken bundle reports the break, not a count it never reached"
+        );
+
+        // Broken while parked: the waiter wakes with the cause it was broken by.
+        let waiting = std::sync::Arc::new(LiveDocBundle::new(
+            DocumentId::new([9; 32]),
+            automerge::Automerge::new(),
+            false,
+            Some([1; 32]),
+            1,
+        ));
+        let parked = std::sync::Arc::clone(&waiting);
+        let waiter = tokio::spawn(async move { parked.await_cgka_ops_count(5).await });
+        tokio::task::yield_now().await;
+        waiting.mark_broken(BrokenReason::CommitRejectedNoWriteAccess);
+        assert_eq!(
+            waiter.await.expect("count waiter task should not panic"),
+            MaterializationOutcome::Broken(BrokenReason::CommitRejectedNoWriteAccess),
+            "the waiter carries the reason, so the caller's defer can log why it deferred"
+        );
+    }
+
+    /// The commit gate must name the real cause. A worker teardown records
+    /// `WorkerDropped` with no rejected commit behind it, so the single generic
+    /// wording ("an earlier rejected commit") was a lie in exactly the case that
+    /// was hardest to read; the two commit-rejection reasons keep that wording
+    /// because for them it is true.
+    #[test]
+    fn commit_gate_reports_the_real_reason() {
+        // A healthy bundle is not a refusal at all.
+        let valid = handle_validity(Some(7), 7, None);
+        assert_eq!(valid, HandleValidity::Valid);
+        assert!(invalid_handle_message(valid).is_none());
+
+        // A handle that predates a reload of the document names the reload.
+        let stale = handle_validity(Some(9), 7, None);
+        assert_eq!(stale, HandleValidity::StaleHandle);
+        let stale_message = invalid_handle_message(stale).expect("a stale handle is refused");
+        assert!(stale_message.contains("stale handle"), "{stale_message}");
+
+        // Teardown is not a rejected commit.
+        let dropped = handle_validity(Some(7), 7, Some(BrokenReason::WorkerDropped));
+        assert_eq!(dropped, HandleValidity::Broken(BrokenReason::WorkerDropped));
+        let dropped_message = invalid_handle_message(dropped).expect("a broken bundle is refused");
+        assert!(
+            !dropped_message.contains("earlier rejected commit"),
+            "a teardown must not be reported as a rejected commit: {dropped_message}"
+        );
+        assert!(dropped_message.contains("replaced"), "{dropped_message}");
+
+        // Both commit-rejection reasons keep the rejected-commit wording and
+        // stay distinguishable from each other.
+        let no_access = invalid_handle_message(handle_validity(
+            Some(7),
+            7,
+            Some(BrokenReason::CommitRejectedNoWriteAccess),
+        ))
+        .expect("refused");
+        let no_key = invalid_handle_message(handle_validity(
+            Some(7),
+            7,
+            Some(BrokenReason::CommitRejectedKeyUnavailable),
+        ))
+        .expect("refused");
+        assert!(no_access.contains("no write access"), "{no_access}");
+        assert!(no_key.contains("document key unavailable"), "{no_key}");
+        assert_ne!(no_access, no_key);
+
+        // A broken bundle whose id also disagrees is still reported by reason:
+        // the reason is the actionable half of the fact.
+        assert_eq!(
+            handle_validity(Some(9), 7, Some(BrokenReason::WorkerDropped)),
+            HandleValidity::Broken(BrokenReason::WorkerDropped)
+        );
+    }
+
+    /// Every reason names its own cause, and only a reason that actually means
+    /// "a commit was rejected" may say so. The inner `match`es are exhaustive,
+    /// so a new variant cannot silently inherit another variant's wording.
+    #[test]
+    fn every_broken_reason_names_its_own_cause() {
+        let all = [
+            BrokenReason::WorkerDropped,
+            BrokenReason::CommitRejectedNoWriteAccess,
+            BrokenReason::CommitRejectedKeyUnavailable,
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for reason in all {
+            let message = reason.refusal_message();
+            assert!(
+                seen.insert(message),
+                "two reasons share one refusal: {message}"
+            );
+
+            let claims_rejected_commit = message.contains("earlier rejected commit");
+            let is_rejected_commit = match reason {
+                BrokenReason::WorkerDropped => false,
+                BrokenReason::CommitRejectedNoWriteAccess
+                | BrokenReason::CommitRejectedKeyUnavailable => true,
+            };
+            assert_eq!(
+                claims_rejected_commit, is_rejected_commit,
+                "{reason:?} claims the wrong cause: {message}"
+            );
+
+            let names_own_cause = match reason {
+                BrokenReason::WorkerDropped => message.contains("worker"),
+                BrokenReason::CommitRejectedNoWriteAccess => message.contains("no write access"),
+                BrokenReason::CommitRejectedKeyUnavailable => {
+                    message.contains("document key unavailable")
+                }
+            };
+            assert!(
+                names_own_cause,
+                "{reason:?} does not name its cause: {message}"
+            );
+        }
+        assert_eq!(seen.len(), 3, "all three reasons are distinct");
     }
 }

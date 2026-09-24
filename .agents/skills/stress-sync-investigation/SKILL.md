@@ -208,6 +208,52 @@ Never treat a single passing focused test as proof of a load-race fix.
 
 ## Hint cache
 
+### Soak timeout that is a draw, not a stall
+
+`big_repo test::local_boundary_commit_stores_fragment_and_prunes_covered_loose_history` (default
+class, 120s cap) timed out on iteration 6 of a `--stress-duration 60m` run and is **not** a stall.
+Discriminators, in order: the captured trace has continuous event density (2.5–5k lines per 10s, no
+inter-event gap above 1.03s) and **zero** `store_fragment` / `FragmentRequested` lines. The test
+brute-forces local commits until one lands on a fragment boundary, giving up after 2000 attempts;
+`Depth::is_boundary()` is `CountLeadingZeroBytes(commit_id) > 0`, so p = 1/256 per commit. Count
+`inserting commit locally` lines for the draw count: 1342 commits in 120s (11.2/s) with no
+boundary drawn — (255/256)^1342 = 0.5% per iteration, and the 2000-attempt panic is 0.04%. At
+~15 iterations per hour this test alone fails ~7% of 60-minute soaks with no product defect.
+Its own durations in that run were 8.0 / 18.3 / 2.3 / 24.2 / 11.4 / 120.0s: the spread is the
+draw count, not load. On this signature do not chase the fragment path, the doc worker, or the
+AFW publish cycle — read the draw count first. That big_repo test is now `#[ignore]`d, with the
+ignore carrying what it was for (our Automerge + envelope wiring must not block the fragment
+path) so a gardener does not delete it as redundant. Re-enable it by constructing the boundary
+commit rather than drawing for it (built by hand, or the depth-metric seam — the metric is a
+construction field and `BigRepoSubduction` pins `CountLeadingZeroBytes`). Never by lengthening the
+cap.
+
+### A partition member count is not an ordering witness
+
+`daybook_core drawer::tests::delete_a_replicated_branch_revokes_before_it_commits_the_tombstone`
+failed `left: 2, right: 1` at `drawer/tests.rs:960` on a **single** node, so a peer cannot be the
+cause: the counter is a local durable read (`big_sync_host.store.member_count(replicated_partition_id())`).
+The ordering it means to pin does hold — `delete_branch: initiated … kind=Replicated`, the awaited
+`remove_obj_from_part` precedes the injected bail in the same function (`mutations.rs:1393` → `:1449`),
+and `DocumentAccessRevoked` for that bdoc is in the log — but the branch doc is re-published into its
+part set ~250 ms later by AFW, restoring the count. Whenever the window contains a live publisher,
+assert the action-scoped fact (`branch_doc_reachable(bdoc) == false`, a keyhive-channel effect a
+republish cannot undo), never a global member count.
+
+### 30s case caps are a wall clock, not a verdict
+
+`big_repo test::big_repo_sync_backend_adds_missing_doc` failed `sync backend test timed out:
+Elapsed(())` at `src/big_repo/test.rs:3520` — `timeout(SYNC_CASE_TIMEOUT = 30s, …)`. Its captured
+trace holds 3943 events across the whole 30s with no gap above 0.97s, so nothing was parked: the doc
+was in a materialization retry loop. Signature to read first: the same 4 `CommitId`s applied 9x from
+`ApplySyncSession { fragment_ids: [] }`, `retry_materialization` 25x from 19.8s to the cap, ending at
+`native: missing entry encryption key while materializing content_ref=[…]`, while
+`ReconcileCausalCoverage` ran 24x and reported `causal coverage satisfied` once and the test's
+`WaitForKeyhiveReconciliation` fence was requested 5x. Follow the epoch-key entry above: correlate
+that content_ref with the doc's derived epoch keys. A 30s cap on a full-parallel box is itself a
+load-dependent failure condition — the same suspicion applies to `KEYHIVE_SYNC_ROUND_TIMEOUT`
+(`hub.rs:157`, panicking in test builds at `hub.rs:3518`), which the prior session's ruling retired.
+
 ### CreateDoc stalls during boot under Keyhive fanout
 
 If logs show `creating doc` without `created doc`, correlate `Document::finish_generate`. A confirmed lock inversion was:

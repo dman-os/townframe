@@ -24,6 +24,7 @@
 //! through a [`GroupScopeHandle`] so the embedder can update it at runtime.
 use crate::changes::{BigRepoLocalNotification, LocalFilter};
 use crate::interlude::*;
+use crate::runtime2::types::{BrokenReason, MaterializationOutcome};
 use crate::runtime2::{GroupScopeHandle, WorkerGroupScope, keyhive_admission};
 use crate::store::sqlite::SqliteBigRepoStore;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
@@ -46,6 +47,33 @@ use std::sync::Arc;
 enum PublishOutcome {
     Published,
     Deferred,
+}
+
+/// Log a deferred publish, at the level its cause deserves.
+///
+/// A worker teardown is the benign race that deferral exists for — it is the
+/// expected way this path is reached — so it stays at `debug`. A rejected commit
+/// means this node lost write access to the document, or the key to persist it,
+/// and the document can no longer be served from this bundle; logged at the same
+/// level as an eviction those two read as routine noise, which is how a lost
+/// write access stayed invisible in triage. A broken bundle with no recorded
+/// reason cannot be told apart from a teardown at this point, so it keeps the
+/// quiet level.
+///
+/// The choice lives here rather than at the call sites because `tracing` fixes the
+/// level in each event's static metadata, so a level computed from `reason` cannot be
+/// handed to `event!` — each arm needs its own macro. `message` is a parameter for the
+/// same reason in reverse: the three defer points each say *where* they gave up, and
+/// that wording tells a reader more than the callsite line this helper collapses.
+fn log_deferred_publish(doc_id: &crate::DocumentId, reason: Option<BrokenReason>, message: &str) {
+    match reason {
+        Some(
+            BrokenReason::CommitRejectedNoWriteAccess | BrokenReason::CommitRejectedKeyUnavailable,
+        ) => tracing::warn!(doc_id = %doc_id, reason = ?reason, "{}", message),
+        Some(BrokenReason::WorkerDropped) | None => {
+            tracing::debug!(doc_id = %doc_id, reason = ?reason, "{}", message)
+        }
+    }
 }
 
 const MATERIALIZATION_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -94,6 +122,8 @@ pub fn spawn_automerge_frontier_worker(
     big_sync_store: Arc<dyn HostPartStore>,
     frontier_store: Arc<dyn HostPartStore>,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
+    timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
     // FIXME: hmm, who added this and when and why?
     _evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     change_manager: Arc<crate::changes::ChangeListenerManager>,
@@ -104,8 +134,6 @@ pub fn spawn_automerge_frontier_worker(
 
     let fut = {
         async move {
-            let timer: Arc<dyn crate::runtime2::Timer<Sendable>> =
-                Arc::new(crate::runtime2::TokioTimer);
             // The part source reads match-all (every part in the scope,
             // including parts created after this boot), so no part
             // enumeration is frozen into the walker. The scope handle is
@@ -184,6 +212,8 @@ pub fn spawn_automerge_frontier_worker(
                 pending_part_sources: HashMap::new(),
                 outbox: Outbox::default(),
                 wake_docs: HashSet::new(),
+                timer,
+                clock,
             };
             tracing::debug!(
                 admission_durable_cursor = admission_durable,
@@ -288,15 +318,19 @@ async fn publish_heads(
         {
             // The internal handle holds no lease, so the doc worker can be evicted —
             // invalidating this bundle — while this wait is in flight. Defer, exactly as
-            // for a timeout: a later event publishes a fresh bundle.
-            Ok(_) if handle.bundle.is_broken() => {
-                tracing::debug!(
-                    %doc_id,
-                    "AFW publish deferred: document bundle invalidated while awaiting materialization"
+            // for a timeout: a later event publishes a fresh bundle. The wait reports the
+            // break itself and carries its reason, so a break cannot arrive here as a task
+            // error instead of a defer: which arm observed the break first used to decide
+            // that, and the error arm dropped the cause.
+            Ok(MaterializationOutcome::Broken(reason)) => {
+                log_deferred_publish(
+                    &doc_id,
+                    Some(reason),
+                    "AFW publish deferred: document bundle invalidated while awaiting materialization",
                 );
                 return Ok(PublishOutcome::Deferred);
             }
-            Ok(result) => result?,
+            Ok(MaterializationOutcome::Materialized) => {}
             Err(_) => {
                 tracing::warn!(
                     %doc_id,
@@ -319,7 +353,12 @@ async fn publish_heads(
     // task instead of deferring would take the worker down over a race that eviction is
     // allowed to win, which is why this is a defer and not an error.
     if handle.bundle.is_broken() {
-        tracing::debug!(%doc_id, "AFW publish deferred: document bundle invalidated");
+        let reason = handle.bundle.broken_reason();
+        log_deferred_publish(
+            &doc_id,
+            reason,
+            "AFW publish deferred: document bundle invalidated",
+        );
         return Ok(PublishOutcome::Deferred);
     }
     let causal_epoch = handle.bundle.current_causal_epoch();
@@ -334,16 +373,19 @@ async fn publish_heads(
         "causal_epoch": causal_epoch,
     });
     // The check above only covers the read: eviction is allowed to win while this task is
-    // blocked on the document lock or building the payload, and `mark_broken` is an atomic
-    // store that takes no lock, so it can land at any instant. Re-check with no await between
-    // the check and the write, so a bundle invalidated in that window defers instead of
-    // publishing heads that cannot be served. (A break during the write itself needs no
+    // blocked on the document lock or building the payload, and `mark_broken` takes only the
+    // bundle's broken-flag lock — which the worker never holds across an await here — so it
+    // can land at any instant. Re-check with no await between the check and the write, so a
+    // bundle invalidated in that window defers instead of publishing heads that cannot be
+    // served. (A break during the write itself needs no
     // handling here: the write is already issued, and the materialization that follows a
     // re-acquisition re-triggers a keyed replacement publish that overwrites stale heads.)
     if handle.bundle.is_broken() {
-        tracing::debug!(
-            %doc_id,
-            "AFW publish deferred: document bundle invalidated before writing frontier payload"
+        let reason = handle.bundle.broken_reason();
+        log_deferred_publish(
+            &doc_id,
+            reason,
+            "AFW publish deferred: document bundle invalidated before writing frontier payload",
         );
         return Ok(PublishOutcome::Deferred);
     }
@@ -498,6 +540,13 @@ struct Worker<'a> {
     /// effect they cover.
     outbox: Outbox<Cmd, Option<SourceCursor>>,
     wake_docs: HashSet<crate::DocumentId>,
+    /// The loop's wait and its notion of "now" are both injected so a test can
+    /// own them and drive the timer arm without wall clock (see
+    /// [`crate::runtime2::tasks::manual_time`]). They must be injected together:
+    /// a loop that slept on one time source and ticked from another would
+    /// compute deadlines against a `now` it never actually waited on.
+    timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
 }
 
 impl<'a> Worker<'a> {
@@ -505,6 +554,11 @@ impl<'a> Worker<'a> {
         loop {
             let available = CONCURRENT_TASK_BUDGET.saturating_sub(self.tasks.active_count());
             let next_deadline = self.tasks.next_deadline();
+            // Reads the arm's start instant and clones the timer out of `self` so
+            // the select arm below does not borrow the worker while other arms
+            // take it mutably.
+            let now = self.clock.instant();
+            let timer = Arc::clone(&self.timer);
             tokio::select! {
                 biased;
 
@@ -513,12 +567,22 @@ impl<'a> Worker<'a> {
                 }
                 _ = async {
                     if let Some(deadline) = next_deadline {
-                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                        // Wakes at the same instant `sleep_until(deadline)` did: the
+                        // wait is `deadline - now` on the injected timer, and the
+                        // subtraction saturates. A deadline the clock has already passed
+                        // therefore becomes a zero-length wait — the same already-expired
+                        // timer the wall-clock version armed — so both the wake ordering
+                        // and the number of loop turns are unchanged.
+                        timer
+                            .sleep(deadline.saturating_duration_since(now))
+                            .await;
                     } else {
                         std::future::pending::<()>().await;
                     }
                 } => {
-                    self.tasks.tick(std::time::Instant::now())?;
+                    // Read `now` fresh: the clock has moved during the wait, and the
+                    // tick must observe the instant the loop actually woke at.
+                    self.tasks.tick(self.clock.instant())?;
                 }
 
                 admission = async {

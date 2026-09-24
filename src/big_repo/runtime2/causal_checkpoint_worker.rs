@@ -40,6 +40,7 @@ pub fn spawn_causal_checkpoint_worker(
     keyhive: BigKeyhiveHandle,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
     timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
     // FIXME: fuck, probably a copy paste leftover from the group part worker?
     _evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     scope: WorkerGroupScope,
@@ -81,7 +82,9 @@ pub fn spawn_causal_checkpoint_worker(
 
             let source = keyhive_admission::Store {
                 store: store.clone(),
-                timer,
+                // The loop below sleeps on the same timer the admission reader
+                // polls with, so both cadences are driven by one seam.
+                timer: Arc::clone(&timer),
             };
             let durable = state.progress().await?.upstream_revision;
             let reader = source.open((), durable).await?;
@@ -108,6 +111,8 @@ pub fn spawn_causal_checkpoint_worker(
                 tasks: big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler::new(
                     CONCURRENT_TASK_BUDGET,
                 ),
+                timer,
+                clock,
                 pending_admission: HashMap::new(),
             };
             worker.machine_loop().await
@@ -164,6 +169,13 @@ struct Worker<'a> {
         FrontierKey,
     >,
     tasks: big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler<FrontierKey, Task, TaskOutput>,
+    /// The loop's wait and its notion of "now" are both injected so a test can
+    /// own them and drive the timer arm without wall clock (see
+    /// [`crate::runtime2::tasks::manual_time`]). They must be injected together:
+    /// a loop that slept on one time source and ticked from another would
+    /// compute deadlines against a `now` it never actually waited on.
+    timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
     pending_admission: HashMap<crate::DocumentId, SourceCursor>,
 }
 
@@ -172,6 +184,11 @@ impl<'a> Worker<'a> {
         loop {
             let available = CONCURRENT_TASK_BUDGET.saturating_sub(self.tasks.active_count());
             let next_deadline = self.tasks.next_deadline();
+            // Reads the arm's start instant and clones the timer out of `self` so
+            // the select arm below does not borrow the worker while other arms
+            // take it mutably.
+            let now = self.clock.instant();
+            let timer = Arc::clone(&self.timer);
             tokio::select! {
                 biased;
                 completion = self.tasks.next_completion() => {
@@ -179,12 +196,22 @@ impl<'a> Worker<'a> {
                 }
                 _ = async {
                     if let Some(deadline) = next_deadline {
-                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                        // Wakes at the same instant `sleep_until(deadline)` did: the
+                        // wait is `deadline - now` on the injected timer, and the
+                        // subtraction saturates. A deadline the clock has already passed
+                        // therefore becomes a zero-length wait — the same already-expired
+                        // timer the wall-clock version armed — so both the wake ordering
+                        // and the number of loop turns are unchanged.
+                        timer
+                            .sleep(deadline.saturating_duration_since(now))
+                            .await;
                     } else {
                         std::future::pending::<()>().await;
                     }
                 } => {
-                    self.tasks.tick(std::time::Instant::now())?;
+                    // Read `now` fresh: the clock has moved during the wait, and the
+                    // tick must observe the instant the loop actually woke at.
+                    self.tasks.tick(self.clock.instant())?;
                 }
                 admission = async {
                     if available == 0 {

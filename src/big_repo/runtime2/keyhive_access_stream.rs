@@ -248,6 +248,7 @@ where
             ready: VecDeque::new(),
             staged_revision: 0,
             staged_computed_at: None,
+            parked_row_seq: None,
             memory: selector.memory,
         })
     }
@@ -283,6 +284,11 @@ pub struct KeyhiveAccessReader<M> {
     /// lazily at the first resolution pass, which is always before that pass's
     /// closure reads.
     staged_computed_at: Option<u64>,
+    /// The seq of the staged row whose proof chain this hive has not applied yet,
+    /// once that park has been reported. A diagnostic marker only — the row itself
+    /// stays in `staged` — so a park names the row it waits on once rather than
+    /// logging on every idle re-probe.
+    parked_row_seq: Option<u64>,
     /// Held for the `Watched` shape, which is `todo!()`: under `All` no closure
     /// cache is consulted, and that is what the spy test asserts. The `Watched`
     /// lane reads this field, and removes the `expect` below when it does.
@@ -326,16 +332,30 @@ where
         // revision and the walker settles it without a task.
         let limit = limits.max_entries.get();
         loop {
+            if !self.staged.is_empty() {
+                match self.resolve_staged(limit).await? {
+                    StagedPass::Progressed => {}
+                    // The head row names a proof chain this hive has not applied
+                    // yet. That dependency is local state — this hive ingesting
+                    // the missing link — and nothing notifies this reader when it
+                    // lands, so the pass re-probes on the same idle bound the
+                    // admission source waits on. Nothing is returned while parked,
+                    // not even the entries already resolved ahead of the row: they
+                    // carry this page's revision, and that revision is what the
+                    // walker settles, so reporting it would advance the consumer's
+                    // cursor past the row that produced no entry.
+                    StagedPass::Parked => {
+                        self.store.timer.sleep(keyhive_admission::IDLE_POLL).await;
+                        continue;
+                    }
+                }
+            }
             if !self.ready.is_empty() {
                 let count = limit.min(self.ready.len());
                 return Ok(RevisionRead::Entries {
                     revision: self.staged_revision,
                     entries: self.ready.drain(..count).collect(),
                 });
-            }
-            if !self.staged.is_empty() {
-                self.resolve_staged(limit).await?;
-                continue;
             }
             match self.reader.next(limits).await? {
                 RevisionRead::ReplayComplete { through } => {
@@ -360,6 +380,16 @@ where
     }
 }
 
+/// How one `resolve_staged` pass ended.
+enum StagedPass {
+    /// Nothing is blocked: `ready` holds every entry the pass could produce.
+    Progressed,
+    /// The head row names a proof chain this hive has not applied yet, so the page
+    /// it belongs to cannot be reported. The row stays staged and each later pass
+    /// re-resolves it; only the missing link landing clears the park.
+    Parked,
+}
+
 impl<M> KeyhiveAccessReader<M>
 where
     M: DeltaWalkerStateRepo + DeltaWalkerSparseStateRepo,
@@ -370,7 +400,12 @@ where
     /// Every await here is before the row's removal from `staged`, so a read
     /// cancelled in the middle of this re-resolves the same row on the next
     /// call rather than dropping it.
-    async fn resolve_staged(&mut self, limit: usize) -> Res<()> {
+    ///
+    /// A row whose proof chain this hive cannot resolve stops the pass instead of
+    /// leaving the queue: the page's revision covers it, and the walker settles
+    /// that revision, so a row removed without producing an entry would carry the
+    /// cursor past an event this consumer never processed.
+    async fn resolve_staged(&mut self, limit: usize) -> Res<StagedPass> {
         if self.staged_computed_at.is_none() {
             self.staged_computed_at = Some(self.store.latest_revision().await?);
         }
@@ -379,7 +414,7 @@ where
             .expect("observed at the head of this pass");
         while self.ready.len() < limit {
             let Some(row) = self.staged.front().cloned() else {
-                return Ok(());
+                return Ok(StagedPass::Progressed);
             };
             let event: StaticEvent<Vec<u8>> = bincode::deserialize(&row.bytes)
                 .map_err(|err| ferr!("admitted Keyhive event decode failed: {err}"))?;
@@ -389,18 +424,25 @@ where
                     self.staged.pop_front();
                     continue;
                 }
-                // The event is early, not wrong: its delegate has not been
-                // ingested yet, so this revision names no subject this hive can
-                // read. The closure is read-time state and a later row naming
-                // that subject carries it, so the row produces no entry instead
-                // of failing the reader — the disposition an id with no local
-                // graph already gets.
+                // The event is early, not wrong: its proof chain names a
+                // delegation this hive has not applied, so this revision names no
+                // subject this hive can read *yet*, and `event_subject_id`'s own
+                // contract is that the caller retries it once the missing link
+                // lands. The row is therefore kept and the pass stops on it: unlike
+                // an id with no local graph — which is a property of the event and
+                // stays true — this resolves from local state, and the row is never
+                // re-admitted, so a row dropped here is one whose subject is never
+                // emitted at all.
                 EventSubject::Unresolved => {
-                    tracing::debug!(
-                        "keyhive access row names a proof chain this hive cannot resolve yet"
-                    );
-                    self.staged.pop_front();
-                    continue;
+                    if self.parked_row_seq != Some(row.seq) {
+                        self.parked_row_seq = Some(row.seq);
+                        tracing::debug!(
+                            seq = row.seq,
+                            staged = self.staged.len(),
+                            "keyhive access row names a proof chain this hive cannot resolve yet; holding its revision"
+                        );
+                    }
+                    return Ok(StagedPass::Parked);
                 }
             };
             let Some(subject) = self.access_subject(id).await? else {
@@ -415,7 +457,7 @@ where
                 computed_at_seq,
             });
         }
-        Ok(())
+        Ok(StagedPass::Progressed)
     }
 }
 
@@ -438,6 +480,7 @@ mod tests {
     use keyhive_core::principal::group::delegation::StaticDelegation;
     use keyhive_core::principal::membered::Membered;
     use keyhive_crypto::signed::Signed;
+    use keyhive_crypto::signer::memory::MemorySigner;
     use keyhive_crypto::verifiable::Verifiable;
     use sqlx_utils_rs::SqlCtx;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -575,6 +618,49 @@ mod tests {
             (
                 stranger,
                 bincode::serialize(&StaticEvent::Delegated(delegation)).expect("serialize event"),
+            )
+        }
+
+        /// A delegation whose wire form names a proof chain this hive has not
+        /// applied, together with the chain's link and the graph both end up naming.
+        ///
+        /// The link is a root delegation on its own signer, properly signed, so this
+        /// hive can apply it holding nothing else: `Keyhive::receive_delegation`
+        /// builds a chain's root group out of the delegation itself, which is why the
+        /// digest the chained delegation names is the one the applied link lands
+        /// under. Both rows then name the chain's root — the link's signer.
+        fn chained_delegation_events(
+            &self,
+        ) -> (Identifier, Signed<StaticDelegation<Vec<u8>>>, Vec<u8>) {
+            let link_key = ed25519_dalek::SigningKey::from_bytes(&[13; 32]);
+            let link_verifying = link_key.verifying_key();
+            let link = MemorySigner::from(link_key)
+                .try_sign_sync(StaticDelegation::<Vec<u8>> {
+                    can: Access::Read,
+                    proof: None,
+                    delegate: self.local_agent,
+                    after_revocations: Vec::new(),
+                    after_content: BTreeMap::new(),
+                })
+                .expect("sign the chain link");
+            let chained = Signed::new(
+                StaticDelegation::<Vec<u8>> {
+                    can: Access::Read,
+                    proof: Some(link.digest()),
+                    delegate: self.local_agent,
+                    after_revocations: Vec::new(),
+                    after_content: BTreeMap::new(),
+                },
+                // `[14; 32]` is not a valid compressed Edwards point, so it cannot be built
+                // with `VerifyingKey::from_bytes`; derive a valid key from a fixed seed instead.
+                ed25519_dalek::SigningKey::from_bytes(&[14; 32]).verifying_key(),
+                ed25519_dalek::Signature::from_bytes(&[0; 64]),
+            );
+            (
+                Identifier::from(link_verifying),
+                link,
+                bincode::serialize(&StaticEvent::Delegated(chained))
+                    .expect("serialize the chained delegation"),
             )
         }
 
@@ -849,6 +935,81 @@ mod tests {
         );
     }
 
+    /// A page whose head row names a proof chain this hive has not applied must not
+    /// be reported. The revision a page is reported at is what the walker settles,
+    /// so reporting it advances this consumer's cursor past a row that produced no
+    /// entry — and that row is never re-admitted, so the subject it names is never
+    /// emitted even once the chain's link lands.
+    ///
+    /// Both rows of the fixture name the chain's root, so the discriminator is how
+    /// many entries the page carries: the link's row alone is the dropped row's
+    /// signature.
+    #[tokio::test]
+    async fn an_unresolvable_proof_chain_holds_its_revision_until_the_link_lands() {
+        let harness = Harness::new().await;
+        let (subject, link, chained_bytes) = harness.chained_delegation_events();
+        harness.admit(chained_bytes).await;
+        let link_seq = harness
+            .admit(
+                bincode::serialize(&StaticEvent::Delegated(link.clone()))
+                    .expect("serialize the link's own row"),
+            )
+            .await;
+
+        let hive = harness.keyhive.clone_keyhive();
+        let mut reader = harness
+            .stream()
+            .open(all_selector(&harness.memory), 0)
+            .await
+            .expect("open reader");
+
+        // The read happens while the link is unapplied, which is the state the log
+        // reaches whenever a delegation is admitted ahead of its proof.
+        let mut read = Box::pin(reader.next(RevisionReadLimits::default()));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut reported = None;
+        for _ in 0..64 {
+            if let std::task::Poll::Ready(page) = read.as_mut().poll(&mut cx) {
+                reported = Some(page);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            reported.is_none(),
+            "a page whose head row names an unresolvable proof chain must not be \
+             reported: settling its revision advances the cursor past a row that \
+             produced no entry; got {reported:?}"
+        );
+
+        // Applying the link is what this hive's ingest does when the missing
+        // delegation arrives; the held row resolves on the next pass.
+        hive.receive_static_event(StaticEvent::Delegated(link))
+            .await
+            .expect("apply the chain link");
+
+        let RevisionRead::Entries { revision, entries } = read
+            .await
+            .expect("the held revision resolves once the link lands")
+        else {
+            panic!("the held page must report the entries it was read for");
+        };
+        assert_eq!(revision, link_seq, "the page reports its own revision");
+        assert_eq!(
+            entries.len(),
+            2,
+            "every row of the page produces an entry, so the chained row is not \
+             dropped: {entries:?}"
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.subject == AccessSubject::Group(subject)),
+            "both rows name the chain's root graph: {entries:?}"
+        );
+    }
+
     #[tokio::test]
     async fn all_reports_one_entry_per_subject_bearing_event_without_a_closure_cache() {
         let harness = Harness::new().await;
@@ -956,6 +1117,7 @@ mod tests {
             ready: VecDeque::new(),
             staged_revision: revision,
             staged_computed_at: None,
+            parked_row_seq: None,
             memory: harness.memory.clone(),
         };
 
@@ -978,25 +1140,6 @@ mod tests {
         assert_eq!(stream.latest_revision().await.expect("head"), 0);
         let seq = harness.admit(harness.unknown_subject_event()).await;
         assert_eq!(stream.latest_revision().await.expect("head"), seq);
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "Watched subject sets land with the first O(k) consumer")]
-    async fn watched_selectors_are_unimplemented() {
-        let harness = Harness::new().await;
-        // The panic comes from the `todo!()` inside `open`, so this call never
-        // returns; `expect` is here because the result is `must_use`.
-        harness
-            .stream()
-            .open(
-                KeyhiveAccessSelector {
-                    watch: AccessSubjectSet::Watched(BTreeSet::new()),
-                    memory: harness.memory.clone(),
-                },
-                0,
-            )
-            .await
-            .expect("a Watched selector must refuse to open");
     }
 
     #[test]

@@ -237,9 +237,61 @@ impl BigSyncRpcClient {
 pub struct BigSyncRpcHandle {
     client: irpc::Client<BigSyncIrpc>,
     protocol_handler: BigSyncRpcProtocolHandler,
+    /// The worker's in-flight page registrations, which the worker itself owns. Held here only for
+    /// tests: `spawn_big_sync_rpc` is the only constructor, and nothing outside the responder can
+    /// observe a release by `supersede`.
+    #[cfg(any(test, feature = "test-support"))]
+    replay_cancels: Arc<std::sync::Mutex<ReplayCancellationRegistry>>,
+}
+
+/// One page request the responder is holding, and whether it has been asked to stop waiting.
+///
+/// A request retires its registration before it builds its reply, so an entry that exists is a
+/// request that has not answered yet, and `cancelled` is set from the moment a `supersede` (or a
+/// later request reusing the id) asks it to release. The bit is observable only while the request
+/// is still in flight.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ReplayRequestRegistration {
+    pub peer: PeerKey,
+    pub scope_key: Arc<str>,
+    pub session_id: ReplaySessionId,
+    pub request_id: big_sync_core::rpc::ReplayRequestId,
+    pub cancelled: bool,
 }
 
 impl BigSyncRpcHandle {
+    /// The responder's in-flight page requests, each with whether it has been asked to release.
+    ///
+    /// A client cannot tell a page released by a `supersede` from one that waited out its own hold:
+    /// both answer with the same page and the same verdicts. This is the responder's own
+    /// registration — the map `register_replay_request` writes and `forget_replay_request` removes —
+    /// so a test can assert the release it caused rather than infer it from how long the answer
+    /// took.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn replay_request_registrations(&self) -> Vec<ReplayRequestRegistration> {
+        let cancels = self
+            .replay_cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut registrations: Vec<ReplayRequestRegistration> = cancels
+            .iter()
+            .flat_map(|((peer, scope_key, session_id), per_scope)| {
+                per_scope
+                    .iter()
+                    .map(move |(request_id, cancel)| ReplayRequestRegistration {
+                        peer: peer.clone(),
+                        scope_key: Arc::clone(scope_key),
+                        session_id: *session_id,
+                        request_id: *request_id,
+                        cancelled: cancel.is_cancelled(),
+                    })
+            })
+            .collect();
+        registrations
+            .sort_by_key(|registration| (registration.session_id.0, registration.request_id.0));
+        registrations
+    }
+
     pub fn local_sender(&self) -> irpc::LocalSender<BigSyncIrpc> {
         self.client.as_local().expect(ERROR_IMPOSSIBLE)
     }
@@ -330,11 +382,12 @@ pub async fn spawn_big_sync_rpc(
     let client = irpc::Client::<BigSyncIrpc>::local(rpc_tx);
 
     let cancel_token = CancellationToken::new();
+    let replay_cancels: Arc<std::sync::Mutex<ReplayCancellationRegistry>> = default();
     let fut = {
         let cancel_token = cancel_token.clone();
         let worker = Arc::new(BigSyncRpcWorker {
             stores,
-            replay_cancels: default(),
+            replay_cancels: Arc::clone(&replay_cancels),
             replay_subscriptions: default(),
         });
         let permits = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_RPC_HANDLERS));
@@ -368,6 +421,8 @@ pub async fn spawn_big_sync_rpc(
             protocol_handler: BigSyncRpcProtocolHandler {
                 tx: authenticated_tx,
             },
+            #[cfg(any(test, feature = "test-support"))]
+            replay_cancels,
         },
         BigSyncRpcStopToken {
             cancel_token,
@@ -583,7 +638,11 @@ struct BigSyncRpcWorker {
     /// older one if it is still waiting. An entry lives only as long as the request it names —
     /// inserted when the request starts, removed when it answers — so a peer can only ever name
     /// its own in-flight requests within that scope, and nothing outlives the request it belongs to.
-    replay_cancels: std::sync::Mutex<ReplayCancellationRegistry>,
+    ///
+    /// Behind an `Arc` because `spawn_big_sync_rpc` keeps a second handle on it: a client cannot
+    /// see the difference between a page released by a `supersede` and one that waited out its own
+    /// hold, so the responder's own registration is the only place that release is observable.
+    replay_cancels: Arc<std::sync::Mutex<ReplayCancellationRegistry>>,
     replay_subscriptions: std::sync::Mutex<ReplaySubscriptionRegistry>,
 }
 
@@ -1506,6 +1565,28 @@ mod tests {
     use iroh::protocol::Router;
     use keyhive_core::access::Access;
     use std::net::Ipv4Addr;
+
+    /// The responder's registration for one request, as `BigSyncRpcHandle` exposes it.
+    ///
+    /// A registration exists only while its request is in flight: the responder inserts it at the
+    /// top of the request's handler and removes it before the request's reply is built. So `None`
+    /// is a request that has already answered, and `Some { cancelled: true }` is one a `supersede`
+    /// has asked to release.
+    fn registration_for(
+        handle: &BigSyncRpcHandle,
+        peer: &PeerKey,
+        session_id: ReplaySessionId,
+        request_id: ReplayRequestId,
+    ) -> Option<ReplayRequestRegistration> {
+        handle
+            .replay_request_registrations()
+            .into_iter()
+            .find(|registration| {
+                &registration.peer == peer
+                    && registration.session_id == session_id
+                    && registration.request_id == request_id
+            })
+    }
 
     /// A reused request id is peer-supplied input, so it must not be able to stop the dispatcher:
     /// the newer request takes the id and the older registration is the one that stops waiting.
@@ -2575,28 +2656,39 @@ mod tests {
         // the lock instead of on the responder — the test would be measuring the client's
         // dial rather than the dispatch loop. The join handle keeps the release below
         // observable rather than taken on trust.
-        let parked_request = page_request(0, None, 5_000);
+        // The hold is `MAX_PAGE_HOLD`, the most a caller can ask for: nothing below can release
+        // the parked request by its own hold expiring, so every release this test observes is one
+        // it caused. The same bound is why asserting that the request is still parked cannot hang
+        // the suite — its own task answers within 15s whatever the test does.
+        let park_hold_ms = u32::try_from(MAX_PAGE_HOLD.as_millis())
+            .expect("MAX_PAGE_HOLD is representable in the wire's hold_ms field");
+        let parked_request = page_request(0, None, park_hold_ms);
         let parked_client = granted.clone();
-        let mut held = tokio::spawn(async move { parked_client.replay_page(parked_request).await });
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), &mut held)
-                .await
-                .is_err(),
-            "a page with nothing to send is held rather than answered early"
-        );
+        let held = tokio::spawn(async move { parked_client.replay_page(parked_request).await });
 
         // The held request is still parked on the responder. A fresh page is answered
-        // anyway, and it is answered *before* the held request's hold elapses: a loop
-        // that handled pages inline would serialize behind the parked one and only
-        // answer after its full 5s. The margin is wide enough that only serialization
-        // can trip it. The successor names the parked request, which is what releases
-        // it instead of letting it wait out its own deadline.
-        let started = std::time::Instant::now();
-        let fresh = granted.replay_page(page_request(1, Some(0), 50)).await??;
+        // anyway: a loop that handled pages inline would have to finish the parked page
+        // first, so this page could not be answered until the parked one's hold elapsed.
+        // That is asserted as the state it leaves behind — the parked request is still
+        // parked — rather than as the round trip's duration, which would fail on a loaded
+        // machine and pass on an inline loop that happened to answer quickly. A page that
+        // answered early would have finished the join handle by now, and nothing has asked
+        // the responder to release this one yet. The fresh page deliberately does not name
+        // the parked request, so nothing but the next block's supersede can release it.
+        let fresh = granted.replay_page(page_request(1, None, 50)).await??;
         assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "a parked page must not serialize the next request behind its hold, waited {:?}",
-            started.elapsed()
+            !held.is_finished(),
+            "a parked page must not serialize the next request behind its hold"
+        );
+        assert!(
+            !registration_for(
+                &rpc_handle,
+                &granted_peer,
+                ReplaySessionId(0),
+                ReplayRequestId(0)
+            )
+            .is_some_and(|registration| registration.cancelled),
+            "nothing has asked the parked request to release yet"
         );
         assert!(
             fresh.events.is_empty(),
@@ -2610,30 +2702,62 @@ mod tests {
         // The supersede has to reach the parked request's own task, which answers instead
         // of waiting out the rest of its hold. A responder registers a request's
         // cancellation at the top of its handler, so a successor that arrives before that
-        // point names an id the responder does not hold yet and is a documented no-op.
-        // Retry with a fresh id while the parked request is still inside its hold: only a
-        // supersede that actually reached it releases it before its own deadline, so a
-        // supersede that stopped working still fails here rather than passing on a retry.
+        // point names an id the responder does not hold yet and is a documented no-op —
+        // hence the retry with a fresh id.
+        //
+        // The retry is driven by the responder's own registration and exits on it rather than on
+        // elapsed time: an entry that is present is a request that has not answered yet, an entry
+        // that was observed and is now gone is a request that answered, and a cancelled entry is
+        // one a supersede released. The cancelled bit is only observable while the request is
+        // still in flight, because answering retires the registration, so the loop accepts either
+        // form. The previous form waited a fixed interval and asserted the elapsed time, which
+        // fails on a loaded machine and passes on a supersede that never landed.
+        const SUPERSEDE_ATTEMPTS: u32 = 64;
         let mut successor = 2u64;
-        let released = loop {
-            match tokio::time::timeout(Duration::from_millis(200), &mut held).await {
-                Ok(joined) => break joined.expect("the parked request task does not panic")??,
-                Err(_) => {
-                    assert!(
-                        started.elapsed() < Duration::from_secs(4),
-                        "a superseded request stops waiting instead of holding to its deadline"
-                    );
-                    let carrier = granted
-                        .replay_page(page_request(successor, Some(0), 50))
-                        .await??;
-                    assert!(
-                        carrier.events.is_empty(),
-                        "the part still has nothing to send"
-                    );
-                    successor += 1;
+        let mut attempts = 0;
+        let mut observed_registration = false;
+        loop {
+            match registration_for(
+                &rpc_handle,
+                &granted_peer,
+                ReplaySessionId(0),
+                ReplayRequestId(0),
+            ) {
+                Some(registration) => {
+                    observed_registration = true;
+                    if registration.cancelled {
+                        break;
+                    }
                 }
+                // Registered above and gone now, so the parked request answered. Nothing else
+                // removes a registration: its hold is `MAX_PAGE_HOLD`, it has not been asked to
+                // release by anything but this test's carriers, and this loop exits as soon as one
+                // of them lands rather than letting the hold run out. A hold-driven release would
+                // need 15s of carrier round trips, and the attempt bound below runs out first
+                // unless every one of them is unexpectedly slow.
+                None if observed_registration => break,
+                // Not registered yet: the responder spawns a request's handler independently of
+                // this test, so the first carriers may arrive before the registration exists and
+                // are the documented no-op.
+                None => {}
             }
-        };
+            assert!(
+                attempts < SUPERSEDE_ATTEMPTS,
+                "the parked request never registered, so no supersede could reach it"
+            );
+            attempts += 1;
+            let carrier = granted
+                .replay_page(page_request(successor, Some(0), 50))
+                .await??;
+            assert!(
+                carrier.events.is_empty(),
+                "the part still has nothing to send"
+            );
+            successor += 1;
+        }
+        let released = held
+            .await
+            .expect("the parked request task does not panic")??;
         assert!(
             released.events.is_empty(),
             "the released page carries nothing to send"
@@ -2730,11 +2854,11 @@ mod tests {
             part_id: part_id.clone(),
             cursor: 0,
         };
-        let page_request = |hold_ms: u32, limit: u32| ScopedRequest {
+        let page_request = |request_id: u64, hold_ms: u32, limit: u32| ScopedRequest {
             scope_key: Arc::from("test-scope"),
             inner: ReplayPageRequest {
                 session_id: ReplaySessionId(0),
-                request_id: big_sync_core::rpc::ReplayRequestId(0),
+                request_id: big_sync_core::rpc::ReplayRequestId(request_id),
                 supersede: None,
                 targets: vec![target.clone()],
                 limit,
@@ -2770,7 +2894,7 @@ mod tests {
         // a verdict: it answers `drained: false` and carries the caller's own cursor. A
         // zero limit reaches that branch without draining anything, which is the same
         // answer a page that runs out of its hold gives.
-        let undrained = granted.replay_page(page_request(50, 0)).await??;
+        let undrained = granted.replay_page(page_request(1, 50, 0)).await??;
         assert!(
             undrained.events.is_empty(),
             "a page that carries nothing has no events"
@@ -2787,7 +2911,7 @@ mod tests {
         // Nothing has joined the part, so this page can only leave on its hold — and
         // this time the replay half has reported completion, which *is* the caught-up
         // verdict.
-        let quiet = granted.replay_page(page_request(50, 16)).await??;
+        let quiet = granted.replay_page(page_request(2, 50, 16)).await??;
         assert!(quiet.events.is_empty(), "a quiet part carries no events");
         let Some(TargetVerdict::Events { resume, drained }) = quiet.verdict(&target) else {
             panic!("a quiet page must carry an events verdict");
@@ -2795,10 +2919,58 @@ mod tests {
         assert!(*drained, "a quiet part whose replay completed is caught up");
         assert_eq!(*resume, 0, "and it resumes from the caller's own cursor");
 
+        // A zero hold must not enter the wait, and the client cannot see that from the answer:
+        // a request that entered a wait with a zero hold returns the same page. What it can see
+        // is the pairing — a long-hold request for the same scope is parked, and the zero-hold
+        // request still answers. A zero hold that waited behind, or was held up by, a parked
+        // request of its own scope could not answer here. The parked request's hold is
+        // `MAX_PAGE_HOLD`, so it cannot be released by its own expiry within this block, and
+        // `MAX_PAGE_HOLD` caps how long it can stay parked, so asserting it is still parked
+        // cannot hang the test. The zero-hold answer must also have retired its registration:
+        // the responder forgets a request before it builds the reply, so a registration left
+        // behind would be a leak the next request of that id would inherit.
+        let park_hold_ms = u32::try_from(MAX_PAGE_HOLD.as_millis())
+            .expect("MAX_PAGE_HOLD is representable in the wire's hold_ms field");
+        let parked_request = page_request(3, park_hold_ms, 16);
+        let parked_client = granted.clone();
+        let parked = tokio::spawn(async move { parked_client.replay_page(parked_request).await });
+
+        let zero_hold = granted.replay_page(page_request(4, 0, 16)).await??;
+        assert!(
+            !parked.is_finished(),
+            "a zero-hold page must not release or wait behind a parked request"
+        );
+        assert!(
+            zero_hold.events.is_empty(),
+            "a zero-hold page of a caught-up part carries nothing"
+        );
+        let Some(TargetVerdict::Events { drained, .. }) = zero_hold.verdict(&target) else {
+            panic!("a zero-hold page must carry an events verdict");
+        };
+        assert!(
+            *drained,
+            "a zero-hold page still reports the caught-up verdict"
+        );
+        assert!(
+            registration_for(
+                &rpc_handle,
+                &granted_peer,
+                ReplaySessionId(0),
+                ReplayRequestId(4)
+            )
+            .is_none(),
+            "an answered request retires its registration"
+        );
+        // The parked request is released by this test dropping it, not by a supersede: its own
+        // hold is the only thing left that will answer it, and the responder's handler for it
+        // holds one of `MAX_INFLIGHT_RPC_HANDLERS` permits until then, which is not a limit this
+        // test reaches. Dropping the client half keeps the test from waiting out that hold.
+        parked.abort();
+
         // The event that lands after the quiet page is still the caller's to fetch, from
         // the cursor the caller already holds.
         seed_test_store(&store, part_id.clone()).await?;
-        let late = granted.replay_page(page_request(250, 16)).await??;
+        let late = granted.replay_page(page_request(5, 250, 16)).await??;
         assert!(
             !late.events.is_empty(),
             "the event written after the quiet page must still be fetchable",
@@ -2824,7 +2996,7 @@ mod tests {
         // The other side of the verdict still exists where it means something: a
         // page that stops on its own limit is not caught up, because backlog
         // remains, and the caller asks again from the cursor it got back.
-        let truncated = granted.replay_page(page_request(250, 1)).await??;
+        let truncated = granted.replay_page(page_request(6, 250, 1)).await??;
         assert_eq!(
             truncated.events.len(),
             1,
@@ -2835,10 +3007,15 @@ mod tests {
         };
         assert!(!drained, "a page that stopped on its limit leaves backlog");
 
-        // `hold_ms == 0` is a drain-only request: it answers out of the log and
-        // never enters the wait, so it cannot take its hold's worth of time.
-        let started = std::time::Instant::now();
-        let drain_only = granted.replay_page(page_request(0, 16)).await??;
+        // `hold_ms == 0` is a drain-only request: it answers out of the log and never enters the
+        // wait. What is asserted is its answer, and — above, where a request of this scope is
+        // parked — that it answers rather than waiting behind one. "Must not wait" itself has no
+        // further state this client can observe: a request that entered a wait with a zero hold
+        // returns the same page, so the elapsed-time form that used to stand at the end of this
+        // block asserted a property of the machine rather than of the code, and was removed
+        // rather than retuned. The drain-only path is otherwise pinned by the verdicts below
+        // against the caller's own cursor and the reader's drained bit.
+        let drain_only = granted.replay_page(page_request(7, 0, 16)).await??;
         assert!(
             !drain_only.events.is_empty(),
             "a drain-only page still carries the backlog"
@@ -2849,11 +3026,6 @@ mod tests {
         assert!(
             *drained,
             "a drain-only page still reports the reader's caught-up verdict"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "hold_ms == 0 must not wait: it took {:?}",
-            started.elapsed()
         );
 
         rpc_stop.stop().await?;

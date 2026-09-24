@@ -2090,6 +2090,103 @@ async fn sqlite_big_repo_prune_admitted_events_respects_reader_floor() -> Res<()
     Ok(())
 }
 
+/// The `archived_through` marker records the bound pruning actually deleted up
+/// to, not the tombstone prefix.
+///
+/// The two diverge whenever a registered consumer lags: that consumer's progress
+/// pins the DELETE below the tombstone prefix while the bytes in between stay in
+/// the log and are still served to a reader. A marker advanced to the prefix
+/// would then assert a gap this prune did not create, and would place a
+/// registered consumer below the floor that was computed to stay under its own
+/// cursor — the state `resume = durable.max(archived)` exists to detect, so an
+/// overstated marker makes that detection fire on consumers whose wake-ups are
+/// intact. The discriminating assertion is the marker after the first
+/// maintenance run: the tombstone prefix already reaches seq 2, nothing was
+/// deleted, so the marker must read 0.
+#[tokio::test]
+async fn sqlite_big_repo_archived_marker_records_the_deletion_bound() -> Res<()> {
+    let sql = SqlCtx::memory().await?;
+    let store = SqliteBigRepoStore::new(sql, "keyhive-archived-marker", BuckId::MAX_LEVEL).await?;
+    // Admission order follows the hash bytes, so these land on seq 1, 2, 3 in
+    // this order.
+    let events = [
+        subduction_keyhive::storage::StorageHash::new([21; 32]),
+        subduction_keyhive::storage::StorageHash::new([22; 32]),
+        subduction_keyhive::storage::StorageHash::new([23; 32]),
+    ];
+    for (index, hash) in events.iter().enumerate() {
+        store
+            .save_keyhive_event(*hash, vec![index as u8], None)
+            .await?;
+    }
+    store.append_admitted_events(events.to_vec(), None).await?;
+    // The tombstone prefix reaches seq 2 while seq 3 is still live.
+    store.delete_keyhive_event(events[0]).await?;
+    store.delete_keyhive_event(events[1]).await?;
+
+    let (advanced, advanced_reader) =
+        retention_consumer(&store.sql, "keyhive-archived-marker", "advanced").await?;
+    store
+        .register_keyhive_admission_reader(&advanced_reader)
+        .await?;
+    advance_walker(&advanced, 3).await?;
+
+    // Registered but not started: its absent progress row reads as zero and pins
+    // the floor, so this maintenance run may delete nothing.
+    let (lagging, lagging_reader) =
+        retention_consumer(&store.sql, "keyhive-archived-marker", "lagging").await?;
+    store
+        .register_keyhive_admission_reader(&lagging_reader)
+        .await?;
+
+    assert_eq!(
+        store.run_maintenance().await?,
+        0,
+        "the lagging consumer pins the floor, so no bytes may be deleted"
+    );
+    assert_eq!(
+        store.admission_events_after(0, 10).await?.len(),
+        3,
+        "every admission is still readable, so no gap exists to report"
+    );
+    assert_eq!(
+        store.archived_through().await?,
+        0,
+        "nothing was deleted and the tombstoned rows are still readable; a marker \
+         at the tombstone prefix would claim seq 1-2 are unavailable and make a \
+         consumer resuming there skip wake-ups it can still be served"
+    );
+    assert!(
+        store.archived_through().await? <= lagging.progress().await?.upstream_revision,
+        "a registered consumer is never below the marker"
+    );
+
+    // Once the lagging consumer has reconciled through the tombstoned prefix, the
+    // same prefix is deletable and the marker follows it.
+    advance_walker(&lagging, 2).await?;
+    assert_eq!(
+        store.run_maintenance().await?,
+        2,
+        "the reader floor now admits the tombstoned prefix"
+    );
+    assert_eq!(
+        store.archived_through().await?,
+        2,
+        "the marker records the bound the delete applied"
+    );
+    assert!(
+        store.archived_through().await? <= lagging.progress().await?.upstream_revision,
+        "a registered consumer is never below the marker"
+    );
+    assert_eq!(
+        store.admission_events_after(2, 10).await?.len(),
+        1,
+        "only the admission above the deleted bound is served"
+    );
+    assert_eq!(store.load_keyhive_events().await?.len(), 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn sqlite_big_repo_unstarted_registered_reader_pins_the_pruning_floor() -> Res<()> {
     let sql = SqlCtx::memory().await?;

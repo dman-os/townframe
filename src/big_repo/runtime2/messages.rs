@@ -180,6 +180,12 @@ pub enum Runtime2Cmd {
     },
     RegisterDocLease {
         doc_id: DocumentId,
+        /// The worker incarnation that is registering. The hub credits the
+        /// caller-handle count only to this generation: a registration that
+        /// arrives after the entry was replaced belongs to a worker the hub no
+        /// longer tracks, and crediting it to the replacement would pin a
+        /// handle count that only the dead generation can release.
+        generation: u64,
         #[educe(Debug(ignore))]
         registered: futures::channel::oneshot::Sender<()>,
     },
@@ -201,7 +207,10 @@ pub enum Runtime2Cmd {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
+    // Built only from test code (`handle_or_hold_evt`'s hold gate and the lifecycle
+    // tests), so a `test-support`-without-`test` build sees it as unconstructed.
+    #[cfg_attr(not(test), allow(dead_code))]
     HasDocWorker {
         doc_id: DocumentId,
         #[educe(Debug(ignore))]
@@ -210,7 +219,7 @@ pub enum Runtime2Cmd {
     /// Test-only: whether `peer_id` currently has a registered connection in
     /// the hub. Lets a lifecycle test assert the deregistration invariant
     /// directly instead of inferring it from an asynchronous sync failure.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     HasConnectedPeer {
         peer_id: PeerKey,
         #[educe(Debug(ignore))]
@@ -246,14 +255,14 @@ pub enum Runtime2Cmd {
     /// own spawned work already emitted its events then races them. `ResumeEvents`
     /// reopens processing and replays the queued events in channel order, which
     /// is the order they would have been handled in without the hold.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     HoldEvents {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<()>,
     },
     /// Test-only seam: reopen event processing and handle the events queued
     /// since [`Runtime2Cmd::HoldEvents`], in channel order.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ResumeEvents {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<()>,
@@ -262,7 +271,7 @@ pub enum Runtime2Cmd {
     /// content-carrying sync-session apply route, reproducing the
     /// worker-stopping race (handle resolved, then the receiver dropped)
     /// deterministically.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     FailNextContentApplyRoute {
         doc_id: DocumentId,
         #[educe(Debug(ignore))]
@@ -272,7 +281,7 @@ pub enum Runtime2Cmd {
     /// `peer_id`'s active round, stamped one seq ahead of the hub's current
     /// `admitted_head`. The reply carries that seq so the test can then inject
     /// the matching admission event and prove the completion was deferred.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     InjectKeyhiveCompletionForTest {
         peer_id: PeerKey,
         #[educe(Debug(ignore))]
@@ -281,7 +290,7 @@ pub enum Runtime2Cmd {
     /// Test-only seam: hand an event directly to the hub's event handler,
     /// bypassing the event channel so a test can drive event ordering
     /// deterministically (no peer, no scheduler, no hold).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     InjectRuntime2EvtForTest {
         evt: Box<Runtime2Evt>,
         #[educe(Debug(ignore))]
@@ -290,7 +299,7 @@ pub enum Runtime2Cmd {
     /// Test-only seam: report the currently active quiescence probe's barrier
     /// id (`None` once resolved), so a test can assert a pending probe restarted
     /// rather than resolving over work routed behind its fence.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     QuiescenceProbeBarrierForTest {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<Option<u64>>,

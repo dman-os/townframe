@@ -265,13 +265,27 @@ impl SqliteBigRepoStore {
         Ok(Self::u64_from_db(head))
     }
 
-    /// The sequence through which the admission log has been pruned, i.e. the
-    /// floor below which this scope's tombstoned wake-ups are gone.
+    /// The sequence through which this scope's admission log has actually been
+    /// pruned: the bound the DELETE reached, i.e. the highest `seq` whose event
+    /// bytes are gone from `big_repo_keyhive_event_log`.
     ///
-    /// A consumer whose durable cursor sits below this floor can never be woken
-    /// for the gap (ADR 013 §9): it must rebuild its sinks from live Keyhive
-    /// state and resume here instead of replaying a history it cannot be told
-    /// about. Set by `prune_admitted_events`, which runs during maintenance.
+    /// This is the bound that was deleted, *not* the tombstone prefix, and the
+    /// distinction is the contract. A tombstoned admission above this marker
+    /// still has its bytes, so a reader below the marker is still served it;
+    /// recording the prefix would claim a gap this prune did not create, and a
+    /// consumer resuming from that overstated marker would skip wake-ups it
+    /// could still have been given.
+    ///
+    /// Because that bound is `min(tombstone prefix, MIN(progress) over the
+    /// registered readers)`, it is at or below every registered consumer's own
+    /// durable cursor — a registered consumer cannot open below this floor.
+    /// Only a consumer absent from `big_repo_keyhive_admission_readers` when the
+    /// prune advanced (one that registers on its first run, or an identity added
+    /// to the registry by a later release) can find itself below it; for those,
+    /// the floor is the signal that it cannot be woken for the gap (ADR 013 §9)
+    /// and must rebuild its sinks from live Keyhive state and resume here rather
+    /// than replay a history it cannot be told about. Set by
+    /// `prune_admitted_events`, which runs during maintenance.
     pub(crate) async fn archived_through(&self) -> Res<u64> {
         let seq: i64 = sqlx::query_scalar!("SELECT COALESCE(MAX(seq), 0) AS \"seq!: i64\" FROM big_repo_keyhive_archived_through WHERE scope_id = ?",
             self.scope().id()
@@ -373,6 +387,15 @@ impl SqliteBigRepoStore {
         Ok(Self::u64_from_db(revision))
     }
 
+    /// The tombstone prefix: the highest `seq` below which every admission has
+    /// been tombstoned, i.e. the most this scope may ever delete.
+    ///
+    /// This is an *upper bound on what may be pruned*, not the prune's result.
+    /// The bytes of a tombstoned admission stay readable until a reader's own
+    /// progress lets the DELETE reach them, which is why `prune_admitted_events`
+    /// intersects this with the reader floor and records that intersection in
+    /// `archived_through` rather than this prefix — the prefix can run ahead of
+    /// every registered consumer's cursor while their rows are still in the log.
     async fn archived_admission_floor(&self) -> Res<u64> {
         let floor: i64 = sqlx::query_scalar!(
             "SELECT COALESCE(
@@ -404,9 +427,11 @@ impl SqliteBigRepoStore {
     /// registered consumer whose progress row is absent — it registered but has
     /// not started — reads as 0 and pins the floor there: history a consumer that
     /// has not started cannot be told about must not be pruned from under it.
+    ///
+    /// `archived_through` advances to the same bound this DELETE applies, never
+    /// to the tombstone prefix the reader floor may hold it below.
     pub(crate) async fn prune_admitted_events(&self) -> Res<u64> {
         let archive_floor = self.archived_admission_floor().await?;
-        self.set_archived_through(archive_floor).await?;
         let reader_floor = sqlx::query!(
             "SELECT MIN(COALESCE(p.upstream_revision, 0)) AS \"reader_floor: i64\"
                FROM big_repo_keyhive_admission_readers r
@@ -422,6 +447,13 @@ impl SqliteBigRepoStore {
         if watermark == 0 {
             return Ok(0);
         }
+        // Record the bound the DELETE below applies rather than `archive_floor`.
+        // The tombstone prefix can run ahead of the reader floor, and the bytes
+        // in between are still readable: advancing the marker to the prefix would
+        // assert a gap this prune does not create, put a registered consumer
+        // below the very floor computed to stay under it, and make a consumer
+        // clamping to the marker skip wake-ups that are still in the log.
+        self.set_archived_through(watermark).await?;
         let result = sqlx::query!(
             "DELETE FROM big_repo_keyhive_event_log
              WHERE scope_id = ?1

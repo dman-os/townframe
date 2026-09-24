@@ -1255,4 +1255,108 @@ mod tests {
 
         assert_eq!(peer.resolve_sync_route(&task), None);
     }
+
+    fn snapshot(
+        task_counts: TaskCounts,
+        active_machine_tasks: usize,
+        active_sync_tasks: usize,
+        replay_pages: Vec<String>,
+    ) -> WorkerSnapshot {
+        WorkerSnapshot {
+            label: "big_sync test",
+            peer_parts: HashMap::new(),
+            full_sync_waiters: HashMap::new(),
+            last_object_syncs: Vec::new(),
+            task_counts,
+            active_machine_tasks,
+            active_sync_tasks,
+            zombie_tasks: 0,
+            peer_part_sync_flags: Vec::new(),
+            replay_pages,
+        }
+    }
+
+    fn idle_counts(live: usize) -> TaskCounts {
+        TaskCounts {
+            live,
+            delayed: 0,
+            spawn_queue: 0,
+            stop_queue: 0,
+        }
+    }
+
+    /// `wait_for_idle` accepts a worker only when it is idle *and* two consecutive
+    /// snapshots are `convergence_eq`, so these two predicates are the whole acceptance
+    /// rule and their exact term sets are what a fence means by "settled".
+    ///
+    /// `convergence_eq` deliberately ignores `replay_pages`: a long poll re-issued with
+    /// fresh request identifiers every round is activity, not progress, and counting it
+    /// would make every convergence wait pass on its first poll. Everything that is
+    /// work — task counters, active sync tasks — still has to match.
+    #[test]
+    fn convergence_waits_ignore_reissued_long_polls_but_not_outstanding_work() {
+        let quiet = snapshot(idle_counts(2), 0, 0, Vec::new());
+        let polling = snapshot(
+            idle_counts(2),
+            0,
+            0,
+            vec!["part=bCwW replay request_id=7".to_string()],
+        );
+        assert!(
+            quiet.convergence_eq(&polling),
+            "a re-issued long poll's identifiers are not progress"
+        );
+
+        let mut paced = idle_counts(2);
+        paced.delayed = 1;
+        assert!(
+            !quiet.convergence_eq(&snapshot(paced, 0, 0, Vec::new())),
+            "work paced for later is not converged"
+        );
+        assert!(
+            !quiet.convergence_eq(&snapshot(idle_counts(2), 0, 1, Vec::new())),
+            "an in-flight sync task is not converged"
+        );
+    }
+
+    /// `is_idle` is a *scheduling* predicate, not a convergence one: it refuses only on
+    /// queued/delayed/stopping work and on sync tasks and zombies, while live tasks and
+    /// in-flight machine tasks do not stop it. A worker can therefore be idle and still
+    /// diverged — which is why `wait_for_idle` also demands a stable `convergence_eq` in
+    /// the test above, and why a caller that reads `is_idle` alone as "settled" is wrong.
+    #[test]
+    fn idle_means_no_scheduled_work_not_convergence() {
+        let quiet = snapshot(idle_counts(3), 0, 0, Vec::new());
+        assert!(
+            quiet.is_idle(),
+            "live tasks are not scheduled work: they do not hold the idle wait"
+        );
+        assert!(
+            snapshot(idle_counts(3), 2, 0, Vec::new()).is_idle(),
+            "an in-flight machine task does not hold the idle wait"
+        );
+
+        let mut busy = idle_counts(3);
+        busy.delayed = 1;
+        busy.spawn_queue = 1;
+        busy.stop_queue = 1;
+        let busy = snapshot(busy, 0, 1, Vec::new());
+        assert!(!busy.is_idle());
+
+        // The refusal has to name which term held it, or a timed-out wait can only say
+        // "not idle". Every term `is_idle` refuses on must appear in the breakdown.
+        let breakdown = busy.idle_breakdown();
+        for term in [
+            "delayed=",
+            "spawn_q=",
+            "stop_q=",
+            "active_sync=",
+            "zombies=",
+        ] {
+            assert!(
+                breakdown.contains(term),
+                "the idle breakdown must name {term:?}, got {breakdown}"
+            );
+        }
+    }
 }

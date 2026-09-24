@@ -75,14 +75,47 @@ pub(crate) async fn housekeep_after_add(
 /// Keep publishing prekeys until the pool reaches [`PREKEY_POOL_FLOOR`].
 ///
 /// Idempotent: a pool already at the floor does nothing.
+///
+/// Termination is structural rather than argued. A published pool is never empty (see
+/// `BigKeyhiveHandle::prekeys`), and a successful `expand_prekeys` inserts one freshly
+/// generated `AddKeyOp` into the same op map that `prekeys` folds — a fresh key can never
+/// be a rotation tombstone, because tombstone values come from keys already in the set, and
+/// the tombstone pass only ever skips removals. So each iteration must grow the published
+/// set by at least one key, and at most one expansion per missing slot is ever needed.
+///
+/// Both ways out of the loop are crashes, never "give up and continue": a published pool that
+/// stops growing while the core keeps publishing is a broken invariant, not a race between
+/// data planes, so proceeding below the floor would hand concurrent inviters a pool with no
+/// distinct slot left. The growth check is the primary diagnostic; the expansion bound is the
+/// backstop that keeps a weakened growth check from silently restoring an unbounded spin.
 pub(crate) async fn refill_to_floor(keyhive: &crate::keyhive::BigKeyhiveHandle) -> Res<()> {
     let mut pool = keyhive.prekeys().await.len();
+    let mut expansions = 0usize;
     while pool < PREKEY_POOL_FLOOR {
+        if expansions == PREKEY_POOL_FLOOR {
+            panic!(
+                "prekey janitor: pool still below the floor after {expansions} expansions \
+                 (pool={pool} floor={PREKEY_POOL_FLOOR}); every expansion is required to \
+                 publish one fresh prekey, so the published prekey view and the keyhive \
+                 core's prekey state have diverged and no further expansion can reach the \
+                 floor"
+            );
+        }
         keyhive
             .expand_prekeys()
             .await
             .map_err(|err| ferr!("prekey janitor: growing pool below floor failed: {err}"))?;
-        pool = keyhive.prekeys().await.len();
+        expansions += 1;
+        let grown = keyhive.prekeys().await.len();
+        if grown <= pool {
+            panic!(
+                "prekey janitor: publishing a prekey did not grow the pool \
+                 (pool={pool} floor={PREKEY_POOL_FLOOR} expansions={expansions}); the \
+                 published prekey view and the keyhive core's prekey state have diverged, \
+                 so no further expansion can reach the floor"
+            );
+        }
+        pool = grown;
     }
     if pool != PREKEY_POOL_FLOOR {
         tracing::debug!(

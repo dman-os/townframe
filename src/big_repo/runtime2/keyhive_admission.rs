@@ -224,4 +224,51 @@ mod tests {
     async fn sqlite_admission_revisioned_store_contract() {
         assert_revisioned_store_contract(&SqliteAdmissionHarness::new().await).await;
     }
+
+    /// Rows admitted while a reader is replaying carry a `seq` above the
+    /// `through` the reader froze at `open`. They must be buffered and released
+    /// only after the replay boundary: a reader that stops at `through` loses
+    /// them, and one that re-reads from its cursor serves them twice.
+    #[tokio::test]
+    async fn the_replay_boundary_buffers_rows_admitted_after_open() {
+        let harness = SqliteAdmissionHarness::new().await;
+        harness.commit(harness.entry(1)).await.expect("admit row 1");
+        harness.commit(harness.entry(2)).await.expect("admit row 2");
+
+        // `through` is frozen at 2 here; rows 3 and 4 land after it.
+        let mut reader = harness.source.open((), 0).await.expect("open reader");
+        harness.commit(harness.entry(3)).await.expect("admit row 3");
+        harness.commit(harness.entry(4)).await.expect("admit row 4");
+
+        let limits = RevisionReadLimits::default();
+        assert_eq!(
+            reader.next(limits).await.expect("read replay batch"),
+            RevisionRead::Entries {
+                revision: 2,
+                entries: vec![harness.entry(1), harness.entry(2)],
+            },
+            "replay must stop at the frozen boundary and buffer what followed"
+        );
+        assert_eq!(
+            reader.next(limits).await.expect("read replay boundary"),
+            RevisionRead::ReplayComplete { through: 2 },
+        );
+        assert_eq!(
+            reader.next(limits).await.expect("read buffered rows"),
+            RevisionRead::Entries {
+                revision: 4,
+                entries: vec![harness.entry(3), harness.entry(4)],
+            },
+            "rows admitted after the boundary arrive after it, exactly once"
+        );
+        // The live tail resumes past the buffered rows without re-serving them.
+        harness.commit(harness.entry(5)).await.expect("admit row 5");
+        assert_eq!(
+            reader.next(limits).await.expect("read live tail"),
+            RevisionRead::Entries {
+                revision: 5,
+                entries: vec![harness.entry(5)],
+            },
+        );
+    }
 }

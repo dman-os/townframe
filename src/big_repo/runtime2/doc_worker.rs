@@ -9,7 +9,9 @@ use crate::runtime2::support::{
     BigRepoCiphertextKind, BigRepoCiphertextLocator, CausalCheckpoint, causal_checkpoint_id,
     is_causal_checkpoint_id, stage_automerge_ingest,
 };
-use crate::runtime2::types::{DocLookup, LiveDocBundle, LiveDocHandle};
+use crate::runtime2::types::{
+    BrokenReason, DocLookup, LiveDocBundle, LiveDocHandle, handle_validity, invalid_handle_message,
+};
 use crate::runtime2::{
     DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken, MaterializationBlocker,
     MaterializationStatus, messages::DocWorkerMsg,
@@ -352,8 +354,27 @@ impl LoadedDocSnapshot {
 
 impl<F: FutureForm> Drop for DocWorker2<F> {
     fn drop(&mut self) {
+        // Teardown invalidates the shared bundle: its in-memory document may
+        // hold mutations that never persisted, so any handle still pointing at
+        // it must be refused and re-acquired. This is the only writer of
+        // `BrokenReason::WorkerDropped` and it runs even when no commit was ever
+        // attempted, which is why the recorded reason matters.
+        let has_caller_handle = self.has_caller_handle();
+        let caller_handles = self.caller_handles.len();
         if let DocState::Live(bundle) = &self.state {
-            bundle.mark_broken();
+            bundle.mark_broken(BrokenReason::WorkerDropped);
+        }
+        // A caller still holding a handle while its worker is torn down is the
+        // one state that yields a broken-bundle refusal with no rejected commit
+        // behind it. It used to leave no trace at all; name it here so the next
+        // occurrence is attributable from the log alone.
+        if has_caller_handle {
+            tracing::warn!(
+                doc_id = %self.doc_id,
+                generation = self.generation,
+                caller_handles,
+                "doc worker dropped while a caller handle was outstanding"
+            );
         }
     }
 }
@@ -569,8 +590,9 @@ impl<F: FutureForm> DocWorker2<F> {
     ) -> eyre::Result<()> {
         let result = match &self.state {
             // - `Live(bundle)` → return `Ready` with a fresh caller lease. A
-            //   broken bundle (an earlier commit from it was rejected) reloads
-            //   the last persisted state into a fresh bundle instead.
+            //   broken bundle — teardown, eviction, or a rejected commit; the bundle
+            //   records which (`BrokenReason`) — reloads the last persisted state into a
+            //   fresh bundle instead.
             DocState::Live(bundle) => {
                 if bundle.is_broken() {
                     self.state = DocState::Unloaded;
@@ -622,6 +644,7 @@ impl<F: FutureForm> DocWorker2<F> {
             .runtime_cmd_tx
             .send(crate::runtime2::Runtime2Cmd::RegisterDocLease {
                 doc_id: self.doc_id.clone(),
+                generation: self.generation,
                 registered: registered_tx,
             })
             .await
@@ -900,9 +923,10 @@ impl<F: FutureForm> DocWorker2<F> {
     /// Commit a set of changes locally.
     ///
     /// The authoritative write gate: a commit is rejected (and its bundle
-    /// latched broken) when
-    /// 1. it comes from a stale or broken bundle (an earlier commit from this
-    ///    bundle was rejected, or the bundle was replaced by a reload), or
+    /// invalidated, recording why) when
+    /// 1. the handle does not name the bundle this worker serves — it predates a
+    ///    reload — or that bundle was already invalidated; the refusal reports
+    ///    the recorded reason rather than assuming a rejected commit, or
     /// 2. the local principal no longer holds write access (revoked or
     ///    Read-only), or
     /// 3. the encrypted commit cannot be persisted (key unavailable).
@@ -918,25 +942,26 @@ impl<F: FutureForm> DocWorker2<F> {
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> eyre::Result<()> {
         // ── 1. Handle validity gate ───────────────────────────────────────
-        // Reject commits from broken bundles (an earlier commit from this
-        // bundle was rejected) and from bundles the worker no longer serves
-        // (reloaded after a break, or a freshly spawned worker with no
-        // bundle). This makes concurrent commits from the same handle fail
-        // atomically with the first rejection, instead of persisting a chain
-        // whose parent — the rejected commit's ghost — was never stored.
+        // Reject commits aimed at a bundle the worker no longer serves (reloaded
+        // after a break, or a freshly spawned worker with no bundle), and
+        // commits from a bundle that was already invalidated — by an earlier
+        // rejection, or by the teardown of the worker that owned it. This makes
+        // concurrent commits from the same handle fail atomically with the first
+        // rejection, instead of persisting a chain whose parent — the rejected
+        // commit's ghost — was never stored. The refusal names the recorded
+        // reason: a teardown is not a rejected commit, and reporting it as one
+        // is what made the failure unattributable.
         let current = match &self.state {
             DocState::Live(bundle) => Some(Arc::clone(bundle)),
             _ => None,
         };
         let served_bundle_id = current.as_ref().map(|bundle| bundle.id());
-        if served_bundle_id != Some(bundle_id)
-            || current.as_ref().is_some_and(|bundle| bundle.is_broken())
-        {
-            let message = if current.as_ref().is_some_and(|bundle| bundle.is_broken()) {
-                "document write rejected: handle invalidated by an earlier rejected commit; re-acquire the document"
-            } else {
-                "document write rejected: commit from a stale handle; re-acquire the document"
-            };
+        let validity = handle_validity(
+            served_bundle_id,
+            bundle_id,
+            current.as_ref().and_then(|bundle| bundle.broken_reason()),
+        );
+        if let Some(message) = invalid_handle_message(validity) {
             resp.send(Err(ferr!("{message}")))
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
@@ -949,7 +974,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 current
                     .as_ref()
                     .expect("live bundle present for a valid commit")
-                    .mark_broken();
+                    .mark_broken(BrokenReason::CommitRejectedNoWriteAccess);
                 resp.send(Err(ferr!(
                     "document write rejected: local access is not writable (revoked or read-only)"
                 )))
@@ -1029,7 +1054,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     current
                         .as_ref()
                         .expect("live bundle present for a valid commit")
-                        .mark_broken();
+                        .mark_broken(BrokenReason::CommitRejectedKeyUnavailable);
                     resp.send(Err(error))
                         .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
@@ -2847,7 +2872,10 @@ mod tests {
 
         let first = acquire_ready(&mut worker).await?;
         let first_bundle_id = first.bundle.id();
-        first.bundle.mark_broken();
+        // Exactly what the write-access gate does when it refuses a commit.
+        first
+            .bundle
+            .mark_broken(super::BrokenReason::CommitRejectedNoWriteAccess);
         drop(first);
 
         // A broken bundle must be reloaded into a fresh instance on the next
@@ -2860,6 +2888,70 @@ mod tests {
         );
         assert!(!second.bundle.is_broken());
         drop(second);
+        hub_ack.abort();
+        Ok(())
+    }
+
+    /// Teardown is the only thing that can invalidate a bundle with no commit
+    /// behind it, and it is reachable while a caller still holds a handle. The
+    /// handle keeps the bundle alive after the worker is gone, so it observes the
+    /// recorded reason rather than a bare `true`.
+    #[tokio::test]
+    async fn dropping_a_live_doc_worker_marks_its_bundle_broken() -> Res<()> {
+        let (mut worker, hub_ack) = ready_recovery_worker();
+
+        let handle = acquire_ready(&mut worker).await?;
+        let bundle = std::sync::Arc::clone(&handle.bundle);
+        assert!(!bundle.is_broken());
+        assert_eq!(bundle.broken_reason(), None);
+
+        drop(worker);
+
+        assert!(bundle.is_broken());
+        assert_eq!(
+            bundle.broken_reason(),
+            Some(super::BrokenReason::WorkerDropped),
+            "teardown must be recorded as teardown, not as a rejected commit"
+        );
+        // The caller's `Arc` keeps the bundle readable after its worker is gone;
+        // the recorded reason is the only thing the dead worker could still tell
+        // it.
+        assert_eq!(bundle.doc_id, DocumentId::new([0x5b; 32]));
+        drop(handle);
+        hub_ack.abort();
+        Ok(())
+    }
+
+    /// Every other writer of the broken flag is inside `commit_delta`, so
+    /// nothing that happens before a commit may latch it. This pins the set of
+    /// writers: the only route to a broken bundle with no commit is teardown. A
+    /// fourth "be safe, mark broken on the way out" site is how a refusal became
+    /// unattributable in the first place.
+    #[tokio::test]
+    async fn no_commit_attempted_means_only_drop_can_break_a_bundle() -> Res<()> {
+        let (mut worker, hub_ack) = ready_recovery_worker();
+
+        // Acquisition materializes the document (a decrypt walk plus a bundle
+        // build) and must leave the flag alone.
+        let handle = acquire_ready(&mut worker).await?;
+        let bundle = std::sync::Arc::clone(&handle.bundle);
+        assert!(!bundle.is_broken());
+
+        // A second acquisition after the caller drops reuses the same bundle;
+        // still untouched.
+        drop(handle);
+        let reused = acquire_ready(&mut worker).await?;
+        assert_eq!(reused.bundle.id(), bundle.id());
+        assert!(!bundle.is_broken());
+        assert_eq!(bundle.broken_reason(), None);
+        drop(reused);
+
+        // Only teardown breaks it, and it records why.
+        drop(worker);
+        assert_eq!(
+            bundle.broken_reason(),
+            Some(super::BrokenReason::WorkerDropped)
+        );
         hub_ack.abort();
         Ok(())
     }

@@ -3,14 +3,15 @@ mod ladder;
 mod stress;
 
 use crate::blobs::{BlobId, BlobsRepo};
-use crate::drawer::DrawerRepo;
+use crate::drawer::{DrawerRepo, types::DrawerError};
 use crate::local_state::SqliteLocalStateRepo;
 use crate::plugs::PlugsRepo;
 use crate::progress::ProgressRepo;
 use crate::repo::{RepoCtx, RepoOpenOptions};
 use crate::repos::{Repo, SubscribeOpts};
 use daybook_types::doc::{
-    AddDocArgs, BlobPin, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
+    AddDocArgs, BlobPin, BranchPath, BranchPathBuf, DocId, DocPatch, FacetKey, FacetRaw,
+    WellKnownFacet, WellKnownFacetTag,
 };
 
 async fn facet_set_hash_rows(
@@ -185,6 +186,51 @@ async fn iroh_sync_between_copied_repos() -> Res<()> {
 
     node_b.stop().await?;
     node_a.stop().await?;
+    Ok(())
+}
+
+/// The teardown order the blob-inventory writer's correctness depends on: it
+/// writes into the store the blob worker and the RPC server serve from, so it
+/// stops only after both are down.
+///
+/// A stop-order inversion is invisible in any single run — every child here stops
+/// successfully in any order, and the damage is a rare teardown race — so the
+/// token records the order and this pins it. The drain deadlines are deliberately
+/// untouched: an ordering assertion is the state-based substitute for a
+/// wall-clock condition, which this campaign ruled out of tests.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_stops_the_inventory_writer_after_the_workers_that_serve_from_it() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let temp_root = tempfile::tempdir()?;
+    let repo_path = temp_root.path().join("repo-a");
+    tokio::fs::create_dir_all(&repo_path).await?;
+    let rtx = RepoCtx::init(
+        &repo_path,
+        RepoOpenOptions::default(),
+        "test-device".to_string(),
+        "test-device".to_string(),
+    )
+    .await?;
+    rtx.shutdown().await?;
+
+    let node = open_sync_node(&repo_path).await?;
+    // The record is read through a handle taken before the stop, which consumes
+    // the token.
+    let shutdown_order = node.sync_stop.shutdown_order();
+    node.stop().await?;
+
+    assert_eq!(
+        shutdown_order.recorded(),
+        vec![
+            "big_sync_worker_stop",
+            "big_sync_rpc_stop",
+            "blob_sync_worker_stop",
+            "big_repo_rpc_stop_token",
+            "blob_inventory_permission_stop",
+        ],
+        "the inventory writer serves the store the blob worker and the RPC server serve \
+         from, so it must stop after both"
+    );
     Ok(())
 }
 
@@ -1221,6 +1267,168 @@ async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()
         .wait_for_full_sync(std::slice::from_ref(&peer_id), &required_partitions, None)
         .await?;
 
+    node_b.stop().await?;
+    node_a.stop().await?;
+    Ok(())
+}
+
+/// A peer can hold a branch's revoked access while its own entry still lists the
+/// branch: the two halves of a replicated branch delete travel on different
+/// channels, and the network delivers them independently.
+///
+/// The revocation arrives on the keyhive channel. A keyhive exchange's durable
+/// incorporation is awaited *inside* the protocol's message handler, in the
+/// connection task, so the peer's graph advances without its hub processing
+/// anything. The tombstone that drops the branch from the entry travels on the doc
+/// channel and is applied by the hub. Holding the hub's events separates the two
+/// halves without touching either transport: the keyhive half is complete and the
+/// doc half has not run.
+///
+/// What the peer does with the branch in that state is the contract this pins. The
+/// write must be refused as an unknown branch, never as a local access refusal:
+/// "the branch was deleted" and "you lost permission on a live branch" need
+/// different handling, and the doc worker's own message cannot tell them apart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_holds_its_revoked_branch_until_the_delete_lands_on_the_doc_channel() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+
+    let temp_root = tempfile::tempdir()?;
+    let repo_a_path = temp_root.path().join("repo-a");
+    let repo_b_path = temp_root.path().join("repo-b");
+    init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
+
+    let node_a = open_sync_node(&repo_a_path).await?;
+    let node_b = open_sync_node(&repo_b_path).await?;
+
+    let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
+    let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
+    let peer_b = PeerKey::new(*node_b.sync_repo.router.endpoint().id().as_bytes());
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr_ba.id).await?;
+
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let doc_id = node_a
+        .drawer
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(
+                title_key.clone(),
+                WellKnownFacet::TitleGeneric("Initial".into()).into(),
+            )]
+            .into(),
+            user_path: None,
+        })
+        .await?;
+    let main_heads = node_a
+        .drawer
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing doc branches after add")?
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch")?
+        .clone();
+    let branch = BranchPathBuf::from("/stress/1");
+    node_a
+        .drawer
+        .create_branch_at_heads_from_branch(
+            &doc_id,
+            &branch,
+            BranchPath::new("main"),
+            &main_heads,
+            None,
+        )
+        .await?;
+
+    wait_for_sync_convergence(&node_a, &node_b, endpoint_addr_ba.id).await?;
+
+    // Positive control: the peer holds the replicated branch while it is reachable,
+    // so the assertions below cannot pass vacuously.
+    let held = node_b
+        .drawer
+        .get_entry(&doc_id)
+        .await?
+        .ok_or_eyre("peer never received the doc entry")?;
+    assert!(
+        held.branches.contains_key("/stress/1"),
+        "peer must hold the replicated branch before the delete"
+    );
+
+    // Hold the peer's events: the doc channel's half of the delete cannot be
+    // applied while held. Commands are still served, so the keyhive half below
+    // still runs.
+    let hold = node_b.ctx.big_repo.hold_hub_events().await?;
+
+    assert!(node_a.drawer.delete_branch(&doc_id, &branch, None).await?);
+
+    // Drive the keyhive half from the node that is NOT held, and await it: the
+    // initiator's completion is resolved by its own hub, and the exchange cannot
+    // complete until the responder has durably incorporated it, so a returned
+    // round means the peer's graph holds the revocation.
+    node_a
+        .ctx
+        .big_repo
+        .sync_keyhive_with_peer(peer_b.clone())
+        .await?;
+
+    let entry = node_b
+        .drawer
+        .get_entry(&doc_id)
+        .await?
+        .ok_or_eyre("peer doc entry vanished")?;
+    let branch_doc_id = entry
+        .branches
+        .get("/stress/1")
+        .ok_or_eyre(
+            "the tombstone travels on the doc channel and its apply is held, so the peer's \
+             entry must still list the branch",
+        )?
+        .branch_doc_id
+        .clone();
+    assert!(
+        !node_b.drawer.branch_doc_reachable(&branch_doc_id).await?,
+        "the revocation arrived on the keyhive channel, so the peer must no longer reach the \
+         branch doc"
+    );
+    let listed = node_b
+        .drawer
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("peer doc branches vanished")?;
+    assert!(
+        !listed.branches.contains_key("/stress/1"),
+        "a branch this peer cannot reach must not be presented by the resolved listing"
+    );
+
+    // The write is the contract: unknown branch, not a local access refusal.
+    let err = node_b
+        .drawer
+        .update_at_heads(
+            DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    title_key.clone(),
+                    WellKnownFacet::TitleGeneric("revoked-peer".into()).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            &branch,
+            None,
+        )
+        .await
+        .expect_err("a write to a branch whose branch doc is unreachable must be refused");
+    assert!(
+        matches!(err, DrawerError::BranchNotFound { .. }),
+        "expected BranchNotFound, got {err:?}"
+    );
+    assert!(
+        !err.to_string().contains("local access is not writable"),
+        "the refusal must not report a permission problem on a live branch: {err}"
+    );
+
+    // Release the held events before stopping, so no held work outlives the test.
+    hold.resume().await?;
     node_b.stop().await?;
     node_a.stop().await?;
     Ok(())

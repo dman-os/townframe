@@ -266,6 +266,7 @@ impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Scripted(VecDeque<big_sync_core::revisioned_store::RevisionRead<u64, PartEvent>>);
     #[async_trait::async_trait]
@@ -275,6 +276,26 @@ mod tests {
             _limits: big_sync_core::revisioned_store::RevisionReadLimits,
         ) -> Res<big_sync_core::revisioned_store::RevisionRead<u64, PartEvent>> {
             Ok(self.0.pop_front().expect("script exhausted"))
+        }
+    }
+
+    /// A part-log reader that serves a scripted sequence and counts how often
+    /// the store asked it for a read. The store asserts nothing about the part
+    /// log's own cursor discipline, so "did it ask again" is the only
+    /// observable half of that contract at this seam.
+    struct CountingScriptedParts {
+        reads: VecDeque<big_sync_core::revisioned_store::RevisionRead<u64, PartEvent>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl LocalPartRevisionReader for CountingScriptedParts {
+        async fn next(
+            &mut self,
+            _limits: big_sync_core::revisioned_store::RevisionReadLimits,
+        ) -> Res<big_sync_core::revisioned_store::RevisionRead<u64, PartEvent>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.reads.pop_front().expect("script exhausted"))
         }
     }
 
@@ -402,6 +423,65 @@ mod tests {
             reader.next(RevisionReadLimits::default()).await?,
             RevisionRead::Entries { revision: 7, entries } if entries.is_empty()
         ));
+        Ok(())
+    }
+
+    /// A read that fails after the store has taken it from the part log is
+    /// retained, not consumed: the cursor advances only with a revision the
+    /// reader actually returned. Dropping the unserved read instead would skip
+    /// that document revision silently, which is how a cancelled sync loses one.
+    #[tokio::test]
+    async fn a_cancelled_frontier_read_resumes_at_the_same_revision() -> Res<()> {
+        let obj = ObjKey::new([9; 32]);
+        let p1 = PartKey::new([1; 32]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reads = VecDeque::from([
+            // Revision 7 cannot be served: its frontier payload does not decode.
+            RevisionRead::Entries {
+                revision: 7,
+                entries: vec![PartEvent::Changed(ObjChanged {
+                    cursor: 7,
+                    part_ids: vec![p1],
+                    obj_id: obj,
+                    payload: serde_json::json!({ "heads": [3] }),
+                })],
+            },
+            // A later, serviceable revision. A store that dropped the failed
+            // read would return this one here, skipping revision 7.
+            RevisionRead::Entries {
+                revision: 8,
+                entries: vec![],
+            },
+        ]);
+        let store: Arc<dyn HostPartStore> = Arc::new(big_sync::MemoryPartStore::default());
+        let mut reader = Reader {
+            inner: Box::new(CountingScriptedParts {
+                reads,
+                calls: Arc::clone(&calls),
+            }),
+            store,
+            pending_read: None,
+        };
+
+        let first = reader.next(RevisionReadLimits::default()).await;
+        assert!(
+            first.is_err(),
+            "an undecodable frontier payload must not be served"
+        );
+        let second = reader
+            .next(RevisionReadLimits::default())
+            .await
+            .expect_err("the unserved revision must be re-served, not skipped");
+        assert_eq!(
+            format!("{:#}", first.unwrap_err()),
+            format!("{:#}", second),
+            "the same retained read must be re-served"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the store must not ask the part log again while a read is pending"
+        );
         Ok(())
     }
 
