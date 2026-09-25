@@ -186,45 +186,37 @@ structstruck::strike! {
     }
 }
 
-structstruck::strike! {
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub enum SyncCompletionDeets {
-        AddedMember,
-        RemovedMember,
-        ChangedObject,
-        Noop,
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncCompletionDeets {
+    AddedMember,
+    RemovedMember,
+    ChangedObject,
+    Noop,
 }
 
-structstruck::strike! {
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct SyncTaskCompletion {
-        pub obj_id: ObjKey,
-        pub deets: SyncCompletionDeets,
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncTaskCompletion {
+    pub obj_id: ObjKey,
+    pub deets: SyncCompletionDeets,
 }
 
-structstruck::strike! {
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct SyncJobEvt {
-        pub obj_id: ObjKey,
-        pub cursors: Set<CursorIndex>,
-        pub deets: SyncCompletionDeets,
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncJobEvt {
+    pub obj_id: ObjKey,
+    pub cursors: Set<CursorIndex>,
+    pub deets: SyncCompletionDeets,
 }
 
-structstruck::strike! {
-    /// Commands must be done immediately blocking the machine and the next response
-    /// must be the command result. Failing commands are not recoverable.
-    /// This is different from tasks which can be retried are scheduled concurrently to machine.
-    #[derive(Clone, Debug)]
-    pub enum BigSyncMachineCommand {
-        SetPartCursor {
-            peer_id: PeerKey,
-            part_id: PartKey,
-            cursor: CursorIndex
-        },
-    }
+/// Commands must be done immediately blocking the machine and the next response
+/// must be the command result. Failing commands are not recoverable.
+/// This is different from tasks which can be retried are scheduled concurrently to machine.
+#[derive(Clone, Debug)]
+pub enum BigSyncMachineCommand {
+    SetPartCursor {
+        peer_id: PeerKey,
+        part_id: PartKey,
+        cursor: CursorIndex,
+    },
 }
 structstruck::strike! {
     #[derive(Debug, Clone, PartialEq, Eq)]
