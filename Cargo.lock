@@ -1089,6 +1089,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "big_automata"
+version = "0.1.0"
+dependencies = [
+ "async-channel",
+ "async-trait",
+ "autosurgeon",
+ "blake3",
+ "bs58",
+ "ciborium",
+ "future_form",
+ "rand 0.9.5",
+ "serde",
+ "siphasher",
+ "structstruck",
+ "thiserror 2.0.20",
+ "tracing",
+ "utils_rs",
+]
+
+[[package]]
 name = "big_repo"
 version = "0.1.0"
 dependencies = [

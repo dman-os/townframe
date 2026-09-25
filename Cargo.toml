@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "./src/am_utils_rs",
   "./src/api_utils_rs",
+  "./src/big_automata/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
@@ -103,6 +104,8 @@ blake3 = "1.8"
 zstd = "0.13"
 camino = { version = "1.2.2", features = ["serde1"] }
 atproto-dasl = "0.14.5"
+siphasher = "1.0.3"
+ciborium = "0.2.2"
 
 #
 # macros

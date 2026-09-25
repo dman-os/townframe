@@ -57,7 +57,6 @@ Concretely, only two events kinds are handled:
   - ObjRemovedFromPart
 
 ObjChanged contains the full object payload and all the keys of parts the object is a member of.
-<!-- this is actually very wasteful on live replay scenarios -->
 It's emitted on any object payload or part membership change.
 ObjRemovedFromPart is what it says on the tin, one event per part.
 
