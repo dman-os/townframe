@@ -176,8 +176,8 @@ mod tests {
     }
 
     /// The signer matching [`boot_handle`]'s seed. [`process_admissions`] does
-    /// not verify signatures (incorporation does), but signing with the handle's
-    /// own identity keeps these rows shaped like the ones the log really holds.
+    /// not verify signatures or authorization witnesses (incorporation does).
+    /// These synthetic rows never enter incorporation; their witnesses are sentinel hashes.
     fn signer_for(seed: [u8; 32]) -> MemorySigner {
         MemorySigner::from(ed25519_dalek::SigningKey::from_bytes(&seed))
     }
@@ -207,6 +207,7 @@ mod tests {
             removed_keys: Vec::new(),
             predecessors: Vec::new(),
             doc_id,
+            authorization: beekem::operation::CgkaAuthorization::Revocation([0; 32]),
         };
         let payload = bincode::serialize(&op).expect("serialize remove op");
         StaticEvent::CgkaOperation(Box::new(Signed::new(
@@ -237,7 +238,14 @@ mod tests {
         added_id: MemberId,
         pk: ShareKey,
     ) -> StaticEvent<Vec<u8>> {
-        let op = CgkaOperation::init_add(doc_id, added_id, pk);
+        let op = CgkaOperation::Add {
+            added_id,
+            pk,
+            leaf_index: 0,
+            predecessors: Vec::new(),
+            doc_id,
+            authorization: beekem::operation::CgkaAuthorization::Delegation([0; 32]),
+        };
         let payload = bincode::serialize(&op).expect("serialize add op");
         StaticEvent::CgkaOperation(Box::new(Signed::new(
             op,

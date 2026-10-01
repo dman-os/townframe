@@ -50,7 +50,6 @@ rand_08 = { version = "0.8", package = "rand", default-features = false }
 tempfile.workspace = true
 atproto-dasl.workspace = true
 nonempty.workspace = true
-nonempty12 = { package = "nonempty", version = "0.12", features = ["std"] }
 bincode = "1.3"
 
 #

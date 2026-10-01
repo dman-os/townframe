@@ -56,7 +56,9 @@ function main() {
   const args = Deno.args;
   const path = args[0];
   if (!path) {
-    console.error("usage: census-report.ts <census.tsv> [--top N] [--tree] [--grep SUBSTR] [--task-id-reuse]");
+    console.error(
+      "usage: census-report.ts <census.tsv> [--top N] [--tree] [--grep SUBSTR] [--task-id-reuse]",
+    );
     Deno.exit(2);
   }
   function flagValue(flag: string, fallback: string): string | undefined {
@@ -74,9 +76,16 @@ function main() {
     return;
   }
 
-
   // --- busy-time table by span name ---
-  const byName = new Map<string, { count: number; total: number; durs: number[]; fanout: Map<string, number> }>();
+  const byName = new Map<
+    string,
+    {
+      count: number;
+      total: number;
+      durs: number[];
+      fanout: Map<string, number>;
+    }
+  >();
   for (const r of rows) {
     let e = byName.get(r.name);
     if (!e) {
@@ -94,11 +103,20 @@ function main() {
     }
   }
   const ranked = [...byName.entries()]
-    .map(([name, e]) => ({ name, ...e, p50: pct(e.durs.sort((a, b) => a - b), 50), p99: pct(e.durs, 99) }))
+    .map(([name, e]) => ({
+      name,
+      ...e,
+      p50: pct(e.durs.sort((a, b) => a - b), 50),
+      p99: pct(e.durs, 99),
+    }))
     .sort((a, b) => b.total - a.total)
     .slice(0, top);
 
-  console.log(`busy time by span name (top ${top} of ${byName.size}), ${rows.length} records, total ${rows.reduce((s, r) => s + r.dur, 0)}ms`);
+  console.log(
+    `busy time by span name (top ${top} of ${byName.size}), ${rows.length} records, total ${
+      rows.reduce((s, r) => s + r.dur, 0)
+    }ms`,
+  );
   console.log("total_ms\tcount\tp50_ms\tp99_ms\tname");
   for (const e of ranked) {
     console.log(`${e.total}\t${e.count}\t${e.p50}\t${e.p99}\t${e.name}`);
@@ -120,7 +138,9 @@ function main() {
       .map(([k, v]) => ({ k, ...v }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 10);
-    console.log("\ntask activity by (task|worker|peer|object); counts alone do not establish retries:");
+    console.log(
+      "\ntask activity by (task|worker|peer|object); counts alone do not establish retries:",
+    );
     for (const w of worst) console.log(`${w.count}\t${w.total}ms\t${w.k}`);
   }
 
@@ -137,13 +157,18 @@ function main() {
       .filter(([, n]) => n > 1)
       .sort((a, b) => b[1] - a[1])
       .slice(0, 15);
-    console.log("\nrepeated task_id tags by worker/peer/object (candidate reuse, not proof of retries):");
+    console.log(
+      "\nrepeated task_id tags by worker/peer/object (candidate reuse, not proof of retries):",
+    );
     for (const [k, n] of reused) console.log(`${n}x\t${k}`);
   }
   // --- icicle tree by (parent -> name) ---
   if (tree) {
     console.log("\nicicle: parent -> name (count, total_ms, p99_ms)");
-    const edges = new Map<string, { count: number; total: number; durs: number[] }>();
+    const edges = new Map<
+      string,
+      { count: number; total: number; durs: number[] }
+    >();
     for (const r of rows) {
       const key = `${r.parent} -> ${r.name}`;
       let e = edges.get(key);
@@ -159,7 +184,9 @@ function main() {
       .map(([k, e]) => ({ k, e, p99: pct(e.durs.sort((a, b) => a - b), 99) }))
       .sort((a, b) => b.e.total - a.e.total)
       .slice(0, 40);
-    for (const l of lines) console.log(`${l.e.count}x ${l.e.total}ms p99=${l.p99}  ${l.k}`);
+    for (const l of lines) {
+      console.log(`${l.e.count}x ${l.e.total}ms p99=${l.p99}  ${l.k}`);
+    }
   }
 }
 

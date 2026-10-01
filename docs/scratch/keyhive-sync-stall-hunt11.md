@@ -42,3 +42,16 @@ How a serving side holding events answers `sending=0`:
    - (A) Make document/group-scoped keyhive events first-class in the peer sync advertisement (subduction protocol change), accepting larger request/response sets; or
    - (B) Keep pair-view sync and treat group membership as *pull-on-demand*: on `Unauthorized`, the requester issues an explicit "send me membership for doc X" exchange before any settlement decision.
    - Related: should `after=NotAuthorized` (backend.rs:247) ever settle a cursor without server-side confirmation? Current behavior turns any membership-delivery lag into a permanent, silent content divergence — that is what froze this test.
+
+## Current-source qualification (2026-10-02 greening)
+
+The log observations above remain historical evidence; the proposed attribution is not established
+for the current branch. Current `static_events_for_agent` calls `events_for_agent`, which includes
+reachable document CGKA operations and `membership_ops_for_agent`; the latter traverses
+`membered_handles_reachable_by(who)` and includes delegation and revocation heads. Therefore three
+root identifiers in the peer-pair computation do not by themselves imply that group/document events
+are excluded. Prove a missing event against those traversals and the pair intersection/cache before
+changing advertisement policy. Current `backend.rs` also already distinguishes Unknown and checks
+document membership history before settling NotAuthorized, unlike the historical quoted path.
+Use a fresh failing trace to determine whether either mechanism remains defective; do not implement
+the earlier fix proposal solely from this document.

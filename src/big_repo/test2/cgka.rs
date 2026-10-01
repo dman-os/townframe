@@ -1570,9 +1570,9 @@ fn kh_document_id(
 
 /// Build a synthetic `StaticEvent::CgkaOperation(Add{..})` admission event
 /// naming `added_id`/`pk`. The signature is structurally valid but the
-/// synthetic row never passes through keyhive incorporation verification: the
-/// janitor's policy is guarded by the *published-set precheck*, so a
-/// test-fabricated row exercises exactly the durable-cursor path.
+/// synthetic row never passes through keyhive incorporation verification,
+/// including its sentinel authorization witness. The janitor's policy is guarded
+/// by the published-set precheck, so it exercises the durable-cursor path.
 fn synthetic_join_add_event(
     added_id: beekem::id::MemberId,
     pk: keyhive_crypto::share_key::ShareKey,
@@ -1581,7 +1581,14 @@ fn synthetic_join_add_event(
     let tree_id = beekem::id::TreeId(
         ed25519_dalek::VerifyingKey::from_bytes(&[0x2a; 32]).expect("valid point"),
     );
-    let op = beekem::operation::CgkaOperation::init_add(tree_id, added_id, pk);
+    let op = beekem::operation::CgkaOperation::Add {
+        added_id,
+        pk,
+        leaf_index: 0,
+        predecessors: Vec::new(),
+        doc_id: tree_id,
+        authorization: beekem::operation::CgkaAuthorization::Delegation([0; 32]),
+    };
     let payload = bincode::serialize(&op)?;
     let signed = keyhive_crypto::signed::Signed::new(
         op,

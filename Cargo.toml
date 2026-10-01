@@ -169,12 +169,12 @@ subduction_crypto = { path = "../subduction/subduction_crypto" }
 subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 
 keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
-keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
-beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
+keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
+beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
-nonempty = "0.10.0"
+nonempty = "0.12.0"
 qrcode = { version = "0.14.1", default-features = false }
 
 #

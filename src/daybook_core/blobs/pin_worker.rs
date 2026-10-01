@@ -1654,12 +1654,14 @@ mod tests {
     /// The facet machine's identity is a separate row — the two machines are
     /// separate consumers — and a fresh construction of the plug-events identity
     /// reads back exactly the row that is in the table, which is what a restart
-    /// resuming "at its own progress" means.
+    /// resuming "at its own progress" means. The writer is stopped first, so the
+    /// row is read at a fixed point rather than racing the machine's own
+    /// settlement of the revisions it is still consuming.
     ///
-    /// Deliberately not asserted: *when* the machine has settled the revision it
-    /// consumed. That instant is only observable by polling the row until it
-    /// moves, and this suite asserts on state, not on elapsed wall clock; the
-    /// advancement itself is left uncovered here.
+    /// Deliberately not asserted: *how far* the machine has settled by the time it
+    /// is stopped. The walker advances on its own task's schedule, so the exact
+    /// revision it reached is not a property of the contract; that a restart reads
+    /// back whatever it reached, and never moves backwards, is.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_plug_events_walker_resumes_at_the_pin_workers_own_progress_row() -> Res<()> {
         let test_context = test_cx(utils_rs::function_full!()).await?;
@@ -1737,9 +1739,12 @@ mod tests {
             "the facet machine keeps its own namespace, not this one: {identities:?}"
         );
 
-        // A restart constructs the state again and resumes at its own row: the
-        // state repo's reading and the table's contents are the same value, read
-        // in the same instant, and a durable revision never moves backwards.
+        // Stop joins the blob-pin supervisor and both machines before comparing
+        // the durable row with a reopened reader. Otherwise the live writer can
+        // advance between those reads. The cloned SQL handle retains the DB.
+        test_context.stop().await?;
+
+        // A restart reads the exact durable revision after its writer has stopped.
         let durable_row = plug_events_progress_row(&sql)
             .await?
             .expect("the machine's task created its progress row before it processed anything");
@@ -1763,8 +1768,6 @@ mod tests {
             durable_row,
             "a restart of the walker resumes at its own progress row"
         );
-
-        test_context.stop().await?;
         Ok(())
     }
 }

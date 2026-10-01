@@ -244,30 +244,32 @@ impl BigRepoStressFixture {
         }
         parts.into_iter().collect()
     }
-    /// A compact `doc:stage` list for one node, capped so a report stays readable.
-    async fn doc_stage_summary(&self, node: &Node, docs: &BTreeSet<DocumentId>) -> String {
-        let mut stages = Vec::new();
+    /// Observe durable doc storage without commands to a potentially frozen hub.
+    async fn doc_storage_summary(&self, node: &Node, docs: &BTreeSet<DocumentId>) -> String {
+        let store = node.repo.shared_part_store();
+        let mut summaries = Vec::new();
         for doc_id in docs.iter().take(SETTLE_STALL_REPORT_DOCS) {
-            let stage = node
-                .repo
-                .document_sync_snapshot(doc_id.clone())
-                .await
-                .map(|snapshot| format!("{:?}", snapshot.stage))
-                .unwrap_or_else(|error| format!("error({error})"));
-            stages.push(format!("{}:{stage}", key_prefix(doc_id, 12)));
+            let storage = async {
+                let parts = store.obj_parts(doc_id.clone()).await?.len();
+                let payload = store.obj_payload(doc_id.clone()).await?.is_some();
+                Ok::<_, crate::interlude::eyre::Report>(format!("parts={parts},payload={payload}"))
+            }
+            .await
+            .unwrap_or_else(|error| format!("error({error})"));
+            summaries.push(format!("{}:{storage}", key_prefix(doc_id, 12)));
         }
         if docs.len() > SETTLE_STALL_REPORT_DOCS {
-            stages.push(format!("+{}", docs.len() - SETTLE_STALL_REPORT_DOCS));
+            summaries.push(format!("+{}", docs.len() - SETTLE_STALL_REPORT_DOCS));
         }
-        stages.join(",")
+        summaries.join(",")
     }
 
     /// Name what a still-outstanding settle barrier is waiting for: which nodes have not
-    /// returned, their BigSync part cursors, and their per-document sync stage.
+    /// returned, their BigSync part cursors, and their durable document presence.
     ///
     /// The hub reports its own internal fence state while a quiescence wait is stalled;
-    /// this is the cross-node view, and unlike the hub's report it needs the fence to be
-    /// armed at the moment it is written rather than continuously pending.
+    /// this is the cross-node durable-store view. It must not query a hub: a
+    /// completed freeze buffers such queries until this barrier sends Unfreeze.
     async fn report_settle_stall(
         &self,
         phase: &str,
@@ -286,7 +288,7 @@ impl BigRepoStressFixture {
                 "{}(holding={} cursors={cursors} docs={})",
                 log_nickname::nickname(&node.peer_id()),
                 holding.contains(&idx),
-                self.doc_stage_summary(node, &tracked_docs).await,
+                self.doc_storage_summary(node, &tracked_docs).await,
             ));
         }
         tracing::warn!(
@@ -1037,7 +1039,7 @@ impl StressFixture for BigRepoStressFixture {
                     Ok::<_, crate::interlude::eyre::Report>(format!(
                         "{}={}",
                         log_nickname::nickname(&node.peer_id()),
-                        self.doc_stage_summary(node, tracked_docs_ref).await,
+                        self.doc_storage_summary(node, tracked_docs_ref).await,
                     ))
                 }))
                 .await?

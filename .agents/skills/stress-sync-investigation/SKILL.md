@@ -32,11 +32,33 @@ Focused stress diagnostics:
 ```bash
 TEST_SEED=<seed> DAYB_STRESS_DIAGNOSTIC_TIMEOUT_SECS=20 RUST_LOG_TEST=debug \
   cargo nextest run -p daybook_core \
-  -E 'test(long_test_iroh_sync_randomized_four_node_stress_converges)' \
+  -E 'test(long_af_test_iroh_sync_randomized_four_node_stress_converges)' \
   >/tmp/stress-diag.log 2>&1
 ```
 
 The diagnostic timeout is an evidence path, not a production timeout increase. Record the emitted seed before rerunning.
+
+Combined all-feature acceptance soak (fail fast, whole package set; do not filter by `/stress/`):
+
+```bash
+RUST_LOG_TEST=debug cargo nextest run -p daybook_core -p big_repo --all-features \
+  --fail-fast --stress-duration 60m >/tmp/green-combined-60m.log 2>&1
+```
+
+Use a fresh log name for subsequent attempts. The offline-transfer test does not contain `stress`
+in its name, so filtering that substring silently omits a relevant synchronization scenario.
+
+When the operator requests CI-equivalent flake handling, use the existing
+`--profile ci`, not a new retry convention. It allows three retries after the
+initial attempt (four attempts per test), not four failing tests globally. CI
+also sets `UTILS_RS_TIMEOUT_MULTIPLIER=3`; this does not change nextest
+timeouts, including the eight-minute `long_af_test` cap. Keep `--fail-fast`
+for the soak and report retries separately from final failures. A passing soak
+does not establish that earlier intermittent failures were repaired.
+
+The disk watcher must recognize both `cargo nextest` and `cargo-nextest` as
+artifact users. Nextest continues executing test binaries after compilation;
+cleaning target/debug during stress deletes binaries needed by later iterations.
 
 ## Hunt loop
 
@@ -237,8 +259,12 @@ The ordering it means to pin does hold — `delete_branch: initiated … kind=Re
 `remove_obj_from_part` precedes the injected bail in the same function (`mutations.rs:1393` → `:1449`),
 and `DocumentAccessRevoked` for that bdoc is in the log — but the branch doc is re-published into its
 part set ~250 ms later by AFW, restoring the count. Whenever the window contains a live publisher,
-assert the action-scoped fact (`branch_doc_reachable(bdoc) == false`, a keyhive-channel effect a
-republish cannot undo), never a global member count.
+assert the action-scoped revocation of the drawer-group and content-docs-group
+grants, with positive access controls before deletion, never a global member
+count. `branch_doc_reachable(bdoc) == false` is NOT a valid witness on the
+creator: its separate direct admin grant survives group revocation. A fresh
+run disproved that historical proposal; the corrected test checks both exact
+revoked groups and retains the unchanged entry/no-tombstone assertions.
 
 ### 30s case caps are a wall clock, not a verdict
 
@@ -446,3 +472,41 @@ Do not combine `--no-fail-fast` with a long duration.
 ## Signed write rejected after offline revocation
 
 In `tier6_offline_downgrade_stale_write_rejected`, Owner first accepts the Editor's `valid` write, then Editor writes `stale` offline before Owner revokes Edit and re-grants Read. Subduction verifies the Sedimentree signer (not the sender) and `subduction_keyhive::policy::authorize_put_with` checks **current** membership, not the grant at the write's causal point. An explicit sync can report `Policy(InsufficientAccess)` if it sees a denied signed object; a successful receipt can instead follow a background denial. Do not require `sync_doc_expect_ready` on that post-reconnect exchange or treat every policy error as expected. Check the earlier accepted value remains readable and that the later local write fails after Editor observes Read. The ignored `tier6_concurrent_offline_write_survives_{revoke,downgrade}` tests pin the intended future causal-authorization contract and must fail today. Rejection logs in Subduction now include `commit_id`/`fragment_id`; correlate those with write stages before concluding which object was denied.
+
+## Owner prekey selected after its secret snapshot
+
+`OwnerHoldsNoPrekeySecret` during document creation can be a local rotation race,
+not missing remote Keyhive events. Keyhive copied the owner secret map before
+awaited group generation; `finish_generate` selected from current published
+prekeys afterward. The janitor could rotate into a new key between those steps.
+Pass the live key-pair map and look up the selected secret after selection. This
+is safe because rotation stores the secret before publishing the prekey and
+retains old secrets; keep the RNG lock released across group/prekey awaits.
+
+Regression: `document_generation_reads_owner_secrets_after_prekey_rotation`
+replaces all published prekeys after capturing owner material, then proves an
+encryption/decryption roundtrip. It failed before and passed after the cutover.
+The original two disk Drawer perf tests passed afterward; a temporary runnable
+API smoke also roundtripped 100 documents (50 reserved identities) alongside
+700 rotations. Do not retry doc creation or refresh the whole map as a fallback.
+
+## A stall observer must not query a frozen actor
+
+BigRepo offline-transfer timed out at the initial-alignment freeze barrier.
+The five-second reporter awaited `document_sync_snapshot` on a node whose
+quiescence wait had already frozen its hub. `InspectDocHeadState` was buffered
+until `Unfreeze`, but the awaited report prevented polling the remaining waits
+and therefore prevented reaching unfreeze. Hub fence warnings appeared while
+the cross-node reporter warning never appeared: the warning query had a
+positive control, and the missing reporter identified the observer itself.
+
+The cross-node report now reads durable part membership/payload directly, with
+no hub command. A temporary forced report after all nodes froze and before
+unfreeze emitted real cursor/doc-presence diagnostics and returned; the
+offline-transfer scenario completed. Remove that forced call after proof and
+rerun under the original mixed load. Do not relax freeze semantics or add
+timeouts, explicit pulls, or retries to hide a diagnostic wait cycle.
+
+For exact durable-resume assertions, stop and join the owning writer before
+comparing its row with a reopened reader. Two reads while a live walker advances
+are not one snapshot; left13/right12 is not evidence of wrong resume identity.

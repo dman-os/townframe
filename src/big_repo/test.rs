@@ -174,9 +174,7 @@ async fn recv_change_batch(
 async fn recv_head_batch(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<super::changes::BigRepoHeadNotification>>,
 ) -> Vec<super::changes::BigRepoHeadNotification> {
-    rx.recv()
-        .await
-        .expect("head listener closed unexpectedly")
+    rx.recv().await.expect("head listener closed unexpectedly")
 }
 
 async fn get_keyhive_agent(repo: &Arc<BigRepo>, peer_id: PeerKey) -> Res<Option<BigKeyhiveAgent>> {

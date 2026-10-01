@@ -394,7 +394,10 @@ async fn local_hive_and_unmaterialized_peer(
     ))));
     let peer_authority = {
         let id = peer_individual.lock().await.id();
-        BigKeyhiveAuthority::Agent(BigKeyhiveAgent::Individual(id, peer_individual.clone()))
+        BigKeyhiveAuthority::Agent(BigKeyhiveAgent::Individual(
+            id,
+            Arc::clone(&peer_individual),
+        ))
     };
 
     Ok((owner, storage, protocol, peer_individual, peer_authority))
@@ -429,7 +432,7 @@ async fn document_creation_succeeds_once_the_coparent_material_is_present() -> R
     assert!(
         owner
             .clone_keyhive()
-            .register_individual(peer_individual.clone())
+            .register_individual(Arc::clone(&peer_individual))
             .await,
         "the fixture must start without the peer registered"
     );
@@ -478,7 +481,7 @@ async fn reserved_document_finalization_succeeds_once_the_parent_material_is_pre
     assert!(
         owner
             .clone_keyhive()
-            .register_individual(peer_individual.clone())
+            .register_individual(Arc::clone(&peer_individual))
             .await,
         "the fixture must start without the peer registered"
     );
@@ -523,7 +526,7 @@ async fn group_creation_succeeds_once_the_coparent_material_is_present() -> Res<
     assert!(
         owner
             .clone_keyhive()
-            .register_individual(peer_individual.clone())
+            .register_individual(Arc::clone(&peer_individual))
             .await,
         "the fixture must start without the peer registered"
     );

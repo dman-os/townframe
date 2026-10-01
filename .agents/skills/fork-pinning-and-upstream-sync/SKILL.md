@@ -15,6 +15,31 @@ commit on top of it on a fork bookmark.
 
 Read `AGENTS.md` first. The VCS rules there apply to all three checkouts.
 
+Local rebase work can be newer than the historical pins in the table. For the active greening
+effort, read `docs/scratch/green-core-big-repo-memory.md` for exact heads, ownership and verified gates.
+Never repin a remote dependency to an unpushed local SHA.
+
+### Preserving a pre-rebase working snapshot
+
+Bookmarks follow rebased change IDs. Creating a bookmark at `@` before `jj rebase` does not by itself
+retain the old snapshot: it moves with the rewritten commit. Record the original **commit ID**,
+then explicitly pin the preservation bookmark back to it after rebase:
+
+```bash
+jj bookmark create green-goal-pre-upstream -r <original-commit-id>
+jj rebase -s 'roots(main@upstream..@)' -d main@upstream
+jj bookmark set green-goal-pre-upstream -r <original-commit-id> --allow-backwards
+```
+
+Resolve conflicted commits in chronological order with the repository's `jj edit` / `jj new` /
+edit / `jj squash -m` convention; fixing only the final working head leaves conflicted ancestors.
+Preserve local instrumentation on its separate bookmark.
+
+After upstream version bumps, a complete local patch is not enough if a consuming requirement
+rejects the local version. Keyhive upstream now declares core 0.6.0 and BeeKEM 0.4.0; update consuming
+requirements consistently and prove one source per crate with Cargo's resolved graph, not merely
+`cargo metadata --no-deps` (which only parses manifests).
+
 ## Ground rules
 
 - Never run git commands in these checkouts. They are jj colocated workspaces; use `jj`.

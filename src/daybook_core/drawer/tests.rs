@@ -816,23 +816,11 @@ async fn a_branch_whose_branch_doc_access_is_revoked_leaves_the_listing_and_is_r
 struct DrawerNode {
     repo: Arc<DrawerRepo>,
     big_repo: SharedBigRepo,
-    big_sync_host: big_sync::Ctx,
     stop_token: crate::repos::RepoStopToken,
     stop_workers: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 }
 
 impl DrawerNode {
-    /// How many objects the replicated partition holds. A replicated branch
-    /// document becomes a member when the branch is created and stops being one
-    /// when its deletion's keyhive-channel half runs, so this is the observable
-    /// that separates the two halves of a replicated branch delete.
-    async fn replicated_partition_member_count(&self) -> Res<u64> {
-        self.big_sync_host
-            .store
-            .member_count(self.repo.replicated_partition_id())
-            .await
-    }
-
     async fn stop(self) -> Res<()> {
         self.stop_token.stop().await?;
         (self.stop_workers)().await
@@ -869,7 +857,6 @@ async fn boot_drawer_node() -> Res<DrawerNode> {
     Ok(DrawerNode {
         repo,
         big_repo,
-        big_sync_host,
         stop_token,
         stop_workers: stop,
     })
@@ -933,13 +920,33 @@ async fn delete_a_replicated_branch_revokes_before_it_commits_the_tombstone() ->
     let node = boot_drawer_node().await?;
     let (doc_id, branch) = replicated_branch_fixture(&node, "order-a").await?;
 
-    // Positive control: the branch is a partition member while it is live, so the
-    // drop asserted below cannot pass vacuously.
-    assert_eq!(
-        node.replicated_partition_member_count().await?,
-        2,
-        "the replicated branch doc must be a partition member before the delete"
+    let branch_ref = node
+        .repo
+        .get_branch_ref(&doc_id, &branch)
+        .await?
+        .ok_or_eyre("replicated branch reference missing before delete")?;
+    let branch_identity = big_repo::keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &branch_ref
+                .branch_doc_id
+                .to_bytes32()
+                .expect("generated branch identity is 32 bytes"),
+        )?,
     );
+    let revoked_groups = [
+        node.repo.drawer_group.id().into(),
+        node.repo.content_docs_group.id().into(),
+    ];
+    for group in &revoked_groups {
+        assert!(
+            node.big_repo
+                .keyhive()
+                .agent_access_on(group, branch_identity)
+                .await
+                .is_some(),
+            "positive control: group {group} reaches the live branch"
+        );
+    }
 
     node.repo.fail_next_drawer_doc_commit_for_test();
     let err = node
@@ -953,15 +960,19 @@ async fn delete_a_replicated_branch_revokes_before_it_commits_the_tombstone() ->
         "expected the injected failure, got {err:?}"
     );
 
-    // The revocation half ran before the failure: the branch doc left the
-    // partition, which is the first statement of
-    // `remove_branch_from_partitions_if_needed`. A delete that committed the
-    // tombstone first would leave this member count unchanged.
-    assert_eq!(
-        node.replicated_partition_member_count().await?,
-        1,
-        "the keyhive-channel half must have run before the drawer-doc commit failed"
-    );
+    // AFW can republish the still-live branch into its partition; the creator
+    // also retains direct admin access. Neither can undo these two group grants
+    // being revoked, which is the action-scoped keyhive effect under test.
+    for group in &revoked_groups {
+        assert!(
+            node.big_repo
+                .keyhive()
+                .agent_access_on(group, branch_identity)
+                .await
+                .is_none(),
+            "group {group} must be revoked before the failed drawer-doc commit"
+        );
+    }
 
     // The tombstone half did not: the entry still lists the branch and records no
     // deletion for it.
