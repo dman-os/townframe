@@ -33,8 +33,8 @@ pub mod triage;
 pub mod wash_plugin;
 
 use dispatch::{
-    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchOnSuccessHook, DispatchRepo,
-    FacetRoutineArgs, facet_routine_args_fingerprint,
+    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchAttempt,
+    DispatchOnSuccessHook, DispatchRepo, FacetRoutineArgs, facet_routine_args_fingerprint,
 };
 use init::InitRepo;
 use wash_plugin::stateless_view;
@@ -69,10 +69,20 @@ pub struct RtConfig {
     pub startup_progress_task_id: Option<String>,
 }
 
+#[cfg(test)]
+struct DispatchTestGate {
+    reached: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
 pub struct Rt {
     pub config: RtConfig,
     pub rcx: Arc<RepoCtx>,
     pub cancel_token: tokio_util::sync::CancellationToken,
+    #[cfg(test)]
+    finalization_gate: tokio::sync::Mutex<Option<DispatchTestGate>>,
+    #[cfg(test)]
+    waiting_activation_gate: tokio::sync::Mutex<Option<DispatchTestGate>>,
     pub plugs_repo: Arc<PlugsRepo>,
     pub drawer: Arc<DrawerRepo>,
     pub config_repo: Arc<ConfigRepo>,
@@ -442,6 +452,10 @@ impl Rt {
             config,
             local_wflow_part_id,
             cancel_token,
+            #[cfg(test)]
+            finalization_gate: tokio::sync::Mutex::new(None),
+            #[cfg(test)]
+            waiting_activation_gate: tokio::sync::Mutex::new(None),
             plugs_repo,
             drawer,
             rcx,
@@ -1134,33 +1148,29 @@ impl Rt {
         let Some((dispatch_id, _)) = event.job_id.rsplit_once('-') else {
             return Ok(());
         };
-        let Some(dispatch) = self.dispatch_repo.get_active(dispatch_id).await else {
-            return Ok(());
-        };
-        let ActiveDispatchDeets::Wflow {
-            wflow_job_id,
-            wflow_key,
-            ..
-        } = &dispatch.deets;
-        let Some(wflow_job_id) = wflow_job_id.as_ref() else {
-            return Ok(());
-        };
-        if wflow_job_id.as_str() != event.job_id.as_ref() {
-            debug!(
-                %dispatch_id,
-                active_job_id = %wflow_job_id,
-                completed_job_id = %event.job_id,
-                wflow_key = %wflow_key,
-                "ignoring stale job result for replaced dispatch"
-            );
-            return Ok(());
+        {
+            let Some(dispatch) = self.dispatch_repo.get_active(dispatch_id).await else {
+                return Ok(());
+            };
+            let ActiveDispatchDeets::Wflow {
+                wflow_job_id,
+                wflow_key,
+                ..
+            } = &dispatch.deets;
+            let Some(wflow_job_id) = wflow_job_id.as_ref() else {
+                return Ok(());
+            };
+            if wflow_job_id.as_str() != event.job_id.as_ref() {
+                debug!(
+                    %dispatch_id,
+                    active_job_id = %wflow_job_id,
+                    completed_job_id = %event.job_id,
+                    wflow_key = %wflow_key,
+                    "ignoring stale job result for replaced dispatch"
+                );
+                return Ok(());
+            }
         }
-
-        // Get staging branch path from dispatch
-        let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
-            staging_branch_path,
-            ..
-        }) = &dispatch.args;
 
         let is_done = match &event.result {
             JobRunResult::Success { value_json } => {
@@ -1258,14 +1268,57 @@ impl Rt {
             JobRunResult::StepEffect(..) | JobRunResult::StepWait(..) => false,
         };
         if is_done {
+            let Some(dispatch) = self.dispatch_repo.get_any(dispatch_id).await else {
+                return Ok(());
+            };
+            // Re-read exact job identity before claiming this attempt. Replacement
+            // and claim validation share the repository's short transition lock.
+            if dispatch.status.is_terminal() {
+                debug!(
+                    %dispatch_id,
+                    status = ?dispatch.status,
+                    "ignoring terminal result; dispatch already settled"
+                );
+                return Ok(());
+            }
+            let ActiveDispatchDeets::Wflow {
+                wflow_job_id: current_job_id,
+                ..
+            } = &dispatch.deets;
+            if current_job_id.as_deref() != Some(event.job_id.as_ref()) {
+                debug!(
+                    %dispatch_id,
+                    %event.job_id,
+                    current_job_id = ?current_job_id,
+                    "ignoring stale job result for replaced dispatch"
+                );
+                return Ok(());
+            }
+            let Some(finalization) = self
+                .dispatch_repo
+                .claim_finalization(dispatch_id, &dispatch)
+                .await?
+            else {
+                return Ok(());
+            };
+            #[cfg(test)]
+            if let Some(gate) = self.finalization_gate.lock().await.take() {
+                gate.reached.send(()).expect(ERROR_CHANNEL);
+                gate.resume.await.expect(ERROR_CHANNEL);
+            }
             // Handle staging branch cleanup based on success/failure
             let ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
                 doc_id,
                 branch_path: target_branch_path,
+                staging_branch_path,
                 ..
             }) = &dispatch.args;
 
-            let merged_successfully = matches!(&event.result, JobRunResult::Success { .. });
+            // Cancellation owns this outcome only after its durable mark commits.
+            // A publication claim seals out later cancellation without waiting.
+            let cancelled_win = finalization.cancelled;
+            let merged_successfully =
+                !cancelled_win && matches!(&event.result, JobRunResult::Success { .. });
 
             if merged_successfully {
                 // Merge staging branch into target branch
@@ -1370,6 +1423,7 @@ impl Rt {
                                     command_invoke_reply_from_result(
                                         &event.result,
                                         dispatch_id,
+                                        cancelled_win,
                                         merged_successfully,
                                     );
                                 daybook_pdk::InvokeCommandReply {
@@ -1424,6 +1478,7 @@ impl Rt {
                                     command_invoke_reply_from_result(
                                         &event.result,
                                         dispatch_id,
+                                        cancelled_win,
                                         merged_successfully,
                                     );
                                 daybook_pdk::InvokeCommandReply {
@@ -1452,7 +1507,7 @@ impl Rt {
 
             let final_status = if merged_successfully {
                 dispatch::DispatchStatus::Succeeded
-            } else if matches!(&event.result, JobRunResult::Aborted) {
+            } else if cancelled_win || matches!(&event.result, JobRunResult::Aborted) {
                 dispatch::DispatchStatus::Cancelled
             } else {
                 dispatch::DispatchStatus::Failed
@@ -1477,8 +1532,9 @@ impl Rt {
                 )
                 .await?;
             self.dispatch_repo
-                .complete(dispatch_id.into(), final_status.clone())
+                .complete(dispatch_id.into(), final_status.clone(), &dispatch)
                 .await?;
+            finalization.finish();
             self.release_waiting_dispatches(
                 dispatch_id,
                 matches!(final_status, dispatch::DispatchStatus::Succeeded),
@@ -1561,6 +1617,11 @@ impl Rt {
                 .remove_waiting_dependency(&waiting_id, completed_dispatch_id)
                 .await?
             {
+                #[cfg(test)]
+                if let Some(gate) = self.waiting_activation_gate.lock().await.take() {
+                    gate.reached.send(()).expect(ERROR_CHANNEL);
+                    gate.resume.await.expect(ERROR_CHANNEL);
+                }
                 self.start_waiting_dispatch(waiting_id, ready_dispatch)
                     .await?;
             }
@@ -1587,7 +1648,7 @@ impl Rt {
     async fn start_waiting_dispatch(
         &self,
         dispatch_id: String,
-        waiting_dispatch: Arc<ActiveDispatch>,
+        waiting_dispatch: Arc<DispatchAttempt>,
     ) -> Res<()> {
         let ActiveDispatchDeets::Wflow {
             plug_id,
@@ -1599,6 +1660,23 @@ impl Rt {
         } = &waiting_dispatch.deets;
         let Some(job_id) = wflow_job_id.as_ref() else {
             eyre::bail!("waiting dispatch missing job id: {dispatch_id}");
+        };
+        let initial_deets = ActiveDispatchDeets::Wflow {
+            wflow_partition_id: None,
+            entry_id: None,
+            plug_id: plug_id.clone(),
+            routine_name: routine_name.clone(),
+            bundle_name: bundle_name.clone(),
+            wflow_key: wflow_key.clone(),
+            wflow_job_id: Some(job_id.clone()),
+        };
+        // Refuse a cancelled/replaced ready snapshot before execution setup.
+        let Some(active_dispatch) = self
+            .dispatch_repo
+            .activate_waiting(&dispatch_id, &waiting_dispatch, initial_deets)
+            .await?
+        else {
+            return Ok(());
         };
         let plug_man = self
             .plugs_repo
@@ -1627,18 +1705,6 @@ impl Rt {
             bundle_man,
         )
         .await?;
-        let initial_deets = ActiveDispatchDeets::Wflow {
-            wflow_partition_id: None,
-            entry_id: None,
-            plug_id: plug_id.clone(),
-            routine_name: routine_name.clone(),
-            bundle_name: bundle_name.clone(),
-            wflow_key: wflow_key.clone(),
-            wflow_job_id: Some(job_id.clone()),
-        };
-        self.dispatch_repo
-            .activate_waiting(&dispatch_id, initial_deets)
-            .await?;
         let entry_id = match self
             .wflow_ingress
             .add_job(job_id.clone().into(), &key, job_args_json, None)
@@ -1647,7 +1713,11 @@ impl Rt {
             Ok(value) => value,
             Err(err) => {
                 self.dispatch_repo
-                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
+                    .complete(
+                        dispatch_id.clone(),
+                        dispatch::DispatchStatus::Failed,
+                        &active_dispatch,
+                    )
                     .await?;
                 return Err(err).wrap_err_with(|| {
                     format!("error scheduling deferred job for dispatch {dispatch_id}")
@@ -2132,7 +2202,7 @@ impl Rt {
             wflow_key: wflow_key.clone(),
             wflow_job_id: Some(job_id.clone()),
         };
-        let active_dispatch = Arc::new(ActiveDispatch {
+        let active_dispatch = Arc::new(DispatchAttempt::new(ActiveDispatch {
             args,
             deets,
             status: if is_waiting {
@@ -2142,7 +2212,7 @@ impl Rt {
             },
             waiting_on_dispatch_ids,
             on_success_hooks,
-        });
+        }));
         let ActiveDispatchArgs::FacetRoutine(args) = &active_dispatch.args;
         debug!(
             %dispatch_id,
@@ -2189,7 +2259,11 @@ impl Rt {
             let Some(bundle_man) = plug_man.wflow_bundles.get(bundle_name.as_str()) else {
                 if let Err(cleanup_err) = self
                     .dispatch_repo
-                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
+                    .complete(
+                        dispatch_id.clone(),
+                        dispatch::DispatchStatus::Failed,
+                        &active_dispatch,
+                    )
                     .await
                 {
                     warn!(
@@ -2214,7 +2288,11 @@ impl Rt {
             {
                 if let Err(cleanup_err) = self
                     .dispatch_repo
-                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
+                    .complete(
+                        dispatch_id.clone(),
+                        dispatch::DispatchStatus::Failed,
+                        &active_dispatch,
+                    )
                     .await
                 {
                     warn!(
@@ -2247,7 +2325,11 @@ impl Rt {
                 Err(err) => {
                     if let Err(cleanup_err) = self
                         .dispatch_repo
-                        .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
+                        .complete(
+                            dispatch_id.clone(),
+                            dispatch::DispatchStatus::Failed,
+                            &active_dispatch,
+                        )
                         .await
                     {
                         warn!(
@@ -2292,7 +2374,11 @@ impl Rt {
                 }
                 if let Err(cleanup_err) = self
                     .dispatch_repo
-                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
+                    .complete(
+                        dispatch_id.clone(),
+                        dispatch::DispatchStatus::Failed,
+                        &active_dispatch,
+                    )
                     .await
                 {
                     warn!(
@@ -2349,17 +2435,32 @@ impl Rt {
             .get_any(dispatch_id)
             .await
             .ok_or_else(|| ferr!("dispatch not found under {dispatch_id}"))?;
-        if matches!(
-            dispatch.status,
-            dispatch::DispatchStatus::Succeeded
-                | dispatch::DispatchStatus::Failed
-                | dispatch::DispatchStatus::Cancelled
-        ) {
+        if dispatch.status.is_terminal() {
+            debug!(%dispatch_id, status = ?dispatch.status, "cancel ignored; dispatch already settled");
             return Ok(());
         }
+        let marked_now = self.dispatch_repo.cancel(dispatch_id, &dispatch).await?;
+        if !marked_now {
+            debug!(%dispatch_id, "cancel ignored; already requested or too late");
+            return Ok(());
+        }
+        // Activation is serialized with the mark write and refuses marked
+        // waiting attempts. Re-read so a concurrently activated job receives
+        // execution cancellation rather than bypassing its staging cleanup.
+        let Some(current) = self.dispatch_repo.get_any(dispatch_id).await else {
+            return Ok(());
+        };
+        if !current.same_attempt(&dispatch) {
+            return Ok(());
+        }
+        let dispatch = current;
         if matches!(dispatch.status, dispatch::DispatchStatus::Waiting) {
             self.dispatch_repo
-                .complete(dispatch_id.into(), dispatch::DispatchStatus::Cancelled)
+                .complete(
+                    dispatch_id.into(),
+                    dispatch::DispatchStatus::Cancelled,
+                    &dispatch,
+                )
                 .await?;
             self.release_waiting_dispatches(dispatch_id, false).await?;
             self.progress_repo
@@ -2375,11 +2476,6 @@ impl Rt {
                     },
                 )
                 .await?;
-            return Ok(());
-        }
-        let marked_now = self.dispatch_repo.mark_cancelled(dispatch_id).await?;
-        if !marked_now {
-            debug!(%dispatch_id, "cancel already requested; skipping duplicate cancel");
             return Ok(());
         }
         match &dispatch.deets {
@@ -2531,15 +2627,25 @@ fn dispatch_stable_identity(dispatch: &ActiveDispatch) -> String {
     }
 }
 
+/// Build the command-invoke reply for a terminal dispatch result.
+///
+/// `cancelled_win` is the finalization ordering outcome: a cancellation that
+/// won reports `Cancelled` regardless of a success that arrived afterwards, so a
+/// parent job never treats an unpublished command as having run. Otherwise the
+/// result maps directly, with a post-run merge failure reported as `Failed`.
 fn command_invoke_reply_from_result(
     result: &JobRunResult,
     dispatch_id: &str,
+    cancelled_win: bool,
     merged_successfully: bool,
 ) -> (
     daybook_pdk::InvokeCommandStatus,
     Option<String>,
     Option<String>,
 ) {
+    if cancelled_win {
+        return (daybook_pdk::InvokeCommandStatus::Cancelled, None, None);
+    }
     if !merged_successfully {
         let error_json = serde_json::json!({
             "kind": "merge-failed",
@@ -2939,6 +3045,397 @@ mod tests {
         );
 
         rtx.shutdown().await?;
+        Ok(())
+    }
+
+    fn success_effect_result(job_id: &str) -> PartitionLogEntry {
+        PartitionLogEntry::JobEffectResult(wflow::wflow_core::partition::job_events::JobRunEvent {
+            job_id: Arc::from(job_id),
+            timestamp: jiff::Timestamp::now(),
+            effect_id: wflow::wflow_core::partition::effects::EffectId {
+                entry_id: 1,
+                effect_idx: 0,
+            },
+            run_id: 0,
+            worker_id: None,
+            start_at: jiff::Timestamp::now(),
+            end_at: jiff::Timestamp::now(),
+            result: JobRunResult::Success {
+                value_json: Arc::from("{}"),
+            },
+        })
+    }
+
+    /// A dispatch racing cancellation vs. a successful workflow result: a target
+    /// doc, a staging branch carrying a facet change, and a processor-runlog
+    /// success hook. `success_effect` and `cancel` drive the two orderings.
+    struct CancelRaceFixture {
+        cx: crate::test_support::DaybookTestContext,
+        doc_id: daybook_types::doc::DocId,
+        title_key: daybook_types::doc::FacetKey,
+        staging: daybook_types::doc::BranchPathBuf,
+        job_id: String,
+        dispatch_id: String,
+        runlog_doc_id: String,
+        runlog_processor: String,
+        runlog_done_token: String,
+    }
+
+    impl CancelRaceFixture {
+        fn title(&self, value: &str) -> daybook_types::doc::FacetRaw {
+            daybook_types::doc::WellKnownFacet::TitleGeneric(value.to_string()).into()
+        }
+
+        async fn setup(waiting_on_dispatch_ids: Vec<String>) -> Res<Self> {
+            let cx = crate::test_support::test_cx(utils_rs::function_full!()).await?;
+            // The processor-runlog success hook writes derived-scope state; the
+            // in-crate test harness builds the RepoCtx directly, so ensure the
+            // derived partition is present as a real boot would.
+            crate::repo::ensure_derived_partitions(&cx.rt.rcx.derived_part_store).await?;
+            let drawer = Arc::clone(&cx.drawer_repo);
+            let title_key = daybook_types::doc::FacetKey::from(
+                daybook_types::doc::WellKnownFacetTag::TitleGeneric,
+            );
+            let title: daybook_types::doc::FacetRaw =
+                daybook_types::doc::WellKnownFacet::TitleGeneric("base".to_string()).into();
+
+            let doc_id = drawer
+                .add(daybook_types::doc::AddDocArgs {
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                    facets: [(title_key.clone(), title)].into(),
+                    user_path: None,
+                })
+                .await?;
+            let main_heads = drawer
+                .get_doc_branches(&doc_id)
+                .await?
+                .ok_or_eyre("missing doc branches after add")?
+                .branches
+                .get("main")
+                .cloned()
+                .ok_or_eyre("missing main branch after add")?;
+
+            let staging = daybook_types::doc::BranchPathBuf::from("/tmp/cancel-race-stage");
+            let staged_title: daybook_types::doc::FacetRaw =
+                daybook_types::doc::WellKnownFacet::TitleGeneric("staged".to_string()).into();
+            drawer
+                .create_branch_at_heads_from_branch(
+                    &doc_id,
+                    &staging,
+                    daybook_types::doc::BranchPath::new("main"),
+                    &main_heads,
+                    /*user_path*/ None,
+                )
+                .await?;
+            drawer
+                .update_at_heads(
+                    daybook_types::doc::DocPatch {
+                        id: doc_id.clone(),
+                        facets_set: [(title_key.clone(), staged_title)].into(),
+                        facets_remove: vec![],
+                        user_path: None,
+                    },
+                    &staging,
+                    Some(main_heads.clone()),
+                )
+                .await?;
+
+            let dispatch_id = "cmdinvoke-cancel-race".to_string();
+            let job_id = format!("{dispatch_id}-job");
+            let runlog_doc_id = "cancel-race-doc".to_string();
+            let runlog_processor = "@test/cancel-race-proc".to_string();
+            let runlog_done_token = "token-cancel-race".to_string();
+            cx.dispatch_repo
+                .add(
+                    dispatch_id.clone(),
+                    Arc::new(DispatchAttempt::new(ActiveDispatch {
+                        deets: ActiveDispatchDeets::Wflow {
+                            wflow_partition_id: Some("part".into()),
+                            entry_id: Some(1),
+                            plug_id: "@test/plug".into(),
+                            routine_name: "routine".into(),
+                            bundle_name: "bundle".into(),
+                            wflow_key: "key".into(),
+                            wflow_job_id: Some(job_id.clone()),
+                        },
+                        args: ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+                            doc_id: doc_id.clone(),
+                            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                            staging_branch_path: staging.clone(),
+                            heads: main_heads.clone(),
+                            invocation: dispatch::RoutineInvocation::Command,
+                            primary_doc: dispatch::DocFacetTokens {
+                                doc_id: doc_id.clone(),
+                                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                                staging_branch_path: staging.clone(),
+                                heads: main_heads.clone(),
+                                facet_acl: vec![],
+                            },
+                            config_docs: vec![],
+                            local_state_acl: vec![],
+                            command_invoke_acl_snapshot: vec![],
+                            wflow_args_json: None,
+                        }),
+                        status: if waiting_on_dispatch_ids.is_empty() {
+                            dispatch::DispatchStatus::Active
+                        } else {
+                            dispatch::DispatchStatus::Waiting
+                        },
+                        waiting_on_dispatch_ids,
+                        on_success_hooks: vec![DispatchOnSuccessHook::ProcessorRunLog {
+                            doc_id: runlog_doc_id.clone(),
+                            processor_full_id: runlog_processor.clone(),
+                            done_token: runlog_done_token.clone(),
+                        }],
+                    })),
+                )
+                .await?;
+
+            Ok(Self {
+                cx,
+                doc_id,
+                title_key,
+                staging,
+                job_id,
+                dispatch_id,
+                runlog_doc_id,
+                runlog_processor,
+                runlog_done_token,
+            })
+        }
+
+        async fn deliver_success(&self) -> Res<()> {
+            self.cx
+                .rt
+                .handle_wflow_entry(/*entry_id*/ 7, success_effect_result(&self.job_id))
+                .await
+        }
+
+        async fn cancel(&self) -> Res<()> {
+            self.cx.rt.cancel_dispatch(&self.dispatch_id).await
+        }
+
+        async fn target_title(&self) -> Res<Option<daybook_types::doc::FacetRaw>> {
+            let doc = self
+                .cx
+                .drawer_repo
+                .get_doc_with_facets_at_branch(
+                    &self.doc_id,
+                    daybook_types::doc::BranchPath::new("main"),
+                    /*facet_keys*/ None,
+                )
+                .await?
+                .ok_or_eyre("target doc missing")?;
+            Ok(doc.facets.get(&self.title_key).cloned())
+        }
+
+        async fn staging_exists(&self) -> Res<bool> {
+            Ok(self
+                .cx
+                .drawer_repo
+                .get_branch_ref(&self.doc_id, &self.staging)
+                .await?
+                .is_some())
+        }
+
+        async fn runlog_done(&self) -> Res<Option<ProcessorRunlogDone>> {
+            self.cx
+                .rt
+                .get_processor_runlog_done(&self.runlog_doc_id, &self.runlog_processor)
+                .await
+        }
+
+        async fn status(&self) -> Res<dispatch::DispatchStatus> {
+            Ok(self
+                .cx
+                .dispatch_repo
+                .get_any(&self.dispatch_id)
+                .await
+                .ok_or_eyre("dispatch missing")?
+                .status
+                .clone())
+        }
+    }
+
+    /// Durable cancellation that wins the ordering forbids the successful result
+    /// that arrives afterwards from publishing staging or running success hooks,
+    /// and settles the dispatch as Cancelled. This drives the real
+    /// `handle_wflow_entry`, so it pins target content and hook effects.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_dispatch_refuses_late_success_publication() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let fixture = CancelRaceFixture::setup(vec![]).await?;
+
+        // Cancellation durably accepted before the success result arrives.
+        fixture.cancel().await?;
+        fixture.deliver_success().await?;
+
+        assert!(
+            fixture.runlog_done().await?.is_none(),
+            "a cancellation-winning dispatch must not run success hooks"
+        );
+        assert_eq!(
+            fixture.target_title().await?,
+            Some(fixture.title("base")),
+            "a cancellation-winning dispatch must not merge staging into the target"
+        );
+        assert!(
+            !fixture.staging_exists().await?,
+            "a cancellation-winning dispatch must clean up its staging branch"
+        );
+        assert_eq!(
+            fixture.status().await?,
+            dispatch::DispatchStatus::Cancelled,
+            "a cancellation that won the ordering must finish Cancelled"
+        );
+
+        fixture.cx.stop().await?;
+        Ok(())
+    }
+
+    /// A successful publication that wins the ordering settles the dispatch as
+    /// Succeeded; a cancellation arriving afterwards must not claim a rollback of
+    /// already-published effects.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn success_finalization_refuses_late_cancellation_rollback() -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        let fixture = CancelRaceFixture::setup(vec![]).await?;
+
+        // The successful result is finalized before the cancellation arrives.
+        fixture.deliver_success().await?;
+        assert_eq!(
+            fixture.status().await?,
+            dispatch::DispatchStatus::Succeeded,
+            "a successful publication must settle the dispatch as Succeeded"
+        );
+
+        fixture.cancel().await?;
+
+        assert_eq!(
+            fixture.target_title().await?,
+            Some(fixture.title("staged")),
+            "a late cancellation must not roll back published target content"
+        );
+        assert!(
+            !fixture.staging_exists().await?,
+            "a successful publication must clean up its staging branch"
+        );
+        assert_eq!(
+            fixture
+                .runlog_done()
+                .await?
+                .ok_or_eyre("success hook must have run")?
+                .done_token,
+            fixture.runlog_done_token,
+            "a successful publication must run its success hooks"
+        );
+        assert_eq!(
+            fixture.status().await?,
+            dispatch::DispatchStatus::Succeeded,
+            "a late cancellation must not change an already-settled Succeeded dispatch"
+        );
+
+        fixture.cx.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancellation_during_claimed_publication_returns_without_waiting() -> Res<()> {
+        let fixture = CancelRaceFixture::setup(vec![]).await?;
+        let (claimed, claimed_rx) = tokio::sync::oneshot::channel();
+        let (resume, resume_rx) = tokio::sync::oneshot::channel();
+        *fixture.cx.rt.finalization_gate.lock().await = Some(DispatchTestGate {
+            reached: claimed,
+            resume: resume_rx,
+        });
+        let ((), ()) = tokio::try_join!(fixture.deliver_success(), async {
+            claimed_rx.await?;
+            // Publication remains paused until cancellation returns. Any
+            // wait over publication deadlocks this test by construction.
+            fixture.cancel().await?;
+            assert_eq!(fixture.status().await?, dispatch::DispatchStatus::Active);
+            assert_eq!(fixture.target_title().await?, Some(fixture.title("base")));
+            assert!(fixture.runlog_done().await?.is_none());
+            resume.send(()).expect(ERROR_CHANNEL);
+            eyre::Ok(())
+        },)?;
+        assert_eq!(fixture.target_title().await?, Some(fixture.title("staged")));
+        assert_eq!(fixture.status().await?, dispatch::DispatchStatus::Succeeded);
+        assert!(!fixture.staging_exists().await?);
+        assert_eq!(
+            fixture.runlog_done().await?.unwrap().done_token,
+            fixture.runlog_done_token,
+        );
+        fixture.cx.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_success_cannot_publish_or_settle_replacement_attempt() -> Res<()> {
+        let fixture = CancelRaceFixture::setup(vec![]).await?;
+        let old = fixture
+            .cx
+            .dispatch_repo
+            .get_any(&fixture.dispatch_id)
+            .await
+            .unwrap();
+        let mut deets = old.deets.clone();
+        let replacement_job = format!("{}-replacement", fixture.dispatch_id);
+        let ActiveDispatchDeets::Wflow { wflow_job_id, .. } = &mut deets;
+        *wflow_job_id = Some(replacement_job.clone());
+        fixture
+            .cx
+            .dispatch_repo
+            .update_active_deets(&fixture.dispatch_id, deets)
+            .await?;
+
+        fixture.deliver_success().await?;
+        assert_eq!(fixture.target_title().await?, Some(fixture.title("base")));
+        assert_eq!(fixture.status().await?, dispatch::DispatchStatus::Active);
+        assert!(fixture.staging_exists().await?);
+        assert!(fixture.runlog_done().await?.is_none());
+
+        fixture
+            .cx
+            .rt
+            .handle_wflow_entry(8, success_effect_result(&replacement_job))
+            .await?;
+        assert_eq!(fixture.target_title().await?, Some(fixture.title("staged")));
+        assert_eq!(fixture.status().await?, dispatch::DispatchStatus::Succeeded);
+        assert!(!fixture.staging_exists().await?);
+        assert_eq!(
+            fixture.runlog_done().await?.unwrap().done_token,
+            fixture.runlog_done_token
+        );
+        fixture.cx.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_ready_dispatch_refuses_waiting_activation() -> Res<()> {
+        let fixture = CancelRaceFixture::setup(vec!["dependency".into()]).await?;
+        let (ready, ready_rx) = tokio::sync::oneshot::channel();
+        let (resume, resume_rx) = tokio::sync::oneshot::channel();
+        *fixture.cx.rt.waiting_activation_gate.lock().await = Some(DispatchTestGate {
+            reached: ready,
+            resume: resume_rx,
+        });
+        tokio::try_join!(
+            fixture.cx.rt.release_waiting_dispatches("dependency", true),
+            async {
+                ready_rx.await?;
+                fixture.cancel().await?;
+                assert_eq!(fixture.status().await?, dispatch::DispatchStatus::Cancelled);
+                resume.send(()).expect(ERROR_CHANNEL);
+                eyre::Ok(())
+            },
+        )?;
+        assert_eq!(fixture.status().await?, dispatch::DispatchStatus::Cancelled);
+        assert_eq!(fixture.target_title().await?, Some(fixture.title("base")));
+        assert!(fixture.runlog_done().await?.is_none());
+        assert!(fixture.cx.dispatch_repo.get_active(&fixture.dispatch_id).await.is_none());
+        assert!(fixture.cx.dispatch_repo.get_by_wflow_job(&fixture.job_id).await.is_none());
+        fixture.cx.stop().await?;
         Ok(())
     }
 }
