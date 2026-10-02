@@ -390,6 +390,8 @@ Executor -> AttemptChanged(...)
 
 The exact start handshake may be collapsed after implementation testing. The executor must never begin solely because it received an unauthenticated or stale offer.
 
+For each accepted or origin attempt, the executor captures the domain's `ResolvedInvocation { args: Vec<u8> }` and the canonical declaration digest. `PersistAttempt` writes both before its exact attempt acknowledgement permits `StartDispatch`. Dispatch consumes that captured invocation, even if classification changes while persistence is pending or the executor reconnects; a fresh attempt resolves anew. Argument encoding belongs to the domain/handler, not the generic task protocol.
+
 Allocations live only in router/executor memory and local DispatchRepo state. If all live witnesses disappear, the pending BigSync ticket becomes allocatable again. Router heartbeat and RPC session liveness do not prove useful task progress; DispatchRepo/wflow must report or fail unexpected hung attempts according to local policy.
 
 ### 8. Task ticket payload
@@ -408,7 +410,7 @@ TaskDeclarationV1 {
     domain: TaskDomainId
     producer: NodePubkey
     handler: HandlerRef
-    encrypted_input: Vec<u8>
+    input: Vec<u8>
     coordination_ref: Optional<DomainCoordinationRef>
     placement: Placement
     preference: Preference
@@ -430,6 +432,8 @@ enum TerminalFactV1 {
 ```
 
 A task declaration is immutable for one TaskId. Concurrent unequal declarations for the same ID are an invalid collision/equivocation, not “desired revision siblings.” Replacement creates a different TaskId and retires the old ticket.
+
+Canonical equality and the declaration digest include the domain-owned input bytes, not encryption envelopes or publisher evidence. Different input under one TaskId is rejected atomically as a collision. Local invalid declarations are programming-invariant failures; malformed remote declarations are rejected before publisher, terminal, readiness, or admission state changes. `AuthoritativePlacement` requires `Preference::Only`; ordinary preference is not an execution-authority constraint.
 
 Terminal lanes use latest signed per-writer sequence and preserve concurrent authenticated facts. Any valid success or cancellation stops ordinary scheduling. Detailed logs, retries, and intermediate failures remain in DispatchRepo or domain state; a failed attempt leaves the task pending unless policy makes it terminal.
 
@@ -479,7 +483,7 @@ enum ResultRetention {
 
 For `ExternalSettlement`, task data may be fully removed after the local domain state proves the obligation settled or obsolete. Multiple authorized domain replicas may race to remove it; removal is idempotent. The router is not the semantic pruning authority.
 
-For `TaskTicketAuthoritative`, the ticket leaves the active part but remains in the authority/archive part. With no retention horizon it is retained until explicit deletion. With a horizon, `not_after` must ensure stale pending copies are permanently non-runnable before terminal evidence can be discarded.
+For `TaskTicketAuthoritative`, the ticket leaves the active part but remains in the authority/archive part. With no retention horizon it is retained until explicit deletion and no execution deadline is required. With a finite horizon, an immutable `not_after` is required and must be less than or equal to `retain_until`; equality is valid. Stale pending copies must be permanently non-runnable when terminal evidence can be discarded.
 
 BigSync removal/tombstone mechanics prevent ordinary local resurrection, but no permanent task tombstone is required for domains whose durable compact settlement rejects stale tasks. An old replica may temporarily reintroduce a ticket; domain classification makes it inert and removes it again.
 
