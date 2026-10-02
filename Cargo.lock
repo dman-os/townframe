@@ -1073,6 +1073,7 @@ dependencies = [
 [[package]]
 name = "beekem"
 version = "0.4.0"
+source = "git+https://github.com/dman-os/keyhive?rev=1063446711dcca3848430044f239830dc948290c#1063446711dcca3848430044f239830dc948290c"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -6242,6 +6243,7 @@ dependencies = [
 [[package]]
 name = "keyhive_core"
 version = "0.6.0"
+source = "git+https://github.com/dman-os/keyhive?rev=1063446711dcca3848430044f239830dc948290c#1063446711dcca3848430044f239830dc948290c"
 dependencies = [
  "beekem",
  "bincode",
@@ -6267,6 +6269,7 @@ dependencies = [
 [[package]]
 name = "keyhive_crypto"
 version = "0.2.1"
+source = "git+https://github.com/dman-os/keyhive?rev=1063446711dcca3848430044f239830dc948290c#1063446711dcca3848430044f239830dc948290c"
 dependencies = [
  "bincode",
  "blake3",
@@ -10632,6 +10635,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_core"
 version = "0.14.2"
+source = "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95"
 dependencies = [
  "async-lock",
  "bijoux",
@@ -11614,6 +11618,7 @@ dependencies = [
 [[package]]
 name = "subduction_core"
 version = "0.18.2"
+source = "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11634,6 +11639,7 @@ dependencies = [
 [[package]]
 name = "subduction_crypto"
 version = "0.9.2"
+source = "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -11647,6 +11653,7 @@ dependencies = [
 [[package]]
 name = "subduction_ephemeral"
 version = "0.8.2"
+source = "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11664,6 +11671,7 @@ dependencies = [
 [[package]]
 name = "subduction_iroh"
 version = "0.10.2"
+source = "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11682,6 +11690,7 @@ dependencies = [
 [[package]]
 name = "subduction_keyhive"
 version = "0.9.0"
+source = "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -11711,6 +11720,7 @@ dependencies = [
 [[package]]
 name = "subduction_redb_storage"
 version = "0.2.2"
+source = "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95"
 dependencies = [
  "future_form",
  "futures",
@@ -11726,6 +11736,7 @@ dependencies = [
 [[package]]
 name = "subduction_websocket"
 version = "0.12.2"
+source = "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95"
 dependencies = [
  "async-channel",
  "async-lock",

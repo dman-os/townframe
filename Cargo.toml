@@ -159,18 +159,19 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.11.0"
 autosurgeon = "0.13.0"
 automerge-test = "0.9"
-subduction_core = { path = "../subduction/subduction_core" }
-subduction_iroh = { path = "../subduction/subduction_iroh" }
-subduction_websocket = { path = "../subduction/subduction_websocket" }
-subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
-sedimentree_core = { path = "../subduction/sedimentree_core" }
-subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
-subduction_crypto = { path = "../subduction/subduction_crypto" }
-subduction_keyhive = { path = "../subduction/subduction_keyhive" }
 
-keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
-keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
-beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = "3afcd2946d2a5452b3e4ca0077707672af945d4c" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
+keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
+beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
@@ -277,6 +278,14 @@ rust.let_underscore_drop = "deny"
 # Remember to re-check resolution after editing either block: a partial block silently
 # duplicates a crate across the local path and the pinned git source.
 [patch."https://github.com/dman-os/keyhive"]
-keyhive_core = { path = "../keyhive/keyhive_core" }
-keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
-beekem = { path = "../keyhive/beekem" }
+# keyhive_core = { path = "../keyhive/keyhive_core" }
+# keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
+# beekem = { path = "../keyhive/beekem" }
+# subduction_core = { path = "../subduction/subduction_core" }
+# subduction_iroh = { path = "../subduction/subduction_iroh" }
+# subduction_websocket = { path = "../subduction/subduction_websocket" }
+# subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
+# sedimentree_core = { path = "../subduction/sedimentree_core" }
+# subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+# subduction_crypto = { path = "../subduction/subduction_crypto" }
+# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
