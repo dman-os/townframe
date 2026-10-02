@@ -41,6 +41,17 @@ pub(crate) struct GenericRow {
     value: Option<Vec<u8>>,
 }
 
+/// A conservative per-row byte cost for the replay read-ahead budget.
+///
+/// The estimate is the row header plus the stored key and payload, which is what a page
+/// materializes. It deliberately over-counts rather than under-counts: a page that comes in
+/// under the budget costs a round trip, while one that overruns it materializes a payload the
+/// read-ahead asked it not to.
+fn row_byte_cost(row: &GenericRow) -> usize {
+    const ENTRY_BYTE_OVERHEAD: usize = 32;
+    ENTRY_BYTE_OVERHEAD + row.key.len() + row.value.as_ref().map_or(0, Vec::len)
+}
+
 #[derive(Clone)]
 pub struct SqliteKeyedFrontier<C: SqliteFrontierCodec> {
     pub(crate) read_pool: SqlitePool,
@@ -167,6 +178,48 @@ impl<C: SqliteFrontierCodec> SqliteReadSource for SqliteKeyedFrontier<C> {
     }
     fn changed(&self) -> &Notify {
         &self.changed
+    }
+    fn fetch_rows_with_byte_budget<'a>(
+        &'a self,
+        selector: &'a Self::Selector,
+        after: FrontierRevision,
+        through: FrontierRevision,
+        max_entries: usize,
+        max_bytes: usize,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(Vec<GenericRow>, FrontierRevision), SqliteReadError>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if max_entries == 0 {
+                return Ok((Vec::new(), through));
+            }
+            // The entry limit selects the candidates; the byte budget then decides how far into
+            // them the page may go. Both are satisfied by the same re-read as the unbounded path:
+            // a page may stop in the middle of one atomic revision, so the revision the budget
+            // lands on is re-read in full and the page ends there.
+            let candidates = self
+                .fetch_rows(selector, after, through, None, Some(max_entries))
+                .await?;
+            let mut bytes = 0usize;
+            let mut cutoff = None;
+            for row in &candidates {
+                bytes = bytes.saturating_add(row_byte_cost(row));
+                cutoff = Some(row.revision);
+                if bytes >= max_bytes {
+                    break;
+                }
+            }
+            let Some(cutoff) = cutoff else {
+                return Ok((Vec::new(), through));
+            };
+            let rows = self.fetch_rows(selector, after, cutoff, None, None).await?;
+            Ok((rows, cutoff))
+        })
     }
     fn initial_after(&self, selector: &Self::Selector) -> FrontierRevision {
         match selector {
@@ -471,6 +524,7 @@ impl<'a, C: SqliteFrontierCodec> KeyedFrontierTransaction<C::Key, C::Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyed_frontier::open_sqlite_reader_with_byte_budget;
     use big_sync_core::keyed_frontier::FrontierReadLimits;
     #[derive(Clone)]
     struct Bytes;
@@ -775,6 +829,77 @@ mod tests {
             if entries.iter().any(|entry| entry.key == "a" && entry.value.is_none())
                 && entries.iter().any(|entry| entry.key == "b" && entry.value.as_deref() == Some("keep")))
         );
+        Ok(())
+    }
+
+    /// The byte budget bounds the page rather than being dropped, and the first entry is
+    /// taken even when it alone exceeds it.
+    #[tokio::test]
+    async fn a_byte_budget_bounds_the_page_and_always_takes_the_first_entry()
+    -> KeyedFrontierResult<()> {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .map_err(backend)?;
+        let frontier =
+            SqliteKeyedFrontier::new(pool.clone(), pool, "budget", Bytes, Arc::new(Notify::new()))
+                .await?;
+        // One entry per revision, each with 100 bytes of payload. `row_byte_cost` charges 32
+        // bytes of header plus the key and payload, so every entry costs 133 bytes.
+        for key in ["a", "b", "c"] {
+            let mut tx = frontier.begin().await?;
+            tx.put(key.into(), "x".repeat(100)).await?;
+            tx.commit().await?;
+        }
+        let limits = FrontierReadLimits {
+            max_entries: std::num::NonZeroUsize::new(8).expect("literal is non-zero"),
+        };
+
+        // Larger than one entry, smaller than two: the page stops at the second.
+        let mut reader = open_sqlite_reader_with_byte_budget(
+            frontier.clone(),
+            SqliteFrontierSelector::All { after: 0 },
+            Some(200),
+        )
+        .await?;
+        let page = reader.next(limits).await?;
+        let big_sync_core::keyed_frontier::FrontierRead::Entries { entries, through } = page else {
+            panic!("a page over existing rows is not a replay-complete read");
+        };
+        assert_eq!(
+            through, 2,
+            "the page ends at the revision the budget landed on"
+        );
+        assert_eq!(
+            entries.len(),
+            2,
+            "the budget stops the page before the third entry"
+        );
+
+        // A budget the first entry alone exceeds still takes that entry: a page that returns
+        // nothing while rows still match loses the walk's position.
+        let mut reader = open_sqlite_reader_with_byte_budget(
+            frontier.clone(),
+            SqliteFrontierSelector::All { after: 0 },
+            Some(1),
+        )
+        .await?;
+        let page = reader.next(limits).await?;
+        let big_sync_core::keyed_frontier::FrontierRead::Entries { entries, through } = page else {
+            panic!("a page over existing rows is not a replay-complete read");
+        };
+        assert_eq!(through, 1);
+        assert_eq!(entries.len(), 1, "the first entry is always taken");
+
+        // The same rows without a budget come back as one page, so the bound above is the
+        // budget's doing rather than an entry limit that was going to stop there anyway.
+        let mut reader = frontier
+            .open(SqliteFrontierSelector::All { after: 0 })
+            .await?;
+        let page = reader.next(limits).await?;
+        let big_sync_core::keyed_frontier::FrontierRead::Entries { entries, .. } = page else {
+            panic!("a page over existing rows is not a replay-complete read");
+        };
+        assert_eq!(entries.len(), 3);
         Ok(())
     }
 }

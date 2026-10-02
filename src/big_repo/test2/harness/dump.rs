@@ -19,12 +19,12 @@ use std::sync::Arc;
 /// Tier-0 check fails, so the failure output names each node and shows its
 /// sedimentree/materialized head counts + materialization state.
 pub async fn diagnostics(pair: &Pair, doc_id: DocumentId) -> Res<String> {
-    let left = pair.left().repo.doc_head_state(doc_id).await?;
-    let right = pair.right().repo.doc_head_state(doc_id).await?;
-    let left_lookup = lookup_summary(&pair.left().repo, doc_id).await;
-    let right_lookup = lookup_summary(&pair.right().repo, doc_id).await;
-    let left_storage = storage_summary(&pair.left().repo, doc_id).await;
-    let right_storage = storage_summary(&pair.right().repo, doc_id).await;
+    let left = pair.left().repo.doc_head_state(doc_id.clone()).await?;
+    let right = pair.right().repo.doc_head_state(doc_id.clone()).await?;
+    let left_lookup = lookup_summary(&pair.left().repo, doc_id.clone()).await;
+    let right_lookup = lookup_summary(&pair.right().repo, doc_id.clone()).await;
+    let left_storage = storage_summary(&pair.left().repo, doc_id.clone()).await;
+    let right_storage = storage_summary(&pair.right().repo, doc_id.clone()).await;
     Ok(format!(
         "\n[diagnostics doc={doc_id}]\n  {}\n    {}\n    {}\n    {}\n  {}\n    {}\n    {}\n    {}\n",
         pair.left().label,

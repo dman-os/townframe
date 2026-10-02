@@ -104,6 +104,8 @@ impl SqliteLocalStateRepo {
         let sqlite_url = format!("sqlite://{}", sqlite_file_path.display());
 
         sqlx_utils_rs::init_sqlite_vec();
+        // FIXME:: this is creating 5 threads for every sql ctx.
+        // Most sql local state has single ownres so a single thread should be enough
         let sql = sqlx_utils_rs::SqlCtx::url(&sqlite_url)
             .await
             .wrap_err("error initializing sqlite local state connection")?;

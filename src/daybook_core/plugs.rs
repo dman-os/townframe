@@ -245,6 +245,141 @@ pub struct ImportedPlug {
     pub source_digest: Option<String>,
 }
 
+/// Whether a config revision describes the state the store already holds.
+///
+/// Heads equality is the only evidence available: a revision whose heads match
+/// the store's current heads is the state we are already on, so its hydrated
+/// snapshot is installed as-is. Anything else — stale, coalesced, local, or
+/// out-of-order revisions — is discarded in favour of the store's own drawer
+/// state, and the revision's snapshot is not installed: the hydrated snapshot
+/// is what later local mutations build patches on, which is how those revisions
+/// converge at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotDecision {
+    /// Revision heads equal the store's: install the revision's snapshot.
+    Install,
+    /// Heads differ, or the store has no snapshot yet: keep the store's own
+    /// state and discard the revision's snapshot.
+    Discard,
+}
+
+/// Decide a revision's snapshot against the store's current heads.
+pub(crate) fn snapshot_decision(
+    current_heads: Option<&ChangeHashSet>,
+    revision: &PlugsConfigRevision,
+) -> SnapshotDecision {
+    if current_heads == Some(&revision.heads) {
+        SnapshotDecision::Install
+    } else {
+        SnapshotDecision::Discard
+    }
+}
+
+/// The derived-cache work one revision event needs before it is announced.
+///
+/// Every revision event is announced either way; this says what, if anything,
+/// must land in the cache first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RevisionAction {
+    /// Nothing to project — the event is announced as it stands.
+    AnnounceOnly,
+    /// Drop the plug's active projection. A plug the config just disabled must
+    /// not still be active for a subscriber reacting to its own `PlugDisabled`.
+    ClearActive { plug_id: String },
+    /// Materialize the plug's active projection from the ref the current config
+    /// holds for it.
+    Activate { plug_id: String, ref_url: url::Url },
+    /// Rebuild the known-manifest projection from the current config.
+    RefreshKnown,
+}
+
+/// Decide one revision event's cache work against the config it is applied to.
+///
+/// An enablement event whose plug has no ref in the current config projects
+/// nothing — the config the revision was diffed from may already have moved
+/// past it — but it is still announced: the announcement is the revision's
+/// event, not the action's.
+pub(crate) fn revision_action(config: &PlugsConfig, event: &PlugsEvent) -> RevisionAction {
+    match event {
+        PlugsEvent::PlugEnabled { plug_id, .. } | PlugsEvent::PlugUpdated { plug_id, .. } => {
+            match config.enabled.get(plug_id) {
+                Some(ref_url) => RevisionAction::Activate {
+                    plug_id: plug_id.clone(),
+                    ref_url: ref_url.clone(),
+                },
+                None => RevisionAction::AnnounceOnly,
+            }
+        }
+        PlugsEvent::PlugDisabled { plug_id } => RevisionAction::ClearActive {
+            plug_id: plug_id.clone(),
+        },
+        PlugsEvent::PlugsConfigChanged { .. } => RevisionAction::RefreshKnown,
+    }
+}
+
+/// A publication of one revision event, observed with the projection it is
+/// announced under.
+///
+/// This is what makes "the projection is applied before the event that
+/// announces it" structural rather than a statement order inside a longer
+/// method: `announce` cannot be called without the cache in hand, and every
+/// call site hands it over after the mutation.
+pub(crate) trait EventSink {
+    fn announce(&mut self, cache: &PlugsCache, event: &PlugsEvent);
+}
+
+/// Clear a plug's active projection, then announce the event that required it.
+pub(crate) fn clear_active_and_announce(
+    cache: &mut PlugsCache,
+    plug_id: &str,
+    event: &PlugsEvent,
+    sink: &mut impl EventSink,
+) {
+    cache.clear_active(plug_id);
+    sink.announce(cache, event);
+}
+
+/// Announce the pending→active edge of an enabled ref that just became
+/// readable. Returns whether it announced anything.
+///
+/// Only the inactive→active edge announces: an already-active plug stays
+/// silent. That is what keeps the live tap and the durable stream consistent —
+/// pending→active depends on local materialization state, so replay cannot
+/// reproduce it, and re-announcing it per boot would make the two disagree.
+pub(crate) fn announce_pending_activation(
+    cache: &PlugsCache,
+    was_active: bool,
+    plug_id: &str,
+    sink: &mut impl EventSink,
+) -> bool {
+    if was_active {
+        return false;
+    }
+    let Some((heads, _manifest)) = cache.active_manifests.get(plug_id) else {
+        // Still pending: enabled, but not readable at its pinned heads.
+        return false;
+    };
+    sink.announce(
+        cache,
+        &PlugsEvent::PlugEnabled {
+            plug_id: plug_id.to_owned(),
+            heads: heads.clone(),
+        },
+    );
+    true
+}
+
+/// The live tap as an [`EventSink`]. Publication does not read the cache, so
+/// the projection handed in is unused here; it is in the signature so no caller
+/// can announce ahead of the cache work.
+struct PlugsRepoEventSink<'a>(&'a PlugsRepo);
+
+impl EventSink for PlugsRepoEventSink<'_> {
+    fn announce(&mut self, _cache: &PlugsCache, event: &PlugsEvent) {
+        self.0.publish_event(event.clone());
+    }
+}
+
 #[expect(clippy::clone_on_ref_ptr)]
 impl PlugsRepo {
     /// Live tap of the config event stream: the same [`PlugsEvent`]s the
@@ -260,11 +395,27 @@ impl PlugsRepo {
         drop(self.events_tx.send(event));
     }
 
+    /// Announce one event, handing the sink the projection it is announced
+    /// under. Together with [`clear_active_and_announce`] this is the only path
+    /// to [`PlugsRepoEventSink`], so no call site can announce ahead of the
+    /// cache work it belongs to.
+    fn announce_applied(&self, sink: &mut PlugsRepoEventSink<'_>, event: &PlugsEvent) {
+        surelock::key::lock_scope(|key| {
+            let (cache, _key) = key.lock(&self.cache);
+            sink.announce(&cache, event);
+        });
+    }
+
     /// Apply one config revision's events to the derived cache and publish
     /// them. The revision's hydrated config is installed as the config store's
     /// in-memory snapshot first, so subsequent local mutations build patches
     /// on fresh state (stale, coalesced, local, and out-of-order revisions all
     /// converge through the hydrated snapshot).
+    ///
+    /// The three rules this method exists to uphold live in their own
+    /// functions so they can be exercised without a BigRepo: the snapshot gate
+    /// is [`snapshot_decision`], the per-event cache work is [`revision_action`],
+    /// and the projection-before-announcement order is [`EventSink`].
     pub(crate) async fn apply_config_revision(&self, revision: &PlugsConfigRevision) -> Res<()> {
         let _guard = self.mutation_mutex.lock().await;
         let store = self.config_store()?;
@@ -290,40 +441,45 @@ impl PlugsRepo {
             "applying plugs config revision"
         );
         let (_, current_heads) = store.latest_snapshot().await?;
-        if current_heads.as_ref() == Some(&revision.heads) {
-            store
-                .apply_external_snapshot(revision.config.clone(), revision.heads.clone())
-                .await?;
-        } else {
-            tracing::debug!(
-                revision_heads = ?revision.heads,
-                ?current_heads,
-                "discarding stale plugs config snapshot in favor of current drawer state"
-            );
-            store.reload().await?;
+        match snapshot_decision(current_heads.as_ref(), revision) {
+            SnapshotDecision::Install => {
+                store
+                    .apply_external_snapshot(revision.config.clone(), revision.heads.clone())
+                    .await?;
+            }
+            SnapshotDecision::Discard => {
+                tracing::debug!(
+                    revision_heads = ?revision.heads,
+                    ?current_heads,
+                    "discarding stale plugs config snapshot in favor of current drawer state"
+                );
+                store.reload().await?;
+            }
         }
         let current_config = store.query_sync(|config| config.clone()).await;
         let after_tracks = store.query_sync(describe_tracks).await;
         tracing::debug!(?after_tracks, "applied plugs config revision snapshot");
+        let mut sink = PlugsRepoEventSink(self);
         for event in &revision.events {
-            match event {
-                PlugsEvent::PlugEnabled { plug_id, .. }
-                | PlugsEvent::PlugUpdated { plug_id, .. } => {
-                    if let Some(ref_url) = current_config.enabled.get(plug_id) {
-                        self.activate_from_ref(plug_id, ref_url).await?;
-                    }
-                }
-                PlugsEvent::PlugDisabled { plug_id } => {
+            match revision_action(&current_config, event) {
+                RevisionAction::ClearActive { plug_id } => {
                     surelock::key::lock_scope(|key| {
                         let (mut cache, _key) = key.lock(&self.cache);
-                        cache.clear_active(plug_id);
+                        clear_active_and_announce(&mut cache, &plug_id, event, &mut sink);
                     });
                 }
-                PlugsEvent::PlugsConfigChanged { .. } => {
+                RevisionAction::Activate { plug_id, ref_url } => {
+                    self.activate_from_ref(&plug_id, &ref_url).await?;
+                    self.announce_applied(&mut sink, event);
+                }
+                RevisionAction::RefreshKnown => {
                     self.refresh_known_cache().await?;
+                    self.announce_applied(&mut sink, event);
+                }
+                RevisionAction::AnnounceOnly => {
+                    self.announce_applied(&mut sink, event);
                 }
             }
-            self.publish_event(event.clone());
         }
         Ok(())
     }
@@ -348,25 +504,13 @@ impl PlugsRepo {
             cache.active_manifests.contains_key(plug_id)
         });
         self.activate_from_ref(plug_id, ref_url).await?;
+        let mut sink = PlugsRepoEventSink(self);
         let is_active = surelock::key::lock_scope(|key| {
             let (cache, _key) = key.lock(&self.cache);
-            cache.active_manifests.contains_key(plug_id)
+            let is_active = cache.active_manifests.contains_key(plug_id);
+            announce_pending_activation(&cache, was_active, plug_id, &mut sink);
+            is_active
         });
-        if !was_active && is_active {
-            let heads = surelock::key::lock_scope(|key| {
-                let (cache, _key) = key.lock(&self.cache);
-                cache
-                    .active_manifests
-                    .get(plug_id)
-                    .map(|(heads, _)| heads.clone())
-            });
-            if let Some(heads) = heads {
-                self.publish_event(PlugsEvent::PlugEnabled {
-                    plug_id: plug_id.to_owned(),
-                    heads,
-                });
-            }
-        }
         Ok(is_active)
     }
 

@@ -9,12 +9,14 @@ use crate::runtime2::support::{
     BigRepoCiphertextKind, BigRepoCiphertextLocator, CausalCheckpoint, causal_checkpoint_id,
     is_causal_checkpoint_id, stage_automerge_ingest,
 };
-use crate::runtime2::types::{DocLookup, LiveDocBundle, LiveDocHandle};
+use crate::runtime2::types::{
+    BrokenReason, DocLookup, LiveDocBundle, LiveDocHandle, handle_validity, invalid_handle_message,
+};
 use crate::runtime2::{
     DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken, MaterializationBlocker,
     MaterializationStatus, messages::DocWorkerMsg,
 };
-use big_sync_core::PeerId;
+use big_sync_core::PeerKey;
 use futures::future::AbortRegistration;
 use sedimentree_core::loose_commit::id::CommitId;
 use sedimentree_core::sedimentree::SedimentreeItem;
@@ -33,15 +35,17 @@ pub fn spawn_doc_worker<F>(
     runtime_evt_tx: async_channel::Sender<Runtime2Evt>,
     generation: u64,
     parent_span: tracing::Span,
-) -> SpawnedDocWorker<F>
+) -> Res<SpawnedDocWorker<F>>
 where
     F: FutureForm + DocWorkerLoop<F> + 'static,
 {
+    // The doc id can reach a worker straight from the sync edge (a peer-supplied object id
+    // resolved by a sync round), so the fixed-width sedimentree id derivation is fallible.
+    let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32()?);
     let (msg_tx, msg_rx) = async_channel::unbounded::<DocWorkerMsg>();
-    let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
 
     let worker = DocWorker2 {
-        doc_id,
+        doc_id: doc_id.clone(),
         sed_id,
         generation,
         state: DocState::Unloaded,
@@ -70,11 +74,11 @@ where
         parent_span,
     );
 
-    SpawnedDocWorker {
+    Ok(SpawnedDocWorker {
         handle: DocWorkerHandle { msg_tx },
         stop: DocWorkerStopToken { abort: stop_abort },
         run,
-    }
+    })
 }
 
 // ─── Mailbox loop trait (discharges from_send_future for wasm) ──────────
@@ -110,6 +114,8 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
         parent_span: tracing::Span,
     ) -> F::Future<'static, eyre::Result<()>> {
         let cancellation = stop_registration.handle();
+        let doc_id_for_span = doc_id.clone();
+        let generation = worker.generation;
         F::from_future(
             async move {
                 let result = futures::future::Abortable::new(
@@ -156,7 +162,8 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
             .instrument(tracing::info_span!(
                 parent: &parent_span,
                 "doc_worker mailbox loop",
-                %doc_id
+                doc_id = %doc_id_for_span,
+                task_id = generation
             )),
         )
     }
@@ -321,6 +328,15 @@ impl LoadedDocSnapshot {
             }
             pending = deferred;
         }
+        tracing::debug!(
+            doc_id = %doc_id,
+            doc_heads = doc.get_heads().len(),
+            checkpoint_count = causal_checkpoints.len(),
+            blocker_count = blockers.len(),
+            blocked_ref_count = blocked_refs.len(),
+            ?partially_decrypted,
+            "load_doc_snapshot: fixed-point outcome"
+        );
         let mut snapshot = Self::from_materialized_doc(
             doc,
             partially_decrypted,
@@ -338,8 +354,27 @@ impl LoadedDocSnapshot {
 
 impl<F: FutureForm> Drop for DocWorker2<F> {
     fn drop(&mut self) {
+        // Teardown invalidates the shared bundle: its in-memory document may
+        // hold mutations that never persisted, so any handle still pointing at
+        // it must be refused and re-acquired. This is the only writer of
+        // `BrokenReason::WorkerDropped` and it runs even when no commit was ever
+        // attempted, which is why the recorded reason matters.
+        let has_caller_handle = self.has_caller_handle();
+        let caller_handles = self.caller_handles.len();
         if let DocState::Live(bundle) = &self.state {
-            bundle.mark_broken();
+            bundle.mark_broken(BrokenReason::WorkerDropped);
+        }
+        // A caller still holding a handle while its worker is torn down is the
+        // one state that yields a broken-bundle refusal with no rejected commit
+        // behind it. It used to leave no trace at all; name it here so the next
+        // occurrence is attributable from the log alone.
+        if has_caller_handle {
+            tracing::warn!(
+                doc_id = %self.doc_id,
+                generation = self.generation,
+                caller_handles,
+                "doc worker dropped while a caller handle was outstanding"
+            );
         }
     }
 }
@@ -435,6 +470,13 @@ impl<F: FutureForm> DocWorker2<F> {
                 Ok(())
             }
             DocWorkerMsg::Fence { reply, _lease } => {
+                debug!(
+                    doc_id = %self.doc_id,
+                    queued_waiters = self.quiescence_waiters.len() + 1,
+                    pending_fragment_requests = self.pending_fragment_requests.len(),
+                    quiescent = self.is_quiescent(),
+                    "TEMP-DIAGNOSTIC: doc worker fence queued",
+                );
                 self.quiescence_waiters.push((reply, _lease));
                 Ok(())
             }
@@ -474,7 +516,7 @@ impl<F: FutureForm> DocWorker2<F> {
         let heads: Arc<[automerge::ChangeHash]> = Arc::from(initial_content.get_heads());
 
         let bundle = Arc::new(LiveDocBundle::new(
-            self.doc_id,
+            self.doc_id.clone(),
             *initial_content,
             false,
             self.causal_epoch,
@@ -484,11 +526,11 @@ impl<F: FutureForm> DocWorker2<F> {
         self.state = DocState::Live(Arc::clone(&bundle));
 
         self.change_manager
-            .notify_doc_created(self.doc_id, Arc::clone(&heads))?;
+            .notify_doc_created(self.doc_id.clone(), Arc::clone(&heads))?;
         self.change_manager
-            .notify_local_doc_created(self.doc_id, Arc::clone(&heads))?;
+            .notify_local_doc_created(self.doc_id.clone(), Arc::clone(&heads))?;
         self.change_manager
-            .notify_local_doc_materialization_ready(self.doc_id, Arc::clone(&heads))?;
+            .notify_local_doc_materialization_ready(self.doc_id.clone(), Arc::clone(&heads))?;
 
         let handle = self
             .wrap_live_handle(bundle, crate::runtime2::DocLeaseKind::Caller)
@@ -511,7 +553,7 @@ impl<F: FutureForm> DocWorker2<F> {
     ) -> eyre::Result<LiveDocHandle> {
         let lease = crate::runtime2::DocLease::new(
             self.runtime_cmd_tx.clone(),
-            self.doc_id,
+            self.doc_id.clone(),
             self.generation,
         );
         self.register_bundle_lease().await?;
@@ -548,8 +590,9 @@ impl<F: FutureForm> DocWorker2<F> {
     ) -> eyre::Result<()> {
         let result = match &self.state {
             // - `Live(bundle)` → return `Ready` with a fresh caller lease. A
-            //   broken bundle (an earlier commit from it was rejected) reloads
-            //   the last persisted state into a fresh bundle instead.
+            //   broken bundle — teardown, eviction, or a rejected commit; the bundle
+            //   records which (`BrokenReason`) — reloads the last persisted state into a
+            //   fresh bundle instead.
             DocState::Live(bundle) => {
                 if bundle.is_broken() {
                     self.state = DocState::Unloaded;
@@ -570,7 +613,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 };
                 self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                 let bundle = Arc::new(LiveDocBundle::new(
-                    self.doc_id,
+                    self.doc_id.clone(),
                     *doc,
                     self.partially_decrypted,
                     self.causal_epoch,
@@ -600,7 +643,8 @@ impl<F: FutureForm> DocWorker2<F> {
         if self
             .runtime_cmd_tx
             .send(crate::runtime2::Runtime2Cmd::RegisterDocLease {
-                doc_id: self.doc_id,
+                doc_id: self.doc_id.clone(),
+                generation: self.generation,
                 registered: registered_tx,
             })
             .await
@@ -643,7 +687,7 @@ impl<F: FutureForm> DocWorker2<F> {
             checkpoint_count,
             "load_doc_snapshot: tree composition"
         );
-        let doc_id_snapshot = self.doc_id;
+        let doc_id_snapshot = self.doc_id.clone();
         let mut plaintexts = HashMap::<Vec<u8>, Vec<u8>>::new();
         let mut blockers = Vec::new();
 
@@ -779,7 +823,7 @@ impl<F: FutureForm> DocWorker2<F> {
         LoadedDocSnapshot::from_decrypted_plaintexts(
             pending,
             partially_decrypted,
-            self.doc_id,
+            self.doc_id.clone(),
             blockers,
             blocked_refs,
         )
@@ -795,7 +839,7 @@ impl<F: FutureForm> DocWorker2<F> {
             DocState::Transient(doc) => {
                 self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                 let bundle = Arc::new(LiveDocBundle::new(
-                    self.doc_id,
+                    self.doc_id.clone(),
                     *doc,
                     self.partially_decrypted,
                     self.causal_epoch,
@@ -823,7 +867,7 @@ impl<F: FutureForm> DocWorker2<F> {
                         self.sync_partial_state().await?;
                         self.causal_epoch = self.io.current_causal_epoch(self.sed_id).await?;
                         let bundle = Arc::new(LiveDocBundle::new(
-                            self.doc_id,
+                            self.doc_id.clone(),
                             doc,
                             partially_decrypted,
                             self.causal_epoch,
@@ -863,11 +907,11 @@ impl<F: FutureForm> DocWorker2<F> {
         }
         let event = if partial {
             Runtime2Evt::DocWorkerMaterializationPending {
-                doc_id: self.doc_id,
+                doc_id: self.doc_id.clone(),
             }
         } else {
             Runtime2Evt::DocWorkerMaterializationReady {
-                doc_id: self.doc_id,
+                doc_id: self.doc_id.clone(),
             }
         };
         self.evt_tx.send(event).await.wrap_err(ERROR_CHANNEL)?;
@@ -879,9 +923,10 @@ impl<F: FutureForm> DocWorker2<F> {
     /// Commit a set of changes locally.
     ///
     /// The authoritative write gate: a commit is rejected (and its bundle
-    /// latched broken) when
-    /// 1. it comes from a stale or broken bundle (an earlier commit from this
-    ///    bundle was rejected, or the bundle was replaced by a reload), or
+    /// invalidated, recording why) when
+    /// 1. the handle does not name the bundle this worker serves — it predates a
+    ///    reload — or that bundle was already invalidated; the refusal reports
+    ///    the recorded reason rather than assuming a rejected commit, or
     /// 2. the local principal no longer holds write access (revoked or
     ///    Read-only), or
     /// 3. the encrypted commit cannot be persisted (key unavailable).
@@ -897,38 +942,39 @@ impl<F: FutureForm> DocWorker2<F> {
         resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> eyre::Result<()> {
         // ── 1. Handle validity gate ───────────────────────────────────────
-        // Reject commits from broken bundles (an earlier commit from this
-        // bundle was rejected) and from bundles the worker no longer serves
-        // (reloaded after a break, or a freshly spawned worker with no
-        // bundle). This makes concurrent commits from the same handle fail
-        // atomically with the first rejection, instead of persisting a chain
-        // whose parent — the rejected commit's ghost — was never stored.
+        // Reject commits aimed at a bundle the worker no longer serves (reloaded
+        // after a break, or a freshly spawned worker with no bundle), and
+        // commits from a bundle that was already invalidated — by an earlier
+        // rejection, or by the teardown of the worker that owned it. This makes
+        // concurrent commits from the same handle fail atomically with the first
+        // rejection, instead of persisting a chain whose parent — the rejected
+        // commit's ghost — was never stored. The refusal names the recorded
+        // reason: a teardown is not a rejected commit, and reporting it as one
+        // is what made the failure unattributable.
         let current = match &self.state {
             DocState::Live(bundle) => Some(Arc::clone(bundle)),
             _ => None,
         };
         let served_bundle_id = current.as_ref().map(|bundle| bundle.id());
-        if served_bundle_id != Some(bundle_id)
-            || current.as_ref().is_some_and(|bundle| bundle.is_broken())
-        {
-            let message = if current.as_ref().is_some_and(|bundle| bundle.is_broken()) {
-                "document write rejected: handle invalidated by an earlier rejected commit; re-acquire the document"
-            } else {
-                "document write rejected: commit from a stale handle; re-acquire the document"
-            };
+        let validity = handle_validity(
+            served_bundle_id,
+            bundle_id,
+            current.as_ref().and_then(|bundle| bundle.broken_reason()),
+        );
+        if let Some(message) = invalid_handle_message(validity) {
             resp.send(Err(ferr!("{message}")))
                 .inspect_err(|_| warn_loc!(ERROR_CALLER))
                 .ok();
             return Ok(());
         }
         // ── 2. Write-access gate ──────────────────────────────────────────
-        match self.io.has_doc_write_access(self.doc_id).await {
+        match self.io.has_doc_write_access(self.doc_id.clone()).await {
             Ok(true) => {}
             Ok(false) => {
                 current
                     .as_ref()
                     .expect("live bundle present for a valid commit")
-                    .mark_broken();
+                    .mark_broken(BrokenReason::CommitRejectedNoWriteAccess);
                 resp.send(Err(ferr!(
                     "document write rejected: local access is not writable (revoked or read-only)"
                 )))
@@ -1008,7 +1054,7 @@ impl<F: FutureForm> DocWorker2<F> {
                     current
                         .as_ref()
                         .expect("live bundle present for a valid commit")
-                        .mark_broken();
+                        .mark_broken(BrokenReason::CommitRejectedKeyUnavailable);
                     resp.send(Err(error))
                         .inspect_err(|_| warn_loc!(ERROR_CALLER))
                         .ok();
@@ -1023,12 +1069,16 @@ impl<F: FutureForm> DocWorker2<F> {
 
         let heads = Arc::from(heads);
         self.change_manager
-            .notify_sedimentree_heads_changed(self.doc_id, Arc::clone(&heads), origin.clone())
+            .notify_sedimentree_heads_changed(
+                self.doc_id.clone(),
+                Arc::clone(&heads),
+                origin.clone(),
+            )
             .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
             .ok();
         if matches!(&origin, BigRepoChangeOrigin::Local) {
             self.change_manager
-                .notify_local_doc_heads_updated(self.doc_id, Arc::clone(&heads))?;
+                .notify_local_doc_heads_updated(self.doc_id.clone(), Arc::clone(&heads))?;
         }
 
         // Fire patches even if heads didn't change (delta can have content
@@ -1036,7 +1086,7 @@ impl<F: FutureForm> DocWorker2<F> {
         for patch in &patches {
             self.change_manager
                 .notify_doc_changed(
-                    self.doc_id,
+                    self.doc_id.clone(),
                     Arc::new(patch.clone()),
                     Arc::clone(&heads),
                     origin.clone(),
@@ -1061,6 +1111,18 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         }
         let DocState::Live(bundle) = &self.state else {
+            let state = match &self.state {
+                DocState::Unloaded => "Unloaded",
+                DocState::Transient(_) => "Transient",
+                DocState::Live(_) => "Live",
+                DocState::PendingMaterialization => "PendingMaterialization",
+            };
+            debug!(
+                doc_id = %self.doc_id,
+                pending_fragment_requests = self.pending_fragment_requests.len(),
+                state,
+                "TEMP-DIAGNOSTIC: fragment requests deferred while doc is not live",
+            );
             return Ok(());
         };
         let requests = std::mem::take(&mut self.pending_fragment_requests);
@@ -1110,7 +1172,7 @@ impl<F: FutureForm> DocWorker2<F> {
         self.state = DocState::PendingMaterialization;
         if !was_pending {
             self.change_manager
-                .notify_local_doc_materialization_pending(self.doc_id)?;
+                .notify_local_doc_materialization_pending(self.doc_id.clone())?;
         }
         // A pending doc is by definition partially decrypted: the blocked
         // set is whatever `transition_to_pending`'s caller captured from the
@@ -1129,7 +1191,7 @@ impl<F: FutureForm> DocWorker2<F> {
     ) -> eyre::Result<()> {
         if was_pending {
             self.change_manager
-                .notify_local_doc_materialization_ready(self.doc_id, heads)?;
+                .notify_local_doc_materialization_ready(self.doc_id.clone(), heads)?;
         }
         Ok(())
     }
@@ -1225,16 +1287,17 @@ impl<F: FutureForm> DocWorker2<F> {
     /// reported. `reply: Some` resolves the caller's sync receipt; `None` is
     /// passive (fire-and-forget) routing.
     #[tracing::instrument(
+        level = "debug",
         skip_all,
         fields(
-            remote_peer_id = %peer_id,
+            peer_id = %peer_id,
             received_commits = commit_ids.len(),
             received_fragments = fragment_ids.len(),
         )
     )]
     async fn apply_sync_session(
         &mut self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         commit_ids: Vec<CommitId>,
         fragment_ids: Vec<CommitId>,
         reply: Option<
@@ -1283,14 +1346,16 @@ impl<F: FutureForm> DocWorker2<F> {
                 self.blocked_refs.extend(unresolved);
                 self.sync_partial_state().await?;
                 if resolved.is_empty() {
-                    self.notif_pending_heads(&mut tree, peer_id).await?;
+                    self.notif_pending_heads(&mut tree, peer_id.clone()).await?;
                     return self.report_sync_outcome(peer_id, has_caller, reply).await;
                 }
                 if !self.blocked_refs.is_empty() {
-                    self.notif_pending_heads(&mut tree, peer_id).await?;
+                    self.notif_pending_heads(&mut tree, peer_id.clone()).await?;
                 }
 
-                let origin = BigRepoChangeOrigin::Remote { peer_id };
+                let origin = BigRepoChangeOrigin::Remote {
+                    peer_id: peer_id.clone(),
+                };
                 // Apply the session's decrypted content incrementally; refs
                 // whose Automerge dependencies are still missing stay blocked.
                 let applied = resolved.len();
@@ -1327,7 +1392,7 @@ impl<F: FutureForm> DocWorker2<F> {
                         Arc::from(doc.get_heads())
                     });
                     self.change_manager
-                        .notify_local_doc_materialization_ready(self.doc_id, heads)?;
+                        .notify_local_doc_materialization_ready(self.doc_id.clone(), heads)?;
                 }
             }
 
@@ -1352,7 +1417,7 @@ impl<F: FutureForm> DocWorker2<F> {
     /// histories need no shadow node, while a missing epoch or uncovered fork
     /// publishes exactly one epoch-specific checkpoint.
     async fn reconcile_causal_coverage(&mut self) -> eyre::Result<bool> {
-        if !self.io.has_doc_write_access(self.doc_id).await? {
+        if !self.io.has_doc_write_access(self.doc_id.clone()).await? {
             debug!(%self.doc_id, "causal coverage skipped: no write access");
             return Ok(true);
         }
@@ -1523,7 +1588,7 @@ impl<F: FutureForm> DocWorker2<F> {
             let patches = if changed
                 && self
                     .change_manager
-                    .has_change_listener_interest(self.doc_id, origin)
+                    .has_change_listener_interest(self.doc_id.clone(), origin)
             {
                 doc.diff(&before, &after)
             } else {
@@ -1542,13 +1607,13 @@ impl<F: FutureForm> DocWorker2<F> {
         origin: &BigRepoChangeOrigin,
     ) -> eyre::Result<()> {
         self.change_manager.notify_sedimentree_heads_changed(
-            self.doc_id,
+            self.doc_id.clone(),
             Arc::clone(&after_heads),
             origin.clone(),
         )?;
         for patch in patches {
             self.change_manager.notify_doc_changed(
-                self.doc_id,
+                self.doc_id.clone(),
                 Arc::new(patch),
                 Arc::clone(&after_heads),
                 origin.clone(),
@@ -1626,7 +1691,7 @@ impl<F: FutureForm> DocWorker2<F> {
     /// receipt must report `Pending` for a doc that is still blocked.
     async fn report_sync_outcome(
         &mut self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         has_caller: bool,
         reply: Option<
             futures::channel::oneshot::Sender<
@@ -1704,7 +1769,7 @@ impl<F: FutureForm> DocWorker2<F> {
             }
             self.change_manager
                 .notify_cold_sedimentree_heads_updated(
-                    self.doc_id,
+                    self.doc_id.clone(),
                     BigRepoChangeOrigin::Remote { peer_id },
                 )
                 .inspect_err(|err| warn_loc!(ERROR_CALLER, ?err))
@@ -1823,7 +1888,16 @@ impl<F: FutureForm> DocWorker2<F> {
                     .try_decrypt_content_keyed(self.sed_id, locator)
                     .await?;
                 let Some(entrypoint_raw) = entrypoint else {
-                    // Key not found — skip; may resolve via causal chain.
+                    // A keyless entry is not automatically unresolved. A
+                    // key-only causal checkpoint escrows the application keys
+                    // of the frontier it covers, so content whose own key is
+                    // escrowed by a covering checkpoint is reachable only by
+                    // walking that checkpoint: the entry carries no key of its
+                    // own to walk from, and the checkpoint is its descendant,
+                    // not its ancestor.
+                    made_progress |= self
+                        .walk_covering_checkpoints(*head, &mut plaintext_by_ref)
+                        .await?;
                     continue;
                 };
 
@@ -1877,10 +1951,63 @@ impl<F: FutureForm> DocWorker2<F> {
         Ok((resolved, unresolved))
     }
 
+    /// Walk the local causal checkpoints that cover `covered` and fold every
+    /// plaintext they unlock into `plaintext_by_ref`.
+    ///
+    /// A key-only checkpoint escrows the application keys of the frontier it
+    /// covers, so it is the only entrypoint that reaches content whose own key
+    /// was escrowed: the covered commit has no key of its own to walk from and
+    /// the checkpoint sits below it in the causal order. Recovered keys are
+    /// cached exactly as the full materialization walk caches them, so a later
+    /// keyed attempt on the same content succeeds without another walk.
+    ///
+    /// Returns true when new plaintext was recovered.
+    async fn walk_covering_checkpoints(
+        &self,
+        covered: CommitId,
+        plaintext_by_ref: &mut HashMap<Vec<u8>, Vec<u8>>,
+    ) -> eyre::Result<bool> {
+        let covering: Vec<CommitId> = self
+            .causal_checkpoints
+            .iter()
+            .filter(|(_, checkpoint)| checkpoint.covered_frontier.contains(&covered))
+            .map(|(head, _)| *head)
+            .collect();
+        let mut made_progress = false;
+        for checkpoint_head in covering {
+            let locator = BigRepoCiphertextLocator::new(
+                BigRepoCiphertextKind::LooseCommit,
+                self.sed_id,
+                checkpoint_head,
+            );
+            let state = self.io.try_causal_decrypt(self.sed_id, locator).await?;
+            {
+                let mut cache = self
+                    .recovered_keys
+                    .lock()
+                    .expect("recovered-key cache lock poisoned");
+                for (content_ref, key) in &state.keys {
+                    if let Ok(array) = <[u8; 32]>::try_from(content_ref.as_slice()) {
+                        cache.insert(CommitId::new(array), *key);
+                    }
+                }
+            }
+            for (content_ref, plaintext) in &state.complete {
+                if plaintext_by_ref
+                    .insert(content_ref.clone(), plaintext.clone())
+                    .is_none()
+                {
+                    made_progress = true;
+                }
+            }
+        }
+        Ok(made_progress)
+    }
+
     async fn notif_pending_heads(
         &mut self,
         tree: &mut sedimentree_core::sedimentree::minimized::MinimizedSedimentree,
-        peer_id: PeerId,
+        peer_id: PeerKey,
     ) -> eyre::Result<()> {
         let commit_ids = tree.heads(&sedimentree_core::depth::CountLeadingZeroBytes);
         let heads = commit_ids
@@ -1890,7 +2017,7 @@ impl<F: FutureForm> DocWorker2<F> {
 
         self.change_manager
             .notify_doc_pending_sedimentree_heads_changed(
-                self.doc_id,
+                self.doc_id.clone(),
                 heads,
                 BigRepoChangeOrigin::Remote { peer_id },
             )?;
@@ -2003,13 +2130,13 @@ impl<F: FutureForm> DocWorker2<F> {
                     let patches = doc.diff(&[], &after_heads);
                     let heads = Arc::<[automerge::ChangeHash]>::from(after_heads);
                     self.change_manager.notify_sedimentree_heads_changed(
-                        self.doc_id,
+                        self.doc_id.clone(),
                         Arc::clone(&heads),
                         origin.clone(),
                     )?;
                     for patch in patches {
                         self.change_manager.notify_doc_changed(
-                            self.doc_id,
+                            self.doc_id.clone(),
                             Arc::new(patch),
                             Arc::clone(&heads),
                             origin.clone(),
@@ -2060,6 +2187,11 @@ impl<F: FutureForm> DocWorker2<F> {
             return Ok(());
         }
         let waiters = std::mem::take(&mut self.quiescence_waiters);
+        debug!(
+            doc_id = %self.doc_id,
+            released = waiters.len(),
+            "TEMP-DIAGNOSTIC: doc worker fence replies released",
+        );
         for (reply, _lease) in waiters {
             // A dropped reply receiver means the hub-side fence awaiter was
             // aborted (shutdown) — benign.
@@ -2242,7 +2374,7 @@ mod tests {
                 })
                 .collect(),
             false,
-            DocumentId::new(*sed_id.as_bytes()),
+            DocumentId::new(sed_id.as_bytes()),
             Vec::new(),
             Vec::new(),
         )
@@ -2530,7 +2662,8 @@ mod tests {
         let content_plaintext = source.save();
 
         let doc_id = DocumentId::new([0x5a; 32]);
-        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+        let sed_id =
+            sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
         let content_ref = CommitId::new([0x11; 32]);
         let checkpoint = CausalCheckpoint::new([0x77; 32], BTreeSet::from([content_ref]));
         let checkpoint_ref = causal_checkpoint_id(&checkpoint);
@@ -2650,7 +2783,8 @@ mod tests {
         let content_plaintext = source.save();
 
         let doc_id = DocumentId::new([0x5b; 32]);
-        let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.into_bytes());
+        let sed_id =
+            sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE));
         let content_ref = CommitId::new([0x21; 32]);
         let checkpoint = CausalCheckpoint::new([0x87; 32], BTreeSet::from([content_ref]));
         let checkpoint_ref = causal_checkpoint_id(&checkpoint);
@@ -2704,7 +2838,7 @@ mod tests {
             .await?;
         rx.await
             .map_err(|_| ferr!(ERROR_CHANNEL))??
-            .into_ready(worker.doc_id)
+            .into_ready(worker.doc_id.clone())
             .map_err(|err| ferr!("{err:?}"))
     }
 
@@ -2738,7 +2872,10 @@ mod tests {
 
         let first = acquire_ready(&mut worker).await?;
         let first_bundle_id = first.bundle.id();
-        first.bundle.mark_broken();
+        // Exactly what the write-access gate does when it refuses a commit.
+        first
+            .bundle
+            .mark_broken(super::BrokenReason::CommitRejectedNoWriteAccess);
         drop(first);
 
         // A broken bundle must be reloaded into a fresh instance on the next
@@ -2751,6 +2888,70 @@ mod tests {
         );
         assert!(!second.bundle.is_broken());
         drop(second);
+        hub_ack.abort();
+        Ok(())
+    }
+
+    /// Teardown is the only thing that can invalidate a bundle with no commit
+    /// behind it, and it is reachable while a caller still holds a handle. The
+    /// handle keeps the bundle alive after the worker is gone, so it observes the
+    /// recorded reason rather than a bare `true`.
+    #[tokio::test]
+    async fn dropping_a_live_doc_worker_marks_its_bundle_broken() -> Res<()> {
+        let (mut worker, hub_ack) = ready_recovery_worker();
+
+        let handle = acquire_ready(&mut worker).await?;
+        let bundle = std::sync::Arc::clone(&handle.bundle);
+        assert!(!bundle.is_broken());
+        assert_eq!(bundle.broken_reason(), None);
+
+        drop(worker);
+
+        assert!(bundle.is_broken());
+        assert_eq!(
+            bundle.broken_reason(),
+            Some(super::BrokenReason::WorkerDropped),
+            "teardown must be recorded as teardown, not as a rejected commit"
+        );
+        // The caller's `Arc` keeps the bundle readable after its worker is gone;
+        // the recorded reason is the only thing the dead worker could still tell
+        // it.
+        assert_eq!(bundle.doc_id, DocumentId::new([0x5b; 32]));
+        drop(handle);
+        hub_ack.abort();
+        Ok(())
+    }
+
+    /// Every other writer of the broken flag is inside `commit_delta`, so
+    /// nothing that happens before a commit may latch it. This pins the set of
+    /// writers: the only route to a broken bundle with no commit is teardown. A
+    /// fourth "be safe, mark broken on the way out" site is how a refusal became
+    /// unattributable in the first place.
+    #[tokio::test]
+    async fn no_commit_attempted_means_only_drop_can_break_a_bundle() -> Res<()> {
+        let (mut worker, hub_ack) = ready_recovery_worker();
+
+        // Acquisition materializes the document (a decrypt walk plus a bundle
+        // build) and must leave the flag alone.
+        let handle = acquire_ready(&mut worker).await?;
+        let bundle = std::sync::Arc::clone(&handle.bundle);
+        assert!(!bundle.is_broken());
+
+        // A second acquisition after the caller drops reuses the same bundle;
+        // still untouched.
+        drop(handle);
+        let reused = acquire_ready(&mut worker).await?;
+        assert_eq!(reused.bundle.id(), bundle.id());
+        assert!(!bundle.is_broken());
+        assert_eq!(bundle.broken_reason(), None);
+        drop(reused);
+
+        // Only teardown breaks it, and it records why.
+        drop(worker);
+        assert_eq!(
+            bundle.broken_reason(),
+            Some(super::BrokenReason::WorkerDropped)
+        );
         hub_ack.abort();
         Ok(())
     }

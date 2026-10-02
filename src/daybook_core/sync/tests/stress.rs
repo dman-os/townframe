@@ -22,8 +22,14 @@ enum EventKind {
     PutBlobAttach,
 }
 
+#[derive(Debug)]
+enum StressEventOutcome {
+    Applied(String),
+    Skipped(String),
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
+async fn long_af_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     // FIXME: use a config field on the repo settings
     TEST_ENV_INIT.call_once(|| unsafe {
@@ -96,7 +102,21 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
             let node_idx = rng.random_range(0..NODE_COUNT);
             if let Some(node) = nodes[node_idx].as_ref() {
                 let kind = random_event_kind(&mut rng);
-                if let Some(detail) = apply_event(node, kind, idx, &mut rng).await? {
+                let outcome = apply_event(node, kind, idx, &mut rng).await?;
+                let (status, detail) = match &outcome {
+                    StressEventOutcome::Applied(detail) => ("applied", detail),
+                    StressEventOutcome::Skipped(reason) => ("skipped", reason),
+                };
+                info!(
+                    phase = "phase-1",
+                    idx,
+                    node = node_idx,
+                    ?kind,
+                    status,
+                    %detail,
+                    "stress operation"
+                );
+                if let StressEventOutcome::Applied(detail) = outcome {
                     applied.push(format!("#{idx} node={node_idx} kind={kind:?} {detail}"));
                 }
             }
@@ -123,13 +143,13 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
             .take()
             .ok_or_eyre("leaving node missing from cluster state")?;
         let leaving_peer_id =
-            PeerId::new(*leaving_node.sync_repo.router.endpoint().id().as_bytes());
+            PeerKey::new(*leaving_node.sync_repo.router.endpoint().id().as_bytes());
         leaving_node.stop().await?;
         for active in nodes.iter().flatten() {
             active
                 .sync_repo
                 .big_sync_worker
-                .remove_peer(leaving_peer_id)
+                .remove_peer(leaving_peer_id.clone())
                 .await?;
         }
 
@@ -147,7 +167,21 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
                 .ok_or_eyre("active node unexpectedly missing")?;
             let kind = random_event_kind(&mut rng);
             let transfer_idx = EVENT_COUNT + idx;
-            apply_event(node, kind, transfer_idx, &mut rng).await?;
+            let outcome = apply_event(node, kind, transfer_idx, &mut rng).await?;
+            let (status, detail) = match &outcome {
+                StressEventOutcome::Applied(detail) => ("applied", detail),
+                StressEventOutcome::Skipped(reason) => ("skipped", reason),
+            };
+            info!(
+                phase = "offline-transfer",
+                idx = transfer_idx,
+                node = node_idx,
+                offline_node = leaving_idx,
+                ?kind,
+                status,
+                %detail,
+                "stress operation"
+            );
         }
 
         info!(
@@ -174,7 +208,7 @@ async fn long_test_iroh_sync_randomized_four_node_stress_converges() -> Res<()> 
         endpoints = connect_topology(&nodes, &full_mesh_topology).await?;
         if std::env::var_os("DAYB_STRESS_STOP_AFTER_KEYHIVE_PROBE").is_some() {
             report_keyhive_document_registration(&nodes).await?;
-            return Ok(());
+            eyre::bail!("diagnostic Keyhive probe stopped before final settlement; this is not a convergence pass");
         }
         log_stage(&nodes, 9, "final offline-reopen settlement");
         settle_stress_phase(
@@ -329,7 +363,7 @@ async fn open_cluster_nodes(paths: &[PathBuf]) -> Res<Vec<Option<SyncTestNode>>>
 async fn connect_topology(
     nodes: &[Option<SyncTestNode>],
     edges: &[(usize, usize)],
-) -> Res<Vec<HashSet<PeerId>>> {
+) -> Res<Vec<HashSet<PeerKey>>> {
     // Pre-provision all active nodes with each other's endpoint IDs
     // so that auth doesn't block connections in the mesh topology.
     let active_nodes: Vec<(usize, &SyncTestNode)> = nodes
@@ -350,7 +384,7 @@ async fn connect_topology(
         }
     }
 
-    let mut endpoint_sets = vec![HashSet::<PeerId>::new(); NODE_COUNT];
+    let mut endpoint_sets = vec![HashSet::<PeerKey>::new(); NODE_COUNT];
     for (a, b) in edges {
         let node_a = nodes[*a]
             .as_ref()
@@ -361,13 +395,13 @@ async fn connect_topology(
 
         let ticket_b = node_b.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr_ab = node_a.sync_repo.connect_url(&ticket_b).await?;
-        let peer_b_id = PeerId::new(*endpoint_addr_ab.id.as_bytes());
-        endpoint_sets[*a].insert(peer_b_id);
+        let peer_b_id = PeerKey::new(*endpoint_addr_ab.id.as_bytes());
+        endpoint_sets[*a].insert(peer_b_id.clone());
 
         let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
-        let peer_a_id = PeerId::new(*endpoint_addr_ba.id.as_bytes());
-        endpoint_sets[*b].insert(peer_a_id);
+        let peer_a_id = PeerKey::new(*endpoint_addr_ba.id.as_bytes());
+        endpoint_sets[*b].insert(peer_a_id.clone());
 
         node_a
             .sync_repo
@@ -388,12 +422,11 @@ async fn connect_topology(
 #[derive(Debug)]
 struct DiagnosticReport {
     stuck_docs: BTreeSet<DocumentId>,
-    known_good_sources: BTreeMap<DocumentId, usize>,
 }
 
 async fn settle_stress_phase(
     nodes: &[Option<SyncTestNode>],
-    peers_set: &[HashSet<PeerId>],
+    peers_set: &[HashSet<PeerKey>],
     diagnostic_timeout: Option<Duration>,
     temp_root: &std::path::Path,
     phase: &'static str,
@@ -407,7 +440,7 @@ async fn settle_stress_phase(
 
 async fn bounded_phase_settlement(
     nodes: &[Option<SyncTestNode>],
-    peers_set: &[HashSet<PeerId>],
+    peers_set: &[HashSet<PeerKey>],
     timeout: Duration,
     phase: &'static str,
     stage: &'static str,
@@ -448,30 +481,47 @@ async fn collect_diagnostic_report(
     let active = nodes.iter().flatten().collect::<Vec<_>>();
     let all_doc_ids = discover_stress_doc_ids(&active).await;
     let mut signatures = BTreeMap::<DocumentId, Vec<String>>::new();
-    let mut known_good_sources = BTreeMap::new();
 
     for (node_index, node) in active.iter().enumerate() {
-        let worker = node.sync_repo.big_sync_worker.snapshot().await?;
-        let recent_objects = worker
-            .last_object_syncs
-            .iter()
-            .rev()
-            .take(8)
-            .map(|(peer, part, object, _)| format!("peer={peer} part={part} object={object}"))
-            .collect::<Vec<_>>();
-        warn!(
-            phase,
-            node = node_index,
-            ?worker.task_counts,
-            active_machine_tasks = worker.active_machine_tasks,
-            active_sync_tasks = worker.active_sync_tasks,
-            zombie_tasks = worker.zombie_tasks,
-            full_sync_waiters = worker.full_sync_waiters.len(),
-            peer_part_flags = ?worker.peer_part_sync_flags,
-            ?recent_objects,
-            "diagnostic BigSync worker snapshot"
-        );
-
+        for (worker_name, worker_handle) in [
+            ("docs", &node.sync_repo.big_sync_worker),
+            ("blobs", &node.sync_repo.blob_sync_worker),
+        ] {
+            let worker = worker_handle.snapshot().await?;
+            let unsettled = worker
+                .peer_part_sync_flags
+                .iter()
+                .filter(
+                    |(_, _, pending, multi_strat, replay_done, cursor_active, unanswered)| {
+                        *pending || *multi_strat || !*replay_done || *cursor_active || *unanswered
+                    },
+                )
+                .collect::<Vec<_>>();
+            let recent_objects = worker
+                .last_object_syncs
+                .iter()
+                .rev()
+                .take(8)
+                .map(|(peer, part, object, _)| format!("peer={peer} part={part} object={object}"))
+                .collect::<Vec<_>>();
+            warn!(
+                phase,
+                node = node_index,
+                worker = worker_name,
+                local_peer_id = %node.sync_repo.router.endpoint().id(),
+                ?worker.peer_parts,
+                ?worker.task_counts,
+                active_machine_tasks = worker.active_machine_tasks,
+                active_sync_tasks = worker.active_sync_tasks,
+                zombie_tasks = worker.zombie_tasks,
+                full_sync_waiters = ?worker.full_sync_waiters,
+                peer_part_flags = ?worker.peer_part_sync_flags,
+                replay_pages = ?worker.replay_pages,
+                ?unsettled,
+                ?recent_objects,
+                "diagnostic BigSync worker snapshot",
+            );
+        }
         let store = node
             .sync_repo
             .rcx
@@ -501,8 +551,10 @@ async fn collect_diagnostic_report(
         );
         for doc_id in &all_doc_ids {
             let identifier = Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes())
-                    .expect("stress document id must be a verifying key"),
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .expect("stress document id must be a verifying key"),
             );
             let registered = !node
                 .sync_repo
@@ -519,16 +571,21 @@ async fn collect_diagnostic_report(
                 .keyhive()
                 .agent_access_on(&local_agent, identifier)
                 .await;
-            let state = node.sync_repo.rcx.big_repo.doc_head_state(*doc_id).await?;
+            let state = node
+                .sync_repo
+                .rcx
+                .big_repo
+                .doc_head_state(doc_id.clone())
+                .await?;
             let signature = format!(
                 "registered={registered} access={access:?} state={:?} sedimentree={:?} materialized={:?}",
                 state.state, state.sedimentree_heads, state.materialized_heads
             );
             warn!(phase, node = node_index, %doc_id, %signature, "diagnostic document state");
-            if state.materialized_heads.is_some() {
-                known_good_sources.entry(*doc_id).or_insert(node_index);
-            }
-            signatures.entry(*doc_id).or_default().push(signature);
+            signatures
+                .entry(doc_id.clone())
+                .or_default()
+                .push(signature);
         }
 
         // TEMP-FORENSICS: compare per-node stored commit/fragment blobs for
@@ -538,7 +595,7 @@ async fn collect_diagnostic_report(
                 .sync_repo
                 .rcx
                 .big_repo
-                .inspect_stored_doc_blobs(*doc_id)
+                .inspect_stored_doc_blobs(doc_id.clone())
                 .await
             else {
                 warn!(phase, node = node_index, %doc_id, "blob forensics: inspect failed");
@@ -582,10 +639,7 @@ async fn collect_diagnostic_report(
         ?stuck_docs,
         "diagnostic differing or non-materialized documents"
     );
-    Ok(DiagnosticReport {
-        stuck_docs,
-        known_good_sources,
-    })
+    Ok(DiagnosticReport { stuck_docs })
 }
 
 async fn discover_stress_doc_ids(nodes: &[&SyncTestNode]) -> BTreeSet<DocumentId> {
@@ -599,7 +653,12 @@ async fn discover_stress_doc_ids(nodes: &[&SyncTestNode]) -> BTreeSet<DocumentId
         if let Ok((_, ids)) = node.drawer.list_just_ids().await {
             for id in ids {
                 if let Ok(Some(entry)) = node.drawer.get_entry(&id).await {
-                    all_doc_ids.extend(entry.branches.values().map(|branch| branch.branch_doc_id));
+                    all_doc_ids.extend(
+                        entry
+                            .branches
+                            .values()
+                            .map(|branch| branch.branch_doc_id.clone()),
+                    );
                 }
             }
         }
@@ -609,7 +668,7 @@ async fn discover_stress_doc_ids(nodes: &[&SyncTestNode]) -> BTreeSet<DocumentId
 
 async fn diagnostic_phase_settlement(
     nodes: &[Option<SyncTestNode>],
-    peers_set: &[HashSet<PeerId>],
+    peers_set: &[HashSet<PeerKey>],
     timeout: Duration,
     temp_root: &std::path::Path,
     phase: &'static str,
@@ -617,129 +676,20 @@ async fn diagnostic_phase_settlement(
     if bounded_phase_settlement(nodes, peers_set, timeout, phase, "natural").await? {
         return Ok(());
     }
-    warn!(phase, path = %temp_root.display(), "settlement timed out; preserving diagnostic repositories");
-
-    // Stage 1: authority only. Do not touch document handles or content sync.
-    let active = nodes.iter().flatten().collect::<Vec<_>>();
-    let keyhive_intervention = async {
-        for (node_index, node) in active.iter().enumerate() {
-            for (peer_index, peer) in active.iter().enumerate() {
-                if node_index != peer_index {
-                    let peer_id = PeerId::new(*peer.sync_repo.router.endpoint().id().as_bytes());
-                    node.sync_repo
-                        .rcx
-                        .big_repo
-                        .sync_keyhive_with_peer(peer_id)
-                        .await?;
-                }
-            }
-        }
-        Res::<()>::Ok(())
-    };
-    match tokio::time::timeout(timeout, keyhive_intervention).await {
-        Ok(result) => result?,
-        Err(_) => warn!(
-            ?timeout,
-            "diagnostic explicit Keyhive intervention timed out"
-        ),
-    }
-    if bounded_phase_settlement(nodes, peers_set, timeout, phase, "explicit-keyhive").await? {
-        return Ok(());
-    }
-    let mut report = collect_diagnostic_report(nodes, phase).await?;
-
-    // Stage 2: ask only differing/non-materialized documents to acquire a
-    // handle. This deliberately measures whether lazy materialization is the
-    // missing wake-up; querying every document would obscure that result.
-    let get_doc_intervention = async {
-        for (node_index, node) in active.iter().enumerate() {
-            for doc_id in &report.stuck_docs {
-                let lookup = match node.sync_repo.rcx.big_repo.get_doc(doc_id).await? {
-                    big_repo::DocLookup::Ready(handle) => {
-                        let mut heads = handle
-                            .with_document_read(|document| document.get_heads())
-                            .await;
-                        heads.sort_unstable();
-                        format!("ready:{heads:?}")
-                    }
-                    big_repo::DocLookup::PendingMaterialization => "pending".to_owned(),
-                    big_repo::DocLookup::Missing => "missing".to_owned(),
-                };
-                warn!(node = node_index, %doc_id, %lookup, "diagnostic forced get_doc result");
-            }
-        }
-        Res::<()>::Ok(())
-    };
-    match tokio::time::timeout(timeout, get_doc_intervention).await {
-        Ok(result) => result?,
-        Err(_) => warn!(?timeout, "diagnostic forced get_doc intervention timed out"),
-    }
-    if bounded_phase_settlement(nodes, peers_set, timeout, phase, "forced-get-doc").await? {
-        return Ok(());
-    }
-    report = collect_diagnostic_report(nodes, phase).await?;
-
-    // Stage 3: content only, from a node that already reported materialized
-    // heads. Creator provenance is not exposed by the public runtime API, so a
-    // known-good materializer is the narrowest honest source available here.
-    let content_intervention = async {
-        for doc_id in &report.stuck_docs {
-            let Some(&source_index) = report.known_good_sources.get(doc_id) else {
-                warn!(%doc_id, "diagnostic content sync skipped: no known-good materializer");
-                continue;
-            };
-            let source_peer = PeerId::new(
-                *active[source_index]
-                    .sync_repo
-                    .router
-                    .endpoint()
-                    .id()
-                    .as_bytes(),
-            );
-            for (target_index, target) in active.iter().enumerate() {
-                if target_index == source_index {
-                    continue;
-                }
-                match target
-                    .sync_repo
-                    .rcx
-                    .big_repo
-                    .sync_doc_with_peer(*doc_id, source_peer)
-                    .await
-                {
-                    Ok(receipt) => {
-                        warn!(%doc_id, source_index, target_index, ?receipt.outcome, "diagnostic explicit document sync completed")
-                    }
-                    Err(error) => {
-                        warn!(%doc_id, source_index, target_index, ?error, "diagnostic explicit document sync failed")
-                    }
-                }
-            }
-        }
-        Res::<()>::Ok(())
-    };
-    match tokio::time::timeout(timeout, content_intervention).await {
-        Ok(result) => result?,
-        Err(_) => warn!(
-            ?timeout,
-            "diagnostic explicit document intervention timed out"
-        ),
-    }
-    if bounded_phase_settlement(nodes, peers_set, timeout, phase, "explicit-stuck-doc-sync").await?
-    {
-        return Ok(());
-    }
-    let final_report = collect_diagnostic_report(nodes, phase).await?;
+    // A diagnostic must only observe: explicit Keyhive sync, get_doc, and document
+    // sync can make a dormant object live and turn a failed natural settle into a pass.
+    warn!(phase, path = %temp_root.display(), "natural settlement timed out; preserving diagnostic repositories");
+    let report = collect_diagnostic_report(nodes, phase).await?;
     eyre::bail!(
-        "diagnostic intervention ladder exhausted; repositories preserved at {}; remaining stuck docs: {:?}",
+        "natural settlement timed out; repositories preserved at {}; differing or non-materialized docs: {:?}",
         temp_root.display(),
-        final_report.stuck_docs
+        report.stuck_docs
     )
 }
 
 async fn wait_network_rest(
     nodes: &[Option<SyncTestNode>],
-    peers_set: &[HashSet<PeerId>],
+    peers_set: &[HashSet<PeerKey>],
 ) -> Res<()> {
     info!(barrier = "network-rest", "stress barrier begin");
     let fixed_points = nodes.iter().enumerate().filter_map(|(index, node)| {
@@ -749,7 +699,7 @@ async fn wait_network_rest(
                 .peer_partition_ids("", true)
                 .into_keys()
                 .collect::<Vec<_>>();
-            let peers = peers_set[index].iter().copied().collect::<Vec<_>>();
+            let peers = peers_set[index].iter().cloned().collect::<Vec<_>>();
             info!(
                 barrier = "network-rest",
                 node = index,
@@ -884,8 +834,10 @@ async fn report_keyhive_document_registration(nodes: &[Option<SyncTestNode>]) ->
         );
         for doc_id in &all_doc_ids {
             let identifier = Identifier::from(
-                ed25519_dalek::VerifyingKey::from_bytes(doc_id.as_bytes())
-                    .expect("stress document id must be a verifying key"),
+                ed25519_dalek::VerifyingKey::from_bytes(
+                    &doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE),
+                )
+                .expect("stress document id must be a verifying key"),
             );
             let registered = !node
                 .sync_repo
@@ -902,7 +854,12 @@ async fn report_keyhive_document_registration(nodes: &[Option<SyncTestNode>]) ->
                 .keyhive()
                 .agent_access_on(&local_agent, identifier)
                 .await;
-            let head_state = node.sync_repo.rcx.big_repo.doc_head_state(*doc_id).await?;
+            let head_state = node
+                .sync_repo
+                .rcx
+                .big_repo
+                .doc_head_state(doc_id.clone())
+                .await?;
             let lookup = match node.sync_repo.rcx.big_repo.get_doc(doc_id).await? {
                 big_repo::DocLookup::Ready(handle) => {
                     let mut heads = handle
@@ -935,7 +892,12 @@ async fn assert_big_repo_sedimentree_parity(nodes: &[&SyncTestNode]) -> Res<()> 
         if let Ok((_, ids)) = node.drawer.list_just_ids().await {
             for id in ids {
                 if let Ok(Some(entry)) = node.drawer.get_entry(&id).await {
-                    all_doc_ids.extend(entry.branches.values().map(|branch| branch.branch_doc_id));
+                    all_doc_ids.extend(
+                        entry
+                            .branches
+                            .values()
+                            .map(|branch| branch.branch_doc_id.clone()),
+                    );
                 }
             }
         }
@@ -950,7 +912,7 @@ async fn assert_big_repo_sedimentree_parity(nodes: &[&SyncTestNode]) -> Res<()> 
                 .sync_repo
                 .rcx
                 .big_repo
-                .doc_head_state(*big_doc_id)
+                .doc_head_state(big_doc_id.clone())
                 .await?;
             let mut sed_heads = head_state
                 .sedimentree_heads
@@ -1046,7 +1008,7 @@ fn big_sync_store_diff(
         snapshot
             .memberships
             .iter()
-            .map(|(part, obj, event_type, _)| ((*part, *obj), *event_type != 2))
+            .map(|(part, obj, event_type, _)| ((part.clone(), obj.clone()), *event_type != 2))
             .collect::<BTreeMap<_, _>>()
     };
     let left_memberships = semantic_memberships(left);
@@ -1203,12 +1165,30 @@ async fn collect_doc_branch_heads(
         };
 
         for branch_name in entry.branches.keys() {
-            if !branch_name.starts_with("/tmp") && !branches.branches.contains_key(branch_name) {
-                return Ok(Err(format!(
-                    "doc {doc_id}: branch '{branch_name}' is in the entry but absent from \
-                     \u{0020}resolved branch heads (branch doc not ready)",
-                )));
+            if branch_name.starts_with("/tmp") || branches.branches.contains_key(branch_name) {
+                continue;
             }
+            // A branch whose branch doc this node cannot reach is legitimately
+            // absent from the resolved listing: a peer's delete revokes this
+            // repo's access to the branch doc on the keyhive channel while the
+            // tombstone that drops the branch from the entry travels on the doc
+            // channel. Only a *reachable* branch missing from the listing is a
+            // convergence offender.
+            let branch = daybook_types::doc::BranchPathBuf::from(branch_name.as_str());
+            let Some(branch_ref) = node.drawer.get_branch_ref(&doc_id, &branch).await? else {
+                continue;
+            };
+            if !node
+                .drawer
+                .branch_doc_reachable(&branch_ref.branch_doc_id)
+                .await?
+            {
+                continue;
+            }
+            return Ok(Err(format!(
+                "doc {doc_id}: branch '{branch_name}' is in the entry but absent from \
+                 \u{0020}resolved branch heads (branch doc not ready)",
+            )));
         }
 
         let mut branch_names = branches.branches.keys().cloned().collect::<Vec<_>>();
@@ -1329,7 +1309,7 @@ async fn apply_event(
     kind: EventKind,
     idx: usize,
     rng: &mut StdRng,
-) -> Res<Option<String>> {
+) -> Res<StressEventOutcome> {
     match kind {
         EventKind::CreateDoc => {
             let mut facets = std::collections::HashMap::new();
@@ -1347,16 +1327,21 @@ async fn apply_event(
                     )),
                 })
                 .await?;
-            Ok(Some(format!("created doc {id}")))
+            Ok(StressEventOutcome::Applied(format!("created doc {id}")))
         }
         EventKind::ModifyDoc => {
             let Some(doc_id) = pick_doc_id(node, rng).await? else {
-                return Ok(None);
+                return Ok(StressEventOutcome::Skipped(
+                    "no ready document to modify".into(),
+                ));
             };
             let branch = daybook_types::doc::BranchPathBuf::from("main");
+            info!(idx, ?kind, %doc_id, %branch, "stress target selected");
             let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await?
             else {
-                return Ok(None);
+                return Ok(StressEventOutcome::Skipped(format!(
+                    "main branch unavailable on {doc_id}"
+                )));
             };
             let mut facets_set = std::collections::HashMap::new();
             facets_set.insert(
@@ -1382,21 +1367,23 @@ async fn apply_event(
                 )
                 .await;
             if let Err(err) = out {
-                if is_missing_facets_object_err(&err) {
-                    return Ok(None);
-                }
                 return Err(err.into());
             }
-            Ok(Some(format!("modified doc {doc_id}")))
+            Ok(StressEventOutcome::Applied(format!(
+                "modified doc {doc_id}"
+            )))
         }
         EventKind::CreateBranch => {
             let Some(doc_id) = pick_doc_id(node, rng).await? else {
-                return Ok(None);
+                return Ok(StressEventOutcome::Skipped(
+                    "no ready document for new branch".into(),
+                ));
             };
             let new_branch = daybook_types::doc::BranchPathBuf::from(format!(
                 "/stress/{}",
                 rng.random_range(0..32)
             ));
+            info!(idx, ?kind, %doc_id, new_branch = %new_branch, "stress target selected");
             let Some((_doc, main_heads)) = node
                 .drawer
                 .get_with_heads(
@@ -1406,7 +1393,9 @@ async fn apply_event(
                 )
                 .await?
             else {
-                return Ok(None);
+                return Ok(StressEventOutcome::Skipped(format!(
+                    "source main branch unavailable on {doc_id}"
+                )));
             };
             let mut facets_set = std::collections::HashMap::new();
             facets_set.insert(
@@ -1424,13 +1413,11 @@ async fn apply_event(
                 )
                 .await;
             if let Err(err) = create_out {
-                if is_missing_facets_object_err(&err) {
-                    return Ok(None);
-                }
                 match err {
-                    crate::drawer::types::DrawerError::BranchAlreadyExists { .. }
-                    | crate::drawer::types::DrawerError::BranchNotFound { .. } => {
-                        return Ok(None);
+                    crate::drawer::types::DrawerError::BranchNotFound { .. } => {
+                        return Ok(StressEventOutcome::Skipped(format!(
+                            "branch create rejected on {doc_id}: {err}"
+                        )));
                     }
                     _ => return Err(err.into()),
                 }
@@ -1451,20 +1438,24 @@ async fn apply_event(
                 )
                 .await;
             if let Err(err) = out {
-                if is_missing_facets_object_err(&err) {
-                    return Ok(None);
-                }
                 return Err(err.into());
             }
-            Ok(Some(format!("created branch {new_branch} on {doc_id}")))
+            Ok(StressEventOutcome::Applied(format!(
+                "created branch {new_branch} on {doc_id}"
+            )))
         }
         EventKind::ModifyBranch => {
             let Some((doc_id, branch)) = pick_doc_and_branch(node, rng).await? else {
-                return Ok(None);
+                return Ok(StressEventOutcome::Skipped(
+                    "no ready document and branch to modify".into(),
+                ));
             };
+            info!(idx, ?kind, %doc_id, %branch, "stress target selected");
             let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await?
             else {
-                return Ok(None);
+                return Ok(StressEventOutcome::Skipped(format!(
+                    "branch {branch} unavailable on {doc_id}"
+                )));
             };
             let mut facets_set = std::collections::HashMap::new();
             facets_set.insert(
@@ -1489,16 +1480,23 @@ async fn apply_event(
             if let Err(err) = out {
                 let msg = err.to_string();
                 if msg.contains("facets object not found") || msg.contains("unrecognized branch") {
-                    return Ok(None);
+                    return Ok(StressEventOutcome::Skipped(format!(
+                        "branch {branch} update rejected on {doc_id}: {err}"
+                    )));
                 }
                 return Err(err.into());
             }
-            Ok(Some(format!("modified branch {branch} on {doc_id}")))
+            Ok(StressEventOutcome::Applied(format!(
+                "modified branch {branch} on {doc_id}"
+            )))
         }
         EventKind::DeleteBranch => {
             let Some((doc_id, branch)) = pick_doc_and_non_main_branch(node, rng).await? else {
-                return Ok(None);
+                return Ok(StressEventOutcome::Skipped(
+                    "no non-main branch to delete".into(),
+                ));
             };
+            info!(idx, ?kind, %doc_id, %branch, "stress target selected");
             let res = node.drawer.delete_branch(&doc_id, &branch, None).await;
             let deleted = match res {
                 Ok(del) => del,
@@ -1508,24 +1506,35 @@ async fn apply_event(
                         || msg.contains("unrecognized branch")
                         || msg.contains("facets object not found")
                     {
-                        return Ok(None);
+                        return Ok(StressEventOutcome::Skipped(format!(
+                            "branch {branch} delete rejected on {doc_id}: {err}"
+                        )));
                     }
                     return Err(err.into());
                 }
             };
             if !deleted {
-                return Ok(None);
+                return Ok(StressEventOutcome::Skipped(format!(
+                    "branch {branch} was not deleted on {doc_id}"
+                )));
             }
-            Ok(Some(format!("deleted branch {branch} on {doc_id}")))
+            Ok(StressEventOutcome::Applied(format!(
+                "deleted branch {branch} on {doc_id}"
+            )))
         }
         EventKind::PutBlobAttach => {
             let Some(doc_id) = pick_doc_id(node, rng).await? else {
-                return Ok(None);
+                return Ok(StressEventOutcome::Skipped(
+                    "no ready document for blob attachment".into(),
+                ));
             };
             let branch = daybook_types::doc::BranchPathBuf::from("main");
+            info!(idx, ?kind, %doc_id, %branch, "stress target selected");
             let Some((_doc, heads)) = node.drawer.get_with_heads(&doc_id, &branch, None).await?
             else {
-                return Ok(None);
+                return Ok(StressEventOutcome::Skipped(format!(
+                    "main branch unavailable for blob attachment on {doc_id}"
+                )));
             };
             let payload = format!("blob-stress-{idx}-{}", rng.random::<u64>()).into_bytes();
             let hash = node.blobs_repo.put(&payload).await?;
@@ -1557,22 +1566,57 @@ async fn apply_event(
                 )
                 .await;
             if let Err(err) = out {
-                if is_missing_facets_object_err(&err) {
-                    return Ok(None);
-                }
                 return Err(err.into());
             }
-            Ok(Some(format!("attached blob {hash} to {doc_id}")))
+            Ok(StressEventOutcome::Applied(format!(
+                "attached blob {hash} to {doc_id}"
+            )))
         }
     }
 }
 
-fn is_missing_facets_object_err(err: &impl std::fmt::Display) -> bool {
-    err.to_string()
-        .contains("facets object not found in content doc")
+// Mirrors the product's write-access gate for the document a write is routed
+// to. A branch write goes to the branch's own document: `mutations.rs
+// ::update_at_heads_with_scope` resolves
+// `get_handle_by_branch_doc_id(branch_ref.branch_doc_id)` and writes there, so
+// the doc worker's gate `NativeBigRepoIo::has_doc_write_access` runs with
+// `doc_id == branch_doc_id`: editor access for the local agent, or for the
+// well-known Public agent.
+//
+// Target selection needs this because the drawer's "branch is listed" and the
+// keyhive's "branch doc is writable" are independent channels. Deleting a
+// `BranchKind::Replicated` branch revokes that branch doc's access on the
+// keyhive channel (`DrawerRepo::remove_branch_from_partitions_if_needed` ->
+// `BigRepo::revoke_doc_access`) and never touches the parent document, while the
+// tombstone that drops the branch from the listing travels on the doc channel.
+// A peer's delete can therefore leave this node still listing a branch whose
+// branch doc this node may no longer write, and the product refuses that write.
+async fn branch_doc_writable(node: &SyncTestNode, branch_doc_id: &DocumentId) -> bool {
+    use big_repo::keyhive_core::principal::{identifier::Identifier, public::Public};
+
+    // Same derivation as the keyhive diagnostics above: the local keyhive agent
+    // is this node's iroh endpoint identity.
+    let endpoint_id = node.sync_repo.router.endpoint().id();
+    let local_agent = Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(endpoint_id.as_bytes())
+            .expect("stress peer id must be a verifying key"),
+    );
+    let branch_doc_bytes = branch_doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE);
+    let branch_ident = Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(&branch_doc_bytes)
+            .expect("stress branch doc id must be a verifying key"),
+    );
+    let keyhive = node.sync_repo.rcx.big_repo.keyhive();
+    let local_access = keyhive.agent_access_on(&local_agent, branch_ident).await;
+    if local_access.is_some_and(|access| access.is_editor()) {
+        return true;
+    }
+    let public_access = keyhive.agent_access_on(&Public.id(), branch_ident).await;
+    public_access.is_some_and(|access| access.is_editor())
 }
 
 async fn pick_doc_id(node: &SyncTestNode, rng: &mut StdRng) -> Res<Option<String>> {
+    let main_branch = daybook_types::doc::BranchPath::new("main");
     let mut docs = list_doc_ids(&node.drawer)
         .await?
         .into_iter()
@@ -1582,6 +1626,14 @@ async fn pick_doc_id(node: &SyncTestNode, rng: &mut StdRng) -> Res<Option<String
     }
     docs.shuffle(rng);
     for doc_id in docs {
+        // The callers write at the doc's main branch, so its branch doc is the
+        // document the product routes the write to.
+        let Some(branch_ref) = node.drawer.get_branch_ref(&doc_id, main_branch).await? else {
+            continue;
+        };
+        if !branch_doc_writable(node, &branch_ref.branch_doc_id).await {
+            continue;
+        }
         match node
             .drawer
             .get_doc_with_facets_at_branch(
@@ -1621,10 +1673,19 @@ async fn pick_doc_and_branch(
         return Ok(None);
     }
     names.shuffle(rng);
-    Ok(Some((
-        doc_id,
-        daybook_types::doc::BranchPathBuf::from(names[0].clone()),
-    )))
+    for name in names {
+        // `DocNBranches.branches` carries heads, keyed by name, not branch refs,
+        // so each candidate branch's branch doc is resolved here.
+        let branch = daybook_types::doc::BranchPathBuf::from(name);
+        let Some(branch_ref) = node.drawer.get_branch_ref(&doc_id, &branch).await? else {
+            continue;
+        };
+        if !branch_doc_writable(node, &branch_ref.branch_doc_id).await {
+            continue;
+        }
+        return Ok(Some((doc_id, branch)));
+    }
+    Ok(None)
 }
 
 async fn pick_doc_and_non_main_branch(
@@ -1650,10 +1711,16 @@ async fn pick_doc_and_non_main_branch(
             continue;
         }
         non_main.shuffle(rng);
-        return Ok(Some((
-            doc_id,
-            daybook_types::doc::BranchPathBuf::from(non_main[0].clone()),
-        )));
+        for name in non_main {
+            let branch = daybook_types::doc::BranchPathBuf::from(name);
+            let Some(branch_ref) = node.drawer.get_branch_ref(&doc_id, &branch).await? else {
+                continue;
+            };
+            if !branch_doc_writable(node, &branch_ref.branch_doc_id).await {
+                continue;
+            }
+            return Ok(Some((doc_id, branch)));
+        }
     }
     Ok(None)
 }

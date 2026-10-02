@@ -319,7 +319,13 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         })
         .await?;
 
-    assert_eq!(big_sync_host.store.member_count(partition_id).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
 
     let main_heads = repo
         .get_doc_branches(&doc_id)
@@ -344,7 +350,13 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         .expect("local branch ref missing after creation");
     // Local branches are checkout-local work and must not enter the
     // replicated drawer partition.
-    assert_eq!(big_sync_host.store.member_count(partition_id).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
     let local_branch_doc = repo
         .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("/tmp/job-1"), None)
         .await?
@@ -426,7 +438,13 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         Some(main_heads.clone()),
     )
     .await?;
-    assert_eq!(big_sync_host.store.member_count(partition_id).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
 
     repo.create_branch_at_heads_from_branch(
         &doc_id,
@@ -509,19 +527,602 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
         Some(main_heads),
     )
     .await?;
-    assert_eq!(big_sync_host.store.member_count(partition_id).await?, 2);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        2
+    );
 
     assert!(
         repo.delete_branch(&doc_id, &local_branch("branch-a"), None)
             .await?
     );
-    assert_eq!(big_sync_host.store.member_count(partition_id).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
 
     assert!(repo.del(&doc_id).await?);
     assert_eq!(big_sync_host.store.member_count(partition_id).await?, 0);
 
     stop_token.stop().await?;
     acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_branch_whose_branch_doc_access_is_revoked_leaves_the_listing_and_is_refused_as_unknown()
+-> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
+
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        let handle = big_repo.create_doc(doc).await?;
+        handle.document_id()
+    };
+
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        big_sync_host.store,
+        drawer_doc_id,
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_store_sql().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        entry_pool,
+        doc_pool,
+        None,
+    )
+    .await?;
+
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let doc_id = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(
+                title_key.clone(),
+                WellKnownFacet::TitleGeneric("Initial".into()).into(),
+            )]
+            .into(),
+            user_path: None,
+        })
+        .await?;
+
+    let main_heads = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing doc branches after add")?
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch")?
+        .clone();
+    let branch = BranchPathBuf::from("/stress/1");
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &branch,
+        BranchPath::new("main"),
+        &main_heads,
+        None,
+    )
+    .await?;
+
+    // Positive control: while the branch doc is reachable the branch is listed
+    // and a write to it succeeds, so the assertions below cannot pass vacuously.
+    let branch_heads = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing doc branches after replicated branch creation")?
+        .branches
+        .get("/stress/1")
+        .ok_or_eyre("replicated /stress/1 branch not listed while reachable")?
+        .clone();
+    repo.update_at_heads(
+        DocPatch {
+            id: doc_id.clone(),
+            facets_set: [(
+                title_key.clone(),
+                WellKnownFacet::TitleGeneric("reachable".into()).into(),
+            )]
+            .into(),
+            facets_remove: vec![],
+            user_path: None,
+        },
+        &branch,
+        Some(branch_heads.clone()),
+    )
+    .await?;
+
+    // Positive control for the reachability gate the merge paths consult: with both
+    // branch docs reachable the merge runs, moves the target's heads, and carries the
+    // source's change into the target, so the refusals below cannot be satisfied by a
+    // gate that refuses every merge.
+    let main_heads_before_merge = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing doc branches before the merge")?
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch before the merge")?
+        .clone();
+    let stress_heads = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing doc branches before the merge")?
+        .branches
+        .get("/stress/1")
+        .ok_or_eyre("missing /stress/1 before the merge")?
+        .clone();
+    repo.merge_from_heads(
+        &doc_id,
+        BranchPath::new("main"),
+        &branch,
+        &stress_heads,
+        None,
+    )
+    .await?;
+    let main_heads_after_merge = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing doc branches after the merge")?
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch after the merge")?
+        .clone();
+    assert_ne!(
+        main_heads_before_merge, main_heads_after_merge,
+        "a merge whose two branch docs are reachable must move the target's heads"
+    );
+    let merged_main = repo
+        .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("main"), None)
+        .await?
+        .ok_or_eyre("missing main branch after the merge")?;
+    assert_eq!(
+        merged_main.facets.get(&title_key),
+        Some(&serde_json::Value::from(WellKnownFacet::TitleGeneric(
+            "reachable".into()
+        ))),
+        "a merge whose two branch docs are reachable must carry the source's change into the target"
+    );
+
+    let branch_ref = repo
+        .get_branch_ref(&doc_id, &branch)
+        .await?
+        .ok_or_eyre("replicated /stress/1 branch ref missing")?;
+
+    // A peer's delete revokes this repo's drawer and content groups' access to the
+    // branch doc (`remove_branch_from_partitions_if_needed`) while the tombstone
+    // that drops the branch from the entry travels on the doc channel, so a peer
+    // that holds the revocation can still list the branch. A peer's membership is
+    // group-only, so the revocation alone removes its reachability; this node
+    // created the branch doc, so it also holds direct admin membership that no
+    // group revocation takes away. Drop both to reach the peer's local state: a
+    // branch doc this node cannot reach while the entry below still lists the
+    // branch.
+    repo.remove_branch_from_partitions_if_needed(
+        super::BranchKind::Replicated,
+        branch_ref.branch_doc_id.clone(),
+    )
+    .await?;
+    repo.big_repo
+        .revoke_doc_access(
+            branch_ref.branch_doc_id.clone(),
+            repo.big_repo.local_keyhive_agent().await?.clone(),
+        )
+        .await?;
+    assert!(
+        !repo.branch_doc_reachable(&branch_ref.branch_doc_id).await?,
+        "the revocation must leave this node unable to reach the branch doc",
+    );
+    // The incoherent state is real and unchanged: the entry still lists the
+    // branch because we did not delete it, while the resolved listing no longer
+    // does because this node can no longer reach its branch doc.
+    let entry = repo
+        .get_entry(&doc_id)
+        .await?
+        .ok_or_eyre("doc entry missing after revocation")?;
+    assert!(entry.branches.contains_key("/stress/1"));
+    let listed = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("doc branches missing after revocation")?;
+    assert!(!listed.branches.contains_key("/stress/1"));
+
+    // The write must be refused as an unknown branch, not as the doc worker's
+    // local access refusal (a listed branch the node cannot write is the bug).
+    let err = repo
+        .update_at_heads(
+            DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    title_key.clone(),
+                    WellKnownFacet::TitleGeneric("unreachable".into()).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            &branch,
+            Some(branch_heads),
+        )
+        .await
+        .expect_err("a write to a branch whose branch doc is unreachable must be refused");
+    assert!(
+        matches!(err, DrawerError::BranchNotFound { .. }),
+        "expected BranchNotFound, got {err:?}"
+    );
+
+    // The merge paths are use sites too, on both sides of the merge. The source is the
+    // unreachable branch here and the target (`main`) is reachable, so only the source
+    // gate can produce this refusal.
+    let err = repo
+        .merge_from_heads(
+            &doc_id,
+            BranchPath::new("main"),
+            &branch,
+            &stress_heads,
+            None,
+        )
+        .await
+        .expect_err("a merge whose source branch doc is unreachable must be refused");
+    assert!(
+        matches!(&err, DrawerError::BranchNotFound { name } if name.as_str() == "/stress/1"),
+        "expected BranchNotFound for /stress/1, got {err:?}"
+    );
+    assert!(
+        !err.to_string().contains("local access is not writable"),
+        "the refusal must not report a permission problem on a live branch: {err}"
+    );
+
+    // And with the roles swapped: the target is the unreachable branch, while the source
+    // (`main`) is reachable, so only the target gate can produce this refusal.
+    let err = repo
+        .merge_from_heads(
+            &doc_id,
+            &branch,
+            BranchPath::new("main"),
+            &main_heads_after_merge,
+            None,
+        )
+        .await
+        .expect_err("a merge whose target branch doc is unreachable must be refused");
+    assert!(
+        matches!(&err, DrawerError::BranchNotFound { name } if name.as_str() == "/stress/1"),
+        "expected BranchNotFound for /stress/1, got {err:?}"
+    );
+    assert!(
+        !err.to_string().contains("local access is not writable"),
+        "the refusal must not report a permission problem on a live branch: {err}"
+    );
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+/// A single drawer node on a fresh in-memory BigRepo, carrying the boot preamble
+/// the branch-lifecycle tests need in one place. The node owns the drawer
+/// document's worker and the BigSync worker, so a test must call
+/// [`DrawerNode::stop`] before dropping it.
+struct DrawerNode {
+    repo: Arc<DrawerRepo>,
+    big_repo: SharedBigRepo,
+    stop_token: crate::repos::RepoStopToken,
+    stop_workers: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+}
+
+impl DrawerNode {
+    async fn stop(self) -> Res<()> {
+        self.stop_token.stop().await?;
+        (self.stop_workers)().await
+    }
+}
+
+async fn boot_drawer_node() -> Res<DrawerNode> {
+    utils_rs::testing::setup_tracing_once();
+    let (big_repo, big_sync_host, stop) = boot_repo().await?;
+
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        big_repo.create_doc(doc).await?.document_id()
+    };
+
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        Arc::clone(&big_sync_host.store),
+        drawer_doc_id,
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_store_sql().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        entry_pool,
+        doc_pool,
+        None,
+    )
+    .await?;
+
+    Ok(DrawerNode {
+        repo,
+        big_repo,
+        stop_token,
+        stop_workers: stop,
+    })
+}
+
+/// A document with a `main` branch and one replicated branch (`/test-device/<name>`;
+/// `/tmp/*` is the local kind, which never enters the partition). Returns
+/// `(doc_id, branch_path)`.
+async fn replicated_branch_fixture(
+    node: &DrawerNode,
+    branch_name: &str,
+) -> Res<(DocId, BranchPathBuf)> {
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let doc_id = node
+        .repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(
+                title_key,
+                WellKnownFacet::TitleGeneric("branch lifecycle".into()).into(),
+            )]
+            .into(),
+            user_path: None,
+        })
+        .await?;
+
+    let main_heads = node
+        .repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing doc branches after add")?
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch")?
+        .clone();
+
+    let branch = local_branch(branch_name);
+    node.repo
+        .create_branch_at_heads_from_branch(
+            &doc_id,
+            &branch,
+            BranchPath::new("main"),
+            &main_heads,
+            None,
+        )
+        .await?;
+
+    Ok((doc_id, branch))
+}
+
+/// A replicated branch delete emits two facts on two channels with no ordering
+/// between them: the keyhive-channel revocation
+/// (`remove_branch_from_partitions_if_needed` — the partition removal plus the
+/// drawer-group and content-docs-group revocations) and the doc-channel tombstone
+/// (`BranchDeleteTombstone` reconciled into the drawer document). Only the end
+/// state is assertable without a failure at the commit, so this test injects one
+/// and pins the order: by the time the commit failed, the revocation had already
+/// been applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn delete_a_replicated_branch_revokes_before_it_commits_the_tombstone() -> Res<()> {
+    let node = boot_drawer_node().await?;
+    let (doc_id, branch) = replicated_branch_fixture(&node, "order-a").await?;
+
+    let branch_ref = node
+        .repo
+        .get_branch_ref(&doc_id, &branch)
+        .await?
+        .ok_or_eyre("replicated branch reference missing before delete")?;
+    let branch_identity = big_repo::keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &branch_ref
+                .branch_doc_id
+                .to_bytes32()
+                .expect("generated branch identity is 32 bytes"),
+        )?,
+    );
+    let revoked_groups = [
+        node.repo.drawer_group.id().into(),
+        node.repo.content_docs_group.id().into(),
+    ];
+    for group in &revoked_groups {
+        assert!(
+            node.big_repo
+                .keyhive()
+                .agent_access_on(group, branch_identity)
+                .await
+                .is_some(),
+            "positive control: group {group} reaches the live branch"
+        );
+    }
+
+    node.repo.fail_next_drawer_doc_commit_for_test();
+    let err = node
+        .repo
+        .delete_branch(&doc_id, &branch, None)
+        .await
+        .expect_err("the injected drawer-doc commit failure must fail the delete");
+    assert!(
+        err.to_string()
+            .contains("injected drawer-doc commit failure"),
+        "expected the injected failure, got {err:?}"
+    );
+
+    // AFW can republish the still-live branch into its partition; the creator
+    // also retains direct admin access. Neither can undo these two group grants
+    // being revoked, which is the action-scoped keyhive effect under test.
+    for group in &revoked_groups {
+        assert!(
+            node.big_repo
+                .keyhive()
+                .agent_access_on(group, branch_identity)
+                .await
+                .is_none(),
+            "group {group} must be revoked before the failed drawer-doc commit"
+        );
+    }
+
+    // The tombstone half did not: the entry still lists the branch and records no
+    // deletion for it.
+    let entry = node
+        .repo
+        .get_entry(&doc_id)
+        .await?
+        .ok_or_eyre("doc entry missing after the failed delete")?;
+    let branch_name = branch.to_string();
+    assert!(
+        entry.branches.contains_key(&branch_name),
+        "a failed delete must not drop the branch from the entry"
+    );
+    assert!(
+        !entry.branches_deleted.contains_key(&branch_name),
+        "a failed delete must not record a tombstone"
+    );
+
+    node.stop().await?;
+    Ok(())
+}
+
+/// The recoverability half of the two-channel window: a delete that failed after
+/// the revocation must leave the branch deletable by name, because the revocation
+/// is idempotent (`remove_obj_from_part` and `revoke_doc_access` early-return on
+/// nothing left to do) and the entry still lists the branch. Re-running the delete
+/// unchanged must converge. This is what the current order buys, and it is the
+/// property a reordering plus GC would have to preserve.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_branch_delete_leaves_the_branch_deletable_by_name() -> Res<()> {
+    let node = boot_drawer_node().await?;
+    let (doc_id, branch) = replicated_branch_fixture(&node, "recover-a").await?;
+    let branch_ref = node
+        .repo
+        .get_branch_ref(&doc_id, &branch)
+        .await?
+        .ok_or_eyre("replicated branch ref missing")?;
+
+    node.repo.fail_next_drawer_doc_commit_for_test();
+    node.repo
+        .delete_branch(&doc_id, &branch, None)
+        .await
+        .expect_err("the injected drawer-doc commit failure must fail the first delete");
+
+    assert!(
+        node.repo.delete_branch(&doc_id, &branch, None).await?,
+        "re-running the delete unchanged must converge and report the removal"
+    );
+
+    let entry = node
+        .repo
+        .get_entry(&doc_id)
+        .await?
+        .ok_or_eyre("doc entry missing after the converging delete")?;
+    let branch_name = branch.to_string();
+    assert!(
+        !entry.branches.contains_key(&branch_name),
+        "the converging delete must drop the branch from the entry"
+    );
+    let tombstones = entry
+        .branches_deleted
+        .get(&branch_name)
+        .ok_or_eyre("the converging delete must record the branch tombstone")?;
+    assert_eq!(
+        tombstones
+            .last()
+            .map(|tombstone| tombstone.branch_doc_id.clone()),
+        Some(branch_ref.branch_doc_id),
+        "the tombstone must name the branch doc that was deleted"
+    );
+
+    node.stop().await?;
+    Ok(())
+}
+
+/// Document-level delete is the codebase's own same-channel atomicity precedent:
+/// `del` pushes the `DocDeleteTombstone` into `docs.map_deleted` and removes the
+/// entry from `docs.map` inside ONE automerge transaction with one commit. The
+/// branch path cannot be atomic — its halves live on different channels — so this
+/// test protects the reference implementation that decision rests on: splitting
+/// the two writes into two commits must fail here.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_document_commits_its_tombstone_and_its_removal_in_one_transaction() -> Res<()> {
+    let node = boot_drawer_node().await?;
+    let (doc_id, _branch) = replicated_branch_fixture(&node, "atomic-a").await?;
+
+    let changes_before = node
+        .repo
+        .drawer_doc_handle
+        .with_document_read(|doc| doc.get_changes(&[]).len())
+        .await;
+
+    assert!(
+        node.repo.del(&doc_id).await?,
+        "deleting an existing document must report success"
+    );
+
+    let heads_after: Arc<[automerge::ChangeHash]> = node
+        .repo
+        .drawer_doc_handle
+        .with_document_read(|doc| Arc::from(doc.get_heads()))
+        .await;
+    let changes_after = node
+        .repo
+        .drawer_doc_handle
+        .with_document_read(|doc| doc.get_changes(&[]).len())
+        .await;
+    assert_eq!(
+        changes_after,
+        changes_before + 1,
+        "the tombstone and the entry removal must land in one commit: the drawer doc must gain exactly one change"
+    );
+    assert!(
+        node.repo.get_entry(&doc_id).await?.is_none(),
+        "the entry must be gone from docs.map"
+    );
+    assert!(
+        node.repo
+            .latest_doc_delete_tombstone(&doc_id, &heads_after)
+            .await?
+            .is_some(),
+        "the delete tombstone must be readable at the heads that same commit produced"
+    );
+
+    node.stop().await?;
+    Ok(())
+}
+
+/// `branch_doc_reachable` states in prose that the write gate derives its local
+/// identifier from this repo's peer key and that the local keyhive agent is looked
+/// up by that same peer id, so the two must be the same value. If the identity ever
+/// breaks, the consequence-level branch tests fail for a confusing reason (the
+/// branch looks unreachable for no stated cause), so assert the identity itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_write_gate_and_the_local_keyhive_agent_agree_on_the_identity() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    // The gate's derivation, verbatim from `NativeBigRepoIo::has_doc_write_access`
+    // (src/big_repo/runtime2/native.rs:665-670).
+    let gate_identifier = big_repo::keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(&node.big_repo.local_peer_id().to_bytes32()?)?,
+    );
+    let keyhive_identifier = node.big_repo.local_keyhive_agent().await?.id();
+    assert_eq!(
+        gate_identifier.to_bytes(),
+        keyhive_identifier.to_bytes(),
+        "the write gate derives its local identifier from the peer key, so the local keyhive agent must carry that same identifier"
+    );
+
+    node.stop().await?;
     Ok(())
 }
 
@@ -560,12 +1161,12 @@ async fn register_existing_doc_initializes_branch_system_facets() -> Res<()> {
     let branch_doc_id = branch_handle.document_id();
     let doc_id = DocId::from(branch_doc_id.to_string());
 
-    repo.register_existing_doc(&doc_id, branch_doc_id, BranchPath::new("main"))
+    repo.register_existing_doc(&doc_id, branch_doc_id.clone(), BranchPath::new("main"))
         .await?;
     let change_count_after_register = branch_handle
         .with_document_read(|doc| doc.get_changes(&[]).len())
         .await;
-    repo.register_existing_doc(&doc_id, branch_doc_id, BranchPath::new("main"))
+    repo.register_existing_doc(&doc_id, branch_doc_id.clone(), BranchPath::new("main"))
         .await?;
     assert_eq!(
         branch_handle
@@ -1604,7 +2205,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     assert!(
         dmeta_after_add.actors.contains_key(
             &repo
-                .content_actor_id(Some(&user_path), main_branch_doc_id)
+                .content_actor_id(Some(&user_path), main_branch_doc_id.clone())
                 .to_string()
         ),
         "user should be recorded on add dmeta"
@@ -2048,7 +2649,8 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
             &main_heads,
             std::slice::from_ref(&note_key),
         )
-        .await?;
+        .await?
+        .expect("doc resolvable in test");
     assert!(
         touched.contains(&note_key),
         "expected Note facet change from user_path-scoped actor to count as local"
@@ -3013,7 +3615,7 @@ async fn perf_big_repo_disk_add_like_drawer_baseline() -> Res<()> {
                     branches: [(
                         "main".to_string(),
                         StoredBranchRef {
-                            branch_doc_id: content_doc_id,
+                            branch_doc_id: content_doc_id.clone(),
                         },
                     )]
                     .into(),

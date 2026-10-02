@@ -111,7 +111,7 @@ impl DrawerRepo {
         )
         .bind(doc_id)
         .bind(branch_path.to_string())
-        .bind(&branch_doc_id.as_bytes()[..])
+        .bind(branch_doc_id.as_bytes())
         .bind(vtag.version.to_string())
         .bind(vtag.actor_id.to_string())
         .bind(updated_at)
@@ -133,7 +133,7 @@ impl DrawerRepo {
         .fetch_optional(&self.meta_store_sql.write_pool)
         .await?;
 
-        Ok(rec.map(|blob| DocumentId::new(blob.try_into().expect(ERROR_IMPOSSIBLE))))
+        Ok(rec.map(DocumentId::new))
     }
 
     pub(super) async fn list_local_branch_refs(
@@ -149,12 +149,7 @@ impl DrawerRepo {
         .fetch_all(&self.meta_store_sql.write_pool)
         .await?
         .into_iter()
-        .map(|(path, id)| {
-            (
-                path,
-                DocumentId::new(id.try_into().expect(ERROR_IMPOSSIBLE)),
-            )
-        })
+        .map(|(path, id)| (path, DocumentId::new(id)))
         .collect())
     }
 
@@ -185,7 +180,7 @@ impl DrawerRepo {
         )
         .bind(doc_id)
         .bind(branch_path.to_string())
-        .bind(&branch_doc_id.as_bytes()[..])
+        .bind(branch_doc_id.as_bytes())
         .bind(branch_heads_json)
         .bind(vtag.version.to_string())
         .bind(vtag.actor_id.to_string())
@@ -252,7 +247,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let Some(latest_heads) = self
-            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
+            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id.clone())
             .await?
         else {
             return Ok(None);
@@ -281,8 +276,17 @@ impl DrawerRepo {
             let Some(branch_ref) = entry.branches.get(&branch_name) else {
                 continue;
             };
+            // A branch this node cannot reach is not part of its view: a peer's
+            // delete revokes this repo's access to the branch doc on the keyhive
+            // channel while the tombstone that drops the branch from the entry
+            // travels on the doc channel, so the entry can list a branch whose
+            // branch doc this node can no longer reach. Presenting it as a live
+            // branch would surface a write that can only be refused.
+            if !self.branch_doc_reachable(&branch_ref.branch_doc_id).await? {
+                continue;
+            }
             let Some(latest_heads) = self
-                .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
+                .get_branch_heads_by_doc_id(branch_ref.branch_doc_id.clone())
                 .await?
             else {
                 // TEMP-INSTRUMENTATION: warn so convergence hangs name the offender.
@@ -297,7 +301,10 @@ impl DrawerRepo {
             branches.insert(branch_name, latest_heads);
         }
         for (branch_path, branch_doc_id) in self.list_local_branch_refs(doc_id).await? {
-            let Some(latest_heads) = self.get_branch_heads_by_doc_id(branch_doc_id).await? else {
+            let Some(latest_heads) = self
+                .get_branch_heads_by_doc_id(branch_doc_id.clone())
+                .await?
+            else {
                 debug!(
                     %doc_id,
                     %branch_path,

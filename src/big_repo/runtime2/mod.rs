@@ -5,6 +5,7 @@ pub(crate) mod automerge_frontier_worker;
 mod causal_checkpoint_worker;
 pub mod doc_revision_store;
 mod group_part_worker;
+pub mod keyhive_access_stream;
 pub(crate) mod keyhive_admission;
 
 pub use automerge_frontier_worker::{
@@ -57,7 +58,7 @@ pub use hub::{Runtime2StopToken, spawn_runtime2};
 /// injected [`RuntimeIo`] / [`DocIo`] / [`TransportConnect`] traits.
 pub struct Runtime2Config<F: FutureForm, R: TaskRuntime<F>> {
     /// Local peer identity (derived from signer by the caller).
-    pub local_peer_id: big_sync_core::PeerId,
+    pub local_peer_id: big_sync_core::PeerKey,
     /// Hub-level IO (keyhive CRUD, sedimentree presence, transport).
     pub runtime_io: std::sync::Arc<dyn RuntimeIo<F>>,
     /// IO surface shared by per-document workers (encrypt, decrypt, store).
@@ -107,12 +108,12 @@ pub trait TransportConnect<F: FutureForm>: Send + Sync {
     #[expect(clippy::type_complexity)]
     fn connect(
         &self,
-        expected_peer: big_sync_core::PeerId,
+        expected_peer: big_sync_core::PeerKey,
         addr_blob: Box<dyn std::any::Any + Send>,
     ) -> F::Future<
         'static,
         eyre::Result<(
-            big_sync_core::PeerId,
+            big_sync_core::PeerKey,
             std::sync::Arc<std::sync::atomic::AtomicBool>,
             F::Future<'static, eyre::Result<()>>,
         )>,
@@ -127,7 +128,7 @@ pub trait TransportConnect<F: FutureForm>: Send + Sync {
     ) -> F::Future<
         'static,
         eyre::Result<(
-            big_sync_core::PeerId,
+            big_sync_core::PeerKey,
             std::sync::Arc<std::sync::atomic::AtomicBool>,
             F::Future<'static, eyre::Result<()>>,
         )>,
@@ -140,7 +141,7 @@ pub trait TransportConnect<F: FutureForm>: Send + Sync {
     /// Returns when the transport has finished tearing down.
     fn close(
         &self,
-        peer_id: big_sync_core::PeerId,
+        peer_id: big_sync_core::PeerKey,
         closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> F::Future<'static, eyre::Result<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>>;
 }

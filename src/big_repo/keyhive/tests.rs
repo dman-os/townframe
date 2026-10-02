@@ -1,5 +1,6 @@
 use super::*;
 use keyhive_core::access::Access;
+use keyhive_core::principal::individual::{Individual, op::KeyOp};
 use keyhive_crypto::{share_key::ShareKey, share_key::ShareSecretKey};
 use nonempty::nonempty;
 
@@ -105,7 +106,7 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
         .await?;
     // A reservation is not yet a Keyhive authority: no document exists and
     // no group contains it.
-    assert!(!owner.document_has_content(doc_id).await?);
+    assert!(!owner.document_has_content(doc_id.clone()).await?);
     assert!(
         !owner
             .group_document_ids(&pending_group)
@@ -122,9 +123,14 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
     // Finalization creates the document under the reserved identity with the
     // real content heads and the reserved parents.
     owner
-        .finalize_reserved_doc(doc_id, nonempty::nonempty!([7u8; 32]), &protocol, &storage)
+        .finalize_reserved_doc(
+            doc_id.clone(),
+            nonempty::nonempty!([7u8; 32]),
+            &protocol,
+            &storage,
+        )
         .await?;
-    assert!(owner.document_has_content(doc_id).await?);
+    assert!(owner.document_has_content(doc_id.clone()).await?);
     assert!(
         owner
             .group_document_ids(&pending_group)
@@ -139,7 +145,7 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
     );
 
     owner
-        .revoke_group_from_doc(&pending_group, doc_id, vec![vec![7; 32]], &protocol)
+        .revoke_group_from_doc(&pending_group, doc_id.clone(), vec![vec![7; 32]], &protocol)
         .await?;
     assert!(
         !owner
@@ -208,13 +214,13 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         .create_doc(vec![core_docs.into()], nonempty![[7; 32]], &protocol)
         .await?;
     let keyhive = owner.clone_keyhive();
-    let kh_doc_id = keyhive_doc_id(doc_id)?;
-    let doc = keyhive
-        .get_document(kh_doc_id)
-        .await
-        .ok_or_eyre("new document is missing")?;
+    let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
+    assert!(
+        keyhive.get_document(kh_doc_id).await.is_some(),
+        "new document is missing"
+    );
     let encrypted = keyhive
-        .try_encrypt_content(doc, &initial_ref, &Vec::new(), b"initial")
+        .try_encrypt_content(kh_doc_id, &initial_ref, &Vec::new(), b"initial")
         .await?;
     if let Some(update) = encrypted.update_op().cloned() {
         persist_cgka_update_ops(&protocol, vec![update]).await?;
@@ -254,13 +260,13 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         .await?;
 
     let checkpoint_ref = vec![8; 32];
-    let doc = keyhive
-        .get_document(kh_doc_id)
-        .await
-        .ok_or_eyre("document disappeared before checkpoint")?;
+    assert!(
+        keyhive.get_document(kh_doc_id).await.is_some(),
+        "document disappeared before checkpoint"
+    );
     let checkpoint = keyhive
         .try_encrypt_content(
-            doc,
+            kh_doc_id,
             &checkpoint_ref,
             &vec![initial_ref.clone()],
             b"authority-checkpoint",
@@ -278,7 +284,7 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         &protocol,
         &storage,
         vec![update],
-        vec![local_secret],
+        vec![Some(local_secret)],
     )
     .await?;
     let restored = BigKeyhiveHandle::restore_from_storage_archive(owner_seed, &storage, listener)
@@ -287,13 +293,13 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
     restored.import_prekey_state(&storage).await?;
     subduction_keyhive::ingest_from_storage(restored.clone_keyhive().as_ref(), &storage).await?;
     let restored_keyhive = restored.clone_keyhive();
-    let restored_doc = restored_keyhive
-        .get_document(kh_doc_id)
-        .await
-        .ok_or_eyre("restored document is missing")?;
+    assert!(
+        restored_keyhive.get_document(kh_doc_id).await.is_some(),
+        "restored document is missing"
+    );
     restored_keyhive
         .try_encrypt_content(
-            restored_doc,
+            kh_doc_id,
             &vec![9; 32],
             &vec![checkpoint_ref],
             b"after-authority-change",
@@ -316,5 +322,221 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         "archive compaction must remove incorporated private deltas"
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Coparent prekey material
+//
+// `Document::generate` picks a prekey for every coparent, so creating or
+// finalizing a document that names a principal whose prekey ops this hive has
+// never ingested cannot succeed. The field failure this pins is opaque — the
+// caller sees "individual <id> has published no prekey to select from" and has
+// to guess whether the publication is still in flight or was never pulled —
+// which is why each site below is pinned in *both* directions: the refusal case
+// states the precondition, and the positive control stops an implementation
+// that always refused from passing on the refusal case alone.
+//
+// The peer here is a *real* hive. Its individual is rebuilt from its own signed
+// prekey op (`expand_prekeys`), which is exactly the material a keyhive sync
+// would deliver, and it is registered into the local hive only where a test
+// says so. "Material absent" and "material present" therefore differ by one
+// call, and nothing in these tests sleeps, retries, or touches the network.
+// ---------------------------------------------------------------------------
+
+/// A local hive plus an independent peer that the local hive has never heard
+/// from, plus the protocol the local hive needs.
+///
+/// The event receivers are dropped deliberately: `BigRepoKeyhiveListener`
+/// treats a closed channel as a dropped debug event rather than an error, so a
+/// send from inside a keyhive operation cannot fail because of this helper.
+async fn local_hive_and_unmaterialized_peer(
+    owner_seed: u8,
+    peer_seed: u8,
+) -> Res<(
+    BigKeyhiveHandle,
+    crate::keyhive_storage::BigRepoKeyhiveStorage,
+    BigRepoKeyhiveProtocol,
+    Arc<futures::lock::Mutex<Individual>>,
+    BigKeyhiveAuthority,
+)> {
+    let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
+    let (owner_tx, _owner_rx) = async_channel::unbounded();
+    let owner = BigKeyhiveHandle::new(
+        [owner_seed; 32],
+        BigRepoKeyhiveListener {
+            evt_tx: owner_tx,
+            storage: storage.clone(),
+        },
+    )
+    .await?;
+    let protocol: BigRepoKeyhiveProtocol = Arc::new(subduction_keyhive::KeyhiveProtocol::new(
+        owner.clone_keyhive(),
+        storage.clone(),
+        owner.keyhive_peer_id(),
+        owner.contact_card().clone(),
+    ));
+
+    let peer_storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
+    let (peer_tx, _peer_rx) = async_channel::unbounded();
+    let peer = BigKeyhiveHandle::new(
+        [peer_seed; 32],
+        BigRepoKeyhiveListener {
+            evt_tx: peer_tx,
+            storage: peer_storage.clone(),
+        },
+    )
+    .await?;
+    // The peer's own published prekey op: the material a sync would carry.
+    let peer_prekey_op = peer.clone_keyhive().expand_prekeys().await?;
+    let peer_individual = Arc::new(futures::lock::Mutex::new(Individual::new(KeyOp::Add(
+        peer_prekey_op,
+    ))));
+    let peer_authority = {
+        let id = peer_individual.lock().await.id();
+        BigKeyhiveAuthority::Agent(BigKeyhiveAgent::Individual(
+            id,
+            Arc::clone(&peer_individual),
+        ))
+    };
+
+    Ok((owner, storage, protocol, peer_individual, peer_authority))
+}
+
+#[tokio::test]
+async fn document_creation_refuses_a_coparent_the_hive_has_not_materialized() -> Res<()> {
+    let (owner, _storage, protocol, peer_individual, peer_authority) =
+        local_hive_and_unmaterialized_peer(61, 62).await?;
+    let peer_identifier: Identifier = peer_individual.lock().await.id().into();
+
+    let err = owner
+        .create_doc(vec![peer_authority], nonempty![[7u8; 32]], &protocol)
+        .await
+        .err()
+        .ok_or_eyre("creation must not proceed without the coparent's material")?;
+    assert!(
+        err.to_string().contains(&peer_identifier.to_string()),
+        "the refusal must name the coparent whose material is missing: {err}"
+    );
+    assert!(
+        err.to_string().contains("is not known to this keyhive"),
+        "a coparent that has published nothing here is reported as unknown to this hive: {err}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn document_creation_succeeds_once_the_coparent_material_is_present() -> Res<()> {
+    let (owner, _storage, protocol, peer_individual, peer_authority) =
+        local_hive_and_unmaterialized_peer(63, 64).await?;
+    assert!(
+        owner
+            .clone_keyhive()
+            .register_individual(Arc::clone(&peer_individual))
+            .await,
+        "the fixture must start without the peer registered"
+    );
+
+    let (doc_id, _hashes) = owner
+        .create_doc(vec![peer_authority], nonempty![[7u8; 32]], &protocol)
+        .await?;
+    assert!(
+        owner.document_has_content(doc_id).await?,
+        "the created document must be materialized"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reserved_document_finalization_refuses_a_parent_the_hive_has_not_materialized() -> Res<()>
+{
+    let (owner, storage, protocol, peer_individual, peer_authority) =
+        local_hive_and_unmaterialized_peer(65, 66).await?;
+    let peer_identifier: Identifier = peer_individual.lock().await.id().into();
+
+    // A reservation stores parent ids without resolving them, so reserving
+    // succeeds here and the refusal has to come from finalization.
+    let doc_id = owner.reserve_doc_id(vec![peer_authority], &storage).await?;
+    let err = owner
+        .finalize_reserved_doc(doc_id, nonempty![[7u8; 32]], &protocol, &storage)
+        .await
+        .err()
+        .ok_or_eyre("finalization must not proceed without the parent's material")?;
+    assert!(
+        err.to_string()
+            .contains("cannot resolve reserved parent authority"),
+        "finalization refuses an unresolvable parent before selecting prekeys: {err}"
+    );
+    assert!(
+        err.to_string().contains(&format!("{peer_identifier:?}")),
+        "the refusal must name the parent it could not resolve: {err}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reserved_document_finalization_succeeds_once_the_parent_material_is_present() -> Res<()> {
+    let (owner, storage, protocol, peer_individual, peer_authority) =
+        local_hive_and_unmaterialized_peer(67, 68).await?;
+    assert!(
+        owner
+            .clone_keyhive()
+            .register_individual(Arc::clone(&peer_individual))
+            .await,
+        "the fixture must start without the peer registered"
+    );
+
+    let doc_id = owner.reserve_doc_id(vec![peer_authority], &storage).await?;
+    owner
+        .finalize_reserved_doc(doc_id.clone(), nonempty![[7u8; 32]], &protocol, &storage)
+        .await?;
+    assert!(
+        owner.document_has_content(doc_id).await?,
+        "the finalized document must be materialized"
+    );
+    Ok(())
+}
+
+/// The same precondition, one call over: `generate_group` resolves its
+/// coparents through the same `agent_by_id` lookup, so a group naming a
+/// principal this hive has not materialized is refused too — and, unlike the
+/// document sites, without any attempt to say why.
+#[tokio::test]
+async fn group_creation_refuses_a_coparent_the_hive_has_not_materialized() -> Res<()> {
+    let (owner, _storage, protocol, peer_individual, peer_authority) =
+        local_hive_and_unmaterialized_peer(69, 70).await?;
+    let peer_identifier: Identifier = peer_individual.lock().await.id().into();
+
+    let err = owner
+        .create_group_with_parents(vec![peer_authority], &protocol)
+        .await
+        .err()
+        .ok_or_eyre("group creation must not proceed without the coparent's material")?;
+    assert!(
+        err.to_string().contains(&peer_identifier.to_string()),
+        "the refusal must name the coparent whose material is missing: {err}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn group_creation_succeeds_once_the_coparent_material_is_present() -> Res<()> {
+    let (owner, _storage, protocol, peer_individual, peer_authority) =
+        local_hive_and_unmaterialized_peer(71, 72).await?;
+    assert!(
+        owner
+            .clone_keyhive()
+            .register_individual(Arc::clone(&peer_individual))
+            .await,
+        "the fixture must start without the peer registered"
+    );
+
+    let (group, _hashes) = owner
+        .create_group_with_parents(vec![peer_authority], &protocol)
+        .await?;
+    assert!(
+        owner.group_document_ids(&group).await.is_empty(),
+        "a group created with no documents yet must still be a live handle"
+    );
     Ok(())
 }

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM big_sync_syncable s\n         JOIN big_sync_members m ON m.maybe_part_ref = s.part_ref\n         JOIN big_sync_objs o ON o.obj_ref = m.obj_ref\n         WHERE s.scope_id = ?1 AND o.obj_id = ?2",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "822c1c787942ea22a4def8a91530b314ca76a8cac8d70fc0cd53511d21660a8c"
+}

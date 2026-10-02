@@ -9,6 +9,7 @@ use super::log_nickname;
 use crate::{BigRepo, DocumentId, Res};
 use keyhive_crypto::digest::Digest;
 use std::collections::{BTreeMap, BTreeSet};
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DocumentKeyhiveSnapshot {
@@ -24,7 +25,7 @@ pub(crate) async fn document_snapshot(
     repo: &BigRepo,
     doc_id: DocumentId,
 ) -> Res<DocumentKeyhiveSnapshot> {
-    let bytes = doc_id.into_bytes();
+    let bytes: [u8; 32] = doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE);
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
         .map_err(|_| crate::ferr!("document id is not a valid Ed25519 point"))?;
     let identifier = keyhive_core::principal::identifier::Identifier::from(verifying_key);
@@ -149,7 +150,7 @@ pub(crate) async fn assert_document_snapshot_equal(
     right: &crate::test2::harness::Node,
     doc_id: DocumentId,
 ) -> Res<()> {
-    let left_snapshot = document_snapshot(&left.repo, doc_id).await?;
+    let left_snapshot = document_snapshot(&left.repo, doc_id.clone()).await?;
     let right_snapshot = document_snapshot(&right.repo, doc_id).await?;
     if left_snapshot != right_snapshot {
         // Report the symmetric difference per field: dumping both snapshots
@@ -240,7 +241,7 @@ mod tests {
             .map_err(|err| crate::ferr!("failed creating seed doc: {err:?}"))?;
         let owner_doc = pair.left().repo.create_doc(seed).await?;
         let doc_id = owner_doc.document_id();
-        fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+        fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
         let _reader_doc =
             fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
         pair.left().repo.wait_for_keyhive_reconciliation().await?;

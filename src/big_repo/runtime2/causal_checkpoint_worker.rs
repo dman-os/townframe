@@ -1,19 +1,16 @@
 //! Maintains causal coverage for documents named by Keyhive admission events.
 //!
-//! The worker owns one admission walker, a bounded keyed task scheduler, and
-//! the serial cursor outbox. Admission decoding and document coverage are
-//! physical tasks; source settlement remains with the walker.
+//! The worker owns one admission walker and a bounded keyed task scheduler.
+//! Admission decoding and document coverage are physical tasks; the walker's own
+//! state commit is what records how far the consumer has reconciled.
 
 use crate::interlude::*;
 use crate::keyhive::BigKeyhiveHandle;
 use crate::runtime2::{WorkerGroupScope, keyhive_admission};
 use crate::store::sqlite::SqliteBigRepoStore;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDeltaRead, ConcurrentDeltaWalker, DeltaAck,
-};
-use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
-use big_sync_core::outbox::Outbox;
+use big_sync_core::concurrent_delta_walker::{ConcurrentDeltaRead, ConcurrentDeltaWalker};
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
 use big_sync_core::revisioned_store::RevisionedStore;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
@@ -43,6 +40,7 @@ pub fn spawn_causal_checkpoint_worker(
     keyhive: BigKeyhiveHandle,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
     timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
     // FIXME: fuck, probably a copy paste leftover from the group part worker?
     _evt_tx: async_channel::Sender<crate::runtime2::Runtime2Evt>,
     scope: WorkerGroupScope,
@@ -50,24 +48,30 @@ pub fn spawn_causal_checkpoint_worker(
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
     let run = Sendable::from_future(async move {
         let fut = async move {
-            let cursor = store.causal_checkpoint_cursor().await?;
-            store
-                .register_keyhive_admission_reader(
-                    crate::store::sqlite::KEYHIVE_ADMISSION_READER_CAUSAL_CHECKPOINT,
-                    cursor,
-                )
-                .await?;
+            let identity = crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT;
+            let state = SqliteDeltaWalkerStateRepo::new(
+                store.sql.read_pool.clone(),
+                store.sql.write_pool.clone(),
+                identity.0,
+                identity.1,
+            )
+            .await?;
 
-            if cursor == 0 {
+            // The walker's durable revision is the authority on what has been
+            // reconciled, so a fresh consumer is the one at revision zero.
+            let progress = state.progress().await?.upstream_revision;
+            if progress == 0 {
                 for doc_obj in keyhive.document_ids().await {
                     if runtime.is_stopped() {
                         return Ok(());
                     }
-                    let doc_id = crate::DocumentId::new(*doc_obj.as_bytes());
+                    let doc_id = crate::DocumentId::new(doc_obj.as_bytes());
                     let admitted = match scope.groups() {
                         None => true,
                         Some(_) => scope.admits_doc_groups(
-                            &keyhive.group_ids_containing_document(doc_id).await?,
+                            &keyhive
+                                .group_ids_containing_document(doc_id.clone())
+                                .await?,
                         ),
                     };
                     if admitted {
@@ -76,25 +80,11 @@ pub fn spawn_causal_checkpoint_worker(
                 }
             }
 
-            let state = {
-                let state = SqliteDeltaWalkerStateRepo::new(
-                    store.sql.read_pool.clone(),
-                    store.sql.write_pool.clone(),
-                    "big_repo.causal_checkpoint",
-                    "admission",
-                )
-                .await?;
-                let progress = state.progress().await?.upstream_revision;
-                if progress == 0 && cursor > 0 {
-                    let mut transaction = state.begin().await?;
-                    transaction.advance_from(0, cursor).await?;
-                    transaction.commit().await?;
-                }
-                state
-            };
             let source = keyhive_admission::Store {
                 store: store.clone(),
-                timer,
+                // The loop below sleeps on the same timer the admission reader
+                // polls with, so both cadences are driven by one seam.
+                timer: Arc::clone(&timer),
             };
             let durable = state.progress().await?.upstream_revision;
             let reader = source.open((), durable).await?;
@@ -106,7 +96,7 @@ pub fn spawn_causal_checkpoint_worker(
                         .expect("persisted keyhive admission event must decode");
                     match event {
                         StaticEvent::CgkaOperation(operation) => FrontierKey::Document(
-                            crate::DocumentId::new(*operation.payload().doc_id().as_bytes()),
+                            crate::DocumentId::new(operation.payload().doc_id().as_bytes()),
                         ),
                         _ => FrontierKey::Decode(row.seq),
                     }
@@ -114,7 +104,6 @@ pub fn spawn_causal_checkpoint_worker(
             )
             .await?;
             let worker = Worker {
-                store,
                 keyhive,
                 runtime,
                 scope,
@@ -122,8 +111,9 @@ pub fn spawn_causal_checkpoint_worker(
                 tasks: big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler::new(
                     CONCURRENT_TASK_BUDGET,
                 ),
+                timer,
+                clock,
                 pending_admission: HashMap::new(),
-                outbox: Outbox::default(),
             };
             worker.machine_loop().await
         };
@@ -140,18 +130,13 @@ pub fn spawn_causal_checkpoint_worker(
     }
 }
 
-#[derive(Debug)]
-enum Cmd {
-    AdvanceCursor(u64),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum FrontierKey {
     Decode(u64),
     Document(crate::DocumentId),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SourceCursor {
     key: FrontierKey,
     cursor: u64,
@@ -174,7 +159,6 @@ enum TaskOutput {
 }
 
 struct Worker<'a> {
-    store: SqliteBigRepoStore,
     keyhive: BigKeyhiveHandle,
     runtime: crate::runtime2::Runtime2Handle<Sendable>,
     scope: WorkerGroupScope,
@@ -185,8 +169,14 @@ struct Worker<'a> {
         FrontierKey,
     >,
     tasks: big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler<FrontierKey, Task, TaskOutput>,
+    /// The loop's wait and its notion of "now" are both injected so a test can
+    /// own them and drive the timer arm without wall clock (see
+    /// [`crate::runtime2::tasks::manual_time`]). They must be injected together:
+    /// a loop that slept on one time source and ticked from another would
+    /// compute deadlines against a `now` it never actually waited on.
+    timer: Arc<dyn crate::runtime2::Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
     pending_admission: HashMap<crate::DocumentId, SourceCursor>,
-    outbox: Outbox<Cmd, ()>,
 }
 
 impl<'a> Worker<'a> {
@@ -194,6 +184,11 @@ impl<'a> Worker<'a> {
         loop {
             let available = CONCURRENT_TASK_BUDGET.saturating_sub(self.tasks.active_count());
             let next_deadline = self.tasks.next_deadline();
+            // Reads the arm's start instant and clones the timer out of `self` so
+            // the select arm below does not borrow the worker while other arms
+            // take it mutably.
+            let now = self.clock.instant();
+            let timer = Arc::clone(&self.timer);
             tokio::select! {
                 biased;
                 completion = self.tasks.next_completion() => {
@@ -201,12 +196,22 @@ impl<'a> Worker<'a> {
                 }
                 _ = async {
                     if let Some(deadline) = next_deadline {
-                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                        // Wakes at the same instant `sleep_until(deadline)` did: the
+                        // wait is `deadline - now` on the injected timer, and the
+                        // subtraction saturates. A deadline the clock has already passed
+                        // therefore becomes a zero-length wait — the same already-expired
+                        // timer the wall-clock version armed — so both the wake ordering
+                        // and the number of loop turns are unchanged.
+                        timer
+                            .sleep(deadline.saturating_duration_since(now))
+                            .await;
                     } else {
                         std::future::pending::<()>().await;
                     }
                 } => {
-                    self.tasks.tick(std::time::Instant::now())?;
+                    // Read `now` fresh: the clock has moved during the wait, and the
+                    // tick must observe the instant the loop actually woke at.
+                    self.tasks.tick(self.clock.instant())?;
                 }
                 admission = async {
                     if available == 0 {
@@ -234,7 +239,6 @@ impl<'a> Worker<'a> {
                     }
                 }
             }
-            self.drain_outbox().await?;
             if tracing::enabled!(tracing::Level::DEBUG) {
                 tracing::debug!(
                     durable = self.admission.durable_revision(),
@@ -265,7 +269,7 @@ impl<'a> Worker<'a> {
         >,
     ) -> Res<()> {
         let source = SourceCursor {
-            key: delta.key,
+            key: delta.key.clone(),
             cursor: delta.cursor,
         };
         match delta.key {
@@ -273,15 +277,15 @@ impl<'a> Worker<'a> {
             // operations key by document, so no second bincode decode.
             FrontierKey::Document(doc_id) => {
                 self.pending_admission
-                    .entry(doc_id)
+                    .entry(doc_id.clone())
                     .and_modify(|old| {
                         if source.cursor > old.cursor {
-                            *old = source;
+                            *old = source.clone();
                         }
                     })
-                    .or_insert(source);
+                    .or_insert(source.clone());
                 self.start_task(
-                    FrontierKey::Document(doc_id),
+                    FrontierKey::Document(doc_id.clone()),
                     Task::EnsureCoverage { doc_id, source },
                 )
             }
@@ -311,7 +315,7 @@ impl<'a> Worker<'a> {
                     // Keyhive itself never received them.
                     let cgka_ops = self
                         .keyhive
-                        .current_cgka_ops_count(doc_id)
+                        .current_cgka_ops_count(doc_id.clone())
                         .await
                         .map(|count| count.to_string())
                         .unwrap_or_else(|error| format!("error: {error:?}"));
@@ -322,7 +326,7 @@ impl<'a> Worker<'a> {
                         "CAUSAL coverage done"
                     );
                 }
-                self.acknowledge_source(source).await?;
+                self.acknowledge_source(source.clone()).await?;
                 if self.pending_admission.get(&doc_id).is_some_and(|pending| {
                     pending.key == source.key && pending.cursor == source.cursor
                 }) {
@@ -335,24 +339,9 @@ impl<'a> Worker<'a> {
     }
 
     async fn acknowledge_source(&mut self, source: SourceCursor) -> Res<()> {
-        if let DeltaAck::Accepted {
-            through: Some(through),
-        } = self.admission.ack(source.key, source.cursor).await?
-        {
-            self.outbox.push(Cmd::AdvanceCursor(through), ());
-        }
-        Ok(())
-    }
-
-    async fn drain_outbox(&mut self) -> Res<()> {
-        while let Some((pending, cmd)) = self.outbox.front() {
-            match cmd {
-                Cmd::AdvanceCursor(cursor) => {
-                    self.store.advance_causal_checkpoint_cursor(*cursor).await?;
-                }
-            }
-            let (_cmd, _unit) = self.outbox.complete(pending.id());
-        }
+        // The walker's ack commits the consumer's progress; there is no second
+        // watermark to write and so nothing here can lag it.
+        self.admission.ack(source.key, source.cursor).await?;
         Ok(())
     }
 }
@@ -366,7 +355,11 @@ async fn run_task(
     match task {
         Task::EnsureCoverage { doc_id, .. } => {
             if let Some(_) = scope.groups()
-                && !scope.admits_doc_groups(&keyhive.group_ids_containing_document(doc_id).await?)
+                && !scope.admits_doc_groups(
+                    &keyhive
+                        .group_ids_containing_document(doc_id.clone())
+                        .await?,
+                )
             {
                 return Ok(TaskOutput::OutOfScope);
             }

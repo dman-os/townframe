@@ -353,7 +353,7 @@ pub(crate) async fn persist_cgka_updates_durably(
     keyhive_protocol: &crate::handler::BigRepoKeyhiveProtocol,
     keyhive_storage: &BigRepoKeyhiveStorage,
     update_ops: Vec<keyhive_crypto::signed::Signed<beekem::operation::CgkaOperation>>,
-    local_secrets: Vec<keyhive_core::cgka::LocalCgkaSecret>,
+    local_secrets: Vec<Option<keyhive_core::cgka::LocalCgkaSecret>>,
 ) -> Res<Vec<EventHash>> {
     if update_ops.len() != local_secrets.len() {
         return Err(ferr!(
@@ -362,7 +362,11 @@ pub(crate) async fn persist_cgka_updates_durably(
             local_secrets.len()
         ));
     }
+    // One secret slot per update: a PCS update does not always mint a new local
+    // secret, but a present secret must belong to the same document as the
+    // operation that publishes it.
     for (update, secret) in update_ops.iter().zip(&local_secrets) {
+        let Some(secret) = secret else { continue };
         if update.payload().doc_id() != &secret.tree_id() {
             return Err(ferr!(
                 "local CGKA private delta belongs to a different document than its update"
@@ -372,7 +376,7 @@ pub(crate) async fn persist_cgka_updates_durably(
 
     // The private leaf key must be durable before the public operation that
     // makes the new leaf current.
-    for secret in local_secrets {
+    for secret in local_secrets.into_iter().flatten() {
         subduction_keyhive::save_local_cgka_secret(keyhive_storage, &secret)
             .await
             .map_err(|error| ferr!("failed saving local CGKA secret: {error}"))?;
@@ -462,12 +466,7 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
         let envelope_bytes = bincode::serialize(&envelope).wrap_err("bincode encode envelope")?;
 
         let (encrypted, app_key) = keyhive
-            .try_encrypt_content_keyed(
-                Arc::clone(&kh_doc),
-                &content_ref,
-                &pred_refs,
-                &envelope_bytes,
-            )
+            .try_encrypt_content_keyed(kh_doc_id, &content_ref, &pred_refs, &envelope_bytes)
             .await
             .map_err(|err| ferr!("encrypt fragment failed: {err}"))?;
         if let Some(secret) = encrypted.local_cgka_secret().copied() {
@@ -518,12 +517,7 @@ pub(crate) async fn encrypt_staged_automerge_ingest(
         let envelope_bytes = bincode::serialize(&envelope).wrap_err("bincode encode envelope")?;
 
         let (encrypted, app_key) = keyhive
-            .try_encrypt_content_keyed(
-                Arc::clone(&kh_doc),
-                &content_ref,
-                &pred_refs,
-                &envelope_bytes,
-            )
+            .try_encrypt_content_keyed(kh_doc_id, &content_ref, &pred_refs, &envelope_bytes)
             .await
             .map_err(|err| ferr!("encrypt loose commit failed: {err}"))?;
         if let Some(secret) = encrypted.local_cgka_secret().copied() {
@@ -583,12 +577,12 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
         .ok_or_else(|| ferr!("keyhive doc not found for commit encryption"))?;
     let content_ref: Vec<u8> = head.as_bytes().to_vec();
     let pred_refs: Vec<Vec<u8>> = parents.iter().map(|id| id.as_bytes().to_vec()).collect();
-    let (owner_secret_count, cgka_operation_count, has_pcs_key) = {
+    let (owner_secret_count, cgka_operation_count) = {
         let locked = kh_doc.lock().await;
         let cgka = locked
             .cgka()
             .map_err(|error| ferr!("failed inspecting document CGKA before encryption: {error}"))?;
-        (cgka.owner_sks().len(), cgka.ops_count(), cgka.has_pcs_key())
+        (cgka.owner_sks().len(), cgka.ops_count())
     };
     let ancestors: std::collections::HashMap<Vec<u8>, SymmetricKey> = {
         let doc_keys = kh_doc.lock().await.known_decryption_keys().clone();
@@ -603,10 +597,9 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
                     .ok_or_else(|| {
                         eyre::Report::new(crate::runtime2::io::DocumentKeyUnavailable {
                             source: ferr!("missing causal encryption key for parent {parent}"),
-                            document_id: crate::DocumentId::new(*sedimentree_id.as_bytes()),
+                            document_id: crate::DocumentId::new(sedimentree_id.as_bytes()),
                             owner_secret_count,
                             cgka_operation_count,
-                            has_pcs_key,
                         })
                     })?;
                 Ok((content_ref, key))
@@ -620,22 +613,16 @@ pub(crate) async fn encrypt_loose_commit_with_update_op(
     let envelope_bytes = bincode::serialize(&envelope).wrap_err("bincode encode envelope")?;
 
     let (encrypted, app_key) = keyhive
-        .try_encrypt_content_keyed(
-            Arc::clone(&kh_doc),
-            &content_ref,
-            &pred_refs,
-            &envelope_bytes,
-        )
+        .try_encrypt_content_keyed(kh_doc_id, &content_ref, &pred_refs, &envelope_bytes)
         .await
         .map_err(|error| match error {
             keyhive_core::keyhive::EncryptContentError::EncryptError(
                 keyhive_core::principal::document::EncryptError::FailedToMakeAppSecret(source),
             ) => eyre::Report::new(crate::runtime2::io::DocumentKeyUnavailable {
                 source: eyre::Report::new(source),
-                document_id: crate::DocumentId::new(*sedimentree_id.as_bytes()),
+                document_id: crate::DocumentId::new(sedimentree_id.as_bytes()),
                 owner_secret_count,
                 cgka_operation_count,
-                has_pcs_key,
             }),
             error => ferr!("encrypt commit failed: {error}"),
         })?;

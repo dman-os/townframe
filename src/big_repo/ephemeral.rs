@@ -305,7 +305,7 @@ where
     fn subscribe_topic(&self, topic: BigEphemeralTopic) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             self.handler
-                .subscribe(nonempty12::nonempty![topic.into()])
+                .subscribe(nonempty::nonempty![topic.into()])
                 .await;
         })
     }
@@ -313,7 +313,7 @@ where
     fn unsubscribe_topic(&self, topic: BigEphemeralTopic) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             self.handler
-                .unsubscribe(nonempty12::nonempty![topic.into()])
+                .unsubscribe(nonempty::nonempty![topic.into()])
                 .await;
         })
     }

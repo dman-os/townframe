@@ -229,6 +229,12 @@ impl crate::repos::Repo for ProgressRepo {
 }
 
 impl ProgressRepo {
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "progress-worker")
+    )]
     pub async fn boot(repo_sql: SqlCtx) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let mut worker = ProgressWorker {
             repo_sql,
@@ -422,6 +428,12 @@ impl ProgressRepo {
 }
 
 impl ProgressWorker {
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "progress-worker")
+    )]
     async fn run(
         &mut self,
         rx: &mut mpsc::UnboundedReceiver<ProgressMsg>,

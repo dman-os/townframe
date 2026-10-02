@@ -11,8 +11,8 @@ impl IdCodec {
     pub(crate) fn tree_blob(id: SedimentreeId) -> Vec<u8> {
         id.as_bytes().to_vec()
     }
-    pub(crate) fn obj_id(id: SedimentreeId) -> ObjId {
-        ObjId(Byte32Id::new(*id.as_bytes()))
+    pub(crate) fn obj_id(id: SedimentreeId) -> ObjKey {
+        ObjKey(ByteKey::new(id.as_bytes()))
     }
     pub(crate) fn commit_blob(id: CommitId) -> Vec<u8> {
         id.as_bytes().to_vec()
@@ -22,13 +22,13 @@ impl IdCodec {
             .try_into()
             .map_err(|_| SqliteBigRepoStoreError::InvalidRecord)
     }
-    pub(crate) fn part_blob(id: PartId) -> Vec<u8> {
+    pub(crate) fn part_blob(id: PartKey) -> Vec<u8> {
         SqliteCore::part_blob(id)
     }
-    pub(crate) fn obj_blob(id: ObjId) -> Vec<u8> {
+    pub(crate) fn obj_blob(id: ObjKey) -> Vec<u8> {
         SqliteCore::obj_blob(id)
     }
-    pub(crate) fn peer_blob(id: PeerId) -> Vec<u8> {
+    pub(crate) fn peer_blob(id: PeerKey) -> Vec<u8> {
         SqliteCore::peer_blob(id)
     }
     pub(crate) fn buck_i64(id: BuckId) -> i64 {
@@ -40,22 +40,22 @@ impl IdCodec {
     pub(crate) fn u64_from_db(value: i64) -> u64 {
         SqliteCore::u64_from_db(value)
     }
-    pub(crate) fn part_from_blob(blob: Vec<u8>) -> PartId {
+    pub(crate) fn part_from_blob(blob: Vec<u8>) -> PartKey {
         SqliteCore::part_from_blob(blob)
     }
-    pub(crate) fn obj_from_blob(blob: Vec<u8>) -> ObjId {
+    pub(crate) fn obj_from_blob(blob: Vec<u8>) -> ObjKey {
         SqliteCore::obj_from_blob(blob)
     }
 }
 
 impl SqliteBigRepoStore {
-    pub(crate) fn part_blob(id: PartId) -> Vec<u8> {
+    pub(crate) fn part_blob(id: PartKey) -> Vec<u8> {
         IdCodec::part_blob(id)
     }
-    pub(crate) fn obj_blob(id: ObjId) -> Vec<u8> {
+    pub(crate) fn obj_blob(id: ObjKey) -> Vec<u8> {
         IdCodec::obj_blob(id)
     }
-    pub(crate) fn peer_blob(id: PeerId) -> Vec<u8> {
+    pub(crate) fn peer_blob(id: PeerKey) -> Vec<u8> {
         IdCodec::peer_blob(id)
     }
     pub(crate) fn buck_i64(id: BuckId) -> i64 {
@@ -67,10 +67,10 @@ impl SqliteBigRepoStore {
     pub(crate) fn u64_from_db(value: i64) -> u64 {
         IdCodec::u64_from_db(value)
     }
-    pub(crate) fn part_from_blob(blob: Vec<u8>) -> PartId {
+    pub(crate) fn part_from_blob(blob: Vec<u8>) -> PartKey {
         IdCodec::part_from_blob(blob)
     }
-    pub(crate) fn obj_from_blob(blob: Vec<u8>) -> ObjId {
+    pub(crate) fn obj_from_blob(blob: Vec<u8>) -> ObjKey {
         IdCodec::obj_from_blob(blob)
     }
 }
@@ -89,12 +89,15 @@ mod tests {
             IdCodec::decode_id(IdCodec::commit_blob(commit)).unwrap(),
             bytes
         );
-        let part = PartId::new(bytes);
-        assert_eq!(IdCodec::part_from_blob(IdCodec::part_blob(part)), part);
-        let obj = ObjId::new(bytes);
-        assert_eq!(IdCodec::obj_from_blob(IdCodec::obj_blob(obj)), obj);
-        let peer = PeerId::new(bytes);
-        assert_eq!(IdCodec::peer_blob(peer), peer.as_bytes().to_vec());
+        let part = PartKey::new(bytes);
+        assert_eq!(
+            IdCodec::part_from_blob(IdCodec::part_blob(part.clone())),
+            part
+        );
+        let obj = ObjKey::new(bytes);
+        assert_eq!(IdCodec::obj_from_blob(IdCodec::obj_blob(obj.clone())), obj);
+        let peer = PeerKey::new(bytes);
+        assert_eq!(IdCodec::peer_blob(peer.clone()), peer.as_bytes().to_vec());
         let buck = BuckId::new(3, 17);
         assert_eq!(IdCodec::buck_id(IdCodec::buck_i64(buck)), buck);
         assert_eq!(IdCodec::u64_from_db(42), 42);

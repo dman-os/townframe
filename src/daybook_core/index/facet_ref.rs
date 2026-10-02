@@ -54,6 +54,12 @@ enum FacetSetBranchPreparation {
 }
 
 impl DocFacetRefIndexRepo {
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "facet-ref-index")
+    )]
     pub(crate) async fn boot(
         drawer_repo: Arc<DrawerRepo>,
         plugs_repo: Arc<PlugsRepo>,
@@ -620,6 +626,12 @@ impl DocFacetRefIndexRepo {
         Ok(FacetSetPreparation::Ready(prepared))
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "facet-ref-index-machine")
+    )]
     async fn run_machine(
         self: Arc<Self>,
         facet_set_store: Arc<FacetSetRevisionStore>,

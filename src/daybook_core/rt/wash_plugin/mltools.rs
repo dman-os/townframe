@@ -177,6 +177,15 @@ impl mltools_llm_chat::Host for SharedWashCtx {
 }
 
 impl mltools_image_tools::Host for SharedWashCtx {
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(
+            worker = "mltools-downsize-image",
+            otel.kind = "server",
+            obj_id = tracing::field::Empty,
+        ),
+    )]
     async fn downsize_image_from_blob(
         &mut self,
         blob_facet: wasmtime::component::Resource<capabilities::FacetToken>,
@@ -187,6 +196,8 @@ impl mltools_image_tools::Host for SharedWashCtx {
             Ok(value) => value,
             Err(err) => return Ok(Err(err)),
         };
+        // The blob identity is only known once its facet token resolves.
+        tracing::Span::current().record("obj_id", tracing::field::display(&blob.digest));
         if !blob.mime.starts_with("image/") {
             return Ok(Err(format!("blob mime is not image/*: {}", blob.mime)));
         }
@@ -200,8 +211,13 @@ impl mltools_image_tools::Host for SharedWashCtx {
             Ok(value) => value,
             Err(err) => return Ok(Err(format!("error reading blob bytes: {err}"))),
         };
+        // Downscaling is CPU-bound: the blocking closure runs in this span so
+        // its work stays attributable to the blob it downscales.
+        let span = tracing::Span::current();
         let downsized = match tokio::task::spawn_blocking(move || {
-            crate::imgtools::downsize_image_jpeg(&image_bytes, max_side, jpeg_quality)
+            span.in_scope(|| {
+                crate::imgtools::downsize_image_jpeg(&image_bytes, max_side, jpeg_quality)
+            })
         })
         .await
         .expect(ERROR_TOKIO)

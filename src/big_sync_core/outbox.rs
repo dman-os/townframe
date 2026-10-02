@@ -1,6 +1,6 @@
 //! Correlated command outbox extracted from `BigSyncMachine`.
 //!
-//! The existing machine keeps `cmds: VecDeque<(Uuid, Command, Option<CursorIndex>, PeerId)>`;
+//! The existing machine keeps `cmds: VecDeque<(Uuid, Command, Option<CursorIndex>, PeerKey)>`;
 //! the driver peeks the front command, executes it, and reports success by id
 //! via `handle_cmd_success`, which pops the front entry and panics unless the
 //! reported id matches — "cmds must be performed serially". The attached

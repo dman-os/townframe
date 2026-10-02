@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT access_level\n             FROM big_sync_syncable\n             WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "access_level",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "big_sync_syncable",
+            "name": "access_level"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "aab70375f142a3b7fdc893279332da820ff604ce502e9bd0055fcbc1bf4583c0"
+}

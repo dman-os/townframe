@@ -156,7 +156,41 @@ pub struct BigKeyhiveHandle {
     keyhive: Arc<BigKeyhiveKeyhive>,
     contact_card: Arc<keyhive_core::contact_card::ContactCard>,
     keyhive_peer_id: subduction_keyhive::KeyhivePeerId,
+    /// Test-only: when `Some`, [`Self::prekeys`] reports this set instead of folding the
+    /// local individual's current prekey ops.
+    ///
+    /// Exists so a test can put the *published view* into disagreement with the core's
+    /// prekey state, which is the one incoherence `prekey_janitor::refill_to_floor` cannot
+    /// expand its way out of. `rotate_op_count_for` exists for the same reason on the
+    /// rotation side: production has no path that desynchronises the two. Compiled out
+    /// entirely without `cfg(test)`, so a production build cannot set it.
+    #[cfg(test)]
+    pinned_prekey_view: Arc<
+        std::sync::Mutex<Option<std::collections::HashSet<keyhive_crypto::share_key::ShareKey>>>,
+    >,
 }
+/// What an admitted Keyhive event names.
+///
+/// The difference between "names no graph" and "names a graph this hive cannot
+/// resolve *yet*" is load-bearing. The first is a property of the event: a
+/// prekey op changes which peers can be reached, not who is a member of what.
+/// The second is a property of this hive's ingest position and clears itself
+/// once the dependency lands — Keyhive classifies exactly it as a missing
+/// dependency (`ReceiveStaticDelegationError::is_missing_dependency`). A caller
+/// that takes the two for one thing either fails over a delivery race or drops
+/// an access change it cannot yet name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EventSubject {
+    /// The graph the event changes.
+    Named(Identifier),
+    /// The event names no graph, so it cannot change a closure.
+    Unnamed,
+    /// The event's proof chain is not resolvable here yet: the hive has not
+    /// applied a delegation the chain names. The event is early rather than
+    /// undecodable, and the caller retries once the missing link lands.
+    Unresolved,
+}
+
 // a background task. rename to new
 impl BigKeyhiveHandle {
     pub(crate) async fn new(seed: [u8; 32], listener: BigRepoKeyhiveListener) -> Res<Self> {
@@ -169,6 +203,8 @@ impl BigKeyhiveHandle {
             keyhive: Arc::new(keyhive),
             contact_card: Arc::new(contact_card),
             keyhive_peer_id,
+            #[cfg(test)]
+            pinned_prekey_view: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -207,6 +243,8 @@ impl BigKeyhiveHandle {
             keyhive: Arc::new(restored),
             contact_card: Arc::new(contact_card),
             keyhive_peer_id,
+            #[cfg(test)]
+            pinned_prekey_view: Arc::new(std::sync::Mutex::new(None)),
         }))
     }
 
@@ -262,9 +300,22 @@ impl BigKeyhiveHandle {
     /// removals inline while iterating the ops map is order-dependent and
     /// resurrects rotated-out keys when the original Add happens to iterate
     /// after its Rotate.
+    ///
+    /// Test-only override: once [`Self::pin_published_prekeys`] has been called this
+    /// returns the pinned set, so a test can observe what a divergent view does to its
+    /// readers.
     pub(crate) async fn prekeys(
         &self,
     ) -> std::collections::HashSet<keyhive_crypto::share_key::ShareKey> {
+        #[cfg(test)]
+        if let Some(frozen) = self
+            .pinned_prekey_view
+            .lock()
+            .expect("pinned prekey view mutex is never poisoned")
+            .clone()
+        {
+            return frozen;
+        }
         use keyhive_core::principal::individual::op::KeyOp;
         let individual = self.keyhive.individual().await;
         let locked = individual.lock().await;
@@ -291,6 +342,30 @@ impl BigKeyhiveHandle {
             }
         }
         set
+    }
+
+    /// Test-only: pin the set [`Self::prekeys`] reports, so every later publication into
+    /// the core is invisible to it.
+    ///
+    /// This is the published-view half of the divergence `refill_to_floor` guards against:
+    /// the core keeps publishing prekeys while the set this caller reads does not move. A
+    /// booted handle starts one key *below* the floor (the production genesis publishes 7,
+    /// `Active::generate`), so the refill has exactly one slot to fill; the set is passed
+    /// explicitly so a test can name the view it wants — including one reporting fewer keys
+    /// than the core has published. That is the shape that used to spin the refill loop
+    /// forever, silently and with the durable cursor frozen behind it, so the loop now
+    /// crashes naming the divergence. Test-only for the same reason as `rotate_op_count_for`:
+    /// no production path can desynchronise the two, and the `cfg(test)` field cannot be set
+    /// in a production build.
+    #[cfg(test)]
+    pub(crate) fn pin_published_prekeys(
+        &self,
+        pinned: std::collections::HashSet<keyhive_crypto::share_key::ShareKey>,
+    ) {
+        *self
+            .pinned_prekey_view
+            .lock()
+            .expect("pinned prekey view mutex is never poisoned") = Some(pinned);
     }
 
     /// The local individual id of the active keyhive agent.
@@ -387,7 +462,11 @@ impl BigKeyhiveHandle {
 
     /// All agents (individuals + groups) who can reach this doc/group, with [`Access`].
     /// O(|transitive_members(target)|) — used for incremental per-target update.
-    pub async fn agents_for_membered(&self, id: Identifier) -> HashMap<[u8; 32], Access> {
+    ///
+    /// Keyed by keyhive [`Identifier`], not by its bytes: the identifier is the
+    /// identity every caller either already holds or must keep, and a byte key
+    /// throws that away for the callers that need it back.
+    pub async fn agents_for_membered(&self, id: Identifier) -> BTreeMap<Identifier, Access> {
         let keyhive = self.keyhive.as_ref();
         // Try document first, then group
         if let Some(doc) = keyhive.get_document(KhDocumentId::from(id)).await {
@@ -397,17 +476,77 @@ impl BigKeyhiveHandle {
             ))
             .await
             .into_iter()
-            .map(|(id, (_, access))| (id.to_bytes(), access))
+            .map(|(id, (_, access))| (id, access))
             .collect();
         }
         if let Some(group) = keyhive.get_group(KhGroupId::from(id)).await {
             return transitive_members_short_locked(Membered::Group(KhGroupId::from(id), group))
                 .await
                 .into_iter()
-                .map(|(id, (_, access))| (id.to_bytes(), access))
+                .map(|(id, (_, access))| (id, access))
                 .collect();
         }
-        HashMap::new()
+        BTreeMap::new()
+    }
+
+    /// Whether this hive holds a document node for `id`.
+    ///
+    /// The `Identifier`-addressed twin of [`Self::get_group`]: an id is a
+    /// membered subject when it names either, and a caller that resolves the
+    /// kind itself must ask in the same order `agents_for_membered` does.
+    pub(crate) async fn has_document(&self, id: Identifier) -> bool {
+        self.keyhive
+            .get_document(KhDocumentId::from(id))
+            .await
+            .is_some()
+    }
+
+    /// The graph an admitted event names, or why it names none.
+    ///
+    /// A `CgkaOperation` names its document; a `Delegated`/`Revoked` names the
+    /// graph Keyhive dispatched the operation to, which is the proof chain's
+    /// root issuer ([`SignedSubjectId`], consumed at `keyhive.rs:1980,2066`) and
+    /// *not* the immediate signer — the two differ whenever a non-root member
+    /// re-delegates, which is the hazard the group-part worker's
+    /// `delegation.issuer` proxy carries (B19).
+    ///
+    /// The wire form carries proof *digests* (`StaticDelegation::proof`), so
+    /// the chain is resolved through this hive's own graph: there is no
+    /// payload-only derivation, and the resolution here is the same one Keyhive
+    /// performs when it applies the event.
+    ///
+    /// Prekey events change which peers can be *reached*, not who is a member
+    /// of what, so they name no graph and cannot change a closure.
+    ///
+    /// The graph is named from the event's own proof chain and never from the
+    /// *delegate*: materializing the event needs the delegate's installed `Agent`
+    /// record, and a replica that only observes a graph is never sent one — measured
+    /// in the private-reader topology, where the delegate stayed unknown for at least
+    /// 77s and a decode that waited for it never ran. Naming the graph needs none of
+    /// that ([`Keyhive::static_membership_subject`]).
+    ///
+    /// An unresolvable chain is reported as [`EventSubject::Unresolved`] and not as a
+    /// failure: the event is early, its source row is not settled yet, and the caller
+    /// retries once the missing link lands. Anything else is an error.
+    pub(crate) async fn event_subject_id(&self, event: StaticEvent<Vec<u8>>) -> Res<EventSubject> {
+        Ok(match &event {
+            StaticEvent::PrekeysExpanded(_) | StaticEvent::PrekeyRotated(_) => {
+                EventSubject::Unnamed
+            }
+            StaticEvent::CgkaOperation(operation) => EventSubject::Named(Identifier::from(
+                ed25519_dalek::VerifyingKey::from(*operation.payload().doc_id()),
+            )),
+            // The proof chain's *root* issuer, not the immediate signer: the walk
+            // answers the chain head's issuer, which is the graph Keyhive dispatched
+            // the operation to. Using the immediate issuer is the B19 hazard and would
+            // name a non-membered id whenever a non-root member re-delegates.
+            StaticEvent::Delegated(_) | StaticEvent::Revoked(_) => {
+                match self.keyhive.static_membership_subject(&event).await {
+                    Some(subject) => EventSubject::Named(subject),
+                    None => EventSubject::Unresolved,
+                }
+            }
+        })
     }
 
     /// What [`Access`] does `agent` have on this doc/group? None if unreachable.
@@ -473,13 +612,13 @@ impl BigKeyhiveHandle {
         caps
     }
 
-    pub(crate) async fn document_ids(&self) -> Vec<big_sync_core::ObjId> {
+    pub(crate) async fn document_ids(&self) -> Vec<big_sync_core::ObjKey> {
         self.keyhive
             .documents()
             .lock()
             .await
             .keys()
-            .map(|id| big_sync_core::ObjId::new(id.to_bytes()))
+            .map(|id| big_sync_core::ObjKey::new(id.to_bytes()))
             .collect()
     }
 
@@ -489,7 +628,7 @@ impl BigKeyhiveHandle {
     ) -> Res<Vec<(Vec<u8>, [u8; 32])>> {
         let doc = self
             .keyhive
-            .get_document(keyhive_doc_id(doc_id)?)
+            .get_document(keyhive_doc_id(doc_id.clone())?)
             .await
             .ok_or_else(|| ferr!("keyhive document not found: {doc_id}"))?;
         Ok(doc
@@ -598,10 +737,15 @@ impl BigKeyhiveHandle {
         initial_content_heads: NonEmpty<[u8; 32]>,
         protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<(DocumentId, Vec<EventHash>)> {
+        // `generate_doc` addresses its coparents by id; build the peers anyway
+        // so each authority is still validated on the way through.
         let coparents = parents
             .into_iter()
             .map(BigKeyhiveAuthority::into_peer)
-            .collect::<Res<Vec<_>>>()?;
+            .collect::<Res<Vec<_>>>()?
+            .into_iter()
+            .map(|peer| peer.id())
+            .collect::<Vec<Identifier>>();
         let initial_content_heads = NonEmpty {
             head: initial_content_heads.head.to_vec(),
             tail: initial_content_heads
@@ -610,17 +754,61 @@ impl BigKeyhiveHandle {
                 .map(Vec::from)
                 .collect(),
         };
+        let coparent_count = coparents.len();
         let keyhive = self.keyhive.as_ref();
-        let doc = keyhive
-            .generate_doc(coparents, initial_content_heads)
-            .await
-            .map_err(|err| ferr!("failed creating keyhive document: {err}"))?;
-        let doc_id = {
-            let locked = doc.lock().await;
-            locked.doc_id().to_bytes()
+        let kh_doc_id = match keyhive.generate_doc(coparents, initial_content_heads).await {
+            Ok(kh_doc_id) => kh_doc_id,
+            Err(err) => {
+                // A coparent's prekey is published by its own hive and only reaches us through
+                // sync, so this error means an individual we are about to co-sign with has no
+                // published prekey here yet. Either its publication is still in flight, or we
+                // never pulled it; it is logged rather than retried because a retry would hide
+                // the second case. Say which of the two it is rather than leaving the caller
+                // to guess.
+                if let keyhive_core::principal::document::GenerateDocError::MissingPrekeys(
+                    missing,
+                ) = &err
+                {
+                    self.explain_missing_prekeys(missing, coparent_count, "create_doc")
+                        .await;
+                }
+                return Err(ferr!("failed creating keyhive document: {err}"));
+            }
         };
-        let hashes = self.persist_document_events(&doc, protocol).await?;
-        Ok((DocumentId::new(doc_id), hashes))
+        let hashes = self.persist_document_events(kh_doc_id, protocol).await?;
+        Ok((DocumentId::new(kh_doc_id.to_bytes()), hashes))
+    }
+
+    /// Distinguish the two ways a coparent can have no prekey here, because they have different
+    /// owners. An individual that is not registered at all means its own prekey op never reached
+    /// us: the identifier travels in other principals' events (a delegation names the delegate),
+    /// but the node is only ever born from the individual's own op, so a member we learned about
+    /// from someone else's delegation is simply absent. A registered individual holding no prekey
+    /// ops is the other case, and not one the wire can produce: `Individual::new` builds the state
+    /// from the op that registers it, so an empty state is something we restored or pruned.
+    async fn explain_missing_prekeys(
+        &self,
+        missing: &keyhive_core::principal::individual::MissingPrekeys,
+        coparent_count: usize,
+        site: &'static str,
+    ) {
+        let keyhive_core::principal::individual::MissingPrekeys::NoPublishedPrekey(missing_id) =
+            missing;
+        let missing_id = **missing_id;
+        let detail = match self.keyhive.get_individual(missing_id).await {
+            None => "individual not registered locally: no op of its own was applied".to_owned(),
+            Some(individual) => format!(
+                "individual registered: held prekey ops={}",
+                individual.lock().await.prekey_ops().len()
+            ),
+        };
+        tracing::warn!(
+            %missing_id,
+            coparent_count,
+            site,
+            detail = %detail,
+            "document creation has no published prekey for a coparent"
+        );
     }
 
     pub(crate) async fn reserve_doc_id(
@@ -632,7 +820,7 @@ impl BigKeyhiveHandle {
         let doc_id = DocumentId::new(signing_key.verifying_key().to_bytes());
         let reservation = crate::keyhive_storage::DocReservation {
             magic: crate::keyhive_storage::DOC_RESERVATION_MAGIC,
-            doc_id: doc_id.into_bytes(),
+            doc_id: doc_id.to_bytes32()?,
             signing_key: signing_key.to_bytes(),
             parents: parents
                 .into_iter()
@@ -656,14 +844,14 @@ impl BigKeyhiveHandle {
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<()> {
         if storage
-            .load_doc_reservation(doc_id.into_bytes())
+            .load_doc_reservation(doc_id.to_bytes32()?)
             .await
             .map_err(|err| ferr!("failed loading document reservation: {err}"))?
             .is_none()
         {
             if self
                 .keyhive
-                .get_document(keyhive_doc_id(doc_id)?)
+                .get_document(keyhive_doc_id(doc_id.clone())?)
                 .await
                 .is_some()
             {
@@ -672,7 +860,7 @@ impl BigKeyhiveHandle {
             return Err(ferr!("no reservation and no keyhive document for {doc_id}"));
         }
         storage
-            .stage_doc_reservation(doc_id.into_bytes(), initial_content, initial_keys)
+            .stage_doc_reservation(doc_id.to_bytes32()?, initial_content, initial_keys)
             .await
             .map_err(|err| ferr!("failed staging initial document content: {err}"))
     }
@@ -692,9 +880,9 @@ impl BigKeyhiveHandle {
         protocol: &BigRepoKeyhiveProtocol,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<Vec<EventHash>> {
-        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
         let Some(reservation) = storage
-            .load_doc_reservation(doc_id.into_bytes())
+            .load_doc_reservation(doc_id.to_bytes32()?)
             .await
             .map_err(|err| ferr!("failed loading document id reservation: {err}"))?
         else {
@@ -714,7 +902,7 @@ impl BigKeyhiveHandle {
             return Ok(Vec::new());
         }
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&reservation.signing_key);
-        if signing_key.verifying_key().to_bytes() != doc_id.into_bytes() {
+        if signing_key.verifying_key().to_bytes() != doc_id.to_bytes32()? {
             return Err(ferr!(
                 "reserved signing key does not match document id {doc_id}"
             ));
@@ -734,12 +922,27 @@ impl BigKeyhiveHandle {
             head: content_heads.head.to_vec(),
             tail: content_heads.tail.into_iter().map(Vec::from).collect(),
         };
-        let doc = self
+        let coparent_count = coparents.len();
+        let kh_doc_id = match self
             .keyhive
             .generate_doc_with_reserved_signer(signing_key, coparents, initial_content_heads)
             .await
-            .map_err(|err| ferr!("failed creating keyhive document: {err}"))?;
-        let hashes = self.persist_document_events(&doc, protocol).await?;
+        {
+            Ok(kh_doc_id) => kh_doc_id,
+            Err(err) => {
+                // Same reasoning as `create_doc`: a coparent prekey that has not reached us is
+                // a pull/publication question first, so record which individual is missing it.
+                if let keyhive_core::principal::document::GenerateDocError::MissingPrekeys(
+                    missing,
+                ) = &err
+                {
+                    self.explain_missing_prekeys(missing, coparent_count, "reserved")
+                        .await;
+                }
+                return Err(ferr!("failed creating keyhive document: {err}"));
+            }
+        };
+        let hashes = self.persist_document_events(kh_doc_id, protocol).await?;
         Ok(hashes)
     }
 
@@ -752,13 +955,13 @@ impl BigKeyhiveHandle {
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<Vec<EventHash>> {
         let Some(_reservation) = storage
-            .load_doc_reservation(doc_id.into_bytes())
+            .load_doc_reservation(doc_id.to_bytes32()?)
             .await
             .map_err(|err| ferr!("failed loading document reservation: {err}"))?
         else {
             if self
                 .keyhive
-                .get_document(keyhive_doc_id(doc_id)?)
+                .get_document(keyhive_doc_id(doc_id.clone())?)
                 .await
                 .is_none()
             {
@@ -768,13 +971,13 @@ impl BigKeyhiveHandle {
         };
         let document_ids = self.group_document_ids(pending_group).await;
         let hashes = if document_ids.contains(&doc_id) {
-            self.revoke_group_from_doc(pending_group, doc_id, after_content, protocol)
+            self.revoke_group_from_doc(pending_group, doc_id.clone(), after_content, protocol)
                 .await?
         } else {
             Vec::new()
         };
         storage
-            .delete_doc_reservation(doc_id.into_bytes())
+            .delete_doc_reservation(doc_id.to_bytes32()?)
             .await
             .map_err(|err| ferr!("failed deleting document reservation: {err}"))?;
         Ok(hashes)
@@ -791,21 +994,19 @@ impl BigKeyhiveHandle {
             .await
     }
 
-    #[expect(clippy::type_complexity)]
     async fn persist_document_events(
         &self,
-        doc: &Arc<
-            futures::lock::Mutex<
-                keyhive_core::principal::document::Document<
-                    future_form::Sendable,
-                    MemorySigner,
-                    Vec<u8>,
-                    BigRepoKeyhiveListener,
-                >,
-            >,
-        >,
+        doc_id: KhDocumentId,
         protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<Vec<EventHash>> {
+        // Document creation answers with an id now, so resolve the shared
+        // handle here to read the ops the new document starts with.
+        let doc = self
+            .keyhive
+            .as_ref()
+            .get_document(doc_id)
+            .await
+            .ok_or_else(|| ferr!("keyhive document missing when persisting its initial events"))?;
         let (cgka_ops, delegations) = {
             let locked = doc.lock().await;
             (
@@ -836,17 +1037,27 @@ impl BigKeyhiveHandle {
         parents: Vec<BigKeyhiveAuthority>,
         protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<(BigKeyhiveGroup, Vec<EventHash>)> {
+        // As in `create_doc`: validate through the peer, hand over the id.
         let coparents = parents
             .into_iter()
             .map(BigKeyhiveAuthority::into_peer)
-            .collect::<Res<Vec<_>>>()?;
+            .collect::<Res<Vec<_>>>()?
+            .into_iter()
+            .map(|peer| peer.id())
+            .collect::<Vec<Identifier>>();
         let keyhive = self.keyhive.as_ref();
-        let group = keyhive
+        let group_id = keyhive
             .generate_group(coparents)
             .await
             .map_err(|err| ferr!("error creating keyhive group: {err}"))?;
+        // `generate_group` answers with the id alone; read the shared handle
+        // back so the group can still be locked for its delegations.
+        let inner = keyhive
+            .get_group(group_id)
+            .await
+            .ok_or_else(|| ferr!("keyhive group missing after creating it"))?;
         let (id, delegations) = {
-            let locked = group.lock().await;
+            let locked = inner.lock().await;
             (
                 locked.group_id(),
                 locked
@@ -862,7 +1073,7 @@ impl BigKeyhiveHandle {
                 hashes.push(hash);
             }
         }
-        Ok((BigKeyhiveGroup { id, inner: group }, hashes))
+        Ok((BigKeyhiveGroup { id, inner }, hashes))
     }
 
     pub(crate) async fn group_document_ids(&self, group: &BigKeyhiveGroup) -> BTreeSet<DocumentId> {
@@ -870,7 +1081,7 @@ impl BigKeyhiveHandle {
             .document_ids_containing_group(group.id())
             .await
             .into_iter()
-            .map(|doc_id| DocumentId::new(*doc_id.as_bytes()))
+            .map(|doc_id| DocumentId::new(doc_id.as_bytes()))
             .collect()
     }
 
@@ -903,7 +1114,7 @@ impl BigKeyhiveHandle {
         let affected_docs = update
             .cgka_ops
             .iter()
-            .map(|op| DocumentId::new(*op.payload().doc_id().as_bytes()))
+            .map(|op| DocumentId::new(op.payload().doc_id().as_bytes()))
             .collect();
         let mut hashes = persist_cgka_update_ops(protocol, update.cgka_ops).await?;
         if let Some(hash) = persist_delegation(protocol, update.delegation).await? {
@@ -923,7 +1134,7 @@ impl BigKeyhiveHandle {
     ) -> Res<Vec<EventHash>> {
         use keyhive_core::principal::membered::Membered;
         let agent = principal.into().into_agent();
-        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
         let kh = self.keyhive.as_ref();
         let doc = kh
             .get_document(kh_doc_id)
@@ -956,7 +1167,7 @@ impl BigKeyhiveHandle {
     ) -> Res<Vec<EventHash>> {
         use keyhive_core::principal::membered::Membered;
 
-        let kh_doc_id = keyhive_doc_id(doc_id)?;
+        let kh_doc_id = keyhive_doc_id(doc_id.clone())?;
         let kh = self.keyhive.as_ref();
         let doc = kh
             .get_document(kh_doc_id)
@@ -1000,7 +1211,10 @@ impl BigKeyhiveHandle {
 }
 
 fn keyhive_doc_id(doc_id: DocumentId) -> Res<keyhive_core::principal::document::id::DocumentId> {
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+    // A document key is a BigSync object key, which ADR 012 decision 1 makes arbitrary
+    // bytes: the keyhive identifier is a fixed-width consumer, so a wrong-width key is an
+    // error here rather than a panicking assertion.
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)
         .map_err(|_| ferr!("doc_id is not a valid Ed25519 point"))?;
     Ok(keyhive_core::principal::document::id::DocumentId::from(
         keyhive_core::principal::identifier::Identifier::from(vk),

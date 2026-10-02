@@ -59,6 +59,7 @@
 
 - Do not adress TODOs or FIXMEs unless told to do so, usually the reason they're there is a broader issue that might not be apparent in the local scope that you encountered them.
 - Prefer to preserve comments unless they are progress comments written by an agent. 
+- Explain the mechanism at the site. A pointer to an ADR is not a substitute for the sentence a reader needs: state the fact where the code is, and even when the ADR carries the reasoning, state the operative part here anyway.
 
 ## big_sync ↔ keyhive racing (read before diagnosing sync flakes)
 
@@ -84,7 +85,7 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 - Every failure a run surfaces is pinned or instrumented in the same turn. "Pre-existing", "unrelated", and "my change didn't cause it" are not findings, and neither are two clean runs after a change.
 - `../keyhive` and `../subduction` are ours to instrument. Ask before *concluding* a bug is upstream, not before adding a log line.
 - Keep instrumentation in its own commit, separate from fixes and pin bumps: the forks move and the logs must be droppable independently.
-- Diagnosis playbooks live in `.agents/skills/`: `stress-sync-investigation` (hunt loop, log triage, load-only hangs), `fork-pinning-and-upstream-sync` (patch/pin lifecycle, upstream PRs, CI), `rr-debugging` (deterministic repros only).
+- Diagnosis playbooks live in `.agents/skills/`: `stress-sync-investigation` (hunt loop, log triage, load-only hangs), `fork-pinning-and-upstream-sync` (patch/pin lifecycle, upstream PRs, CI), `rr-debugging` (deterministic repros only), `message-ordering-audit` (causal ordering across hub command/event/mailbox surfaces).
 ## VCS
 
 > [!INFO]

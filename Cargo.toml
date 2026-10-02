@@ -88,9 +88,13 @@ semver = { version = "1", features = ["serde"] }
 surelock = "0.1"
 
 #
+# collections
+
+#
 # encoding
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+postcard = { version = "1.1.3", features = ["alloc"] }
 serde_with = "3.16"
 multihash = "0.19.3"
 data-encoding = "2.10"
@@ -155,22 +159,23 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 automerge = "0.11.0"
 autosurgeon = "0.13.0"
 automerge-test = "0.9"
-subduction_core = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
-subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "643c48205d70fb5afdb7cbac7b6c7cafecbbe066" }
 
-keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "d4bda7c71db4efcdf988348478f1e802170a7ecd" }
-keyhive_core = { version = "0.5.0", git = "https://github.com/dman-os/keyhive", rev = "d4bda7c71db4efcdf988348478f1e802170a7ecd" }
-beekem = { version = "0.3.0", git = "https://github.com/dman-os/keyhive", rev = "d4bda7c71db4efcdf988348478f1e802170a7ecd" }
+subduction_core = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_websocket = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_ephemeral = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+sedimentree_core = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_redb_storage = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_crypto = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+subduction_keyhive = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
+
+keyhive_crypto = { version = "0.2.1", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
+keyhive_core = { version = "0.6.0", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
+beekem = { version = "0.4.0", git = "https://github.com/dman-os/keyhive", rev = "1063446711dcca3848430044f239830dc948290c" }
 
 ed25519-dalek = "2.2.0"
 async-channel = "2.5.0"
-nonempty = "0.10.0"
+nonempty = "0.12.0"
 qrcode = { version = "0.14.1", default-features = false }
 
 #
@@ -264,3 +269,23 @@ clippy.let_underscore_must_use = "warn"
 clippy.let_underscore_untyped = "deny"
 rust.let_underscore_drop = "deny"
 # clippy.used_underscore_binding = "warn"
+
+# Subduction is taken straight from the local checkout by the path dependencies above: its own
+# workspace members depend on each other by path, so nothing has to negotiate versions and the graph
+# holds exactly one copy of each crate. Keyhive stays declared by `rev` and is redirected by the
+# patch below, because subduction's own keyhive dependency is a git edge at the pushed rev — only a
+# patch on the shared URL unifies that edge with ours onto the one local checkout.
+# Remember to re-check resolution after editing either block: a partial block silently
+# duplicates a crate across the local path and the pinned git source.
+[patch."https://github.com/dman-os/keyhive"]
+# keyhive_core = { path = "../keyhive/keyhive_core" }
+# keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
+# beekem = { path = "../keyhive/beekem" }
+# subduction_core = { path = "../subduction/subduction_core" }
+# subduction_iroh = { path = "../subduction/subduction_iroh" }
+# subduction_websocket = { path = "../subduction/subduction_websocket" }
+# subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
+# sedimentree_core = { path = "../subduction/sedimentree_core" }
+# subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+# subduction_crypto = { path = "../subduction/subduction_crypto" }
+# subduction_keyhive = { path = "../subduction/subduction_keyhive" }

@@ -1648,3 +1648,189 @@ async fn test_local_config_write_not_double_processed() -> Res<()> {
     ctx.stop().await?;
     Ok(())
 }
+
+// The three rules of a config-revision application, exercised against the
+// extracted core (`snapshot_decision`, `revision_action`, `EventSink`,
+// `announce_pending_activation`). They need no BigRepo, no drawer, and no
+// revision delivery, so they are deterministic where reaching the same branch
+// through `test_cx` would depend on the order revisions arrive in.
+
+fn revision_heads(byte: u8) -> ChangeHashSet {
+    ChangeHashSet(Arc::from([automerge::ChangeHash([byte; 32])]))
+}
+
+/// A config carrying only what a revision's events are projected against: the
+/// enabled refs.
+fn plugs_config(enabled: HashMap<String, url::Url>) -> PlugsConfig {
+    PlugsConfig {
+        enabled,
+        known_plugs: default(),
+        plug_config_doc_ids: default(),
+    }
+}
+
+fn cache_with_active(plug_id: &str, heads: ChangeHashSet) -> PlugsCache {
+    let mut cache = PlugsCache::default();
+    cache.set_active(plug_id, heads, Arc::new(mock_plug("plug1")));
+    cache
+}
+
+/// Records every announcement with whether the announced plug was still in the
+/// active projection at announcement time — i.e. exactly what a subscriber
+/// reacting to the event sees.
+#[derive(Default)]
+struct RecordingSink {
+    announced: Vec<(PlugsEvent, bool)>,
+}
+
+impl EventSink for RecordingSink {
+    fn announce(&mut self, cache: &PlugsCache, event: &PlugsEvent) {
+        let active = match event {
+            PlugsEvent::PlugEnabled { plug_id, .. }
+            | PlugsEvent::PlugUpdated { plug_id, .. }
+            | PlugsEvent::PlugDisabled { plug_id } => cache.active_manifests.contains_key(plug_id),
+            PlugsEvent::PlugsConfigChanged { .. } => false,
+        };
+        self.announced.push((event.clone(), active));
+    }
+}
+
+/// The heads gate: a revision whose heads are the store's current heads has its
+/// snapshot installed, and nothing else does. Every other revision is stale,
+/// coalesced, local, or out of order, and is discarded in favour of the store's
+/// own drawer state — this branch is the only thing stopping a stale config
+/// snapshot from reverting a user's enable/disable.
+#[test]
+fn a_config_revision_whose_heads_are_not_current_reloads_instead_of_applying_its_snapshot() {
+    let heads = revision_heads(1);
+    let revision = PlugsConfigRevision {
+        heads: heads.clone(),
+        config: plugs_config(default()),
+        events: Vec::new(),
+    };
+
+    assert_eq!(
+        snapshot_decision(Some(&heads), &revision),
+        SnapshotDecision::Install
+    );
+    assert_eq!(
+        snapshot_decision(Some(&heads), &revision),
+        SnapshotDecision::Install
+    );
+    assert_eq!(
+        snapshot_decision(Some(&revision_heads(2)), &revision),
+        SnapshotDecision::Discard
+    );
+    // A store with no snapshot yet keeps its own state and reloads: installing
+    // a revision the store cannot show is current is what the gate forbids.
+    assert_eq!(
+        snapshot_decision(None, &revision),
+        SnapshotDecision::Discard
+    );
+}
+
+/// Teardown before announcement: a subscriber that reacts to `PlugDisabled` by
+/// reading the active projection must not find the plug still active. The pin
+/// worker's plug-events walker does exactly that read.
+#[test]
+fn disabling_a_plug_clears_its_active_cache_before_publishing_plug_disabled() {
+    let plug_id = "@test/plug1";
+    let mut cache = cache_with_active(plug_id, revision_heads(1));
+    assert!(cache.active_manifests.contains_key(plug_id));
+
+    let event = PlugsEvent::PlugDisabled {
+        plug_id: plug_id.to_owned(),
+    };
+    let mut sink = RecordingSink::default();
+    clear_active_and_announce(&mut cache, plug_id, &event, &mut sink);
+
+    assert_eq!(sink.announced, vec![(event, false)]);
+    assert!(!cache.active_manifests.contains_key(plug_id));
+}
+
+/// The pending→active edge announces exactly once. Enabled-but-unreadable is a
+/// pending state (activation leaves no active entry); the transition to active
+/// is live-only, so re-resolving an already-active plug must stay silent or the
+/// live tap and the durable stream disagree.
+#[test]
+fn a_pending_enabled_ref_publishes_plug_enabled_exactly_once_when_it_becomes_readable() {
+    let plug_id = "@test/plug1";
+    let mut sink = RecordingSink::default();
+
+    // Enabled, nothing readable at its pinned heads yet: nothing to announce.
+    let pending = PlugsCache::default();
+    assert!(!announce_pending_activation(
+        &pending, false, plug_id, &mut sink
+    ));
+    assert!(sink.announced.is_empty());
+
+    // Readable now: the inactive→active edge announces once, carrying the heads
+    // the manifest is pinned at.
+    let heads = revision_heads(1);
+    let active = cache_with_active(plug_id, heads.clone());
+    assert!(announce_pending_activation(
+        &active, false, plug_id, &mut sink
+    ));
+    let expected = PlugsEvent::PlugEnabled {
+        plug_id: plug_id.to_owned(),
+        heads,
+    };
+    assert_eq!(sink.announced, vec![(expected, true)]);
+
+    // Resolved again while already active — the edge is behind us: silence.
+    assert!(!announce_pending_activation(
+        &active, true, plug_id, &mut sink
+    ));
+    assert_eq!(sink.announced.len(), 1);
+}
+
+/// The action table, including the branch that looks like a no-op: an
+/// enablement event whose plug the current config no longer holds projects
+/// nothing — but it is still an event of the revision, and the caller announces
+/// it as it stands.
+#[test]
+fn a_revision_event_projects_only_against_the_config_it_is_applied_to() {
+    let plug_id = "@test/plug1";
+    let heads = revision_heads(1);
+    let ref_url = PlugsRepo::build_enabled_ref("plug-manifest-doc", "main", &heads).unwrap();
+    let enabled = plugs_config(HashMap::from([(plug_id.to_owned(), ref_url.clone())]));
+
+    assert_eq!(
+        revision_action(
+            &enabled,
+            &PlugsEvent::PlugEnabled {
+                plug_id: plug_id.to_owned(),
+                heads: heads.clone()
+            }
+        ),
+        RevisionAction::Activate {
+            plug_id: plug_id.to_owned(),
+            ref_url
+        }
+    );
+    assert_eq!(
+        revision_action(
+            &plugs_config(default()),
+            &PlugsEvent::PlugEnabled {
+                plug_id: plug_id.to_owned(),
+                heads: heads.clone()
+            }
+        ),
+        RevisionAction::AnnounceOnly
+    );
+    assert_eq!(
+        revision_action(
+            &enabled,
+            &PlugsEvent::PlugDisabled {
+                plug_id: plug_id.to_owned()
+            }
+        ),
+        RevisionAction::ClearActive {
+            plug_id: plug_id.to_owned()
+        }
+    );
+    assert_eq!(
+        revision_action(&enabled, &PlugsEvent::PlugsConfigChanged { heads }),
+        RevisionAction::RefreshKnown
+    );
+}

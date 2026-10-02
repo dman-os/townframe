@@ -31,7 +31,7 @@ pub struct TokioTaskCompletion<C, O> {
 /// only the walker knows which source revisions the command covers.
 pub struct TokioKeyedScheduler<K, C, O>
 where
-    K: Eq + Hash + Copy + Send + Sync + 'static,
+    K: Eq + Hash + Clone + Send + Sync + 'static,
     C: Clone + Send + Sync + 'static,
     O: Send + 'static,
 {
@@ -54,7 +54,7 @@ where
 
 impl<K, C, O> TokioKeyedScheduler<K, C, O>
 where
-    K: Eq + Hash + Copy + Send + Sync + 'static,
+    K: Eq + Hash + Clone + Send + Sync + 'static,
     C: Clone + Send + Sync + 'static,
     O: Send + 'static,
 {
@@ -90,7 +90,7 @@ where
     where
         F: Future<Output = Res<O>> + Send + 'static,
     {
-        let old_task = self.scheduler.active_task(key);
+        let old_task = self.scheduler.active_task(key.clone());
         let task_id = self.scheduler.replace(Instant::now(), key, command);
         if let Some(old_task) = old_task {
             self.ready_futures.remove(&old_task);
@@ -106,7 +106,7 @@ where
 
     /// Cancel the current task for `key`, including a delayed retry.
     pub fn cancel(&mut self, key: K) {
-        let old_task = self.scheduler.active_task(key);
+        let old_task = self.scheduler.active_task(key.clone());
         if self.scheduler.cancel(key).is_some() {
             if let Some(old_task) = old_task {
                 self.ready_futures.remove(&old_task);
@@ -137,7 +137,7 @@ where
     where
         F: Future<Output = Res<O>> + Send + 'static,
     {
-        if !self.scheduler.wake(Instant::now(), key) {
+        if !self.scheduler.wake(Instant::now(), key.clone()) {
             return Ok(false);
         }
         let task_id = self
@@ -246,6 +246,12 @@ where
         let task_id = task.id;
         let completion_tx = self.completion_tx.clone();
         let command = task.seed;
+        // The keyed work runs inside a span per physical task, so everything one key's
+        // current attempt logs is grouped under one id, and a retry or a replacement of
+        // that key is visibly a different span. The key itself cannot be named here:
+        // neither `K` nor the command `C` carries a `Debug` bound, and adding one would
+        // change this generic's public bounds for every crate that drives it.
+        let future = future.instrument(tracing::debug_span!("keyed_task", task_id).or_current());
         let handle = self.task_set.spawn(async move {
             let result = future.await;
             // Closing the receiver means the owning worker is shutting down;

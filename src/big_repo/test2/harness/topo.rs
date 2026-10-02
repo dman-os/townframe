@@ -14,9 +14,18 @@
 use crate::interlude::*;
 
 use super::log_nickname;
-use crate::test::StressBigSyncRpcClient;
+
+/// The live-lane replay hold the harness asks for, in milliseconds.
+///
+/// Production parks a caught-up live lane for `ReplayPageTask::HOLD_MS` (15s). A test's
+/// settling waits (`wait_for_quiescence`, `wait_for_keyhive_reconciliation`) cannot see a
+/// parked lane as in-flight work, so an assertion made after quiescence would fire while
+/// the lane is still parked and the cluster is not converged. The harness therefore asks
+/// for a short hold of its own — a client-side pacing choice the responder honours —
+/// instead of having a test double ignore the request.
+const REPLAY_HOLD_MS: u32 = 200;
 use crate::{
-    BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerId, SqliteBigRepoStore,
+    BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerKey, SqliteBigRepoStore,
     StorageConfig, WorkerGroupScope,
 };
 use big_sync::{HostPartStore, stress_support};
@@ -37,9 +46,14 @@ pub(crate) struct Node {
     pub(crate) endpoint: iroh::Endpoint,
     _router: iroh::protocol::Router,
     repo_rpc_stop: crate::rpc::BigRepoRpcStopToken,
+    big_sync_rpc_stop: big_sync::rpc::BigSyncRpcStopToken,
+    /// Kept alive for the whole node: the handle owns the local sender that keeps
+    /// `spawn_big_sync_rpc`'s dispatch loop open. Dropping it closes `rpc_rx`, which
+    /// tears the loop down and makes every accepted connection close unhandled.
+    _big_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
     accepted: Arc<Mutex<Option<BigRepoConnection>>>,
     accepts: Arc<Notify>,
-    connections: Arc<Mutex<HashMap<PeerId, BigRepoConnection>>>,
+    connections: Arc<Mutex<HashMap<PeerKey, BigRepoConnection>>>,
     /// Human label for diagnostics ("Alice"). Registered in [`log_nickname`].
     pub label: &'static str,
     pub(crate) identity_seed: [u8; 32],
@@ -47,7 +61,7 @@ pub(crate) struct Node {
     /// restarts so a restarted node keeps its hidden-parts config — a
     /// restart that drops it silently re-advertises GLOBAL to peers that
     /// still hide it, and those routes never establish.
-    hidden_parts: HashSet<big_sync_core::PartId>,
+    hidden_parts: HashSet<big_sync_core::PartKey>,
     /// Frontier-worker group scope. Disabled by default (see boot_with_store);
     /// persisted across restarts like hidden_parts.
     pub(crate) frontier_scope: WorkerGroupScope,
@@ -115,7 +129,7 @@ impl Node {
         seed: u8,
         label: &'static str,
         storage: StorageConfig,
-        hidden_parts: HashSet<big_sync_core::PartId>,
+        hidden_parts: HashSet<big_sync_core::PartKey>,
     ) -> crate::Res<Self> {
         Self::boot_with_scopes(
             seed,
@@ -134,7 +148,7 @@ impl Node {
         seed: u8,
         label: &'static str,
         storage: StorageConfig,
-        hidden_parts: HashSet<big_sync_core::PartId>,
+        hidden_parts: HashSet<big_sync_core::PartKey>,
         frontier_scope: WorkerGroupScope,
     ) -> crate::Res<Self> {
         Self::boot_with_scopes_impl(seed, label, storage, hidden_parts, frontier_scope, true).await
@@ -144,7 +158,7 @@ impl Node {
         seed: u8,
         label: &'static str,
         storage: StorageConfig,
-        hidden_parts: HashSet<big_sync_core::PartId>,
+        hidden_parts: HashSet<big_sync_core::PartKey>,
         frontier_scope: WorkerGroupScope,
         keyhive_change_notifs: bool,
     ) -> crate::Res<Self> {
@@ -174,7 +188,7 @@ impl Node {
         // document scope has to be a document, which the frontier worker asserts
         // in test builds.
         store.ensure_part(stress_support::test_part()).await?;
-        store.ensure_part(crate::GLOBAL_PART_ID).await?;
+        store.ensure_part(crate::seds_part_id()).await?;
         Self::boot_with_store(
             seed,
             label,
@@ -192,7 +206,7 @@ impl Node {
         label: &'static str,
         storage: StorageConfig,
         store: Arc<SqliteBigRepoStore>,
-        hidden_parts: HashSet<big_sync_core::PartId>,
+        hidden_parts: HashSet<big_sync_core::PartKey>,
         frontier_scope: WorkerGroupScope,
         keyhive_change_notifs: bool,
     ) -> crate::Res<Self> {
@@ -221,12 +235,23 @@ impl Node {
         let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .clear_ip_transports()
             .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
+            // The iroh identity is the node identity, as in production: the big-sync RPC
+            // attributes a request to `conn.remote_id()`, and that key has to be the same
+            // `PeerKey` the part grants name. A random endpoint key would make every
+            // peer-facing read answer `UnkownParts` for a peer that is in fact a member.
+            .secret_key(iroh::SecretKey::from_bytes(&[seed; 32]))
             .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await?;
         let accepted = Arc::new(Mutex::new(None));
         let accepts = Arc::new(Notify::new());
         let (repo_rpc, repo_rpc_stop) = crate::rpc::spawn_repo_rpc(Arc::clone(&repo)).await?;
+        let (big_sync_rpc, big_sync_rpc_stop) =
+            big_sync::rpc::spawn_big_sync_rpc(HashMap::from([(
+                Arc::from("big-repo-test"),
+                Arc::clone(&store) as crate::SharedPartStore,
+            )]))
+            .await?;
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(
                 subduction_iroh::ALPN,
@@ -238,6 +263,10 @@ impl Node {
                 },
             )
             .accept(crate::rpc::REPO_SYNC_ALPN, repo_rpc.protocol_handler())
+            .accept(
+                big_sync::rpc::BIG_SYNC_RPC_ALPN,
+                big_sync_rpc.protocol_handler(),
+            )
             .spawn();
 
         let sync_backend = Arc::new(crate::BigRepoSyncBackend::boot(Arc::downgrade(&repo)).await?);
@@ -249,10 +278,17 @@ impl Node {
             backends,
             label,
             Some(Duration::from_secs(5)),
+            // Bucket-diff, explicitly: this harness runs the band the embedder ships, so big_repo's
+            // tests exercise it; `bucket_band_reconciles_after_offline_reopen` covers the
+            // offline-reopen path that used to be the reason to stay on cursor replay.
+            Some(big_sync::SyncMode::Bucket),
             Arc::from("big-repo-test"),
         )?;
         log_nickname::register(repo.local_peer_id(), label);
+        worker.set_replay_hold_ms(REPLAY_HOLD_MS).await?;
         Ok(Self {
+            big_sync_rpc_stop,
+            _big_sync_rpc: big_sync_rpc,
             repo,
             store,
             worker,
@@ -304,14 +340,14 @@ impl Node {
         Ok(restarted)
     }
 
-    pub fn peer_id(&self) -> PeerId {
+    pub fn peer_id(&self) -> PeerKey {
         self.repo.local_peer_id()
     }
 
     pub(crate) async fn obj_parts_contains(
         &self,
         doc_id: DocumentId,
-        part_id: big_sync_core::PartId,
+        part_id: big_sync_core::PartKey,
     ) -> crate::Res<bool> {
         Ok(self.store.obj_parts(doc_id).await?.contains(&part_id))
     }
@@ -321,7 +357,7 @@ impl Node {
     pub(crate) async fn set_peer_parts(
         &self,
         remote: &Self,
-        subscribed_parts: Vec<big_sync_core::PartId>,
+        subscribed_parts: Vec<big_sync_core::PartKey>,
     ) -> crate::Res<()> {
         let parts = subscribed_parts
             .into_iter()
@@ -330,21 +366,47 @@ impl Node {
         self.worker
             .set_peer(
                 remote.peer_id(),
-                Arc::new(StressBigSyncRpcClient {
-                    target_part_store: Arc::clone(&remote.store) as crate::SharedPartStore,
-                    subscriber: self.peer_id(),
-                }),
+                Arc::new(big_sync::rpc::BigSyncRpcClient::over_iroh(
+                    self.endpoint.clone(),
+                    remote.endpoint.addr(),
+                )),
                 parts,
                 HashMap::new(),
             )
             .await
+    }
+
+    /// Authorize this node to pull `parts` from `remote`.
+    ///
+    /// Part access is explicit: nothing derives it from a document-level grant, and
+    /// `/seds` in particular is a mirror-grade grant that a document grant must never
+    /// imply. A topology whose peers are `/seds` readers therefore has to say so — and
+    /// must say so *before* the routes are registered, because a page denied at
+    /// registration backs off rather than retrying once the grant lands.
+    pub(crate) async fn allow_part_pull(
+        &self,
+        remote: &Self,
+        parts: &[big_sync_core::PartKey],
+    ) -> crate::Res<()> {
+        for part in parts {
+            remote
+                .store
+                .add_part_member(
+                    part.clone(),
+                    self.peer_id(),
+                    keyhive_core::access::Access::Read,
+                )
+                .await?;
+        }
+        Ok(())
     }
     /// Open an outbound connection to `remote` and wire bidirectional big-sync
     /// part replication between the two nodes.
     async fn connect_with_keyhive_notifications(
         &self,
         remote: &Self,
-        subscribed_parts: Vec<big_sync_core::PartId>,
+        subscribed_parts: Vec<big_sync_core::PartKey>,
+        part_access: bool,
     ) -> crate::Res<BigRepoConnection> {
         let connection = self
             .repo
@@ -355,22 +417,60 @@ impl Node {
                 None,
             )
             .await?;
+        // Part access is explicit on the serving side (see `allow_part_pull`), so the
+        // fixture grants the parts each side subscribes for, in both directions, before
+        // the routes are registered. A page denied at registration backs off for the whole
+        // unauthorized window instead of retrying once the grant lands, so the order here
+        // is not interchangeable.
+        //
+        // `part_access: false` is for tests that assert what a *document* grant does and
+        // does not authorize: with the mirror part already granted, a permitted answer
+        // legitimately includes `/seds` and the assertion stops being about the document
+        // grant.
+        if part_access {
+            self.allow_part_pull(remote, &subscribed_parts).await?;
+            remote.allow_part_pull(self, &subscribed_parts).await?;
+        }
         self.set_peer_parts(remote, subscribed_parts.clone())
             .await?;
         remote.set_peer_parts(self, subscribed_parts).await?;
         Ok(connection)
     }
     pub(crate) async fn connect(&self, remote: &Self) -> crate::Res<BigRepoConnection> {
-        self.connect_with_parts(remote, vec![crate::GLOBAL_PART_ID])
+        self.connect_with_parts(remote, vec![crate::seds_part_id()])
             .await
     }
     pub(crate) async fn connect_with_parts(
         &self,
         remote: &Self,
-        subscribed_parts: Vec<big_sync_core::PartId>,
+        subscribed_parts: Vec<big_sync_core::PartKey>,
+    ) -> crate::Res<BigRepoConnection> {
+        self.connect_with_parts_inner(remote, subscribed_parts, true)
+            .await
+    }
+
+    /// [`Self::connect_with_parts`] without the part grants.
+    ///
+    /// Part read is explicit on the serving side, so the normal path grants it. Tests
+    /// that assert what a *document* grant does and does not authorize need it left
+    /// ungranted.
+    pub(crate) async fn connect_with_parts_ungranted(
+        &self,
+        remote: &Self,
+        subscribed_parts: Vec<big_sync_core::PartKey>,
+    ) -> crate::Res<BigRepoConnection> {
+        self.connect_with_parts_inner(remote, subscribed_parts, false)
+            .await
+    }
+
+    async fn connect_with_parts_inner(
+        &self,
+        remote: &Self,
+        subscribed_parts: Vec<big_sync_core::PartKey>,
+        part_access: bool,
     ) -> crate::Res<BigRepoConnection> {
         let connection = self
-            .connect_with_keyhive_notifications(remote, subscribed_parts)
+            .connect_with_keyhive_notifications(remote, subscribed_parts, part_access)
             .await?;
         self.connections
             .lock()
@@ -378,11 +478,11 @@ impl Node {
             .insert(remote.peer_id(), connection.clone());
         Ok(connection)
     }
-    pub(crate) async fn connected_peer_ids(&self) -> Vec<PeerId> {
-        self.connections.lock().await.keys().copied().collect()
+    pub(crate) async fn connected_peer_ids(&self) -> Vec<PeerKey> {
+        self.connections.lock().await.keys().cloned().collect()
     }
-    pub(crate) async fn disconnect_peer(&self, peer_id: PeerId) -> crate::Res<()> {
-        self.worker.remove_peer(peer_id).await?;
+    pub(crate) async fn disconnect_peer(&self, peer_id: PeerKey) -> crate::Res<()> {
+        self.worker.remove_peer(peer_id.clone()).await?;
         if let Some(connection) = self.connections.lock().await.remove(&peer_id) {
             connection.stop().await?;
         }
@@ -436,6 +536,11 @@ impl Node {
             .stop()
             .await
             .expect("big_sync_stop failed during shutdown");
+        self.big_sync_rpc_stop
+            .stop()
+            .await
+            .inspect_err(|err| error!("shutdown err: {err}"))
+            .ok();
     }
 }
 
@@ -573,6 +678,15 @@ impl Pair {
             left_conn: None,
             right_conn: None,
         };
+        // These peers read `/seds`, the store-wide enumeration part. Part access is
+        // explicit and a page denied at registration backs off for the whole
+        // unauthorized window, so the grant has to precede the routes.
+        pair.left()
+            .allow_part_pull(pair.right(), &[crate::seds_part_id()])
+            .await?;
+        pair.right()
+            .allow_part_pull(pair.left(), &[crate::seds_part_id()])
+            .await?;
         pair.connect().await?;
         // The contact-card exchange rides the first keyhive protocol round;
         // with the notification subscription unwired nothing starts one
@@ -580,6 +694,20 @@ impl Pair {
         pair.left_conn().sync_keyhive_with_peer().await?;
         pair.right_conn().sync_keyhive_with_peer().await?;
         Ok(pair)
+    }
+
+    /// Connect an already-booted pair leaving part read ungranted on both sides.
+    pub(crate) async fn connect_ungranted(&mut self) -> crate::Res<()> {
+        assert!(self.left_conn.is_none());
+        assert!(self.right_conn.is_none());
+        let left_conn = self
+            .left()
+            .connect_with_parts_ungranted(self.right(), vec![crate::seds_part_id()])
+            .await?;
+        let right_conn = self.right().accepted_connection().await;
+        self.left_conn = Some(left_conn);
+        self.right_conn = Some(right_conn);
+        Ok(())
     }
 
     /// Boot a connected pair with persistent per-node BigRepo storage.
@@ -700,6 +828,25 @@ impl Pair {
         Ok(pair)
     }
 
+    /// Boot a connected pair whose parts are **not** granted to each other.
+    ///
+    /// [`Self::boot`] grants the parts each side subscribes (part read is explicit on the
+    /// serving side; see [`Node::connect_with_parts`]). Tests that assert what a document
+    /// grant does and does not authorize need the ungranted state instead, because a
+    /// granted mirror part legitimately appears in a permitted answer.
+    pub(crate) async fn boot_ungranted(
+        left_seed: u8,
+        right_seed: u8,
+        left_label: &'static str,
+        right_label: &'static str,
+    ) -> crate::Res<Self> {
+        let mut pair =
+            Self::boot_disconnected(left_seed, right_seed, left_label, right_label).await?;
+        pair.connect_ungranted().await?;
+        pair.left_conn().sync_keyhive_with_peer().await?;
+        Ok(pair)
+    }
+
     /// Boot a connected pair with admission-driven Automerge frontier workers.
     pub(crate) async fn boot_with_frontier_workers(
         left_seed: u8,
@@ -732,6 +879,14 @@ impl Pair {
             left_conn: None,
             right_conn: None,
         };
+        // The frontier peers read `/seds` (store-wide enumeration): grant it before
+        // the routes are registered, or the reader's first page is denied and backs off.
+        pair.left()
+            .allow_part_pull(pair.right(), &[crate::seds_part_id()])
+            .await?;
+        pair.right()
+            .allow_part_pull(pair.left(), &[crate::seds_part_id()])
+            .await?;
         pair.connect().await?;
         pair.left_conn().sync_keyhive_with_peer().await?;
         Ok(pair)

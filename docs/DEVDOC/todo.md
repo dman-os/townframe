@@ -29,12 +29,19 @@
   - [ ] Built in updater
   - [x] Per sink switch/index rebuild
   - [ ] Some std::mem::take sites can be a drain()
+  - [x] Rewrite big_sync_core
+    - Avoid push based or channel based replay
+      - Pull RPC with limits
+      - i.e. rev store
+    - Reuse the other machinery
+    - [ ] Make BigSyncM.set_peer incremental
+  - [ ] Evalute every storage layer/API with regards to evolution
 
 - [ ] ~Replace sqlx with seaorm~ use sqlx query macros (compile times?)
 - [ ] Plugs
   - [ ] Change manifest/types module structure for plugs
   - [ ] Better SDK
-  - [ ] Store plugin info in drawer??
+  - [x] Store plugin info in drawer??
   - [ ] Js execution
   - [ ] Processors should only run on device that created the doc
   - [ ] Predicates for losing/gaining facets

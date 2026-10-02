@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use big_sync_core::{Byte32Id, ObjId, PartId, PeerId};
+use big_sync_core::{ByteKey, ObjKey, PartKey, PeerKey};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ struct LwwPayload {
     #[serde(rename = "writtenAt")]
     written_at: u64,
     #[serde(rename = "writerId")]
-    writer_id: PeerId,
+    writer_id: PeerKey,
 }
 
 impl LwwPayload {
@@ -33,7 +33,7 @@ impl LwwPayload {
 pub fn payload(
     value: impl Into<serde_json::Value>,
     written_at: u64,
-    writer_id: PeerId,
+    writer_id: PeerKey,
 ) -> serde_json::Value {
     LwwPayload {
         value: value.into(),
@@ -43,14 +43,14 @@ pub fn payload(
     .into_value()
 }
 
-pub fn test_part() -> PartId {
-    PartId(Byte32Id::new([
+pub fn test_part() -> PartKey {
+    PartKey(ByteKey::new([
         32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12, //
         32, 12, 54, 54, 65, 112, 213, 43, 12, 54, 123, 123, 54, 23, 68, 12,
     ]))
 }
 
-pub fn test_parts() -> Vec<PartId> {
+pub fn test_parts() -> Vec<PartKey> {
     vec![test_part()]
 }
 
@@ -90,7 +90,32 @@ pub trait StressFixture: Sync {
         payload: serde_json::Value,
     ) -> Res<()>;
     async fn observed_state(&self, node: &Self::Node) -> Res<Self::Observation>;
-    fn peer_id(&self, node: &Self::Node) -> PeerId;
+    fn peer_id(&self, node: &Self::Node) -> PeerKey;
+
+    /// Compares successive observations for settlement. Fixtures may ignore diagnostic-only
+    /// churn, such as replay request identities that change during a healthy long-poll.
+    fn observations_equal(&self, left: &[Self::Observation], right: &[Self::Observation]) -> bool {
+        left == right
+    }
+
+    /// First-sight description of how two successive rounds differ, for the settle fence's stall
+    /// report. The default prints both rounds (truncated), which is enough for a fixture whose
+    /// observation is a small value map; a fixture whose observation is large and structured
+    /// overrides this so the log names the node, document and field that moved instead of
+    /// dumping every document.
+    fn observation_diff(&self, left: &[Self::Observation], right: &[Self::Observation]) -> String {
+        const DIFF_CHARS: usize = 700;
+        let render = |observations: &[Self::Observation]| {
+            let text = format!("{observations:?}");
+            if text.chars().count() <= DIFF_CHARS {
+                return text;
+            }
+            let mut out: String = text.chars().take(DIFF_CHARS).collect();
+            out.push('…');
+            out
+        };
+        format!("left={} right={}", render(left), render(right))
+    }
     // Fixture-specific application content for a document mutation.
     #[expect(clippy::too_many_arguments)]
     fn make_doc_content(
@@ -101,7 +126,7 @@ pub trait StressFixture: Sync {
         obj: &Self::StressObj,
         nonce: u64,
         written_at: u64,
-        writer_id: PeerId,
+        writer_id: PeerKey,
     ) -> serde_json::Value {
         stress_payload(phase, step, node_idx, obj, nonce, written_at, writer_id)
     }
@@ -184,10 +209,10 @@ impl<Obj: Clone> StressState<Obj> {
     }
 }
 
-pub fn stress_obj(rng: &mut impl Rng) -> ObjId {
+pub fn stress_obj(rng: &mut impl Rng) -> ObjKey {
     let mut bytes = [0u8; 32];
     rng.fill(&mut bytes);
-    ObjId(Byte32Id::new(bytes))
+    ObjKey(ByteKey::new(bytes))
 }
 
 pub fn stress_payload(
@@ -197,7 +222,7 @@ pub fn stress_payload(
     obj: &impl std::fmt::Debug,
     nonce: u64,
     written_at: u64,
-    writer_id: PeerId,
+    writer_id: PeerKey,
 ) -> serde_json::Value {
     payload(
         format!("{phase}:step={step}:node={node_idx}:obj={obj:?}:nonce={nonce}"),
@@ -527,8 +552,11 @@ pub async fn wait_for_cluster_settled<F: StressFixture + ?Sized>(
 ) -> Res<()> {
     let started_at = std::time::Instant::now();
     let deadline = timeout.map(|duration| std::time::Instant::now() + duration);
-    let mut last_snapshot = None;
+    let mut last_snapshot: Option<Vec<F::Observation>> = None;
     let mut stable_rounds = 0usize;
+    let mut changes = 0usize;
+    let mut last_diff = String::from("none yet: no observation has moved");
+    let mut last_diff_log = std::time::Instant::now();
     let mut last_warn = std::time::Instant::now();
 
     loop {
@@ -537,7 +565,10 @@ pub async fn wait_for_cluster_settled<F: StressFixture + ?Sized>(
             current.push(fixture.observed_state(node).await?);
         }
 
-        if last_snapshot.as_ref().is_some_and(|prev| prev == &current) {
+        if last_snapshot
+            .as_ref()
+            .is_some_and(|previous| fixture.observations_equal(previous, &current))
+        {
             stable_rounds += 1;
             if stable_rounds >= STRESS_SETTLE_STABLE_ROUNDS {
                 log_if_slow(label, started_at);
@@ -545,11 +576,31 @@ pub async fn wait_for_cluster_settled<F: StressFixture + ?Sized>(
             }
         } else {
             stable_rounds = 1;
+            changes += 1;
+            // Settling is "nothing moved for N rounds", so a fence that cannot reach N has to
+            // say what kept moving; without this line the report is a bare elapsed time and the
+            // movement has to be reconstructed from the raw log afterwards. The description is
+            // kept current on every change (the timeout error and the 10s warn carry it) but
+            // only written once a second, because a 40s settle changes on nearly every round.
+            if let Some(previous) = last_snapshot.as_ref() {
+                last_diff = fixture.observation_diff(previous, &current);
+                if last_diff_log.elapsed() >= Duration::from_secs(1) {
+                    tracing::debug!(label, changes, diff = %last_diff, "stress cluster observation moved");
+                    last_diff_log = std::time::Instant::now();
+                }
+            }
         }
 
         last_snapshot = Some(current);
         if last_warn.elapsed() >= Duration::from_secs(10) {
-            warn!(label, elapsed = ?started_at.elapsed(), "waiting for stress cluster to settle");
+            warn!(
+                label,
+                elapsed = ?started_at.elapsed(),
+                stable_rounds,
+                changes,
+                diff = %last_diff,
+                "waiting for stress cluster to settle"
+            );
             last_warn = std::time::Instant::now();
         }
         if let Some(target_deadline) = deadline
@@ -557,7 +608,7 @@ pub async fn wait_for_cluster_settled<F: StressFixture + ?Sized>(
         {
             log_if_slow(label, started_at);
             return Err(ferr!(
-                "timed out waiting for stress cluster to settle at {label}: last_snapshot={last_snapshot:?}"
+                "timed out waiting for stress cluster to settle at {label}: changes={changes} diff={last_diff} last_snapshot={last_snapshot:?}"
             ));
         }
 

@@ -41,7 +41,7 @@ pub(crate) struct SubscriptionEntry {
     pub tx: irpc::channel::mpsc::Sender<KeyhiveChangedRpcEvent>,
 }
 
-pub(crate) type SubscriptionMap = Arc<surelock::mutex::Mutex<HashMap<PeerId, SubscriptionEntry>>>;
+pub(crate) type SubscriptionMap = Arc<surelock::mutex::Mutex<HashMap<PeerKey, SubscriptionEntry>>>;
 
 /// Producer-side handle to the dispatcher task.
 #[derive(Clone)]
@@ -54,14 +54,14 @@ impl KeyhiveChangeDispatcher {
     /// the initial confirmation event. Returns the subscription ID.
     pub(crate) async fn subscribe(
         &self,
-        peer_id: PeerId,
+        peer_id: PeerKey,
         tx: irpc::channel::mpsc::Sender<KeyhiveChangedRpcEvent>,
     ) -> Uuid {
         let sub_id = Uuid::new_v4();
         surelock::key::lock_scope(|key| {
             let (mut subscriptions, _key) = key.lock(&self.subscriptions);
             subscriptions.insert(
-                peer_id,
+                peer_id.clone(),
                 SubscriptionEntry {
                     id: sub_id,
                     tx: tx.clone(),
@@ -94,7 +94,7 @@ impl KeyhiveChangeDispatcher {
     }
 
     /// Unregister a peer's notification stream for the given subscription ID.
-    pub(crate) async fn unsubscribe(&self, peer_id: &PeerId, sub_id: Uuid) {
+    pub(crate) async fn unsubscribe(&self, peer_id: &PeerKey, sub_id: Uuid) {
         surelock::key::lock_scope(|key| {
             let (mut subscriptions, _key) = key.lock(&self.subscriptions);
             if let Some(entry) = subscriptions.get(peer_id)
@@ -147,6 +147,7 @@ pub(crate) fn spawn_keyhive_dispatcher(
     protocol: BigRepoKeyhiveProtocol,
     store: SqliteBigRepoStore,
     timer: Arc<dyn Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
     notify: Arc<tokio::sync::Notify>,
     subscriptions: SubscriptionMap,
     policy: DebouncePolicy,
@@ -156,7 +157,7 @@ pub(crate) fn spawn_keyhive_dispatcher(
     };
     let (abort_handle, abort_registration) = futures::future::AbortHandle::new_pair();
     let run = Sendable::from_future(async move {
-        let fut = run_dispatcher(notify, protocol, store, timer, subscriptions, policy);
+        let fut = run_dispatcher(notify, protocol, store, timer, clock, subscriptions, policy);
         match futures::future::Abortable::new(fut, abort_registration).await {
             Ok(result) => result,
             Err(_) => Ok(()),
@@ -178,10 +179,11 @@ async fn run_dispatcher(
     protocol: BigRepoKeyhiveProtocol,
     store: SqliteBigRepoStore,
     timer: Arc<dyn Timer<Sendable>>,
+    clock: Arc<dyn crate::runtime2::Clock>,
     subscriptions: SubscriptionMap,
     policy: DebouncePolicy,
 ) -> Res<()> {
-    let mut batcher: KeyedBatcher<PeerId, (), DebouncePolicy> =
+    let mut batcher: KeyedBatcher<PeerKey, (), DebouncePolicy> =
         KeyedBatcher::new(policy, |_: &()| 0, |(), ()| {});
     // Boot at the current head: pre-boot incorporations are covered by each
     // subscriber's initial pull. The shared reader owns replay-boundary and
@@ -189,11 +191,17 @@ async fn run_dispatcher(
     // peer delivery.
     let source = keyhive_admission::Store {
         store: store.clone(),
-        timer,
+        // The loop below waits on the same timer the admission reader polls
+        // with, so both cadences are driven by one seam.
+        timer: Arc::clone(&timer),
     };
     let mut reader = source.open((), store.admission_head().await?).await?;
     loop {
-        let deadline = batcher.next_deadline().map(tokio::time::Instant::from_std);
+        // The debounce ceiling and the loop's `now` come from the same injected
+        // clock the wait below uses, so the deadline it computes is the one it
+        // actually sleeps to (`ceiling - now` on the injected timer).
+        let deadline = batcher.next_deadline();
+        let now = clock.instant();
         tokio::select! {
             read = reader.next(RevisionReadLimits { max_entries: ADMISSION_BATCH }) => {
                 match read? {
@@ -204,18 +212,26 @@ async fn run_dispatcher(
                 }
             }
             _ = notify.notified() => {
-                let due = batcher.take_due(Instant::now());
+                let due = batcher.take_due(clock.instant());
                 deliver(&subscriptions, due).await;
             }
             _ = async {
                 if let Some(deadline) = deadline {
-                    tokio::time::sleep_until(deadline).await;
+                    // Wakes at the same instant `sleep_until(deadline)` did: the wait is
+                    // `deadline - now` on the injected timer, and the subtraction
+                    // saturates. A ceiling the clock has already passed therefore becomes a
+                    // zero-length wait — the same already-expired timer the wall-clock
+                    // version armed — so a due ceiling is still delivered on this iteration
+                    // and no loop turn is added.
+                    timer.sleep(deadline.saturating_duration_since(now)).await;
                 } else {
                     std::future::pending::<()>().await;
                 }
             } => {}
         }
-        let due = batcher.take_due(Instant::now());
+        // Read `now` fresh: the clock has moved during the wait, and due peers must
+        // be taken against the instant the loop actually woke at.
+        let due = batcher.take_due(clock.instant());
         deliver(&subscriptions, due).await;
     }
 }
@@ -231,7 +247,7 @@ async fn run_dispatcher(
 /// failure surfaces through the task's unwrap rather than being retried
 /// forever.
 async fn classify_rows(
-    batcher: &mut KeyedBatcher<PeerId, (), DebouncePolicy>,
+    batcher: &mut KeyedBatcher<PeerKey, (), DebouncePolicy>,
     protocol: &BigRepoKeyhiveProtocol,
     subscriptions: &SubscriptionMap,
     rows: &[keyhive_admission::AdmittedRow],
@@ -239,9 +255,13 @@ async fn classify_rows(
     let connected: BTreeSet<KeyhivePeerId> = surelock::key::lock_scope(|key| {
         let (subs, _key) = key.lock(subscriptions);
         subs.keys()
-            .map(|peer| KeyhivePeerId::from_bytes(*peer.as_bytes()))
-            .collect()
-    });
+            // The subscriber keys are registered from our own connection path with the
+            // authenticated peer identity, so a key of the wrong width means our plumbing broke,
+            // not that a peer sent something odd. Report it rather than skip: skipping would
+            // silently drop that peer's admission rows.
+            .map(|peer| eyre::Ok(KeyhivePeerId::from_bytes(peer.to_bytes32()?)))
+            .collect::<Res<BTreeSet<KeyhivePeerId>>>()
+    })?;
     if connected.is_empty() {
         if dispatch_diag() {
             tracing::debug!(
@@ -413,7 +433,7 @@ async fn classify_rows(
             // neither selected nor covered by the unattributed fallback is a
             // peer the cache proved is not a recipient.
             if selected {
-                let peer_id = PeerId::new(*peer.verifying_key());
+                let peer_id = PeerKey::new(*peer.verifying_key());
                 batcher.push(now, peer_id, ());
             }
         }
@@ -422,7 +442,7 @@ async fn classify_rows(
 }
 
 /// Deliver due notifications concurrently, dropping subscriptions whose stream closed.
-async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
+async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerKey, ())>) {
     if due.is_empty() {
         return;
     }
@@ -431,15 +451,16 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
         tracing::debug!(?due_peers, "KEYHIVE_DISPATCH_DIAG deliver batch");
     }
     let targets: Vec<(
-        PeerId,
+        PeerKey,
         Uuid,
         irpc::channel::mpsc::Sender<KeyhiveChangedRpcEvent>,
-    )> =
-        surelock::key::lock_scope(|key| {
-            let (subs, _key) = key.lock(subscriptions);
-            due.into_iter()
+    )> = surelock::key::lock_scope(|key| {
+        let (subs, _key) = key.lock(subscriptions);
+        due.into_iter()
             .filter_map(|(peer_id, ())| {
-                let found = subs.get(&peer_id).map(|entry| (peer_id, entry.id, entry.tx.clone()));
+                let found = subs
+                    .get(&peer_id)
+                    .map(|entry| (peer_id.clone(), entry.id, entry.tx.clone()));
                 if dispatch_diag() && found.is_none() {
                     tracing::debug!(
                         peer = %peer_id,
@@ -449,7 +470,7 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
                 found
             })
             .collect()
-        });
+    });
     let delivery_futures = targets.into_iter().map(|(peer_id, sub_id, tx)| async move {
         if tx
             .send(KeyhiveChangedRpcEvent { initial: false })
@@ -479,7 +500,7 @@ async fn deliver(subscriptions: &SubscriptionMap, due: Vec<(PeerId, ())>) {
         }
     });
     let results = futures::future::join_all(delivery_futures).await;
-    let failed: Vec<(PeerId, Uuid)> = results.into_iter().flatten().collect();
+    let failed: Vec<(PeerKey, Uuid)> = results.into_iter().flatten().collect();
     if !failed.is_empty() {
         surelock::key::lock_scope(|key| {
             let (mut subs, _key) = key.lock(subscriptions);

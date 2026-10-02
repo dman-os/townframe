@@ -533,7 +533,7 @@ async fn plan_processor_group(
     let mut local_changed = if let Some(current_heads) = &current_heads {
         let mut keys = local_candidates.iter().cloned().collect::<Vec<_>>();
         keys.sort();
-        triage
+        let Some(local_changed) = triage
             .rt
             .drawer
             .facet_keys_touched_by_local_actor(
@@ -543,6 +543,14 @@ async fn plan_processor_group(
                 &keys,
             )
             .await?
+        else {
+            // The doc/branch is not resolvable at these heads yet (entry,
+            // branch ref or handle not materialized). Classifying now would
+            // mislabel local changes as remote, so defer the whole revision:
+            // the driver parks on the materialization wake and reprocesses it.
+            return Ok(None);
+        };
+        local_changed
     } else {
         HashSet::new()
     };
@@ -712,6 +720,12 @@ impl DocProcessorStopToken {
     }
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    err(Debug),
+    fields(worker = "doc-processor")
+)]
 pub(crate) async fn spawn_doc_processor_driver(
     rt: Arc<Rt>,
     facet_set_store: Arc<FacetSetRevisionStore>,
@@ -746,6 +760,12 @@ pub(crate) async fn spawn_doc_processor_driver(
     })
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    err(Debug),
+    fields(worker = "doc-processor")
+)]
 async fn run_doc_processor_driver(
     rt: Arc<Rt>,
     facet_set_store: Arc<FacetSetRevisionStore>,

@@ -348,15 +348,20 @@ impl FacetSetRevisionStore {
                 return Err(ferr!("dmeta state identity does not match Branch facet"));
             }
             if delta.branch_id.0 == state.document_id {
-                for facet_key in drawer
+                let touched_local = drawer
                     .facet_keys_touched_by_local_actor(
                         &state.document_id,
                         daybook_types::doc::BranchPath::new("main"),
                         &state.branch_heads,
                         &state.all_facet_keys,
                     )
-                    .await?
-                {
+                    .await?;
+                let Some(touched_local) = touched_local else {
+                    // Doc not resolvable at these heads; defer the revision
+                    // rather than classifying local origin with stale data.
+                    return Ok(None);
+                };
+                for facet_key in touched_local {
                     removed_local.insert((
                         state.document_id.clone(),
                         delta.branch_id.0.clone(),
@@ -721,6 +726,12 @@ impl DocFacetSetIndexRepo {
     /// machine's mutable state (walker, scheduler, pending, and parked keys) lives
     /// as stack locals here; only the revision store is shared with the
     /// repo's public query surface.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "facet-set-index-machine")
+    )]
     async fn machine_loop(
         &self,
         drawer: Arc<DrawerRepo>,
@@ -938,6 +949,12 @@ impl DocFacetSetIndexRepo {
         &self.sql
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "facet-set-index")
+    )]
     pub async fn boot(
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
         drawer: Arc<DrawerRepo>,

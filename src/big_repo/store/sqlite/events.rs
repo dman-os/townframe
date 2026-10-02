@@ -1,10 +1,22 @@
 use super::*;
 use sqlx::{QueryBuilder, Row};
 
-pub(crate) const KEYHIVE_ADMISSION_READER_GROUP_PART: &str = "group_part";
-pub(crate) const KEYHIVE_ADMISSION_READER_CAUSAL_CHECKPOINT: &str = "causal_checkpoint";
-pub(crate) const KEYHIVE_ADMISSION_READER_AUTOMERGE_FRONTIER: &str = "automerge_frontier";
-pub(crate) const KEYHIVE_ADMISSION_READER_PREKEY_JANITOR: &str = "prekey_janitor";
+/// The walker identities of the consumers that gate admission-log retention.
+///
+/// Each pair is the one place its consumer is named: it keys the consumer's
+/// `delta_walker_progress` row — which is the authoritative "reconciled through"
+/// value — and its `"{namespace}/{consumer_id}"` form (the format
+/// `SqliteDeltaWalkerStateRepo::retention_reader_id_of` builds) keys the retention
+/// registration that keeps the consumer's unprocessed admission rows from being
+/// pruned.
+pub(crate) const KEYHIVE_ADMISSION_CONSUMER_GROUP_PART: (&str, &str) =
+    ("big_repo.group_part", "admission");
+pub(crate) const KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT: (&str, &str) =
+    ("big_repo.causal_checkpoint", "admission");
+pub(crate) const KEYHIVE_ADMISSION_CONSUMER_AUTOMERGE_FRONTIER: (&str, &str) =
+    ("big_repo.automerge_frontier", "keyhive-admission");
+pub(crate) const KEYHIVE_ADMISSION_CONSUMER_PREKEY_JANITOR: (&str, &str) =
+    ("big_repo.prekey_janitor", "admission");
 
 impl SqliteBigRepoStore {
     /// All part IDs currently present in this store's scope.
@@ -12,7 +24,7 @@ impl SqliteBigRepoStore {
     /// Used by the `All` worker-scope path to watch every part without
     /// enumerating keyhive groups (a keyhive enumeration would miss parts
     /// for groups not yet in the hive and pays a graph walk).
-    pub(crate) async fn list_parts(&self) -> Res<HashSet<PartId>> {
+    pub(crate) async fn list_parts(&self) -> Res<HashSet<PartKey>> {
         let rows: Vec<Vec<u8>> = sqlx::query_scalar!(
             "SELECT part_id AS 'part_id: Vec<u8>'
              FROM big_sync_parts WHERE scope_id = ?",
@@ -226,9 +238,22 @@ impl SqliteBigRepoStore {
             next_seq += i64::try_from(chunk.len()).expect(ERROR_IMPOSSIBLE);
         }
         tx.commit().await?;
-        Ok(Self::u64_from_db(
-            head + i64::try_from(missing.len()).expect(ERROR_IMPOSSIBLE),
-        ))
+        let seq = Self::u64_from_db(head + i64::try_from(missing.len()).expect(ERROR_IMPOSSIBLE));
+        // Record the committed head at the durable choke point. Read back
+        // synchronously by the keyhive sync-done observer to stamp a completion
+        // with how far admission has actually progressed. `fetch_max` keeps the
+        // watermark monotonic under concurrent appends racing their commits
+        // (a lower committed seq never regresses it).
+        self.admission_watermark
+            .fetch_max(seq, std::sync::atomic::Ordering::SeqCst);
+        Ok(seq)
+    }
+
+    /// Cheap synchronous read of the last committed admission seq (see the
+    /// `admission_watermark` field docs). No DB round-trip.
+    pub(crate) fn admission_watermark(&self) -> u64 {
+        self.admission_watermark
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub(crate) async fn admission_head(&self) -> Res<u64> {
@@ -240,7 +265,27 @@ impl SqliteBigRepoStore {
         Ok(Self::u64_from_db(head))
     }
 
-    #[cfg(test)]
+    /// The sequence through which this scope's admission log has actually been
+    /// pruned: the bound the DELETE reached, i.e. the highest `seq` whose event
+    /// bytes are gone from `big_repo_keyhive_event_log`.
+    ///
+    /// This is the bound that was deleted, *not* the tombstone prefix, and the
+    /// distinction is the contract. A tombstoned admission above this marker
+    /// still has its bytes, so a reader below the marker is still served it;
+    /// recording the prefix would claim a gap this prune did not create, and a
+    /// consumer resuming from that overstated marker would skip wake-ups it
+    /// could still have been given.
+    ///
+    /// Because that bound is `min(tombstone prefix, MIN(progress) over the
+    /// registered readers)`, it is at or below every registered consumer's own
+    /// durable cursor — a registered consumer cannot open below this floor.
+    /// Only a consumer absent from `big_repo_keyhive_admission_readers` when the
+    /// prune advanced (one that registers on its first run, or an identity added
+    /// to the registry by a later release) can find itself below it; for those,
+    /// the floor is the signal that it cannot be woken for the gap (ADR 013 §9)
+    /// and must rebuild its sinks from live Keyhive state and resume here rather
+    /// than replay a history it cannot be told about. Set by
+    /// `prune_admitted_events`, which runs during maintenance.
     pub(crate) async fn archived_through(&self) -> Res<u64> {
         let seq: i64 = sqlx::query_scalar!("SELECT COALESCE(MAX(seq), 0) AS \"seq!: i64\" FROM big_repo_keyhive_archived_through WHERE scope_id = ?",
             self.scope().id()
@@ -266,64 +311,91 @@ impl SqliteBigRepoStore {
         Ok(())
     }
 
-    pub(crate) async fn register_keyhive_admission_reader(
-        &self,
-        reader: &str,
-        cursor: u64,
-    ) -> Res<()> {
+    /// Register `reader` as a consumer whose unprocessed admission rows must not
+    /// be pruned.
+    ///
+    /// Registration carries no value: the retention floor is read from the
+    /// consumer's `delta_walker_progress` row, so a registered consumer that has
+    /// not started (no progress row) pins the floor at 0 until it does.
+    /// Idempotent.
+    pub(crate) async fn register_keyhive_admission_reader(&self, reader: &str) -> Res<()> {
         sqlx::query!(
-            "INSERT INTO big_repo_keyhive_admission_readers(scope_id, reader, seq)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(scope_id, reader) DO UPDATE
-                 SET seq = MAX(seq, excluded.seq)",
+            "INSERT INTO big_repo_keyhive_admission_readers(scope_id, reader)
+             VALUES (?1, ?2)
+             ON CONFLICT(scope_id, reader) DO NOTHING",
             self.scope().id(),
-            reader,
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
+            reader
         )
         .execute(&self.sql.write_pool)
         .await?;
         Ok(())
     }
 
-    pub(crate) async fn advance_keyhive_admission_reader_in_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        reader: &str,
-        cursor: u64,
-    ) -> Res<()> {
-        sqlx::query!(
-            "INSERT INTO big_repo_keyhive_admission_readers(scope_id, reader, seq)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(scope_id, reader) DO UPDATE
-                 SET seq = MAX(seq, excluded.seq)",
-            self.scope().id(),
-            reader,
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
-        )
-        .execute(&mut **tx)
-        .await?;
+    /// Register every admission consumer this runtime runs, so pruning can never
+    /// outrun a consumer that exists but has not started yet.
+    ///
+    /// The retention floor [`Self::prune_admitted_events`] computes is a `MIN`
+    /// over **registered** readers only. The registry therefore has to be
+    /// complete before any maintenance run: a consumer that has not registered is
+    /// invisible to the floor, and its unprocessed admission events can be pruned
+    /// from under it. Registering all four identities here, once, before the
+    /// workers and the maintenance loop are spawned, makes the registry complete
+    /// by construction instead of depending on each worker's spawn ordering
+    /// against the maintenance timer. Idempotent.
+    pub(crate) async fn register_admission_consumers(&self) -> Res<()> {
+        for (namespace, consumer_id) in [
+            KEYHIVE_ADMISSION_CONSUMER_GROUP_PART,
+            KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT,
+            KEYHIVE_ADMISSION_CONSUMER_AUTOMERGE_FRONTIER,
+            KEYHIVE_ADMISSION_CONSUMER_PREKEY_JANITOR,
+        ] {
+            self.register_keyhive_admission_reader(
+                &big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo::retention_reader_id_of(
+                    namespace,
+                    consumer_id,
+                ),
+            )
+            .await?;
+        }
         Ok(())
     }
 
     #[cfg(test)]
-    pub(crate) async fn advance_keyhive_admission_reader(
+    /// The consumer's own "reconciled through" revision, read from the delta
+    /// walker's `delta_walker_progress` row (0 when the consumer has not started).
+    ///
+    /// This is the one value fences, observability and the retention floor read:
+    /// it is the row the consumer's ack commits inside the same transaction as its
+    /// effects, so no second watermark can lag it.
+    ///
+    /// Test-only: the harness fences (`test2::harness::fixtures`) are the only readers;
+    /// the production fences compare the hub's in-memory watermarks instead.
+    pub(crate) async fn admission_consumer_progress(
         &self,
-        reader: &str,
-        cursor: u64,
-    ) -> Res<()> {
-        sqlx::query!(
-            "UPDATE big_repo_keyhive_admission_readers
-                SET seq = MAX(seq, ?3)
-              WHERE scope_id = ?1 AND reader = ?2",
-            self.scope().id(),
-            reader,
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
+        namespace: &str,
+        consumer_id: &str,
+    ) -> Res<u64> {
+        let revision: i64 = sqlx::query_scalar!(
+            "SELECT COALESCE(MAX(upstream_revision), 0) AS \"revision!: i64\"
+               FROM delta_walker_progress
+              WHERE namespace = ?1 AND consumer_id = ?2",
+            namespace,
+            consumer_id
         )
-        .execute(&self.sql.write_pool)
+        .fetch_one(&self.sql.read_pool)
         .await?;
-        Ok(())
+        Ok(Self::u64_from_db(revision))
     }
 
+    /// The tombstone prefix: the highest `seq` below which every admission has
+    /// been tombstoned, i.e. the most this scope may ever delete.
+    ///
+    /// This is an *upper bound on what may be pruned*, not the prune's result.
+    /// The bytes of a tombstoned admission stay readable until a reader's own
+    /// progress lets the DELETE reach them, which is why `prune_admitted_events`
+    /// intersects this with the reader floor and records that intersection in
+    /// `archived_through` rather than this prefix — the prefix can run ahead of
+    /// every registered consumer's cursor while their rows are still in the log.
     async fn archived_admission_floor(&self) -> Res<u64> {
         let floor: i64 = sqlx::query_scalar!(
             "SELECT COALESCE(
@@ -347,24 +419,41 @@ impl SqliteBigRepoStore {
         Ok(Self::u64_from_db(floor))
     }
 
+    /// Prune the admission log up to the watermark no registered consumer needs.
+    ///
+    /// The reader floor is the minimum "reconciled through" revision over the
+    /// registered consumers, read from each one's `delta_walker_progress` row (the
+    /// walker commits it with the effects it covers, so it is the only writer). A
+    /// registered consumer whose progress row is absent — it registered but has
+    /// not started — reads as 0 and pins the floor there: history a consumer that
+    /// has not started cannot be told about must not be pruned from under it.
+    ///
+    /// `archived_through` advances to the same bound this DELETE applies, never
+    /// to the tombstone prefix the reader floor may hold it below.
     pub(crate) async fn prune_admitted_events(&self) -> Res<u64> {
         let archive_floor = self.archived_admission_floor().await?;
-        self.set_archived_through(archive_floor).await?;
         let reader_floor = sqlx::query!(
-            "SELECT MIN(seq) AS \"reader_floor: i64\"
-               FROM big_repo_keyhive_admission_readers
-              WHERE scope_id = ?1",
+            "SELECT MIN(COALESCE(p.upstream_revision, 0)) AS \"reader_floor: i64\"
+               FROM big_repo_keyhive_admission_readers r
+               LEFT JOIN delta_walker_progress p
+                 ON (p.namespace || '/' || p.consumer_id) = r.reader
+              WHERE r.scope_id = ?1",
             self.scope().id()
         )
         .fetch_one(&self.sql.read_pool)
         .await?;
-        let Some(reader_floor) = reader_floor.reader_floor else {
-            return Ok(0);
-        };
+        let reader_floor = reader_floor.reader_floor.unwrap_or_default();
         let watermark = archive_floor.min(Self::u64_from_db(reader_floor));
         if watermark == 0 {
             return Ok(0);
         }
+        // Record the bound the DELETE below applies rather than `archive_floor`.
+        // The tombstone prefix can run ahead of the reader floor, and the bytes
+        // in between are still readable: advancing the marker to the prefix would
+        // assert a gap this prune does not create, put a registered consumer
+        // below the very floor computed to stay under it, and make a consumer
+        // clamping to the marker skip wake-ups that are still in the log.
+        self.set_archived_through(watermark).await?;
         let result = sqlx::query!(
             "DELETE FROM big_repo_keyhive_event_log
              WHERE scope_id = ?1

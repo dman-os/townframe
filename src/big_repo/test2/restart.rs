@@ -26,6 +26,7 @@ use super::harness::{Pair, fixtures, heads};
 use crate::StorageConfig;
 use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
 use keyhive_core::access::Access;
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -69,7 +70,7 @@ async fn create_initial(
 /// Grant read access to the right node and have it sync the document.
 async fn grant_and_sync(pair: &Pair, doc_id: crate::DocumentId) -> crate::Res<crate::BigDocHandle> {
     let agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
-    fixtures::grant_and_propagate(pair, doc_id, &agent, Access::Read).await?;
+    fixtures::grant_and_propagate(pair, doc_id.clone(), &agent, Access::Read).await?;
     fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await
 }
 
@@ -108,7 +109,7 @@ async fn reconcile_payload_first(
 ) -> crate::Res<(crate::BigDocHandle, crate::BigDocHandle)> {
     // First doc sync — may produce PendingMaterialization because the reader
     // hasn't synced the updated CGKA key material yet.
-    pair.right_conn().sync_doc_with_peer(doc_id).await?;
+    pair.right_conn().sync_doc_with_peer(doc_id.clone()).await?;
     pair.right().repo.wait_for_quiescence(None).await?;
     // Now sync membership so the reader learns the new CGKA epoch.
     pair.left_conn().sync_keyhive_with_peer().await?;
@@ -134,7 +135,7 @@ async fn tier5_remote_restart_membership_first() -> crate::Res<()> {
         Pair::boot_persistent(60, 61, "Owner", "Reader", left_path, right_path.clone()).await?;
 
     let (owner_doc, doc_id) = create_initial(&pair, "restart-membership-first").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "restart-membership-first");
     drop(reader_doc);
 
@@ -143,7 +144,7 @@ async fn tier5_remote_restart_membership_first() -> crate::Res<()> {
     pair.connect().await?;
 
     // membership-first: sync keyhive then bidirectional doc sync.
-    let (owner_doc2, reader_doc2) = reconcile_membership_first(&pair, doc_id).await?;
+    let (owner_doc2, reader_doc2) = reconcile_membership_first(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc2).await, "restart-membership-first");
     heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
@@ -163,7 +164,7 @@ async fn tier5_remote_restart_payload_first() -> crate::Res<()> {
         Pair::boot_persistent(62, 63, "Owner", "Reader", left_path, right_path.clone()).await?;
 
     let (owner_doc, doc_id) = create_initial(&pair, "restart-payload-first").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "restart-payload-first");
     drop(reader_doc);
 
@@ -171,7 +172,7 @@ async fn tier5_remote_restart_payload_first() -> crate::Res<()> {
     pair.connect().await?;
 
     // payload-first: sync doc, then keyhive, then bidirectional doc sync.
-    let (owner_doc2, reader_doc2) = reconcile_payload_first(&pair, doc_id).await?;
+    let (owner_doc2, reader_doc2) = reconcile_payload_first(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc2).await, "restart-payload-first");
     heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
@@ -198,9 +199,9 @@ async fn tier5_offline_updates_membership_first() -> crate::Res<()> {
         Pair::boot_persistent(64, 65, "Owner", "Reader", left_path, right_path.clone()).await?;
 
     let (owner_doc, doc_id) = create_initial(&pair, "offline-base").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "offline-base");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+    heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &reader_doc).await?;
     drop(reader_doc);
 
     // --- Go offline.
@@ -228,7 +229,7 @@ async fn tier5_offline_updates_membership_first() -> crate::Res<()> {
     pair.connect().await?;
 
     // membership-first.
-    let (owner_doc2, reader_doc2) = reconcile_membership_first(&pair, doc_id).await?;
+    let (owner_doc2, reader_doc2) = reconcile_membership_first(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc2).await, "offline-update");
     heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
@@ -248,9 +249,9 @@ async fn tier5_offline_updates_payload_first() -> crate::Res<()> {
         Pair::boot_persistent(66, 67, "Owner", "Reader", left_path, right_path.clone()).await?;
 
     let (owner_doc, doc_id) = create_initial(&pair, "offline-base").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "offline-base");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+    heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &reader_doc).await?;
     drop(reader_doc);
 
     // --- Go offline.
@@ -275,7 +276,7 @@ async fn tier5_offline_updates_payload_first() -> crate::Res<()> {
     pair.connect().await?;
 
     // payload-first: doc first, then keyhive, then bidirectional doc sync.
-    let (owner_doc2, reader_doc2) = reconcile_payload_first(&pair, doc_id).await?;
+    let (owner_doc2, reader_doc2) = reconcile_payload_first(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc2).await, "offline-update");
     heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
@@ -307,14 +308,14 @@ async fn tier5_reopen_no_sync_membership_first() -> crate::Res<()> {
         Pair::boot_persistent(68, 69, "Owner", "Reader", left_path, right_path.clone()).await?;
 
     let (owner_doc, doc_id) = create_initial(&pair, "no-sync-persist").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "no-sync-persist");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+    heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &reader_doc).await?;
     drop(reader_doc);
 
     // Take the initial seed DocHeadState for comparison after restart.
-    let left_state = pair.left().repo.doc_head_state(doc_id).await?;
-    let right_pre_state = pair.right().repo.doc_head_state(doc_id).await?;
+    let left_state = pair.left().repo.doc_head_state(doc_id.clone()).await?;
+    let right_pre_state = pair.right().repo.doc_head_state(doc_id.clone()).await?;
 
     // Full close: stop connections and restart the right node.
     let old_left = pair.left_conn.take().expect("left connection should exist");
@@ -334,10 +335,13 @@ async fn tier5_reopen_no_sync_membership_first() -> crate::Res<()> {
     // Even without a keyhive sync, the local store persisted the keyhive
     // state. Verify the right node's keyhive still knows the document.
     let right_reader_peer = pair.right().peer_id();
-    let reader_agent_key = ed25519_dalek::VerifyingKey::from_bytes(right_reader_peer.as_bytes())
-        .expect("peer id must be a verifying key");
-    let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-        .expect("document id must be a verifying key");
+    let reader_agent_key = ed25519_dalek::VerifyingKey::from_bytes(
+        &right_reader_peer.to_bytes32().expect(ERROR_IMPOSSIBLE),
+    )
+    .expect("peer id must be a verifying key");
+    let doc_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .expect("document id must be a verifying key");
     let agent_id = keyhive_core::principal::identifier::Identifier::from(reader_agent_key);
     let doc_ident = keyhive_core::principal::identifier::Identifier::from(doc_key);
 
@@ -355,7 +359,7 @@ async fn tier5_reopen_no_sync_membership_first() -> crate::Res<()> {
     );
 
     // --- Payload assertions: sedimentree heads are preserved.
-    let right_post_state = pair.right().repo.doc_head_state(doc_id).await?;
+    let right_post_state = pair.right().repo.doc_head_state(doc_id.clone()).await?;
     assert_eq!(
         right_pre_state.sedimentree_heads,
         right_post_state.sedimentree_heads,
@@ -386,12 +390,12 @@ async fn tier5_reopen_no_sync_payload_first() -> crate::Res<()> {
         Pair::boot_persistent(70, 71, "Owner", "Reader", left_path, right_path.clone()).await?;
 
     let (owner_doc, doc_id) = create_initial(&pair, "no-sync-payload-first").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "no-sync-payload-first");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+    heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &reader_doc).await?;
     drop(reader_doc);
 
-    let right_pre_state = pair.right().repo.doc_head_state(doc_id).await?;
+    let right_pre_state = pair.right().repo.doc_head_state(doc_id.clone()).await?;
 
     // Full close and restart.
     let old_left = pair.left_conn.take().expect("left connection should exist");
@@ -407,7 +411,7 @@ async fn tier5_reopen_no_sync_payload_first() -> crate::Res<()> {
     pair.connect().await?;
 
     // --- Assertions: payload (sedimentree heads) first.
-    let right_post_state = pair.right().repo.doc_head_state(doc_id).await?;
+    let right_post_state = pair.right().repo.doc_head_state(doc_id.clone()).await?;
     assert_eq!(
         right_pre_state.sedimentree_heads,
         right_post_state.sedimentree_heads,
@@ -417,10 +421,13 @@ async fn tier5_reopen_no_sync_payload_first() -> crate::Res<()> {
 
     // --- Membership assertions.
     let right_reader_peer = pair.right().peer_id();
-    let reader_agent_key = ed25519_dalek::VerifyingKey::from_bytes(right_reader_peer.as_bytes())
-        .expect("peer id must be a verifying key");
-    let doc_key = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
-        .expect("document id must be a verifying key");
+    let reader_agent_key = ed25519_dalek::VerifyingKey::from_bytes(
+        &right_reader_peer.to_bytes32().expect(ERROR_IMPOSSIBLE),
+    )
+    .expect("peer id must be a verifying key");
+    let doc_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .expect("document id must be a verifying key");
     let agent_id = keyhive_core::principal::identifier::Identifier::from(reader_agent_key);
     let doc_ident = keyhive_core::principal::identifier::Identifier::from(doc_key);
 
@@ -456,9 +463,9 @@ async fn tier5_reopen_sync_membership_first() -> crate::Res<()> {
         Pair::boot_persistent(72, 73, "Owner", "Reader", left_path, right_path.clone()).await?;
 
     let (owner_doc, doc_id) = create_initial(&pair, "reopen-sync-mf").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "reopen-sync-mf");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+    heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &reader_doc).await?;
     drop(reader_doc);
 
     // Owner makes an additional edit before reopening — tests that
@@ -482,7 +489,7 @@ async fn tier5_reopen_sync_membership_first() -> crate::Res<()> {
     pair.connect().await?;
 
     // membership-first: sync keyhive then bidirectional doc sync.
-    let (owner_doc2, reader_doc2) = reconcile_membership_first(&pair, doc_id).await?;
+    let (owner_doc2, reader_doc2) = reconcile_membership_first(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc2).await, "reopen-edit");
     heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
@@ -502,9 +509,9 @@ async fn tier5_reopen_sync_payload_first() -> crate::Res<()> {
         Pair::boot_persistent(74, 75, "Owner", "Reader", left_path, right_path.clone()).await?;
 
     let (owner_doc, doc_id) = create_initial(&pair, "reopen-sync-pf").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc).await, "reopen-sync-pf");
-    heads::tier0_invariants(&pair, doc_id, &owner_doc, &reader_doc).await?;
+    heads::tier0_invariants(&pair, doc_id.clone(), &owner_doc, &reader_doc).await?;
     drop(reader_doc);
 
     owner_doc
@@ -526,7 +533,7 @@ async fn tier5_reopen_sync_payload_first() -> crate::Res<()> {
     pair.connect().await?;
 
     // payload-first: doc sync, then keyhive, then bidirectional doc sync.
-    let (owner_doc2, reader_doc2) = reconcile_payload_first(&pair, doc_id).await?;
+    let (owner_doc2, reader_doc2) = reconcile_payload_first(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc2).await, "reopen-payload-first-edit");
     heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
@@ -570,10 +577,11 @@ async fn tier5_both_endpoints_restart_preserve_document() -> crate::Res<()> {
     let owner_doc = pair.left().repo.create_doc(initial).await?;
     let doc_id = owner_doc.document_id();
 
-    fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
 
     let reader_doc =
-        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+        fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone())
+            .await?;
     assert_eq!(read_title(&reader_doc).await, "both-restart");
     drop(reader_doc);
     drop(owner_doc);
@@ -593,7 +601,7 @@ async fn tier5_both_endpoints_restart_preserve_document() -> crate::Res<()> {
     pair.left_conn().sync_keyhive_with_peer().await?;
     pair.right_conn().sync_keyhive_with_peer().await?;
 
-    let (owner_doc2, reader_doc2) = fixtures::sync_doc_pair(&pair, doc_id).await?;
+    let (owner_doc2, reader_doc2) = fixtures::sync_doc_pair(&pair, doc_id.clone()).await?;
     assert_eq!(read_title(&reader_doc2).await, "both-restart");
     heads::tier0_invariants(&pair, doc_id, &owner_doc2, &reader_doc2).await?;
 
@@ -634,9 +642,11 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
 
     // Grant and sync keyhive so the reader learns the CGKA material — but
     // do NOT sync the document content yet.
-    fixtures::grant_and_propagate(&pair, doc_id, &reader_agent, Access::Read).await?;
+    tracing::info!(%doc_id, stage = "grant-and-propagate", "restart test await begin");
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader_agent, Access::Read).await?;
 
     // Write content that has NOT been synced to the reader.
+    tracing::info!(%doc_id, stage = "local-write", "restart test await begin");
     owner_doc
         .with_document(|doc| {
             doc.transact(|tx| tx.put(automerge::ROOT, "note", "written-before-restart"))
@@ -644,13 +654,16 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
         })
         .await??;
     drop(owner_doc);
+    tracing::info!(%doc_id, stage = "pre-restart-quiescence", "restart test await begin");
     pair.left().repo.wait_for_quiescence(None).await?;
 
     // --- Restart the left node WITHOUT syncing the content first.
     let old_left = pair.left_conn.take().expect("left connection");
     let _old_right = pair.right_conn.take().expect("right connection");
+    tracing::info!(%doc_id, stage = "stop-connection", "restart test await begin");
     old_left.stop().await?;
 
+    tracing::info!(%doc_id, stage = "restart-left", "restart test await begin");
     pair.restart_left(StorageConfig::Disk { path: left_path })
         .await?;
 
@@ -661,7 +674,7 @@ async fn tier5_restart_after_local_write_delivers_on_reconnect() -> crate::Res<(
 
     // Now sync bidirectionally — the local write should be pushed to the reader
     // and both repos settle for safe convergence checks.
-    let (owner_doc2, reader_doc) = fixtures::sync_doc_pair(&pair, doc_id).await?;
+    let (owner_doc2, reader_doc) = fixtures::sync_doc_pair(&pair, doc_id.clone()).await?;
     assert_eq!(
         read_text(&reader_doc, "note").await.as_deref(),
         Some("written-before-restart"),
@@ -703,11 +716,11 @@ async fn wait_for_reader_access(
 ) -> crate::Res<()> {
     let peer = repo.local_peer_id();
     let agent = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(peer.as_bytes())
+        ed25519_dalek::VerifyingKey::from_bytes(&peer.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .expect("peer id must be a verifying key"),
     );
     let document = keyhive_core::principal::identifier::Identifier::from(
-        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.into_bytes())
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
             .expect("document id must be a verifying key"),
     );
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -737,15 +750,24 @@ async fn tier5_remote_restart_notification_propagates_existing_doc_update() -> c
     let mut pair =
         Pair::boot_persistent(154, 155, "Owner", "Reader", left_path, right_path.clone()).await?;
     let (owner_doc, doc_id) = create_initial(&pair, "before-notification-restart").await?;
-    let reader_doc = grant_and_sync(&pair, doc_id).await?;
+    let reader_doc = grant_and_sync(&pair, doc_id.clone()).await?;
     drop(reader_doc);
     restart_right(&mut pair, right_path).await?;
-    pair.connect().await?;
+    // Both peers read `/seds`, the store-wide enumeration part. Part access is
+    // explicit, and a page denied when its route is registered backs off for the whole
+    // unauthorized window, so grant before `connect` re-registers the routes.
     pair.left()
-        .set_peer_parts(pair.right(), vec![crate::GLOBAL_PART_ID])
+        .allow_part_pull(pair.right(), &[crate::seds_part_id()])
         .await?;
     pair.right()
-        .set_peer_parts(pair.left(), vec![crate::GLOBAL_PART_ID])
+        .allow_part_pull(pair.left(), &[crate::seds_part_id()])
+        .await?;
+    pair.connect().await?;
+    pair.left()
+        .set_peer_parts(pair.right(), vec![crate::seds_part_id()])
+        .await?;
+    pair.right()
+        .set_peer_parts(pair.left(), vec![crate::seds_part_id()])
         .await?;
     owner_doc
         .with_document(|doc| {
@@ -772,8 +794,8 @@ async fn tier5_remote_restart_notification_propagates_new_doc_membership() -> cr
         .set_peer_parts(
             pair.right(),
             vec![
-                crate::GLOBAL_PART_ID,
-                crate::PartId::new(doc_id.into_bytes()),
+                crate::seds_part_id(),
+                crate::PartKey::new(doc_id.as_bytes()),
             ],
         )
         .await?;
@@ -781,18 +803,18 @@ async fn tier5_remote_restart_notification_propagates_new_doc_membership() -> cr
         .set_peer_parts(
             pair.left(),
             vec![
-                crate::GLOBAL_PART_ID,
-                crate::PartId::new(doc_id.into_bytes()),
+                crate::seds_part_id(),
+                crate::PartKey::new(doc_id.as_bytes()),
             ],
         )
         .await?;
     let reader_agent = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
     pair.left()
         .repo
-        .grant_doc_access(doc_id, reader_agent, Access::Read)
+        .grant_doc_access(doc_id.clone(), reader_agent, Access::Read)
         .await?;
-    wait_for_reader_access(&pair.right().repo, doc_id).await?;
-    fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id).await?;
+    wait_for_reader_access(&pair.right().repo, doc_id.clone()).await?;
+    fixtures::sync_doc_expect_ready(pair.right_conn(), &pair.right().repo, doc_id.clone()).await?;
     wait_for_title(&pair.right().repo, doc_id, "new-notification-doc").await?;
     drop(owner_doc);
     Ok(())

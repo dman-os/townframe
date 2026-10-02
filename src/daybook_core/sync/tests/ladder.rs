@@ -363,7 +363,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
                     WellKnownFacet::Blob(daybook_types::doc::Blob {
                         mime: "application/octet-stream".to_string(),
                         length_octets: payload.len() as u64,
-                        digest: crate::blobs::blob_id_to_digest_str(hash),
+                        digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                         inline: None,
                         urls: Some(vec![format!("db+blob:///{hash}")]),
                     })
@@ -409,7 +409,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
                 daybook_types::doc::Blob {
                     mime: "application/octet-stream".to_string(),
                     length_octets: payload.len() as u64,
-                    digest: crate::blobs::blob_id_to_digest_str(hash),
+                    digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                     inline: None,
                     urls: Some(vec![format!("db+blob:///{hash}")]),
                 },
@@ -422,11 +422,11 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
             .rcx
             .blob_part_store
             .add_obj_to_parts(
-                crate::blobs::blob_id_from_hash(&hash.to_string()),
-                vec![blob_part],
+                ObjKey::from(crate::blobs::blob_id_from_hash(&hash.to_string())?),
+                vec![blob_part.clone()],
             )
             .await?;
-        let peer_id_a = PeerId::new(*endpoint_id_a.as_bytes());
+        let peer_id_a = PeerKey::new(*endpoint_id_a.as_bytes());
         node_b
             .sync_repo
             .wait_for_full_sync(&[peer_id_a], &[blob_part], None)
@@ -562,7 +562,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
                     WellKnownFacet::Blob(daybook_types::doc::Blob {
                         mime: "application/octet-stream".to_string(),
                         length_octets: payload.len() as u64,
-                        digest: crate::blobs::blob_id_to_digest_str(hash),
+                        digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                         inline: None,
                         urls: Some(vec![format!("db+blob:///{hash}")]),
                     })
@@ -578,12 +578,12 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
         wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
         let blob_part = crate::blobs::blob_inventory_part_id(&node_a.ctx.docs_inventory_doc_id);
         let endpoint_id_a = node_a.sync_repo.endpoint_addr().id;
-        let peer_id_a = PeerId::new(*endpoint_id_a.as_bytes());
+        let peer_id_a = PeerKey::new(*endpoint_id_a.as_bytes());
         node_b
             .sync_repo
             .wait_for_full_sync(&[peer_id_a], &[blob_part], None)
             .await?;
-        let got = wait_for_blob_bytes(&node_b.blobs_repo, hash, None).await?;
+        let got = wait_for_blob_bytes(&node_b.blobs_repo, hash.clone(), None).await?;
         assert_eq!(got, payload);
         wait_for_doc_head_parity(
             &node_a,
@@ -614,7 +614,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
                 daybook_types::doc::Blob {
                     mime: "application/octet-stream".to_string(),
                     length_octets: payload.len() as u64,
-                    digest: crate::blobs::blob_id_to_digest_str(hash),
+                    digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
                     inline: None,
                     urls: Some(vec![format!("db+blob:///{hash}")]),
                 },
@@ -1193,8 +1193,8 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
     .await?;
     let source_repo_id = rtx.repo_id.clone();
     let source_repo_name = rtx.repo_name.clone();
-    let source_doc_app = *rtx.doc_app.document_id();
-    let source_doc_drawer = *rtx.doc_drawer.document_id();
+    let source_doc_app = rtx.doc_app.document_id().clone();
+    let source_doc_drawer = rtx.doc_drawer.document_id().clone();
     rtx.shutdown().await?;
 
     let node_a = open_sync_node(&repo_a_path).await?;
@@ -1238,12 +1238,12 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
 
     assert_eq!(
         cloned.doc_app.document_id(),
-        ObjId::new(*source_doc_app.as_bytes()),
+        ObjKey::new(source_doc_app.as_bytes()),
         "cloned app_doc must reference the source's app doc id"
     );
     assert_eq!(
         cloned.doc_drawer.document_id(),
-        ObjId::new(*source_doc_drawer.as_bytes()),
+        ObjKey::new(source_doc_drawer.as_bytes()),
         "cloned drawer_doc must reference the source's drawer doc id"
     );
 

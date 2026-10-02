@@ -1,8 +1,8 @@
 #!/usr/bin/env -S deno run --allow-all
 
 // Disk-space watchdog: loops every 5s checking free space on
-// the repo filesystem. When free drops below THRESHOLD_GIB and no rust build is
-// running, runs `x/clean-rust.ts`. If clean-rust doesn't recover to at least
+// the repo filesystem. When free drops below THRESHOLD_GIB and no rust build or
+// nextest run is using its artifacts, runs `x/clean-rust.ts`. If clean-rust does not recover to at least
 // OK_GIB, removes `<cargo target>/debug`. If that still doesn't reach OK_GIB,
 // errors out (uncaught throw → non-zero exit) so the failure is noticed instead
 // of silently churning.
@@ -29,10 +29,11 @@ async function freeGib(): Promise<number> {
 }
 
 async function buildRunning(): Promise<boolean> {
-  // Detect an active rust build. Excludes `cargo clean` (which clean-rust runs)
-  // and this script's own deno process.
+  // Nextest executes binaries after Cargo exits; cleaning during the run removes
+  // executables needed by later stress iterations. Exclude cargo clean itself.
   const out = await $`ps -ef`.text();
-  return /cargo (clippy|build|check|test|run)\b|rustc/.test(out);
+  return /cargo (clippy|build|check|test|run|nextest)\b|cargo-nextest\b|rustc/
+    .test(out);
 }
 
 async function targetDebugDir(): Promise<string> {

@@ -14,7 +14,7 @@ mod interlude {
     pub use automerge::ActorId;
     pub use autosurgeon::{Hydrate, Reconcile};
     pub use big_repo::{DocumentId, SharedBigRepo};
-    pub use big_sync_core::{ObjId, PartId, PeerId};
+    pub use big_sync_core::{ObjKey, PartKey, PeerKey};
     pub use std::{
         borrow::Cow,
         collections::{HashMap, HashSet},
@@ -88,19 +88,19 @@ uniffi::custom_type!(VersionTag, String, {
 });
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn peer_id_from_label(label: &str) -> PeerId {
+pub(crate) fn peer_id_from_label(label: &str) -> PeerKey {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
     hasher.update(label.as_bytes());
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 32];
     bytes.copy_from_slice(&digest[..32]);
-    PeerId::new(bytes)
+    PeerKey::new(bytes)
 }
 
-pub fn part_id_from_label(label: &str) -> PartId {
+pub fn part_id_from_label(label: &str) -> PartKey {
     let digest = blake3::hash(label.as_bytes());
-    PartId::new(*digest.as_bytes())
+    PartKey::new(*digest.as_bytes())
 }
 
 pub use blobs::{blob_inventory_part_id, blob_inventory_part_id_from_doc_id};

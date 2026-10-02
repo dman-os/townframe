@@ -176,7 +176,7 @@ pub struct DrawerRepo {
     drawer_group: BigKeyhiveGroup,
     pending_documents_group: BigKeyhiveGroup,
     local_actor_id: ActorId,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     local_user_path: daybook_types::doc::UserPathBuf,
 
     // LRU Caches
@@ -196,6 +196,16 @@ pub struct DrawerRepo {
     current_heads: surelock::mutex::Mutex<ChangeHashSet>,
     drawer_doc_handle: big_repo::BigDocHandle,
     meta_store_sql: SqlCtx,
+    /// Test-only: fail the next `delete_branch` drawer-document commit before the
+    /// tombstone reaches the drawer doc. Deleting a replicated branch applies the
+    /// keyhive-channel revocation (`remove_branch_from_partitions_if_needed`) and
+    /// the doc-channel tombstone in two steps with no ordering between them, so a
+    /// failure at the commit is the only way a test can hold a node inside that
+    /// window; the end state alone cannot distinguish the order from an
+    /// interrupted pair of writes. Zero production cost — absent from non-test
+    /// builds.
+    #[cfg(test)]
+    fail_next_drawer_doc_commit: std::sync::atomic::AtomicBool,
     plugs_repo: Option<Arc<crate::plugs::PlugsRepo>>,
 }
 
@@ -231,6 +241,32 @@ impl DrawerRepo {
         &self.meta_store_sql
     }
 
+    /// Test-only: arm the next [`DrawerRepo::delete_branch`] drawer-doc commit to
+    /// fail before it commits, leaving the node in the window between the
+    /// keyhive-channel revocation and the doc-channel tombstone (see
+    /// [`DrawerRepo::fail_next_drawer_doc_commit`]). The flag is consumed by the
+    /// first delete that reaches the commit, so a test that asserts the failed
+    /// delete can then re-run it unchanged to exercise recovery.
+    #[cfg(test)]
+    pub(crate) fn fail_next_drawer_doc_commit_for_test(&self) {
+        self.fail_next_drawer_doc_commit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test-only: consume the flag armed by
+    /// [`DrawerRepo::fail_next_drawer_doc_commit_for_test`].
+    #[cfg(test)]
+    fn take_fail_next_drawer_doc_commit(&self) -> bool {
+        self.fail_next_drawer_doc_commit
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "drawer-notifs", doc_id = %drawer_doc_id),
+    )]
     #[expect(clippy::too_many_arguments)]
     pub async fn load(
         big_repo: SharedBigRepo,
@@ -251,7 +287,7 @@ impl DrawerRepo {
         let drawer_am_handle = big_repo
             .get_doc(&drawer_doc_id)
             .await?
-            .into_ready(drawer_doc_id)?;
+            .into_ready(drawer_doc_id.clone())?;
 
         let initial_heads = drawer_am_handle
             .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
@@ -260,7 +296,7 @@ impl DrawerRepo {
         // Listen for changes to docs.map
         let (ticket, notif_rx) = big_repo
             .subscribe_change_listener(big_repo::BigRepoChangeFilter {
-                doc_id: Some(big_repo::BigRepoDocIdFilter::new(drawer_doc_id)),
+                doc_id: Some(big_repo::BigRepoDocIdFilter::new(drawer_doc_id.clone())),
                 path: vec!["docs".into(), "map".into()],
                 origin: None,
             })
@@ -289,6 +325,8 @@ impl DrawerRepo {
             current_heads: surelock::mutex::Mutex::new(initial_heads),
             drawer_doc_handle: drawer_am_handle,
             meta_store_sql: meta_db_pool,
+            #[cfg(test)]
+            fail_next_drawer_doc_commit: std::sync::atomic::AtomicBool::new(false),
             #[cfg(not(test))]
             plugs_repo: Some(Arc::clone(&plugs_repo)),
             #[cfg(test)]
@@ -340,10 +378,16 @@ impl DrawerRepo {
             };
             for branch in entry.branches.values() {
                 self.big_repo
-                    .add_admin_member_to_doc(branch.branch_doc_id, self.content_docs_group.clone())
+                    .add_admin_member_to_doc(
+                        branch.branch_doc_id.clone(),
+                        self.content_docs_group.clone(),
+                    )
                     .await?;
                 self.big_repo
-                    .add_admin_member_to_doc(branch.branch_doc_id, self.drawer_group.clone())
+                    .add_admin_member_to_doc(
+                        branch.branch_doc_id.clone(),
+                        self.drawer_group.clone(),
+                    )
                     .await?;
             }
         }
@@ -367,7 +411,7 @@ impl DrawerRepo {
         eyre::bail!("invalid branch path '{}'", branch_path);
     }
 
-    pub(crate) fn replicated_partition_id(&self) -> PartId {
+    pub(crate) fn replicated_partition_id(&self) -> PartKey {
         big_repo::group_part_id(self.drawer_group.id().to_bytes())
     }
 
@@ -382,7 +426,7 @@ impl DrawerRepo {
             let heads = am_utils_rs::serialize_commit_heads(heads);
             self.partition_store
                 .set_obj_payload(
-                    branch_doc_id,
+                    branch_doc_id.clone(),
                     serde_json::json!({
                         "heads": heads
                     }),
@@ -403,7 +447,7 @@ impl DrawerRepo {
                 let branch_path = daybook_types::doc::BranchPath::new(branch_name.as_str());
                 if self.branch_kind_for_path(branch_path)? == BranchKind::Replicated {
                     self.partition_store
-                        .add_obj_to_parts(branch_ref.branch_doc_id, vec![part_id])
+                        .add_obj_to_parts(branch_ref.branch_doc_id.clone(), vec![part_id.clone()])
                         .await?;
                 }
             }
@@ -418,18 +462,54 @@ impl DrawerRepo {
     ) -> Res<()> {
         if branch_kind == BranchKind::Replicated {
             let part_id = self.replicated_partition_id();
-            let obj_id = big_sync_core::ObjId::new(*branch_doc_id.as_bytes());
+            let obj_id = big_sync_core::ObjKey::new(branch_doc_id.as_bytes());
             self.partition_store
                 .remove_obj_from_part(obj_id, part_id)
                 .await?;
             self.big_repo
-                .revoke_doc_access(branch_doc_id, self.drawer_group.clone())
+                .revoke_doc_access(branch_doc_id.clone(), self.drawer_group.clone())
                 .await?;
             self.big_repo
                 .revoke_doc_access(branch_doc_id, self.content_docs_group.clone())
                 .await?;
         }
         Ok(())
+    }
+
+    /// Whether this node can reach the branch's document at all. Deleting a
+    /// replicated branch revokes this repo's drawer and content groups' access to
+    /// that branch doc on the keyhive channel, while the tombstone that drops the
+    /// branch from the listing travels on the doc channel; the channels are
+    /// independent, so a peer can hold the revocation while still listing the
+    /// branch. Presenting or using a branch must consult this, so the two channels
+    /// cannot produce a branch that is listed and unwritable.
+    pub(crate) async fn branch_doc_reachable(&self, branch_doc_id: &DocumentId) -> Res<bool> {
+        use big_repo::keyhive_core::principal::{identifier::Identifier, public::Public};
+
+        // The write gate (`NativeBigRepoIo::has_doc_write_access`) derives its
+        // local identifier from this repo's peer key, and the local keyhive agent
+        // is looked up by that same peer id, so `id()` is that same identifier.
+        let local_ident = self.big_repo.local_keyhive_agent().await?.id();
+        // A branch doc key is a BigSync object key, which ADR 012 makes arbitrary
+        // bytes: a key that is not a valid verifying key names a document this
+        // node cannot reach, not a hard error.
+        let Ok(branch_doc_bytes) = branch_doc_id.to_bytes32() else {
+            return Ok(false);
+        };
+        let Ok(branch_doc_key) = ed25519_dalek::VerifyingKey::from_bytes(&branch_doc_bytes) else {
+            return Ok(false);
+        };
+        let branch_doc_ident = Identifier::from(branch_doc_key);
+        let keyhive = self.big_repo.keyhive();
+        let local_reachable = keyhive
+            .agent_access_on(&local_ident, branch_doc_ident)
+            .await
+            .is_some();
+        let public_reachable = keyhive
+            .agent_access_on(&Public.id(), branch_doc_ident)
+            .await
+            .is_some();
+        Ok(local_reachable || public_reachable)
     }
 
     pub(crate) fn content_actor_id(
@@ -478,7 +558,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let Some(heads) = self
-            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
+            .get_branch_heads_by_doc_id(branch_ref.branch_doc_id.clone())
             .await?
         else {
             debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, op = "get_branch_heads_for_path", "branch doc heads unavailable");
@@ -534,7 +614,7 @@ impl DrawerRepo {
             return Ok(None);
         };
         let Some(handle) = self
-            .get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
+            .get_handle_by_branch_doc_id(branch_ref.branch_doc_id.clone())
             .await?
         else {
             debug!(%doc_id, %branch_path, branch_doc_id = %branch_ref.branch_doc_id, op = "resolve_handle_for_branch_heads", "no handle");
@@ -587,7 +667,7 @@ impl DrawerRepo {
         _doc_id: &DocId,
         snapshot: &BranchSnapshot,
     ) -> Res<Option<HashSet<FacetKey>>> {
-        let branch_doc_id = snapshot.branch_doc_id;
+        let branch_doc_id = snapshot.branch_doc_id.clone();
         let Some(handle) = self.get_handle_by_branch_doc_id(branch_doc_id).await? else {
             return Ok(None);
         };
@@ -628,7 +708,7 @@ impl DrawerRepo {
                 continue;
             }
             let Some(branch_heads) = self
-                .get_branch_heads_by_doc_id(branch_ref.branch_doc_id)
+                .get_branch_heads_by_doc_id(branch_ref.branch_doc_id.clone())
                 .await?
             else {
                 continue;

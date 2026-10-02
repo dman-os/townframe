@@ -46,7 +46,7 @@ pub struct InitRepo {
     running_dispatches: tokio::sync::RwLock<HashMap<String, String>>,
     per_boot_done: tokio::sync::RwLock<HashSet<String>>,
     cancel_token: CancellationToken,
-    local_peer_id: PeerId,
+    local_peer_id: PeerKey,
     _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
 }
 
@@ -68,6 +68,12 @@ impl crate::repos::Repo for InitRepo {
 }
 
 impl InitRepo {
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "init-notifs", doc_id = %app_doc_id),
+    )]
     pub async fn load(
         big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
@@ -95,7 +101,7 @@ impl InitRepo {
         let app_am_handle = big_repo
             .get_doc(&app_doc_id)
             .await?
-            .into_ready(app_doc_id)?;
+            .into_ready(app_doc_id.clone())?;
         let store_val = InitStore::load(&app_am_handle).await?;
         let store = crate::stores::AmStoreHandle::new(
             store_val,
@@ -145,6 +151,12 @@ impl InitRepo {
         format!("{plug_id}@{plug_version}/{init_key}")
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        err(Debug),
+        fields(worker = "init-notifs", doc_id = %self.app_am_handle.document_id()),
+    )]
     async fn notifs_loop(
         &self,
         mut notif_rx: tokio::sync::mpsc::UnboundedReceiver<
@@ -253,7 +265,7 @@ impl InitRepo {
         patch_heads: &Arc<[automerge::ChangeHash]>,
         out: &mut Vec<InitEvent>,
         live_origin: Option<&big_repo::BigRepoChangeOrigin>,
-        exclude_peer_id: Option<&PeerId>,
+        exclude_peer_id: Option<&PeerKey>,
     ) -> Res<()> {
         // Live notification path only: skip local self-echoes here.
         // Replay/diff calls pass `live_origin = None` and are never skipped.

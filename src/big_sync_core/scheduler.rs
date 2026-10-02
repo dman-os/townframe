@@ -69,7 +69,7 @@ pub struct Scheduler<Seed> {
     stopped: HashSet<TaskId>,
 }
 
-impl<Seed: Clone> Default for Scheduler<Seed> {
+impl<Seed> Default for Scheduler<Seed> {
     fn default() -> Self {
         Self {
             max_backoff: Duration::from_secs(60),
@@ -83,7 +83,7 @@ impl<Seed: Clone> Default for Scheduler<Seed> {
     }
 }
 
-impl<Seed: Clone> Scheduler<Seed> {
+impl<Seed> Scheduler<Seed> {
     pub fn set_max_backoff(&mut self, max_backoff: Duration) {
         self.max_backoff = max_backoff;
     }
@@ -148,6 +148,12 @@ impl<Seed: Clone> Scheduler<Seed> {
     /// uses `min_delay` (capped), later retries double the previous backoff
     /// (floored by `min_delay`, capped by `max_backoff`; a zero cap falls
     /// back to one minute).
+    ///
+    /// Note the cap is the embedder's pacing knob and it wins over the floor: the
+    /// daybook tests clamp it to 500ms so a route whose grant is still in flight is
+    /// picked up quickly. A caller that must not be paced that fast has to be paced
+    /// by something other than the task ladder (see `Unauthorized` in the replay
+    /// page handler, which is where this was first noticed).
     ///
     /// Contract, made unrepresentable-to-violate: `prev_id` must have been
     /// [`Self::stop`]ped first — the real machine always pairs them
@@ -287,7 +293,7 @@ impl<Seed: Clone> Scheduler<Seed> {
 #[derive(Debug)]
 pub struct KeyedScheduler<K, Seed>
 where
-    K: Eq + std::hash::Hash + Copy,
+    K: Eq + std::hash::Hash + Clone,
     Seed: Clone,
 {
     scheduler: Scheduler<Seed>,
@@ -298,7 +304,7 @@ where
 
 impl<K, Seed> Default for KeyedScheduler<K, Seed>
 where
-    K: Eq + std::hash::Hash + Copy,
+    K: Eq + std::hash::Hash + Clone,
     Seed: Clone,
 {
     fn default() -> Self {
@@ -313,7 +319,7 @@ where
 
 impl<K, Seed> KeyedScheduler<K, Seed>
 where
-    K: Eq + std::hash::Hash + Copy,
+    K: Eq + std::hash::Hash + Clone,
     Seed: Clone,
 {
     /// Replace the current task for `key`, discarding its old seed.
@@ -339,9 +345,9 @@ where
             self.scheduler.cancel(old_task);
         }
         let task = self.scheduler.spawn(now, seed.clone());
-        let old = self.active_by_key.insert(key, task);
+        let old = self.active_by_key.insert(key.clone(), task);
         assert!(old.is_none(), "key replacement left an old active task");
-        let old = self.key_by_task.insert(task, key);
+        let old = self.key_by_task.insert(task, key.clone());
         assert!(old.is_none(), "scheduler task id was reused");
         self.seed_by_key.insert(key, seed);
         task
@@ -425,9 +431,9 @@ where
             return false;
         };
         let task = self.scheduler.spawn(now, seed.clone());
-        let old = self.active_by_key.insert(key, task);
+        let old = self.active_by_key.insert(key.clone(), task);
         assert!(old.is_none(), "waking a key left an active task");
-        let old = self.key_by_task.insert(task, key);
+        let old = self.key_by_task.insert(task, key.clone());
         assert!(old.is_none(), "scheduler task id was reused");
         self.seed_by_key.insert(key, seed);
         true
@@ -449,9 +455,9 @@ where
         let task = self
             .scheduler
             .spawn_delayed(seed.clone(), retry, min_delay, now);
-        let old = self.active_by_key.insert(key, task);
+        let old = self.active_by_key.insert(key.clone(), task);
         assert!(old.is_none(), "retry left an active task for the key");
-        let old = self.key_by_task.insert(task, key);
+        let old = self.key_by_task.insert(task, key.clone());
         assert!(old.is_none(), "scheduler task id was reused");
         self.seed_by_key.insert(key, seed);
         task

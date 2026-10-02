@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT s.principal_id FROM big_sync_syncable s\n                  WHERE s.scope_id = ?1\n                    AND s.part_ref IN (\n                        SELECT m.maybe_part_ref FROM big_sync_members m\n                         WHERE m.scope_id = ?1 AND m.obj_ref = ?2\n                           AND m.maybe_part_ref > 0 AND m.event_type != 2\n                    )",
+  "describe": {
+    "columns": [
+      {
+        "name": "principal_id",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "big_sync_syncable",
+            "name": "principal_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ba835dccf570fad2e614b8f661657972d8140cd012d13afef90e464d3f77203e"
+}

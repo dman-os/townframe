@@ -68,9 +68,15 @@ pub enum KeyhiveSyncOutcome {
 }
 
 /// A document's Keyhive encryption state cannot currently produce an application key.
+///
+/// The structural `Cgka::has_pcs_key` predicate that upstream #222 removed is deliberately not
+/// replaced here. Its replacement — whether this node can derive the PCS key right now — takes
+/// the document's lock and walks the tree to decrypt the root secret, which is not a price the
+/// commit-encryption success path should pay for a field only read when that path fails. A
+/// future investigation that needs the fact should instrument it where it is asked.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "document encryption key unavailable: {source} (document={document_id}, owner_secrets={owner_secret_count}, cgka_ops={cgka_operation_count}, has_pcs_key={has_pcs_key})"
+    "document encryption key unavailable: {source} (document={document_id}, owner_secrets={owner_secret_count}, cgka_ops={cgka_operation_count})"
 )]
 pub(crate) struct DocumentKeyUnavailable {
     #[source]
@@ -78,7 +84,6 @@ pub(crate) struct DocumentKeyUnavailable {
     pub(crate) document_id: crate::DocumentId,
     pub(crate) owner_secret_count: usize,
     pub(crate) cgka_operation_count: usize,
-    pub(crate) has_pcs_key: bool,
 }
 
 /// The doc-worker's IO contract. All methods are `F::Future<'_>` so the same
@@ -197,10 +202,10 @@ pub trait DocIo<F: FutureForm>: Send + Sync {
     fn has_doc_write_access(&self, doc_id: crate::DocumentId) -> F::Future<'_, eyre::Result<bool>>;
 
     /// Whether the local principal may fetch or sync this document (Fetch/Relay access
-    /// or better). Used for early fail-fast validation prior to network sync.
-    // TEMP-HUNT: the sync_doc_with_peer call site is temporarily disabled in
-    // native.rs; keep the trait surface until it is re-enabled.
-    #[expect(dead_code)]
+    /// or better). Written for the local sync preflight, which is currently disabled
+    /// (`NativeRuntimeIo::sync_doc_with_peer`); the surface stays until whether the
+    /// local gate should pre-empt the wire's `Unauthorized` is decided.
+    #[expect(dead_code, reason = "the disabled sync preflight is its only caller")]
     fn has_doc_fetch_access(&self, doc_id: crate::DocumentId) -> F::Future<'_, eyre::Result<bool>>;
 
     /// Store a raw fragment bundle at a boundary commit. The implementation
@@ -333,7 +338,7 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     /// Initiate a keyhive sync round with a peer.
     fn sync_keyhive_with_peer(
         &self,
-        peer_id: big_sync_core::PeerId,
+        peer_id: big_sync_core::PeerKey,
         request_id: subduction_keyhive::message::RequestId,
     ) -> F::Future<'_, eyre::Result<KeyhiveSyncOutcome>>;
 
@@ -347,7 +352,7 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     fn sync_doc_with_peer(
         &self,
         sed_id: sedimentree_core::id::SedimentreeId,
-        peer_id: big_sync_core::PeerId,
+        peer_id: big_sync_core::PeerKey,
         request_id: Option<subduction_core::connection::message::RequestId>,
     ) -> F::Future<'_, eyre::Result<SyncDocAttempt>>;
 }

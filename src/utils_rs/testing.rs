@@ -40,6 +40,12 @@ fn setup_tracing() -> Res<()> {
         )
         .with(tracing_error::ErrorLayer::default());
 
+    // Span census (task attribution): opt-in via TASK_CENSUS_FILE, appends one
+    // TSV line per closed span to that file. Sits after the filter so it
+    // observes exactly the spans the filter admits. `Option<L>` implements
+    // `Layer`, so `None` (env unset) is a no-op layer. See census.rs.
+    let registry = registry.with(crate::census::CensusLayer::from_env());
+
     #[cfg(target_os = "android")]
     let registry = registry.with(tracing_android::layer("org.example.daybook")?);
 

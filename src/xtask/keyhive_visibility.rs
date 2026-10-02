@@ -8,7 +8,7 @@
 
 use keyhive_core::{
     access::Access,
-    principal::{identifier::Identifier, membered::Membered, peer::Peer},
+    principal::{identifier::Identifier, membered::id::MemberedId},
 };
 use nonempty::nonempty;
 use subduction_keyhive::test_utils::{
@@ -42,7 +42,10 @@ async fn one_round(iteration: usize) -> Res<()> {
     let alice = make_keyhive().await;
     let bob = make_keyhive().await;
 
-    let (a_card, b_card) = (alice.contact_card().await?, bob.contact_card().await?);
+    let (a_card, b_card) = (
+        alice.generate_contact_card().await?,
+        bob.generate_contact_card().await?,
+    );
     alice.receive_contact_card(&b_card).await?;
     bob.receive_contact_card(&a_card).await?;
 
@@ -57,19 +60,22 @@ async fn one_round(iteration: usize) -> Res<()> {
 
     // Group owned by alice, bob added as a member — the daybook
     // `content_docs_group` shape.
-    let group = alice.generate_group(vec![]).await?;
+    let gid = alice.generate_group(vec![]).await?;
     let bob_ident_on_alice = bob_id
         .to_identifier()
         .map_err(|error| eyre::eyre!("bob identifier: {error}"))?;
-    let bob_agent_on_alice = alice
+    // The membership and projection calls below all take ids, so bob's agent handle is no longer
+    // bound here. The lookup itself stays: its message is this reproducer's diagnostic for the case
+    // where alice never learned bob at all, which `add_member` reports only as its own resolution
+    // failure.
+    alice
         .get_agent(bob_ident_on_alice)
         .await
         .ok_or_eyre("alice has no agent for bob")?;
-    let gid = group.lock().await.group_id();
     alice
         .add_member(
-            bob_agent_on_alice.clone(),
-            &Membered::Group(gid, Arc::clone(&group)),
+            bob_ident_on_alice,
+            MemberedId::GroupId(gid),
             Access::Read,
             &[],
         )
@@ -93,25 +99,25 @@ async fn one_round(iteration: usize) -> Res<()> {
     }
 
     // Creator-side serving projection BEFORE any sync of the new doc.
-    let events_before = alice.static_events_for_agent(&bob_agent_on_alice).await;
+    let events_before = alice.static_events_for_agent(bob_ident_on_alice).await;
 
     // The doc creation under test: coparent = the group.
-    let doc = alice
+    // `generate_doc` takes coparent ids and hands back the `DocumentId` itself.
+    let doc_id = alice
         .generate_doc(
-            vec![Peer::Group(gid, Arc::clone(&group))],
+            vec![Identifier::from(MemberedId::GroupId(gid))],
             nonempty![[0u8; 32]],
         )
         .await?;
-    let doc_id = doc.lock().await.doc_id();
 
     // Cache freshness is structural now: static_events_for_agent gates on
     // Keyhive::state_generation, so no manual bump is needed after mutation.
 
-    let events_after = alice.static_events_for_agent(&bob_agent_on_alice).await;
+    let events_after = alice.static_events_for_agent(bob_ident_on_alice).await;
     let new_visible = events_after.len() as i64 - events_before.len() as i64;
 
     let doc_reachable = alice
-        .docs_reachable_by_agent(&bob_agent_on_alice)
+        .docs_reachable_by_agent(bob_ident_on_alice)
         .await
         .contains_key(&doc_id);
 
@@ -128,12 +134,12 @@ async fn one_round(iteration: usize) -> Res<()> {
     .await;
 
     let bob_self_ident: Identifier = bob.id().into();
-    let bob_agent_on_bob = bob
-        .get_agent(bob_self_ident)
+    // Same as alice's lookup above: the calls take ids, the lookup is kept for its message.
+    bob.get_agent(bob_self_ident)
         .await
         .ok_or_eyre("bob has no self agent")?;
     let mut bob_got_doc = bob
-        .docs_reachable_by_agent(&bob_agent_on_bob)
+        .docs_reachable_by_agent(bob_self_ident)
         .await
         .contains_key(&doc_id);
 
@@ -153,7 +159,7 @@ async fn one_round(iteration: usize) -> Res<()> {
         .await;
         extra_rounds += 1;
         bob_got_doc = bob
-            .docs_reachable_by_agent(&bob_agent_on_bob)
+            .docs_reachable_by_agent(bob_self_ident)
             .await
             .contains_key(&doc_id);
     }

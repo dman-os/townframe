@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b16d63f0ac2d6e43e4ddb25f5c6d9c4941c64ce028ea624e51ab0599172daf34"
+}

@@ -1,0 +1,49 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                 (SELECT COUNT(*)\n                    FROM big_sync_objs o\n                   WHERE o.scope_id = ?1 AND o.payload_json IS NOT NULL AND o.payload_json != '') AS payload_objects\n               , (SELECT COALESCE(SUM(length(o.payload_json)), 0)\n                    FROM big_sync_objs o\n                   WHERE o.scope_id = ?1 AND o.payload_json IS NOT NULL AND o.payload_json != '') AS payload_bytes\n               , (SELECT COUNT(*)\n                    FROM big_sync_objs o\n                   WHERE o.scope_id = ?1 AND o.payload_json IS NOT NULL AND o.payload_json != ''\n                     AND NOT EXISTS (\n                         SELECT 1\n                           FROM big_sync_members m\n                          WHERE m.scope_id = o.scope_id\n                            AND m.obj_ref = o.obj_ref\n                            AND m.maybe_part_ref > 0\n                            AND m.event_type != ?2\n                     )) AS partless_objects\n               , (SELECT COUNT(*)\n                    FROM big_sync_members m\n                   WHERE m.scope_id = ?1 AND m.maybe_part_ref > 0 AND m.event_type != ?2) AS live_rows\n               , (SELECT COUNT(*)\n                    FROM big_sync_members m\n                   WHERE m.scope_id = ?1 AND m.maybe_part_ref > 0 AND m.event_type = ?2) AS dead_rows",
+  "describe": {
+    "columns": [
+      {
+        "name": "payload_objects",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "payload_bytes",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "partless_objects",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "live_rows",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "dead_rows",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e314ead121ef3bfd3156bb6f4dbc709957d2da533070c265c08198c7fdffd701"
+}

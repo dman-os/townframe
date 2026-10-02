@@ -2,8 +2,8 @@ use crate::interlude::*;
 
 pub mod decide_peer_strat;
 use decide_peer_strat::*;
-pub mod peer_replay;
-use peer_replay::{PeerReplayTask, PeerReplayWorkerError, PeerReplayWorkerMsg};
+pub mod replay_page;
+use replay_page::{ReplayPageResult, ReplayPageTask, ReplayPageTaskError};
 pub mod list_bucket;
 use list_bucket::{ListBucketsResult, ListBucketsTask, ListBucketsTaskError};
 pub mod leaf_buckets;
@@ -21,18 +21,18 @@ structstruck::strike! {
                 SetPeerStrategy (SetPeerStrategy),
                 ListBuckets (ListBucketsResult),
                 LeafBuckets (LeafBucketsResult),
+                ReplayPage (ReplayPageResult),
             },
         }),
         MachineTaskError (pub struct {
             pub task_id: TaskId,
             pub(crate) deets: pub(crate) enum MachineTaskErrDeets {
                 DecidePeerStrategy(DecidePeerStrategyTaskError)
-                PeerReplayWorker(PeerReplayWorkerError)
+                ReplayPage(ReplayPageTaskError)
                 ListBuckets(ListBucketsTaskError)
                 LeafBuckets(LeafBucketsTaskError)
             },
         })
-        PeerReplayWorker (PeerReplayWorkerMsg)
     }
 }
 
@@ -46,8 +46,9 @@ structstruck::strike! {
         /// to the main event loop
         pub id: TaskId,
         pub(crate) deets: pub(crate) enum MachineTaskDeets {
+            #![derive(Clone)]
             DecidePeerStrategy (DecidePeerStrategyTask)
-            PeerReplay(PeerReplayTask)
+            ReplayPage(ReplayPageTask)
             ListBuckets(ListBucketsTask)
             LeafBuckets(LeafBucketsTask)
         }
@@ -59,12 +60,12 @@ structstruck::strike! {
     pub struct SyncTask {
         pub id: TaskId,
         pub kind: SyncTaskKind,
-        pub part_hints: Set<PartId>,
+        pub part_hints: Set<PartKey>,
         pub deets: struct SyncTaskDeets {
             #![derive(Clone)]
 
-            pub peer_id: PeerId,
-            pub obj_id: ObjId,
+            pub peer_id: PeerKey,
+            pub obj_id: ObjKey,
             pub remote_payload: Option<crate::part_store::ObjPayload>,
         }
     }
@@ -81,214 +82,64 @@ pub enum SyncTaskKind {
 }
 
 structstruck::strike! {
+    #[derive(Clone)]
     pub struct SyncTaskSeed {
         pub kind: SyncTaskKind,
-        pub part_hints: Set<PartId>,
+        pub part_hints: Set<PartKey>,
         pub deets: SyncTaskDeets,
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Retry {
-    pub attempt_no: usize,
-    backoff: Duration,
-    queued_at: Instant,
-}
+/// The retry bookkeeping carried through the task frame.
+///
+/// There is one such type because there is one frame: the machine's handlers
+/// only ever hand this value straight back to the scheduler that produced it.
+/// A second structurally-identical type here would exist only to be converted.
+pub use crate::scheduler::Retry;
 
 impl Retry {
     /// A fresh retry state (first attempt, no backoff). Used when a removal
     /// failure arrives for a task that was already stopped (cancelled by a
     /// re-add): the cancelled path never consumes the retry, so a fresh
     /// value is only a placeholder.
-    pub(crate) fn fresh() -> Self {
+    pub(crate) fn fresh(now: Instant) -> Self {
         Self {
             attempt_no: 1,
             backoff: Duration::ZERO,
-            queued_at: Instant::now(),
+            queued_at: now,
         }
     }
 }
 
+#[derive(Clone)]
 pub enum TaskSeed {
     Machine(MachineTaskDeets),
     Sync(SyncTaskSeed),
 }
 
+/// Test-support projection of `SchedulerCounts`, so the sync worker's
+/// diagnostics do not have to name the scheduler type. Fields mirror it
+/// one-for-one, including the single spawn queue, because the frame is single.
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskCounts {
-    pub all: usize,
-    pub pending: usize,
-    pub sync_spawn_queue: usize,
-    pub machine_spawn_queue: usize,
+    pub live: usize,
+    pub delayed: usize,
+    pub spawn_queue: usize,
     pub stop_queue: usize,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl TaskCounts {
     pub fn is_idle(&self) -> bool {
-        self.all == 0
-            && self.pending == 0
-            && self.sync_spawn_queue == 0
-            && self.machine_spawn_queue == 0
-            && self.stop_queue == 0
-    }
-}
-
-structstruck::strike! {
-    pub struct Tasks {
-        pub max_backoff: Duration,
-        next_id: TaskId,
-        all: Map<TaskId, pub struct TaskState {
-            pub retry: Retry,
-        }>,
-        pending: Map<TaskId, (TaskSeed, Instant)>,
-        sync_spawn_queue: Vec<SyncTask>,
-        machine_spawn_queue: Vec<MachineTask>,
-        stop_queue: Set<TaskId>,
-    }
-}
-
-impl Default for Tasks {
-    fn default() -> Self {
-        Self {
-            max_backoff: Duration::from_mins(1),
-            next_id: Default::default(),
-            all: Default::default(),
-            pending: Default::default(),
-            sync_spawn_queue: Default::default(),
-            machine_spawn_queue: Default::default(),
-            stop_queue: Default::default(),
-        }
-    }
-}
-
-impl Tasks {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn task_counts(&self) -> TaskCounts {
-        TaskCounts {
-            all: self.all.len(),
-            pending: self.pending.len(),
-            sync_spawn_queue: self.sync_spawn_queue.len(),
-            machine_spawn_queue: self.machine_spawn_queue.len(),
-            stop_queue: self.stop_queue.len(),
-        }
-    }
-
-    pub fn stop_task(&mut self, id: TaskId) -> Option<TaskState> {
-        let old = self.all.remove(&id);
-        if self.pending.remove(&id).is_some() {
-            // we only remove the sttate if the
-            // task isn't alive
-            return old;
-        }
-        self.sync_spawn_queue.retain(|task| task.id != id);
-        self.machine_spawn_queue.retain(|task| task.id != id);
-        self.stop_queue.insert(id);
-        old
-    }
-
-    pub fn spawn_task(&mut self, seed: TaskSeed) -> TaskId {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.all.insert(
-            id,
-            TaskState {
-                retry: Retry {
-                    attempt_no: 1,
-                    backoff: default(),
-                    queued_at: std::time::Instant::now(),
-                },
-            },
-        );
-        match seed {
-            TaskSeed::Sync(seed) => self.sync_spawn_queue.push(SyncTask {
-                id,
-                kind: seed.kind,
-                part_hints: seed.part_hints,
-                deets: seed.deets,
-            }),
-            TaskSeed::Machine(deets) => self.machine_spawn_queue.push(MachineTask { id, deets }),
-        }
-        id
-    }
-
-    pub fn spawn_delayed_task(
-        &mut self,
-        seed: TaskSeed,
-        prev_retry: Retry,
-        min_delay: Duration,
-    ) -> TaskId {
-        let max_backoff = if self.max_backoff.is_zero() {
-            Duration::from_mins(1)
-        } else {
-            self.max_backoff
-        };
-        let backoff = if prev_retry.backoff.is_zero() {
-            min_delay.min(max_backoff)
-        } else {
-            prev_retry
-                .backoff
-                .saturating_mul(2)
-                .max(min_delay)
-                .min(max_backoff)
-        };
-        let now = std::time::Instant::now();
-        let retry = Retry {
-            attempt_no: prev_retry.attempt_no + 1,
-            queued_at: now,
-            backoff,
-        };
-        let due_at = retry.queued_at + retry.backoff;
-
-        let id = self.next_id;
-        self.next_id += 1;
-        self.all.insert(id, TaskState { retry });
-        self.pending.insert(id, (seed, due_at));
-        id
-    }
-
-    pub fn enqueue_due_tasks(&mut self, now: Instant) {
-        let due_task_ids: Vec<_> = self
-            .pending
-            .iter()
-            .filter_map(|(task_id, (_, due_at))| (*due_at <= now).then_some(*task_id))
-            .collect();
-        for id in due_task_ids {
-            let Some((seed, _)) = self.pending.remove(&id) else {
-                continue;
-            };
-            match seed {
-                TaskSeed::Sync(seed) => self.sync_spawn_queue.push(SyncTask {
-                    id,
-                    kind: seed.kind,
-                    part_hints: seed.part_hints,
-                    deets: seed.deets,
-                }),
-                TaskSeed::Machine(deets) => {
-                    self.machine_spawn_queue.push(MachineTask { id, deets })
-                }
-            }
-        }
-    }
-
-    pub fn drain_sync_spawn_queue(&mut self) -> std::vec::Drain<'_, SyncTask> {
-        self.sync_spawn_queue.drain(..)
-    }
-
-    pub fn drain_machine_spawn_queue(&mut self) -> std::vec::Drain<'_, MachineTask> {
-        self.machine_spawn_queue.drain(..)
-    }
-
-    pub fn drain_stop_queue(&mut self) -> std::collections::hash_set::Drain<'_, u64> {
-        self.stop_queue.drain()
+        self.live == 0 && self.delayed == 0 && self.spawn_queue == 0 && self.stop_queue == 0
     }
 }
 
 pub struct TaskCtx<K, PStore, Rpc, Rng> {
     pub task_id: TaskId,
     pub main_tx: mpsc::Sender<MachineTaskMsg>,
-    pub rpc_clients: Map<PeerId, Rpc>,
+    pub rpc_clients: Map<PeerKey, Rpc>,
     pub part_store: PStore,
     pub rng: Rng,
     pub _phantom: std::marker::PhantomData<K>,
@@ -307,10 +158,10 @@ impl MachineTask {
                 .run(&mut cx)
                 .await
                 .map_err(MachineTaskErrDeets::DecidePeerStrategy),
-            MachineTaskDeets::PeerReplay(inner) => inner
+            MachineTaskDeets::ReplayPage(inner) => inner
                 .run(&mut cx)
                 .await
-                .map_err(MachineTaskErrDeets::PeerReplayWorker),
+                .map_err(MachineTaskErrDeets::ReplayPage),
             MachineTaskDeets::ListBuckets(inner) => inner
                 .run(&mut cx)
                 .await
