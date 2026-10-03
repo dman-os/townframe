@@ -1000,8 +1000,7 @@ impl DocFacetSetIndexRepo {
         // state: membership is keyed by the complete document/branch/tag/key
         // identity, while heads and provenance remain typed JSON for exact
         // head consumers.
-        sqlx::query(
-            r#"
+        let schema = "
             CREATE TABLE IF NOT EXISTS facet_set_doc_facets (
                 document_id TEXT NOT NULL
               , branch_id TEXT NOT NULL
@@ -1012,9 +1011,10 @@ impl DocFacetSetIndexRepo {
               , branch_heads_json TEXT NOT NULL
               , PRIMARY KEY(document_id, branch_id, facet_tag, facet_id)
             ) STRICT
-            CREATE INDEX IF NOT EXISTS facet_set_doc_facets_tag_id
-                ON facet_set_doc_facets (facet_tag, facet_id)
-            "#,
+        ";
+        sqlx::query(schema).execute(&sql.write_pool).await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS facet_set_doc_facets_tag_id ON facet_set_doc_facets (facet_tag, facet_id)",
         )
         .execute(&sql.write_pool)
         .await?;

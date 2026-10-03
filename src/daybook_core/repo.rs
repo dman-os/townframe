@@ -500,8 +500,7 @@ impl RepoCtx {
                     core_id.clone(),
                     docs_id.clone(),
                     encryption_id.clone(),
-                ]
-                .into_iter(),
+                ],
             )
             .await?;
             // The core docs are encrypted like content and plug docs
