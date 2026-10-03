@@ -5,8 +5,8 @@ use super::{BranchKind, DrawerRepo, FacetRaw, FacetWriteScope};
 use crate::drawer::{
     dmeta,
     types::{
-        BranchDeleteTombstone, DocDeleteTombstone, DocEntry, DrawerError, StoredBranchRef,
-        UpdateDocArgsV2, UpdateDocBatchErrV2,
+        BranchDeleteTombstone, DocDeleteTombstone, DocEntry, DrawerError, MergeCandidate,
+        StoredBranchRef, UpdateDocArgsV2, UpdateDocBatchErrV2,
     },
 };
 
@@ -22,6 +22,138 @@ use daybook_types::doc::{
 enum BranchAuthority {
     Document,
     Checkout,
+}
+
+fn merge_branch_not_found(path: &daybook_types::doc::BranchPath) -> DrawerError {
+    DrawerError::BranchNotFound {
+        name: path.to_string(),
+    }
+}
+
+/// Wraps a typed library error (automerge, autosurgeon) as the unexpected
+/// drawer error, so closures that must carry a specific drawer variant (the
+/// merge CAS refusal) keep that variant instead of folding it into a report.
+fn other_reported<E: Into<utils_rs::prelude::eyre::Report>>(err: E) -> DrawerError {
+    DrawerError::Other { inner: err.into() }
+}
+
+/// Hydrates every facet of an in-memory (candidate) document at exactly
+/// `heads` — the uncached form of the drawer's exact-heads facet read, since
+/// candidate snapshots never touch the facet cache or dmeta bookkeeping.
+fn hydrate_candidate_facets(
+    doc: &automerge::Automerge,
+    heads: &[automerge::ChangeHash],
+) -> Res<HashMap<FacetKey, FacetRaw>> {
+    let facets_obj = match automerge::ReadDoc::get_at(doc, automerge::ROOT, "facets", heads)? {
+        Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+        // A candidate may legitimately combine into a document whose facets
+        // object has not been created yet.
+        _ => return Ok(HashMap::new()),
+    };
+    let mut facets = HashMap::new();
+    for item in automerge::ReadDoc::map_range_at(doc, &facets_obj, .., heads) {
+        let key_str = item.key.to_string();
+        let value: Option<ThroughJson<FacetRaw>> =
+            autosurgeon::hydrate_prop_at(doc, &facets_obj, &*key_str, heads)?;
+        if let Some(value) = value {
+            facets.insert(FacetKey::from(key_str.as_str()), value.0);
+        }
+    }
+    Ok(facets)
+}
+
+/// Context for materializing a snapshot of the merge source branch at exactly
+/// `heads`. The merge commit path and in-memory candidate preparation share
+/// this mechanism (ADR 011 §6 steps 5–7); keeping one spelling for the
+/// fast-path/fork_at/failure story is what keeps the committed merge and the
+/// validated candidate the same CRDT operation.
+struct BranchSnapshotContext<'a> {
+    id: &'a DocId,
+    /// The merge verb taking the snapshot, for error attribution.
+    action: &'static str,
+    to_branch: &'a daybook_types::doc::BranchPath,
+    from_branch: &'a daybook_types::doc::BranchPath,
+    target_branch_doc_id: &'a DocumentId,
+    source_branch_doc_id: &'a DocumentId,
+    heads: &'a ChangeHashSet,
+}
+
+/// Forks a snapshot of a branch document at exactly `heads`. Fails when the
+/// branch is missing the requested heads; `fork_at` panics are caught and
+/// reported with the heads context so they remain diagnosable.
+fn snapshot_branch_doc_at(
+    from_doc: &automerge::Automerge,
+    ctx: &BranchSnapshotContext<'_>,
+) -> Res<automerge::Automerge> {
+    let current_heads = from_doc.get_heads();
+    let current_heads_serialized = am_utils_rs::serialize_commit_heads(&current_heads);
+    let from_heads_serialized = am_utils_rs::serialize_commit_heads(ctx.heads.as_ref());
+    let missing_before_fork: Vec<String> = ctx
+        .heads
+        .iter()
+        .filter(|head| from_doc.get_change_by_hash(head).is_none())
+        .map(ToString::to_string)
+        .collect();
+    if current_heads.as_slice() == &ctx.heads[..] {
+        return Ok(from_doc.clone());
+    }
+    debug!(
+        id = %ctx.id,
+        action = ctx.action,
+        to_branch = %ctx.to_branch,
+        from_branch = %ctx.from_branch,
+        source_branch_doc_id = %ctx.source_branch_doc_id,
+        current_heads = ?current_heads_serialized,
+        from_heads = ?from_heads_serialized,
+        ?missing_before_fork,
+        "{}: attempting fork_at for source branch snapshot",
+        ctx.action
+    );
+    if !missing_before_fork.is_empty() {
+        eyre::bail!(
+            "invariant break before {} fork_at: source branch is missing requested heads: \
+             doc_id={} to_branch={} source_branch_doc_id={} from_heads={:?} current_heads={:?} missing={:?}",
+            ctx.action,
+            ctx.id,
+            ctx.to_branch,
+            ctx.source_branch_doc_id,
+            from_heads_serialized,
+            current_heads_serialized,
+            missing_before_fork
+        );
+    }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| from_doc.fork_at(ctx.heads)))
+    {
+        Ok(res) => res.map_err(eyre::Report::from),
+        Err(payload) => {
+            let missing_after_panic: Vec<String> = ctx
+                .heads
+                .iter()
+                .filter(|head| from_doc.get_change_by_hash(head).is_none())
+                .map(ToString::to_string)
+                .collect();
+            let panic_payload = if let Some(msg) = payload.downcast_ref::<&str>() {
+                (*msg).to_string()
+            } else if let Some(msg) = payload.downcast_ref::<String>() {
+                msg.clone()
+            } else {
+                "non-string panic payload".to_string()
+            };
+            eyre::bail!(
+                "{} fork_at panicked: doc_id={} to_branch={} source_branch_doc_id={} \
+                 target_branch_doc_id={} from_heads={:?} current_heads={:?} panic={} missing_after_panic={:?}",
+                ctx.action,
+                ctx.id,
+                ctx.to_branch,
+                ctx.source_branch_doc_id,
+                ctx.target_branch_doc_id,
+                from_heads_serialized,
+                current_heads_serialized,
+                panic_payload,
+                missing_after_panic
+            );
+        }
+    }
 }
 
 struct PreparedAddDoc {
@@ -988,10 +1120,75 @@ impl DrawerRepo {
         }
     }
 
+    /// Resolves both ends of a merge and gates reachability. The target is
+    /// gated first because it is the branch this call mutates and the one
+    /// resolved here; gating before the handle lookup also keeps an unreachable
+    /// branch from being reported as a missing document.
+    ///
+    /// Using a branch is not merely resolving its ref: a peer's delete revokes
+    /// this repo's access to the branch doc on the keyhive channel while the
+    /// tombstone that drops the branch from the entry travels on the doc
+    /// channel, so this node can still resolve the ref to a branch doc it can
+    /// no longer reach. Merging through such a branch would reach the doc
+    /// worker and be refused as a local access failure, which misstates the
+    /// situation: this node is not losing permission on a live branch, the
+    /// branch is gone as far as it can tell. The source is a use site too: a
+    /// merge reads the source branch's content to replay it into the target.
+    async fn resolve_merge_endpoints(
+        &self,
+        id: &DocId,
+        to_branch: &daybook_types::doc::BranchPath,
+        from_branch: &daybook_types::doc::BranchPath,
+    ) -> Result<
+        (
+            big_repo::BigDocHandle,
+            crate::drawer::BranchRefRow,
+            big_repo::BigDocHandle,
+            crate::drawer::BranchRefRow,
+        ),
+        DrawerError,
+    > {
+        let to_branch_ref = self
+            .get_branch_ref(id, to_branch)
+            .await?
+            .ok_or_else(|| merge_branch_not_found(to_branch))?;
+        if !self
+            .branch_doc_reachable(&to_branch_ref.branch_doc_id)
+            .await?
+        {
+            return Err(merge_branch_not_found(to_branch));
+        }
+        let handle = self
+            .get_handle_by_branch_doc_id(to_branch_ref.branch_doc_id.clone())
+            .await?
+            .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
+        let from_branch_ref = self
+            .get_branch_ref(id, from_branch)
+            .await?
+            .ok_or_else(|| merge_branch_not_found(from_branch))?;
+        if !self
+            .branch_doc_reachable(&from_branch_ref.branch_doc_id)
+            .await?
+        {
+            return Err(merge_branch_not_found(from_branch));
+        }
+        let from_handle = self
+            .get_handle_by_branch_doc_id(from_branch_ref.branch_doc_id.clone())
+            .await?
+            .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
+        Ok((handle, to_branch_ref, from_handle, from_branch_ref))
+    }
+
     pub async fn merge_from_heads(
         &self,
         id: &DocId,
         to_branch: &daybook_types::doc::BranchPath,
+        // Publish/merge CAS refusal basis (ADR 011 §6 steps 7–8): when `Some`,
+        // the target branch must still be exactly at these heads when the
+        // merge commits, else `HeadConcurrency` and nothing is written.
+        // The check and the merge share one doc-lock scope, so this is a true
+        // compare-and-swap against concurrent local and remote writers.
+        expected_to_heads: Option<&ChangeHashSet>,
         from_branch: &daybook_types::doc::BranchPath,
         from_heads: &ChangeHashSet,
         user_path: Option<&daybook_types::doc::UserPath>,
@@ -1001,127 +1198,50 @@ impl DrawerRepo {
                 inner: ferr!("repo is stopped"),
             });
         }
-        let to_branch_ref = self.get_branch_ref(id, to_branch).await?.ok_or_else(|| {
-            DrawerError::BranchNotFound {
-                name: to_branch.to_string(),
-            }
-        })?;
-        // Using the branch is not merely resolving its ref, exactly as for the write gate
-        // above: a peer's delete revokes this repo's access to the branch doc on the
-        // keyhive channel while the tombstone that drops the branch from the entry travels
-        // on the doc channel, so this node can still resolve the ref to a branch doc it can
-        // no longer reach. Merging through such a branch would reach the doc worker and be
-        // refused as a local access failure, which misstates the situation: this node is
-        // not losing permission on a live branch, the branch is gone as far as it can tell.
-        // The target is gated first because it is the branch this call mutates and the one
-        // resolved here; gating before the handle lookup also keeps an unreachable branch
-        // from being reported as a missing document.
-        if !self
-            .branch_doc_reachable(&to_branch_ref.branch_doc_id)
-            .await?
-        {
-            return Err(DrawerError::BranchNotFound {
-                name: to_branch.to_string(),
-            });
-        }
-        let handle = self
-            .get_handle_by_branch_doc_id(to_branch_ref.branch_doc_id.clone())
-            .await?
-            .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
+        let (handle, to_branch_ref, from_handle, from_branch_ref) = self
+            .resolve_merge_endpoints(id, to_branch, from_branch)
+            .await?;
+
+        // 1. Merge content docs. The expected-to-heads CAS and the merge share
+        // one doc-lock scope on the target: remote mutation application and other
+        // local writers are serialized through the same lock, so a heads check
+        // immediately before the merge cannot be interleaved with either.
+        let expected_to_heads = expected_to_heads.cloned();
         let mutation_actor_id =
             self.content_actor_id(user_path, to_branch_ref.branch_doc_id.clone());
-        let from_branch_ref = self.get_branch_ref(id, from_branch).await?.ok_or_else(|| {
-            DrawerError::BranchNotFound {
-                name: from_branch.to_string(),
-            }
-        })?;
-        // The source is a use site too: a merge reads the source branch's content to replay
-        // it into the target, so a source this node cannot reach cannot be merged from — the
-        // content is not this node's to read. Same reasoning as the target gate above.
-        if !self
-            .branch_doc_reachable(&from_branch_ref.branch_doc_id)
-            .await?
-        {
-            return Err(DrawerError::BranchNotFound {
-                name: from_branch.to_string(),
-            });
-        }
-        let from_handle = self
-            .get_handle_by_branch_doc_id(from_branch_ref.branch_doc_id.clone())
-            .await?
-            .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
-
-        // 1. Merge content docs
         let user_path_for_dmeta = user_path;
         let mut am_from = from_handle
             .with_document_read(|from_doc| {
-                let current_heads = from_doc.get_heads();
-                let current_heads_serialized = am_utils_rs::serialize_commit_heads(&current_heads);
-                let from_heads_serialized =
-                    am_utils_rs::serialize_commit_heads(from_heads.as_ref());
-                let missing_before_fork: Vec<String> = from_heads
-                    .iter()
-                    .filter(|head| from_doc.get_change_by_hash(head).is_none())
-                    .map(ToString::to_string)
-                    .collect();
-                if current_heads.as_slice() == &from_heads[..] {
-                    Ok(from_doc.clone())
-                } else {
-                    debug!(
-                        ?id,
-                        to_branch = %to_branch,
-                        from_branch = %from_branch,
-                        from_branch_doc_id = %from_branch_ref.branch_doc_id,
-                        current_heads = ?current_heads_serialized,
-                        from_heads = ?from_heads_serialized,
-                        ?missing_before_fork,
-                        "merge_from_heads: attempting fork_at for source branch snapshot"
-                    );
-                    if !missing_before_fork.is_empty() {
-                        eyre::bail!(
-                            "invariant break before merge_from_heads fork_at: source branch is missing requested heads: doc_id={} to_branch={} source_branch_doc_id={} from_heads={:?} current_heads={:?} missing={:?}",
-                            id,
-                            to_branch,
-                            from_branch_ref.branch_doc_id,
-                            from_heads_serialized,
-                            current_heads_serialized,
-                            missing_before_fork
-                        );
-                    }
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        from_doc.fork_at(from_heads)
-                    })) {
-                        Ok(res) => res.map_err(eyre::Report::from),
-                        Err(payload) => {
-                            let missing_after_panic: Vec<String> = from_heads
-                                .iter()
-                                .filter(|head| from_doc.get_change_by_hash(head).is_none())
-                                .map(ToString::to_string)
-                                .collect();
-                            let panic_payload = if let Some(msg) = payload.downcast_ref::<&str>() {
-                                (*msg).to_string()
-                            } else if let Some(msg) = payload.downcast_ref::<String>() {
-                                msg.clone()
-                            } else {
-                                "non-string panic payload".to_string()
-                            };
-                            eyre::bail!(
-                                "merge_from_heads fork_at panicked: doc_id={} to_branch={} source_branch_doc_id={} from_heads={:?} current_heads={:?} panic={} missing_after_panic={:?}",
-                                id,
-                                to_branch,
-                                from_branch_ref.branch_doc_id,
-                                from_heads_serialized,
-                                current_heads_serialized,
-                                panic_payload,
-                                missing_after_panic
-                            );
-                        }
-                    }
-                }
+                snapshot_branch_doc_at(
+                    from_doc,
+                    &BranchSnapshotContext {
+                        id,
+                        action: "merge_from_heads",
+                        to_branch,
+                        from_branch,
+                        target_branch_doc_id: &to_branch_ref.branch_doc_id,
+                        source_branch_doc_id: &from_branch_ref.branch_doc_id,
+                        heads: from_heads,
+                    },
+                )
             })
             .await?;
         let (_new_heads, _modified_facets, invalidated_uuids) = handle
-            .with_document(move |am_doc| {
+            .with_document(move |am_doc| -> Result<_, DrawerError> {
+                if let Some(expected) = &expected_to_heads {
+                    let actual = am_doc.get_heads();
+                    if actual.as_slice() != expected.0.as_ref() {
+                        // The CAS refusal keeps its own variant through the
+                        // closure: `with_document`'s report folding would
+                        // turn it into `Other` and publication could not
+                        // distinguish it from an unexpected failure.
+                        return Err(DrawerError::HeadConcurrency {
+                            branch: to_branch.to_string(),
+                            expected: am_utils_rs::serialize_commit_heads(expected.0.as_ref()).join(" "),
+                            actual: am_utils_rs::serialize_commit_heads(&actual).join(" "),
+                        });
+                    }
+                }
                 am_doc.set_actor(mutation_actor_id.clone());
                 // A branch merge imports the source history, but branch identity belongs
                 // to the physical destination document. Snapshot it before the CRDT merge
@@ -1129,13 +1249,24 @@ impl DrawerRepo {
                 // resolution and relabel the destination as the source branch.
                 let branch_key = FacetKey::from(WellKnownFacetTag::Branch).to_string();
                 let target_branch_facet: ThroughJson<FacetRaw> = {
-                    let facets_obj = match am_doc.get(automerge::ROOT, "facets")? {
+                    let facets_obj = match am_doc
+                        .get(automerge::ROOT, "facets")
+                        .map_err(other_reported)?
+                    {
                         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => eyre::bail!("facets object not found in target content doc"),
+                        _ => {
+                            return Err(DrawerError::Other {
+                                inner: ferr!("facets object not found in target content doc"),
+                            })
+                        }
                     };
-                    let target: Option<ThroughJson<FacetRaw>> =
-                        autosurgeon::hydrate_prop(am_doc, &facets_obj, &*branch_key)?;
-                    target.ok_or_else(|| ferr!("target content doc is missing its Branch facet"))?
+                    let target: Option<ThroughJson<FacetRaw>> = autosurgeon::hydrate_prop(
+                        am_doc,
+                        &facets_obj,
+                        &*branch_key,
+                    )
+                    .map_err(other_reported)?;
+                    target.ok_or_else(|| ferr!("target content doc is missing its Branch facet"))? 
                 };
                 let (patches, new_heads) = match std::panic::catch_unwind(
                     std::panic::AssertUnwindSafe(|| -> Res<(Vec<automerge::Patch>, ChangeHashSet)> {
@@ -1156,16 +1287,18 @@ impl DrawerRepo {
                         } else {
                             "non-string panic payload".to_string()
                         };
-                        eyre::bail!(
-                            "merge_from_heads panicked during merge_and_log_patches: doc_id={} to_branch={} from_branch={} target_branch_doc_id={} source_branch_doc_id={} from_heads={:?} panic={}",
-                            id,
-                            to_branch,
-                            from_branch,
-                            to_branch_ref.branch_doc_id,
-                            from_branch_ref.branch_doc_id,
-                            am_utils_rs::serialize_commit_heads(from_heads.as_ref()),
-                            panic_payload
-                        );
+                        return Err(DrawerError::Other {
+                            inner: ferr!(
+                                "merge_from_heads panicked during merge_and_log_patches: doc_id={} to_branch={} from_branch={} target_branch_doc_id={} source_branch_doc_id={} from_heads={:?} panic={}",
+                                id,
+                                to_branch,
+                                from_branch,
+                                to_branch_ref.branch_doc_id,
+                                from_branch_ref.branch_doc_id,
+                                am_utils_rs::serialize_commit_heads(from_heads.as_ref()),
+                                panic_payload
+                            ),
+                        });
                     }
                 };
 
@@ -1190,16 +1323,21 @@ impl DrawerRepo {
                     let heads_now = am_doc.get_heads();
                     let mut tx =
                         am_doc.transaction_at(automerge::PatchLog::inactive(), &heads_now).expect(ERROR_IMPOSSIBLE);
-                    let facets_obj = match tx.get(automerge::ROOT, "facets")? {
+                    let facets_obj = match tx.get(automerge::ROOT, "facets").map_err(other_reported)? {
                         Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
-                        _ => { eyre::bail!("facets object not found in content doc"); }
+                        _ => {
+                            return Err(DrawerError::Other {
+                                inner: ferr!("facets object not found in content doc"),
+                            })
+                        }
                     };
                     autosurgeon::reconcile_prop(
                         &mut tx,
                         &facets_obj,
                         &*branch_key,
                         target_branch_facet,
-                    )?;
+                    )
+                    .map_err(other_reported)?;
                     let now = Timestamp::now();
                     let invalidated = dmeta::apply_merge(
                         &mut tx,
@@ -1214,7 +1352,7 @@ impl DrawerRepo {
                     invalidated
                 };
 
-                eyre::Ok((new_heads, modified_facets, invalidated_uuids))
+                Ok((new_heads, modified_facets, invalidated_uuids))
             })
             .await??;
 
@@ -1397,10 +1535,146 @@ impl DrawerRepo {
         }
     }
 
+    /// Builds the in-memory candidate of merging `from_branch` (at
+    /// `from_heads`) into `to_branch` at its current heads, without committing
+    /// anything — ADR 011 §6 steps 5–6. Candidates are validated (facets via
+    /// [`Self::validate_merge_candidate`], plus the caller's lens
+    /// interpretation) before the caller persists them through
+    /// [`Self::merge_from_heads`] with an `expected_to_heads` CAS on the
+    /// target. The target heads are read in the same lock scope as the doc
+    /// snapshot, so the candidate basis is exact; the CRDT merge itself is
+    /// deterministic given the two snapshots, so the committed result's facet
+    /// values match the validated candidate's.
+    pub async fn prepare_merge_candidate(
+        &self,
+        id: &DocId,
+        to_branch: &daybook_types::doc::BranchPath,
+        from_branch: &daybook_types::doc::BranchPath,
+        from_heads: &ChangeHashSet,
+    ) -> Result<MergeCandidate, DrawerError> {
+        if self.cancel_token.is_cancelled() {
+            return Err(DrawerError::Other {
+                inner: ferr!("repo is stopped"),
+            });
+        }
+        let (to_handle, to_branch_ref, from_handle, from_branch_ref) = self
+            .resolve_merge_endpoints(id, to_branch, from_branch)
+            .await?;
+
+        let mut am_from = from_handle
+            .with_document_read(|from_doc| {
+                snapshot_branch_doc_at(
+                    from_doc,
+                    &BranchSnapshotContext {
+                        id,
+                        action: "prepare_merge_candidate",
+                        to_branch,
+                        from_branch,
+                        target_branch_doc_id: &to_branch_ref.branch_doc_id,
+                        source_branch_doc_id: &from_branch_ref.branch_doc_id,
+                        heads: from_heads,
+                    },
+                )
+            })
+            .await?;
+
+        let (to_branch_heads, mut candidate) = to_handle
+            .with_document_read(|doc| (ChangeHashSet(doc.get_heads().into()), doc.clone()))
+            .await;
+
+        let mut patch_log = automerge::PatchLog::active();
+        candidate
+            .merge_and_log_patches(&mut am_from, &mut patch_log)
+            .map_err(eyre::Report::from)?;
+        let patches = candidate.make_patches(&mut patch_log);
+        let candidate_heads = ChangeHashSet(candidate.get_heads().into());
+
+        let mut modified_facet_keys = Vec::<FacetKey>::new();
+        let mut seen = HashSet::new();
+        for patch in patches {
+            // A merge's facet change reaches the patch log in two shapes: a
+            // change AT the facets map itself (a scalar facet overwrite; its
+            // whole path is just ["facets"] and the changed map key lives in
+            // the action), and a change inside a facet value object (the
+            // facet key is the second path entry). Both must enumerate as
+            // modified — the merge-CAS publication gate validates exactly
+            // these keys (ADR 011 §6 step 6).
+            let modified = if let Some((_, automerge::Prop::Map(p0))) = patch.path.first()
+                && p0 == "facets"
+            {
+                if let Some((_, automerge::Prop::Map(facet_key_str))) = patch.path.get(1) {
+                    Some(facet_key_str.to_string())
+                } else {
+                    match &patch.action {
+                        automerge::PatchAction::PutMap { key, .. }
+                        | automerge::PatchAction::DeleteMap { key } => Some(key.clone()),
+                        automerge::PatchAction::Conflict { prop }
+                        | automerge::PatchAction::Increment { prop, .. } => match prop {
+                            automerge::Prop::Map(key) => Some(key.to_string()),
+                            automerge::Prop::Seq(_) => None,
+                        },
+                        _ => None,
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(key) = modified
+                && seen.insert(key.clone())
+            {
+                modified_facet_keys.push(FacetKey::from(key.as_str()));
+            }
+        }
+        modified_facet_keys.sort();
+
+        let facets = hydrate_candidate_facets(&candidate, candidate_heads.0.as_ref())?;
+
+        Ok(MergeCandidate {
+            id: id.clone(),
+            to_branch: to_branch.to_path_buf(),
+            to_branch_heads,
+            candidate_heads,
+            modified_facet_keys,
+            facets,
+        })
+    }
+
+    /// Validates a [`MergeCandidate`]'s facets against the registered plug
+    /// manifests — the same schema/reference checks every transaction write
+    /// runs (ADR 011 §6 step 6 / §7 merge-if-valid validation). The merge
+    /// commit path rewrites system-managed facets (the Branch facet) and its
+    /// own dmeta bookkeeping, so this is a validation rather than a user
+    /// write; the schema and reference checks still apply to every facet key
+    /// the merge changes.
+    pub async fn validate_merge_candidate(&self, candidate: &MergeCandidate) -> Res<()> {
+        let incoming: HashMap<FacetKey, FacetRaw> = candidate
+            .modified_facet_keys
+            .iter()
+            .filter_map(|key| {
+                candidate
+                    .facets
+                    .get(key)
+                    .map(|value| (key.clone(), value.clone()))
+            })
+            .collect();
+        // Keys the merge emptied validate as removals against the resulting
+        // key set, mirroring how a facet removal would be checked.
+        let removed: Vec<FacetKey> = candidate
+            .modified_facet_keys
+            .iter()
+            .filter(|key| !candidate.facets.contains_key(*key))
+            .cloned()
+            .collect();
+        let resulting: HashSet<FacetKey> = candidate.facets.keys().cloned().collect();
+        self.validate_facets(&incoming, &removed, &resulting, FacetWriteScope::System)
+            .await
+    }
+
     pub async fn merge_from_branch(
         &self,
         id: &DocId,
         to_branch: &daybook_types::doc::BranchPath,
+        expected_to_heads: Option<&ChangeHashSet>,
         from_branch: &daybook_types::doc::BranchPath,
         user_path: Option<&daybook_types::doc::UserPath>,
     ) -> Result<(), DrawerError> {
@@ -1412,12 +1686,17 @@ impl DrawerRepo {
         let from_branch_state = self
             .get_branch_heads_for_path(id, from_branch)
             .await?
-            .ok_or_else(|| DrawerError::BranchNotFound {
-                name: from_branch.to_string(),
-            })?;
+            .ok_or_else(|| merge_branch_not_found(from_branch))?;
 
-        self.merge_from_heads(id, to_branch, from_branch, &from_branch_state, user_path)
-            .await
+        self.merge_from_heads(
+            id,
+            to_branch,
+            expected_to_heads,
+            from_branch,
+            &from_branch_state,
+            user_path,
+        )
+        .await
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(%id, %branch_path))]

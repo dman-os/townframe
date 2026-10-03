@@ -1279,7 +1279,7 @@ impl Rt {
                 );
                 match self
                     .drawer
-                    .merge_from_branch(doc_id, target_branch_path, staging_branch_path, None)
+                    .merge_from_branch(doc_id, target_branch_path, None, staging_branch_path, None)
                     .await
                 {
                     Ok(()) => {}

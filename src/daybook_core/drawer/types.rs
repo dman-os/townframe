@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use daybook_types::doc::{ChangeHashSet, Doc, DocId, FacetKey};
+use daybook_types::doc::{ChangeHashSet, Doc, DocId, FacetKey, FacetRaw};
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -23,11 +23,37 @@ pub enum DrawerError {
         #[from]
         inner: daybook_types::doc::FacetTagParseError,
     },
+    /// merge refused: branch heads moved concurrently: branch {branch} expected [{expected}] actual [{actual}]
+    HeadConcurrency {
+        branch: String,
+        expected: String,
+        actual: String,
+    },
     /// unexpected error: {inner}
     Other {
         #[from]
         inner: eyre::Report,
     },
+}
+
+/// An uncommitted merge of one branch into another (ADR 011 §6 steps 5–7).
+/// Prepared by `DrawerRepo::prepare_merge_candidate`; nothing on either branch
+/// changes until the caller validates it and commits through the
+/// `expected_to_heads` CAS on `merge_from_heads`.
+#[derive(Debug, Clone)]
+pub struct MergeCandidate {
+    pub id: DocId,
+    pub to_branch: daybook_types::doc::BranchPathBuf,
+    /// The target branch's heads the candidate was computed against; the CAS
+    /// basis `merge_from_heads` must be given when committing this candidate.
+    pub to_branch_heads: ChangeHashSet,
+    /// Automerge heads of the merged combination, before the commit path's
+    /// dmeta/branch bookkeeping change (facet values are unaffected by it).
+    pub candidate_heads: ChangeHashSet,
+    /// Facet keys whose values the merge changed.
+    pub modified_facet_keys: Vec<FacetKey>,
+    /// The merged document's facets, hydrated at `candidate_heads`.
+    pub facets: HashMap<FacetKey, FacetRaw>,
 }
 
 #[derive(Debug, thiserror::Error, displaydoc::Display)]

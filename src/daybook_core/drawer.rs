@@ -18,6 +18,7 @@ mod tests;
 pub mod types;
 
 pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
+pub use crate::drawer::types::MergeCandidate;
 pub use meta::doc_version_updates;
 pub use meta::version_updates;
 
