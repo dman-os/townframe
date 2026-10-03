@@ -1,6 +1,6 @@
 use super::codec::{
-    HEADER_LEN, HeaderFacts, MASTER_KEY_LEN, RECORD_OVERHEAD, SALT_LEN, decrypt_bytes_ikm,
-    encrypt_raw_ikm, payload_size,
+    HEADER_LEN, HeaderFacts, MASTER_KEY_LEN, RECORD_OVERHEAD, SALT_LEN, StreamDecryptor,
+    decrypt_bytes_ikm, encrypt_raw_ikm, payload_size,
 };
 use super::*;
 
@@ -206,9 +206,30 @@ fn truncated_stream_is_rejected() {
     let wire = SMALL_RS as usize + RECORD_OVERHEAD;
     assert!(decrypt_bytes(&key, &ct[..HEADER_LEN + wire]).is_err());
 }
+#[test]
+fn empty_plaintext_roundtrips_under_minimal_padding() -> Res<()> {
+    // A minimal-padding empty plaintext is one delimiter octet of payload:
+    // its single final record is exactly RECORD_OVERHEAD wire octets, the
+    // shortest record a final record may be. The stream decoders must accept
+    // it or empty content blobs are write-only.
+    let key = MasterKey::random();
+    let ct = encrypt_with_rs(&key, b"", SMALL_RS, Padding::Minimal);
+    assert_eq!(
+        decrypt_bytes(&key, &ct)?,
+        b"".as_slice(),
+        "an empty minimal record must decrypt to an empty plaintext"
+    );
+    // And through the streaming decoder, the path a download actually uses.
+    let mut dec = StreamDecryptor::new(key.clone());
+    dec.push(&ct)?;
+    dec.finish()?;
+    let plaintext: Vec<u8> = dec.drain_outbox().flatten().collect();
+    assert!(plaintext.is_empty());
+    Ok(())
+}
 
 #[test]
-fn deterministic_per_content() {
+fn deterministic_per_content() -> Res<()> {
     let key = MasterKey::random();
     let pt = b"deterministic bytes".to_vec();
     let ct1 = encrypt_bytes(&key, &pt);
@@ -219,10 +240,21 @@ fn deterministic_per_content() {
     );
     assert_eq!(Hash::new(&ct1), Hash::new(&ct2));
     // Same key, different plaintext: salts must diverge (GCM safety).
+    // Same key, different plaintext: salts must diverge (GCM safety).
     let other = b"different plaintext".to_vec();
-    let salt1 = key.salt_for(&Hash::new(&pt));
-    let salt2 = key.salt_for(&Hash::new(&other));
+    let framing = EncodingParams::default();
+    let salt1 = key.salt_for(&Hash::new(&pt), &framing);
+    let salt2 = key.salt_for(&Hash::new(&other), &framing);
     assert_ne!(salt1, salt2);
+    // Same key + plaintext, different framing: the salt must diverge too —
+    // record contents differ per framing, so a shared salt would reuse the
+    // same (CEK, nonce) pair across differing record plaintexts.
+    let other_framing = EncodingParams::new(SMALL_RS, Padding::Minimal)?;
+    let salt3 = key.salt_for(&Hash::new(&pt), &other_framing);
+    assert_ne!(salt1, salt3);
+    // And the identical framing reproduces the identical salt.
+    assert_eq!(salt1, key.salt_for(&Hash::new(&pt), &framing));
+    Ok(())
 }
 
 #[test]

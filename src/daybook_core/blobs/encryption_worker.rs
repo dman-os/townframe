@@ -1864,10 +1864,19 @@ impl Ctx {
         if resolves_through(&blob, cipher_key) {
             return Ok(());
         }
+        // The path must name the plaintext digest, not the facet key's own id:
+        // every reader of `Blob.urls` (`blob_pins_from_facet_value` in the pin
+        // worker, `plaintext_blob_id` here) treats the `db+blob` path as a
+        // blob digest, and a production facet's id may be any base58 string —
+        // `BlobId`'s zero-padding parse of foreign ids would turn it into a
+        // pin on a hash that names no blob.
+        let plaintext = plaintext_blob_id(&blob).ok_or_else(|| {
+            eyre::eyre!("the Blob facet {blob_key} of document {doc_id} names no blob digest")
+        })?;
         let url = format!(
             "{}:///{}?via={}",
             crate::blobs::BLOB_SCHEME,
-            blob_key.id,
+            plaintext,
             cipher_key
         );
         blob.urls.get_or_insert_with(Vec::new).push(url);

@@ -46,6 +46,19 @@ pub enum Padding {
     #[default]
     Record,
 }
+impl Padding {
+    /// The canonical one-octet identity of this padding policy in the salt
+    /// derivation. Values are frozen forever (`Minimal = 1`, `Record = 2`),
+    /// and a future policy takes a fresh value — never a reshuffle — so
+    /// derivations under variants that existed before it keep reproducing
+    /// byte-identically (see [`MasterKey::salt_for`]).
+    pub(crate) fn domain_byte(&self) -> u8 {
+        match self {
+            Padding::Minimal => 1,
+            Padding::Record => 2,
+        }
+    }
+}
 
 /// Padding policy used by the store flows and new representations.
 pub const DEFAULT_PADDING: Padding = Padding::Record;

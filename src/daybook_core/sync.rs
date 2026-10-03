@@ -479,6 +479,7 @@ impl IrohSyncRepo {
     /// A repo whose config predates the encrypted-representation inventory has
     /// no such document, so it has no part for it: nothing to classify, and a
     /// sentinel id would name a scope that cannot exist.
+    // FIXME: this ought to be retied and wait_for_full_sync should take (scope,part) instead
     #[inline]
     pub fn is_blob_part(&self, part_id: &PartKey) -> bool {
         let core_blob = crate::blobs::blob_inventory_part_id(&self.rcx.core_inventory_doc_id);

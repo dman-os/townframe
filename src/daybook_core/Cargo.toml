@@ -151,6 +151,8 @@ ed25519-dalek = { version = "2.2.0", features = ["digest"] }
 
 [dev-dependencies]
 big_repo = { workspace = true, features = ["test-support"] }
+keyhive_core.workspace = true
+subduction_iroh.workspace = true
 big_sync = { workspace = true, features = ["test-support"] }
 secrets_rs = { workspace = true, features = ["test-support"] }
 tokio-util = { workspace = true }

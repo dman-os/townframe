@@ -43,20 +43,27 @@ impl MasterKey {
     }
 
     /// The salt for a plaintext of this representation: a pure function of
-    /// (master key, plaintext digest). Two different plaintexts under one key
-    /// therefore derive different CEKs/nonce bases — a GCM nonce collision
-    /// across messages is unrepresentable.
-    pub(crate) fn salt_for(&self, p_hash: &Hash) -> [u8; SALT_LEN] {
-        let mut hasher = blake3::Hasher::new_derive_key("daybook.cipherblob.salt.v1");
+    /// (master key, plaintext digest, framing). The framing participates in
+    /// the derivation because it shapes every record's plaintext: without it,
+    /// the same JWK applied to the same plaintext under two different
+    /// record-size or padding choices would reuse each record's (CEK, nonce)
+    /// pair across *different* record contents — a GCM confidentiality and
+    /// authentication break the type system alone cannot rule out. Two
+    /// different plaintexts under one key always derive a different salt, so
+    /// a nonce collision across messages is unrepresentable either way.
+    pub(crate) fn salt_for(&self, p_hash: &Hash, framing: &EncodingParams) -> [u8; SALT_LEN] {
+        let mut hasher = blake3::Hasher::new_derive_key("daybook.cipherblob.salt.v2");
         hasher.update(&self.0);
         hasher.update(p_hash.as_bytes());
+        hasher.update(&framing.record_size.to_be_bytes());
+        hasher.update([framing.padding.domain_byte()].as_slice());
         let mut salt = [0u8; SALT_LEN];
         salt.copy_from_slice(&hasher.finalize().as_bytes()[..SALT_LEN]);
         salt
     }
 
-    pub(crate) fn cipher_for(&self, p_hash: &Hash) -> Cipher {
-        self.cipher_with_salt(&self.salt_for(p_hash))
+    pub(crate) fn cipher_for(&self, p_hash: &Hash, framing: &EncodingParams) -> Cipher {
+        self.cipher_with_salt(&self.salt_for(p_hash, framing))
     }
 
     pub(crate) fn cipher_with_salt(&self, salt: &[u8; SALT_LEN]) -> Cipher {

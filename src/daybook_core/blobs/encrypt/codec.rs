@@ -147,7 +147,17 @@ pub(crate) fn header(salt: &[u8; SALT_LEN], rs: u64) -> [u8; HEADER_LEN] {
 /// §17.)
 pub fn encrypt_with_rs(key: &MasterKey, plaintext: &[u8], rs: u64, padding: Padding) -> Vec<u8> {
     let p_hash = Hash::new(plaintext);
-    encrypt_raw_ikm(&key.0, &key.salt_for(&p_hash), rs, padding, plaintext)
+    let framing = EncodingParams {
+        record_size: rs,
+        padding,
+    };
+    encrypt_raw_ikm(
+        &key.0,
+        &key.salt_for(&p_hash, &framing),
+        rs,
+        padding,
+        plaintext,
+    )
 }
 
 /// [`encrypt_with_rs`] with an explicit RFC 8188 (ikm, salt) - the shape
@@ -393,7 +403,7 @@ impl StreamDecryptor {
                 "truncated ciphertext: no final record"
             );
             eyre::ensure!(
-                self.pending.len() > RECORD_OVERHEAD,
+                self.pending.len() >= RECORD_OVERHEAD,
                 "final record too short"
             );
             let cipher = self.cipher.as_ref().expect("set with header");
@@ -431,7 +441,7 @@ pub(crate) struct RecordEncryptor {
 
 impl RecordEncryptor {
     pub(crate) fn new(key: &MasterKey, p_hash: &Hash, encoding: EncodingParams) -> Self {
-        let salt = key.salt_for(p_hash);
+        let salt = key.salt_for(p_hash, &encoding);
         let cipher = key.cipher_with_salt(&salt);
         Self {
             salt,

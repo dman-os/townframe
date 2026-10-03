@@ -111,9 +111,14 @@ async fn consume_decrypted(
                     }
                 }
                 for payload in dec.drain_outbox() {
+                    // The importer's own failure is the real error and is
+                    // reported by its task; a dead consumer only ends this
+                    // fetch, it must not escalate to the process panic handler.
                     p_tx.send(Ok(bytes::Bytes::from(payload)))
                         .await
-                        .expect("import receiver dropped before fetch ended");
+                        .map_err(|_| {
+                            eyre::eyre!("the download's plaintext importer stopped consuming")
+                        })?;
                 }
             }
             bao_tree::io::BaoContentItem::Parent(parent) => {
@@ -133,7 +138,7 @@ async fn consume_decrypted(
     for payload in dec.drain_outbox() {
         p_tx.send(Ok(bytes::Bytes::from(payload)))
             .await
-            .expect("import receiver dropped before fetch ended");
+            .map_err(|_| eyre::eyre!("the download's plaintext importer stopped consuming"))?;
     }
     Ok(leaves)
 }

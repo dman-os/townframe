@@ -92,11 +92,11 @@ struct PlainPair {
 
 impl PlainPair {
     fn new(key: &MasterKey, p_hash: Hash, reader: SyncReader, encoding: EncodingParams) -> Self {
-        let salt = key.salt_for(&p_hash);
+        let salt = key.salt_for(&p_hash, &encoding);
         let payload_max = payload_size(encoding.record_size);
         let p_len = reader.len();
         Self {
-            cipher: key.cipher_for(&p_hash),
+            cipher: key.cipher_for(&p_hash, &encoding),
             header: header(&salt, encoding.record_size),
             p_hash,
             reader,
