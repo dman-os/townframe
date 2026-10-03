@@ -6,7 +6,7 @@ use super::*;
 
 use daybook_core::test_support::DaybookTestContext;
 use daybook_types::doc::{
-    AddDocArgs, Body, BranchPathBuf, FacetKey, Note, WellKnownFacet, WellKnownFacetTag,
+    AddDocArgs, Body, BranchPathBuf, DocId, FacetKey, Note, WellKnownFacet, WellKnownFacetTag,
 };
 use daybook_types::dpath::Dpath;
 use daybook_types::url::build_facet_ref;
@@ -199,17 +199,19 @@ async fn occupied_destination_refuses_before_any_visible_write() -> Res<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn node_without_dpath_registration_is_refused_as_predating_checkout() -> Res<()> {
     // A node predating checkout support has an active core manifest without
-    // the dpath facet. Every load re-seeds the fresh core manifest, so author
-    // and enable the pre-checkout revision explicitly through the normal
-    // validated plug path (removal is a 0.x minor bump, which skips the
-    // command-preservation gate by design).
+    // the dpath facet. Core is now 0.1.0 (the dpath-registration minor bump),
+    // and every load re-seeds the fresh core manifest, so author the dpath-less
+    // revision explicitly through the normal validated plug path (removal is a
+    // 0.x minor bump, which skips the command-preservation gate by design). The
+    // version is bumped only to satisfy the core-version monotonicity gate
+    // against the already-seeded 0.1.0 manifest.
     let ctx = daybook_core::test_support::test_cx("checkout_old_node_refusal").await?;
     let plugs = std::sync::Arc::<daybook_core::plugs::PlugsRepo>::clone(&ctx.rt.plugs_repo);
     let mut old_core = daybook_core::plugs::system_plugs()
         .into_iter()
         .next()
         .ok_or_eyre("system_plugs is empty")?;
-    old_core.version = "0.0.2".parse()?;
+    old_core.version = "0.1.1".parse()?;
     let before = old_core.facets.len();
     old_core
         .facets
@@ -228,6 +230,195 @@ async fn node_without_dpath_registration_is_refused_as_predating_checkout() -> R
     assert!(error.to_string().contains("predates checkout support"));
     ctx.stop().await?;
     Ok(())
+}
+
+/// The whole-doc e2e writes the `{}` dpath facet via `Dpath::parse(..)`, but
+/// the registration validation itself keys on the tag: mirror the drawer
+/// suite's `dpath_facet_key` so the selective e2e exercises the exact manifest
+/// path (`org.example.daybook.dpath` under the `oneOf` value schema).
+fn dpath_facet_key() -> FacetKey {
+    FacetKey::from(format!("{}/main", daybook_types::dpath::DPATH_FACET_TAG))
+}
+
+/// The facet-ref index ingests manifest-declared references asynchronously
+/// through the delta machine, so the edge for a just-written document appears
+/// on a later poll rather than synchronously with the write.
+async fn wait_for_outgoing_facet_ref_edge(
+    index: &daybook_core::index::DocFacetRefIndexRepo,
+    origin_doc_id: &DocId,
+    target_facet_key: &FacetKey,
+) -> Res<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    while tokio::time::Instant::now() < deadline {
+        if index
+            .list_outgoing(origin_doc_id)
+            .await?
+            .iter()
+            .any(|edge| edge.target_facet_key == *target_facet_key)
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    eyre::bail!(
+        "timeout waiting for facet-ref edge from {} to {}",
+        origin_doc_id,
+        target_facet_key
+    );
+}
+
+/// Selective dpath claims ride the ordinary validated write path: the 0.1.0
+/// core manifest's `oneOf` value schema accepts both the targets spelling and
+/// the single-target shorthand, and the manifest-declared reference specs must
+/// feed the doc-facet-ref index (same-transaction `self` targets resolve to
+/// the origin document in the edge).
+#[test]
+fn selective_dpath_claims_accept_fresh_node_validated_writes_and_materialize_index_edges() -> Res<()>
+{
+    block_on_big_stack(async {
+        let ctx = setup("checkout_dpath_selective_validated_write").await?;
+        let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let note_key = FacetKey::from(WellKnownFacetTag::Note);
+
+        // Targets spelling: same-transaction self target to the title facet
+        // added in the same write (empty `refHeads` = dict.md same-transaction
+        // convention; only an existence rule, never an existence gate).
+        let selective_doc_id = ctx
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [
+                    (
+                        title_key.clone(),
+                        serde_json::Value::from(WellKnownFacet::TitleGeneric(
+                            "selective dpath e2e".into(),
+                        )),
+                    ),
+                    (
+                        dpath_facet_key(),
+                        serde_json::json!({ "targets": [{
+                            "facetRef": build_facet_ref(
+                                daybook_types::url::FACET_SELF_DOC_ID,
+                                &title_key,
+                            )?
+                            .as_str(),
+                            "refHeads": [],
+                        }]}),
+                    ),
+                ]
+                .into(),
+                user_path: None,
+            })
+            .await
+            .wrap_err("selective targets dpath write")?;
+
+        // Shorthand spelling rides the second optional manifest
+        // (`$.facetRef` string value + `$.refHeads` sibling heads).
+        let shorthand_doc_id = ctx
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [
+                    (
+                        note_key.clone(),
+                        serde_json::Value::from(WellKnownFacet::Note(Note {
+                            mime: "text/plain".into(),
+                            content: "shorthand dpath e2e".into(),
+                        })),
+                    ),
+                    (
+                        dpath_facet_key(),
+                        serde_json::json!({
+                            "facetRef": build_facet_ref(
+                                daybook_types::url::FACET_SELF_DOC_ID,
+                                &note_key,
+                            )?
+                            .as_str(),
+                            "refHeads": [],
+                        }),
+                    ),
+                ]
+                .into(),
+                user_path: None,
+            })
+            .await
+            .wrap_err("shorthand dpath write")?;
+
+        let index = ctx.rt.doc_facet_ref_index_repo.as_ref();
+        wait_for_outgoing_facet_ref_edge(index, &selective_doc_id, &title_key).await?;
+        wait_for_outgoing_facet_ref_edge(index, &shorthand_doc_id, &note_key).await?;
+
+        let selective_edges = index.list_outgoing(&selective_doc_id).await?;
+        assert_eq!(
+            selective_edges.len(),
+            1,
+            "targets claim indexes exactly its declared reference"
+        );
+        assert_eq!(selective_edges[0].target_facet_key, title_key);
+        assert_eq!(
+            selective_edges[0].target_doc_id, selective_doc_id,
+            "`self` resolves to the origin document in the edge"
+        );
+
+        let shorthand_edges = index.list_outgoing(&shorthand_doc_id).await?;
+        assert_eq!(shorthand_edges.len(), 1);
+        assert_eq!(shorthand_edges[0].target_facet_key, note_key);
+        assert_eq!(shorthand_edges[0].target_doc_id, shorthand_doc_id);
+
+        ctx.stop().await?;
+        Ok(())
+    })
+}
+
+/// On a node whose core manifest predates the dpath facet, the selective
+/// write cannot pass the write gate: the facet tag has no registered manifest
+/// there at all (fresh nodes get the 0.1.0 registration from system_plugs).
+#[test]
+fn selective_dpath_write_on_old_node_is_refused_by_the_write_gate() -> Res<()> {
+    block_on_big_stack(async {
+        let ctx = daybook_core::test_support::test_cx("checkout_dpath_old_node_refusal").await?;
+        let plugs = std::sync::Arc::<daybook_core::plugs::PlugsRepo>::clone(&ctx.rt.plugs_repo);
+        let mut old_core = daybook_core::plugs::system_plugs()
+            .into_iter()
+            .next()
+            .ok_or_eyre("system_plugs is empty")?;
+        // Core is 0.1.0 (the dpath minor bump) and is already seeded by load;
+        // the version is bumped only to satisfy the core-version monotonicity
+        // gate on this fresh repo.
+        old_core.version = "0.1.1".parse()?;
+        old_core
+            .facets
+            .retain(|facet| facet.key_tag.to_string() != daybook_types::dpath::DPATH_FACET_TAG);
+        plugs.add(old_core).await?;
+        plugs.enable_known_plug("@daybook/core").await?;
+
+        let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+        let claim = serde_json::json!({ "targets": [{
+            "facetRef": build_facet_ref(daybook_types::url::FACET_SELF_DOC_ID, &title_key)?
+                .as_str(),
+            "refHeads": [],
+        }]});
+        let result = ctx
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [(dpath_facet_key(), claim)].into(),
+                user_path: None,
+            })
+            .await;
+        let Err(error) = result else {
+            panic!("selective dpath write must be refused on old nodes");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("has no registered manifest in plugs repo"),
+            "old-node rejection must come from the write gate: {error:#}"
+        );
+
+        ctx.stop().await?;
+        Ok(())
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]

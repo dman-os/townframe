@@ -635,9 +635,12 @@ async fn test_plug_reference_json_path_must_exist_in_schema() -> Res<()> {
         key_tag: "org.test.image".into(),
         value_schema: schemars::schema_for!(daybook_types::doc::ImageMetadata),
         display_config: default(),
-        references: vec![manifest::FacetReferenceManifest::UrlStringSplit {
+        references: vec![manifest::FacetReferenceManifest {
             json_path: "/doesNotExist".into(),
-            at_commit_json_path: "/refHeads".into(),
+            optional: false,
+            value: manifest::FacetReferenceValue::UrlString,
+            at_commit_json_path: Some("/refHeads".into()),
+            heads_optional: false,
         }],
     });
 
@@ -667,9 +670,12 @@ async fn test_plug_at_commit_json_path_type_must_be_array_of_strings() -> Res<()
         key_tag: "org.test.image".into(),
         value_schema: schemars::schema_for!(daybook_types::doc::ImageMetadata),
         display_config: default(),
-        references: vec![manifest::FacetReferenceManifest::UrlStringSplit {
+        references: vec![manifest::FacetReferenceManifest {
             json_path: "/facetRef".into(),
-            at_commit_json_path: "/mime".into(),
+            optional: false,
+            value: manifest::FacetReferenceValue::UrlString,
+            at_commit_json_path: Some("/mime".into()),
+            heads_optional: false,
         }],
     });
 
@@ -1835,8 +1841,13 @@ fn a_revision_event_projects_only_against_the_config_it_is_applied_to() {
     );
 }
 
+/// Accept/reject matrix over the dpath oneOf value schema: every claim shape
+/// the typed reader accepts (`null`/`{}` whole-doc, `targets`, shorthand) is
+/// also writer-valid, and every mimic (empty targets, mixed targets+facetRef,
+/// unknown keys, wrong types) is rejected — the shape exactness the whole-doc
+/// slice locked in, now covering selective claims (FDR 001 §2, §3).
 #[test]
-fn whole_document_dpath_facet_schema_is_registered_and_shape_exact() -> Res<()> {
+fn dpath_claim_shapes_are_writer_strict_under_the_oneof_registration() -> Res<()> {
     let core = crate::plugs::system_plugs()
         .into_iter()
         .next()
@@ -1845,27 +1856,151 @@ fn whole_document_dpath_facet_schema_is_registered_and_shape_exact() -> Res<()> 
         .facets
         .iter()
         .find(|facet| facet.key_tag.to_string() == daybook_types::dpath::DPATH_FACET_TAG)
-        .ok_or_eyre("whole-document dpath facet is not registered")?;
-    assert!(
-        manifest.references.is_empty(),
-        "dpath registration declares no generic references"
-    );
+        .ok_or_eyre("selective dpath facet is not registered")?;
     let schema = serde_json::to_value(&manifest.value_schema)?;
     let validator = jsonschema::validator_for(&schema)?;
 
-    assert!(validator.is_valid(&serde_json::json!(null)));
-    assert!(validator.is_valid(&serde_json::json!({})));
+    for accepted in [
+        serde_json::json!(null),
+        serde_json::json!({}),
+        serde_json::json!({
+            "targets": [
+                {"facetRef": "db+facet:///self/org.example.daybook/todo", "refHeads": []}
+            ]
+        }),
+        serde_json::json!({
+            "targets": [{"facetRef": "db+facet:///doc123/org.example.daybook/todo"}]
+        }),
+        serde_json::json!({"facetRef": "db+facet:///self/org.example.daybook/todo"}),
+    ] {
+        assert!(
+            validator.is_valid(&accepted),
+            "valid dpath claim shape rejected: {accepted}"
+        );
+    }
+
     for rejected in [
         serde_json::json!({"targets": []}),
-        serde_json::json!({"facetRef": "db+facet:///self/x/y"}),
+        serde_json::json!({
+            "targets": [{"facetRef": "db+facet:///doc123/x"}],
+            "facetRef": "db+facet:///doc123/y"
+        }),
         serde_json::json!({"unknown": 1}),
+        serde_json::json!({"facetRef": 7}),
+        serde_json::json!({"targets": [{"facetRef": "db+facet:///doc123/x", "refHeads": [1]}]}),
+        serde_json::json!({"targets": [{"refHeads": []}]}),
         serde_json::json!("whole"),
         serde_json::json!(0),
     ] {
         assert!(
             !validator.is_valid(&rejected),
-            "selective/unknown shapes must be rejected: {rejected}"
+            "dpath mimic shape must be rejected: {rejected}"
         );
     }
+    Ok(())
+}
+
+/// The core plug's reference registrations survived the engine break with
+/// identical semantics: same selected paths, same URL/heads sources, same
+/// presence and heads requirements. Field-level pins below, plus the
+/// authoring gate (`validate_structure`, which resolves every manifest
+/// against its facet schema) must accept the whole registration — the
+/// ImageMetadata/Embedding split paths, Body array references, and the two
+/// optional dpath manifests over the oneOf branches.
+#[tokio::test(flavor = "multi_thread")]
+async fn core_plug_reference_registrations_match_pre_engine_break_semantics() -> Res<()> {
+    let ctx = crate::test_support::test_cx(
+        "plugs_test_core_plug_reference_registrations_match_pre_engine_break_semantics",
+    )
+    .await?;
+    let repo = Arc::clone(&ctx.rt.plugs_repo);
+
+    let core = crate::plugs::system_plugs()
+        .into_iter()
+        .next()
+        .ok_or_eyre("system_plugs is empty")?;
+    assert_eq!(core.version.to_string(), "0.1.0");
+
+    let references_of = |tag: &str| -> Res<Vec<manifest::FacetReferenceManifest>> {
+        core.facets
+            .iter()
+            .find(|facet| facet.key_tag.to_string() == tag)
+            .map(|facet| facet.references.clone())
+            .ok_or_eyre(format!("facet '{tag}' not registered"))
+    };
+
+    for split_tag in [
+        daybook_types::doc::WellKnownFacetTag::ImageMetadata
+            .to_string(),
+        daybook_types::doc::WellKnownFacetTag::Embedding.to_string(),
+    ] {
+        let refs = references_of(&split_tag)?;
+        match refs.as_slice() {
+            [manifest::FacetReferenceManifest {
+                json_path,
+                optional,
+                value,
+                at_commit_json_path: Some(at_commit),
+                heads_optional,
+            }] => {
+                assert_eq!(json_path, "/facetRef");
+                assert!(!optional, "{split_tag} facetRef must be required");
+                assert!(matches!(value, manifest::FacetReferenceValue::UrlString));
+                assert_eq!(at_commit, "/refHeads");
+                assert!(!heads_optional, "{split_tag} heads must be required");
+            }
+            other => panic!("{split_tag} must hold exactly one split reference, got {other:?}"),
+        }
+    }
+
+    match references_of(
+        &daybook_types::doc::WellKnownFacetTag::Body
+            .to_string(),
+    )?.as_slice() {
+        [manifest::FacetReferenceManifest {
+            json_path,
+            optional,
+            value,
+            at_commit_json_path: None,
+            heads_optional,
+        }] => {
+            assert_eq!(json_path, "/order");
+            assert!(!optional);
+            assert!(matches!(value, manifest::FacetReferenceValue::UrlString));
+            assert!(!heads_optional);
+        }
+        other => panic!("Body must hold exactly one array reference, got {other:?}"),
+    }
+
+    let dpath_refs = references_of(daybook_types::dpath::DPATH_FACET_TAG)?;
+    match dpath_refs.as_slice() {
+        [targets, shorthand] => {
+            assert_eq!(targets.json_path, "$.targets[*]");
+            assert!(targets.optional, "targets manifest must serve whole-doc values");
+            assert!(matches!(
+                &targets.value,
+                manifest::FacetReferenceValue::UrlObject { ref_field, heads_field }
+                    if ref_field == "facetRef" && heads_field == "refHeads"
+            ));
+            assert!(targets.at_commit_json_path.is_none());
+            assert!(
+                targets.heads_optional,
+                "refHeads absent ≡ [] ≡ same-transaction"
+            );
+            assert_eq!(shorthand.json_path, "$.facetRef");
+            assert!(shorthand.optional);
+            assert!(matches!(shorthand.value, manifest::FacetReferenceValue::UrlString));
+            assert_eq!(shorthand.at_commit_json_path.as_deref(), Some("$.refHeads"));
+            assert!(shorthand.heads_optional);
+        }
+        other => panic!("dpath must hold exactly two reference manifests, got {other:?}"),
+    }
+
+    // Authoring-gate equivalence: every registration resolves against its
+    // facet value schema, including the two optional dpath manifests through
+    // the oneOf branches and the required split paths.
+    repo.validate_structure(&core).await?;
+
+    ctx.stop().await?;
     Ok(())
 }

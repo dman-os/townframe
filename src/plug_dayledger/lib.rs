@@ -143,7 +143,8 @@ mod wflows {
 use daybook_types::doc::{Note, WellKnownFacetTag};
 use daybook_types::manifest::{
     CompareOp, DocChangePredicate, DocPredicateClause, FacetDependencyManifest, FacetDisplayDeets,
-    FacetDisplayHint, FacetManifest, FacetReferenceManifest, FacetViewMode, InitDeets,
+    FacetDisplayHint, FacetManifest, FacetReferenceManifest, FacetReferenceValue, FacetViewMode,
+    InitDeets,
     InitManifest, InitRunMode, PlugDependencyManifest, PlugManifest, ProcessorDeets,
     ProcessorEventPredicate, ProcessorManifest, RoutineDocAcl, RoutineFacetAccess, RoutineImpl,
     RoutineManifest, ViewManifest, ViewProviderManifest, ViewRef,
@@ -175,8 +176,15 @@ pub fn plug_manifest() -> PlugManifest {
                 key_tag: claim_tag.clone(),
                 value_schema: schemars::schema_for!(Claim),
                 display_config: Default::default(),
-                references: vec![FacetReferenceManifest::UrlObjectMany {
+                references: vec![FacetReferenceManifest {
                     json_path: "$.srcRefs[*]".into(),
+                    optional: false,
+                    value: FacetReferenceValue::UrlObject {
+                        ref_field: "ref".into(),
+                        heads_field: "heads".into(),
+                    },
+                    at_commit_json_path: None,
+                    heads_optional: false,
                 }],
             },
             FacetManifest {
@@ -732,5 +740,45 @@ mod tests {
                 .any(|key| key.key_tag.to_string() == NOTE_EDITOR_CONFIG_FACET_TAG),
             "dayledger should depend on the core note editor config facet",
         );
+    }
+}
+
+#[cfg(test)]
+mod claim_reference_tests {
+    use super::*;
+    use daybook_types::manifest::FacetReferenceValue;
+    use daybook_types::reference::{
+        schema_allows_fields_reference_object, schema_node_for_json_path,
+    };
+
+    /// The dayledger claims registration survived the reference engine break
+    /// with identical semantics: one required field-shaped reference at
+    /// `$.srcRefs[*]` decoding `{ref, heads}` objects, resolving through the
+    /// Claim value schema's source-refs array.
+    #[test]
+    fn claim_reference_registration_matches_pre_engine_break_semantics() {
+        let facet = plug_manifest()
+            .facets
+            .into_iter()
+            .find(|facet| facet.key_tag.to_string() == crate::types::DayledgerFacetTag::Claim.as_str())
+            .expect("claim facet not registered");
+        let [reference] = facet.references.as_slice() else {
+            panic!("claim facet must hold exactly one reference");
+        };
+        assert_eq!(reference.json_path, "$.srcRefs[*]");
+        assert!(!reference.optional);
+        assert!(matches!(
+            &reference.value,
+            FacetReferenceValue::UrlObject { ref_field, heads_field }
+                if ref_field == "ref" && heads_field == "heads"
+        ));
+        assert!(reference.at_commit_json_path.is_none());
+        assert!(!reference.heads_optional);
+
+        let schema_json = serde_json::to_value(&facet.value_schema).expect("schema serializes");
+        let node = schema_node_for_json_path(&schema_json, "$.srcRefs[*]")
+            .expect("resolving the json path failed")
+            .expect("$.srcRefs[*] does not resolve in the Claim schema");
+        assert!(schema_allows_fields_reference_object(node, "ref", "heads"));
     }
 }

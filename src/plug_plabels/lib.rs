@@ -55,8 +55,9 @@ mod wflows;
 
 use daybook_types::manifest::{
     CommandDeets, CommandManifest, DocPredicateClause, FacetDependencyManifest, FacetManifest,
-    FacetReferenceManifest, PlugManifest, ProcessorDeets, ProcessorManifest, RoutineDocAcl,
-    RoutineFacetAccess, RoutineImpl, RoutineLocalStateAccess, RoutineManifest,
+    FacetReferenceManifest, FacetReferenceValue, PlugManifest, ProcessorDeets,
+    ProcessorManifest, RoutineDocAcl, RoutineFacetAccess, RoutineImpl, RoutineLocalStateAccess,
+    RoutineManifest,
 };
 use std::sync::Arc;
 
@@ -569,8 +570,12 @@ pub fn plug_manifest() -> PlugManifest {
                 key_tag: PlabelFacetTag::PseudoLabel.as_str().into(),
                 value_schema: schemars::schema_for!(PseudoLabel),
                 display_config: Default::default(),
-                references: vec![FacetReferenceManifest::UrlString {
+                references: vec![FacetReferenceManifest {
                     json_path: "$.sourceRef".into(),
+                    optional: false,
+                    value: FacetReferenceValue::UrlString,
+                    at_commit_json_path: None,
+                    heads_optional: false,
                 }],
             },
             FacetManifest {
@@ -586,5 +591,40 @@ pub fn plug_manifest() -> PlugManifest {
                 references: vec![],
             },
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use daybook_types::manifest::FacetReferenceValue;
+    use daybook_types::reference::{
+        schema_allows_url_reference, schema_node_for_json_path,
+    };
+
+    /// The plabel registration survived the reference engine break with
+    /// identical semantics: one required URL-string reference at `$.sourceRef`
+    /// with no heads source, resolving against the PseudoLabel value schema.
+    #[test]
+    fn pseudo_label_reference_registration_matches_pre_engine_break_semantics() {
+        let facet = plug_manifest()
+            .facets
+            .into_iter()
+            .find(|facet| facet.key_tag.to_string() == crate::types::PlabelFacetTag::PseudoLabel.as_str())
+            .expect("pseudo label facet not registered");
+        let [reference] = facet.references.as_slice() else {
+            panic!("pseudo label must hold exactly one reference");
+        };
+        assert_eq!(reference.json_path, "$.sourceRef");
+        assert!(!reference.optional);
+        assert!(matches!(reference.value, FacetReferenceValue::UrlString));
+        assert!(reference.at_commit_json_path.is_none());
+        assert!(!reference.heads_optional);
+
+        let schema_json = serde_json::to_value(&facet.value_schema).expect("schema serializes");
+        let node = schema_node_for_json_path(&schema_json, "$.sourceRef")
+            .expect("resolving the json path failed")
+            .expect("$.sourceRef does not resolve in the PseudoLabel schema");
+        assert!(schema_allows_url_reference(node));
     }
 }

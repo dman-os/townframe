@@ -3879,3 +3879,320 @@ async fn checkout_branch_is_independently_authorized() -> Res<()> {
     assert!(reopened_heads_matched, "reopened checkout branch must retain its basis");
     Ok(())
 }
+
+// -- dpath selective claims: write-gate matrix (FDR 001 §2; lane D design §5) --
+//
+// The dpath facet is registered by the core plug's manifest through the
+// GENERIC reference engine (optional manifests on `$.targets[*]` and
+// `$.facetRef`), so these claims are exercised through the ordinary
+// `repo.add` validated path. Presence is re-governed by `optional`
+// (whole-doc claims select nothing and pass); the heads rules —
+// same-transaction self-references must exist in the validated facet set,
+// cross-doc empty heads must pin heads in the URL `?at=` fragment — are the
+// pre-existing engine rules. Cross-doc target existence is never checked
+// (a missing target is a state, FDR 001 §6), so cross-doc writes with
+// pinned heads are accepted with an arbitrary doc id.
+
+async fn boot_dpath_drawer() -> Res<(
+    Arc<DrawerRepo>,
+    crate::repos::RepoStopToken,
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+)> {
+    let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
+
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        let handle = big_repo.create_doc(doc).await?;
+        handle.document_id()
+    };
+
+    let (repo, stop_token) = DrawerRepo::load(
+        big_repo,
+        big_sync_host.store,
+        drawer_doc_id,
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_store_sql().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        None,
+    )
+    .await?;
+
+    Ok((repo, stop_token, acx_stop))
+}
+
+fn dpath_facet_key() -> FacetKey {
+    FacetKey::from(format!("{}/main", daybook_types::dpath::DPATH_FACET_TAG))
+}
+
+/// A syntactically valid pinned heads array, produced through the shared
+/// commit-heads codec (base58 multibase). The write gate only checks heads
+/// syntax — existence is never a write-gate rule for cross-doc targets.
+fn pinned_heads() -> Vec<String> {
+    am_utils_rs::serialize_commit_heads(&[automerge::ChangeHash([7u8; 32])])
+}
+
+fn dpath_targets_claim(
+    doc_id: &str,
+    facet_key: &FacetKey,
+    heads: Vec<String>,
+) -> Res<serde_json::Value> {
+    Ok(serde_json::json!({ "targets": [{
+        "facetRef": build_facet_ref(doc_id, facet_key)?.as_str(),
+        "refHeads": heads,
+    }]}))
+}
+
+fn dpath_shorthand_claim(
+    doc_id: &str,
+    facet_key: &FacetKey,
+    heads: Vec<String>,
+) -> Res<serde_json::Value> {
+    Ok(serde_json::json!({
+        "facetRef": build_facet_ref(doc_id, facet_key)?.as_str(),
+        "refHeads": heads,
+    }))
+}
+
+fn dpath_facets(
+    value: serde_json::Value,
+    extra: Vec<(FacetKey, serde_json::Value)>,
+) -> HashMap<FacetKey, serde_json::Value> {
+    let mut facets = extra;
+    facets.push((dpath_facet_key(), value));
+    facets.into_iter().collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_accepts_dpath_whole_doc_claims_with_selective_references_registered() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Whole-doc claims select nothing on both optional manifests: exactly the
+    // registration shape where the pre-selection gate would have bailed.
+    for value in [serde_json::json!(null), serde_json::json!({})] {
+        repo.add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: dpath_facets(value, vec![]),
+            user_path: None,
+        })
+        .await?;
+    }
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_accepts_selective_dpath_self_target_facet_in_same_write() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Empty/absent heads are the dict.md same-transaction convention: a self
+    // target must name a facet in the same validated write.
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let same_write_title = (
+        title_key.clone(),
+        serde_json::Value::from(WellKnownFacet::TitleGeneric("same write".to_string())),
+    );
+
+    let claim = dpath_targets_claim(daybook_types::url::FACET_SELF_DOC_ID, &title_key, vec![])?;
+    repo.add(AddDocArgs {
+        branch_path: BranchPathBuf::from("main"),
+        facets: dpath_facets(claim, vec![same_write_title]),
+        user_path: None,
+    })
+    .await?;
+
+    // Shorthand spelling, same rule.
+    let note_key = FacetKey::from(WellKnownFacetTag::Note);
+    let same_write_note = (
+        note_key.clone(),
+        serde_json::Value::from(WellKnownFacet::Note("same write".into())),
+    );
+    let shorthand = dpath_shorthand_claim(daybook_types::url::FACET_SELF_DOC_ID, &note_key, vec![])?;
+    repo.add(AddDocArgs {
+        branch_path: BranchPathBuf::from("main"),
+        facets: dpath_facets(shorthand, vec![same_write_note]),
+        user_path: None,
+    })
+    .await?;
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_rejects_selective_dpath_self_target_without_target_facet() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Same-transaction self target whose facet is NOT in the write: must pin
+    // heads instead (existing self-reference rule, untouched).
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let claim = dpath_targets_claim(daybook_types::url::FACET_SELF_DOC_ID, &title_key, vec![])?;
+    let result = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: dpath_facets(claim, vec![]),
+            user_path: None,
+        })
+        .await;
+    assert!(result.is_err());
+    // Empty-heads self target outside the write is rejected by the existing
+    // heads rule (must pin heads or carry an `?at=` fragment).
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("must include commit heads in URL fragment"),
+        "same-transaction self target outside the write must be rejected"
+    );
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_accepts_selective_dpath_target_with_pinned_heads_without_target_facet() -> Res<()>
+{
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Pinned heads bypass the same-transaction requirement — and cross-doc
+    // target existence is never checked, so any doc id works.
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let claim = dpath_targets_claim("crossdoc-no-such-doc", &title_key, pinned_heads())?;
+    repo.add(AddDocArgs {
+        branch_path: BranchPathBuf::from("main"),
+        facets: dpath_facets(claim, vec![]),
+        user_path: None,
+    })
+    .await?;
+
+    // Shorthand spelling with pinned heads, same acceptance.
+    let note_key = FacetKey::from(WellKnownFacetTag::Note);
+    let shorthand = dpath_shorthand_claim("crossdoc-no-such-doc", &note_key, pinned_heads())?;
+    repo.add(AddDocArgs {
+        branch_path: BranchPathBuf::from("main"),
+        facets: dpath_facets(shorthand, vec![]),
+        user_path: None,
+    })
+    .await?;
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_cross_doc_dpath_target_head_rules_match_pre_migration_engine() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Cross-doc target with no heads at all (`refHeads` absent): the existing
+    // "must include commit heads in URL fragment" rule (dict.md), untouched.
+    // Absent ⇒ empty heads ⇒ the same-transaction convention demands an
+    // `?at=` fragment for a cross-doc tag, exactly as before the engine break.
+    let title_ref = build_facet_ref(
+        "crossdoc-no-such-doc",
+        &FacetKey::from(WellKnownFacetTag::TitleGeneric),
+    )?;
+    for claim in [
+        serde_json::json!({"targets": [{"facetRef": title_ref.as_str()}]}),
+        serde_json::json!({"facetRef": title_ref.as_str()}),
+    ] {
+        let result = repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: dpath_facets(claim, vec![]),
+                user_path: None,
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must include commit heads in URL fragment"),
+            "cross-doc target without heads/fragment must be rejected"
+        );
+    }
+
+    // Legacy engine oddity preserved exactly as it was: an EXPLICIT empty
+    // heads-source array selects one value ⇒ self/whole mode, which only
+    // gates self targets — a cross-doc doc id slips through ungated. This is
+    // pre-migration behavior (documented in the read-tolerant/write-strict
+    // matrix), not new dpath semantics.
+    for claim_builder in [&dpath_shorthand_claim] {
+        let claim = claim_builder(
+            "crossdoc-no-such-doc",
+            &FacetKey::from(WellKnownFacetTag::Note),
+            vec![],
+        )?;
+        repo.add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: dpath_facets(claim, vec![]),
+            user_path: None,
+        })
+        .await
+        .map_err(|err| eyre::eyre!("legacy empty-at-commit-array cross-doc ref must stay accepted: {err:#}"))?;
+    }
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_rejects_malformed_dpath_reference_shapes() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Malformed URL string in the selective target.
+    let no_target_scheme = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: dpath_facets(
+                serde_json::json!({"targets": [{"facetRef": "not-a-facet-url", "refHeads": []}]}),
+                vec![],
+            ),
+            user_path: None,
+        })
+        .await;
+    assert!(no_target_scheme.is_err());
+
+    // Malformed heads: heads are validated through parse_commit_heads either way.
+    let bad_heads = dpath_targets_claim(
+        "crossdoc-no-such-doc",
+        &FacetKey::from(WellKnownFacetTag::TitleGeneric),
+        vec!["not-a-hash".to_string()],
+    )?;
+    let result = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: dpath_facets(bad_heads, vec![]),
+            user_path: None,
+        })
+        .await;
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .to_lowercase()
+            .contains("commit"),
+        "malformed heads must be rejected"
+    );
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}

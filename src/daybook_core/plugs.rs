@@ -26,13 +26,13 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
     use daybook_types::doc::*;
     use manifest::{
         FacetDisplayDeets, FacetDisplayHint, FacetManifest, FacetReferenceManifest,
-        LocalStateManifest,
+        FacetReferenceValue, LocalStateManifest,
     };
 
     let plugs = vec![manifest::PlugManifest {
         namespace: "daybook".into(),
         name: "core".into(),
-        version: "0.0.1".parse().unwrap(),
+        version: "0.1.0".parse().unwrap(),
         title: "Daybook Core".into(),
         desc: "Core keys and routines".into(),
         local_states: [
@@ -124,18 +124,24 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 key_tag: WellKnownFacetTag::ImageMetadata.into(),
                 value_schema: schemars::schema_for!(ImageMetadata),
                 display_config: default(),
-                references: vec![FacetReferenceManifest::UrlStringSplit {
+                references: vec![FacetReferenceManifest {
                     json_path: "/facetRef".into(),
-                    at_commit_json_path: "/refHeads".into(),
+                    optional: false,
+                    value: FacetReferenceValue::UrlString,
+                    at_commit_json_path: Some("/refHeads".into()),
+                    heads_optional: false,
                 }],
             },
             FacetManifest {
                 key_tag: WellKnownFacetTag::Embedding.into(),
                 value_schema: schemars::schema_for!(daybook_types::doc::Embedding),
                 display_config: default(),
-                references: vec![FacetReferenceManifest::UrlStringSplit {
+                references: vec![FacetReferenceManifest {
                     json_path: "/facetRef".into(),
-                    at_commit_json_path: "/refHeads".into(),
+                    optional: false,
+                    value: FacetReferenceValue::UrlString,
+                    at_commit_json_path: Some("/refHeads".into()),
+                    heads_optional: false,
                 }],
             },
             FacetManifest {
@@ -172,25 +178,99 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 key_tag: WellKnownFacetTag::Body.into(),
                 value_schema: schemars::schema_for!(Body),
                 display_config: default(),
-                references: vec![FacetReferenceManifest::UrlStringMany {
+                references: vec![FacetReferenceManifest {
                     json_path: "/order".into(),
+                    optional: false,
+                    value: FacetReferenceValue::UrlString,
+                    at_commit_json_path: None,
+                    heads_optional: false,
                 }],
             },
             FacetManifest {
                 key_tag: daybook_types::dpath::DPATH_FACET_TAG.into(),
-                // Whole-document claims only: `null` or `{}`. Selective
-                // `targets`/`facetRef` values are typed in daybook_types
-                // but are not registered until the reference-validation
-                // engine can represent them.
+                // One value schema for all three claim shapes: whole-doc
+                // `null`/`{}`, selective `targets`, single-target shorthand.
+                // `oneOf`, not `anyOf`: the branches are mutually exclusive —
+                // the mixed writer bug `{"targets": [...], "facetRef": ...}`
+                // matches exactly zero branches. `{"targets": []}` is *read*
+                // as whole-doc by the typed parser but never written (canonical
+                // whole-doc serialization is `{}`), so the schema rejects it
+                // too — reads stay tolerant, writes stay strict (FDR 001 §4).
                 value_schema: serde_json::from_value(serde_json::json!({
-                    "anyOf": [
+                    "oneOf": [
                         {"type": "null"},
                         {"type": "object", "additionalProperties": false},
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["targets"],
+                            "properties": {
+                                "targets": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "required": ["facetRef"],
+                                        "properties": {
+                                            "facetRef": {"type": "string"},
+                                            "refHeads": {
+                                                "type": "array",
+                                                "items": {"type": "string"}
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["facetRef"],
+                            "properties": {
+                                "facetRef": {"type": "string"},
+                                "refHeads": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                },
+                            },
+                        },
                     ]
                 }))
-                .expect("whole-document dpath facet schema is valid"),
+                .expect("dpath facet schema is valid"),
                 display_config: default(),
-                references: default(),
+                // Selective claims are real manifest-declared references: they
+                // go through the generic write gate (`validate_facets`) and
+                // feed the doc-facet-ref index. Both manifests are `optional`
+                // so whole-doc `null`/`{}` values select nothing instead of
+                // failing the "reference path … is missing" gate, and
+                // `heads_optional` because `refHeads` absent ≡ `[]` ≡
+                // dict.md same-transaction (self-target must be facet in the
+                // same validated write; cross-doc empty heads must pin heads
+                // in the URL `?at=` fragment — existing rules, untouched).
+                references: vec![
+                    // Selective claims: each `$.targets[*]` entry is a
+                    // `{facetRef, refHeads}` object (generic field-shaped
+                    // reference decoding, engine has no dpath names).
+                    FacetReferenceManifest {
+                        json_path: "$.targets[*]".into(),
+                        optional: true,
+                        value: FacetReferenceValue::UrlObject {
+                            ref_field: "facetRef".into(),
+                            heads_field: "refHeads".into(),
+                        },
+                        at_commit_json_path: None,
+                        heads_optional: true,
+                    },
+                    // Single-target shorthand: URL string, sibling refHeads.
+                    FacetReferenceManifest {
+                        json_path: "$.facetRef".into(),
+                        optional: true,
+                        value: FacetReferenceValue::UrlString,
+                        at_commit_json_path: Some("$.refHeads".into()),
+                        heads_optional: true,
+                    },
+                ],
             },
         ],
     }];

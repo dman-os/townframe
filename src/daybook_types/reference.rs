@@ -214,6 +214,18 @@ pub fn schema_allows_array_of_strings(schema_node: &serde_json::Value) -> bool {
 }
 
 pub fn schema_allows_reference_object(schema_node: &serde_json::Value) -> bool {
+    schema_allows_fields_reference_object(schema_node, "ref", "heads")
+}
+
+/// Whether a schema node can hold the generic field-shaped reference objects
+/// declared by [`crate::manifest::FacetReferenceValue::UrlObject`]: an object
+/// whose `url_field` is a string (or branch-union over one) and whose
+/// `heads_field` is an array of strings (or branch-union over one).
+pub fn schema_allows_fields_reference_object(
+    schema_node: &serde_json::Value,
+    url_field: &str,
+    heads_field: &str,
+) -> bool {
     if schema_has_type(schema_node, "object") {
         let Some(properties) = schema_node
             .get("properties")
@@ -221,10 +233,10 @@ pub fn schema_allows_reference_object(schema_node: &serde_json::Value) -> bool {
         else {
             return false;
         };
-        let Some(ref_schema) = properties.get("ref") else {
+        let Some(ref_schema) = properties.get(url_field) else {
             return false;
         };
-        let Some(heads_schema) = properties.get("heads") else {
+        let Some(heads_schema) = properties.get(heads_field) else {
             return false;
         };
         return schema_supports_string(ref_schema)
@@ -235,7 +247,9 @@ pub fn schema_allows_reference_object(schema_node: &serde_json::Value) -> bool {
         if let Some(branches) = schema_node
             .get(branch_key)
             .and_then(|value| value.as_array())
-            && branches.iter().any(schema_allows_reference_object)
+            && branches
+                .iter()
+                .any(|branch| schema_allows_fields_reference_object(branch, url_field, heads_field))
         {
             return true;
         }
@@ -299,6 +313,31 @@ fn schema_has_type(schema_node: &serde_json::Value, expected_type: &str) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write-gate and index paths select reference values on whole facet
+    /// values, which may legitimately be `null` (whole-document dpath claims,
+    /// FDR 001 §2). A non-matching path on any root must be an empty
+    /// selection, never an error — `optional` reference manifests depend on
+    /// this (an error here would fail even absent-selecting manifests).
+    #[test]
+    fn json_path_selection_on_non_matching_or_null_root_is_empty() {
+        for json_path in ["$.facetRef", "$.targets[*]", "/facetRef", "/targets/0"] {
+            let null_root = serde_json::Value::Null;
+            assert!(
+                select_json_path_values(&null_root, json_path)
+                    .unwrap()
+                    .is_empty(),
+                "null root with path {json_path} must select nothing"
+            );
+            let empty_object_root = serde_json::json!({});
+            assert!(
+                select_json_path_values(&empty_object_root, json_path)
+                    .unwrap()
+                    .is_empty(),
+                "empty-object root with path {json_path} must select nothing"
+            );
+        }
+    }
 
     #[test]
     fn schema_node_for_json_path_supports_wildcard_array_items() {
