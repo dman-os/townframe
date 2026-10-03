@@ -524,6 +524,27 @@ This is not re-encryption.
 
 #### Representation rotation within the same access domain
 
+**Implemented shape (this PR, keyScope: Document).** A rotation runs as an
+`EncryptionTaskKind::Rotate` on the same keyed scheduler and budget as
+install/delta tasks, keyed on the same branch identity, so a rotation cannot
+race an install or a delta for the same document. The trigger is an explicit
+request (`Rt::request_doc_representations_rotation`) carried to the worker's
+facet machine through a channel; the machine's budget gates it like every
+other task. `rotate_document` reconciles first, then rotates each existing
+representation: a fresh `MasterKey` and §16 migration (a fresh key-storage
+document per rotation), §11 install of the new ciphertext, then the cipherBlob
+facet updated **in place under its unchanged facet key** at fresh heads — that
+in-place update is the commit point. The old ciphertext's release is *not*
+written by the rotation: it rides the reactive pin diff (§19), so the "wait
+for required retention acknowledgement" and "eventually remove" of the safe
+relay rotation above are realized as the pin worker's release leaf observing
+the facet delta. The rotation task carries the branch's pending delta cursor
+through the scheduler and acknowledges it on durable success, so a rotated
+delta cannot gate the walker's durable prefix forever. Crash windows: a fault
+at entry leaves nothing registered (retry is idempotent and orphan-free); a
+fault after §11 install leaves the new pair rooted-but-unreferenced — the
+declared window, whose eventual collect is GC-era work on the same fork, and
+the retry recovers to the correct end state.
 Generate fresh keying material and a fresh encrypted representation:
 
 ```text

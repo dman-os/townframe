@@ -2152,7 +2152,7 @@ async fn init_told_sync_node(
     let doc_config_id = rtx.doc_config.document_id();
     let local_device_name = rtx.local_device_name.clone();
     let local_user_path = rtx.local_user_path.clone();
-    let local_peer_key = rtx.local_peer_key.clone();
+    let local_peer_key = std::sync::Arc::<str>::clone(&rtx.local_peer_key);
     let local_actor_id = rtx.local_actor_id.clone();
     let repo_id = rtx.repo_id.clone();
     let checkout_id = rtx.checkout_id.clone();

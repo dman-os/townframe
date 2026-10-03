@@ -100,6 +100,12 @@ pub struct Rt {
     pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
     pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
     local_wflow_part_id: String,
+    /// Sender half of the §15 rotation trigger (`rotation_channel()`); held
+    /// only when blob workers spawn. `None` otherwise — a rotation request on a
+    /// repo that runs no encryption worker is an error at the call site, not a
+    /// silently dropped message.
+    doc_rotation_tx:
+        Option<tokio::sync::mpsc::Sender<crate::blobs::encryption_worker::RotationRequest>>,
 }
 
 pub struct RtStopToken {
@@ -216,6 +222,33 @@ pub enum InvokeCommandFromWflowError {
 }
 
 impl Rt {
+    /// §15 trigger: rotate the document's existing cipherBlob representations —
+    /// fresh key document, re-encrypted ciphertext, pair roots re-rooted
+    /// through the worker's keyed-task machinery (ADR 003 §15/§19). The task
+    /// shares the reconcile/delta scheduler and its budget, so a rotation for a
+    /// document cannot race its install/delta work.
+    ///
+    /// Errors when this repo spawned no encryption worker (`spawn_blob_workers`
+    /// unset): refusing here is the runtime telling the caller the worker that
+    /// owns the rotation does not exist, rather than the request vanishing into
+    /// a channel nobody reads.
+    pub async fn request_doc_representations_rotation(
+        &self,
+        doc_id: daybook_types::doc::DocId,
+    ) -> Res<()> {
+        let Some(rotation_tx) = self.doc_rotation_tx.as_ref() else {
+            return Err(eyre::eyre!(
+                "cannot rotate {:?}: no blob encryption worker is running in this repo",
+                &doc_id
+            ));
+        };
+        rotation_tx
+            .send(crate::blobs::encryption_worker::RotationRequest {
+                doc_id: doc_id.clone(),
+            })
+            .await
+            .map_err(|_| eyre::eyre!("the encryption worker's rotation channel closed"))
+    }
     async fn emit_startup_progress_status(
         progress_repo: &Arc<crate::progress::ProgressRepo>,
         startup_progress_task_id: Option<&str>,
@@ -355,6 +388,9 @@ impl Rt {
         // encrypted-representation inventory it refuses to run - installing a
         // representation nothing can advertise or release is the one option that
         // leaks (ADR 003 §19).
+        let mut doc_rotation_tx_sender: Option<
+            tokio::sync::mpsc::Sender<crate::blobs::encryption_worker::RotationRequest>,
+        > = None;
         let blob_encryption_worker_stop = if config.spawn_blob_workers {
             Some(
                 crate::blobs::spawn_blob_encryption_worker(
@@ -367,6 +403,17 @@ impl Rt {
                         domain_group: authority.encrypted_blob_docs.clone(),
                         encryption_inventory_doc_id: rcx.encryption_inventory_doc_id.clone(),
                         parent_cancel_token: cancel_token.clone(),
+                        // A rotation request for an unspawned worker is refused
+                        // at `Rt::request_doc_representations_rotation`, so the
+                        // channel existence mirrors `spawn_blob_workers`.
+                        rotation_rx: {
+                            let (doc_rotation_tx, doc_rotation_rx) =
+                                crate::blobs::encryption_worker::rotation_channel();
+                            doc_rotation_tx_sender = Some(doc_rotation_tx);
+                            Some(doc_rotation_rx)
+                        },
+                        // The §15 trigger rides with the worker: the runtime
+                        // holds the sender, tests/other callers hold theirs.
                     },
                 )
                 .await?,
@@ -500,6 +547,7 @@ impl Rt {
         let rt = Arc::new(Self {
             config,
             local_wflow_part_id,
+            doc_rotation_tx: doc_rotation_tx_sender,
             cancel_token,
             plugs_repo,
             drawer,

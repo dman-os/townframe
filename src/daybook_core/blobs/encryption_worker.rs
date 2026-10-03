@@ -90,6 +90,28 @@ mod faults {
         ATTEMPTS.fetch_add(1, Ordering::SeqCst);
         true
     }
+
+    // The rotation seam's two points are separate because they have different
+    // recovery stories (ADR 003 §19): failing at entry retries into the same
+    // §19 sequence with nothing registered, so the retry leaves no unreferenced
+    // pair; failing after the §19 step-1 install leaves the interrupted
+    // attempt's pair rooted-but-unreferenced, which is the declared crash
+    // window, not a bug to assert away.
+    pub(super) static FAIL_ROTATE: AtomicBool = AtomicBool::new(false);
+    pub(super) static FAIL_ROTATE_AFTER_INSTALL: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn fail_next_rotate(after_install: bool) -> bool {
+        let armed = if after_install {
+            &FAIL_ROTATE_AFTER_INSTALL
+        } else {
+            &FAIL_ROTATE
+        };
+        if !armed.load(Ordering::SeqCst) {
+            return false;
+        }
+        ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+        true
+    }
 }
 
 /// The branch every writer in the workspace uses; the delta machine resolves
@@ -115,6 +137,8 @@ pub(crate) struct BlobEncryptionWorkerArgs {
     pub domain_group: BigKeyhiveGroup,
     pub encryption_inventory_doc_id: Option<DocumentId>,
     pub parent_cancel_token: CancellationToken,
+    /// The §15 rotation trigger; `None` where nothing sends rotations.
+    pub rotation_rx: Option<RotationRequestRx>,
 }
 
 pub(crate) async fn spawn_blob_encryption_worker(
@@ -129,6 +153,7 @@ pub(crate) async fn spawn_blob_encryption_worker(
         domain_group,
         encryption_inventory_doc_id,
         parent_cancel_token,
+        rotation_rx,
     } = args;
     let Some(encryption_inventory_doc_id) = encryption_inventory_doc_id else {
         eyre::bail!(
@@ -156,7 +181,7 @@ pub(crate) async fn spawn_blob_encryption_worker(
         let ctx = Arc::clone(&ctx);
         let cancel_token = cancel_token.clone();
         async move {
-            let mut worker = Worker::new(ctx);
+            let mut worker = Worker::new(ctx, rotation_rx);
             worker
                 .run(facet_set_store, facet_index, cancel_token)
                 .await
@@ -319,15 +344,49 @@ impl Ctx {
     }
 }
 
+/// A §15 rotation trigger: mint fresh keying material for every representation
+/// the document already names, under its (unchanged) cipherBlob facet key.
+#[derive(Debug, Clone)]
+pub(crate) struct RotationRequest {
+    pub doc_id: DocId,
+}
+
+pub(crate) type RotationRequestRx = tokio::sync::mpsc::Receiver<RotationRequest>;
+
+/// The trigger surface for §15 rotation: send a `RotationRequest`, the facet
+/// machine runs it as an `EncryptionTask` keyed like every other task, so a
+/// rotation and a reconcile/delta for the same branch cannot race. The parent
+/// wires the runtime facade around it (`Rt::request_doc_representations_rotation`).
+pub(crate) fn rotation_channel() -> (
+    tokio::sync::mpsc::Sender<RotationRequest>,
+    RotationRequestRx,
+) {
+    tokio::sync::mpsc::channel(8)
+}
+
 /// Private machine owner.
 struct Worker {
     ctx: Arc<Ctx>,
+    /// The §15 rotation trigger. `None` where nothing rotates (a caller that
+    /// never sends simply leaves the machine arm pending).
+    rotation_rx: Option<RotationRequestRx>,
+}
+
+/// What a document task does at its branch: make the declared blobs represented
+/// at the given heads, or (§15) mint fresh keying material for the
+/// representations that already exist. Both share one key identity, so a
+/// rotation and a reconcile for the same branch cannot run concurrently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncryptionTaskKind {
+    Reconcile,
+    Rotate,
 }
 
 /// One document's representation work, keyed by the walker's branch key.
 #[derive(Debug, Clone)]
 struct EncryptionTask {
     key: EncryptionKey,
+    kind: EncryptionTaskKind,
     cursor: u64,
     doc_id: DocId,
     branch_id: BranchId,
@@ -347,21 +406,39 @@ enum EncryptionTaskOutput {
 
 /// One document's representation work, off the worker's loop.
 async fn run_encryption_task(task: EncryptionTask, ctx: Arc<Ctx>) -> Res<EncryptionTaskOutput> {
-    let Some(heads) = &task.heads else {
-        return Ok(EncryptionTaskOutput::Applied);
-    };
     let Some(branch) = ctx.branch_path_for(&task.doc_id, &task.branch_id).await? else {
         return Ok(EncryptionTaskOutput::Applied);
     };
-    #[cfg(test)]
-    {
-        eyre::ensure!(
-            !faults::fail_next_reconcile(),
-            "injected reconciliation failure for {}",
-            task.doc_id
-        );
+    match task.kind {
+        EncryptionTaskKind::Reconcile => {
+            let Some(heads) = &task.heads else {
+                return Ok(EncryptionTaskOutput::Applied);
+            };
+            #[cfg(test)]
+            {
+                eyre::ensure!(
+                    !faults::fail_next_reconcile(),
+                    "injected reconciliation failure for {}",
+                    task.doc_id
+                );
+            }
+            ctx.reconcile_document(&task.doc_id, &branch, heads).await?;
+        }
+        // §15: heads are read at execution time, not at enqueue time — the
+        // rotation is committed at whatever heads are current when it runs, so
+        // a request enqueued behind a delta applies to that delta's state.
+        EncryptionTaskKind::Rotate => {
+            #[cfg(test)]
+            {
+                eyre::ensure!(
+                    !faults::fail_next_rotate(false),
+                    "injected rotation failure (entry) for {}",
+                    task.doc_id
+                );
+            }
+            ctx.rotate_document(&task.doc_id, &branch).await?;
+        }
     }
-    ctx.reconcile_document(&task.doc_id, &branch, heads).await?;
     Ok(EncryptionTaskOutput::Applied)
 }
 
@@ -374,8 +451,8 @@ impl std::ops::Deref for Worker {
 }
 
 impl Worker {
-    fn new(ctx: Arc<Ctx>) -> Self {
-        Self { ctx }
+    fn new(ctx: Arc<Ctx>, rotation_rx: Option<RotationRequestRx>) -> Self {
+        Self { ctx, rotation_rx }
     }
 
     async fn run(
@@ -441,8 +518,7 @@ impl Worker {
             let key = encryption_facet_key(&branch_id);
             let task = EncryptionTask {
                 key,
-                // The pass has no walker cursor to advance; the cursor is the
-                // delta machine's bookkeeping and is unused here.
+                kind: EncryptionTaskKind::Reconcile,
                 cursor: 0,
                 doc_id: membership.doc_id.clone(),
                 branch_id: branch_id.clone(),
@@ -538,6 +614,10 @@ impl Worker {
         let mut tasks = TokioKeyedScheduler::new(ENCRYPTION_TASK_BUDGET);
         // The newest unacked delta per key.
         let mut pending: HashMap<EncryptionKey, EncryptionTask> = HashMap::new();
+        // A rotation that arrived while the budget was busy, dispatched at the
+        // next loop head ahead of new walker reads, so a rotation request is
+        // not starved by steady delta traffic.
+        let mut buffered: std::collections::VecDeque<RotationRequest> = Default::default();
         loop {
             let available = ENCRYPTION_TASK_BUDGET.saturating_sub(tasks.active_count());
             let next_deadline = tasks.next_deadline();
@@ -548,6 +628,21 @@ impl Worker {
                     self.on_task_completion(&mut tasks, &mut walker, &mut pending, completion?)
                         .await?;
                 }
+                // Budget-gated rotation dispatch: a fresh rotation request is
+                // enqueued before any walker read, because it carries the
+                // branch's pending delta cursor and must not sit behind
+                // unbounded delta traffic.
+                request = async {
+                    match self.rotation_rx.as_mut() {
+                        None => std::future::pending().await,
+                        Some(rx) => rx.recv().await,
+                    }
+                }, if available == 0 || buffered.is_empty() => match request {
+                    Some(request) => buffered.push_back(request),
+                    None => {
+                        // The trigger side is gone; nothing can enqueue more.
+                    }
+                },
                 read = async {
                     if available == 0 {
                         std::future::pending().await
@@ -577,7 +672,54 @@ impl Worker {
                     tasks.tick(std::time::Instant::now())?;
                 }
             }
+            // Loop head: dispatch a buffered rotation into now-available
+            // budget, before the next read can claim it.
+            if available > 0
+                && let Some(request) = buffered.pop_front()
+            {
+                self.enqueue_rotation(&mut tasks, &mut pending, request)
+                    .await?;
+            }
         }
+    }
+
+    /// Turn a rotation request into the same keyed task shape the delta machine
+    /// runs, on the same scheduler, so a rotation and a reconcile for one
+    /// branch serialize by construction.
+    ///
+    /// A rotation also *subsumes* whatever reconciliation is pending for the
+    /// branch: `rotate_document` runs the same reconcile first and then rotates,
+    /// so the pending delta's cursor is carried onto the rotation task and
+    /// acknowledged by its successful completion — leaving that cursor unacked
+    /// instead would gate the walker's durable prefix forever.
+    async fn enqueue_rotation(
+        &mut self,
+        tasks: &mut TokioKeyedScheduler<EncryptionKey, EncryptionTask, EncryptionTaskOutput>,
+        pending: &mut HashMap<EncryptionKey, EncryptionTask>,
+        request: RotationRequest,
+    ) -> Res<()> {
+        let Some(branch_id) = self.ctx.main_branch_id(&request.doc_id).await? else {
+            tracing::warn!(
+                doc_id = %request.doc_id,
+                "blob-encryption: rotation requested for a document with no main branch; dropping"
+            );
+            return Ok(());
+        };
+        let key = encryption_facet_key(&branch_id);
+        let carried = pending
+            .remove(&key)
+            .map(|pending| pending.cursor)
+            .unwrap_or(0);
+        let task = EncryptionTask {
+            key,
+            kind: EncryptionTaskKind::Rotate,
+            cursor: carried,
+            doc_id: request.doc_id,
+            branch_id,
+            // Rotation reads current heads at execution time.
+            heads: None,
+        };
+        self.start_task(tasks, task)
     }
 
     /// A delta becomes a task keyed by its branch, so a newer delta for the same
@@ -592,6 +734,7 @@ impl Worker {
         let entry = &delta.entry;
         let task = EncryptionTask {
             key: delta.key,
+            kind: EncryptionTaskKind::Reconcile,
             cursor: delta.cursor,
             doc_id: entry.key.document_id.clone(),
             branch_id: entry.key.branch_id.clone(),
@@ -640,6 +783,15 @@ impl Worker {
         let task = completion.command;
         match completion.result {
             Ok(EncryptionTaskOutput::Applied) => {
+                if task.kind == EncryptionTaskKind::Rotate {
+                    // The rotation subsumed the pending delta it carried, so
+                    // settling that cursor here is what a reconcile completion
+                    // would do; cursor 0 means nothing was carried.
+                    if task.cursor != 0 {
+                        walker.ack(task.key, task.cursor).await?;
+                    }
+                    return Ok(());
+                }
                 // The document's state is durable; only now may the walker
                 // cursor advance past it.
                 walker.ack(task.key, task.cursor).await?;
@@ -808,6 +960,226 @@ impl Ctx {
         Ok(())
     }
 
+    /// §15 representation rotation for every representation this document
+    /// already names, at its current heads.
+    ///
+    /// Runs the same reconcile first, so the subsumes-pending-delta claim the
+    /// scheduler leans on holds: after this method succeeds, the document's
+    /// blob state is current at whatever heads are live now — reconciliation
+    /// and rotation in one act. Only *existing* representations rotate; a blob
+    /// with no cipherBlob facet is left to the reconcile branch above.
+    async fn rotate_document(&self, doc_id: &DocId, branch: &BranchPathBuf) -> Res<()> {
+        if !self.doc_is_eligible(doc_id).await? {
+            return Ok(());
+        }
+        let Some(heads) = self
+            .drawer_repo
+            .get_branch_heads_for_path(doc_id, branch)
+            .await?
+        else {
+            return Ok(());
+        };
+        self.reconcile_document(doc_id, branch, &heads).await?;
+        self.rotate_representations(doc_id, branch, &heads).await
+    }
+
+    async fn rotate_representations(
+        &self,
+        doc_id: &DocId,
+        branch: &BranchPathBuf,
+        heads: &ChangeHashSet,
+    ) -> Res<()> {
+        let Some(keys) = self
+            .drawer_repo
+            .facet_keys_at_branch_heads(doc_id, branch, heads)
+            .await?
+        else {
+            return Ok(());
+        };
+        let blob_keys: Vec<FacetKey> = keys
+            .iter()
+            .filter(|key| key.tag == FacetTag::WellKnown(WellKnownFacetTag::Blob))
+            .cloned()
+            .collect();
+        if blob_keys.is_empty() {
+            return Ok(());
+        }
+        let mut read_keys = blob_keys.clone();
+        read_keys.extend(blob_keys.iter().map(|key| self.cipher_facet_key(key)));
+        let Some(doc) = self
+            .drawer_repo
+            .get_doc_with_facets_at_branch_heads(doc_id, branch, heads, Some(read_keys))
+            .await?
+        else {
+            return Ok(());
+        };
+        for blob_key in &blob_keys {
+            let Some(raw) = doc.facets.get(blob_key) else {
+                continue;
+            };
+            let blob = match WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::Blob)? {
+                WellKnownFacet::Blob(blob) => blob,
+                other => {
+                    tracing::warn!(
+                        doc_id = %doc_id,
+                        facet = %blob_key,
+                        tag = ?other.tag(),
+                        "blob-rotation: Blob facet decoded to another variant"
+                    );
+                    continue;
+                }
+            };
+            let Some(plaintext) = plaintext_blob_id(&blob) else {
+                continue;
+            };
+            let Some(cipher_raw) = doc.facets.get(&self.cipher_facet_key(blob_key)) else {
+                // §15 rotates representations that exist; creation is the
+                // reconcile path's job.
+                continue;
+            };
+            self.rotate_representation(
+                doc_id,
+                branch,
+                plaintext,
+                blob_key,
+                &self.cipher_facet_key(blob_key),
+                cipher_raw,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// One §15 representation rotation: `C1/K1 -> C2/K2`, the cipherBlob facet
+    /// updated in place under its unchanged facet key (the id names the domain
+    /// and the sibling `Blob` facet, not the ciphertext — §19, so application
+    /// references do not move). Fresh keying material per §9's rule
+    /// (salt-only rotation is deliberately impossible); the framing is
+    /// carried over unchanged, so only the keying rotates.
+    ///
+    /// Order is §19's, adapted: the new representation is servable and rooted
+    /// before anything names it, the JWK lands in a fresh key document (§16's
+    /// migration: a new key-storage document per rotation; stopping grants on
+    /// the old one is the §16 stronger-isolation step, not this operation),
+    /// and the facet update is the commit point. The resolution URL names the
+    /// facet key — unchanged — and is ensured last anyway. The old
+    /// representation's release is nobody's direct write here: its pin leaves
+    /// the desired set with this facet delta, and the pin worker's release
+    /// leaf drops the old `ct:`/`pt:` tags (§19, "the release path is
+    /// deliberate").
+    async fn rotate_representation(
+        &self,
+        doc_id: &DocId,
+        branch: &BranchPathBuf,
+        plaintext: BlobId,
+        blob_key: &FacetKey,
+        cipher_key: &FacetKey,
+        existing: &FacetRaw,
+    ) -> Res<()> {
+        let cipher =
+            match WellKnownFacet::from_json(existing.clone(), WellKnownFacetTag::CipherBlob)? {
+                WellKnownFacet::CipherBlob(cipher) => cipher,
+                other => {
+                    eyre::bail!(
+                        "facet {cipher_key} in document {doc_id} decoded to {:?}, not a cipherBlob",
+                        other.tag()
+                    )
+                }
+            };
+        // Rotation re-encrypts, so it needs the plaintext, like §14 does; a
+        // plaintext this node does not hold is a skip with a warn, the same
+        // shape reconcile_document takes.
+        if self
+            .blob_status(crate::blobs::blob_id_to_iroh_hash(plaintext.clone()))
+            .await?
+            .is_none()
+        {
+            tracing::debug!(
+                doc_id = %doc_id,
+                plaintext = %plaintext,
+                "blob-rotation: plaintext not stored locally, not rotating"
+            );
+            return Ok(());
+        }
+        // The framing comes from the facet being rotated, so a rotation is
+        // strictly a keying change.
+        let encoding = EncodingParams::from_encoding_parameters(
+            &cipher.content_encoding,
+            &cipher.encoding_parameters,
+        )?;
+        #[cfg(test)]
+        {
+            eyre::ensure!(
+                !faults::fail_next_rotate(false),
+                "injected rotation failure (entry) for {doc_id}"
+            );
+        }
+        // 1. §11 pass over P under the fresh key: C2 servable + rooted.
+        let new_key = MasterKey::random();
+        let c2_hash = self
+            .provider
+            .install(
+                &self.store,
+                &new_key,
+                crate::blobs::blob_id_to_iroh_hash(plaintext.clone()),
+                encoding,
+            )
+            .await?;
+        eyre::ensure!(
+            c2_hash != crate::blobs::blob_id_to_iroh_hash(plaintext.clone()),
+            "rotation of {plaintext} did not change the representation digest"
+        );
+        let c2_len = self.blob_status(c2_hash).await?.ok_or_else(|| {
+            eyre::eyre!("representation {c2_hash} is not complete immediately after install")
+        })?;
+        #[cfg(test)]
+        {
+            eyre::ensure!(
+                !faults::fail_next_rotate(true),
+                "injected rotation failure (after install) for {doc_id}"
+            );
+        }
+
+        // 2. The fresh key document, for §16's migration shape. Same facet key
+        // as any key document of this domain: the keyScope's one-key-per-doc
+        // rule is per (document, domain), and a rotation mints a new document.
+        let key_doc_id = self
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from(MAIN_BRANCH),
+                facets: default(),
+                user_path: None,
+            })
+            .await?;
+        let jwk_key = self.jwk_facet_key();
+        self.write_jwk_facet(&key_doc_id, &jwk_key, &new_key)
+            .await?;
+        let key_heads = self
+            .drawer_repo
+            .get_branch_heads_for_path(&key_doc_id, BranchPath::new(MAIN_BRANCH))
+            .await?
+            .ok_or_else(|| eyre::eyre!("key document {key_doc_id} has no {MAIN_BRANCH} branch"))?;
+        let key_ref = format!("db+facet:///{key_doc_id}/{jwk_key}");
+
+        // 3. The facet update, built at fresh heads (a change has to descend
+        // from the state it replaces) — the commit point.
+        let heads = self
+            .drawer_repo
+            .get_branch_heads_for_path(doc_id, branch)
+            .await?
+            .ok_or_else(|| eyre::eyre!("document {doc_id} has no {branch} branch"))?;
+        self.write_cipher_facet(
+            doc_id, branch, &heads, cipher_key, c2_hash, c2_len, &key_ref, key_heads, encoding,
+        )
+        .await?;
+
+        // 5. The resolution already names this facet key; ensure it anyway, in
+        // case the representation's first commit never got this far.
+        self.write_resolution_url(doc_id, branch, blob_key, cipher_key)
+            .await?;
+        Ok(())
+    }
+
     /// Steps 1-3 and 5 for a blob that has no representation yet.
     async fn create_representation(
         &self,
@@ -860,7 +1232,15 @@ impl Ctx {
         // resolves through this document can reach a representation that is
         // already servable.
         self.write_cipher_facet(
-            doc_id, branch, heads, cipher_key, c_hash, c_len, &key_ref, key_heads,
+            doc_id,
+            branch,
+            heads,
+            cipher_key,
+            c_hash,
+            c_len,
+            &key_ref,
+            key_heads,
+            EncodingParams::DEFAULT,
         )
         .await?;
 
@@ -988,6 +1368,7 @@ impl Ctx {
         c_len: u64,
         key_ref: &str,
         key_heads: ChangeHashSet,
+        encoding: EncodingParams,
     ) -> Res<()> {
         eyre::ensure!(
             !key_heads.0.is_empty(),
@@ -1006,7 +1387,7 @@ impl Ctx {
                 .parse()
                 .map_err(|err| eyre::eyre!("cipherBlob keyRef {key_ref:?} is not a URL: {err}"))?,
             key_ref_heads: key_heads,
-            encoding_parameters: EncodingParams::DEFAULT.to_encoding_parameters(),
+            encoding_parameters: encoding.to_encoding_parameters(),
         };
         self.drawer_repo
             .update_at_heads_with_scope(
@@ -1110,7 +1491,7 @@ impl Ctx {
 mod tests {
     use super::*;
     use crate::blobs::blob_id_to_iroh_hash;
-    use crate::blobs::encrypt::{TAG_CT_PREFIX, TAG_PT_PREFIX};
+    use crate::blobs::encrypt::{TAG_CT_PREFIX, TAG_PT_PREFIX, get_decrypted};
     use crate::index::facet_set::DocFacetTagMembership;
     use crate::test_support::{DaybookTestContext, test_cx};
     use daybook_types::doc::BlobPin;
@@ -1237,7 +1618,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn eligible_document_gets_a_servable_representation() -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
         let plaintext_bytes = b"blob-encryption worker: eligible".to_vec();
         let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
         let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
@@ -1320,7 +1701,7 @@ mod tests {
             .big_repo
             .create_group_with_parents(Vec::new())
             .await?;
-        let worker = Worker::new(test_ctx(&ctx, Some(outsider_group)).await?);
+        let worker = Worker::new(test_ctx(&ctx, Some(outsider_group)).await?, None);
         let plaintext = ctx
             .rt
             .blobs_repo
@@ -1361,7 +1742,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn second_pass_reuses_the_representation() -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
         let plaintext = ctx
             .rt
             .blobs_repo
@@ -1460,7 +1841,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn released_representation_is_reinstalled_with_a_fresh_key_by_the_next_pass() -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
         let plaintext_bytes = b"blob-encryption worker: released then redeclared".to_vec();
         let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
         let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
@@ -1615,7 +1996,7 @@ mod tests {
     async fn released_inventory_pin_with_absent_plaintext_is_not_resurrected_by_the_pass() -> Res<()>
     {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
         let plaintext = ctx
             .rt
             .blobs_repo
@@ -1679,15 +2060,18 @@ mod tests {
             daybook_types::doc::UserPathBuf::from("/test-user"),
         )
         .await?;
-        let bare = Worker::new(Arc::new(Ctx {
-            drawer_repo: Arc::clone(&ctx.drawer_repo),
-            sql: ctx.rt.rcx.sql.clone(),
-            store: fresh_repo.iroh_store(),
-            provider: fresh_repo.cipher_provider(),
-            domain_id: worker.domain_id.clone(),
-            domain_group: worker.domain_group.clone(),
-            encryption_inventory_doc_id: worker.encryption_inventory_doc_id.clone(),
-        }));
+        let bare = Worker::new(
+            Arc::new(Ctx {
+                drawer_repo: Arc::clone(&ctx.drawer_repo),
+                sql: ctx.rt.rcx.sql.clone(),
+                store: fresh_repo.iroh_store(),
+                provider: fresh_repo.cipher_provider(),
+                domain_id: worker.domain_id.clone(),
+                domain_group: worker.domain_group.clone(),
+                encryption_inventory_doc_id: worker.encryption_inventory_doc_id.clone(),
+            }),
+            None,
+        );
 
         bare.reconcile_document(&doc_id, &branch, &worker_heads(&ctx, &doc_id).await?)
             .await?;
@@ -1756,7 +2140,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn pass_reconciles_documents_that_predate_the_worker() -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
         let plaintext = ctx
             .rt
             .blobs_repo
@@ -1808,7 +2192,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn boot_pass_failure_is_rescheduled_and_applied_without_a_second_boot() -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Arc::new(Worker::new(test_ctx(&ctx, None).await?));
+        let worker = Arc::new(Worker::new(test_ctx(&ctx, None).await?, None));
         let plaintext = ctx
             .rt
             .blobs_repo
@@ -1882,6 +2266,7 @@ mod tests {
             domain_group: authority.encrypted_blob_docs.clone(),
             encryption_inventory_doc_id: None,
             parent_cancel_token: tokio_util::sync::CancellationToken::new(),
+            rotation_rx: None,
         })
         .await
         {
@@ -1990,7 +2375,7 @@ mod tests {
             .await?;
         let (doc_id, blob_key) = stage_document_with_blob(ctx, before).await?;
         await_indexed(ctx, &doc_id).await?;
-        let mut worker = Worker::new(Arc::clone(worker_ctx));
+        let mut worker = Worker::new(Arc::clone(worker_ctx), None);
         let cancel_token = CancellationToken::new();
         let facet_index = Arc::clone(&ctx.rt.doc_facet_set_index_repo);
         let handle = tokio::spawn({
@@ -2177,5 +2562,611 @@ mod tests {
         handle.await??;
         ctx.stop().await?;
         Ok(())
+    }
+
+    // ---- §15 rotation ----
+
+    /// Spawn the pin worker the way the runtime does, so the facet-delta-driven
+    /// inventory diff — and the release leaf that drops a departing pair's
+    /// roots — runs while the test rotates.
+    async fn spawn_pin_worker_for_test(
+        ctx: &DaybookTestContext,
+    ) -> Res<crate::repos::RepoStopToken> {
+        crate::blobs::spawn_blob_pin_worker(crate::blobs::BlobPinWorkerArgs {
+            drawer_repo: Arc::clone(&ctx.rt.drawer),
+            sql: ctx.rt.rcx.sql.clone(),
+            core_inventory_doc_id: ctx.rt.rcx.core_inventory_doc_id.clone(),
+            docs_inventory_doc_id: ctx.rt.rcx.docs_inventory_doc_id.clone(),
+            encryption_inventory_doc_id: ctx.rt.rcx.encryption_inventory_doc_id.clone(),
+            blobs_repo: Arc::clone(&ctx.rt.blobs_repo),
+            facet_set_store: ctx.rt.doc_facet_set_index_repo.revision_store(),
+            plugs_repo: Arc::clone(&ctx.rt.plugs_repo),
+            parent_cancel_token: tokio_util::sync::CancellationToken::new(),
+        })
+        .await
+    }
+
+    /// The `BlobPin` facet ids on the encrypted-representation inventory.
+    async fn inventory_cipher_pin_ids(
+        drawer: &DrawerRepo,
+        inventory_doc_id: &DocId,
+    ) -> Res<Vec<String>> {
+        let Some(doc) = drawer
+            .get_doc_with_facets_at_branch(inventory_doc_id, BranchPath::new(MAIN_BRANCH), None)
+            .await?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(doc
+            .facets
+            .keys()
+            .filter(|key| key.tag == FacetTag::WellKnown(WellKnownFacetTag::BlobPin))
+            .map(|key| key.id.clone())
+            .collect())
+    }
+
+    async fn wait_for_cipher_pin(
+        drawer: &DrawerRepo,
+        inventory_doc_id: &DocId,
+        id: &str,
+        should_exist: bool,
+    ) -> Res<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let present = inventory_cipher_pin_ids(drawer, inventory_doc_id)
+                .await?
+                .iter()
+                .any(|got| got == id);
+            if present == should_exist {
+                return Ok(());
+            }
+            eyre::ensure!(
+                std::time::Instant::now() < deadline,
+                "cipher pin {id} never reached {should_exist} in inventory {inventory_doc_id}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Every `ct:`/`pt:` pair tag name on the store.
+    async fn pair_tag_names(
+        store: &iroh_blobs::api::Store,
+    ) -> Res<std::collections::HashSet<String>> {
+        use futures::StreamExt;
+        let stream = store.tags().list().await?;
+        futures::pin_mut!(stream);
+        let mut names = std::collections::HashSet::new();
+        while let Some(info) = stream.next().await {
+            let name = String::from_utf8_lossy(&info?.name.0).into_owned();
+            if name.starts_with(TAG_CT_PREFIX) || name.starts_with(TAG_PT_PREFIX) {
+                names.insert(name);
+            }
+        }
+        Ok(names)
+    }
+
+    async fn pair_tag_name(cipher: &BlobId, prefix: &str) -> String {
+        format!(
+            "{prefix}{}",
+            iroh_blobs::Hash::from_bytes(cipher.to_bytes32())
+        )
+    }
+
+    async fn wait_for_pair_tags(
+        store: &iroh_blobs::api::Store,
+        cipher: &BlobId,
+        should_exist: bool,
+    ) -> Res<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let names = pair_tag_names(store).await?;
+            let ct = pair_tag_name(cipher, TAG_CT_PREFIX).await;
+            let pt = pair_tag_name(cipher, TAG_PT_PREFIX).await;
+            if (names.contains(&ct) && names.contains(&pt)) == should_exist {
+                return Ok(());
+            }
+            eyre::ensure!(
+                std::time::Instant::now() < deadline,
+                "pair tags for {cipher} never reached {should_exist}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// A facet read at explicit heads — the historical reader's shape.
+    async fn read_facet_at_heads(
+        drawer: &DrawerRepo,
+        doc_id: &DocId,
+        heads: &ChangeHashSet,
+        key: &FacetKey,
+    ) -> Res<Option<FacetRaw>> {
+        let Some(doc) = drawer
+            .get_doc_with_facets_at_branch_heads(
+                doc_id,
+                &BranchPathBuf::from(MAIN_BRANCH),
+                heads,
+                Some(vec![key.clone()]),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(doc.facets.get(key).cloned())
+    }
+
+    /// One full §15 rotation, with the pin worker watching: the facet body
+    /// changes (fresh `C` under a fresh key document) while its key stays the
+    /// same, the inventory pin follows the facet delta, the old pair's roots
+    /// drop through the release leaf, a reader decrypts the new representation
+    /// through the unchanged resolution URL, and the old key's naming is gone
+    /// — which is §19's rule: `key_for` resolves through the facet at the
+    /// *current* heads, and the updated facet no longer names `C1`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rotation_mints_fresh_keying_material_and_the_old_representation_releases() -> Res<()> {
+        let ctx = test_cx(utils_rs::function_full!()).await?;
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
+        let plaintext_bytes = b"blob-rotation: fresh keying".to_vec();
+        let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
+        let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
+        let cipher_key = worker.cipher_facet_key(&blob_key);
+
+        worker
+            .reconcile_document(
+                &doc_id,
+                &BranchPathBuf::from(MAIN_BRANCH),
+                &worker_heads(&ctx, &doc_id).await?,
+            )
+            .await?;
+        let cipher1 = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .expect("the document names a representation before it rotates");
+        let c1 = digest_str_to_blob_id_lenient(&cipher1.representation.digest)
+            .expect("the facet digest is a blob id");
+        let old_key_ref = cipher1.key_ref.to_string();
+        let old_key_ref_heads = cipher1.key_ref_heads.clone();
+        let old_encoding = cipher1.encoding_parameters.clone();
+
+        let ctx_store = ctx.rt.blobs_repo.iroh_store();
+        spawn_pin_worker_for_test(&ctx).await?;
+        wait_for_cipher_pin(
+            &ctx.drawer_repo,
+            &worker.encryption_inventory_doc_id,
+            &cipher1.representation.digest,
+            true,
+        )
+        .await?;
+        let baseline = pair_tag_names(&ctx_store).await?;
+        assert_eq!(
+            baseline,
+            std::collections::HashSet::from([
+                pair_tag_name(&c1, TAG_CT_PREFIX).await,
+                pair_tag_name(&c1, TAG_PT_PREFIX).await,
+            ]),
+            "the pre-rotation store roots only the one pair"
+        );
+
+        let heads_before = worker_heads(&ctx, &doc_id).await?;
+        worker
+            .rotate_document(&doc_id, &BranchPathBuf::from(MAIN_BRANCH))
+            .await?;
+
+        let cipher2 = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .expect("the rotated facet is still there");
+        assert_ne!(
+            cipher2.representation.digest, cipher1.representation.digest,
+            "rotation mints fresh representation material"
+        );
+        assert_ne!(
+            cipher2.key_ref.to_string(),
+            old_key_ref,
+            "rotation re-points the keyRef at a fresh key document"
+        );
+        assert!(
+            !cipher2.key_ref_heads.0.is_empty(),
+            "the repointed keyRef pins the key state it meant"
+        );
+        assert_eq!(
+            cipher2.encoding_parameters, old_encoding,
+            "rotation is a keying change, not a framing change"
+        );
+
+        // The inventory pin is derived, never authored: the facet delta moves
+        // it, and the diff that removes the old pin drives the old pair's
+        // release.
+        wait_for_cipher_pin(
+            &ctx.drawer_repo,
+            &worker.encryption_inventory_doc_id,
+            &cipher2.representation.digest,
+            true,
+        )
+        .await?;
+        wait_for_cipher_pin(
+            &ctx.drawer_repo,
+            &worker.encryption_inventory_doc_id,
+            &cipher1.representation.digest,
+            false,
+        )
+        .await?;
+        wait_for_pair_tags(&ctx_store, &c1, false).await?;
+        let c2 = digest_str_to_blob_id_lenient(&cipher2.representation.digest)
+            .expect("the rotated facet digest is a blob id");
+        wait_for_pair_tags(&ctx_store, &c2, true).await?;
+        assert_eq!(
+            pair_tag_names(&ctx_store).await?,
+            std::collections::HashSet::from([
+                pair_tag_name(&c2, TAG_CT_PREFIX).await,
+                pair_tag_name(&c2, TAG_PT_PREFIX).await,
+            ]),
+            "the released pair's roots are gone; only the fresh pair is rooted"
+        );
+
+        // A reader resolving through the document decrypts the fresh
+        // representation.
+        let keys = DocKeySource::new(
+            Arc::clone(&ctx.drawer_repo),
+            doc_id.clone(),
+            BranchPathBuf::from(MAIN_BRANCH),
+        );
+        assert_eq!(
+            get_decrypted(
+                &ctx_store,
+                &keys,
+                iroh_blobs::Hash::from_bytes(c2.to_bytes32())
+            )
+            .await?,
+            plaintext_bytes,
+            "the rotated representation decrypts to the same plaintext"
+        );
+        // §19: key resolution reads the facet at *current* heads, so C1's
+        // naming is gone the moment the rotated facet commits — even while its
+        // bytes may still sit uncollected on the store.
+        let old_error = keys
+            .key_for(&iroh_blobs::Hash::from_bytes(c1.to_bytes32()))
+            .await
+            .err()
+            .expect("the old key's naming must be gone after rotation");
+        assert!(
+            format!("{old_error:#}").contains("no cipherBlob facet"),
+            "the old key failure must say C1 is no longer named, got: {old_error:#}"
+        );
+        // The historical form is intact where §16 keeps it: the pre-rotation
+        // facet state at pinned heads still decodes, and the old key document
+        // still holds its JWK at the heads its keyRef pinned - the byte
+        // release above is the only thing that stops a historical read, per
+        // §16's own accounting.
+        let historical = read_facet_at_heads(&ctx.drawer_repo, &doc_id, &heads_before, &cipher_key)
+            .await?
+            .expect("the pre-rotation facet state is retained");
+        let historical = match WellKnownFacet::from_json(historical, WellKnownFacetTag::CipherBlob)?
+        {
+            WellKnownFacet::CipherBlob(cipher) => cipher,
+            other => eyre::bail!("expected a cipherBlob facet, got {:?}", other.tag()),
+        };
+        assert_eq!(
+            historical.representation.digest,
+            cipher1.representation.digest
+        );
+        assert_eq!(historical.key_ref.to_string(), old_key_ref);
+        let old_key_doc = parse_facet_ref_doc_id(&old_key_ref)?;
+        let jwk = ctx
+            .drawer_repo
+            .get_doc_with_facets_at_branch_heads(
+                &old_key_doc,
+                &BranchPathBuf::from(MAIN_BRANCH),
+                &old_key_ref_heads,
+                None,
+            )
+            .await?
+            .expect("the old key document is readable at the pinned heads");
+        assert!(
+            jwk.facets
+                .keys()
+                .any(|key| key.tag == FacetTag::WellKnown(WellKnownFacetTag::Jwk)),
+            "the old key document still carries its JWK at the pinned heads"
+        );
+        ctx.stop().await?;
+        Ok(())
+    }
+
+    /// A rotation faulted at entry has registered nothing, so the retry runs
+    /// the same §19 sequence and reaches the same end state: no orphaned pair
+    /// roots, the facet key unchanged, the old representation released.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rotation_retry_after_a_fault_at_entry_is_idempotent_and_orphan_free() -> Res<()> {
+        let ctx = test_cx(utils_rs::function_full!()).await?;
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
+        let plaintext_bytes = b"blob-rotation: retry idempotence".to_vec();
+        let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
+        let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
+        let cipher_key = worker.cipher_facet_key(&blob_key);
+        worker
+            .reconcile_document(
+                &doc_id,
+                &BranchPathBuf::from(MAIN_BRANCH),
+                &worker_heads(&ctx, &doc_id).await?,
+            )
+            .await?;
+        let cipher1 = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .expect("the document names a representation");
+        let c1 = digest_str_to_blob_id_lenient(&cipher1.representation.digest)
+            .expect("the facet digest is a blob id");
+        let ctx_store = ctx.rt.blobs_repo.iroh_store();
+        spawn_pin_worker_for_test(&ctx).await?;
+
+        faults::FAIL_ROTATE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let faulted = worker
+            .rotate_document(&doc_id, &BranchPathBuf::from(MAIN_BRANCH))
+            .await;
+        assert!(
+            faulted.is_err(),
+            "the injected entry fault must fail the rotation"
+        );
+        let uncommitted = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .expect("the facet is untouched by the faulted attempt");
+        assert_eq!(
+            uncommitted.representation.digest, cipher1.representation.digest,
+            "a fault at entry commits nothing"
+        );
+        let after_fault = pair_tag_names(&ctx_store).await?;
+        assert_eq!(
+            after_fault.len(),
+            2,
+            "an entry fault registers no pair: got {after_fault:?}"
+        );
+
+        faults::FAIL_ROTATE.store(false, std::sync::atomic::Ordering::SeqCst);
+        worker
+            .rotate_document(&doc_id, &BranchPathBuf::from(MAIN_BRANCH))
+            .await?;
+        let cipher2 = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .expect("the retried rotation committed");
+        assert_ne!(cipher2.representation.digest, cipher1.representation.digest);
+        assert_ne!(
+            cipher2.key_ref.to_string(),
+            cipher1.key_ref.to_string(),
+            "the retried rotation mints a fresh key document"
+        );
+        let c2 = digest_str_to_blob_id_lenient(&cipher2.representation.digest).expect("a blob id");
+        wait_for_cipher_pin(
+            &ctx.drawer_repo,
+            &worker.encryption_inventory_doc_id,
+            &cipher2.representation.digest,
+            true,
+        )
+        .await?;
+        wait_for_cipher_pin(
+            &ctx.drawer_repo,
+            &worker.encryption_inventory_doc_id,
+            &cipher1.representation.digest,
+            false,
+        )
+        .await?;
+        wait_for_pair_tags(&ctx_store, &c1, false).await?;
+        wait_for_pair_tags(&ctx_store, &c2, true).await?;
+        assert_eq!(
+            pair_tag_names(&ctx_store).await?,
+            std::collections::HashSet::from([
+                pair_tag_name(&c2, TAG_CT_PREFIX).await,
+                pair_tag_name(&c2, TAG_PT_PREFIX).await,
+            ]),
+            "the retried rotation leaves exactly one pair rooted: no orphans"
+        );
+        let keys = DocKeySource::new(
+            Arc::clone(&ctx.drawer_repo),
+            doc_id.clone(),
+            BranchPathBuf::from(MAIN_BRANCH),
+        );
+        assert_eq!(
+            get_decrypted(
+                &ctx_store,
+                &keys,
+                iroh_blobs::Hash::from_bytes(c2.to_bytes32())
+            )
+            .await?,
+            plaintext_bytes,
+            "the retried rotation's representation decrypts"
+        );
+        ctx.stop().await?;
+        Ok(())
+    }
+
+    /// §19's declared crash window, asserted rather than asserted away: a fault
+    /// after the §19 step-1 install leaves the interrupted attempt's pair
+    /// rooted but unreferenced ("a crash before step 5 leaves unreferenced
+    /// artifacts"), and the retry recovers to a correct end state while the
+    /// orphan stays — the pin diff that releases pairs only drives pairs some
+    /// facet once named, so collecting such an orphan is GC/collect territory
+    /// (ADR-005-era), not the release path's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn crash_after_install_leaves_the_declared_unreferenced_pair_and_the_retry_recovers()
+    -> Res<()> {
+        let ctx = test_cx(utils_rs::function_full!()).await?;
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
+        let plaintext_bytes = b"blob-rotation: crash window".to_vec();
+        let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
+        let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
+        let cipher_key = worker.cipher_facet_key(&blob_key);
+        worker
+            .reconcile_document(
+                &doc_id,
+                &BranchPathBuf::from(MAIN_BRANCH),
+                &worker_heads(&ctx, &doc_id).await?,
+            )
+            .await?;
+        let cipher1 = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .expect("the document names a representation");
+        let c1 = digest_str_to_blob_id_lenient(&cipher1.representation.digest).expect("a blob id");
+        let ctx_store = ctx.rt.blobs_repo.iroh_store();
+        spawn_pin_worker_for_test(&ctx).await?;
+
+        faults::FAIL_ROTATE_AFTER_INSTALL.store(true, std::sync::atomic::Ordering::SeqCst);
+        let faulted = worker
+            .rotate_document(&doc_id, &BranchPathBuf::from(MAIN_BRANCH))
+            .await;
+        assert!(
+            faulted.is_err(),
+            "the after-install fault must fail the rotation"
+        );
+        // The interrupted attempt's pair is rooted; the facet did not move.
+        let orphaned = pair_tag_names(&ctx_store).await?;
+        assert_eq!(
+            orphaned.len(),
+            4,
+            "the after-install fault leaves the attempt's pair rooted: got {orphaned:?}"
+        );
+        let still = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .expect("the facet survives");
+        assert_eq!(
+            still.representation.digest, cipher1.representation.digest,
+            "the commit point was not reached"
+        );
+
+        faults::FAIL_ROTATE_AFTER_INSTALL.store(false, std::sync::atomic::Ordering::SeqCst);
+        worker
+            .rotate_document(&doc_id, &BranchPathBuf::from(MAIN_BRANCH))
+            .await?;
+        let cipher2 = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .expect("the retried rotation committed");
+        let c2 = digest_str_to_blob_id_lenient(&cipher2.representation.digest).expect("a blob id");
+        assert_ne!(cipher2.representation.digest, cipher1.representation.digest);
+        wait_for_cipher_pin(
+            &ctx.drawer_repo,
+            &worker.encryption_inventory_doc_id,
+            &cipher2.representation.digest,
+            true,
+        )
+        .await?;
+        wait_for_cipher_pin(
+            &ctx.drawer_repo,
+            &worker.encryption_inventory_doc_id,
+            &cipher1.representation.digest,
+            false,
+        )
+        .await?;
+        wait_for_pair_tags(&ctx_store, &c1, false).await?;
+        wait_for_pair_tags(&ctx_store, &c2, true).await?;
+        let names = pair_tag_names(&ctx_store).await?;
+        assert_eq!(
+            names.len(),
+            4,
+            "c1 released, c2 rooted, the orphaned attempt's pair still rooted: got {names:?}"
+        );
+        let keys = DocKeySource::new(
+            Arc::clone(&ctx.drawer_repo),
+            doc_id.clone(),
+            BranchPathBuf::from(MAIN_BRANCH),
+        );
+        assert_eq!(
+            get_decrypted(
+                &ctx_store,
+                &keys,
+                iroh_blobs::Hash::from_bytes(c2.to_bytes32())
+            )
+            .await?,
+            plaintext_bytes,
+            "the recovered representation decrypts"
+        );
+        ctx.stop().await?;
+        Ok(())
+    }
+
+    /// A rotation request runs as an `EncryptionTask` on the facet machine's
+    /// own keyed scheduler — same branch key as reconciles, so it cannot race a
+    /// delta task — and the machine keeps walking afterwards (the carried
+    /// pending-delta cursor is settled on rotation completion, so the request
+    /// cannot gate the durable prefix).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rotation_request_runs_on_the_facet_machine_and_leaves_it_walking() -> Res<()> {
+        let ctx = test_cx(utils_rs::function_full!()).await?;
+        let worker_ctx = test_ctx(&ctx, None).await?;
+        // The request may land before or after the document's own delta;
+        // either way the machine must produce a representation and keep going.
+        let (rotation_tx, rotation_rx) = rotation_channel();
+        let mut worker = Worker::new(Arc::clone(&worker_ctx), Some(rotation_rx));
+        let cancel_token = CancellationToken::new();
+        let facet_index = Arc::clone(&ctx.rt.doc_facet_set_index_repo);
+        let handle = tokio::spawn({
+            let cancel_token = cancel_token.clone();
+            let revision_store = facet_index.revision_store();
+            async move { worker.run(revision_store, facet_index, cancel_token).await }
+        });
+
+        let plaintext = ctx
+            .rt
+            .blobs_repo
+            .put(b"blob-rotation: scheduler path")
+            .await?;
+        let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext).await?;
+        await_indexed(&ctx, &doc_id).await?;
+        let cipher_key = worker_ctx.cipher_facet_key(&blob_key);
+        rotation_tx
+            .send(RotationRequest {
+                doc_id: doc_id.clone(),
+            })
+            .await?;
+        let cipher1 = await_representation(&ctx, &doc_id, &cipher_key, "the machine").await?;
+        // The rotation either subsumed the reconcile (carried cursor) or ran
+        // after it; either way a *further* request must produce a fresh
+        // representation through the same scheduler.
+        rotation_tx
+            .send(RotationRequest {
+                doc_id: doc_id.clone(),
+            })
+            .await?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let cipher2 = loop {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let cipher = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+                .await?
+                .expect("the facet survives");
+            if cipher.representation.digest != cipher1.representation.digest {
+                break cipher;
+            }
+            eyre::ensure!(
+                std::time::Instant::now() < deadline,
+                "the second rotation request never committed a fresh representation"
+            );
+        };
+        assert_ne!(
+            cipher2.key_ref.to_string(),
+            cipher1.key_ref.to_string(),
+            "each rotation mints its own key document"
+        );
+
+        // The machine is still walking: a new document gets its representation.
+        let other_plaintext = ctx
+            .rt
+            .blobs_repo
+            .put(b"blob-rotation: machine still walking")
+            .await?;
+        let (other_doc, other_blob_key) = stage_document_with_blob(&ctx, other_plaintext).await?;
+        await_indexed(&ctx, &other_doc).await?;
+        await_representation(
+            &ctx,
+            &other_doc,
+            &worker_ctx.cipher_facet_key(&other_blob_key),
+            "the machine after rotations",
+        )
+        .await?;
+
+        cancel_token.cancel();
+        drop(rotation_tx);
+        handle.await??;
+        ctx.stop().await?;
+        Ok(())
+    }
+
+    /// The key document's doc id out of a `db+facet:///{doc_id}/{facet}` ref.
+    fn parse_facet_ref_doc_id(key_ref: &str) -> Res<DocId> {
+        daybook_types::url::parse_facet_ref_str(key_ref)
+            .map_err(|err| eyre::eyre!("keyRef {key_ref:?} is not a facet reference: {err}"))
+            .map(|reference| reference.doc_id)
     }
 }
