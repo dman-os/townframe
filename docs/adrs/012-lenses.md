@@ -1,226 +1,155 @@
-# ADR 012: Lenses
+# ADR 012: Lens recognition, selection, ingestion, and production
 
-- **Status:** Draft
-- **Supersedes:** none
-- **Depends on:** ADR 010 (bridge & vtree), ADR 011 (checkouts & reconciliation), FDR 001 (dpaths), FDR 003 (VC primitives), FDR 004 (workspace CLI), townframe-2 ADR 007 (plug manifests as drawer docs)
-- **Depended on by:** ADR 013 (blob strategy)
+- **Status:** Accepted (replaces the superseded revision; see superseded decisions in the drafts disposition ledger).
+- **Supersedes:** The original ADR 012's extension-first single-winner classification, ingest-without-render-base API, generic stubs, and render-failure-to-bounce contract.
+- **Depends on:** ADRs 010–011, FDRs 001–004, document/branch identity and plug registration designs.
+- **Related:** ADR 013 owns blob retention, chunk access, and byte transfer.
 
-## 1. What a lens is
+## 1. Role and scope
 
-The bridge (010) is format-agnostic; the **lens** is where format knowledge
-lives. A lens is the daybook deployment's codec between **docs** (facet
-sets on branches, tf2 ADR 007) and **file representations** (entries in a
-checkout's trees):
+A lens interprets Daybook facets as file representations and file edits as document operations. It is Daybook-side format knowledge, not a generic bridge feature. Lenses can handle raw text/bytes, Markdown notes, Obsidian conventions, image/metadata sidecars, and later compound formats. A document may produce one or many files; a filesystem file is not necessarily a document boundary.
 
-- **ingest**: a file delta (from an fs backend change report) → doc
-  operations (facet changes on the doc the path is bound to);
-- **render**: a doc's state → the entries that represent it (paths, kinds,
-  content);
+Plugs register lenses and their versions. Active lenses, selected versions, preferences, and parameters are deployment/checkout inputs. Basic text and blob lenses establish a small useful baseline; additional interpretations must compose without every lens knowing its competitors. The design does not require a universal perfect format detector before interop can work.
 
-Lenses are **per-format** (markdown notes, obsidian vault conventions,
-image+sidecar pairs, later: zip/.doc atomization, epub) and registered by
-**plugs** (plug manifests as drawer docs, tf2 ADR 007) — the set of active
-lenses is a deployment/checkout configuration, not a hard-coded list.
+The pipeline has separate stages:
 
-The store and bridge never parse a file; every semantic act goes through a
-lens. This is what keeps 010/011 honest about agnosticism.
-
-## 2. Locked expectations (the contract)
-
-1. **Idempotence / round-trip fidelity**: `render(ingest(delta))` is stable
-   — re-rendering an unchanged doc produces byte-identical entries, and
-   ingesting a rendered entry yields no doc ops. The daybook backend's
-   heads-based change tracking **leans on this** (ADR 010 §2.1: "report is
-   heads-delta → lens-rendered deltas" only works if re-renders are
-   no-ops).
-2. **Determinism per version**: render is a pure function of
-   (doc state, lens version). Same inputs, same entries, same hashes.
-3. **Totality or bounce**: a lens either fully renders a doc or **bounces**
-   it (validation failure → device-local conflict branch per ADR 011 §5).
-   **No partial renders ever reach disk.**
-4. **Version stamping**: every rendered entry carries
-   `LensAnno { doc_ref, lens_id, lens_ver }` (ADR 010 §3.1); every
-   `Origin::Rendered` content reference carries the regenerating triple.
-   Stale-projection detection is a field compare, and a lens upgrade
-   re-renders only entries whose `lens_ver` is behind.
-5. **One doc → N entries** (FDR 001 dpath claims): a doc may claim a single
-   file, a directory of uniquely-named files, or `.d`-stacked variants; the
-   lens owns the claim's shape, FDR 001 owns the collision rules.
-6. **Incremental render**: lenses render *deltas* — only entries whose
-   source content changed (the O(changed docs) projection cost that 010's
-   commit cycle assumes).
-
-4 and 6 are the same rule seen from both ends, and they are in tension in a way
-the deployment has to resolve: the field that #4 compares is the recipe, and #6
-only holds if that recipe is **per path**. A doc that reports one state token for
-the whole document changes every path's recipe on every edit, which makes #4
-re-render everything and #6 dead letter. So the recipe a path carries is the
-state of the facet *that path* renders from, not of the doc. The comparison is
-against the recipe and never against the digest: a lens version bump can produce
-identical bytes, and the digest in hand would be the old render's (ADR 010 §2.3).
-
-## 3. The lens API (shape)
-
-> All code samples in here are rough advisory sketches and not
-> prescriptions of using traits or any constructs.
-
-```rust
-#[async_trait]
-trait Lens: Send + Sync {
-    fn id(&self) -> LensId;
-    fn version(&self) -> LensVer;
-
-    /// Which paths does this lens claim? Extension + content sniffing;
-    /// first claim wins per the checkout's lens priority (§6).
-    fn classify(&self, hint: &FileHint) -> Option<Claim>;
-
-    /// File delta -> doc ops. Parse + validate; a failure is a BOUNCE
-    /// (ADR 011 §5), never a partial apply.
-    async fn ingest(&self, delta: &Delta) -> Result<Vec<DocOp>, Bounce>;
-
-    /// Doc state -> entry deltas (incremental; see expectation 6).
-    async fn render(&self, doc: &DocState, prev: Option<&DocState>)
-        -> Res<Vec<EntryDelta>>;
-
-    /// Stdout-shaped diff for the conflict viewer (ADR 011 §5.4) and
-    /// `db diff` surfaces. No on-disk rendering, ever.
-    fn diff_view(&self, a: &DocState, b: &DocState) -> Res<RenderedDiff>;
-}
+```text
+eligible documents/files
+    → requested identification signals
+    → interested lenses and proposals
+    → overlap detection and selection
+    → complete preparation/validation
+    → reviewed document operations or output plan
+    → backend application and acknowledged correspondence
 ```
 
-- `DocOp`/`DocState` are **daybook-side types** — the lens trait is generic
-  over them (or they live in the deployment layer that instantiates the
-  bridge); the bridge crate itself never names them (ADR 010 §5.1 posture:
-  the crate is a bridge; lens *implementations* are deployment property).
-- `EntryDelta` is vtree-shaped (010 §3.1): path, kind, `ContentRef` —
-  rendered content arrives as streams, chunks assigned lazily (010 §2.4).
+Rendering bytes is not required merely to report that an output exists or changed. Conversely, output discovery or validation may require input inspection for particular formats; those requirements must be declared rather than concealed as cheap metadata checks.
 
-### 3.1 What the lens layer owes the bridge
+## 2. Selection scope and identification signals
 
-Lenses are the deployment's, but three of their answers cross into the bridge,
-and all three are given in the deployment's own vocabulary (ADR 010 §4.5):
+The checkout first determines which documents or candidate filesystem paths are eligible. Dpath selection and by-ID selection are distinct checkout classes under ADR 011. Recognition does not expand authority or silently import unrelated files outside that selection.
 
-- **An identity per rendered path, encoded by this layer.** It is a token in the
-  deployment's scheme — a doc, the state of the facet *that path* renders from, a
-  lens id and its version, encoded however the deployment likes — plus a claim
-  built from the same parts, minus the state, because an edit does not change who
-  owns a path (010 §8.6). The bridge stores and compares these bytes and never
-  reads them.
-- **`report`: identities, not digests.** A producer is the authority for its own
-  output, so its report compares the identity it would report now against the one
-  recorded — a lens version bump may produce identical bytes, and only the
-  producer knows the identity moved (010 §4.1, §2.3).
-- **`accept`: does the checkout already hold what I would produce?** Usually this
-  is "compare the offered digest with the recorded one", because a digest is the
-  one identity both sides can produce. It answers `Bytes` whenever it *cannot*
-  know — a lens has to run to know what it renders, so a bumped identity carries
-  no digest and the bytes travel. That is the honest answer, and it is also why
-  ingesting an edit re-renders that path once: the doc's identity for it moved,
-  and for a canonicalizing lens that pass is where a user's bytes become the
-  doc's rendering.
+For document projection, extract selected dpath facets, target references, facet tags, Body designation, and other declared metadata. A whole-document dpath facet uses the **Body facet** to identify primary content; selected facets may contribute to a compound representation. A selective dpath facet addresses its listed targets. A referenced document/facet is distinct from the holder of the addressing dpath facet.
 
-## 4. Ingest & render cycles (pseudocode)
+For file ingestion, collect shared identification signals: path/extension, kind, size, directory shape, sibling relationships, available MIME evidence, magic/header bytes, and any additional declared inspection result. Size is a useful exclusion signal: a lens may reject zero-length or oversized inputs before parsing. Recognition can inspect content; extension alone is neither proof nor a mandatory first winner.
 
-```rust
-// fs delta -> doc ops (the ingest half of a reconcile cycle)
-async fn ingest(cx: &mut Cx, deltas: Vec<Delta>) -> Res<Vec<DocOp>> {
-    let mut ops = vec![];
-    for d in deltas {
-        match cx.lens_for(&d)? {                 // classify → claim
-            Some(lens) => ops.extend(lens.ingest(&d).await?),   // bounce ? 011 §5
-            None => match d {
-                // unclaimed paths in a track-only checkout: rep-level only
-                Delta::Removed{..} => continue,
-                other => cx.track_unclaimed(&other)?,   // no doc, no ingest
-            },
-        }
-    }
-    Ok(ops)
-}
+Signal acquisition is demand-driven and incremental. If no interested lens requests magic bytes, do not read them merely because a detector could. Start with cheap available metadata; gather further signals required by plausible candidates, sharing inspection work rather than letting every lens independently reopen the same file. Some formats require fuller parsing. The system should make such work visible and attributable, not claim all recognition is bounded to a header.
 
-// doc ops -> entry deltas (the render half)
-async fn render(cx: &mut Cx, touched: Vec<(DocRef, DocState)>) -> Res<Vec<EntryDelta>> {
-    let mut out = vec![];
-    for (doc_ref, state) in touched {
-        let lens = cx.lens_of(&doc_ref)?;
-        let prev = cx.prev_state(&doc_ref);       // for incrementality
-        for mut e in lens.render(&state, prev).await? {
-            e.lens = Some(LensAnno{ doc_ref, lens_id: lens.id(), lens_ver: lens.version() });
-            out.push(e);
-        }
-    }
-    Ok(out)
-}
-```
+Model-based format identification can be added as a signal provider, including small specialized classifiers or later LLM-assisted inspection. This is **identification**, not the rendering contract. Model/version, input evidence, and selected interpretation should be recorded sufficiently to explain the decision; model output does not silently become facet content or an undeclared rendering dependency. Remote recognition, if offered, must have explicitly granted authority to inspect/transmit inputs; sandboxed codecs receive no ambient network authority. Such providers are extensions, not prerequisites or mandatory network calls for basic import.
 
-Both halves are consumed by the ordered walks of ADR 011 §6 — bulk ingest
-streams batches of `ingest → fold` cycles behind one cursor; render feeds
-transfer planning in canonical path order.
+## 3. Interest declarations and proposals
 
-## 5. Conflict contract (with ADR 011 §5)
+A lens declares interest in combinations of signals, rather than claiming a filename globally. For example, a workspace lens can require an XML manifest with a particular root, specific sibling files, and a directory layout. A basic XML lens may independently recognize each XML file. The specialized workspace is a stronger interpretation when its required structure exists, not because its plug happened to register first.
 
-- A lens's **only** conflict surface is the `Bounce` (validation failure).
-- `render_conflict` **does not exist**: lenses render last-good states and
-  provide `diff_view` for the CLI conflict viewer (stdout, pick-a-version);
-  no lens ever writes conflict content into real files.
-- A bounced doc's last-good render stays in place until the user picks a
-  version from its conflict branch.
+An applicable lens produces a proposal declaring:
 
-## 6. Lens selection & per-checkout knobs
+- lens identity/version and relevant configuration;
+- input documents/facets or files, including recognition-only context;
+- matched signals and interpretation category/specificity;
+- owned editable outputs/input entry set, distinguished from read-only context;
+- write destinations for document operations;
+- stable output slots, kinds, and proposed path structure;
+- declared dependencies needed to reproduce or validate each output.
 
-- **Classification precedence**: when several lenses could claim a path,
-  the checkout's lens priority list decides (explicit in the `.dtree`
-  spec); unknown extensions fall to content sniffing; still-unknown paths
-  are *unclaimed* (tracked, not ingested — the adopt-only default).
-- **Per-checkout spec knobs** (owed from FDR 004 §3/§4, ADR 011 §2): ignore
-  patterns, per-lens parameters, auto-import behavior, lens priority.
-  Schema lives in the checkout spec; defaults come from the lens
-  registration; **no global (node-level) lens policy**.
+A context signal does not automatically grant ownership of that file. Two proposals may read the same manifest while owning disjoint outputs. Competing editable ownership and colliding proposed output paths must be detected before selection/application. One editable file cannot silently have several competing writers; a compound lens is responsible for its declared interpretation and destinations.
 
-## 7. wasi execution model
+Proposals describe the complete output structure before visible publication. Formats whose entry sets need parsing perform that discovery during preparation; they do not stream newly discovered paths straight into the live checkout. The exact declaration language, signal registry, and treatment of dynamically discovered entry sets require implementation experiments. They do not change the complete-plan gate.
 
-- Lens codecs run in the **wasi sandbox** (FDR 003 §2's `--stage` mechanics,
-  ADR 010 §4.5's WasiBackend): declared inputs (doc bytes, referenced
-  files) served lazily by the bridge as stub-capable backend; outputs
-  collected as `EntryDelta`s.
-- **Determinism expectation**: a lens run is a pure function of its
-  declared inputs (same inputs, same outputs, same hashes) — this is what
-  makes `Origin::Rendered` re-rendering sound (ADR 010 §2.4) and what makes
-  lens versioning meaningful. Non-deterministic codecs (timestamps inside
-  render output, etc.) must launder them into declared inputs or bounce.
-- No ambient authority: no network, no fs outside the sandbox mounts.
+## 4. Hierarchy, overlap, and overrides
 
-## 8. Gallery & compound formats (deferred, directionally locked)
+Selection evaluates current signals and configuration. Lenses do not enumerate competing lens IDs or declare a fallback edge to every overlapping plug. The selector provides shared hierarchy categories: explicit user choice, recognized workspace/compound interpretation, recognized individual format, and basic text/blob fallback. Specificity and configured preferences order applicable proposals within that framework.
 
-- **zip/.doc-style atomization**: a lens presents an archive as a
-  directory of entries (read: extract lazily via chunk ranges; write:
-  re-zip atomically per file). Expensive but stub-compatible.
-- **epub & media + metadata sidecars**: blob entries with generated
-  sidecars (EXIF-derived markdown, cover images); sidecar regen from
-  `Origin::Rendered` means blob GC never orphans metadata.
-- These are *lens instances*, not new machinery — the API above must
-  suffice. If it doesn't, that's a finding against §3, not an extension.
+Select disjoint proposals together. When a specialized workspace proposal owns `project.xml` and `settings.xml`, it can displace individual XML interpretations of those files while leaving an unrelated `notes.md` to another lens. Recognizing a directory does not confer ownership of its entire subtree.
 
-## 9. Open questions
+Equally preferred overlaps use a stable configured default, not plug installation order; the selected interpretation and alternatives remain visible and overridable. Exact ordering within a category and the final deterministic tie-breaker remain selector design work. They must not depend on hash-map/scan order or a hidden 'try until something works' execution loop. A numeric scoring language or elaborate global optimizer is not required initially.
 
-1. **Lens API exact surface** — `FileHint` contents (mtime? size? first-N
-   bytes?), streaming granularity of `render` output, error taxonomy of
-   `Bounce` (validation vs transient). _Blocks: implementation._
-2. **Round-trip fidelity policy** — ingest normalizes (e.g. markdown
-   formatting, frontmatter ordering): which representation is
-   authoritative when re-render differs from the file on disk? Lean: doc
-   state is authoritative; the fs copy converges on next materialize; a
-   user's hand-edits *are* ingest input, so normalization is a lens policy
-   knob. _Blocks: FDR 001 §open questions (dpath adoption) alignment._
-3. **Customization facets** (deferred from FDR 001): user-tunable render
-   templates/layout per doc class — facet-shaped configuration vs lens
-   parameters. Lean: facet-shaped (they're shared opinions). _Blocks:
-   FDR 001 revision._
-4. **Intra-doc entry-set collisions** (deferred from FDR 001): two entries
-   of one doc claiming the same name — Rule 1/2/3 mechanics owned by FDR
-   001, but the lens-side API for *declaring* the entry set needs one pass.
-   _Blocks: §3 `render` signature finalization._
-5. **Sandbox capability versioning** — lens_ver pins codec behavior; does
-   it also pin the wasi surface (so old lenses keep running)? Lean: yes,
-   pin both; re-render-upgrade is opt-in per checkout. _Blocks: 011 §2
-   spec knobs._
+A checkout-local dot-prefixed configuration surface exposes preferences and overrides for document IDs, dpaths/paths, or recognized workspaces. Exact filename, match syntax, and scope precedence are technical choices. Local overrides can select raw text rather than a specialized structured interpretation when preserving/editing the literal representation is desired.
+
+Selection is stateless in the useful sense: given the eligible current state, signals, configured lens versions, and overrides, recompute the proposals and winner. It does **not** discard historical bindings, output ownership, or render bases. Changing selection refuses dirty affected entry sets until ingestion or explicit discard. Clean outputs can be reprojected. Selection alone must not split/merge existing document histories or replace a document ID because recognition changed.
+
+Installed lens upgrades do not automatically change the selected version. Explicit upgrade/reselection validates dirty-output safety and prepares reprojection. Provenance in checkout state records which version and configuration produced existing files; no separate textual 'lens log' is required. Old production versions remain pinned where supported or fail explicitly if unavailable, never silently render using a different codec.
+
+## 5. Recognition is not execution fallback
+
+'Not this format' is a recognition result: discard that proposal and consider other applicable interpretations, including text/blob. A selected lens that fails parsing/preparation, lacks input, or crashes is an execution failure. Do not silently select a different interpretation until one succeeds.
+
+Interactive ingestion exposes selected lenses and intended documents/outputs after recognition and preparation; recognition may take time when expensive providers are explicitly enabled. An editor-based review can present that plan, but final CLI grammar/editor integration belongs to FDR 004. Failed operations retain their explanation for status and the next attempt. Users can fix the input, change selection/configuration, or explicitly request fallback/alternative attempts. Fallback is not the default response to recurring execution failures.
+
+Watch uses configured selection without launching an interactive editor. A failure blocks automatic activity for the checkout under ADR 011; GUI surfaces can request retry, changed interpretation, exclusion, or recovery. Source bytes are preserved. Automatic watch creation is limited by selection/ignore rules, not concealed by silently ignoring lens failures.
+
+## 6. Ingestion contract
+
+Ingestion receives changed bytes/path/kind, the bound output slot, the **recorded render heads and production recipe**, relevant facets at those heads, sibling output observations, and declared inputs. It is not `ingest(&Delta)` with no base context. This permits a lens to edit a structured facet using its previous logical state rather than infer everything from current file bytes.
+
+Prepare facet/document operations without publishing them. All selected lenses in the requested batch must prepare successfully before staging/publication begins. Large byte payloads may be staged on disk or in backend storage; 'buffer the batch' does not mean load a photo library into RAM. Revalidate the assumptions used by a reviewed plan before applying it.
+
+Prepared facets must satisfy their schemas. Producing an invalid facet is a lens/preparation error, not a semantic bounce. Individually valid local and upstream states may later have an invalid Automerge merge; ADR 011 validates that candidate in memory and retains checkout branches rather than creating a separate bounce branch. Runtime errors, missing bytes, missing codec versions, and access denial remain distinct failures.
+
+Edits to existing bound files preserve document identity. Replacing a JPEG updates its blob and lens-managed metadata in the declared owning documents. A dpath facet in A may reference a facet in B: content edits target B while path edits can target A's addressing facet. The proposal declares these destinations explicitly. There is no digest-equality document takeover and no automatic creation of a replacement document for changed bytes. New unbound input is a separate import case and may create documents.
+
+Removal of one compound output is an edit offered to the lens, not automatic deletion of its owning document. If it cannot represent the edit, report a preparation failure and preserve the missing-output observation. Removal of a sole ordinary dpath output can remove the addressing dpath facet through checkout policy. Trash and document lifecycle remain explicit product operations.
+
+## 7. Authority and cross-document inputs
+
+Cross-document and cross-facet URLs are supported. A lens can inspect or produce content using resolved references; the generic vtree stores only opaque producer information, not the URL/facet interpretation. Missing references or bytes are availability failures, not empty file content.
+
+Effective write access is the **least permissive access across every input document of the selected lens invocation**, including recognition-only context. This deliberately conservative lens-wide rule avoids claiming we know every internal effect of a codec. Declared write destinations must also be authorized. A later design may introduce finer-grained dependency roles, but v1 does not exempt read-only context from this rule.
+
+Project filesystem permission bits accordingly and refresh them when authority changes. They discourage invalid edits but do not enforce Daybook authority; users can chmod files or replace them through writable parent directories. Stage/publish checks enforce actual authority. Preserve unauthorized local bytes and explain pending/unpublished work. Checkout-local branches retain previously projected bases as specified in ADR 011; independent local ownership is distinct from permission to publish upstream.
+
+## 8. Production, versioning, and round trips
+
+Separate **describe/plan** from **produce bytes**. Output plans identify stable slots, paths/kinds, and opaque recipes. A recipe includes every declared input that affects that output, lens version, execution compatibility, and configuration. It may use several facets/documents and recognition context; the old one-facet-per-path recipe restriction is insufficient.
+
+Incremental production invalidates only affected outputs when dependency information permits. It is not a blanket guarantee of O(changed documents) without inspection: a workspace layout change can affect many outputs, and a codec may require a whole archive parse. Reporting a recipe change does not require producing its digest. A new lens version is meaningful even when resulting bytes are identical.
+
+Determinism is per declared production inputs/version: the same inputs produce the same entry structure and bytes. Timestamps or external data that affect output must be declared inputs, not ambient nondeterminism. A nondeterministic codec is not rescued by calling its failure a bounce.
+
+Round-trip stability remains required: ingesting an unchanged generated representation produces no document operation; repeated production from unchanged inputs is byte-identical. Exact preservation of arbitrary user formatting is **lens-specific**, not a universal round-trip law. Basic raw text preserves actual text bytes under its supported encoding contract; a structured XML lens may normalize formatting. After accepted ingestion, canonical output is the next projection, like a formatter operating upstream. Replace the file only if it still matches the accepted input; a newer edit must not be overwritten. Markdown-oriented lenses should preserve meaningful whitespace, but the bridge cannot provide that property on their behalf.
+
+A virtual WASI receiver can install the producer/version reference without copying bytes. When accessed, it asks the bridge to obtain that version's bytes from the producer. Ranged access is optional: a lens can render once into local cache on first access and then serve ranges. Accurate file size may require lazy production when not already known. No generic stub or zero-length fiction stands in for unavailable content. Rendered caches remain local and are not synced as iroh-blobs artifacts.
+
+## 9. Output plans and naming
+
+One document or one selected interpretation can yield N files, directories (including empty directories), or sidecars. Lenses declare internal output names and stable slots. Checkout naming resolves collisions between independently selected output sets and platform limitations without rewriting dpath identities. `.d` spill allocation belongs to checkout naming, not a lens-specific license to rename incumbents.
+
+Duplicate internal editable slots or contradictory kinds/paths within a proposal must be detected during plan validation. The final path assignment includes literal claims, sibling outputs, reserved checkout surfaces, and existing sticky bindings. Preflight complete plans before writing any visible member.
+
+The filesystem backend may obtain all required bytes in staging storage then apply moves. Per-file atomicity does not mean atomic visibility of a multi-file set. Application failures have explicit progress/recovery under ADR 011; the old 'no partial renders ever reach disk' is replaced by 'no invalid/incomplete plan is deliberately published, and interrupted application is accounted for.'
+
+## 10. Interface responsibilities and execution
+
+The old `classify/ingest/render/diff_view` sketch needs more stages, not a new public symbol for every specialization:
+
+| Stage | Responsibility |
+|---|---|
+| Interest declaration | Specify required signals, constraints and contextual shape. |
+| Proposal | Declare interpretation, inputs, ownership, write destinations, output structure, and dependencies. |
+| Preparation | Parse/validate edits or discover a complete output plan; return buffered operations/references, not published writes. |
+| Production | Serve output bytes at a specific recipe/version, lazily and streamably where possible. |
+| Diff view | Explain logical/rendered differences for status and ordinary branch resolution without inserting conflict markers into files. |
+
+Concrete APIs remain advisory. Document/facet operation types live on the Daybook side; the bridge sees path/kind/opaque identities and byte access. Outputs cross the boundary as descriptions and production references, not eagerly populated byte buffers.
+
+Codecs run in a WASI sandbox with declared document data and referenced files mounted through lazy bridge access. No ambient filesystem access outside mounts or network authority. Outputs are collected/prepared, not immediately copied into the checkout while the codec runs. Lens version and sandbox capability compatibility must be recorded so old production recipes are meaningful; exact packaging and ABI retention are implementation work. Recognition providers with additional capabilities are separately authorized, not an excuse to enlarge every codec's ambient authority.
+
+## 11. Compound-format examples and limitations
+
+- **Obsidian/workspace conventions:** recognition can combine note files and directory metadata without consuming every descendant. A workspace interpretation outranks applicable generic file lenses for its explicitly owned entries; context files need not be owned.
+- **Image plus metadata:** a blob and metadata facets can produce an image plus generated sidecar. Changes affect declared owning facets and preserve document IDs. Blob GC must retain real payload dependencies separately from generated cache bytes.
+- **Zip/.doc-style atomization:** preparation may inspect archive structure to declare extracted paths; reads can use ranges where the format/backend allows, otherwise cache a full decode. Ingest can rebuild an archive before publication. This is not a promise that every archive supports efficient random access.
+- **EPUB/gallery:** cover images, text, and metadata may form multiple outputs with different dependency sets. A sidecar being regenerable does not itself ensure its blob dependency survives GC.
+
+These remain motivating lens instances, not proof that today's API suffices. If a case cannot declare safe ownership, dependencies, or a complete plan, that is an interface/design finding—not permission to hide it behind 'lenses handle it.'
+
+## 12. Remaining technical work
+
+Implement a small selector using basic text/blob plus one specialized compound lens before designing a general constraint language. Test demand-driven signal sharing, stable overlap resolution, context-wide authority, loss of recognition, dirty selection switches, explicit upgrades, normalization, new file imports, multi-output removal, and lazy producer access.
+
+Still open: exact signal/proposal representation; same-category tie-breaker; dynamic entry-set discovery; size/stat behavior for unproduced files; non-UTF-8 filename/encoding policy; customization facets versus local parameters and their precedence; retention of old codecs/inputs; sandbox ABI compatibility; by-ID creation/editing surfaces. Shared customization facets are plausible inputs, but not an unapproved global lens policy. These are bounded follow-up choices; the pipeline, preparation gate, failure model, and ownership/access boundaries above are settled architecture.
+
+## 13. Byte-valued facet keys and URLs
+
+Byte-valued IDs use a shared canonical UTF-8 key codec, not a dpath-only convention. Unicode stays literal without normalization; literal backslashes are doubled, LF/TAB/CR use `\n`/`\t`/`\r`, and other control or invalid UTF-8 bytes use lowercase `\xhh`. Unicode control characters are escaped through their UTF-8 bytes. Keys have no outer quotes, and alternate spellings are rejected. Ordinary facet keys are not implicitly interpreted as escape syntax; decoding is explicit when recovering a byte-valued ID.
+
+URLs percent-encode the escaped facet key itself. Resolution percent-decodes the URL component once and looks up the resulting key literally, without byte-key decoding. Non-UTF-8 native names can use this codec without lossy conversion; a stable native-name byte representation for Windows and filesystem-adapter integration remain separate work. Rust's unspecified `OsStr::as_encoded_bytes` representation is not a persisted interchange format.

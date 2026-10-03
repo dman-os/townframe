@@ -1,288 +1,58 @@
-# FDR 004: Workspace CLI Experience — Nodes, Checkouts, Import, Watch, Sync
+# FDR 004: Daybook CLI — Nodes, Checkouts, Import, Watch, and Sync
 
-**Status:** Draft. The FDR of the **CLI checkout experience**: what an
-engineer types to put daybook content on disk, keep it live, and send it to
-peers. GUI notes are one paragraph — the GUI drives these same verbs, so the
-CLI grammar is the contract; deeper GUI design (drawer-grouped browsing,
-progress panels' layout) is not locked here.
+**Status:** Proposed (draft accepted as the working specification; technical sections marked in-text are still settling). This document describes ordinary command-line workflows and their observable results. The GUI can perform the same product actions without adopting the CLI's command spelling.
 
-Companion documents: FDR 002 (vocabulary — node/`.dnode`, checkout/`.dtree`),
-FDR 003 (VC primitives — main-by-default, commit, branch-on-conflict, trash,
-porcelain verbs), FDR 001 (dpaths — reserved surfaces, binding stability,
-adoption assignment), ADR 010–013 (pauperfuse internals).
+## What the CLI is for
 
-Day-1 use cases this FDR must serve (locked):
+A user can keep an existing photo library or Obsidian vault where it is, work on Daybook content using normal filesystem tools, stage an agent's proposed edits for review, and exchange selected drawers with other nodes. The CLI should make those workflows comprehensible without requiring a Git repository, a global account login, or a checkout-wide commit. It must distinguish local observation, local document writes, and network synchronization.
 
-1. **Media library** — a photo/video/music folder stays where it is, blobs
-   are adopted without byte duplication (hardlink-first per ADR 013), files
-   keep working in every existing app.
-2. **Obsidian vault sync** — an existing vault becomes node-synced; edits
-   flow both ways; interoperability with Obsidian is preserved *as an Obsidian
-   vault*.
-3. **Agents as task-tracker collaborators** — agents get daybook checkouts as
-   working surfaces for shared task/collab state, write into staging branches
-   (FDR 003), and humans review/merge. This locks the techie use case: a
-   multi-agent workflow where daybook *is* the task tracker, not a file dump.
+Daybook nodes have their own identities and home drawers. A checkout belongs to one node and exposes a selected set of content. A document can belong to several drawers; branches are normally presented within their logical document even though each branch has an underlying document ID. FDRs 001–003 define the path, vocabulary, and history semantics used below. This CLI document does not turn a node into a repository or a checkout into one versioned document.
 
----
+## Three ways to bring content into view
 
-## Decision
+**`db init [name]`** creates a new node, a normal home drawer, and a root checkout selecting only that drawer. It places the node's `.dnode` and the checkout's `.dtree` in a new directory. The exact directory-name prompt and display-name default need to be specified together: the node's display name is ordinary, shareable metadata and is not its public-key identity or necessarily its directory name. Adding or mirroring another drawer later does not silently add it to the root checkout. Node setup among siblings is a separate product flow; `db mirror <node>` is not its command.
 
-### 1. The lifecycle: ambient ingest, explicit sync
+**`db checkout <dir> [selection]`** creates a new checkout of selected content from the current node in a new directory. Its `.dtree` records durable bindings, last-rendered versions, and checkout policy. Selection may use dpath prefixes, a drawer, `/by-id`, or another supported path source: a checkout is not necessarily a query over every dpath in the node. `/trash/**` can be excluded by default when dpaths are selected; it is not a forbidden dpath namespace. A staging checkout may select temporary branches for explicit documents so agent or plug work can be reviewed before promotion. It does not create a single branch that atomically spans the whole checkout. A temporary checkout has its own state while it exists and can discard that state when safely closed.
 
-Two independent clocks control when state moves. Misreading this is the
-classic daybook confusion, so it is stated first:
+**`db adopt <dir> [--under <dpath>] [--drawer <drawer>]`** attaches an existing directory to the current node as a tracked checkout without moving or converting its files. It creates `.dtree` and records the filesystem paths, ownership evidence, and proposed destinations for a later import. Before import these are *candidate* dpaths, not dpath facets in documents that do not yet exist. `--under` proposes a prefix; a drawer option chooses the intended admission context. Adopt previews how many files may become text documents or blob-backed documents and any names or content it cannot presently interpret. It does not assert that creating a document happened merely by tracking a file. Adoption does not start `db watch` or occupy the terminal with a background process.
 
-- **Ingest (local) is ambient.** Every `.dtree`-related CLI invocation acts
-  jj-style: it first **auto-commits the working set** — applying detected
-  local edits into the branch of record (main, per FDR 003 §1) — and then
-  performs its operation. The CLI is a pseudo-watch: walk away from a
-  checkout and return any time; the last command already captured state.
-  There is no "remember to commit before `db log`".
-- **Watch mode is an explicit daemon** (`db watch` / GUI runs one watcher
-  aggregate). It exists for *idle-time* ingest — a normie editing a vault
-  who never runs commands deserves the same auto-commit behavior. Watch =
-  debounce → semantic ingest (FDR 003 §1, §6 policy). The scanner is always
-  authoritative; events only mark dirty scopes (pauperfuse reconciliation,
-  ADR 011).
-- **Remote sync is always explicit**: nodes advance locally from checkouts
-  (and incoming sync traffic while a sync node runs), but **nothing talks to
-  remote nodes until a sync node is up** (`db sync`, §7; apps run one by
-  default per FDR 002). A one-shot CLI command on a plane commits locally and
-  syncs later. This is also why the CLI needs no login and no default node
-  (FDR 002 §7).
+Adopt and import are deliberately different. Binding a large directory is cheap and does not by itself publish thousands of documents. An explicit `--import-now` or `db import` action can convert the existing contents into Daybook documents. After import, an adopted checkout retains correspondence between files and the documents it created or selected; later scans use that correspondence instead of inventing a fresh document for every unchanged path. A checkout policy must say whether *new files appearing later* are automatically imported during watch, ignored, or offered for review. An already-running node service might observe adopted directories; it must respect that policy. In particular, a default must not unexpectedly publish build output from an adopted source tree. The choice of default is open below.
 
-### 2. Node lifecycle: `init` and `mirror` are node-level
+**`db import <path> [--drawer <drawer>] [--under <dpath>] [--doc-id <id>]`** is a separate, explicit one-shot conversion suitable for drag-and-drop or a CLI path. It does **not** require or create a checkout, and repeated imports need not be idempotent: the same input may intentionally become another document. An existing checkout may supply a binding when import is invoked as part of its adoption workflow, but that is the checkout's tracked-import behavior, not a general digest-to-document identity rule. `--doc-id` is a deliberate selection of an existing target where applicable, not an inferred identity from matching bytes. A bulk import reports per-file progress, errors, chosen document IDs, and destination drawers; a failed or partial batch must remain understandable and retryable without claiming an atomic multi-document result.
 
-- **`db init [name]`** creates a **node**, not a checkout: a fresh named
-  directory in the **cwd**, containing its `.dnode` (node stores, secrets,
-  node metadata) plus the root-drawer checkout's `.dtree`. Git's
-  `git init <dir>` shape. The node's display name defaults to the directory
-  name; GUI-created nodes default to device-name-style names (FDR 002
-  open call).
-- **`db mirror <source> [dir]`** is the remote-flavored node creation:
-  bootstrap a new node that **mirrors** an existing one (relay account or
-  p2p peer) — the add-device/mirror flow of FDR 002 §8, expressed for the
-  CLI. Mirror = new node + own agent + hydrate through sync; never a
-  `.dnode` copy (FDR 002 §2). **`clone` is retired as a verb everywhere** —
-  it implies a repo-like, data-first relationship that isn't real here; the
-  relationship is *mirroring* and that is the word, everywhere the concept
-  appears (FDR 002 §1/§8 included).
+By default, one imported file becomes one document; basic text and blob representations handle ordinary input when no specialized lens is selected. A user may explicitly choose several files in one document for a common history boundary, with path claims addressing their respective content. A content digest can allow byte reuse where safe, particularly for large media, but **byte deduplication does not merge independently created document identities**. In-place adoption and hardlink/reflink safety need the blob/backend ADR; neither this FDR nor import's progress display promises that bytes survive if the only external copy is deleted.
 
-### 3. Checkout lifecycle: `checkout` and `adopt`
+**`db detach <dir>`** stops tracking a checkout without deleting its documents, drawer listings, or source files. Before removing `.dtree`, the CLI must identify pending filesystem edits, local-only bounced work, and bindings that are the only available explanation of file identity; it must not silently erase recoverable work. The command's confirmation and cleanup policy are still to be specified.
 
-Two distinct entry points, finally separated (the old "adopt vs import" blur
-resolved):
+## CLI context
 
-- **`db checkout <dir> [spec]`** creates a NEW tracked materialization from
-  the current node: fresh directory, fresh `.dtree`. The spec (§4) selects
-  content by **dpath prefixes and reserved clauses** (v1 grammar; the full
-  query system is future). Agent staging: `--stage` puts checkout writes on a
-  `/tmp` branch per FDR 003 (agents-as-task-tracker use case: shared task
-  drawers, one staged checkout per agent, human merges after review; CLI
-  specifics fleshed out once the pauperfuse ADRs exist, per review).
-- **`db adopt <dir> [--under <dpath>] [--drawer <drawer>]`** is the missing
-  interop verb: **bind an EXISTING directory as a live tracked checkout of
-  the EXISTING node.** Files stay where they are; daybook object identity is
-  created behind the scenes:
+A command run inside a checkout resolves its `.dtree` and node. Otherwise it can use a nearby `.dnode`, an explicit node selection, or a deliberately configured default; if none applies, it reports how to select a node. A command that will mutate data shows or accepts an explicit target when context is ambiguous. The CLI does not need a general login command to access local documents. Relay-account authentication is a separate service operation.
 
-  1. bind the directory (create `.dtree`, bind to the contextual node);
-  2. assign dpaths from origin paths (`--under /DCIM` prefixes every file;
-     default root: files land at `/`, drawer files under the chosen
-     subtree — the common shape from FDR 001 §7);
-  3. track every file in the pauperfuse checkout tree **without creating
-     any docs** (default, locked per review): adopt only creates the
-     `.dtree` and records what the conversion *would* do; `db status` then
-     shows it (`~312 new notes via obsidian lens, 44 blobs adopted in
-     place, 3 unknown formats`), and `--import-now` (or a plain
-     `db import .`) performs the conversion. The dry-run preview is part
-     of adopt's plan output and status remains the living preview.
-  4. **the non-importing default is a design-shaping rule**: import/creation
-     of docs is network-expensive once a sync node is up, so **defaults do
-     the cheap local-tracking thing and the expensive thing is always
-     explicit**. Watch-ingest of *later* edits is exempt from this (the
-     OneDrive reasoning: once you track a directory you've accepted its
-     sync cost — including compiler trash — which is the normie
-     optimization); but bulk *initial* conversion must never happen as a
-     side effect of binding.
-  5. content handling at import time: blob-like files are adopted in place
-     (external-tracked, hardlink-first — ADR 013; no copy), text-like
-     files become dpathed docs via the import flow (§5).
+A file path can identify the logical document behind a bound checkout output. Commands that change branches or document history also accept an explicit document ID. When several file outputs belong to one document, the CLI does not create several branches by accident. Short, keyboard-friendly IDs can be offered for interactive selection if they are unambiguous in the displayed context; scripts use full IDs. Branch commands without a document/path selection do not fork an entire checkout implicitly. Sibling branches should be discoverable under their logical document where authority permits, while checkout-local selection remembers which branch is currently rendered.
 
-- **`db detach <dir>`** releases a checkout without touching repo data:
-  removes `.dtree`, keeps docs/dpaths/blobs. (Uninstall story.)
+## Editing, commit, and observation
 
-### 4. The checkout spec (what `.dtree` binds)
+`db status [paths]`, `db diff [paths]`, and `db log [paths]` are **observational**. They can scan and refresh local observations but do not ingest or publish pending edits. Status shows at least the distinction between an un-ingested filesystem change, a document update not yet rendered here, a semantic edit preserved on a local branch, a missing target, and bytes that are not available. It can also show import and sync progress. A read must not erase the pending work it was meant to inspect.
 
-- **Selection grammar (v1): dpath prefixes + reserved clauses.** `--under
-  /DCIM`, `--drawer <drawer>`, the reserved `/trash/` default-exclusion (FDR
-  003 §8), `--include/--exclude` prefix lists. The *mechanism* is
-  query-shaped from day one (all checkouts are "queries over dpath space"),
-  but v1 speaks only clauses this simple; the query system FDR replaces
-  clauses wholesale later.
-- **Binding-stability knob** (FDR 001 Binding stability): sticky+timestamp by
-  default; a checkout spec may pin alternatives (e.g. forbidding clean-name
-  stealing for vaults).
-- **Lens selection** comes from dpath extension + content hints (FDR 001
-  §9); per-checkout lens overrides are **not** v1 (lens customization facet
-  is ADR 012 territory).
-- **Ephemeral checkouts** (`--ephemeral`): own throwaway `.dtree`, auto-pruned
-  (FDR 002 resolved call).
-- Checkout state is *per-checkout, always*: bindings, transactional store,
-  watch cursor, staged-branch pointers (`.dtree` is the whole story; FDR 002).
+`db commit [paths] [-m <message>]` explicitly ingests selected checkout edits into their owning documents. Ordinary successful writes target the document of record; a staged checkout writes to its selected branches. The document/lens boundary either accepts an edit or preserves it by its semantic bounce policy. Codec failure, missing bytes, or network failure do not become semantic conflicts. Local ingestion must protect dirty filesystem bytes before a newer remote render replaces a path. A single invocation may affect several documents; it reports results per document and cannot name a mythical “last Automerge change ID across all touched docs.”
 
-### 5. `db import` — the touch-like converter
+A message supplied with `-m` is intended for change metadata. Its representation when one invocation changes several documents, whether it names one change or a range of changes, and whether a shared marker would aid correlation remain open. Short interactive IDs are not automatically stable cross-document operation IDs. Raw histories cannot be rewritten merely to rename a message later; any mutable user-facing annotation would need a separate design.
 
-- **`db import <path>`** converts an external file or directory into
-  **dpathed docs in the node**, using the same lens machinery that
-  materialization runs in reverse. One-shot; **no binding, no checkout
-  state**. Re-running is content-idempotent (same digest → same dpathed doc
-  facets merge into themselves; FDR 001 import idempotency).
-- Import is also *adopt's* bulk engine (§3, step 5; opt-in at adopt, never
-  the default) — one convert path, two surfaces. **Import is the most
-  network-expensive ambient operation in the system**; when `db sync` is
-  running, every imported doc fan-outs to peers, which is why adopt does
-  not import by default and why import stays an explicit, reportable,
-  resumable stream (progress events for the GUI panel).
-- **How lenses drive imports is owned by ADR 012** (flagged in review): the
-  lens codec, ingest direction, per-format behaviors (.doc atomization, epub
-  as blob, mime/extension hints), and what "convert to a daybook facet" means
-  per format live there. This FDR only fixes the CLI contract: import speaks
-  paths and emits dpathed docs, and progress is reportable (the GUI's
-  import/sync progress panel consumes these events).
-- Default target drawer/dpath root is the contextual node's root drawer at
-  the path-derived dpath; flags override (`--under`, `--drawer`, `--doc-id`
-  for the single-doc code-SCM mode later).
+`db watch` is an explicitly run, long-lived process for observing configured checkouts and ingesting changes according to their policies. A GUI or separately started node process may provide equivalent ongoing behavior. Filesystem notifications can make a scan timely but are not a substitute for a scan that discovers changes missed while the watcher was absent. Merely running `db adopt` does not start `db watch`; ordinary read commands do not secretly act as a watcher.
 
-### 6. Auto-commit semantics on commands
+## Sync and status
 
-- **Which commands auto-commit**: anything that consults a `.dtree` working
-  set. The working set is the pending local ingest (un-ingested file edits
-  vs. last-applied tree); auto-commit = FDR 003's `db commit` (branch-on-
-  conflict policy applies exactly as for watch). **Ordering rule, applied
-  everywhere:** local writes first, upstream materialization second — a
-  `db commit` ingests the working set, and ambient materialization of
-  upstream changes comes after, so the checkpoint the commit names is the
-  local write frontier: the last change id of the local ingest across all
-  touched docs.
-- **Messages**: auto-commits are **anonymous changes** — no message, no
-  ceremony. Naming is **checkpoint framing, not git commit framing** (locked
-  per review): since the sync protocol has no truncation, a git-style
-  "message names one commit" can't fit a stream of anonymous auto-changes.
-  Instead, Patchwork-style: a **name is a mutable annotation covering the
-  range of changes since the previous name** ("last N changes as a group",
-  until a previous named marker). Mechanism: mutable replicable annotation
-  mapping `(branch, from_heads…to_heads) → name`, rendered on top of the
-  change-group timeline (FDR 003 §5). Consequence: **names are renameable
-  after the fact** — the earlier immutability concern dissolves at the
-  naming layer; raw automerge changes underneath stay unnamed and immutable
-  (change-metadata messages remain an implementation detail for the newest
-  change, if used at all).
-- **Name changes after the fact** (locked here; the remaining hard case):
-  - **branch names**: mutable — ADR 007 makes names optional relationships in
-    the `daybook.branches` directory; renames never touch `BranchId`.
-  - **change-level messages**: immutable — they ride an already-synced
-    change. The user-facing fix for labeling mistakes is therefore the
-    checkpoint annotation above (mutable, range-covering), not change
-    rewriting; the nuclear path remains redaction (new doc id, FDR 003 §4).
-  - **node display names**: mutable, local facet territory (app/config docs;
-    FDR 002 open call).
-- A command that can neither auto-commit (e.g. pure reads like `db diff --at
-  <past>`) nor find issues reports clearly; reads never fail silently because
-  state was stale — they commit first when the working set is non-empty
-  (except `--no-commit` for scripting).
+Local edits do not require immediate network delivery. A running node sync service may exchange authority metadata, document history, and requested bytes with reachable peers; the CLI can start or control such a service with `db sync`. A `db commit` does not itself promise to contact peers or fetch every remote change. Incoming content can be accepted and stored before a checkout materializes it. Materialization of a remote update must respect locally dirty files and the document layer's accepted/renderable state.
 
-### 7. Sync lifecycle
+The CLI can express a node's choice to know a drawer, request mirroring of a selected drawer or subset, or stop local retention. These are not the operation of creating a sibling node. A granted access path, an official drawer roster entry, a requested mirror, a successful document transfer, and available blob bytes are distinct statuses. A relay sponsorship request likewise does not equal accepted, durably retained bytes. Provider hints are candidates, not proof of completeness or freshness. `db status --sync` or an equivalent structured status surface must distinguish pending, rejected, unavailable, and fulfilled work rather than reporting a cursor as a completed backup.
 
-- **`db sync`** stands up the node's sync engine: foreground (default),
-  daemonized, or emitted as a **systemd unit** (`--systemd`). This is the
-  only CLI surface that talks to remote nodes (FDR 002 §7).
-- While up: peer sync over the existing stack (iroh-backed transports),
-  drawer-scoped discovery, relay attach (`db relay add` — account flows are
-  ADR 005/006 territory and referenced, not re-specced).
-- **Device mirroring on by default** among a home's nodes: my-devices list
-  (node metadata) means `db sync` on both laptops converges them; for
-  relayless users this is the whole story (FDR 002 §8, FDR 003).
-- **Progress surfaces**: sync state (per-node/per-drawer backlog) and import
-  progress (§5) are the two event streams the GUI's progress panel consumes.
-  Emitted as structured status, readable via `db status --sync`/`--import`;
-  the GUI subscribes. (The GUI panel layout itself is not this FDR.)
+A user can explicitly remove a document through a separate product operation, which may use a trash convention. Removing a file from a checkout does not automatically run that operation. Checkout status may report trash claims when requested, but `/trash` is not a checkout-owned special filesystem surface.
 
-### 8. Status surfaces (normie and techie sharing one engine)
+## Questions before command grammar is final
 
-- `db status [paths]` — the three-way (FDR 003 §1) plus checkout-level
-  decorations: degraded states (FDR 001 §6: `missing-content`,
-  `target-not-found`, `in-conflict`), conflict-branch presence
-  (`/tmp/conflicts/…`), trash hits, staged-branch summaries.
-- Trash is **not a special surface** in v1: `/trash/…` is query-invisible in
-  checkouts by default and inspectable via `db status --trash` / restore via
-  `db restore` (FDR 003 §8).
-- The node's **local inventory** (what this node actually holds — ADR 011)
-  backs "everything synced?" answers; its user-facing surface is minimal in
-  v1 (a `db status --node` summary at most).
-
-### 9. GUI (one paragraph, on purpose)
-
-The GUI runs watch for **all checkouts combined**, renders the drawer-grouped
-browser of the identity-context discussion, and surfaces the two progress
-streams (import, sync). It exercises this FDR's verbs as its implementation
-contract — no GUI-specific data flows exist; anything the GUI needs that the
-CLI lacks is a missing verb, filed here.
-
----
-
-## Open Questions
-
-1. **`db init` literal shape** — resolved: `db init [name]` always creates
-   `./<name>/` in the cwd and never inits an existing dir; `--adopt-here`
-   can bundle "new node + adopt cwd" for the rare case, but existing-dir
-   workflows own `db adopt` (per review). _Blocks: porcelain only._
-2. ~~Verb rename: `db commit` → ?~~ — **resolved: keep `db commit`**, with
-   ordered semantics per review: a commit performs **local writes first,
-   then remote pulls, always** — the ambient materialization of upstream
-   changes is ordered *after* the local ingest. The commit then **names the
-   last change id of the local write across docs** (the anchor of the
-   checkpoint range). No `db pull` verb exists; upstream application is
-   ambient in every operation, after the local step. FDR 003 §2 wording
-   updated to match.
-3. **Agent task-tracker conventions** — resolved to plug-territory: agent
-   layouts/facets are plug-defined (markdown dirs + occasional flushes is
-   the expected shape); 004 locks only `--stage` mechanics. No dedicated
-   FDR for now.
-4. **`--import-now` ordering** — when converting an adopted dir: import is
-   always local-first (docs are local automerge changes; sync catches up on
-   the next `db sync`), no queueing layer. _Blocks: §3/§5 detail._
-   Also: no `db pull` unless the rename is rejected.
-4. **Per-checkout import policy** — confirmed per review: import behavior
-   (auto-import on ingest? ignore patterns? lens parameters?) is a
-   **per-checkout config knob** in the checkout spec, not a global. Schema
-   owner: ADR 012 (lens definitions) + this FDR's spec shape.
-
-## Resolved in this review
-
-- ~~adopt vs import~~ — no `db adopt` under an import umbrella: **adopt =
-  bind existing dir as tracked checkout** (the missing interop verb),
-  **import = touch-like one-shot lens conversion**, and **checkout = fresh
-  materialization**. Adopt reuses import as its bulk engine.
-- ~~Watch default~~ — watch is a CLI command / GUI daemon; the CLI itself
-  auto-commits the working set on every `.dtree`-related invocation
-  (jj-style pseudo-watch; `--no-commit` for scripting).
-- ~~Node-init vs checkout-init conflation~~ — `init`/`mirror` are node-level;
-  `checkout`/`adopt` are checkout-level; existing directories never belong
-  to `db init`.
-- ~~Ingest vs sync lifecycle~~ — commands auto-commit locally; remote sync
-  happens only while `db sync` (or the app) runs.
-- ~~`clone` naming~~ — retired everywhere: the verb is **`db mirror`**
-  (mirroring is the actual relationship; `clone` implies a repo-like,
-  data-first vision that is false — hydrate-through-sync is not a copy).
-- **Import cost principle** — *defaults never trigger network-expensive
-  work*: adopt tracks without converting (`--import-now` / `db import` to
-  convert); ambient incremental ingest stays (OneDrive normie reasoning);
-  per-checkout import policy configurable.
-- **Naming = checkpoint framing** — names are mutable range annotations
-  ("last N changes since the previous name"), not per-change commit
-  messages; follows the no-truncation sync posture. Adopted into FDR 003
-  §5's follow-up (see below).
-- **Default-node config** — the app global config (`app.rs` semantics) +
-  XDG config may define a default node, consulted last; no implicit
-  default.
+1. **New-file policy:** for a tracked, adopted directory, should watch import *new* files by default after initial explicit import, or require an opt-in policy? How are ignored paths previewed and changed?
+2. **Root path sources:** does the initial checkout include a `/by-id` view, and if so, only for documents in the home drawer or for all locally accessible dpathless documents? FDR 002 fixes the home-drawer selection but not this generated surface's scope.
+3. **Import destination:** when one-shot import runs outside a checkout, how does it choose a default home drawer and dpath root from its node context, and how is a user warned that a repeated import creates another logical document?
+4. **Messages and grouped history:** what metadata is written by `-m` for each affected document? Are cross-document correlation markers worth the added semantics? Do not equate interactive short IDs with durable operation identities by accident.
+5. **Detach and watch recovery:** which pending changes or local-only branches block detaching, and how are imported paths re-associated if checkout metadata is lost? These cannot be answered by matching only a content digest.
+6. **Sync process:** which commands start or control a long-running node service, and what does a one-shot sync command report when some authorized bytes remain unavailable?

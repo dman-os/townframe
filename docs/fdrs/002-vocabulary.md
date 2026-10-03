@@ -1,240 +1,58 @@
-# FDR 002: Vocabulary — Nodes, Drawers, Checkouts, and the Identity Ladder
+# FDR 002: Nodes, drawers, and checkouts
 
-**Status:** Draft. Resolved-in-review items are folded into the body; the
-remaining open calls are at the end. This document replaces the `Repo` section
-of `docs/dict.md` once ratified. Note: even the app name **daybook** is not
-final; the `db` CLI binary name is locked per review.
+**Status:** Proposed (draft accepted as the working specification; technical sections marked in-text are still settling). This document names Daybook's principal user-visible scopes and their relationships.
 
-**Old name → new name:** ~~repo~~ → **node**. The ~~home~~/~~profile~~
-proposals and the transient `.dhome`/`.dctx` dir names lost the review; the
-node's directory is **`.dnode`** (the git-dir). Everything else below is
-either retained or newly defined.
+## Why these names matter
 
----
+A Daybook node can hold many documents without presenting them as one repository to copy. Documents have their own identities and histories. Drawers gather documents for sharing and discovery. Nodes connect to other nodes and decide what to keep locally. Checkouts expose selected content to ordinary filesystem tools. None of these is another name for the whole collection of a person's data.
 
-## Context
+The same document can appear in several drawers; a drawer can be known on several nodes without every node keeping all of its bytes. One machine may host several nodes. The user interface must show what is known, accessible, and locally available without implying that all three are equivalent.
 
-The word **repo** is overloaded and provably wrong at this point:
+## The vocabulary
 
-- It implies git semantics (one shareable unit of data + history). Reality:
-  the **shareable** unit is a smaller collection (drawer, or even a single
-  doc); devices sync drawers, not "the repo"; two people's data *overlaps
-  through shared drawers* rather than being fork/cloned wholes.
-- In the codebase it labels two different things: `big_repo` (the local
-  storage + sync-node context bound at startup) and `daybook_core/repo.rs`
-  (an identity/auth context). Neither is "a repo" in any git sense.
-- It carries no identity connotation, yet the decisive startup binding is
-  exactly an identity(ish) set: which keyhive agent a sync connection uses.
+**Document.** An identified unit of content and history that can contain facets rather than correspond to one filesystem file. People normally encounter a **logical document** identified by its main document ID, with related branches presented within it. Each branch has its own underlying document ID and CRDT history; this does not make it an unrelated top-level item in the GUI or CLI. A branch is not automatically listed in every drawer containing the main document, and removing a listing does not erase the document or its other memberships.
 
-The user-facing world it must express (from the normie/GUI discussion): you
-open the app, you have a default drawer to put things in; to collaborate you
-create more drawers; GUI lists objects **grouped by identity context**; your
-own devices sync your stuff automatically, relays extend reach, and there is
-no user-account → drawer hierarchy *mandated* — hierarchy is a presentation
-choice, not a structural constraint.
+**Drawer.** An identified collection and a context for sharing. A drawer has the ID of its descriptor document; a single-document drawer may hold its own descriptor and content and later grow into a larger collection without changing identity. A document can belong to more than one drawer. The drawer's official listing, effective access to a listed document, local retention, and actual byte availability are different facts. Adding a document to a drawer neither proves that its bytes are present nor gives the drawer manager authority over that document. A child or subset is another drawer with an explicit relationship; a link alone does not grant access or require every node to know about both ends. The drawer FDR owns membership, sharing, and collection behavior.
 
-Prior art for terms: **Keyhive** (agents vs principals vs identity — see §2;
-edge names/petnames for the naming layer; Beelay for sync); **Patchwork**
-(no repo noun at all — a per-device account doc, contact docs, folders);
-**jj** (repo vs workspaces layering); Syncthing (devices + shared folders as
-first-class normie vocabulary — and its node id is exactly the mental model
-we adopt); Signal (linked devices).
+**Node.** A locally operated Daybook participant with its own public-key identity, sync and storage context, and choices about which drawers it knows or mirrors. One machine may host multiple nodes.A node is not a drawer, an account, or a complete replica of another node's data. It can know a drawer without mirroring its documents, and it can be granted access before any document or blob bytes arrive. A node's display name can be recorded in an ordinary metadata document and shown on other nodes. Names are not unique or authoritative: the node's public-key identity distinguishes it. The precise metadata facet and proof rules belong in an ADR.
 
----
+**Mirror (a drawer).** A node deliberately retains some or all of the data it is entitled to retain from a drawer. The drawer ID does not change. Mirroring is not a pristine copy and does not promise that every listed document or blob is present, current, or readable. A node's request to mirror, its authority, and fulfilled local retention must be shown separately. A second drawer publishing a selected subset has its own ID and is not merely another mirror of the same drawer. Mirroring a *node* is not the name for setting up another node.
 
-## Decision
+**Home drawer.** The initial drawer created with a new node, used as the ordinary destination for content when the user has not selected another drawer. It is a normal drawer, not an authority root for every drawer that node later discovers. Adding other drawers does not add them to the home drawer.
 
-### 1. The entity ladder
+**Checkout.** A filesystem working surface selecting Daybook content and reconciling edits. It records bindings between projected outputs and actual filesystem paths. Dpaths are one source of addresses, but checkouts may present other path sources, including `/by-id`; a checkout is not defined as the entire dpath namespace. One document may produce several files; one file is not necessarily a document. A checkout can be durable or temporary; a temporary checkout still needs state while it exists. A checkout does not imply that the node mirrors every drawer that might appear in a query. FDR 001 owns the path and file-operation expectations.
 
-```
-identity (deferred, external layer; petnames/edge-names shaped)
-  → normie words: contact / person
-  └─ keyhive agent  = authority-graph entity that can sign
-                      Document :< Stateful :< Stateless   (see §2)
-  └─ node           = a daybook sync instance bound to ONE keyhive agent;
-                      holds drawers, node metadata, local stores
-                      ├─ drawer    = shareable collection + permission
-                      │              boundary (KEEP)
-                      └─ checkout  = durable materialized surface with
-                                     bindings and transactional state
-```
+**Contact.** A user-facing representation of another person or identity for communication and sharing. A contact is not assumed to be one node, one device, one Keyhive key, or one drawer. How people and keys are linked is separate identity work.
 
-### 2. The node (renames ~~repo~~)
+**Relay account.** A business or sponsorship relationship with a relay service, distinct from a node identity or a drawer. A relay request, granted retention authority, relay acceptance under its policy, delivery of bytes, and durable retention are separate states. A relay may offer services to several nodes; it does not become the owner of their drawers by doing so.
 
-The **node** is the thing we used to call the repo: one identity context's
-sync instance.
+**Sibling nodes (name only).** Nodes intentionally associated through a product-level setup flow, each retaining its own public-key identity. They may share selected configuration documents or drawer access. The relationship, authorization sequence, sharing defaults, and user flow require a separate FDR and ADR; this vocabulary does not infer siblinghood merely from access to the same document and does not call one node the other's clone.
 
-- **A machine may run multiple nodes**; a node syncs *through a single
-  keyhive agent* (its own). Every node — including the node on your own
-  second device — **participates in sync with its own identity, using the
-  same machinery as cross-user syncing**. There is no special "self-sync"
-  path.
-- **Adding a device = mirroring a node.** A new node is created on the new
-  device and mirrors an existing node's content **through sync, not by
-  copying**: the new node mints its own principal and is *admitted* into the
-  relevant drawer/group agents. Private keys are **never moved** between
-  nodes. Copying a `.dnode` directory does *not* work and must not be a
-  supported migration: local stores are encrypted at rest, content keys live
-  in the OS keyring, and signing keys are device-bound. Everything needed to
-  re-materialize arrives via the keyhive graph (capability admission) and
-  normal sync.
-- **node metadata** (formerly "meta drawer") is the replicated core state
-  every node mirrors: drawer memberships, the node registry ("nodes that
-  have these drawers", with relay hints — relays are just long-lived nodes),
-  and the my-devices list. It is user-invisible in v1 but load-bearing for
-  hydration; its contents spec lands in FDR 004 and the reconciliation ADR 011.
-- The node is **not user-facing-named**: nobody names their node; normie UX
-  says "mirror your node" or just "add device". This is deliberate — techie
-  word, normie flow.
+## Creating and finding a node
 
-### 3. Directory surface names
+`db init` creates a node, its home drawer, and a root checkout of **that home drawer only**. It does not make a checkout of all content the node might later know. The root checkout offers a useful place to create and import files without silently expanding when the node joins or mirrors another drawer. A GUI may offer the same starting experience without using CLI commands.
 
-- **`.dnode`** — the **home of a node**: the node's local directory holding
-  secrets, local stores (automerge/blob/sqlite), node-metadata cache, and
-  sync config. The "git-dir" of the layout; the *home-of-a-node* reading is
-  why this beats `.dctx`, and `$HOME` is the borrowed intuition. **Nodes
-  live wherever the user puts them** — there is no registry-only location:
-  `db init` creates a fresh named directory **in the cwd** containing the
-  node's `.dnode` (plus the root checkout's `.dtree`), the GUI defaults to
-  creating them under `~/Documents/`, and an in-tree `.dnode` marks a node
-  rooted at that directory. Which node a CLI invocation talks to is
-  **context-dependent** (cwd resolution; see §7); an app-side database may
-  additionally list/track all local nodes for convenience (extra, not
-  required).
-- **`.dtree`** — a checkout's local state (bindings, transactional store) per
-  the pauperfuse checkout model; present in *any* checkout directory,
-  including adopted ones; records which node it belongs to. `.dtree`s are
-  checked out from `.dnode`s.
-- Nesting: `.dtree` inside materialized subtrees is not re-adopted; a
-  `.dnode` nested inside an adopted tree must be refused or re-bound (FDR
-  001 §5; pauperfuse ADR 010/011 detail). A `.dnode` is always more than a
-  folder of files (keyring-bound material) and is never treated as data to
-  copy.
+A node's local state is associated with `.dnode`; a checkout's local bindings and transactional state live with `.dtree`. A checkout identifies its node. These names are local layout/context markers, not Daybook data types or dpath namespaces. A node can be placed wherever its operator chooses; a local application may also maintain a list of nodes to help navigate them. The exact store format, secrets, portability, and recovery rules belong in technical documents. Copying a directory is not presented as the ordinary way to authorize another node: a new node needs its own identity and access arrangements. Nested `.dnode` and `.dtree` surfaces must not be mistaken for user files during import.
 
-### 4. Drawers, checkouts, contacts
+The CLI is contextual rather than requiring a general login command. When run in a checkout, it finds the nearest `.dtree` and its node; otherwise it looks for a nearby `.dnode`, then an explicitly configured node or a configured default, and otherwise reports how to choose a context. A status or diagnostic command should state which node and checkout it is examining. Local context selection must not grant drawer access on its own. Relay-account authentication for a relay service is separate from choosing a local node. The exact configuration variable and precedence can be specified with the CLI FDR; changing context must be visible rather than silently choosing the wrong node.
 
-- **drawer** (kept): the share unit, the permission surface, the thing the
-  GUI presents and the CLI operates on. `db init` creates a node plus its
-  **root drawer** (default drawer; the normie's first stop).
-- **checkout** (kept; **~~view~~ removed per review**): the only
-  materialization surface name. Stateless projections (wasi runs, FUSE
-  mounts, `db export`) are just **ephemeral checkouts** — same machinery, no
-  durable bindings.
-- **contact** (kept): the user-facing card for *someone else's* identity
-  (name/avatar/color — Patchwork's contact-doc precedent). Owns the future
-  addressable-identity layer slot; **petnames/edge-names** (Keyhive's
-  `edge_names` design) are the obvious substrate when it lands.
+The CLI need not contact peers merely to perform local edits; another process or an explicitly started sync service handles network communication. Running that service does not make every known drawer fully mirrored. Read-only CLI commands must not publish edits merely because they inspect a checkout.
 
-### 5. Keyhive alignment: agent vs principal (per keyhive design)
+## Setting up other nodes
 
-Adopted verbatim from Keyhive's `group_membership` design:
+A new node has its own identity and can be granted access to drawers through the same authority machinery used for collaboration. Nodes under the same person's control can participate as siblings; this is not the same operation as mirroring one drawer and does not mean they share one identity, all local policies, or every checkout. The sibling-node FDR will define the setup flow and what is shared. This FDR neither assigns a CLI command to that flow nor prescribes a special self-sync channel.
 
-- **Agent** = an entity in the authority graph capable of receiving,
-  delegating, and exercising authority; keyed by a root key pair. Subtyping:
-  **`Document :< Stateful :< Stateless`**.
-  - **Documents and groups ARE agents** (document agents carry content ops +
-    auth ops; groups are stateful agents). So "principal also includes docs
-    and groups?" resolves as: the graph entities are all agents; drawers and
-    docs will be document agents.
-  - **Stateless agents** are bare pubkeys — device keys, hardware keys,
-    passkeys; the leaf signers. Not rotatable; device keysets, rotation, and
-    multi-device support are managed by **stateful** agents.
-- **principal** (the notebook's word) = the cryptographic authority behind
-  agents. Daybook docs use **agent** when talking about the graph, and keep
-  "principal" only where ADR 006 established it (recovery principal, repo
-  agents). **device** stays the normie word for the stateless agent running
-  on one machine.
-- A daybook **node** syncs through **one** keyhive agent; identity (the
-  real-world binding) remains external, and addressable identity stays
-  deferred with petname-style naming as the eventual layer.
+A newly authorized node may learn a drawer ID and metadata before it receives its roster, documents, or blobs. It can choose to keep only some content. A provider or relay hint tells it where to ask, not that the provider has the latest version or retained bytes. A node's configuration can itself be stored in ordinary documents and shared deliberately; there is no required, universally mirrored special node-metadata substrate. A shared list of known drawers, one node's retention settings, and another node's chosen settings are different information and must not be treated as one policy.
 
-### 6. Relay account
+## Technical terms at the boundary
 
-The business/sponsorship relation at a relay (ADR 05) correlating a set of
-agents. Distinct from node and identity; a node may use several relay
-accounts, and one relay account may serve several nodes. Relays know agents
-and sponsorship, not nodes or drawers by name.
+Keyhive provides authority over documents and groups. Its agents, keys, graph edges, and access levels are technical primitives, not synonyms for node, person, drawer, or contact. Cabinet presents drawer and document operations while evaluating authority and local policy. Effective access to one document can come through more than one path and can differ from the access suggested by a drawer label. The authority ADRs define the underlying Keyhive model; this FDR does not require a user to understand its agent type hierarchy to choose a drawer or checkout.
 
-### 7. CLI context model (no logins)
+The codebase may continue to contain internal crates or interfaces named `big_repo` or `Repo`; those identifiers do not redefine the user-facing vocabulary. Renaming implementation interfaces is separate migration work.
 
-- The CLI has **no login verb**; it is a contextual tool.
-- Context resolution: nearest ancestor directory with `.dtree` (which names
-  its node) or `.dnode` → `DAYBOOK_NODE` env → app-configured default (app
-  global config / XDG config) → error with a hint. The CLI is
-  context-driven; a default node exists only through explicit configuration,
-  never implicitly.
-- `db status`/`doctor`-style introspection prints the resolved context
-  (node, agent in use, drawers in scope, checkout state).
-- **Sync server**: apps start one per node by default. From the CLI it must
-  be started explicitly (`db sync serve` — foreground, daemonized, or as a
-  systemd unit). This is the *only* CLI surface where "standing a sync node
-  as an identity" appears explicitly.
+## Questions for later designs
 
-### 8. New-device flow = mirroring (normie-first)
-
-1. Install → **create node** (mint device agent, root drawer, `.dnode`) or
-   **mirror an existing node**: sign in to a relay account (hydrate node
-   metadata; ADR 06 recovery on total loss) *or* p2p-link from an existing
-   device (QR/link; the old device **admits the new node's agent** into the
-   drawer group graphs — no secret bundle is transferred).
-2. Hydrate node metadata through sync: drawer list, node registry (relays
-   *and* my other devices), my-devices list → direct device-to-device p2p
-   sync is **first-class, on by default** (Syncthing-shaped; for relayless
-   users it is the entire sync story, and it starts working the moment both
-   devices are on — both nodes participate with their own agents over the
-   same machinery as cross-user sync).
-3. Checkouts rebind on read; content syncs drawer-by-drawer by object
-   identity (FDR 001 presentation-only divergence rules apply).
-
-The CLI never *requires* a relay: nodes and device sync work fully p2p.
-
----
-
-## Resolved in this review (recorded so the history is explicit)
-
-- ~~repo~~ → **node** (concept); the node's local directory is **`.dnode`**
-  ("the home of a node"), replacing transient name candidates (`.dhome`,
-  `.dctx`). Normie phrasing: "mirror your node". `home` does not survive as
-  a concept noun — it is filesystem surface, nothing more.
-- ~~view~~ — removed; ephemeral checkouts cover it.
-- **meta drawer** → **node metadata** (replicated core state).
-- Agent-vs-principal settled from Keyhive's design: documents and groups are
-  agents (`Document :< Stateful :< Stateless`); device keys are stateless
-  agents; "principal" survives only as ADR 006 vocabulary.
-- Adding a device never copies secrets; `.dnode` is keyring-bound,
-  encrypted-at-rest material that cannot be copy-pasted between nodes.
-- `db` stays the CLI binary name (daybook itself is still an open name).
-
-## Open calls
-
-1. **Node naming** — nodes created from the GUI (under `~/Documents/`) will
-   need user-facing names; device names as the default is the current idea.
-   Does the CLI's `db init` also take a name (defaulting to the created
-   directory's name), and do node *display* names live in node metadata
-   facets? _Blocks: FDR 004 CLI._
-
-### Resolved in this review
-
-- ~~XDG node layout~~ — **nodes are created anywhere**; the in-tree `.dnode`
-  *is* the node (that's the point of the name). CLI `db init` creates a new
-  dir in the pwd for it; the GUI creates nodes under `~/Documents/`. This
-  removes the default-node-selection problem for CLI usage: **the node is
-  context-dependent** (nearest `.dtree`/`.dnode` in cwd ancestry, then
-  `DAYBOOK_NODE`), and a default/registration layer is an app-side extra
-  (app db), not a CLI requirement.
-- ~~Ephemeral-checkout plumbing~~ — **every checkout, durable or ephemeral,
-  owns its own state**; that is exactly what `.dtree` is for. Ephemeral
-  checkouts get throwaway `.dtree`s and no special plumbing.
-
-## Backlog items landing in other documents
-
-- `big_repo` → **node store** (or node context) and `daybook_core`'s Repo
-  rename: **code refactor**, not blockable by FDRs; do it in the same pass as
-  sketch cleanup so vocabulary stays honest.
-- Node metadata contents spec (drawer memberships, node registry, device
-  list, relay hints): FDR 004 (workspace CLI) / ADR 011 territory.
-- Recovery/add-device details: ADR 006 stands; the mirroring flow above
-  defers to it for total-loss cases.
-- Tree/store/adapter naming for pauperfuse internals: ADR 010.
-- Addressable identity and petnames: future FDR; contact cards (§4) reserve
-  the slot.
+- The sibling-node FDR/ADR must specify relationship evidence, authorization, configuration sharing, and recovery without collapsing node identities. CLI spelling remains open.
+- The CLI FDR must settle the exact context override, node-directory creation and display-name prompts, and whether different checkout specs select one drawer, several drawers, or other path sources.
+- An ADR must specify the node metadata document, update authority, and which information is shareable; another must pin the portability and recovery guarantees of `.dnode` and `.dtree`.
+- Drawer/provider discovery, shared known lists, per-node mirror policy, and effective retention follow the drawer FDR/ADR; none makes every accessible byte automatically available.

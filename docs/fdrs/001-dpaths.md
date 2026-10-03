@@ -1,477 +1,126 @@
-# FDR 001: Dpaths — Paths, Tags, and Filesystem Projection of Daybook Docs
+# FDR 001: Dpaths and filesystem checkouts
 
-**Status:** Draft. Resolved-in-review decisions are folded into the body;
-remaining open questions are collected in [Open Questions](#open-questions)
-and tagged inline as `Q<n>`.
+**Status:** Proposed (draft accepted as the working specification; technical sections marked in-text are still settling). This document defines intended user-facing behavior; collision naming and lens selection still need technical specifications.
 
-Companion documents (planned): FDR 002 (vocabulary — nodes, drawers,
-checkouts), FDR 003 (version-control primitives across CLI and GUI), FDR 004
-(workspace CLI experience), ADR 010+ (pauperfuse virtual tree store,
-checkouts & reconciliation, lenses, blob strategy).
-ADR 003 and ADR 001 cover cipherblobs and blob inventory/pins respectively;
-this document is the logical addressing layer those physical layers slot
-under. Note: throughout, the library is called **pauperfuse** (full name).
+## Why paths matter
 
----
+This functional design describes how people address Daybook content with dpaths and work with it in filesystem checkouts. It covers the meaning of claims, what ordinary file operations should do, and the limits of inferring intent from a filesystem snapshot. It does not define storage schemas or the reconciliation algorithm; the ADRs do that.
 
-## Context
+Daybook documents have stable identities and CRDT histories, but they are not files. A document contains facets; a branch is a separate document with its own identity and history. A document might represent one note, many source files, or metadata for a photograph. People and existing tools instead work with paths: they edit notes in a familiar directory, import an Obsidian vault, browse DCIM, or use a filesystem from a sandbox. Daybook therefore needs both a way to address content with path-like labels and a way to work with it through ordinary files.
 
-Daybook documents live in a CRDT-based node with **no global arbiter**:
+These are different concerns. A **dpath** is a claim made in Daybook. A **checkout** selects content, gives it filesystem paths, records what it rendered, and reconciles later filesystem edits. The Daybook side of a checkout can also provide paths by other means: `/by-id` is not a collection of dpath claims. Other path sources can be added without redefining dpaths. Generic filesystem/tree reconciliation does not need to understand documents, facets, or lenses; its Daybook backend does.
 
-- Documents are identified by unique doc ids, but the docs themselves are made
-  of unordered facets. Two replicas can concurrently assign _any_ metadata to a
-  doc; the CRDT guarantees convergence, not uniqueness.
-- There is no write gate that could enforce "only one document may live at
-  `/notes/foo.md`". Any peer may write anything at any time, including
-  concurrently with another peer.
-- Causal consistency means path-assignment facts arrive in arbitrary order and
-  may be temporarily invisible on a partitioned device.
+!> this FDR is introducing FDRs because you're replacing the FDR replacement ADR! but you're just jumping into the fucking discussion!
 
-Yet every downstream consumer of daybook — the CLI, an Obsidian vault import, a
-DCIM photo folder, a wasi sandbox, an LLM agent, mobile app file pickers —
-speaks the language of **paths**. The path is the universal interop surface
-("interop is the main usecase"), so we need a path system that:
+The checkout is for interoperation, not a demand that every document look like one file or that every legal dpath has the same literal spelling on every filesystem. It must favor stable, usable paths over aesthetically uniform collision results.
 
-1. survives concurrency without needing uniqueness;
-2. is user-facing (non-technical users, mobile apps, GUI and CLI alike);
-3. works as a tagging/filtering system (e.g. "everything under `/inbox`");
-4. maps deterministically onto real filesystems;
-5. stays out of pauperfuse's way: pauperfuse is daybook-object-model-agnostic,
-   so dpaths must be expressible as ordinary opaque object references to it.
+## Dpath claims
 
-Prior art consulted: Ink & Switch **Patchwork** — its drafts plugin
-(`patchwork-base/drafts`) demonstrates branch bookkeeping as clone-docs + heads
-(`clonedAt`/`mergedAt`), frozen checkouts as url→heads maps (`DraftCheckpoint`),
-and cross-doc derived timeline caches with heads cursors
-(`ChangeGroupDoc.computedThrough`). That prior art informs FDR 003; dpaths here
-are daybook's analog of its _pointers_: stable, app-agnostic addresses of
-content.
+A dpath is a UTF-8 path-shaped label beginning with `/`. Segments are separated by single `/` characters, cannot be empty, and cannot be `.` or `..`. The initial `/` is part of the dpath; no additional leading or trailing separator is allowed. Daybook compares the UTF-8 bytes exactly: it does not fold case or normalize Unicode. It imposes no uniqueness constraint. A doc can claim `/inbox/hello.md` and `/projects/daybook/hello.md`; another doc can claim either one. `/a/b` is legal without a claim on `/a`: a checkout may make `/a` an implicit directory.
 
----
+A dpath is both an address and a useful prefix-filtering label. Selecting `/inbox/**` can provide an inbox; selecting `/tagged/urgent/**` can serve a tagging convention. Such a label is still a path claim, however: selecting it for projection may produce a file or collide with another claim. Other, non-path tag facets remain possible. Daybook reserves no dpath subtree, including `/trash` and `/by-id`. Most checkouts can exclude `/trash/**` by default without making `/trash` a special Daybook data type.
 
-## Decision
+A local filesystem may compare names differently or reject names Daybook accepts. The checkout must account for case-insensitive names, Unicode normalization, and platform-forbidden names without changing the underlying dpath. Whether and how an arbitrary non-UTF-8 filesystem filename can be imported into a UTF-8 dpath is **not decided** here; an import must not silently replace an unrepresentable name with a different identity.
 
-### 1. Dpaths are a label set with path syntax
+### Facet representation
 
-A dpath is a UTF-8 string that looks like a Unix path:
+A dpath is declared by a facet in the **claiming document**. The facet tag is `org.example.daybook.dpath`, and its key ID is the entire dpath, including its leading slash. Thus the key for `/photos/beach.jpg` is `org.example.daybook.dpath//photos/beach.jpg`. The existing facet-reference grammar can address this facet: `db+facet:///<doc-id>/org.example.daybook.dpath//photos/beach.jpg`. Everything after the facet tag is its ID; the double slash is intentional. This FDR does not extend the URL grammar to fields within facets or specify dpath URLs.
 
-```
-/inbox/hello.md
-/DCIM/2026/06/IMG_1234.jpg
-/projects/daybook/design.md
-```
-
-but it is a **label**, not a filesystem position. Specifically:
-
-- **No uniqueness constraint.** Any number of documents (or facets) may claim
-  the same dpath, concurrently and from different devices.
-- Labels form a **derived tree**. `/a/b` may exist without `/a`; when it does,
-  `/a` materializes as a bare (implicit) directory.
-- A dpath is simultaneously a path-like address and a tag. Because the namespace
-  is a label set, "tag assignment" is the degenerate case: a tag is just a dpath
-  that happens to have no file under it (see [Tags](#tags)). No separate tag
-  mechanism is needed for v1.
-
-Syntax rules:
-
-- Segments are separated by a single `/`; no empty segments (no `//`, no leading
-  or trailing slash **inside** the dpath _value_).
-- Segments MUST NOT be `.` or `..`.
-- Segments are UTF-8 strings. No percent-encoding inside daybook.
-- **Comparison is byte-exact** (no case folding, no Unicode normalization — see
-  note on normalization below). Everything downstream treats dpath strings as
-  opaque UTF-8 byte sequences.
-- **No reserved namespaces in daybook.** Dpath labels are not restricted. The
-  special surfaces a checkout creates (`/by-id`, the checkout metadata
-  directory, etc.) are instead addressed at the **materialization layer**, by
-  collision resolution: a dpath claim on a reserved name loses its literal real
-  path to the reserved surface and spills into the suffix rules, e.g.
-  `/by-id.d/…` (see §5). Nothing in daybook itself forbids or rewrites such
-  claims.
-- **Per-platform materialization adjustments are in scope.** Case-insensitive
-  filesystems and NFC/NFD normalization (macOS is NFD) are materializer
-  concerns: daybook stays byte-exact UTF-8, and the FS materializer adapts
-  explicitly per platform, consistently. The materialized tree must remain
-  honestly usable *as a filesystem* — copyable, deletable, consumable by any
-  other program (a user deletes a file, it is gone from disk; another app owns
-  the directory, daybook coexists). That interop requirement is why the
-  materializer layer — not the dpath namespace — carries normalization and
-  case-degradation behavior.
-
-### 2. The dpath facet
-
-A dpath is declared by a facet in the claiming document. The facet key is the
-dpath tag followed by the dpath itself, so its id begins with the dpath's own
-`/` — `org.example.daybook.dpath//photos/beach.jpg`. A facet-ref URL carries
-that faithfully: the key id is *everything after the tag*, slashes and all
-(`db+facet:///<doc-id>/org.example.daybook.dpath//photos/beach.jpg`).
-Addressing a *field inside* a facet (`…/<facet-id>/<field>`) is not expressible
-yet and is left to a later URL design.
+A claim with no explicit targets addresses the claiming document's user-visible content. Its Body facet identifies the primary content for lens selection; other user-visible facets may contribute according to that lens. A selective claim lists facets to project. References can specify heads, including the existing empty-heads same-transaction convention; the URL and head rules are defined by the facet-reference design, not invented here. For example:
 
 ```jsonc
 {
-  // Full-doc claim (document IS the thing at this path):
-  "org.example.daybook.dpath//inbox/hello.md": {
-    // empty object = whole-document reference is implied
-  },
-
-  // Selective claim (only these facets materialize at this path):
+  "org.example.daybook.dpath//inbox/hello.md": {},
   "org.example.daybook.dpath//photos/beach.jpg": {
     "targets": [
       { "facetRef": "db+facet:///self/org.example.daybook.blob/main" },
-      {
-        "facetRef": "db+facet:///self/org.example.daybook.imagemetadata/main",
-        "refHeads": []
-      }
+      { "facetRef": "db+facet:///self/org.example.daybook.imagemetadata/main", "refHeads": [] }
     ]
   },
-
-  // Cross-doc claim: assign a dpath to a doc we may not have write
-  // access to (read-only adoption). The dpath facet lives in OUR doc;
-  // the target may be any doc in the node.
   "org.example.daybook.dpath//DCIM/other.jpg": {
-    "facetRef": "db+facet:///<doc-id>/org.example.daybook.blob/main",
+    "facetRef": "db+facet:///<other-doc-id>/org.example.daybook.blob/main",
     "refHeads": ["<hash>"]
   }
 }
 ```
 
-Decisions locked:
+The last claim lives in a document the author can edit and points at another document, which the author need not control. That makes read-only addressing possible; it does not grant access to the target, ensure the target exists locally, or make its bytes available. The claimant and target identities must remain distinct in status and history. No one editable output may silently combine several document histories: the precise admissible scope of cross-document references and read-only projections needs a lens contract before implementation.
 
-- **Key-id = the dpath string itself** (with a leading `/` to disambiguate from
-  other facet key-ids, since real dpaths always start with `/`).
-  - This gives **one dpath facet per exact dpath string per doc**. The
-    consequence the design leans on: concurrent assignment of the same dpath to
-    the same doc converges into a single merged facet rather than creating
-    duplicates. This also makes **import idempotent by construction**: importing
-    the same camera folder on two devices concurrently produces
-    map-key-identical facets that merge cleanly.
-- **Multiple dpaths per document**: allowed and first-class. A photo can live at
-  `/DCIM/2026/06/IMG_1.jpg` and `/favorites/IMG_1.jpg` simultaneously. Each is
-  an independent facet under its own key; adding one never disturbs the others.
-- **Default scope = whole document.** If the facet value carries no targets (or
-  no value at all), the lens set materializes every user-visible facet of the
-  doc at that path.
-- **Selective scope = target list.** Each entry references facets by the
-  existing `db+facet` URL machinery, including the empty-heads same-transaction
-  convention from dict.md.
-- **Cross-doc targets are allowed.** A dpath facet may reference facets of _any_
-  document. This deliberately enables "quick and dirty" assignment of dpaths to
-  docs the assigning replica cannot write to. The cost: path resolvers must
-  model **"target not found"** as a normal state (see Materialization states).
-  Expected to be rare; kept because it makes read-only adoption trivial.
-- **Dpath facets are plain facets.** They receive the same sync, merge,
-  conflict, and history treatment as everything else, and are themselves
-  addressable in the facet-reference graph.
-- **The dpath facet stays a pure address.** No lens hints, no mime expectations,
-  no lens parameters ride inside it. Lens customization, when needed, is a
-  **separate facet** that the lens layer resolves against the dpath — see
-  [Lens interaction](#9-lens-interaction-pointer-to-adr-012) and ADR 012.
+The facet key permits one claim slot per exact dpath **within the same document**. Repeated assignment there converges on that slot; it does not unify two independently created documents that happen to import the same path. Multiple claims on one document are independent facets; removing one does not erase the others. Dpath facets are ordinary document facets and have ordinary history. A branch document does not inherit drawer membership or dpath claims merely because it records an origin; copied or new claims have to be accounted for explicitly.
 
-### 3. Materialization: the dpath tree maps onto a real FS deterministically
+A dpath claim describes what is addressed, not how to encode it. Lens selection may consider an extension, blob MIME information, and separate customization facets; no lens ID, MIME assertion, or rendering parameters are put into the dpath value solely to make projection work.
 
-The mapping from dpath labels to concrete filesystem paths must be
-**deterministic as a function of (claimant set, checkout binding state)** — a
-checkout can always be rebuilt and reconciled from materialized content *plus its
-recorded bindings* (three-way detection needs reproducibility, scoped to the
-checkout that owns the binding state). Fresh checkouts with no binding history
-converge across devices via shared tiebreakers — see [Binding
-stability](#binding-stability) below.
+## Checkout selection and path sources
 
-Three rules define the mapping. They compose by recursion: apply the rules
-segment by segment down each materialized directory.
+A checkout chooses what content to expose and where it will appear. Dpath-prefix queries are one useful selection mechanism, not the only possible source of paths. The `/by-id` surface supplies a full-JSON view of dpathless documents for consumers such as a WASI filesystem; these entries are checkout-generated and are not dpath claims. Documents with dpaths do not also appear in `/by-id` in the existing v1 rule. The checkout state directory (`.dtree`) and, when present, node state (`.dnode`) are also checkout-owned surfaces. Their literal names win over user claims *within that checkout*; those claims remain valid in Daybook and must receive other usable materialized names if selected.
 
-**Rule 1 — many-claimants (two or more objects claim the same dpath).** The
-conflicting dpath materializes as a directory. Each claimant gets a
-deterministically-unique entry name inside it. The unique name is derived from
-the claimant's object identity (doc id, plus facet key-id for selective claims —
-naming scheme is open: Q1). Two notes both claiming `/inbox/hello.md`
-materialize as `inbox/hello.md/<name-a>.<ext>` and `inbox/hello.md/<name-b>.<ext>`;
-the dpath's extension is preserved in the derived names (see Q1).
+A checkout can filter claims by a query or prefix. It may choose to hide `/trash/**` without rewriting or forbidding those claims. A selected but inaccessible document, missing blob, missing target facet, or unrenderable facet is not silently treated as an empty ordinary file. The CLI or application reports which content is pending or unavailable; missing blob bytes are not fabricated as filesystem stubs. The checkout must not treat its own generated surfaces or nested checkout metadata inside adopted directories as new files to re-import recursively.
 
-**Rule 2 — file/dir collision (one object claims dpath `P` as a file, another
-object's children live under `P`).** The file keeps the accurate name `P`; the
-divergent children materialize under `P + .d` (e.g. file at `/a`, file at
-`/a/b` → `/a` and `/a.d/b`).
+A lens maps selected content to an **entry set**. One claim may produce a note plus sidecars or a thread plus attachments, rather than exactly one file. Internal names in that set are a lens concern; collisions between outputs from different claims are a checkout naming concern. The full-document JSON view is a useful baseline lens, while text and blob representations are the basic import/render paths. Multiple possible lenses and lens-customization facets require an explicit selection policy, not a promise that extensions alone always choose correctly. This FDR does not declare a file whose editable contents depend on several documents to be supported.
 
-**Rule 3 — `.d` stacking (the total order).** Rule 2 can itself produce a new
-claimant collision (a third object claims the literal dpath `/a.d`). Conflicts
-resurface as more suffixes: the mapping keeps appending `.d` until every
-claimant has a unique real path; **the claimant with the most `.d` suffixes
-loses its name first** — concretely, the real-FS path `/a.d` is awarded to the
-_collision directory_ of `/a`'s rule-2 spill, and the object claiming literal
-dpath `/a.d` is demoted to a deeper suffixed name. The invariant to hold is:
-the procedure terminates and is order-independent (Q2: proof + worked examples;
-Appendix A).
+## Bindings and collisions
 
-Two consequences worth restating because they are load-bearing:
+A **binding** is the checkout's recorded association between a projected output and a real path. The dpath is an address in Daybook; the binding is local correspondence. This history is durable checkout state, not a cache whose loss can always be healed by rescanning the current tree. Once an output owns a path, the arrival of another claimant does not turn the incumbent's file into a directory or rename it. The newcomer takes a distinct name. A checkout with different prior bindings may choose a different clean-name winner; this is presentation divergence, not divergence in document identity or content.
 
-- **Prefix-only paths exist.** `/a/b` may be claimed with no claimant for `/a`;
-  the materialized tree contains a bare `a/` directory.
-- **No rename atomicity.** Moving an object = adding a new dpath facet and
-  (separately) deleting the old one. Between the two, the object materializes in
-  _both_ places. The checkout's reconciliation layer (FDR 002/ADR 011) may
-  choose to collapse add+remove of an identical object into a rename when both
-  arrive in one detected change, but the CRDT layer provides no such atomicity
-  and nothing may assume it.
+A fresh checkout allocates names from the complete claim set it currently knows, not from the order in which a scan happens to visit entries. Checkout-owned surfaces take their literal names first. Literal dpath claims take precedence over newly derived spill directories, while competing literal claimants use a stable identity-based tie-breaker; the exact claimant ordering and derived-name spelling belong in the naming ADR. Once recorded, a binding is sticky. A later claim cannot evict it, even if allocating the now-complete set from scratch would have produced different names. Different arrival histories may therefore produce different local names without changing document identity.
 
-#### Binding stability
+At least these collision classes must work together:
 
-Path stability over time — the interop property ("the file at this path today is
-at this path tomorrow") — is a per-checkout property, and bindings are sticky:
+| Selected content | Required user-facing behavior |
+| --- | --- |
+| A alone claims `/inbox/hello.md` | Expose A at `/inbox/hello.md` when the filesystem permits it. |
+| A is bound at `/inbox/hello.md`; B later claims it | Keep A there; expose B under a distinct derived name, preserving a useful extension where applicable. Do not replace A with a directory. |
+| A is a file at `/a`; another claim needs `/a/b` | Preserve A's file; place the descendant under a distinct usable directory, such as `/a.d/b` if that name is free. |
+| A claims `/a.d` but nobody needs descendants under a file at `/a` | Do **not** invent a spill: A may use `/a.d`. |
+| Both `/a` as a file and `/a/b` need a spill, while another claimant owns `/a.d` | Preserve existing bindings; resolve the spill/literal-name collision without losing either claimant. Exact suffix iteration is not fixed here. |
+| Fresh checkout sees `/a` (file), `/a.d` (file), and `/a/b` together | Give the literal files `/a` and `/a.d`; use a distinct `.d`-marked directory, such as `/a.d.d/b`, for the child. The scan order must not change this allocation. |
+| Checkout has already bound `/a/b` under `/a.d/b`; D later claims literal `/a.d` | Keep the existing `/a.d/` directory; give D a distinct file name. A later claim does not reallocate earlier bindings. |
+| A claims `/by-id/x` in a checkout with `/by-id` | Keep `/by-id` for the checkout surface and give A a distinct real path; do not prohibit its Daybook claim. |
+| Two names are distinct in Daybook but equal on the target filesystem | Preserve established bindings and distinguish the names on disk or report that safe representation is unavailable. |
 
-- **A materialized binding is never rewritten.** Once a claimant is bound to a
-  real path in a checkout, later arrivals (lexicographically smaller,
-  earlier-dated, whatever) must NOT rename it. New claimants take the clean name
-  only if it is free; otherwise they follow the suffix rules. Deletion of the
-  current holder promotes the next claimant into the path — the one unavoidable
-  churn event, caused by an actual delete.
-- **Tiebreaker chain for assigning a _new_ binding:**
+The old rule that made *every* many-claimant dpath into a directory contradicts stable bindings and is rejected. The example `A → /a; D → /a.d` alone is not a file/directory collision. `.d` is the recognizable preferred marker for a directory spilled from a file/descendant collision, not a reserved Daybook suffix: literal `.d` claims remain valid, and a lens may deliberately produce a directory, including an empty one. Spill directories are checkout outputs for displaced children, not extra claims made by the file at their original path. Stacking `.d` is a candidate when a spill name is already occupied; its interactions with literal suffixes, lens outputs, and platform normalization need a terminating algorithm in an ADR. The FDR guarantees no silent loss, deterministic initial allocation over the known set, and no later-arrival rename of incumbents—not one universal name independent of arrival history. If the clean-name incumbent disappears, others keep their existing derived paths until explicitly rebound.
 
-  1. already bound in this checkout → keep (stickiness; effectively
-     first-come-first-served for the checkout);
-  2. dpath-assignment timestamp (the dpath facet's change metadata /
-     `dmeta.createdAt` — shared state, so fresh checkouts on any device agree;
-     clock skew only degrades intuition, never correctness — every replica
-     computes the same function of the same bytes);
-  3. object id, lexicographic (final fallback).
+## Working with files
 
-- **Cross-device divergence is presentation-only.** Two checkouts may bind the
-  same dpath's claimants differently (different stickiness histories, clock
-  skew, holder deletions at different times). Content never flows through
-  filesystem paths: edits sync by object identity and dedupe by digest.
-  Documented consequence: rsync-ing the raw tree between devices can observe
-  renames that daybook sync itself never performs.
-- **Checkout specs may pin the policy** (default: sticky + timestamp) — e.g. an
-  Obsidian-vault checkout may forbid clean-name stealing entirely, a diff view
-  may sort purely lexicographically. One knob, narrow first; per-projection rule
-  DSLs are explicitly out of scope for v1.
+A filesystem scan observes a state, not necessarily the sequence of operations that produced it. The Daybook backend uses recorded output bindings and last-rendered document heads to interpret changes; the generic tree and filesystem backend do not need to know Daybook IDs. Better filesystem move heuristics may improve recognition later without making inode identity part of a document or dpath.
 
-### 4. Conflicts are opinions, not errors
+| User action | Checkout expectation |
+| --- | --- |
+| Edit a rendered file | Send its edit to the owning lens, using the version that produced the previous render as its base. Do not silently overwrite unreported local bytes with a remote update. |
+| Create a file | Import using an applicable lens, with basic text or blob handling as the fallback rather than silently ignoring the file. A specialized lens failure must not discard the source bytes. |
+| Move a rendered file | If its origin can be identified, retain its document identity and update its address through the Daybook/lens operation. A filesystem move is not evidence that two documents are one. |
+| Remove one file from a multi-file output | Deliver the removal to that output's lens. It can update the owning document if the edit is representable; it cannot silently delete the whole document. |
+| Remove the sole output of a document | Interpret removal of that projection/claim; do not automatically delete the document from the node. |
+| Remove A's file at `x` and move B's from `y` to `x` | If observations distinguish the operations, remove A's relevant output and move B's claim, even when they belong to different documents. The final name `x` alone does not make B an edit to A. |
+| A remote document update arrives during local edits | Keep the local work safe and interpret it against the render base; document acceptance and semantic bounce belong below the checkout. |
 
-Automerge can merge anything the JSON schema permits — including values whose
-_combination_ is semantically broken or surprising. Per the project's
-error-handling philosophy, we do **not** gate merges. Adopted rule (agreed in
-design discussion):
+When two identical files and their observed metadata leave the history ambiguous, **the existing binding at the path wins**. The system may therefore interpret a real move as a deletion. It must not claim perfect move detection from snapshots or change document ownership just because two hashes match. The CLI needs to show consequential ambiguity and allow deliberate correction of correspondence; precise controls belong in the CLI FDR.
 
-- A CRDT merge always proceeds. If the merged facet state is semantically wrong
-  (two conflicting values automerge keeps as a conflict, a shape a lens can't
-  parse, a broken intra-doc reference), the **facet is flagged as in-conflict
-  and the document keeps moving** — other facets remain fully usable, exactly
-  like jj keeps conflicts inside working-copy content without blocking other
-  operations.
-- The conflict is _an opinion about the data, not a low-level error_. The
-  materializer renders conflicted state in-place (conflict markers for text
-  lenses, e.g. `<<<`/`>>>` blocks in markdown, per-lens), and the CLI offers
-  adjustment tools to repair. Resolution writes new changes; it is never a
-  special protocol event.
-- For dpath _assignment_ specifically: the CLI's reconciliation resolves
-  claimant collisions deterministically per
-  [Rule 3](#3-materialization-the-dpath-tree-maps-onto-a-real-fs-deterministically)
-  at the next transaction, so dpath-level conflicts never require user
-  arbitration — only _facet-content_ conflicts can surface as visible conflict
-  state.
+Deleting a checkout file **never automatically deletes its Daybook document**. Document lifecycle management requires an explicit operation; the CLI should allow finding documents once projected in this checkout. Removing a dpath facet stops projecting that address; it does not erase the underlying history or revoke other claims. If a blob existed only at the deleted checkout path, its bytes may genuinely be lost: neither a retained document ID nor a digest is a backup. Checkout deletion and remote removal must not destroy locally changed bytes just because the target was previously claimed by Daybook.
 
-### 5. Reserved materialization surfaces (`.dnode`, `.dtree`, `/by-id`)
+Local filesystem changes may touch several documents. The checkout can apply its own state changes transactionally, but it cannot promise a single Automerge head or one atomic replicated commit across those documents. Normal filesystem use must not require collection-wide version-control machinery. Rich CLI operations can present the separate document writes and their outcomes without inventing a global commit identity.
 
-The checkout creates special filesystem surfaces that are *not* dpath claims:
+## Unavailable content and document conflicts
 
-- the checkout state directory (`.dtree` — per FDR 002) and, where the tree
-  roots a node, the node directory (`.dnode`), holding the pauperfuse
-  transactional state;
-- `/by-id/` — materialization of **dpathless documents** (docs with no dpath
-  facets) as full JSON reprs. Primary consumer: the **wasi virtual filesystem**,
-  giving LLM agents raw JSON access to documents. Documents with dpaths do not
-  appear under `/by-id` in v1.
+A dpath claim may exist while its blob is absent, a cross-document target cannot be resolved, or its current document view cannot be rendered. These are different states for status and recovery. Missing content or a missing target is not a zero-byte file. A missing blob, including one lost after in-place adoption, must be reported honestly rather than implied to be retained. A local filesystem deletion of an adopted path is a removal, not automatically a missing-blob stub.
 
-Handling of the interaction with user dpath claims (locked in review):
+The generic tree and filesystem checkout do not classify Daybook semantic conflicts. The document/lens write boundary determines whether an edit can be accepted or must be preserved via the bounce policy. A runtime failure or unavailable input is not a semantic bounce. Invalid content already received from another node cannot be moved retroactively out of its history; the document layer must decide which state is renderable and how it can be repaired. Checkouts do not write conflict-marker text into otherwise ordinary files. The detailed policy for writes against already-invalid heads belongs in a document-layer ADR; this FDR does not invent its answer.
 
-- **No namespace reservation.** A dpath claim on `/by-id/…` (or on the checkout
-  directory's name) is a perfectly legal dpath.
-- **Reserved surfaces win their literal name via Rule 2.** The reserved surface
-  acts as the winning "file" at that real-FS position; dpath claimants of the
-  same name spill into the suffix rules and materialize under the `.d` suffixed
-  path (e.g. `/by-id.d/…`). The exact name of the metadata directory is an FDR
-  002 decision; the rule is fixed regardless of the name chosen.
-- **Degraded/absent states need not be representable on the filesystem.** The
-  placeholder states below exist in the pauperfuse *transactional store*; what
-  the filesystem itself shows may be coarser (e.g. an empty placeholder file).
-  The **driver** — CLI, watch daemon, wasi bridge, app — is responsible for
-  surfacing these states via status queries, not by inventing filesystem
-  encodings.
-- **Nested checkouts** (a dpath-materialized subtree inside a checkout looking
-  like an importable folder, `.dnode`/`.dtree` dirs inside adopted trees) must not be
-  recursively re-adopted/imported: by-id materialization is skipped beneath
-  dpath-materialized subtrees, and import/adopt must detect and refuse or
-  re-bind nested checkout metadata. Spec owned by the pauperfuse ADRs (008/009).
+## Adoption and import
 
-### 6. Degraded availability states are first-class
+Adoption begins with an existing directory. A track-only adoption can record local candidate paths without creating documents or dpath facets; these names become Daybook claims only on import. An Obsidian vault can then use its existing note paths, and a DCIM library can use `/DCIM/...` paths, without requiring a rename solely for Daybook. Import creates or selects document identities and chooses lenses. The normal one-file/one-document choice and the one-document/many-files choice are both useful: the latter lets a collection of related source files share one document history while receiving individual path claims. The facet mapping and CLI choice for this mode still need specification.
 
-Because dpath facets and the content they reference are separate facets that
-sync independently, a materialized path may exist while its content is missing
-(blob not yet synced — see ADR 001's inventory model — target facet not found
-for cross-doc refs, or facet in conflict). The checkout represents these as
-**normal, first-class states**, never errors:
+Media adoption should not promise an extra full copy where a safe backend strategy can reuse existing bytes, but a hardlink to a mutable checkout is not safe merely because its source once appeared immutable. Byte transfer and retention guarantees need the blob/backend ADR and honest status. Imported claims face the ordinary collision policy; there is no secret digest-equality takeover rule. Re-import into an already known document can reuse the same path-keyed claim, while two devices independently inventing document IDs can produce distinct claimants and a collision.
 
-- `missing-content` — path materialized as a placeholder; recovery (re-sync,
-  restore from blob backup) fills it in later. Mirrors the "totally tolerant
-  about missing blobs" requirement.
-- `target-not-found` — cross-doc dpath pointing at a facet that doesn't resolve
-  (yet or ever). Materialized as placeholder + status entry.
-- `in-conflict` — per §4.
-
-These states live in the local transactional store and surface through the
-driver's status surface (CLI, app UI), not through special filesystem gadgets —
-see §5.
-
-### 7. Adoption and import
-
-Interop case studies adopted (from the smooth-transition discussion):
-
-- **Obsidian vault**: `db import .` / `db adopt .` treats an existing directory
-  as a materialized checkout, assigns dpaths from origin paths, and wires
-  bidirectional sync. Existing files keep their paths; daybook object identity
-  is created behind the scenes.
-- **DCIM / media libraries**: import assigns dpaths from origin paths
-  (`/DCIM/...`) and — critically — **adopts blobs in place** (external tracked
-  blobs, hardlinks/reflinks; no byte duplication). Detail in the blob-strategy ADR 013; this
-  document only fixes the addressing consequences.
-- **Assignment**: each adopted file becomes a **new document** (new doc id)
-  claiming its origin-path dpath. The default is one-doc-per-file; the "adopt
-  into a single document" mode (one CRDT history for a whole directory tree —
-  the code-source-control case) is supported by the same primitives: one doc,
-  one dpath facet per file, each targeting the specific facets that represent
-  that file. Facet-level granularity for this mode needs its own spec (Q4).
-- **Adoption collisions follow the generic rules, not a special policy.**
-  Adoption first creates the candidate docs, then hands resolution to the
-  transactional layer, which materializes under the Rule 1–3 suffix procedures
-  and records resolvable status entries. The expected common shape —
-  "adopt this folder under the dpath subtree `/hello/`" — makes collisions
-  rare, so we start with this uniform semantic and relax later only if the UX
-  demands it (no hash-compare takeover special case in v1).
-
-### 8. Deletion and garbage collection (assumption)
-
-Deletion of a dpath facet unassigns an address. What happens to
-no-longer-referenced documents, branch docs, and unreachable bookkeeping CRDTs
-is a **garbage collection system** to be specified (Patchwork's lesson: their
-`onDeleteDraft` unlinks bookkeeping from the parent's `drafts` list and leaves
-the CRDTs in place — deletion = unreachability, not physical removal). This FDR
-assumes a GC layer exists and defines dpath deletion as "stop materializing
-here"; the GC's scope, triggers, and guarantees are owned by FDR 003 and
-ADR 011.
-
-### 9. Lens interaction (pointer to ADR 012)
-
-- The dpath **extension is a lens-selection hint**; MIME types from
-  `blob`/metadata facets are the other input; plugs register lenses and may
-  inspect both. Which hint wins for which format is ADR 012 material.
-- A full-JSON materialization lens (rendering the entire doc as JSON, used by
-  the by-id view and available under dpaths as a sidecar for power users) is one
-  of the first lenses.
-- Selective dpaths referencing facets across docs make the lens resolution step
-  potentially multi-document; lenses must accept a target set, not a single doc.
-- **One dpath → an entry *set*.** A single lens's output over one object can be
-  multiple files (note + sidecars, thread + attachments). All naming
-  *within* one lens's output — including lens customization via separate facets
-  (Q: how, exactly — ADR 012) — is lens territory. Only collisions *between*
-  entry-sets of different claimants follow the dpath rules here; whether Rule 1
-  also covers intra-doc entry-set clashes is an ADR 012 open problem. The dpath
-  layer fixes only the boundary: dpath → object → entry-set, and the collision
-  order between distinct claimants.
-- **Multiple lenses may target the same dpath source**; constraints here are
-  expected to emerge from real use rather than being bounded now.
-
----
-
-## Tags
-
-Tags are the superset case: a dpath label whose tree position is conventional
-rather than structural (`/inbox`, `/tagged/urgent/2026` or any agreed
-convention). Nothing in the addressing scheme treats any subtree specially;
-filtering by prefix is the tag query. The design consequence is deliberate:
-**tagging tools can be built entirely on dpath assignment + prefix queries**
-with no additional mechanism. Separately, plugs can define their own tag-like
-facets (e.g. automatic hashtag extraction for Obsidian markdown is already
-planned); when a full **query system** lands, materialization selection
-(checkout filtering) rides **on top of it**. Dpath prefix-queries remain the
-zero-infrastructure path for v1 filtering.
-
----
-
-## Open Questions
-
-Remaining after the first review round; each tagged with what it blocks.
-
-1. **Unique-name derivation inside Rule 1 directories.** Locked lean: preserve
-   the dpath's extension in derived names; give the lens some control (since
-   multiple lenses may emit for one dpath source); stay unbounded about the
-   exact scheme until constraints emerge from real lens behavior. Must be
-   stable, collision-free, user-legible (`ls` output) and adoption-round-trip
-   safe. _Blocks: FS materializer, import UX._
-2. **Rule 3 totality proof.** The `.d`-stacking procedure must terminate for
-   adversarial inputs (documents claiming `a.d`, `a.d.d`, … simultaneously,
-   interacting with rules 1 and 2). Appendix A keeps growing with the worked
-   cases; if the "most `.d` wins" order turns out ambiguous at some depth,
-   define tie-breaks. _Blocks: FS materializer spec._
-3. **Reserved-surface mechanics.** Directory names are settled (`.dnode`,
-   `.dtree` — FDR 002); the *rule* (reserved surface wins the literal name,
-   dpath claims spill to `<name>.d`) stands. Open: is `/by-id`
-   materialization skipped under dpath-materialized subtrees only, or does
-   the driver get finer controls? _Blocks: pauperfuse ADRs._
-4. **Single-doc adoption granularity.** For code-source-control adoptions (one
-   CRDT history per directory), confirm facet-per-file mapping and that the
-   dpath targeting scheme can address per-file facets within the single doc.
-   _Blocks: FDR 003 (multi-CRDT-history representation), ADR 010._
-5. **Body-facet primacy for display.** Resolution for "which path shows" is
-   lexicographic-first (see below), but whether the Body facet should be able
-   to override it for UX primacy is undecided. _Blocks: FDRs 002/003 display._
-
-Resolved in this review (kept here so the history is explicit):
-
-- ~~Reserved namespaces~~ — none; collision rules handle reserved surfaces (§5).
-- ~~Tags: real tag facets?~~ — plugs may add their own facets (hashtag
-  extraction planned); materialization queries ride atop the future query
-  system (Tags section).
-- ~~Dpath value metadata~~ — facet stays lean; customization is a separate
-  facet resolved by the lens layer (ADR 012).
-- ~~Import collision policy~~ — uniform Rule 1–3 handling post-adoption; the
-  common "adopt under `/subpath/`" shape makes this rare (§7).
-- ~~Primary dpath / path display~~ — pauperfuse materializes **all** dpaths
-  (or the query-filtered subset, once that exists). For deterministic display
-  when one path must be shown: Body-facet primacy if applicable, else
-  lexicographically-first dpath.
-- ~~Dpaths in URLs~~ — moved to Appendix B; a dedicated URL FDR is planned.
-
----
-
-## Appendix A: worked materialization examples
-
-Cases 1–5 are the base rules; 6–8 are the adversarial compositions that case
-2's totality proof (Q: Rule 3 totality) must cover.
-
-| # | Dpath claims (objects)                                                                                | Materialized FS                                                                   |
-| - | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| 1 | doc A → `/inbox/hello.md`                                                                             | `/inbox/hello.md` (A)                                                             |
-| 2 | A → `/inbox/hello.md`; B → `/inbox/hello.md`                                                          | `/inbox/hello.md/` dir; children `<A-name>.…`, `<B-name>.…`                       |
-| 3 | A → `/hi/hello`; C → `/hi/hello/child`                                                                | file and dir collide: `/hi/hello` (A) + `/hi/hello.d/child` (C)                   |
-| 4 | A → `/a`; D claims `/a.d`                                                                             | rule-3 spill: `/a.d/` belongs to `/a`'s collision dir; D demoted to deeper suffix |
-| 5 | A → `/a/b` only                                                                                       | bare `a/` dir materialized (implicit), `a/b` (A)                                  |
-| 6 | A → `/a`; C → `/a/b`; D → `/a.d`                                                                      | compose cases 3 and 4                                                             |
-| 7 | A → `/a`; E → `/a.d/x`; F → `/a.d.d`                                                                  | deep suffix stacking                                                              |
-| 8 | G → `/inbox`; H → `/inbox` (both docs are _directories_: each has file-children via their own dpaths) | rule 1 on the dir: `/inbox/` with `<G-name>/…` and `<H-name>/…` subtrees          |
-| 9 | doc A claims `/by-id/x` while the checkout materializes its own `/by-id/` surface                     | reserved surface wins literal name; A spills to `/by-id.d/…` (Rule 2/3)            |
-| 10 | A binds `/x.png` (holder); claimant B arrives later with an earlier dpath-assignment timestamp        | binding is sticky: A keeps `/x.png`; B lands at `/x~<id-b>.png` (the tiebreaker chain only applies to unbound claimants) |
-
-## Appendix B: deferred to other documents
-
-- **Dpaths in URLs** (`db+dpath:…`, inter-doc references, dict.md's open
-  branches-in-URLs TODO): belongs with a dedicated URL FDR; not addressed
-  here. townframe-2 ADR 007 §7 already fixes the base address grammar
-  (`db:<id>`, `db://<drawer-id>/<id>`, `db+iroh://…`); dpath addressing must
-  extend, not redefine, it.
-- **Nested checkout / re-adoption detection**: spec owned by the pauperfuse
-  ADRs (008/009); principle noted in §5.
-- **Lens customization facets and intra-doc entry-set collision semantics**:
-  owned by ADR 012 (§9).
-- **Checkout metadata directory naming**: owned by FDR 002.
+## Decisions still required
+!> it keeps it's path
+1. **Names:** what are the exact derived-name and spill rules for claimant collisions, lens entry sets, file/child collisions, reserved surfaces, literal suffixes, case folding, and forbidden platform names? Prove termination and preservation of existing bindings before calling the algorithm fixed.
+!> implement a quick typescript version in ./docs/scratch/
+2. **Import encoding:** how are non-UTF-8 filesystem names represented reversibly, or when does import refuse them? Percent-encoding a facet key is not automatically a solution: its decoded dpath identity, literal `%` names, and URL encoding must remain unambiguous.
+!> should we require url encoding for keyids? I think that might make sense
+3. **Lens scope and selection:** how are cross-document target references rendered without creating one editable output with several histories? How does Daybook choose facets and a lens for each claim, including whole-document claims selected through the Body facet, and what is the fallback when a specific lens does not apply? What happens to an unrepresentable partial deletion? These require a worked lens ADR.
+!> this is a good quesiton and highlights our poorly designed lens system. i.e. how does hte daybook backend select document facets and select the lenses and so forth? keep this open quesiton, we'll discuss it in the ADR
+4. **Import granularity and preferred display:** how does a user choose one document per file versus one document for several files? A whole-document claim uses the Body facet to select its primary lens; when several dpaths can be shown as the document's preferred address, what ordering or user choice applies?
+!> body facet is our canonical "this is the main facet of a document" system. for dpaths that refer to wholee documents for example, that's how we'll select the lens. indeed, this means we need a sophisticated lens selection -> fallback system at both ends! A big missing detail from the prev ADR
+5. **Recovery UX:** what CLI operations expose old bindings, correct ambiguous identity, and explicitly manage a document that no longer has a projected path? The detailed commands belong in the CLI FDR.
+!> agree

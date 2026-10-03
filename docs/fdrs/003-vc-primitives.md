@@ -1,386 +1,72 @@
-# FDR 003: Version-Control Primitives — Diffs, Branches, and History Across CLI and GUI
+# FDR 003: History, branches, and changes
 
-**Status:** Draft. Open questions are numbered and tagged with what they block.
-Scope note (locked in review): this FDR covers the **common grammar of VCS
-primitives** — how diffs, branches, and histories are represented so CLI and
-GUI speak one language — with focus on the design work needed to implement the
-CLI pauperfuse surface. Out of scope: node metadata contents (FDR 004/ADR 009),
-GUI layouts, blob diffing/patching (ADR 011, deferred by design).
+**Status:** Proposed (draft accepted as the working specification; technical sections marked in-text are still settling). This document defines user-visible version-control operations for Daybook documents and checkouts. It does not require a checkout-wide history object or a single transaction across documents.
 
-Companion documents: FDR 001 (dpaths — conflicts-as-opinions, §4), FDR 002
-(vocabulary — node, drawer, checkout, agent), **townframe-2 ADR 007**
-(logical document/branch/drawer identity — adopted throughout below), ADR 010+
-(pauperfuse tree store, reconciliation), dict.md (doc branches, `/tmp` branch
-namespace, heads). Note: townframe-2 ADRs already claim 007–009; this repo's
-pauperfuse ADRs begin at **010** (vtree store), then 011 (checkouts &
-reconciliation), 012 (lenses), 013 (blob strategy).
+## Purpose
 
-Prior art consulted: Ink & Switch **Patchwork** — lab notebook entries 03–09
-(dynamic history, diff visualizations, edit groups, simple branching, bots,
-history-as-chat) plus the actual implementation in `patchwork-base/drafts`
-(clone-doc branches + heads bookkeeping, heads-pinned checkpoint views,
-cross-doc change groups with cursors). Appendix A has the code-level details;
-§3 and §7 lean on them directly.
+Daybook keeps document histories and permits concurrent work without a Git-style staging area. People need to see what changed, inspect older versions, experiment without changing ordinary work, and recover a local edit that cannot be accepted. A checkout can contain files from several documents; a document can produce several files. Its filesystem tree is therefore not itself one versioned document.
 
----
+The CLI and GUI should present the same underlying concepts: a logical document identified by its main document, its versions, its branch relationships, a checkout's selection of versions or branches, and differences between what was rendered and what is on disk. A branch has its own underlying document ID and history, but the ordinary UI shows it *under its logical document*, not as another unrelated top-level document. Drawer admission and authority for the underlying branch still require explicit treatment; the relationship alone does not grant either.
 
-## Context
+## Everyday edits
 
-Daybook is CRDT-based; merging always succeeds, so "conflict" never blocks
-work (FDR 001 §4). What remains genuinely hard — and what this FDR must
-settle — is the **grammar**: what the user sees, what the CLI verbs do, and
-what the GUI renders, such that both surfaces express the same five things
-about a document collection under concurrent multi-device editing:
+Ordinary edits go to the document of record when they can be represented. There is no mandatory `add`/`stage` step before saving. A filesystem change remains local until ingested; watch mode can ingest it as it arrives, and an explicit write command can do so immediately. Successful local ingest persists changes locally; remote delivery depends on sync. It is not a Git commit that can later be rebased away.
 
-1. *what changed* (diffs);
-2. *where work diverges* (branches);
-3. *what happened* (history);
-4. *how the FS checkout relates to the node's docs* (checkouts, three-way state);
-5. *what it means to remove things* (deletion).
+`db status`, `db diff`, and `db log` observe without ingesting or publishing semantic edits. They may scan the filesystem and refresh local observations so their answers are current. `db status` distinguishes un-ingested local changes, document changes not yet rendered here, missing content, and edits that the document layer cannot accept. Reading status must not destroy the un-ingested state it reports. A GUI should distinguish the same states without making users learn staging vocabulary.
 
-Two asymmetries shape every decision below:
+The CLI may identify a document by its full ID or by a checkout file path whose recorded binding identifies its owning document. One document may own several output files. When that ownership is ambiguous, a CLI operation that changes history must not guess merely from a matching filename or digest. Short, keyboard-friendly contextual IDs may be displayed and accepted where they resolve uniquely; they are abbreviations, not durable identities. A script or saved reference uses the full ID. The exact short-ID alphabet and disambiguation rules belong in the CLI design.
 
-- **Most documents have exactly one human reader/writer.** Multi-user
-  contention exists (shared drawers) but is not the common case, so the
-  default flow must be zero-ceremony.
-- **Agents and plugs are *also* writers** — of a different character: bulk,
-  mechanical, sometimes untrusted. They need a staging surface that humans
-  can review before it reaches main.
+## Logical documents, branches, and checkout selection
 
----
+A **logical document** is what the ordinary GUI and CLI present in a document list. Its main branch's document ID identifies it. Its branches form a navigable family: each branch has its own underlying document ID, history, access, and possibly different drawer membership, but ordinarily appears as a version-control choice *within that logical document*, not as an independent top-level item. A branch records a source relationship and, where known, the heads from which it was created. Branch names are optional, mutable labels, not IDs. Users can navigate parents and siblings that their node can discover and access. Some branches may have no shared listing or may be local to one node; the interface must not imply it knows every branch everywhere.
 
-## Decision
+A checkout may select a branch for each logical document it displays. That **checkout-local selection** makes it possible to experiment in a separate checkout without changing what another checkout renders. Its paths and bindings still retain the selected branch's underlying ID, while user-facing paths and history navigation refer back to the logical document. Selecting branch B does not move edits already made to A. Choosing a branch of one logical document does not automatically switch unrelated documents in the checkout.
 
-### 1. Main-by-default (write path)
+For now, a CLI branch-creation command requires an explicit logical-document ID or file path. `db branch <name>` with no document selection is refused rather than silently forking every document in a possibly large checkout. An explicit selection can name more than one logical document, but success and failure are reported for each; no checkout-wide branch ID or all-or-nothing replicated operation is implied. The CLI should preview scope when an operation creates many underlying branch documents. Names shared across logical documents can help orient users, but names alone do not identify a checkout-wide branch selection. The exact verbs and flags for creation, switching, naming, merging, and removal belong with the CLI FDR.
 
-Changes are written **directly to the branch of record — `main` — by
-default**. There is no hidden working branch, no eager tmp-branch snapshots.
-Data safety does not depend on user action: Automerge retains full history
-and every write is an ordinary synced change the moment connectivity allows
-(Patchwork's identical conclusion: edits on main, drafts opt-in).
+A temporary branch document can preserve agent work, staging, or a failed local semantic edit without immediately publishing it. It may remain node-local and not replicate. Being temporary does **not** license deletion while it contains the only saved copy of a person's work. The CLI should expose where pending work lives, permit recovery, and require a safe retention policy. There is no promise that every ordinary edit first creates a temporary branch.
 
-Consequences:
+## Historical versions and immutable history
 
-- **The CLI's "uncommitted state" is purely local ingest lag** — bytes on
-  disk or in a plug's buffer that have not yet been ingested into facets.
-  `db status` reveals exactly this: the three-way state (last-applied tree ↔
-  real tree ↔ branch of record) from the pauperfuse reconciliation model
-  (ADR 009).
-- **Watch mode** auto-ingests detected edits into main after its debounce
-  window. Nothing "commits" in git's durability sense; ingest *is* the save.
-- **Staging is opt-in and for non-human writers**: agent/plug workflows write
-  into a `/tmp`-namespace branch (device-local per dict.md) — e.g. an agent
-  checkout configured `--stage` — and a human promotes (`db merge`) or
-  discards. This is the entire role of tmp branches: stage wflow and AI
-  writes. They are not load-bearing for normal users and get pruned
-  aggressively (§8).
+One branch's historical version is specified by that branch's heads, not by a global checkout version. Automerge *can* accept a write based on historical heads of the same document, creating changes concurrent with later ones; this is not technically forbidden. The ordinary historical view is read-only as a **product choice**: when a user wants to continue independently from an older state, the interface creates a related branch so newer main changes are not immediately merged into that work. The user may later merge it deliberately. This does not roll back or rewrite main, and changes already published there cannot be relocated retroactively.
 
-### 2. The CLI porcelain (v1 surface)
+A checkout spanning several documents has no single Automerge head. A historical view must say which document version it chose for each displayed document. A user-facing time or label may help select versions, but time is not proof that those versions formed an atomic snapshot. A CLI spelling such as `checkout --at <version>` must not pretend one version argument identifies the entire tree unless its scope explicitly resolves to one document or to a recorded selection. The CLI and GUI may offer historical navigation once that selection behavior is specified.
 
-Verbs are git-shaped because git grammar is the interop target, but they map
-to different machinery underneath:
+Creating a successor document and redirecting paths or drawer listings can **supersede** an old document; it cannot promise to erase history already held by other nodes. An actual erasure/redaction policy requires a separate design. Physical garbage collection of local unneeded bytes is distinct from a visible edit, removing a path, or changing drawer membership.
 
-| Verb | Meaning | Machinery beneath |
-|---|---|---|
-| `db status [paths]` | three-way: un-ingested local edits, upstream changes, conflicts, missing content | pauperfuse reconciliation diff (ADR 009) |
-| `db diff [paths] [--at <version>] [--branch <b>]` | diff between any two of: real tree / last-applied / any heads | tree diff + content diff (§7) |
-| `db commit [paths] [-m]` | apply detected local edits into main (or `--branch`) now, naming the change range since the last checkpoint | semantic ingest via lens → automerge transaction |
+## Differences and history presentation
 
-| `db log [paths] [--doc …] [--author …]` | history of the tree/doc(s), grouped per §5, with named checkpoint ranges | automerge `getChangesMeta` + pauperfuse op log |
-| `db branch <name>` / `list` / `merge` / `delete` / `rename` | branch management on the branch of record | branch bookkeeping (§3) |
-| `db fork [--at <version>]` | fork from a historical point (§4) | clone-at-heads |
-| `db stage`-style flags on checkout creation (`--stage`, agent mode) | writes land in a tmp branch | tmp branch + later `merge` |
-| `db checkout --at <version>` / pin | materialize a historical version read-only | heads-pinned views (§6) |
+A checkout can compare its last rendered state with the current filesystem tree and with newer document versions. Users should be able to ask for a path's owning document, the render base, changes on disk, and document changes not yet reflected in that path. A file move may be inferred from observations, but snapshots cannot always prove one: where identical bytes make two stories indistinguishable, existing path bindings win as specified in FDR 001. A diff must not report an inferred move as certain when it could equally be removal plus addition.
 
+For document content, text lenses can show useful textual changes; blob content can initially show that a reference changed or bytes are unavailable without pretending to offer a textual patch. A multi-file lens may explain which output changed while associating that edit with one owning document. CLI text, summaries, and GUI inline rendering may present the same facts differently. The exact diff object shape and Automerge operation projection are technical design, not a requirement that every renderer display raw CRDT internals.
 
-`commit` vs `ingest`: the verbs are aliases for the same operation —
-"apply the working set to the branch of record" — kept git-shaped for
-familiarity; `-m` attaches a message to the change.
+A document's history lists its own changes and any user-facing annotations. A drawer or checkout can show a **derived timeline** of changes across the documents it selected, grouping nearby events for readability. Such a row is presentation, not an authored atomic multi-document commit. Sync can deliver related changes at different times; the view must not conceal partial availability or imply a total order where none exists. Named annotations or messages are optional. A message supplied while ingesting several documents cannot attach to one imaginary Automerge change across them; its precise durable representation needs a separate design.
 
+## Semantic failures and concurrent work
 
-### 3. Branches (per-doc, git-simple at the surface)
+Automerge can incorporate concurrent changes, but an application may be unable to validate or render the resulting facet state. This is distinct from a path collision, a missing blob, or a lens runtime error. The document layer evaluates accepted/renderable content; generic filesystem reconciliation does not define a Daybook conflict type or write conflict-marker text into files.
 
-Per dict.md, branches are per-doc CRDTs sharing genesis. Locked UX posture
-(Patchwork's simple-branching lessons, verified in `drafts`):
+A local edit is interpreted against the document heads from which its output was last rendered. It can therefore become concurrent with an incoming edit instead of silently overwriting it with the latest value. If the resulting semantic edit is valid, it can land on the document of record. If semantic validation fails, preserve the user's edit on an identifiable local branch and keep the checkout's usable file safe. A failed codec invocation or unavailable data is not itself a reason to create a conflict branch. The exact validation, bounce, accepted-view, and repair rules—including writes when the current document was already invalid—belong in a document-layer ADR.
 
-- **One branch of record per doc: main.** All other branches are drafts,
-  agent staging, or experimental forks. UX constraint, not engine constraint
-  (the CRDT model permits branching from any branch; the *surface* defaults
-  to simple branching: create-from-main, merge-back, delete).
-- **Branch bookkeeping follows townframe-2 ADR 007** (logical document,
-  branch, and drawer identity), not a Patchwork-style ad-hoc bookkeeping doc:
+Remote changes that have already entered a document cannot be transferred out of its history by the checkout. If their accepted state cannot be rendered, consumers need a reported state and a last good render where available; recovery is not described as retroactive bouncing. A merge of a branch can be refused when it would make the accepted result invalid. The user needs a usable repair or rendered-choice experience, not a promise that every CRDT-convergent value is meaningful.
 
-  - `DocumentId = main BranchId = main physical document ID`; each branch is
-    its own physical object, addressed by `BranchId`.
-  - Branch identity lives in a `daybook.branch` system facet on every branch
-    (`document_id`, `branch_id`, `created_from: optional BranchVersion` — the
-    fork point = the source's heads at fork time, which is Patchwork's
-    `CloneEntry.clonedAt` made durable in a facet).
-  - The main branch carries a `daybook.branches` directory **keyed by stable
-    `BranchId`, never by mutable name**; a declaration carries an optional
-    name, a `publication` of `Shared | Archived`, an `authority` scope, and
-    `created_from`. Names are relationships, not identifiers; renaming never
-    touches `BranchId`.
-  - Ordinary facet writes cannot mutate these system facets; only
-    branch-management operations author them (with authority validation
-    before authoring).
-  - **Discovery is authority-scoped**: shared branches via the main-branch
-    directory; private branches via authorized group feeds; **local
-    (`/tmp`-namespace) branches are discovered only through checkout-local
-    state** — which is exactly where our conflict/staging branches live and
-    the mechanism by which they never replicate.
-  - A **merge stamps the merged heads** onto the bookkeeping (the
-    `mergedAt` of Patchwork's CloneEntry, as a declaration field; exact
-    schema belongs to the facet-schema work ADR 007 defers).
-  - Deleting a branch = removing its declaration (and unlinking any shared
-    directory entry); the CRDT remains as data per §8.
-- **Unnamed drafts by default** ("Draft N" counter, renameable later), **merge
-  deletes the draft** (bookkeeping unlink; the CRDT remains as data — §8), and
-  **fork-at-version** is the retroactive affordance: scrub/pin to a past
-  version and `db fork --at`. *Nothing is ever moved off main*: history
-  contains main's edits and always will (§4).
+## Removal, trash, and retention
 
-### 4. History is immutable; relocation never happens
+Deleting a file in a checkout is a lens/path edit. It **does not** automatically delete its document or create a `/trash` claim. Deleting one output of a multi-file lens does not automatically delete the other outputs. FDR 001 specifies the filesystem operation contract and how ambiguous observations are handled. Removing a dpath claim changes that address, not document identity or other claims. Removing a document from one drawer changes its official listing there, not its other drawer memberships or its historical bytes.
 
-- **The one-never-moves rule:** once changes are on a replicated branch,
-  they can be forked-from, merged, partially applied, or reverted — never
-  relocated, truncated, or rewritten. Sync has no "retract" op and that is a
-  feature: every replica keeps the audit trail.
-- **Redaction requires a new doc id.** If content must disappear from
-  history (legal, privacy, spam), redaction = create a redacted successor
-  doc, re-assign dpaths/labels to it, and abandon the old doc's drawer
-  membership (old CRDT becomes unreachable; GC handles reaping per ADR 009).
-  There is no in-place history surgery.
-- **Scrubbing/pinned views are heads-based reads, not rewrites.** Loading a
-  past version renders the doc *at those heads* (read-only by construction —
-  the heads-pinned view has no write surface). "Continue from this point"
-  = fork-at-version (§3): a new branch cloned at those heads; main keeps its
-  history untouched. No content is replaced wholesale anywhere in the
-  system; the only "broad replacement" that exists is redaction via new doc
-  id (§4 first bullet).
+Trash is a separate **document-deletion product action**, such as a user pressing Delete on a document in the GUI or invoking an equivalent explicit command. `/trash` remains an ordinary dpath convention that some checkouts omit from their selection. A document with several claims or drawer memberships needs an explicit product policy for what the delete action hides, retains, and can restore. Neither placing one claim under `/trash` nor removing a drawer listing proves that all other copies or access paths have vanished. Those details belong in the deletion/CLI design; checkout-file deletion never triggers the action implicitly.
 
-### 5. Multi-doc history: groups are derived, not authored
+Discarding a branch removes its discoverable relationship or local selection, subject to retention of unsaved work; it does not retroactively erase changes held elsewhere. Reclaiming storage is a later local policy constrained by other references, blob retention reasons, and recoverable work. Temporary branches that preserve bounced edits must not be pruned solely because their name begins with `/tmp` or a timer expired.
 
-"Session" was proposed as a first-class authored unit and **rejected for
-v1** — it has no owner in the porcelain, and inventing one now would bake in
-guesses. Instead:
+## Multi-document limits
 
-- The **change group** is a *derived* view: changes across a drawer's docs
-  grouped by (author, time-burst) — Patchwork's `ChangeGroup` model
-  (inactivity-gap grouping, debounced incremental recomputation with heads
-  cursors). `db log`, the GUI timeline, and `db status` summaries all render
-  from this one grouping.
-- **Commits are not a useful name-able unit in general** — Automerge emits
-  one change per non-debounced keystroke from live editors, so in practice a
-  busy doc produces many small changes; the message-bearing "commit" exists
-  where the tooling creates one explicitly (`db commit -m`), and raw changes
-  must still all be represented in history. The ChangeGroup view exists
-  precisely to make that mass legible.
-- What *does* exist as an authored unit: **the commit** (a message on a
-  change — §2) and **the branch** (a named sink for changes). Both are
-  optional ceremony on top of history, never required.
-- Cross-doc atomicity does not exist at the CRDT layer and nothing pretends
-  it does: a multi-doc operation is N changes with a shared op-log record in
-  the checkout (pauperfuse op log, ADR 009), displayed as one group because
-  the records share an op id.
-- Grouping is **rendering-local** (resolved): inactivity-gap grouping is a
-  projection; tune parameters once we have an implementation and real
-  samples. No store-level commitment.
+Daybook can perform useful operations over an explicit list of documents, but it must not require a collection-level frontier or checkout-wide commit to make ordinary edits work. An Automerge transaction is per document. Multiple document writes may be prepared or coordinated locally, but this FDR does **not** promise an atomic filesystem-and-document transaction across them. Some documents may succeed and others fail; the CLI reports which and supports safe retry or repair. Independently synchronized nodes may also observe those documents at different times even if local storage later gains stronger transactional behavior.
 
-### 6. Branch-on-conflict (the auto-merge policy)
+The default filesystem import boundary is **one document per file**. A user can explicitly choose to keep multiple related files inside one document, so they share one history boundary and can be rendered as several outputs. A directory name alone does not imply one document; a shared branch name across several documents does not create one history boundary either. This choice needs clear preview in import/checkout tooling, especially for source trees and large existing directories.
 
-Default policy for every write path (CLI, watch, GUI), both for ingest of
-local edits and merge of a draft:
+## Decisions deferred to other documents
 
-1. **Attempt against main**: compute the semantic facet updates (lens ingest)
-   against main's current heads and *dry-run validate* — each affected facet
-   must still validate against its plug schema, and each lens must be able to
-   render the would-be merged state.
-2. **Validate → land on main** (the overwhelmingly common case: single-editor
-   docs, CRDT merges already resolved the content).
-3. **Fail-validate → auto-branch**: the write lands on a conflict branch at
-   the standard local path **`/tmp/conflicts/<conflicting-facet-id>`**, and
-   the checkout thereafter tracks that branch for further writes coming from
-   it until the user resolves.
-
-**Trigger discipline:** this is *not* a contention mechanism. Concurrent
-multi-editor edits of sound schemas merge fine (that is what the CRDT is
-for). Auto-branch fires only for **poorly designed schemas that break under
-concurrent changes** — schema or lens validation can fail even though
-automerge merged happily. The resolution UX is therefore **"pick a version of
-the document"** — of the document *as rendered by its lens*, never of raw
-facets; users are not shown the guts. The picker offers the rendered
-candidate states (main-as-was, the tmp branch's render); picking one either
-merges the chosen tmp branch forward or re-lands the chosen version on main;
-the other is abandoned.
-
-**General rule: merges are explicit and refusable.** The system never
-reattempts a failed merge on its own; resolving a conflict branch (or
-picking a rendered version) is manual, and the same generalization applies
-everywhere: **`db merge` of anything — draft branch, agent branch, checkout
-ingest — is refused when it would break a facet** (validation failure =
-refusal with the rendered-pick escape hatch). In most cases the refusal is
-telling you the facet schema is badly designed; fix the schema rather than
-loosening the rule.
-
-**Conflict branches are `/tmp`-only, by design.** They never replicate:
-creating a branch is expensive (a whole new branch CRDT and its sync
-metadata — ADR 007's doc-identity machinery), and unattended/broken tooling
-must not be able to flood sync with them. Consequence, documented as a
-caveat: conflict branches are **visible only on the node (and checkout) that
-created them** — other nodes will just see the conflicted state on main and
-their own local conflict branch when they touch the same data.
-
-This keeps branch management a **burden you only carry when a schema is
-actually sick**, and even then nothing is lost or blocked. After-the-fact,
-history always allows re-derivation (any past state is renderable at heads).
-
-### 7. The diff object (one primitive, three renderers)
-
-Every diff the user sees is derived from one shape so CLI and GUI cannot
-drift:
-
-```
-Diff {
-  // tree-level, from pauperfuse reconciliation + tree diffs
-  entries: [ EntryChange {
-    path_binding,          // where it landed in the checkout (FDR 001),
-    object,                // object ref (facet URL / blob digest)
-    from: {heads?, content_ref?}, to: {heads?, content_ref?},
-    kind: added | removed | changed | moved | missing-content | in-conflict,
-  } ],
-  // content-level, per changed object, from automerge ops (per-char) or
-  // lens-appropriate granularity; blob objects diff by ref only (ADR 011)
-  changes: per-object,
-}
-```
-
-Renderers: (a) git-style path+line text for CLI; (b) summary stats
-(+chars/−chars by author/section — Patchwork's minibar findings word better
-than char-counts for prose); (c) GUI inline visual per datattype. Diffs are
-compute-on-demand from (heads A, heads B, tree bindings) — nothing persists
-except the op log's own record.
-
-### 8. Deletion and GC (multi-doc reality)
-
-**Deletion is a lens operation, not a data-layer operation.** Content
-deletion semantics belong to each lens (a multi-file lens that sees a file
-removed adjusts its specific entries; a whole-doc lens reacts to its source
-disappearing). The user-facing unit of deletion — and the thing checkouts
-force us to reckon with, since checkouts are multi-doc by nature — is:
-
-- **The trash can is a dpath tag** (`/trash/…`, a reserved top-level
-  namespace in FDR 001 §5 terms). A deletion in a checkout (or via any
-  interop surface, `rm` in an Obsidian vault included) **moves the claimed
-  dpath into `/trash/…`**. Resolved per review:
-
-  1. **Checkouts are query driven, and all checkouts default to excluding
-     the `/trash/` clause** — so trashed objects vanish from every
-     materialized tree by default without any per-checkout or per-drawer
-     special casing. Trash is just a tag.
-  2. **Drawers need no trash logic at all**: with the drawer-as-descriptor
-     semantics (townframe-2 ADR 007 §6), a trashed doc simply **no longer
-     makes itself part of any drawer group** — no membership surgery, no
-     per-drawer bookkeeping.
-  3. Emptying trash (GC, ADR 011) unassigns the `/trash/` dpath and drops
-     any remaining drawer association. Until emptied, trash is reversible —
-     objects restore to their previous dpath (`db restore`).
-  4. **New requirement surfaced by this design: a node-local tracking
-     surface for "all locally existing sedimentrees and their docs" that is
-     not drawer-based.** Trash (and checkouts, and GC, and recovery)
-     otherwise have nothing to enumerate what a node actually holds, since
-     drawer membership is no longer the container of record. Spec lands in
-     the reconciliation ADR 011 (local inventory), consumed by FDR 004's
-     status surfaces.
-- **In-doc content deletions** (text, facets) remain ordinary CRDT changes;
-  concurrent edit-vs-delete merges per automerge semantics — the trash model
-  deliberately sidesteps this class by deleting *claims and membership*, not
-  content bytes.
-- **Deleting a branch** = removing its `daybook.branches` declaration (ADR
-  007); the branch CRDT remains as locally prunable / unreachable data.
-- **GC (owned by ADR 011)**: emptying trash removes dpath claims + drawer
-  memberships and reaps unreachable CRDTs; `/tmp` branches are aggressively
-  prunable on device (never replicated; prune on merge, abandon, or TTL);
-  unreachable agents/docs/drawer-links are reaped only when unreferenced by
-  any live bookkeeping — the Patchwork lesson: *deletion = unlinking the
-  reference; physical reaping is a separate, later, local decision.*
-
----
-
-## Open Questions
-
-
-
-3. **Redaction flow ownership** — new-doc-id redaction touches dpath
-   re-assignment, drawer membership, and blob pinning (ADR 001).
-   Out of scope here, confirmed by review; tracked. _Blocks: future FDR._
-
-### Resolved in this review
-
-- ~~`ingest` alias~~ — porcelain verb is `db commit` only.
-- ~~Change-group parameters~~ — rendering-local projection; inactivity-gap
-  grouping; tune with real samples.
-- ~~Ingest granularity~~ — pauperfuse transactional-semantics ADR (011)
-  territory, not FDR.
-- ~~Conflict-branch location/visibility~~ — `/tmp/conflicts/<conflicting-facet-id>`,
-  `/tmp`-only (never replicated; sync-flooding guard); the originating
-  checkout tracks it for subsequent writes. Cost rationale: branch creation
-  = new branch CRDT + sync metadata; broken tooling must not flood sync.
-- ~~Fork for multi-doc checkouts~~ — mirror jj: the **checkout switches** to
-  the newly forked branch state; any pending working-set state is eagerly
-  captured into that branch at fork time so nothing is lost (this is the one
-  deliberate eager-write exception to §1's main-by-default — it exists only
-  at fork/branch-switch time).
-- ~~Resurrection policy~~ — dropped with the redesign: deletion is lens/trash
-  territory (§8), not a content-level CRDT question; no resurrection status
-  exists.
-- ~~Redaction scope~~ — confirmed out of scope here.
-
-## Backlog landing in other documents
-
-- **Watch-mode debounce/ingest policy**: FDR 004 + ADR 011.
-- **Pauperfuse transaction semantics** (commit/ingest granularity, per-doc
-  change batching vs per-file with shared op record): ADR 011.
-- **Blob diff/replacement semantics** (content-addressed; reference-link LWW
-  on the blob facet): ADR 013.
-- **GC scope/triggers/guarantees** (incl. trash emptying): ADR 011.
-- **Doc-level forking** — "fork this doc into a *new doc* in my drawer"
-  (hypermedia edit-friendliness; differs from branch forks: new DocumentId,
-  fresh drawer membership): its own future FDR, per review.
-- **GUI grammar**: the primitives here are the surface contract; GUI-specific
-  renderings inherit them. Next FDR or per-app design.
-
----
-
-## Appendix A: Patchwork prior art (code-verified)
-
-From `~/repos/ecma/patchwork-base/drafts/` — the shipped drafts plugin, not
-the essay prototypes:
-
-- **A branch is a clone doc + heads bookkeeping** — `DraftDoc.clones:
-  Record<originUrl, CloneEntry{cloneUrl, clonedAt: UrlHeads, mergedAt?:
-  UrlHeads}>`. Fork = `repo.clone(originHandle)` + record `clonedAt`; merge =
-  `target.merge(clone)` + stamp `mergedAt`. No history mutation anywhere.
-- **Edits on main by default** — the overlay forks docs resolved beneath a
-  draft only ("On 'main': no clone"; main clones are identity mappings). Our
-  main-by-default matches the shipped system.
-- **Checkpoints = url→heads maps** — `DraftCheckpoint = Record<url,
-  DocCheckpoint{from?, to?}>` renders each member doc at fixed heads. This is
-  how their timeline scrubber "loads an old version": pinned heads-pinned
-  read-views (`withHeads(url, to)`), *not* content replacement. Continuing
-  from a pinned point = fork-at-version (`cloneAtVersion` in
-  `DraftsSidebar.tsx`), whose clones branch off the pinned heads with
-  `clonedAt` recorded.
-- **Cross-doc timeline rows** — `ChangeGroup` spans member docs (inactivity
-  gap 10 min, 250ms debounce), persisted incrementally in a `ChangeGroupDoc`
-  with per-member `computedThrough` heads cursors, invalidated by
-  late-syncing old-timestamp changes. Direct precedent for §5's derived
-  groups and §7's diff plumbing (Automerge `getChangesMetaSince`).
-- **Deletion = unlinking bookkeeping** — `onDeleteDraft` removes the entry
-  from the parent's `drafts` list; CRDTs stay in place; unreachable docs
-  accumulate until GC. Our §8 takes the same stance and hands reaping to
-  ADR 009.
-- **What Patchwork gave up, we keep** — their shipped UI has *no*
-  "move my recent edits off main into a branch" (the essay's single-user
-  prototype had it; live sync killed it). Our `/tmp` staging for agents'
-  bulk writes plus `fork --at` covers the honest retroactive cases.
+- The CLI FDR specifies branch command names, explicit selection and switching, short-ID display and resolution, historical checkout navigation, status output, and the document-delete/restore flow.
+- The document and lens ADRs define branch ancestry, schema validation, accepted/renderable states, safe bounce and repair, multi-file lens ingest, and message or history annotations. In particular, they must address writes against already-invalid current heads.
+- The checkout ADR specifies durable bindings, filesystem observation, removal safety, and local partial-operation recovery without imposing Daybook identities on the generic tree.
+- Blob/retention work specifies what can be recovered when a removed checkout file held the only bytes and how GC accounts for every other retention reason.
