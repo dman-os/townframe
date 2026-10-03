@@ -2739,6 +2739,7 @@ dependencies = [
  "am_utils_rs",
  "anyhow",
  "autosurgeon",
+ "big_repo",
  "big_sync_core",
  "blake3",
  "clap",

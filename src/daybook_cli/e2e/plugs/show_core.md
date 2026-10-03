@@ -34,6 +34,7 @@ facets:
   org.example.daybook.blobPin
   org.example.daybook.pending
   org.example.daybook.body
+  org.example.daybook.dpath
 dependencies: 
 routines: 
 commands: 
