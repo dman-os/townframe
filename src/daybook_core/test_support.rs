@@ -208,7 +208,7 @@ pub async fn write_jwk_facet(
         )
         .await?;
     drawer
-        .get_branch_heads_for_path(doc_id, &daybook_types::doc::BranchPath::new("main"))
+        .get_branch_heads_for_path(doc_id, daybook_types::doc::BranchPath::new("main"))
         .await?
         .ok_or_eyre("key document has no main branch")
 }

@@ -25,6 +25,20 @@ pub(crate) const BLOB_PIN_STATE_LOCAL_STATE_ID: &str = "@daybook/core/blob-pin-w
 /// Walker state for the enablement machine (plugs config event rev store).
 pub(crate) const BLOB_PIN_PLUG_EVENTS_STATE_ID: &str = "@daybook/core/blob-pin-plug-events";
 
+/// Everything `spawn_blob_pin_worker` reads from the booted repo. Named
+/// fields (not a positional tuple) keep the two spawn sites self-describing.
+pub(crate) struct BlobPinWorkerArgs {
+    pub drawer_repo: Arc<DrawerRepo>,
+    pub sql: SqlCtx,
+    pub core_inventory_doc_id: DocumentId,
+    pub docs_inventory_doc_id: DocumentId,
+    pub encryption_inventory_doc_id: Option<DocumentId>,
+    pub blobs_repo: Arc<crate::blobs::BlobsRepo>,
+    pub facet_set_store: Arc<FacetSetRevisionStore>,
+    pub plugs_repo: Arc<crate::plugs::PlugsRepo>,
+    pub parent_cancel_token: CancellationToken,
+}
+
 /// Spawn the blob-pin worker and its two machines:
 ///
 /// - the facet machine: blob facet deltas -> docs inventory (full-branch
@@ -43,17 +57,18 @@ pub(crate) const BLOB_PIN_PLUG_EVENTS_STATE_ID: &str = "@daybook/core/blob-pin-p
     err(Debug),
     fields(worker = "blob-pin-worker")
 )]
-pub(crate) async fn spawn_blob_pin_worker(
-    drawer_repo: Arc<DrawerRepo>,
-    sql: SqlCtx,
-    core_inventory_doc_id: DocumentId,
-    docs_inventory_doc_id: DocumentId,
-    encryption_inventory_doc_id: Option<DocumentId>,
-    blobs_repo: Arc<crate::blobs::BlobsRepo>,
-    facet_set_store: Arc<FacetSetRevisionStore>,
-    plugs_repo: Arc<crate::plugs::PlugsRepo>,
-    parent_cancel_token: CancellationToken,
-) -> Res<RepoStopToken> {
+pub(crate) async fn spawn_blob_pin_worker(args: BlobPinWorkerArgs) -> Res<RepoStopToken> {
+    let BlobPinWorkerArgs {
+        drawer_repo,
+        sql,
+        core_inventory_doc_id,
+        docs_inventory_doc_id,
+        encryption_inventory_doc_id,
+        blobs_repo,
+        facet_set_store,
+        plugs_repo,
+        parent_cancel_token,
+    } = args;
     Ctx::ensure_schema(&sql).await?;
 
     let core_doc_id = drawer_repo
@@ -1336,17 +1351,17 @@ mod tests {
     async fn spawn_pin_worker_for_test(
         test_context: &crate::test_support::DaybookTestContext,
     ) -> Res<crate::repos::RepoStopToken> {
-        crate::blobs::spawn_blob_pin_worker(
-            Arc::clone(&test_context.rt.drawer),
-            test_context.rt.rcx.sql.clone(),
-            test_context.rt.rcx.core_inventory_doc_id.clone(),
-            test_context.rt.rcx.docs_inventory_doc_id.clone(),
-            test_context.rt.rcx.encryption_inventory_doc_id.clone(),
-            Arc::clone(&test_context.rt.blobs_repo),
-            test_context.rt.doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&test_context.rt.plugs_repo),
-            tokio_util::sync::CancellationToken::new(),
-        )
+        crate::blobs::spawn_blob_pin_worker(crate::blobs::BlobPinWorkerArgs {
+            drawer_repo: Arc::clone(&test_context.rt.drawer),
+            sql: test_context.rt.rcx.sql.clone(),
+            core_inventory_doc_id: test_context.rt.rcx.core_inventory_doc_id.clone(),
+            docs_inventory_doc_id: test_context.rt.rcx.docs_inventory_doc_id.clone(),
+            encryption_inventory_doc_id: test_context.rt.rcx.encryption_inventory_doc_id.clone(),
+            blobs_repo: Arc::clone(&test_context.rt.blobs_repo),
+            facet_set_store: test_context.rt.doc_facet_set_index_repo.revision_store(),
+            plugs_repo: Arc::clone(&test_context.rt.plugs_repo),
+            parent_cancel_token: tokio_util::sync::CancellationToken::new(),
+        })
         .await
     }
 

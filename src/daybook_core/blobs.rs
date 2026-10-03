@@ -16,8 +16,8 @@ pub mod pin_worker;
 pub mod pins_part_worker;
 pub mod sync;
 
-pub(crate) use encryption_worker::spawn_blob_encryption_worker;
-pub(crate) use pin_worker::spawn_blob_pin_worker;
+pub(crate) use encryption_worker::{BlobEncryptionWorkerArgs, spawn_blob_encryption_worker};
+pub(crate) use pin_worker::{BlobPinWorkerArgs, spawn_blob_pin_worker};
 pub(crate) use pins_part_worker::spawn_blob_pins_part_worker;
 
 pub fn blob_inventory_part_id(doc_id: &DocumentId) -> PartKey {

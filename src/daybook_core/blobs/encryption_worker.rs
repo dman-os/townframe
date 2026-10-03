@@ -103,16 +103,33 @@ const MAIN_BRANCH: &str = "main";
 /// release is never reached, so the `ct:`/`pt:` tags would root the ciphertext's
 /// outboard and the plaintext that serves it forever (ADR 003 §19, "the release
 /// path is deliberate"). Skipping quietly is the one option that leaks.
+/// Everything `spawn_blob_encryption_worker` reads from the booted repo.
+/// Named fields (not a positional tuple) keep the two spawn sites
+/// self-describing.
+pub(crate) struct BlobEncryptionWorkerArgs {
+    pub drawer_repo: Arc<DrawerRepo>,
+    pub sql: SqlCtx,
+    pub blobs_repo: Arc<crate::blobs::BlobsRepo>,
+    pub facet_set_store: Arc<FacetSetRevisionStore>,
+    pub facet_index: Arc<DocFacetSetIndexRepo>,
+    pub domain_group: BigKeyhiveGroup,
+    pub encryption_inventory_doc_id: Option<DocumentId>,
+    pub parent_cancel_token: CancellationToken,
+}
+
 pub(crate) async fn spawn_blob_encryption_worker(
-    drawer_repo: Arc<DrawerRepo>,
-    sql: SqlCtx,
-    blobs_repo: Arc<crate::blobs::BlobsRepo>,
-    facet_set_store: Arc<FacetSetRevisionStore>,
-    facet_index: Arc<DocFacetSetIndexRepo>,
-    domain_group: BigKeyhiveGroup,
-    encryption_inventory_doc_id: Option<DocumentId>,
-    parent_cancel_token: CancellationToken,
+    args: BlobEncryptionWorkerArgs,
 ) -> Res<RepoStopToken> {
+    let BlobEncryptionWorkerArgs {
+        drawer_repo,
+        sql,
+        blobs_repo,
+        facet_set_store,
+        facet_index,
+        domain_group,
+        encryption_inventory_doc_id,
+        parent_cancel_token,
+    } = args;
     let Some(encryption_inventory_doc_id) = encryption_inventory_doc_id else {
         eyre::bail!(
             "refusing to run the blob encryption worker: this repo has no encrypted-representation \
@@ -719,7 +736,6 @@ impl Ctx {
     }
 
     /// Steps 1-3 and 5 for a blob that has no representation yet.
-    #[expect(clippy::too_many_arguments)]
     async fn create_representation(
         &self,
         doc_id: &DocId,
@@ -735,7 +751,7 @@ impl Ctx {
         // 1. §11 pass over P: compute C, install the virtual entry, register the
         // pair. `install` is the only public way in, so installed implies
         // servable and rooted.
-        let c = self
+        let c_hash = self
             .provider
             .install(
                 &self.store,
@@ -744,8 +760,8 @@ impl Ctx {
                 EncodingParams::DEFAULT,
             )
             .await?;
-        let c_len = self.blob_status(c).await?.ok_or_else(|| {
-            eyre::eyre!("representation {c} is not complete immediately after install")
+        let c_len = self.blob_status(c_hash).await?.ok_or_else(|| {
+            eyre::eyre!("representation {c_hash} is not complete immediately after install")
         })?;
 
         // 2. The JWK facet, in a key document of its own: §19 keeps the key out
@@ -762,7 +778,7 @@ impl Ctx {
         self.write_jwk_facet(&key_doc_id, &jwk_key, &key).await?;
         let key_heads = self
             .drawer_repo
-            .get_branch_heads_for_path(&key_doc_id, &BranchPath::new(MAIN_BRANCH))
+            .get_branch_heads_for_path(&key_doc_id, BranchPath::new(MAIN_BRANCH))
             .await?
             .ok_or_else(|| eyre::eyre!("key document {key_doc_id} has no {MAIN_BRANCH} branch"))?;
         let key_ref = format!("db+facet:///{key_doc_id}/{jwk_key}");
@@ -771,7 +787,7 @@ impl Ctx {
         // resolves through this document can reach a representation that is
         // already servable.
         self.write_cipher_facet(
-            doc_id, branch, heads, cipher_key, c, c_len, &key_ref, key_heads,
+            doc_id, branch, heads, cipher_key, c_hash, c_len, &key_ref, key_heads,
         )
         .await?;
 
@@ -789,7 +805,6 @@ impl Ctx {
     /// state and the entries it serves are durable, so a node that restarts
     /// holds no pair for a `C` it already installed; re-registering the pair from
     /// the facet's own key and framing is the recovery.
-    #[expect(clippy::too_many_arguments)]
     async fn reuse_representation(
         &self,
         doc_id: &DocId,
@@ -809,13 +824,13 @@ impl Ctx {
                     )
                 }
             };
-        let c = digest_str_to_blob_id_lenient(&cipher.representation.digest).ok_or_else(|| {
+        let ct_blob_id = digest_str_to_blob_id_lenient(&cipher.representation.digest).ok_or_else(|| {
             eyre::eyre!(
                 "cipherBlob {cipher_key} in document {doc_id} names digest {:?}, which is not a blob digest",
                 cipher.representation.digest
             )
         })?;
-        let c_hash = crate::blobs::blob_id_to_iroh_hash(c);
+        let c_hash = crate::blobs::blob_id_to_iroh_hash(ct_blob_id);
         let p_hash = crate::blobs::blob_id_to_iroh_hash(plaintext.clone());
 
         // The key and the framing come from the facet that pinned them, so a
@@ -878,7 +893,7 @@ impl Ctx {
                     facets_remove: vec![],
                     user_path: None,
                 },
-                &BranchPath::new(MAIN_BRANCH),
+                BranchPath::new(MAIN_BRANCH),
                 None,
                 FacetWriteScope::System,
             )
@@ -896,7 +911,7 @@ impl Ctx {
         branch: &BranchPathBuf,
         heads: &ChangeHashSet,
         cipher_key: &FacetKey,
-        c: Hash,
+        c_hash: Hash,
         c_len: u64,
         key_ref: &str,
         key_heads: ChangeHashSet,
@@ -910,7 +925,7 @@ impl Ctx {
         let cipher = CipherBlob {
             representation: Representation {
                 // §3: the multihash spelling is canonical for a facet digest.
-                digest: blob_id_to_digest_str(BlobId::new(*c.as_bytes())),
+                digest: blob_id_to_digest_str(BlobId::new(*c_hash.as_bytes())),
                 length_octets: c_len,
             },
             content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
@@ -1377,16 +1392,16 @@ mod tests {
         let ctx = test_cx(utils_rs::function_full!()).await?;
         let authority =
             crate::authority::ensure(&ctx.rt.rcx.big_repo, &ctx.rt.rcx.sql, None).await?;
-        let error = match spawn_blob_encryption_worker(
-            Arc::clone(&ctx.drawer_repo),
-            ctx.rt.rcx.sql.clone(),
-            Arc::clone(&ctx.rt.blobs_repo),
-            ctx.rt.doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&ctx.rt.doc_facet_set_index_repo),
-            authority.encrypted_blob_docs.clone(),
-            None,
-            tokio_util::sync::CancellationToken::new(),
-        )
+        let error = match spawn_blob_encryption_worker(BlobEncryptionWorkerArgs {
+            drawer_repo: Arc::clone(&ctx.drawer_repo),
+            sql: ctx.rt.rcx.sql.clone(),
+            blobs_repo: Arc::clone(&ctx.rt.blobs_repo),
+            facet_set_store: ctx.rt.doc_facet_set_index_repo.revision_store(),
+            facet_index: Arc::clone(&ctx.rt.doc_facet_set_index_repo),
+            domain_group: authority.encrypted_blob_docs.clone(),
+            encryption_inventory_doc_id: None,
+            parent_cancel_token: tokio_util::sync::CancellationToken::new(),
+        })
         .await
         {
             Ok(_) => eyre::bail!("the worker must refuse a repo with no encryption inventory"),

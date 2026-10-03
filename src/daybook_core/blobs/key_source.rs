@@ -41,13 +41,13 @@ impl DocKeySource {
         }
     }
 
-    /// The `cipherBlob` facet of the owning document that names `c`.
+    /// The `cipherBlob` facet of the owning document that names the ciphertext.
     ///
     /// Read at the document's current branch heads, because "which key does this
     /// ciphertext use" is asked about the representation the document names
     /// now - the historical form would need heads, and the codec's callers pass
     /// only the hash.
-    async fn cipherblob_facet(&self, c: &Hash) -> Res<CipherBlob> {
+    async fn cipherblob_facet(&self, ct_hash: &Hash) -> Res<CipherBlob> {
         let heads = self
             .drawer
             .get_branch_heads_for_path(&self.doc_id, &self.branch)
@@ -84,12 +84,12 @@ impl DocKeySource {
             .await?
         else {
             eyre::bail!(
-                "document {} became unreadable while resolving ciphertext {c}",
+                "document {} became unreadable while resolving ciphertext {ct_hash}",
                 self.doc_id
             );
         };
 
-        let wanted = blob_id_for_hash(c);
+        let wanted = blob_id_for_hash(ct_hash);
         let mut named: Vec<(FacetKey, CipherBlob)> = Vec::new();
         for (key, raw) in &doc.facets {
             let cipher = cipherblob_from_raw(raw)?;
@@ -99,7 +99,7 @@ impl DocKeySource {
         }
         match named.len() {
             0 => eyre::bail!(
-                "no cipherBlob facet in document {} names ciphertext {c}",
+                "no cipherBlob facet in document {} names ciphertext {ct_hash}",
                 self.doc_id
             ),
             1 => Ok(named.pop().expect("length checked").1),
@@ -107,9 +107,9 @@ impl DocKeySource {
             // under the same plaintext is the same ciphertext). Picking one
             // would be picking a key for the caller, so say so instead.
             _ => {
-                named.sort_by(|(a, _), (b, _)| a.to_string().cmp(&b.to_string()));
+                named.sort_by_key(|(key, _)| key.to_string());
                 eyre::bail!(
-                    "document {} names ciphertext {c} in {} cipherBlob facets ({}), so which key it uses is ambiguous",
+                    "document {} names ciphertext {ct_hash} in {} cipherBlob facets ({}), so which key it uses is ambiguous",
                     self.doc_id,
                     named.len(),
                     named
@@ -190,17 +190,17 @@ impl DocKeySource {
 
 #[async_trait::async_trait]
 impl CipherKeySource for DocKeySource {
-    async fn key_for(&self, c: &Hash) -> Res<MasterKey> {
-        let cipher = self.cipherblob_facet(c).await?;
+    async fn key_for(&self, ct_hash: &Hash) -> Res<MasterKey> {
+        let cipher = self.cipherblob_facet(ct_hash).await?;
         let jwk = self.jwk_at(&cipher).await?;
-        master_key_from_jwk(&jwk, c)
+        master_key_from_jwk(&jwk, ct_hash)
     }
 
     /// The framing `C` was built with, from the same facet `key_for` resolves
     /// through: the codec re-installs or serves `C` with it. Decryption itself
     /// reads `rs` from the authenticated header instead.
-    async fn encoding_for(&self, c: &Hash) -> Res<EncodingParams> {
-        let cipher = self.cipherblob_facet(c).await?;
+    async fn encoding_for(&self, ct_hash: &Hash) -> Res<EncodingParams> {
+        let cipher = self.cipherblob_facet(ct_hash).await?;
         EncodingParams::from_encoding_parameters(
             &cipher.content_encoding,
             &cipher.encoding_parameters,
@@ -234,20 +234,20 @@ fn cipherblob_from_raw(raw: &FacetRaw) -> Res<CipherBlob> {
 
 /// The secret a JWK facet carries, through the codec's own JWK codec: this seam
 /// must not grow a second reading of the same wire shape.
-fn master_key_from_jwk(jwk: &Jwk, c: &Hash) -> Res<MasterKey> {
-    let k = jwk
+fn master_key_from_jwk(jwk: &Jwk, ct_hash: &Hash) -> Res<MasterKey> {
+    let key_material = jwk
         .members
         .get("k")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
             eyre::eyre!(
-                "JWK (kty {:?}) for ciphertext {c} carries no `k` member",
+                "JWK (kty {:?}) for ciphertext {ct_hash} carries no `k` member",
                 jwk.kty
             )
         })?;
     JwkOct {
         kty: jwk.kty.clone(),
-        k: k.to_owned(),
+        k: key_material.to_owned(),
     }
     .to_master_key()
 }
@@ -311,19 +311,14 @@ mod tests {
         Ok(doc_id)
     }
 
-    /// Write a `cipherBlob` facet for `domain` naming `digest`: the shape the
-    /// encryption worker writes (ADR 003 §19), and the only thing the key seam
-    /// reads.
+    /// Write a `cipherBlob` facet for `domain` naming the representation in
+    /// `cipher`: the shape the encryption worker writes (ADR 003 §19), and the
+    /// only thing the key seam reads.
     async fn stage_cipherblob(
         drawer: &DrawerRepo,
         doc_id: &DocId,
         domain: &str,
-        digest: &str,
-        length_octets: u64,
-        key_ref: &str,
-        key_heads: ChangeHashSet,
-        content_encoding: &str,
-        encoding_parameters: serde_json::Value,
+        cipher: CipherBlob,
     ) -> Res<()> {
         drawer
             .update_at_heads_with_scope(
@@ -334,16 +329,7 @@ mod tests {
                             tag: FacetTag::WellKnown(WellKnownFacetTag::CipherBlob),
                             id: domain.to_string(),
                         },
-                        FacetRaw::from(WellKnownFacet::CipherBlob(CipherBlob {
-                            representation: Representation {
-                                digest: digest.to_string(),
-                                length_octets,
-                            },
-                            content_encoding: content_encoding.to_string(),
-                            key_ref: key_ref.parse()?,
-                            key_ref_heads: key_heads,
-                            encoding_parameters,
-                        })),
+                        FacetRaw::from(WellKnownFacet::CipherBlob(cipher)),
                     )]
                     .into(),
                     facets_remove: vec![],
@@ -387,12 +373,16 @@ mod tests {
             &drawer,
             &doc_id,
             "relay",
-            &multihash_digest(c_a),
-            ciphertext_len_of(&store, c_a).await?,
-            &key_ref,
-            key_heads.clone(),
-            CONTENT_ENCODING_AES128GCM,
-            small.to_encoding_parameters(),
+            CipherBlob {
+                representation: Representation {
+                    digest: multihash_digest(c_a),
+                    length_octets: ciphertext_len_of(&store, c_a).await?,
+                },
+                content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
+                key_ref: key_ref.parse()?,
+                key_ref_heads: key_heads.clone(),
+                encoding_parameters: small.to_encoding_parameters(),
+            },
         )
         .await?;
 
@@ -411,12 +401,16 @@ mod tests {
             &drawer,
             &doc_id,
             "relay-minimal",
-            &plain_digest(c_b),
-            ciphertext_len_of(&store, c_b).await?,
-            &key_ref,
-            key_heads,
-            CONTENT_ENCODING_AES128GCM,
-            minimal.to_encoding_parameters(),
+            CipherBlob {
+                representation: Representation {
+                    digest: plain_digest(c_b),
+                    length_octets: ciphertext_len_of(&store, c_b).await?,
+                },
+                content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
+                key_ref: key_ref.parse()?,
+                key_ref_heads: key_heads,
+                encoding_parameters: minimal.to_encoding_parameters(),
+            },
         )
         .await?;
 
@@ -457,12 +451,16 @@ mod tests {
             &drawer,
             &pinned_doc,
             "relay",
-            &multihash_digest(c),
-            ciphertext_len_of(&store, c).await?,
-            &key_ref,
-            heads_a.clone(),
-            CONTENT_ENCODING_AES128GCM,
-            encoding.to_encoding_parameters(),
+            CipherBlob {
+                representation: Representation {
+                    digest: multihash_digest(c),
+                    length_octets: ciphertext_len_of(&store, c).await?,
+                },
+                content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
+                key_ref: key_ref.parse()?,
+                key_ref_heads: heads_a.clone(),
+                encoding_parameters: encoding.to_encoding_parameters(),
+            },
         )
         .await?;
 
@@ -484,12 +482,16 @@ mod tests {
             &drawer,
             &latest_doc,
             "relay",
-            &multihash_digest(c),
-            ciphertext_len_of(&store, c).await?,
-            &key_ref,
-            heads_b,
-            CONTENT_ENCODING_AES128GCM,
-            encoding.to_encoding_parameters(),
+            CipherBlob {
+                representation: Representation {
+                    digest: multihash_digest(c),
+                    length_octets: ciphertext_len_of(&store, c).await?,
+                },
+                content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
+                key_ref: key_ref.parse()?,
+                key_ref_heads: heads_b,
+                encoding_parameters: encoding.to_encoding_parameters(),
+            },
         )
         .await?;
         let latest =
@@ -527,12 +529,16 @@ mod tests {
             &drawer,
             &good_doc,
             "relay",
-            &multihash_digest(good_c),
-            128,
-            &key_ref,
-            key_heads.clone(),
-            CONTENT_ENCODING_AES128GCM,
-            encoding.to_encoding_parameters(),
+            CipherBlob {
+                representation: Representation {
+                    digest: multihash_digest(good_c),
+                    length_octets: 128,
+                },
+                content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
+                key_ref: key_ref.parse()?,
+                key_ref_heads: key_heads.clone(),
+                encoding_parameters: encoding.to_encoding_parameters(),
+            },
         )
         .await?;
         let good = DocKeySource::new(Arc::clone(&drawer), good_doc, BranchPathBuf::from("main"));
@@ -556,12 +562,16 @@ mod tests {
             &drawer,
             &broken_doc,
             "unknown-heads",
-            &multihash_digest(unknown_heads_c),
-            128,
-            &key_ref,
-            ChangeHashSet(Arc::from([automerge::ChangeHash([7u8; 32])])),
-            CONTENT_ENCODING_AES128GCM,
-            encoding.to_encoding_parameters(),
+            CipherBlob {
+                representation: Representation {
+                    digest: multihash_digest(unknown_heads_c),
+                    length_octets: 128,
+                },
+                content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
+                key_ref: key_ref.parse()?,
+                key_ref_heads: ChangeHashSet(Arc::from([automerge::ChangeHash([7u8; 32])])),
+                encoding_parameters: encoding.to_encoding_parameters(),
+            },
         )
         .await?;
         let missing_doc_c = Hash::new(b"keyRef into a document that does not exist");
@@ -569,12 +579,16 @@ mod tests {
             &drawer,
             &broken_doc,
             "missing-doc",
-            &multihash_digest(missing_doc_c),
-            128,
-            "db+facet:///nosuchkeydoc/org.example.daybook.jwk/relay",
-            key_heads.clone(),
-            CONTENT_ENCODING_AES128GCM,
-            encoding.to_encoding_parameters(),
+            CipherBlob {
+                representation: Representation {
+                    digest: multihash_digest(missing_doc_c),
+                    length_octets: 128,
+                },
+                content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
+                key_ref: "db+facet:///nosuchkeydoc/org.example.daybook.jwk/relay".parse()?,
+                key_ref_heads: key_heads.clone(),
+                encoding_parameters: encoding.to_encoding_parameters(),
+            },
         )
         .await?;
         let bad_scheme_c = Hash::new(b"a scheme this codec does not implement");
@@ -582,12 +596,16 @@ mod tests {
             &drawer,
             &broken_doc,
             "bad-scheme",
-            &multihash_digest(bad_scheme_c),
-            128,
-            &key_ref,
-            key_heads.clone(),
-            "br",
-            encoding.to_encoding_parameters(),
+            CipherBlob {
+                representation: Representation {
+                    digest: multihash_digest(bad_scheme_c),
+                    length_octets: 128,
+                },
+                content_encoding: "br".to_string(),
+                key_ref: key_ref.parse()?,
+                key_ref_heads: key_heads.clone(),
+                encoding_parameters: encoding.to_encoding_parameters(),
+            },
         )
         .await?;
         let bad_params_c = Hash::new(b"parameters its own scheme cannot parse");
@@ -595,12 +613,16 @@ mod tests {
             &drawer,
             &broken_doc,
             "bad-params",
-            &multihash_digest(bad_params_c),
-            128,
-            &key_ref,
-            key_heads.clone(),
-            CONTENT_ENCODING_AES128GCM,
-            serde_json::json!({ "recordSize": 8, "padding": "record" }),
+            CipherBlob {
+                representation: Representation {
+                    digest: multihash_digest(bad_params_c),
+                    length_octets: 128,
+                },
+                content_encoding: CONTENT_ENCODING_AES128GCM.to_string(),
+                key_ref: key_ref.parse()?,
+                key_ref_heads: key_heads.clone(),
+                encoding_parameters: serde_json::json!({ "recordSize": 8, "padding": "record" }),
+            },
         )
         .await?;
         let broken =

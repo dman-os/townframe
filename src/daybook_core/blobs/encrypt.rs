@@ -36,9 +36,9 @@
 //! `BLAKE3("daybook.cipherblob.salt.v1" || master_key || P_hash)[..16]`.
 //! Because GCM is catastrophic under (CEK, nonce) reuse, and nonces reset per
 //! message, two plaintexts under one shared master key MUST NOT share a salt.
-//! Content-deriving the salt makes that collision impossible by construction
-//! - no persistence-layer discipline required - while keeping encryption
-//! deterministic (reconstruct C byte-identically from P + key). Consequence:
+//! Content-deriving the salt makes that collision impossible by
+//! construction - no persistence-layer discipline required - while keeping
+//! encryption deterministic (reconstruct C byte-identically from P + key). Consequence:
 //! rotating only the salt is impossible by design (non-goal; rotate keys).
 
 use crate::interlude::*;
@@ -201,9 +201,9 @@ pub const TAG_PT_PREFIX: &str = "pt:";
 
 pub type Res<T> = eyre::Result<T>;
 
-fn raw(h: Hash) -> HashAndFormat {
+fn raw(hash: Hash) -> HashAndFormat {
     HashAndFormat {
-        hash: h,
+        hash,
         format: BlobFormat::Raw,
     }
 }
@@ -292,11 +292,11 @@ pub struct MapKeySource(pub HashMap<Hash, MasterKey>);
 
 #[async_trait::async_trait]
 impl CipherKeySource for MapKeySource {
-    async fn key_for(&self, c: &Hash) -> Res<MasterKey> {
+    async fn key_for(&self, ct_hash: &Hash) -> Res<MasterKey> {
         self.0
-            .get(c)
+            .get(ct_hash)
             .cloned()
-            .ok_or_else(|| eyre::eyre!("no key registered for ciphertext {c}"))
+            .ok_or_else(|| eyre::eyre!("no key registered for ciphertext {ct_hash}"))
     }
 }
 
@@ -307,15 +307,15 @@ fn b64url_encode_32(key: &[u8; MASTER_KEY_LEN]) -> String {
     data_encoding::BASE64URL_NOPAD.encode(key)
 }
 
-fn b64url_decode_32(s: &str) -> Res<[u8; MASTER_KEY_LEN]> {
+fn b64url_decode_32(encoded: &str) -> Res<[u8; MASTER_KEY_LEN]> {
     eyre::ensure!(
-        s.len() == 43,
+        encoded.len() == 43,
         "expected 43 unpadded base64url chars for a 32-octet key, got {}",
-        s.len()
+        encoded.len()
     );
     let bytes = data_encoding::BASE64URL_NOPAD
-        .decode(s.as_bytes())
-        .map_err(|e| eyre::eyre!("invalid unpadded base64url: {e}"))?;
+        .decode(encoded.as_bytes())
+        .map_err(|err| eyre::eyre!("invalid unpadded base64url: {err}"))?;
     let out: [u8; MASTER_KEY_LEN] = bytes
         .try_into()
         .expect("43 unpadded base64url chars decode to 32 octets");
@@ -357,11 +357,11 @@ struct Cipher {
 
 impl Cipher {
     fn nonce(&self, seq: u64) -> [u8; NONCE_LEN] {
-        let mut n = self.nonce_base;
-        for (i, b) in seq.to_be_bytes().iter().enumerate() {
-            n[4 + i] ^= b;
+        let mut masked = self.nonce_base;
+        for (idx, octet) in seq.to_be_bytes().iter().enumerate() {
+            masked[4 + idx] ^= *octet;
         }
-        n
+        masked
     }
 
     /// Encrypt one record: `plaintext` is the record content (without the
@@ -393,8 +393,8 @@ impl Cipher {
         let mut buf = ct.to_vec();
         self.aead
             .decrypt_in_place(Nonce::from_slice(&self.nonce(seq)), &[], &mut buf)
-            .map_err(|e| eyre::eyre!("record decryption failed: {e:?}"))?;
-        let Some(pos) = buf.iter().rposition(|&b| b != 0) else {
+            .map_err(|err| eyre::eyre!("record decryption failed: {err:?}"))?;
+        let Some(pos) = buf.iter().rposition(|&octet| octet != 0) else {
             eyre::bail!("record contains no delimiter octet");
         };
         let payload = &buf[..pos];
@@ -407,11 +407,11 @@ impl Cipher {
 }
 
 fn header(salt: &[u8; SALT_LEN], rs: u64) -> [u8; HEADER_LEN] {
-    let mut h = [0u8; HEADER_LEN];
-    h[..SALT_LEN].copy_from_slice(salt);
-    h[SALT_LEN..SALT_LEN + 4].copy_from_slice(&(rs as u32).to_be_bytes());
-    h[HEADER_LEN - 1] = 0; // id_len: no sender key id
-    h
+    let mut hdr = [0u8; HEADER_LEN];
+    hdr[..SALT_LEN].copy_from_slice(salt);
+    hdr[SALT_LEN..SALT_LEN + 4].copy_from_slice(&(rs as u32).to_be_bytes());
+    hdr[HEADER_LEN - 1] = 0; // id_len: no sender key id
+    hdr
 }
 
 /// Encrypt a complete plaintext buffer with an explicit record size and
@@ -445,10 +445,10 @@ fn encrypt_raw_ikm(
     // Non-final records always carry a full payload chunk and no padding;
     // their delimiter fills the frame to exactly `rs` wire bytes.
     let full = n_records - 1;
-    for i in 0..full {
-        let start = i * payload_max;
+    for rec_index in 0..full {
+        let start = rec_index * payload_max;
         let chunk = plaintext[start..start + payload_max].to_vec();
-        out.extend_from_slice(&rc.encrypt_record(i as u64, false, chunk, 0));
+        out.extend_from_slice(&rc.encrypt_record(rec_index as u64, false, chunk, 0));
     }
     // The final record carries the tail (possibly empty) plus the policy's
     // padding: a full frame under [`Padding::Record`], delimiter-only under
@@ -657,7 +657,7 @@ impl StreamDecryptor {
 
     /// Take decrypted payload chunks emitted since the last drain.
     fn drain_outbox(&mut self) -> std::vec::IntoIter<Vec<u8>> {
-        std::mem::replace(&mut self.outbox, Vec::new()).into_iter()
+        std::mem::take(&mut self.outbox).into_iter()
     }
 
     /// Consume the trailing final (possibly short) record once the stream
@@ -774,9 +774,9 @@ where
     // `encodingParameters` - so the codec never picks one for them.
     let c_hash = match provider.install(store, key, p_hash, encoding).await {
         Ok(c_hash) => c_hash,
-        Err(e) => {
+        Err(err) => {
             drop(p_tag);
-            return Err(e);
+            return Err(err);
         }
     };
     drop(p_tag);
@@ -808,8 +808,8 @@ async fn add_progress_to_tag(
     loop {
         match stream.next().await {
             Some(iroh_blobs::api::proto::AddProgressItem::Done(tag)) => return Ok(tag),
-            Some(iroh_blobs::api::proto::AddProgressItem::Error(e)) => {
-                return Err(eyre::eyre!("import failed: {e}"));
+            Some(iroh_blobs::api::proto::AddProgressItem::Error(err)) => {
+                return Err(eyre::eyre!("import failed: {err}"));
             }
             Some(_) => {}
             None => eyre::bail!("import progress stream ended without completion"),
@@ -899,8 +899,8 @@ fn n_records_for(p_len: u64, payload_max: u64) -> u64 {
 /// under `encoding`.
 fn ciphertext_len(p_len: u64, encoding: EncodingParams) -> u64 {
     let payload_max = payload_size(encoding.record_size);
-    let n = n_records_for(p_len, payload_max);
-    let final_content = p_len - (n - 1) * payload_max;
+    let record_count = n_records_for(p_len, payload_max);
+    let final_content = p_len - (record_count - 1) * payload_max;
     let final_wire = match encoding.padding {
         // Minimal: content + delimiter + tag (a full-content final record is
         // exactly `rs` wire bytes - content + delimiter = rs - 16).
@@ -908,7 +908,7 @@ fn ciphertext_len(p_len: u64, encoding: EncodingParams) -> u64 {
         // Record: the final frame is padded up to full record size.
         Padding::Record => encoding.record_size,
     };
-    HEADER_LEN as u64 + (n - 1) * encoding.record_size + final_wire
+    HEADER_LEN as u64 + (record_count - 1) * encoding.record_size + final_wire
 }
 
 /// Pass 2 over already-stored plaintext: one incremental read sweep of `P`
@@ -945,7 +945,7 @@ async fn install_virtual_encrypted(
     // ciphertext length (and therefore the ciphertext's bao tree).
     let p_len: u64 = match items.next().await {
         Some(EncodedItem::Size(len)) => len,
-        Some(EncodedItem::Error(e)) => eyre::bail!("export of {p_hash} failed: {e:?}"),
+        Some(EncodedItem::Error(err)) => eyre::bail!("export of {p_hash} failed: {err:?}"),
         other => eyre::bail!("export of {p_hash} did not announce a size: {other:?}"),
     };
     let c_len = ciphertext_len(p_len, encoding);
@@ -970,7 +970,7 @@ async fn install_virtual_encrypted(
                         c_tx.write_all(&rec).await?;
                     }
                 }
-                EncodedItem::Error(e) => eyre::bail!("export of {p_hash} failed: {e:?}"),
+                EncodedItem::Error(err) => eyre::bail!("export of {p_hash} failed: {err:?}"),
                 EncodedItem::Parent(_) | EncodedItem::Size(_) | EncodedItem::Done => {}
             }
         }
@@ -979,7 +979,9 @@ async fn install_virtual_encrypted(
             c_tx.write_all(&rec).await?;
         }
         c_tx.shutdown().await?;
-        let _ = rebuilt_tx.send(rebuilt);
+        // The only failure mode is a dropped receiver, which cannot happen:
+        // the digest is read from `rebuilt_rx` right after the join below.
+        let _sent: Result<(), blake3::Hash> = rebuilt_tx.send(rebuilt);
         Ok::<(), eyre::Report>(())
     };
 
@@ -997,7 +999,7 @@ async fn install_virtual_encrypted(
         bao_sync_outboard(&mut reader, tree, &mut ob).map(|root| (root, ob))
     });
 
-    let (producer_res, consumer_res) = tokio::join!(producer, async { consumer.await });
+    let (producer_res, consumer_res) = tokio::join!(producer, consumer);
     producer_res?;
     let (c_root, mut ob) = consumer_res.expect("outboard task panicked")?;
     let rebuilt = rebuilt_rx
@@ -1137,33 +1139,33 @@ impl FsDownloadLedger {
         Self { root: root.into() }
     }
 
-    fn dir_for(&self, c: &Hash) -> std::path::PathBuf {
+    fn dir_for(&self, ct_hash: &Hash) -> std::path::PathBuf {
         self.root
-            .join(data_encoding::BASE64URL_NOPAD.encode(c.as_bytes()))
+            .join(data_encoding::BASE64URL_NOPAD.encode(ct_hash.as_bytes()))
     }
 
-    pub(crate) fn spill_path(&self, c: &Hash) -> std::path::PathBuf {
-        self.dir_for(c).join("spill.bin")
+    pub(crate) fn spill_path(&self, ct_hash: &Hash) -> std::path::PathBuf {
+        self.dir_for(ct_hash).join("spill.bin")
     }
 
-    fn meta_path(&self, c: &Hash) -> std::path::PathBuf {
-        self.dir_for(c).join("meta.bin")
+    fn meta_path(&self, ct_hash: &Hash) -> std::path::PathBuf {
+        self.dir_for(ct_hash).join("meta.bin")
     }
 
     /// Remove all ledger state for `c` (no-op when nothing is recorded).
-    pub fn clear(&self, c: &Hash) -> Res<()> {
-        match std::fs::remove_dir_all(self.dir_for(c)) {
+    pub fn clear(&self, ct_hash: &Hash) -> Res<()> {
+        match std::fs::remove_dir_all(self.dir_for(ct_hash)) {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
         }
     }
 
     /// Persist the header facts + padding of an in-flight download. Written
     /// once, right after the first attempt parsed the header; the resume
     /// point itself is not stored - it is recovered from the spill length.
-    fn write_meta(&self, c: &Hash, facts: HeaderFacts, padding: Padding) -> Res<()> {
-        let dir = self.dir_for(c);
+    fn write_meta(&self, ct_hash: &Hash, facts: HeaderFacts, padding: Padding) -> Res<()> {
+        let dir = self.dir_for(ct_hash);
         std::fs::create_dir_all(&dir)?;
         let mut buf = Vec::with_capacity(LEDGER_META_LEN);
         buf.extend_from_slice(&LEDGER_META);
@@ -1175,25 +1177,25 @@ impl FsDownloadLedger {
             Padding::Record => 1,
         });
         eyre::ensure!(buf.len() == LEDGER_META_LEN, "meta layout drifted");
-        let path = self.meta_path(c);
+        let path = self.meta_path(ct_hash);
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, &buf)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
 
-    fn read_meta(&self, c: &Hash) -> Res<Option<(HeaderFacts, Padding)>> {
-        let bytes = match std::fs::read(self.meta_path(c)) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
+    fn read_meta(&self, ct_hash: &Hash) -> Res<Option<(HeaderFacts, Padding)>> {
+        let bytes = match std::fs::read(self.meta_path(ct_hash)) {
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
         };
         eyre::ensure!(
             bytes.len() == LEDGER_META_LEN,
             "corrupt download ledger meta"
         );
         eyre::ensure!(
-            &bytes[..LEDGER_META.len()] == &LEDGER_META[..],
+            bytes[..LEDGER_META.len()] == LEDGER_META[..],
             "foreign download ledger meta"
         );
         let salt = bytes[5..21].try_into().expect("16 salt octets");
@@ -1263,10 +1265,10 @@ pub async fn download_encrypted(
     // watermark implied by the spill length.
     let prior = match ledger {
         None => None,
-        Some(l) => {
-            let path = l.spill_path(&c_hash);
+        Some(ledger) => {
+            let path = ledger.spill_path(&c_hash);
             std::fs::create_dir_all(path.parent().expect("spill has a parent"))?;
-            Some((l, path, l.read_meta(&c_hash)?))
+            Some((ledger, path, ledger.read_meta(&c_hash)?))
         }
     };
     let (spill, encoding) = match prior {
@@ -1288,7 +1290,7 @@ pub async fn download_encrypted(
         Some((_, path, Some((facts, padding)))) => {
             let len = tokio::fs::metadata(&path)
                 .await
-                .map(|m| m.len())
+                .map(|meta| meta.len())
                 .unwrap_or(0);
             // A crash can leave a torn final record: resume from whole
             // records only. A complete short final record under
@@ -1299,6 +1301,9 @@ pub async fn download_encrypted(
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
+                // The resume watermark is re-established by `set_len` below;
+                // nothing here may truncate the spill being resumed.
+                .truncate(false)
                 .open(&path)
                 .await?;
             file.set_len(seq * payload).await?;
@@ -1324,7 +1329,11 @@ pub async fn download_encrypted(
     // the chunk containing the first missing record, open-ended.
     let first_byte = spill
         .as_ref()
-        .and_then(|(_, facts, seq)| facts.as_ref().map(|f| f.record_start(*seq)))
+        .and_then(|(_, facts, seq)| {
+            facts
+                .as_ref()
+                .map(|header_facts| header_facts.record_start(*seq))
+        })
         .unwrap_or(0);
     let ranges = if fresh_decoder {
         bao_tree::ChunkRanges::all()
@@ -1347,8 +1356,8 @@ pub async fn download_encrypted(
     // Decrypted records stream into the spill/importer; the bounded channel
     // applies backpressure to the fetch whenever the sink falls behind.
     let (p_tx, p_rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(16);
-    let ledger_consume = ledger.map(|l| LedgerConsume {
-        ledger: l,
+    let ledger_consume = ledger.map(|ledger| LedgerConsume {
+        ledger,
         c_hash,
         padding: encoding.padding,
     });
@@ -1367,7 +1376,7 @@ pub async fn download_encrypted(
         Some((file, _, _)) => {
             let (fetch_res, consume_res, spill_res) =
                 tokio::join!(fetch, consume, spill_writer(p_rx, file));
-            fetch_res.map_err(|e| eyre::eyre!("fetch_bao_to failed: {e:?}"))?;
+            fetch_res.map_err(|err| eyre::eyre!("fetch_bao_to failed: {err:?}"))?;
             consume_res?;
             spill_res?;
             // Crash-during-a-prior-attempt can mean this suffix request lands
@@ -1389,7 +1398,7 @@ pub async fn download_encrypted(
                 consume,
                 import_stream_to_tag(store, mpsc_into_stream(p_rx))
             );
-            fetch_res.map_err(|e| eyre::eyre!("fetch_bao_to failed: {e:?}"))?;
+            fetch_res.map_err(|err| eyre::eyre!("fetch_bao_to failed: {err:?}"))?;
             consume_res?;
             let tag = tag_res?;
             let len = dec.ciphertext_len;
@@ -1423,8 +1432,8 @@ pub async fn download_encrypted(
         );
     }
 
-    if let Some(l) = ledger {
-        l.clear(&c_hash)?;
+    if let Some(ledger) = ledger {
+        ledger.clear(&c_hash)?;
     }
     drop(p_tag); // named tags now root both entries
     Ok(p_hash)
@@ -1457,17 +1466,21 @@ async fn import_file_to_tag(
     let reader = async move {
         loop {
             let mut buf = bytes::BytesMut::zeroed(64 * 1024);
-            let n = file.read(&mut buf).await?;
-            if n == 0 {
+            let read_bytes = file.read(&mut buf).await?;
+            if read_bytes == 0 {
                 break;
             }
-            if tx.send(Ok(buf.split_to(n).freeze())).await.is_err() {
+            if tx
+                .send(Ok(buf.split_to(read_bytes).freeze()))
+                .await
+                .is_err()
+            {
                 break; // import side gone; its result surfaces the cause
             }
         }
         eyre::Ok(())
     };
-    let handle = tokio::spawn(async move { reader.await });
+    let handle = tokio::spawn(reader);
     let tag = import_stream_to_tag(store, mpsc_into_stream(rx)).await?;
     handle
         .await
@@ -1486,13 +1499,17 @@ async fn import_stream_to_tag(
 
 /// Fetch-and-decrypt a ciphertext verifiable on this node (stored, or virtual
 /// with a live provider registered).
-pub async fn get_decrypted(store: &Store, keys: &dyn CipherKeySource, c: Hash) -> Res<Vec<u8>> {
-    let key = keys.key_for(&c).await?;
+pub async fn get_decrypted(
+    store: &Store,
+    keys: &dyn CipherKeySource,
+    ct_hash: Hash,
+) -> Res<Vec<u8>> {
+    let key = keys.key_for(&ct_hash).await?;
     // Virtual entries are only served through export_bao; its Leaf items are
     // raw ciphertext bytes.
     let stream = store
         .blobs()
-        .export_bao(c, bao_tree::ChunkRanges::all())
+        .export_bao(ct_hash, bao_tree::ChunkRanges::all())
         .stream();
     futures::pin_mut!(stream);
     let mut dec = StreamDecryptor::new(key);
@@ -1502,8 +1519,8 @@ pub async fn get_decrypted(store: &Store, keys: &dyn CipherKeySource, c: Hash) -
             bao_tree::io::mixed::EncodedItem::Parent(_)
             | bao_tree::io::mixed::EncodedItem::Size(_) => {}
             bao_tree::io::mixed::EncodedItem::Done => break,
-            bao_tree::io::mixed::EncodedItem::Error(e) => {
-                eyre::bail!("export_bao failed: {e:?}")
+            bao_tree::io::mixed::EncodedItem::Error(err) => {
+                eyre::bail!("export_bao failed: {err:?}")
             }
         }
     }
@@ -1608,10 +1625,10 @@ impl PlainPair {
     /// RFC 8188 encryption is deterministic, so they agree, and the loser's
     /// work is wasted but never wrong.
     fn record(&self, idx: u64) -> io::Result<Bytes> {
-        if let Some((cached, ct)) = self.cache.lock().expect("cache lock poisoned").as_ref() {
-            if *cached == idx {
-                return Ok(ct.clone());
-            }
+        if let Some((cached, ct)) = self.cache.lock().expect("cache lock poisoned").as_ref()
+            && *cached == idx
+        {
+            return Ok(ct.clone());
         }
         #[cfg(test)]
         self.encryptions.fetch_add(1, Ordering::Relaxed);
@@ -1695,20 +1712,20 @@ impl CipherBlobProvider {
     pub async fn register_pair(
         &self,
         store: &Store,
-        c: Hash,
+        c_hash: Hash,
         key: &MasterKey,
         p_hash: Hash,
         encoding: EncodingParams,
     ) -> Res<()> {
         let Some(reader) = store.sync_reader(p_hash).await? else {
-            eyre::bail!("cannot serve {c}: plaintext {p_hash} has no readable stored data");
+            eyre::bail!("cannot serve {c_hash}: plaintext {p_hash} has no readable stored data");
         };
-        set_pair_tags(store, c, p_hash).await?;
+        set_pair_tags(store, c_hash, p_hash).await?;
         let pair = Arc::new(PlainPair::new(key, p_hash, reader, encoding));
         self.pairs
             .write()
             .expect("pairs lock poisoned")
-            .insert(c, pair);
+            .insert(c_hash, pair);
         Ok(())
     }
 
@@ -1730,9 +1747,10 @@ impl CipherBlobProvider {
         p_hash: Hash,
         encoding: EncodingParams,
     ) -> Res<Hash> {
-        let c = install_virtual_encrypted(store, key, p_hash, encoding).await?;
-        self.register_pair(store, c, key, p_hash, encoding).await?;
-        Ok(c)
+        let c_hash = install_virtual_encrypted(store, key, p_hash, encoding).await?;
+        self.register_pair(store, c_hash, key, p_hash, encoding)
+            .await?;
+        Ok(c_hash)
     }
 
     /// Register this provider under [`PROVIDER_NAME`] on a live registry.
@@ -1740,7 +1758,8 @@ impl CipherBlobProvider {
         self: &Arc<Self>,
         virtuals: &iroh_blobs::store::virtual_blob::VirtualProviders,
     ) -> std::io::Result<()> {
-        virtuals.register(PROVIDER_NAME, self.clone())
+        let this = std::sync::Arc::clone(self);
+        virtuals.register(PROVIDER_NAME, this)
     }
 }
 
@@ -1754,7 +1773,9 @@ impl iroh_blobs::store::virtual_blob::Provider for CipherBlobProvider {
     fn reader_for(&self, hash: &Hash) -> Option<iroh_blobs::store::virtual_blob::DynVirtualSource> {
         let pairs = self.pairs.read().expect("pairs lock poisoned");
         let pair = pairs.get(hash)?;
-        Some(Arc::new(CipherSource { pair: pair.clone() }))
+        Some(Arc::new(CipherSource {
+            pair: std::sync::Arc::clone(pair),
+        }))
     }
 }
 
@@ -1873,19 +1894,24 @@ pub struct CipherReader {
 }
 
 impl CipherReader {
-    /// Open a reader over the stored ciphertext `c`, which the caller's
+    /// Open a reader over the stored ciphertext `ct_hash`, which the caller's
     /// metadata says decrypts to `p_len` plaintext octets.
     ///
-    /// Fails if `c` has no readable local data, or if that data is too short to
+    /// Fails if `ct_hash` has no readable local data, or if that data is too short to
     /// hold `p_len` octets under its own framing.
-    pub async fn open(store: &Store, keys: &dyn CipherKeySource, c: Hash, p_len: u64) -> Res<Self> {
-        let key = keys.key_for(&c).await?;
-        let Some(reader) = store.sync_reader(c).await? else {
-            eyre::bail!("cannot read {c}: no readable stored data");
+    pub async fn open(
+        store: &Store,
+        keys: &dyn CipherKeySource,
+        ct_hash: Hash,
+        p_len: u64,
+    ) -> Res<Self> {
+        let key = keys.key_for(&ct_hash).await?;
+        let Some(reader) = store.sync_reader(ct_hash).await? else {
+            eyre::bail!("cannot read {ct_hash}: no readable stored data");
         };
         eyre::ensure!(
             reader.len() >= HEADER_LEN as u64,
-            "ciphertext {c} is shorter than an RFC 8188 header"
+            "ciphertext {ct_hash} is shorter than an RFC 8188 header"
         );
         let head = reader.read_bytes_at(0, HEADER_LEN)?;
         let salt: [u8; SALT_LEN] = head[..SALT_LEN].try_into()?;
@@ -1895,7 +1921,7 @@ impl CipherReader {
         let records_start = HEADER_LEN as u64 + u64::from(head[HEADER_LEN - 1]);
         eyre::ensure!(
             reader.len() > records_start,
-            "ciphertext {c} carries no records"
+            "ciphertext {ct_hash} carries no records"
         );
 
         let payload_max = payload_size(rs);
@@ -1911,7 +1937,7 @@ impl CipherReader {
             + RECORD_OVERHEAD as u64;
         eyre::ensure!(
             reader.len() >= shortest,
-            "ciphertext {c} holds {} octets, too few for {p_len} plaintext octets",
+            "ciphertext {ct_hash} holds {} octets, too few for {p_len} plaintext octets",
             reader.len()
         );
 
@@ -1923,7 +1949,7 @@ impl CipherReader {
             payload_max,
             n_records,
             p_len,
-            c_hash: c,
+            c_hash: ct_hash,
         })
     }
 
@@ -2432,7 +2458,9 @@ mod tests {
             // Sweep the whole ciphertext in store-sized bao leaves: every
             // record is encrypted exactly once, however many leaves it spans.
             let pair = Arc::new(PlainPair::new(&key, p_hash, reader.clone(), encoding));
-            let src = CipherSource { pair: pair.clone() };
+            let src = CipherSource {
+                pair: Arc::clone(&pair),
+            };
             let total = expected.len() as u64;
             let mut off = 0;
             while off < total {
@@ -2686,7 +2714,7 @@ mod tests {
             let c = provider
                 .install(&store, &key, p_hash, EncodingParams::DEFAULT)
                 .await?;
-            assert_eq!(c, Hash::new(&encrypt_bytes(&key, &plaintext)));
+            assert_eq!(c, Hash::new(encrypt_bytes(&key, &plaintext)));
 
             let mut keys_map = MapKeySource::default();
             keys_map.0.insert(c, key.clone());
@@ -2879,7 +2907,7 @@ mod tests {
             .connect(r_a.endpoint().addr(), iroh_blobs::ALPN)
             .await?;
         let provider_b = Arc::new(CipherBlobProvider::new());
-        let keys2 = keys.clone();
+        let keys2 = std::sync::Arc::clone(&keys);
         // Drive the first attempt in place and interrupt it once progress is
         // observable: dropping the pinned future cancels the download mid-
         // transfer, which is exactly the crash we want to survive.
@@ -2912,7 +2940,7 @@ mod tests {
                 _ = tokio::time::sleep(std::time::Duration::from_micros(500)) => {
                     if tokio::fs::metadata(&spill_path)
                         .await
-                        .map(|m| m.len())
+                        .map(|meta| meta.len())
                         .unwrap_or(0)
                         >= 2 * payload
                     {

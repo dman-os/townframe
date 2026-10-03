@@ -332,17 +332,17 @@ impl Rt {
         };
         let blob_pin_worker_stop = if config.spawn_blob_workers {
             Some(
-                crate::blobs::spawn_blob_pin_worker(
-                    Arc::clone(&drawer),
-                    rcx.sql.clone(),
-                    rcx.core_inventory_doc_id.clone(),
-                    rcx.docs_inventory_doc_id.clone(),
-                    rcx.encryption_inventory_doc_id.clone(),
-                    Arc::clone(&blobs_repo),
-                    doc_facet_set_index_repo.revision_store(),
-                    Arc::clone(&plugs_repo),
-                    cancel_token.clone(),
-                )
+                crate::blobs::spawn_blob_pin_worker(crate::blobs::BlobPinWorkerArgs {
+                    drawer_repo: Arc::clone(&drawer),
+                    sql: rcx.sql.clone(),
+                    core_inventory_doc_id: rcx.core_inventory_doc_id.clone(),
+                    docs_inventory_doc_id: rcx.docs_inventory_doc_id.clone(),
+                    encryption_inventory_doc_id: rcx.encryption_inventory_doc_id.clone(),
+                    blobs_repo: Arc::clone(&blobs_repo),
+                    facet_set_store: doc_facet_set_index_repo.revision_store(),
+                    plugs_repo: Arc::clone(&plugs_repo),
+                    parent_cancel_token: cancel_token.clone(),
+                })
                 .await?,
             )
         } else {
@@ -358,14 +358,16 @@ impl Rt {
         let blob_encryption_worker_stop = if config.spawn_blob_workers {
             Some(
                 crate::blobs::spawn_blob_encryption_worker(
-                    Arc::clone(&drawer),
-                    rcx.sql.clone(),
-                    Arc::clone(&blobs_repo),
-                    doc_facet_set_index_repo.revision_store(),
-                    Arc::clone(&doc_facet_set_index_repo),
-                    authority.encrypted_blob_docs.clone(),
-                    rcx.encryption_inventory_doc_id.clone(),
-                    cancel_token.clone(),
+                    crate::blobs::BlobEncryptionWorkerArgs {
+                        drawer_repo: Arc::clone(&drawer),
+                        sql: rcx.sql.clone(),
+                        blobs_repo: Arc::clone(&blobs_repo),
+                        facet_set_store: doc_facet_set_index_repo.revision_store(),
+                        facet_index: Arc::clone(&doc_facet_set_index_repo),
+                        domain_group: authority.encrypted_blob_docs.clone(),
+                        encryption_inventory_doc_id: rcx.encryption_inventory_doc_id.clone(),
+                        parent_cancel_token: cancel_token.clone(),
+                    },
                 )
                 .await?,
             )
