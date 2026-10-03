@@ -1352,7 +1352,6 @@ async fn bootstrap_clone_repo_from_url_for_tests(
 /// whose inventories a peer pulls needs them (those pins exist only because the
 /// workers derived them), while a node that merely fetches bytes does not.
 async fn open_sync_node(repo_root: &std::path::Path, blob_workers: bool) -> Res<SyncTestNode> {
-    info!(repo_root = %repo_root.display(), "opening sync test node");
     let rtx = RepoCtx::open(
         repo_root,
         RepoOpenOptions {
@@ -1361,6 +1360,14 @@ async fn open_sync_node(repo_root: &std::path::Path, blob_workers: bool) -> Res<
         "test-device".into(),
     )
     .await?;
+    open_sync_node_over_ctx(rtx, blob_workers).await
+}
+
+/// The body of `open_sync_node` over an already-opened repo context: a told
+/// node's test-built ctx (see `init_told_sync_node`) takes the same boot path
+/// as a plain one.
+async fn open_sync_node_over_ctx(rtx: Arc<RepoCtx>, blob_workers: bool) -> Res<SyncTestNode> {
+    info!(repo_root = %rtx.layout.repo_root.display(), "opening sync test node");
     let blobs_repo =
         BlobsRepo::new(rtx.layout.blobs_root.clone(), rtx.local_user_path.clone()).await?;
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
@@ -2101,5 +2108,698 @@ async fn wait_for_blob_bytes_retries_until_blob_arrives() -> Res<()> {
         .expect("delayed blob put task should complete")?;
 
     blobs_repo.shutdown().await?;
+    Ok(())
+}
+
+/// Node_b's seam for the "told, not cloned" shape: a fresh, fully independent
+/// repo that never cloned anything (its keyhive holds only its own graph), and
+/// whose inventories are the ones the config doc names.
+///
+/// The telling is exactly the write every repo init and clone adoption makes:
+/// `ConfigRepo::set_blob_inventories` on the repo's config field
+/// (`AppBlobInventories`, config.rs), and the local init_state row for the
+/// inventories is dropped to the triple-of-`None`s the clone path itself
+/// writes (`sync/bootstrap.rs`) — the shape `load_core_docs`' config fallback
+/// exists for. The ctx is then booted through `finish_clone_init`, the same
+/// loader the clone path uses when the inventoried ids live in config, so the
+/// told ids genuinely arrive via the config field rather than being injected.
+///
+/// The plain disk-open path cannot serve this shape: it additionally runs
+/// `grant_docs_admin` against the told (foreign) inventory documents, which
+/// fails on a keyhive that has never pulled them — only a pulled (clone- or
+/// grant-fed) repo can. `finish_clone_init` boots the same ctx shape without
+/// that requirement, and that is the one legitimate pre-existing seam in the
+/// tree; no new config plumbing was added.
+async fn init_told_sync_node(
+    repo_root: &std::path::Path,
+    told: crate::config::AppBlobInventories,
+) -> Res<SyncTestNode> {
+    let device_name = "test-device".to_string();
+    // 1. A fresh independent repo: own identity, own core docs, own keyhive.
+    //    Its own init dance also mints its own inventories; the tell below
+    //    re-points the node's inventories at the told ones, and the local
+    //    leftovers stay as inert drawer-only docs nothing watches.
+    let rtx = RepoCtx::init(
+        repo_root,
+        RepoOpenOptions::default(),
+        "told-node".to_string(),
+        device_name.clone(),
+    )
+    .await?;
+    let layout = rtx.layout.clone();
+    let doc_app_id = rtx.doc_app.document_id();
+    let doc_drawer_id = rtx.doc_drawer.document_id();
+    let doc_config_id = rtx.doc_config.document_id();
+    let local_device_name = rtx.local_device_name.clone();
+    let local_user_path = rtx.local_user_path.clone();
+    let local_peer_key = rtx.local_peer_key.clone();
+    let local_actor_id = rtx.local_actor_id.clone();
+    let repo_id = rtx.repo_id.clone();
+    let checkout_id = rtx.checkout_id.clone();
+    let repo_name = rtx.repo_name.clone();
+
+    // 2. The tell, on the node's own config doc, via the production mutator.
+    let result: Res<()> = async {
+        let blobs_repo = BlobsRepo::new(
+            layout.blobs_root.clone(),
+            daybook_types::doc::UserPathBuf::from(local_user_path.clone()),
+        )
+        .await?;
+        let (plugs_repo, plugs_stop) = PlugsRepo::load(
+            Arc::clone(&rtx.big_repo),
+            Arc::clone(&blobs_repo),
+            doc_config_id.clone(),
+            daybook_types::doc::UserPathBuf::from(local_user_path.clone()),
+            Arc::clone(&rtx.sqlite_local_state_repo),
+        )
+        .await?;
+        let (config_repo, config_stop) = crate::config::ConfigRepo::load(
+            Arc::clone(&rtx.big_repo),
+            doc_app_id.clone(),
+            Arc::clone(&plugs_repo),
+            daybook_types::doc::UserPathBuf::from(local_user_path.clone()),
+            rtx.sql.clone(),
+        )
+        .await?;
+        config_repo.set_blob_inventories(told.clone()).await?;
+        assert_eq!(
+            config_repo.get_blob_inventories().await,
+            Some(told.clone()),
+            "the tell must land in the repo's config doc",
+        );
+        crate::repo::globals::set_init_state(
+            &rtx.sql,
+            &crate::repo::globals::InitState::Created {
+                doc_id_app: doc_app_id.clone(),
+                doc_id_drawer: doc_drawer_id.clone(),
+                doc_id_config: Some(doc_config_id.clone()),
+                core_inventory_doc_id: None,
+                docs_inventory_doc_id: None,
+                encryption_inventory_doc_id: None,
+            },
+        )
+        .await?;
+        config_stop.stop().await?;
+        plugs_stop.stop().await?;
+        blobs_repo.shutdown().await?;
+        eyre::Ok(())
+    }
+    .await;
+    rtx.shutdown().await?;
+    result?;
+
+    // 3. The told boot: the ctx the clone machinery itself delivers once the
+    // inventoried ids live in config.
+    let result: Res<SyncTestNode> = async {
+        let lock_guard = crate::repo::RepoLockGuard::acquire(layout.lock_path.clone()).await?;
+        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::file(layout.sqlite_path.clone()))
+            .await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            crate::local_state::SqliteLocalStateRepo::boot(layout.repo_root.join("local_state"))
+                .await?;
+        let secret_store = secrets_rs::SecretStore::boot().await?;
+        let identity = crate::secrets::load_identity(&secret_store, &checkout_id.clone())
+            .await?
+            .ok_or_else(|| eyre::eyre!("told node identity missing from the secret store"))?;
+        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
+            node_identity_seed: identity.iroh_secret_key.to_bytes(),
+            storage: big_repo::StorageConfig::Disk {
+                path: layout.big_repo_root.clone(),
+            },
+            scope_key: Arc::from("daybook-core"),
+            hidden_parts: default(),
+            automerge_frontier_group_scope: default(),
+            causal_checkpoint_group_scope: default(),
+            group_part_group_scope: default(),
+        })
+        .await?;
+        let parts = crate::repo::RepoCtxParts {
+            layout: layout.clone(),
+            lock_guard,
+            options: RepoOpenOptions {
+                sync_max_task_backoff: Some(Duration::from_millis(500)),
+            },
+            sql: sql.clone(),
+            sqlite_local_state_repo: Arc::clone(&sqlite_local_state_repo),
+            sqlite_local_state_stop: std::sync::Mutex::new(Some(sqlite_local_state_stop)),
+            part_store: big_repo.shared_part_store(),
+            blob_part_store: crate::repo::open_blob_part_store(big_repo.sql_ctx()).await?,
+            frontier_part_store: big_repo.frontier_part_store(),
+            derived_part_store: big_repo.derived_part_store(),
+            big_repo: Arc::clone(&big_repo),
+            big_repo_stop: std::sync::Mutex::new(Some(big_repo_stop)),
+            local_peer_key,
+            local_actor_id,
+            local_user_path: local_user_path.clone(),
+            local_device_name,
+            repo_id,
+            checkout_id,
+            repo_name,
+            iroh_public_key: identity.iroh_public_key.to_string(),
+            iroh_secret_key: identity.iroh_secret_key.clone(),
+            secret_store,
+        };
+        let rtx = crate::repo::finish_clone_init(parts).await?;
+        assert_eq!(
+            rtx.encryption_inventory_doc_id, told.encryption_inventory_doc_id,
+            "the told boot must resolve the encryption inventory from the config doc",
+        );
+        assert_eq!(
+            rtx.core_inventory_doc_id, told.core_inventory_doc_id,
+            "the told boot must resolve the core inventory from the config doc",
+        );
+        open_sync_node_over_ctx(rtx, false).await
+    }
+    .await;
+    result
+}
+
+/// The access rows of one blob-inventory part, read from the repository's own
+/// blob part store (scope-keyed; the shape the permission writer's tests use).
+async fn inventory_part_rows(
+    sql: &SqlCtx,
+    scope: &str,
+    part: &PartKey,
+) -> Res<Vec<(PeerKey, String)>> {
+    let scope_id =
+        big_sync::sqlite_core::SqliteCore::ensure_scope_id(&sql.write_pool, &Arc::from(scope))
+            .await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT s.principal_id AS principal_id
+             , s.access_level AS access_level
+          FROM big_sync_syncable s
+          JOIN big_sync_parts p ON p.part_ref = s.part_ref
+         WHERE p.scope_id = ?1
+           AND p.part_id = ?2
+        "#,
+    )
+    .bind(scope_id)
+    .bind(big_sync::sqlite_core::SqliteCore::part_blob(part.clone()))
+    .fetch_all(&sql.read_pool)
+    .await?;
+    use sqlx::Row as _;
+    rows.into_iter()
+        .map(|row| {
+            let principal: Vec<u8> = row.get("principal_id");
+            let level: i64 = row.get("access_level");
+            let principal =
+                PeerKey::new(<[u8; 32]>::try_from(principal.as_slice()).map_err(|_| {
+                    eyre::eyre!(
+                        "a principal id is {} bytes wide, expected 32",
+                        principal.len()
+                    )
+                })?);
+            Ok((principal, level.to_string()))
+        })
+        .collect()
+}
+
+/// Bounded wait for the peer's keyhive agent on a node (the grant needs it).
+async fn wait_for_peer_agent(
+    node: &SyncTestNode,
+    peer_id: PeerKey,
+    timeout: Duration,
+) -> Res<big_repo::BigKeyhiveAgent> {
+    let deadline = utils_rs::scale_timeout(timeout);
+    let deadline = tokio::time::Instant::now() + deadline;
+    loop {
+        if let Some(agent) = node
+            .ctx
+            .big_repo
+            .keyhive_agent_for_peer(peer_id.clone())
+            .await?
+        {
+            return Ok(agent);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eyre::bail!(
+                "timed out waiting for the peer's keyhive agent on node {}; \
+                 the contact-card exchange never named it",
+                node.sync_repo.router.endpoint().id(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Drive one keyhive exchange from `node` toward `peer`, retrying while the
+/// connection has not landed yet (the established pattern of
+/// `sync/tests/stress.rs`, which connects and then exchanges in both
+/// directions).
+async fn drive_keyhive_exchange(
+    node: &SyncTestNode,
+    peer_id: PeerKey,
+    timeout: Duration,
+) -> Res<()> {
+    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(timeout);
+    loop {
+        match node
+            .ctx
+            .big_repo
+            .sync_keyhive_with_peer(peer_id.clone())
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(_) if tokio::time::Instant::now() >= deadline => {
+                eyre::bail!(
+                    "timed out driving the keyhive exchange from {} toward {peer_id}",
+                    node.sync_repo.router.endpoint().id(),
+                );
+            }
+            Err(_) => {
+                // The connection may still be landing on the far side; retry
+                // within the bounded window.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+}
+
+/// The "told, not cloned" arc: a node holds the inventories of documents it is
+/// told about through config, without ever cloning the origin's graph, and the
+/// ciphertext the encrypted-representation inventory names is unreachable to
+/// it until the origin grants it the inventory document (ADR 003 §13).
+///
+/// node_a runs its production blob workers: the encryption worker installs the
+/// representation of one locally-stored plaintext, and the pin worker derives
+/// the C pin into the encryption inventory — the only place the ciphertext is
+/// named by anything (the doc names its own `Blob` url with the plaintext).
+///
+/// node_b is told the inventories through the config field only
+/// (`init_told_sync_node`): it never cloned, its keyhive has never seen the
+/// origin's graph, and its told parts start empty and unmembered.
+///
+/// Both arcs live here, ordered:
+/// 1. *Ablation, before any grant*, bounded: within a window where the machine
+///    is only pacing its retries, the ciphertext never lands on disk and the
+///    machine reports the refused part (`PeerPartUnanswered` — the flags
+///    record of the UnknownPart verdict the serving side answers because the
+///    origin's part rows, written from the inventory document's closure by the
+///    permission writer, do not admit node_b) and the full-sync waiter stays
+///    blocked on the part.
+/// 2. *The grant*, after the bounded window: a Read grant on the told
+///    encryption inventory document only (the grant shape big_repo's own
+///    cross-repo tests use) reaches node_a's permission writer, whose part row
+///    now admits node_b; the part's next retry resolves, its members arrive,
+///    and the ciphertext bytes land — while the still-ungranted core/docs
+///    parts of the same subscription batch stay refused: no members, no
+///    bytes, `unanswered` still true. The peer summary answer is per part
+///    (`big_sync/rpc.rs` refuses named parts beside the readable summaries in
+///    the same answer), and the decision side marks exactly the refused parts
+///    unanswered and retries exactly those, so a partially granted batch
+///    serves every granted part of it.
+///
+/// Ablation story: each half fails alone. If the serving side stopped folding
+/// denied parts into the refused set — or the permission writer stopped
+/// seeding/deltaing rows — the ciphertext would land before the grant and the
+/// no-bytes/member-count assertions of the ablation half fail. If the
+/// pending-with-backoff loop died (or the writer dropped a grant), the part
+/// never resolves and the post-grant convergence wait fails. Removing either
+/// half cannot pass the other. The discriminator for the per-part answer is
+/// the post-grant half's ungranted-parts assertions: under the old
+/// all-or-nothing batch answer the ciphertext cannot land before every told
+/// part is granted, so granting only the encryption inventory must hang.
+///
+/// Presence is asserted with the same disk-based helpers as the clone test,
+/// never through `get_bytes` — a missing blob read materializes from the
+/// active peers and would prove nothing. The one byte read below happens only
+/// after presence was already established, and is sanity, not proof.
+#[tokio::test(flavor = "multi_thread")]
+async fn told_not_cloned_inventory_part_is_refused_until_the_inventory_document_is_granted()
+-> Res<()> {
+    use big_repo::keyhive_core::access::Access;
+
+    utils_rs::testing::setup_tracing_once();
+    let temp_root = tempfile::tempdir()?;
+    let repo_a_path = temp_root.path().join("repo-a");
+    let repo_b_path = temp_root.path().join("repo-b");
+
+    tokio::fs::create_dir_all(&repo_a_path).await?;
+    let device_name = "test-device".to_string();
+    let rtx = RepoCtx::init(
+        &repo_a_path,
+        RepoOpenOptions::default(),
+        device_name.clone(),
+        device_name,
+    )
+    .await?;
+    rtx.shutdown().await?;
+
+    let node_a = open_sync_node(&repo_a_path, true).await?;
+    let encryption_inventory = node_a
+        .ctx
+        .encryption_inventory_doc_id
+        .clone()
+        .ok_or_else(|| eyre::eyre!("a fresh repo has an encrypted-representation inventory"))?;
+    let encryption_inventory_doc_id = node_a
+        .drawer
+        .resolve_doc_id_for_branch_doc_id(encryption_inventory.clone())
+        .await?;
+
+    // One locally-stored plaintext with a `Blob` facet: the encryption worker
+    // installs the representation, the pin worker routes its digest into the
+    // encrypted-representation inventory.
+    let payload = b"told-not-cloned-plaintext".to_vec();
+    let plaintext = node_a.blobs_repo.put(&payload).await?;
+    let _doc_id = node_a
+        .drawer
+        .add(AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: [(
+                FacetKey::from(WellKnownFacetTag::Blob),
+                FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                    mime: "application/octet-stream".to_string(),
+                    length_octets: payload.len() as u64,
+                    digest: crate::blobs::blob_id_to_digest_str(plaintext.clone()),
+                    inline: None,
+                    urls: Some(vec![format!("db+blob:///{plaintext}")]),
+                })),
+            )]
+            .into(),
+            user_path: Some(daybook_types::doc::UserPathBuf::from(
+                node_a.ctx.local_user_path.clone(),
+            )),
+        })
+        .await?;
+
+    let ciphertext_pins = wait_for_inventory_pin_ids(
+        &node_a,
+        &encryption_inventory_doc_id,
+        utils_rs::scale_timeout(Duration::from_secs(90)),
+    )
+    .await?;
+    let ciphertext = ciphertext_pins
+        .iter()
+        .map(|pin| {
+            crate::blobs::digest_str_to_blob_id_lenient(pin)
+                .ok_or_else(|| eyre::eyre!("inventory pin {pin} is not a blob digest"))
+        })
+        .collect::<Res<Vec<_>>>()?;
+    assert!(
+        !ciphertext.is_empty() && !ciphertext.contains(&plaintext),
+        "the inventory must name ciphertext, not the plaintext: {ciphertext:?}"
+    );
+
+    // The tell: node_b's independent repo names node_a's inventories through
+    // config and never clones anything.
+    let node_b = init_told_sync_node(
+        &repo_b_path,
+        crate::config::AppBlobInventories {
+            core_inventory_doc_id: node_a.ctx.core_inventory_doc_id.clone(),
+            docs_inventory_doc_id: node_a.ctx.docs_inventory_doc_id.clone(),
+            encryption_inventory_doc_id: Some(encryption_inventory.clone()),
+        },
+    )
+    .await?;
+    assert_eq!(
+        node_b.ctx.encryption_inventory_doc_id.as_ref(),
+        Some(&encryption_inventory),
+        "the told config must name the origin's inventories without any clone"
+    );
+    assert_ne!(
+        node_b.ctx.repo_id, node_a.ctx.repo_id,
+        "the two nodes are independent repos"
+    );
+    let encryption_part = crate::blobs::blob_inventory_part_id(&encryption_inventory);
+    info!(
+        told_core_part = %crate::blobs::blob_inventory_part_id(&node_a.ctx.core_inventory_doc_id),
+        told_docs_part = %crate::blobs::blob_inventory_part_id(&node_a.ctx.docs_inventory_doc_id),
+        told_encryption_part = %encryption_part,
+        "told part ids"
+    );
+    assert!(
+        node_b.sync_repo.is_blob_part(&encryption_part),
+        "the told encryption inventory must classify as a blob part"
+    );
+    assert!(
+        node_b
+            .sync_repo
+            .peer_partition_ids("", true)
+            .contains_key(&encryption_part),
+        "the told encryption inventory must be advertised on connect"
+    );
+
+    let peer_a = PeerKey::new(*node_a.sync_repo.router.endpoint().id().as_bytes());
+    let peer_b = PeerKey::new(*node_b.sync_repo.router.endpoint().id().as_bytes());
+
+    let node_a_ticket = node_a.sync_repo.get_clone_ticket_url().await?;
+    let endpoint_addr = node_b.sync_repo.connect_url(&node_a_ticket).await?;
+    assert_eq!(
+        endpoint_addr.id,
+        node_a.sync_repo.router.endpoint().id(),
+        "node_b must have connected to node_a"
+    );
+    // The contact-card exchange the grant below needs; no grant exists yet, so
+    // nothing of node_a's graph is readable to node_b here.
+    drive_keyhive_exchange(&node_a, peer_b.clone(), Duration::from_secs(30)).await?;
+    drive_keyhive_exchange(&node_b, peer_a.clone(), Duration::from_secs(30)).await?;
+
+    // Full sync on the told part only: the never-granted core/docs parts must
+    // stay out of the required set, because a told-and-ungranted part is what
+    // this test pends forever.
+    let sync_repo = Arc::clone(&node_b.sync_repo);
+    let waited_peers = [peer_a.clone()];
+    let waited_parts = [encryption_part.clone()];
+    let synced = sync_repo.wait_for_full_sync(&waited_peers, &waited_parts, None);
+    tokio::pin!(synced);
+
+    // Ablation: the refusal is the machine's state, and it is bounded — no
+    // ciphertext may land while the part is ungranted.
+    info!(
+        encryption_part = %encryption_part,
+        "ablation: window begins; no grant yet"
+    );
+    let ablation_window = utils_rs::scale_timeout(Duration::from_secs(12));
+    let deadline = tokio::time::Instant::now() + ablation_window;
+    let mut saw_unanswered = false;
+    let mut saw_blocked_waiter = false;
+    while tokio::time::Instant::now() < deadline {
+        for cipher in &ciphertext {
+            assert!(
+                !node_b.blobs_repo.has_blob_on_disk(cipher.clone()).await?,
+                "ciphertext {cipher} must not land before the inventory document is granted",
+            );
+        }
+        assert_eq!(
+            node_b
+                .ctx
+                .blob_part_store
+                .member_count(encryption_part.clone())
+                .await?,
+            0,
+            "the refused part must stay unmembered before the grant",
+        );
+        let snapshot = node_b.sync_repo.blob_sync_worker.snapshot().await?;
+        saw_unanswered |= snapshot.peer_part_sync_flags.iter().any(
+            |(peer, part, _pending, _multi, _replay, _cursor, unanswered)| {
+                peer == &peer_a && part == &encryption_part && *unanswered
+            },
+        );
+        saw_blocked_waiter |= snapshot
+            .full_sync_waiters
+            .values()
+            .flatten()
+            .any(|(peer, part)| peer == &peer_a && part == &encryption_part);
+        tokio::select! {
+            _ = &mut synced => {
+                eyre::bail!(
+                    "the told part must not fully sync before the grant: the ablation \
+                     window caught a successful pull of an ungranted part"
+                );
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+    }
+    if !saw_unanswered {
+        dump_sync_state(
+            &node_b,
+            "told node: no refusal observed in the ablation window",
+        )
+        .await;
+        eyre::bail!(
+            "the machine must report the told part unanswered within {ablation_window:?} \
+             (the PeerPartUnanswered flag)",
+        );
+    }
+    assert!(
+        saw_blocked_waiter,
+        "the full-sync waiter must be blocked on the refused part while unanswered"
+    );
+
+    // The grant: a Read grant on the encryption inventory document ONLY, to
+    // node_b's agent — the shape part rows derive from (the closure the
+    // permission writer mirrors). Only the encryption inventory, because the
+    // old answer folded every unreadable part of a summary batch into one
+    // `UnkownParts` error and retried the whole pending batch: a partially
+    // granted batch starved the granted part forever. The per-part answer
+    // (`big_sync/rpc.rs`) makes exactly this partial grant converge, which is
+    // the discriminator the assertions below lean on.
+    let agent_b = wait_for_peer_agent(&node_a, peer_b.clone(), Duration::from_secs(30)).await?;
+    info!("granting the origin's encryption inventory document to node_b's agent");
+    node_a
+        .ctx
+        .big_repo
+        .grant_doc_access(encryption_inventory.clone(), agent_b.clone(), Access::Read)
+        .await?;
+    // Pull the grants' keyhive events on node_b's own connection so both
+    // sides' part rows agree.
+    drive_keyhive_exchange(&node_b, peer_a.clone(), Duration::from_secs(30)).await?;
+    drive_keyhive_exchange(&node_a, peer_b.clone(), Duration::from_secs(30)).await?;
+    // The permission writer must fold the grant into the origin's part row
+    // before the part's next retry can resolve.
+    let row_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let rows = inventory_part_rows(
+            &node_a.ctx.big_repo.sql_ctx(),
+            "daybook-blobs",
+            &encryption_part,
+        )
+        .await?;
+        if rows.iter().any(|principal| principal.0 == peer_b) {
+            break;
+        }
+        info!(
+            rows = ?rows.iter().map(|(k, v)| (k.to_string(), format!("{v:?}"))).collect::<Vec<_>>(),
+            "origin inventory part rows after the grant"
+        );
+        if tokio::time::Instant::now() >= row_deadline {
+            eyre::bail!("node_b never appeared in the origin's inventory part row after the grant");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let granted = tokio::time::timeout(
+        utils_rs::scale_timeout(Duration::from_secs(90)),
+        &mut synced,
+    )
+    .await;
+    if granted.is_err() {
+        dump_sync_state(&node_b, "told node: granted part never fully synced").await;
+        dump_sync_state(&node_a, "origin: granted part never fully synced").await;
+    }
+    granted.map_err(|_| eyre::eyre!("timed out waiting for the granted part to fully sync"))??;
+
+    // Membership convergence: the part's members (the ciphertext objects the
+    // pin worker pinned) arrive at node_b.
+    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(Duration::from_secs(30));
+    let origin_count = loop {
+        let origin_count = node_a
+            .ctx
+            .blob_part_store
+            .member_count(encryption_part.clone())
+            .await?;
+        let told_count = node_b
+            .ctx
+            .blob_part_store
+            .member_count(encryption_part.clone())
+            .await?;
+        if origin_count > 0 && told_count == origin_count {
+            break origin_count;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eyre::bail!(
+                "timed out waiting for the part's members to arrive: origin={origin_count} \
+                 told={told_count}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    for cipher in &ciphertext {
+        assert!(
+            node_b
+                .ctx
+                .blob_part_store
+                .obj_exists(cipher.clone().into())
+                .await?,
+            "the part's membership must name ciphertext object {cipher}"
+        );
+        assert!(
+            node_b
+                .ctx
+                .blob_part_store
+                .obj_parts(cipher.clone().into())
+                .await?
+                .contains(&encryption_part),
+            "ciphertext object {cipher} must be a member of the told part"
+        );
+    }
+
+    // Presence, before any byte is read: the bytes have now landed by sync.
+    for cipher in &ciphertext {
+        wait_for_blob_replicated(&node_b.blobs_repo, cipher.clone(), Duration::from_secs(60))
+            .await?;
+    }
+    // Only now are bytes read — post-presence sanity, not the proof.
+    for cipher in &ciphertext {
+        let got = node_b.blobs_repo.get_bytes(cipher.clone()).await?;
+        assert!(!got.is_empty(), "ciphertext {cipher} must have bytes");
+        assert_ne!(
+            got, payload,
+            "ciphertext {cipher} must be ciphertext, not the plaintext bytes"
+        );
+    }
+    tracing::debug!(
+        member_count = origin_count,
+        ciphertext = ?ciphertext,
+        "granted arc converged"
+    );
+
+    // The discriminator: two of the three told parts were never granted, and
+    // they must still be refused in the same machine that just landed the
+    // granted one. Under the old all-or-nothing summary answer, granting only
+    // the encryption inventory hung it forever — this is the starvation being
+    // closed. Bounded on both sides: the ungranted parts' bytes may not land
+    // within the window and their `unanswered` flags must keep saying so.
+    let ungranted_parts = [
+        crate::blobs::blob_inventory_part_id(&node_a.ctx.core_inventory_doc_id),
+        crate::blobs::blob_inventory_part_id(&node_a.ctx.docs_inventory_doc_id),
+    ];
+    let still_window = utils_rs::scale_timeout(Duration::from_secs(12));
+    let still_deadline = tokio::time::Instant::now() + still_window;
+    loop {
+        let snapshot = node_b.sync_repo.blob_sync_worker.snapshot().await?;
+        let for_a_and_ungranted: Vec<_> = snapshot
+            .peer_part_sync_flags
+            .iter()
+            .filter(
+                |(peer, part, _pending, _multi, _replay, _cursor, _unanswered)| {
+                    peer == &peer_a && ungranted_parts.contains(part)
+                },
+            )
+            .collect();
+        let unanswered = for_a_and_ungranted
+            .iter()
+            .any(|(.., unanswered)| *unanswered);
+        if for_a_and_ungranted.len() == ungranted_parts.len() && unanswered {
+            break;
+        }
+        if tokio::time::Instant::now() >= still_deadline {
+            dump_sync_state(&node_b, "told node: ungranted parts lost their refusal").await;
+            eyre::bail!(
+                "the ungranted told parts must stay refused (answered=false, \
+                 unanswered=true) beside the granted one; saw {}/{}/{unanswered}, \
+                 snapshot flags: {:?}",
+                for_a_and_ungranted.len(),
+                ungranted_parts.len(),
+                snapshot.peer_part_sync_flags
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    for part in &ungranted_parts {
+        assert_eq!(
+            node_b
+                .ctx
+                .blob_part_store
+                .member_count(part.clone())
+                .await?,
+            0,
+            "the ungranted part {part} must stay unmembered after a partial grant"
+        );
+    }
+
+    node_b.stop().await?;
+    node_a.stop().await?;
     Ok(())
 }

@@ -8,10 +8,15 @@ use crate::fingerprint::{Fingerprint, FingerprintSeed};
 use crate::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 
 pub trait BigSyncRpcClient<K: FutureForm> {
+    /// A per-part answer: readable parts in [`PeerSummaryResult::parts`], refused
+    /// parts in [`PeerSummaryResult::refused`]. The batch refusal was
+    /// `ListPartsError::UnkownParts` over the whole request, which starved every
+    /// granted part behind an ungranted neighbor until the whole batch was
+    /// granted.
     fn peer_summary<'a>(
         &'a self,
         req: PeerSummaryRequest,
-    ) -> K::Future<'a, BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>;
+    ) -> K::Future<'a, BigSyncRpcResult<PeerSummaryResult>>;
 
     /// One bounded, filtered replay page for a single target.
     ///
@@ -324,6 +329,13 @@ structstruck::strike! {
         /// picks a strat per part (cursor diff or bucket working level), so
         /// different parts can be served by different strats.
         pub parts: Map<PartKey, Vec<PartStratSummary>>,
+        /// Parts named in the request this answer refuses: a part unknown to the
+        /// responder or not granted to the asker, denied and missing deliberately
+        /// folded together per part (a denial that answers differently from an
+        /// unknown part confirms the part exists). Refusing a part must never
+        /// swallow a different readable part's summary riding the same request,
+        /// so the refusal travels with the answer instead of replacing it.
+        pub refused: Set<PartKey>,
     }
 }
 

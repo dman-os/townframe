@@ -7,7 +7,7 @@ use crate::runtime2::doc_worker::DocWorkerLoop;
 use crate::runtime2::{
     DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, Runtime2Config, Runtime2Handle,
     TaskRuntime, TaskSet,
-    messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt},
+    messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt, fresh_internal_waiter_id},
 };
 use big_sync_core::PeerKey;
 use future_form::{FutureForm, Local, Sendable};
@@ -330,6 +330,67 @@ pub(crate) trait HubCommandFuture<F: FutureForm> {
 /// in flight. Diagnostic only: the fence itself has no timeout.
 const QUIESCENCE_STALL_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Settle each peer's Keyhive channel through the hub's own waiter machinery,
+/// before a caller reads the Keyhive projection to generate something with
+/// that peer (document/group coparents).
+///
+/// Settling means: every Keyhive-sync round already running for the peer runs
+/// to its incorporated completion (a round's waiter is released only once the
+/// hub's `admitted_head` watermark covers the round's own admissions), and a
+/// connected idle peer gets a fresh round now, pulling whatever it currently
+/// publishes. Peers that are not connected right now cannot be ingesting
+/// anything, so they are skipped: their absence from the projection is the
+/// legitimate `MissingPrekeys` failure, not the race this closes.
+///
+/// No deadline is applied at this layer: a caller that needs one applies it at
+/// the application boundary (the same contract as
+/// [`crate::runtime2::Runtime2Handle::sync_keyhive_with_peer`]).
+pub(crate) async fn await_keyhive_channels(
+    cmd_tx: &async_channel::Sender<Runtime2Cmd>,
+    peers: Vec<PeerKey>,
+) -> eyre::Result<()> {
+    let mut runs = Vec::with_capacity(peers.len());
+    for peer_id in peers {
+        let (connected_resp, connected_rx) = futures::channel::oneshot::channel();
+        cmd_tx
+            .send(Runtime2Cmd::IsConnectedPeer {
+                peer_id: peer_id.clone(),
+                resp: connected_resp,
+            })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        let connected = connected_rx
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_CHANNEL))??;
+        if !connected {
+            continue;
+        }
+        let (done, done_rx) = futures::channel::oneshot::channel();
+        cmd_tx
+            .send(Runtime2Cmd::SyncKeyhiveWithPeer {
+                peer_id,
+                waiter_id: fresh_internal_waiter_id(),
+                resp: done,
+            })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        runs.push(done_rx);
+    }
+    for done_rx in runs {
+        // A peer whose round fails here does not fail the caller: the failure
+        // means the settle could not be observed, which leaves exactly the
+        // pre-fix window, and the Keyhive generation's own `MissingPrekeys`
+        // diagnostics still describe the projection honestly. Only a hub
+        // failure (the waiter's response channel closing) is fatal here, as it
+        // is for every other caller of these commands.
+        let done = done_rx.await.map_err(|_| eyre::eyre!(ERROR_CHANNEL))?;
+        if let Err(error) = done {
+            tracing::warn!(%error, "keyhive channel settle round failed; continuing on generation's own diagnostics");
+        }
+    }
+    Ok(())
+}
+
 #[future_form::future_form(Sendable, Local)]
 impl<F: FutureForm> HubCommandFuture<F> for F {
     fn allocate_doc(
@@ -380,6 +441,15 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                         already_persisted,
                     )
                     .await?;
+                // The authority creation below reads the coparents' prekeys out
+                // of the Keyhive projection; settle their channels first, or a
+                // coparent prekey that only just arrived can still be sitting
+                // in an unincorporated exchange when the projection is read.
+                await_keyhive_channels(
+                    &cmd_tx,
+                    runtime_io.reserved_doc_parents(doc_id.clone()).await?,
+                )
+                .await?;
                 // The initial content is encrypted against the Keyhive document,
                 // so authority creation precedes Sedimentree persistence.
                 runtime_io
@@ -468,6 +538,10 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
     ) -> F::Future<'static, eyre::Result<()>> {
         let span = tracing::debug_span!("create_doc", doc_id = tracing::field::Empty);
         let fut = async move {
+            // The Keyhive generation inside `create_document` reads the
+            // coparents' prekeys out of the projection; settle their channels
+            // first (same ordering as the reserved/finalize path).
+            await_keyhive_channels(&cmd_tx, crate::keyhive::authority_peer_keys(&parents)?).await?;
             match runtime_io.create_document(parents, content_heads).await {
                 Ok(doc_id) => {
                     tracing::Span::current().record("doc_id", tracing::field::display(&doc_id));
@@ -745,6 +819,11 @@ where
             self.note_activity();
         }
         match cmd {
+            Runtime2Cmd::IsConnectedPeer { peer_id, resp } => {
+                resp.send(Ok(self.connected_peers.contains_key(&peer_id)))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+            }
             Runtime2Cmd::AllocateDoc { parents, resp } => {
                 self.spawn_tracked(
                     crate::runtime2::TrackedWorkKind::CreateDoc,

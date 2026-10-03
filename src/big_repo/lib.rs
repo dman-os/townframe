@@ -930,6 +930,13 @@ impl BigRepo {
         self: &Arc<Self>,
         parents: Vec<BigKeyhiveAuthority>,
     ) -> Res<BigKeyhiveGroup> {
+        // `generate_group` reads the coparents' prekeys out of the Keyhive
+        // projection; settle their channels first (same ordering as the doc
+        // generation paths).
+        let coparent_peers = crate::keyhive::authority_peer_keys(&parents)?;
+        self.runtime
+            .await_keyhive_channel_settled(coparent_peers)
+            .await?;
         let (group, _hashes) = self
             .keyhive
             .create_group_with_parents(parents, &self.keyhive_protocol)

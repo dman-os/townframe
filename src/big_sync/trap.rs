@@ -153,7 +153,7 @@ impl BigSyncRpcClient<Sendable> for TrappedRpcClient {
     fn peer_summary<'a>(
         &'a self,
         req: PeerSummaryRequest,
-    ) -> BoxFuture<'a, BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
+    ) -> BoxFuture<'a, BigSyncRpcResult<PeerSummaryResult>> {
         let fut = self.inner.peer_summary(req);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }

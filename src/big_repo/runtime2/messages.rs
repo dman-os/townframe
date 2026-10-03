@@ -225,6 +225,13 @@ pub enum Runtime2Cmd {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
     },
+    /// Production connectivity read for waits issued from inside the runtime's
+    /// own futures (the test-only `HasConnectedPeer` cannot serve a lib build).
+    IsConnectedPeer {
+        peer_id: PeerKey,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
+    },
     InspectStoredDocBlobs {
         sed_id: sedimentree_core::id::SedimentreeId,
         #[educe(Debug(ignore))]
@@ -535,6 +542,15 @@ pub enum DocWorkerMsg {
 /// Monotonic waiter-id counters (shared handle↔hub).
 pub fn fresh_waiter_id(counter: &AtomicU64) -> u64 {
     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Internal waiter ids for Keyhive-sync waits issued by hub futures (doc
+/// creation, finalize). Handles count up from 1; these count down from the
+/// top, so the two namespaces cannot collide inside the hub's waiter id set.
+static INTERNAL_KEYHIVE_WAITER_IDS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+pub fn fresh_internal_waiter_id() -> u64 {
+    INTERNAL_KEYHIVE_WAITER_IDS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Classification of a tracked finite background future, for diagnostics.

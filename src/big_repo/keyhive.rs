@@ -119,6 +119,24 @@ impl BigKeyhiveAuthority {
     }
 }
 
+/// The sync-plane peer keys of the authorities a Keyhive generation will
+/// address, in the same order, using `[BigKeyhiveAuthority::into_peer]`
+/// exactly as the generation sites do — so a caller that settles its
+/// Keyhive channel with these peers cannot settle a peer the generation
+/// would reject.
+pub(crate) fn authority_peer_keys(
+    parents: &[BigKeyhiveAuthority],
+) -> Res<Vec<big_sync_core::PeerKey>> {
+    Ok(parents
+        .iter()
+        .cloned()
+        .map(BigKeyhiveAuthority::into_peer)
+        .collect::<Res<Vec<_>>>()?
+        .into_iter()
+        .map(|peer| big_sync_core::PeerKey::new(peer.id().to_bytes()))
+        .collect())
+}
+
 type BigKeyhivePeer = keyhive_core::principal::peer::Peer<
     future_form::Sendable,
     keyhive_crypto::signer::memory::MemorySigner,
@@ -760,11 +778,13 @@ impl BigKeyhiveHandle {
             Ok(kh_doc_id) => kh_doc_id,
             Err(err) => {
                 // A coparent's prekey is published by its own hive and only reaches us through
-                // sync, so this error means an individual we are about to co-sign with has no
-                // published prekey here yet. Either its publication is still in flight, or we
-                // never pulled it; it is logged rather than retried because a retry would hide
-                // the second case. Say which of the two it is rather than leaving the caller
-                // to guess.
+                // sync. The hub future settled every *connected* coparent's Keyhive channel
+                // before calling in here, so this error now means one of the following, in
+                // that order: the coparent is not connected (nothing of its was pullable), we
+                // never pulled it (no connected peer serves its publication), or it genuinely
+                // has not published a prekey. A retry here would paper over the second and
+                // third; these are logged rather than retried, with the diagnostics below
+                // saying which of the three it is.
                 if let keyhive_core::principal::document::GenerateDocError::MissingPrekeys(
                     missing,
                 ) = &err
@@ -780,12 +800,15 @@ impl BigKeyhiveHandle {
     }
 
     /// Distinguish the two ways a coparent can have no prekey here, because they have different
-    /// owners. An individual that is not registered at all means its own prekey op never reached
-    /// us: the identifier travels in other principals' events (a delegation names the delegate),
-    /// but the node is only ever born from the individual's own op, so a member we learned about
-    /// from someone else's delegation is simply absent. A registered individual holding no prekey
-    /// ops is the other case, and not one the wire can produce: `Individual::new` builds the state
-    /// from the op that registers it, so an empty state is something we restored or pruned.
+    /// owners. The doc-generation hub futures settle every connected coparent's Keyhive channel
+    /// before generating, so a prekey mid-ingest can no longer land in the failure path: an
+    /// individual that is not registered at all means its own prekey op never reached us (the
+    /// identifier travels in other principals' events — a delegation names the delegate — but
+    /// the node is only ever born from the individual's own op, so a member we learned about
+    /// from someone else's delegation is simply absent, or not connected so it was not
+    /// pullable). A registered individual holding no prekey ops is the other case, and not one
+    /// the wire can produce: `Individual::new` builds the state from the op that registers it,
+    /// so an empty state is something we restored or pruned.
     async fn explain_missing_prekeys(
         &self,
         missing: &keyhive_core::principal::individual::MissingPrekeys,
@@ -930,8 +953,10 @@ impl BigKeyhiveHandle {
         {
             Ok(kh_doc_id) => kh_doc_id,
             Err(err) => {
-                // Same reasoning as `create_doc`: a coparent prekey that has not reached us is
-                // a pull/publication question first, so record which individual is missing it.
+                // Same reasoning as `create_doc` (whose channel settle this
+                // path's hub future also ran): a coparent prekey that has not
+                // reached us after the channel settle is a publication-or-
+                // reachability question, so record which individual is missing it.
                 if let keyhive_core::principal::document::GenerateDocError::MissingPrekeys(
                     missing,
                 ) = &err

@@ -389,7 +389,8 @@ impl Worker {
             inventory = %self.encryption_inventory_doc_id,
             "blob-encryption: worker starting"
         );
-        self.reconcile_eligible_documents(&facet_index).await?;
+        self.reconcile_eligible_documents(&facet_index, cancel_token.clone())
+            .await?;
         self.run_facet_machine(facet_set_store, cancel_token).await
     }
 
@@ -400,11 +401,28 @@ impl Worker {
     /// replaying history, so this covers documents that became eligible (or
     /// were written) before this worker existed - a delta-only worker cannot
     /// see them, because being eligible is not an event.
-    async fn reconcile_eligible_documents(&self, facet_index: &DocFacetSetIndexRepo) -> Res<()> {
+    ///
+    /// Each indexed document becomes the *same* keyed task the delta machine
+    /// runs, on this pass's own scheduler with the machine's retry mechanics:
+    /// one task per `EncryptionKey` source, failures rescheduled with
+    /// [`ENCRYPTION_RETRY_DELAY`] backoff until the document's state is durable,
+    /// so a store or drawer failure in one document's step is not a lost
+    /// boot-pass retry ("only at the next boot"). The scheduler budget is
+    /// deliberately still this worker's own; the machine opens only after the
+    /// pass, so the two never run the same document at once.
+    async fn reconcile_eligible_documents(
+        &self,
+        facet_index: &DocFacetSetIndexRepo,
+        cancel_token: CancellationToken,
+    ) -> Res<()> {
         let memberships = facet_index
             .list_docs_for_tag(WellKnownFacetTag::Blob.as_str())
             .await?;
         let mut seen = std::collections::HashSet::new();
+        let mut tasks = TokioKeyedScheduler::new(ENCRYPTION_TASK_BUDGET);
+        // The number of documents whose state is not durable yet: a failed
+        // completion stays counted, its task comes back on the retry path.
+        let mut outstanding = 0usize;
         for membership in memberships {
             if !seen.insert(membership.doc_id.clone()) {
                 continue;
@@ -417,19 +435,61 @@ impl Worker {
             else {
                 continue;
             };
-            if let Err(error) = self
-                .reconcile_document(&membership.doc_id, &branch, &heads)
-                .await
-            {
-                // A representation that cannot be produced now is retried by
-                // the document's next delta or by the next pass; taking the
-                // worker down over one document's peer-authored state would
-                // stop every other document.
-                tracing::warn!(
-                    doc_id = %membership.doc_id,
-                    %error,
-                    "blob-encryption: pass over indexed document failed"
-                );
+            let Some(branch_id) = self.main_branch_id(&membership.doc_id).await? else {
+                continue;
+            };
+            let key = encryption_facet_key(&branch_id);
+            let task = EncryptionTask {
+                key,
+                // The pass has no walker cursor to advance; the cursor is the
+                // delta machine's bookkeeping and is unused here.
+                cursor: 0,
+                doc_id: membership.doc_id.clone(),
+                branch_id: branch_id.clone(),
+                heads: Some(heads),
+            };
+            let future = run_encryption_task(task.clone(), Arc::clone(&self.ctx));
+            tasks.replace(key, task, future)?;
+            outstanding += 1;
+        }
+        while outstanding > 0 {
+            let next_deadline = tasks.next_deadline();
+            tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return Ok(()),
+                completion = tasks.next_completion() => {
+                    let completion = completion?;
+                    if completion.result.is_ok() {
+                        // Durable; there is no walker cursor to ack here.
+                        outstanding -= 1;
+                        continue;
+                    }
+                    // Not durable: the document must not be dropped, so it is
+                    // rescheduled with backoff, exactly as a failed delta is.
+                    tracing::warn!(
+                        doc_id = %completion.command.doc_id,
+                        error = %completion.result.as_ref().unwrap_err(),
+                        "blob-encryption: boot-pass document task failed; rescheduling"
+                    );
+                    let task = completion.command;
+                    let future = run_encryption_task(task.clone(), Arc::clone(&self.ctx));
+                    tasks.retry(
+                        task.key,
+                        task.clone(),
+                        completion.retry,
+                        ENCRYPTION_RETRY_DELAY,
+                        future,
+                    )?;
+                }
+                _ = async {
+                    if let Some(deadline) = next_deadline {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    tasks.tick(std::time::Instant::now())?;
+                }
             }
         }
         Ok(())
@@ -627,6 +687,19 @@ impl Ctx {
             .iter()
             .find(|(_, branch)| branch.branch_doc_id.to_string() == branch_id.0)
             .map(|(path, _)| BranchPathBuf::from(path.clone())))
+    }
+
+    /// The physical branch id behind `MAIN_BRANCH`, the same identity the delta
+    /// machine keys its tasks with (`encryption_facet_key` collapses it), so a
+    /// boot-pass task and a delta task for the same branch share one key.
+    async fn main_branch_id(&self, doc_id: &DocId) -> Res<Option<BranchId>> {
+        let Some(entry) = self.drawer_repo.get_entry(doc_id).await? else {
+            return Ok(None);
+        };
+        Ok(entry
+            .branches
+            .get(MAIN_BRANCH)
+            .map(|branch| BranchId(branch.branch_doc_id.to_string())))
     }
 
     /// §19's sequence for every blob this document declares, at `heads`.
@@ -1036,8 +1109,11 @@ impl Ctx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blobs::blob_id_to_iroh_hash;
+    use crate::blobs::encrypt::{TAG_CT_PREFIX, TAG_PT_PREFIX};
     use crate::index::facet_set::DocFacetTagMembership;
     use crate::test_support::{DaybookTestContext, test_cx};
+    use daybook_types::doc::BlobPin;
 
     /// The worker's context, built the way `rt` builds it (the group comes from
     /// the authority, the inventory from the repo config).
@@ -1203,7 +1279,7 @@ mod tests {
 
         // Servable: fetch C from the store and decrypt it through the document
         // layer, which is what a peer does.
-        let c_hash = crate::blobs::blob_id_to_iroh_hash(c);
+        let c_hash = blob_id_to_iroh_hash(c);
         assert!(
             worker.blob_status(c_hash).await?.is_some(),
             "the representation entry is complete after install"
@@ -1337,6 +1413,343 @@ mod tests {
         Ok(())
     }
 
+    /// The inventory write the pin worker's `apply_inventory_diff` performs:
+    /// one BlobPin facet per ciphertext, on the inventory doc's `main` branch
+    /// through the plain (user-scoped) facet write. Tests drive the same
+    /// production write when they stand in for the pin diff.
+    async fn write_inventory_pin(
+        drawer: &DrawerRepo,
+        inventory_doc_id: &DocId,
+        digest: &str,
+        pin: Option<BlobPin>,
+    ) -> Res<()> {
+        let key = FacetKey {
+            tag: WellKnownFacetTag::BlobPin.into(),
+            id: digest.to_string(),
+        };
+        let (facets_set, facets_remove) = match pin {
+            Some(pin) => (
+                [(key.clone(), FacetRaw::from(WellKnownFacet::BlobPin(pin)))].into(),
+                vec![],
+            ),
+            None => (std::collections::HashMap::new(), vec![key]),
+        };
+        drawer
+            .update_at_heads(
+                DocPatch {
+                    id: inventory_doc_id.clone(),
+                    user_path: None,
+                    facets_set,
+                    facets_remove,
+                },
+                BranchPath::new(MAIN_BRANCH),
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// A released representation is not dead: the facet that named it is gone,
+    /// its inventory pin is gone, and its store roots are gone - but the
+    /// plaintext is still local, so the next pass re-authorizes it and the
+    /// document may declare the blob again. The re-install mints a fresh
+    /// random key (the old pair was released; nothing may reuse released key
+    /// material), so the new representation names a different digest, while
+    /// the same document-facing cipherBlob facet id carries it and the
+    /// released pair's roots stay released.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn released_representation_is_reinstalled_with_a_fresh_key_by_the_next_pass() -> Res<()> {
+        let ctx = test_cx(utils_rs::function_full!()).await?;
+        let worker = Worker::new(test_ctx(&ctx, None).await?);
+        let plaintext_bytes = b"blob-encryption worker: released then redeclared".to_vec();
+        let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
+        let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
+        let cipher_key = worker.cipher_facet_key(&blob_key);
+        let branch = BranchPathBuf::from(MAIN_BRANCH);
+        let heads = ctx
+            .drawer_repo
+            .get_branch_heads_for_path(&doc_id, &branch)
+            .await?
+            .expect("document has a branch");
+
+        worker.reconcile_document(&doc_id, &branch, &heads).await?;
+        let first = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .expect("first pass installs a representation");
+        let c1 = digest_str_to_blob_id_lenient(&first.representation.digest)
+            .expect("the facet digest is a blob digest");
+        let c1_hash = blob_id_to_iroh_hash(c1);
+        let p_hash = blob_id_to_iroh_hash(plaintext.clone());
+        assert_eq!(
+            worker
+                .store
+                .tags()
+                .get(format!("{TAG_CT_PREFIX}{c1_hash}"))
+                .await?
+                .expect("a registered pair roots its ciphertext")
+                .hash,
+            c1_hash,
+        );
+        // The pin worker saw the facet and pinned it (the write shape above).
+        write_inventory_pin(
+            &ctx.drawer_repo,
+            &worker.encryption_inventory_doc_id,
+            &first.representation.digest,
+            Some(BlobPin {
+                length_octets: first.representation.length_octets,
+            }),
+        )
+        .await?;
+
+        // The release, production-shaped end to end: the facet is re-authored
+        // away (system-managed, so the writer's scope applies), the inventory
+        // pin leaves, and the pin worker's release leaf drops the pair roots.
+        ctx.drawer_repo
+            .update_at_heads_with_scope(
+                DocPatch {
+                    id: doc_id.clone(),
+                    user_path: None,
+                    facets_set: std::collections::HashMap::new(),
+                    facets_remove: vec![cipher_key.clone()],
+                },
+                &branch,
+                None,
+                FacetWriteScope::System,
+            )
+            .await?;
+        write_inventory_pin(
+            &ctx.drawer_repo,
+            &worker.encryption_inventory_doc_id,
+            &first.representation.digest,
+            None,
+        )
+        .await?;
+        crate::blobs::encrypt::drop_pair_tags(&worker.store, c1_hash).await?;
+        assert!(
+            read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+                .await?
+                .is_none(),
+            "the released facet is gone"
+        );
+        assert!(
+            worker
+                .store
+                .tags()
+                .get(format!("{TAG_CT_PREFIX}{c1_hash}"))
+                .await?
+                .is_none(),
+            "the released pair is un-rooted"
+        );
+
+        // The same pass mechanics cover the re-install: the Blob facet is
+        // still on the document, so the pass finds a declared blob with no
+        // representation and creates one; re-declaring is not a worker input.
+        let heads = ctx
+            .drawer_repo
+            .get_branch_heads_for_path(&doc_id, &branch)
+            .await?
+            .expect("document has a branch");
+        worker.reconcile_document(&doc_id, &branch, &heads).await?;
+
+        let second = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .expect("the pass re-installs the declared blob's representation");
+        assert_ne!(
+            second.representation.digest, first.representation.digest,
+            "a re-install after a release mints fresh key material; the old key is released"
+        );
+        let c2 = digest_str_to_blob_id_lenient(&second.representation.digest)
+            .expect("the facet digest is a blob digest");
+        let c2_hash = blob_id_to_iroh_hash(c2);
+        let ct_tag = worker
+            .store
+            .tags()
+            .get(format!("{TAG_CT_PREFIX}{c2_hash}"))
+            .await?
+            .expect("the re-installed pair is rooted");
+        assert_eq!(ct_tag.hash, c2_hash);
+        let pt_tag = worker
+            .store
+            .tags()
+            .get(format!("{TAG_PT_PREFIX}{c2_hash}"))
+            .await?
+            .expect("the re-installed pair roots its plaintext");
+        assert_eq!(pt_tag.hash, p_hash);
+        assert!(
+            worker
+                .store
+                .tags()
+                .get(format!("{TAG_CT_PREFIX}{c1_hash}"))
+                .await?
+                .is_none(),
+            "the released pair's roots stay released across the re-install"
+        );
+        // A reader resolving through the document decrypts the new
+        // representation back to the plaintext.
+        let keys = DocKeySource::new(
+            Arc::clone(&ctx.drawer_repo),
+            doc_id.clone(),
+            BranchPathBuf::from(MAIN_BRANCH),
+        );
+        let decrypted = crate::blobs::encrypt::get_decrypted(&worker.store, &keys, c2_hash).await?;
+        assert_eq!(decrypted, plaintext_bytes);
+        let blob = read_blob(&ctx.drawer_repo, &doc_id, &blob_key)
+            .await?
+            .expect("the Blob facet is still there");
+        assert!(
+            resolves_through(&blob, &cipher_key),
+            "the re-installed representation is what the document resolves through, got {:?}",
+            blob.urls
+        );
+        ctx.stop().await?;
+        Ok(())
+    }
+
+    /// A stale inventory pin cannot authorize a re-install: the pin worker's
+    /// row may outlive its facet by one diff, but the pass re-produces a
+    /// representation only for a declared blob whose plaintext this node
+    /// stores (§14). Released, with the plaintext gone, the pass must leave
+    /// every plane exactly as it found it - no facet, no re-rooted pair, and
+    /// no pin bookkeeping on its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn released_inventory_pin_with_absent_plaintext_is_not_resurrected_by_the_pass() -> Res<()>
+    {
+        let ctx = test_cx(utils_rs::function_full!()).await?;
+        let worker = Worker::new(test_ctx(&ctx, None).await?);
+        let plaintext = ctx
+            .rt
+            .blobs_repo
+            .put(b"blob-encryption worker: released without a local plaintext")
+            .await?;
+        let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
+        let cipher_key = worker.cipher_facet_key(&blob_key);
+        let branch = BranchPathBuf::from(MAIN_BRANCH);
+
+        worker
+            .reconcile_document(&doc_id, &branch, &worker_heads(&ctx, &doc_id).await?)
+            .await?;
+        let first = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .expect("first pass installs a representation");
+        let c1 = digest_str_to_blob_id_lenient(&first.representation.digest)
+            .expect("the facet digest is a blob digest");
+        let c1_hash = blob_id_to_iroh_hash(c1.clone());
+        let urls_before = read_blob(&ctx.drawer_repo, &doc_id, &blob_key)
+            .await?
+            .expect("the Blob facet is there")
+            .urls;
+        // The released state, production-shaped: facet re-authored away, pair
+        // roots dropped, and the stale pin that outlives the diff still in the
+        // inventory - the window the release contract must not leak through.
+        write_inventory_pin(
+            &ctx.drawer_repo,
+            &worker.encryption_inventory_doc_id,
+            &first.representation.digest,
+            Some(BlobPin {
+                length_octets: first.representation.length_octets,
+            }),
+        )
+        .await?;
+        ctx.drawer_repo
+            .update_at_heads_with_scope(
+                DocPatch {
+                    id: doc_id.clone(),
+                    user_path: None,
+                    facets_set: std::collections::HashMap::new(),
+                    facets_remove: vec![cipher_key.clone()],
+                },
+                &branch,
+                None,
+                FacetWriteScope::System,
+            )
+            .await?;
+        write_inventory_pin(
+            &ctx.drawer_repo,
+            &worker.encryption_inventory_doc_id,
+            &first.representation.digest,
+            None,
+        )
+        .await?;
+        crate::blobs::encrypt::drop_pair_tags(&worker.store, c1_hash).await?;
+        // Now the plaintext is gone too: a fresh store with nothing in it is
+        // the state every released blob ends in once GC has run.
+        let fresh = tempfile::tempdir()?;
+        let fresh_repo = crate::blobs::BlobsRepo::new(
+            fresh.path().join("blobs"),
+            daybook_types::doc::UserPathBuf::from("/test-user"),
+        )
+        .await?;
+        let bare = Worker::new(Arc::new(Ctx {
+            drawer_repo: Arc::clone(&ctx.drawer_repo),
+            sql: ctx.rt.rcx.sql.clone(),
+            store: fresh_repo.iroh_store(),
+            provider: fresh_repo.cipher_provider(),
+            domain_id: worker.domain_id.clone(),
+            domain_group: worker.domain_group.clone(),
+            encryption_inventory_doc_id: worker.encryption_inventory_doc_id.clone(),
+        }));
+
+        bare.reconcile_document(&doc_id, &branch, &worker_heads(&ctx, &doc_id).await?)
+            .await?;
+
+        assert!(
+            read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+                .await?
+                .is_none(),
+            "a stale pin row must not produce a representation"
+        );
+        assert!(
+            bare.blob_status(c1_hash).await?.is_none(),
+            "the pass must not have written the released ciphertext into the bare store"
+        );
+        assert!(
+            bare.store
+                .tags()
+                .get(format!("{TAG_CT_PREFIX}{c1_hash}"))
+                .await?
+                .is_none()
+                && bare
+                    .store
+                    .tags()
+                    .get(format!("{TAG_PT_PREFIX}{c1_hash}"))
+                    .await?
+                    .is_none(),
+            "the pass must not have re-rooted the released pair in the bare store"
+        );
+        let pin_key = FacetKey {
+            tag: WellKnownFacetTag::BlobPin.into(),
+            id: first.representation.digest.clone(),
+        };
+        assert!(
+            read_facet(
+                &ctx.drawer_repo,
+                &worker.encryption_inventory_doc_id,
+                &pin_key
+            )
+            .await?
+            .is_none(),
+            "the pass owns no pin writes; the stale pin was released above"
+        );
+        assert_eq!(
+            read_blob(&ctx.drawer_repo, &doc_id, &blob_key)
+                .await?
+                .expect("the Blob facet is still there")
+                .urls,
+            urls_before,
+            "a skipped document is written to nowhere"
+        );
+        fresh_repo.shutdown().await?;
+        ctx.stop().await?;
+        Ok(())
+    }
+
+    async fn worker_heads(ctx: &DaybookTestContext, doc_id: &DocId) -> Res<ChangeHashSet> {
+        ctx.drawer_repo
+            .get_branch_heads_for_path(doc_id, &BranchPathBuf::from(MAIN_BRANCH))
+            .await?
+            .ok_or_else(|| eyre::eyre!("document {doc_id} has no {MAIN_BRANCH} branch"))
+    }
+
     /// The pass covers documents that were already eligible before the worker
     /// existed - the case a delta-only worker cannot see, because eligibility is
     /// a state rather than an event.
@@ -1373,13 +1786,81 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
-        worker.reconcile_eligible_documents(&facet_index).await?;
+        worker
+            .reconcile_eligible_documents(&facet_index, CancellationToken::new())
+            .await?;
 
         assert!(
             read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
                 .await?
                 .is_some(),
             "the pass must produce a representation for an already-eligible document"
+        );
+        ctx.stop().await?;
+        Ok(())
+    }
+
+    /// A boot-pass document whose work fails is not waved through and not
+    /// dropped: it is rescheduled by the pass's own scheduler with backoff, and
+    /// the representation is applied once the cause clears - without a second
+    /// boot pass. No write to the document happens in between, so the
+    /// rescheduled task is the only thing that can produce it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn boot_pass_failure_is_rescheduled_and_applied_without_a_second_boot() -> Res<()> {
+        let ctx = test_cx(utils_rs::function_full!()).await?;
+        let worker = Arc::new(Worker::new(test_ctx(&ctx, None).await?));
+        let plaintext = ctx
+            .rt
+            .blobs_repo
+            .put(b"boot pass: failure then retry")
+            .await?;
+        let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext).await?;
+        let cipher_key = worker.cipher_facet_key(&blob_key);
+        let facet_index = Arc::clone(&ctx.rt.doc_facet_set_index_repo);
+        await_indexed(&ctx, &doc_id).await?;
+
+        // Armed before the pass starts: the document's boot task is the one
+        // that fails, and every attempt at it fails while the latch holds.
+        faults::FAIL_RECONCILE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let cancel_token = CancellationToken::new();
+        let pass = tokio::spawn({
+            let worker = Arc::clone(&worker);
+            let facet_index = Arc::clone(&facet_index);
+            let cancel_token = cancel_token.clone();
+            async move {
+                worker
+                    .reconcile_eligible_documents(&facet_index, cancel_token)
+                    .await
+            }
+        });
+
+        // More than one attempt is the reschedule itself: the retry delay is
+        // 2s, so reaching a second attempt can only happen on the retry path.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while faults::attempts() < 2 {
+            eyre::ensure!(
+                std::time::Instant::now() < deadline,
+                "the pass never rescheduled the failed boot task, saw {} attempt(s)",
+                faults::attempts()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+                .await?
+                .is_none(),
+            "nothing durable may exist for a boot task whose work failed"
+        );
+
+        // Clearing the cause is what lets the retry succeed, and the pass
+        // finishes on its own: nothing here re-runs it.
+        faults::FAIL_RECONCILE.store(false, std::sync::atomic::Ordering::SeqCst);
+        pass.await??;
+        assert!(
+            read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+                .await?
+                .is_some(),
+            "the rescheduled boot task must apply without a second boot pass"
         );
         ctx.stop().await?;
         Ok(())

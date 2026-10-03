@@ -113,15 +113,25 @@ impl DecidePeerStrategyTask {
                 parts: self.parts.clone(),
                 asker_part_cursors: asker_part_cursors.clone(),
             })
-            .await??;
+            .await?;
         tracing::debug!(
             peer_id = %self.peer_id,
             part_count = summary.parts.len(),
+            refused_count = summary.refused.len(),
             "decide peer strategy summary"
         );
 
         let mut part_strats: Map<_, _> = default();
         for part_id in self.parts {
+            // A refused part (responder-declared, or missing from the answer map,
+            // which the responder also guarantees is exactly its refused set) is
+            // decided `Unkown`: `handle_set_peer_strat` marks exactly it
+            // unanswered and retries exactly it, so an ungranted neighbor part's
+            // refusal keeps no granted part out of this batch's strategies.
+            if summary.refused.contains(&part_id) {
+                part_strats.insert(part_id, PeerPartStratDecision::Unkown);
+                continue;
+            }
             let Some(strat_summaries) = summary.parts.get(&part_id) else {
                 part_strats.insert(part_id, PeerPartStratDecision::Unkown);
                 continue;
@@ -320,7 +330,7 @@ mod tests {
     use super::*;
 
     use crate::{
-        BuckId, ObjKey, PartKey, PeerKey, SyncMode, mpsc,
+        BuckId, ObjKey, PartKey, PeerKey, Set, SyncMode, mpsc,
         part_store::{ObjPayload, PartDirtyCount, PartStoreReadOnly},
         rpc::{
             BigSyncRpcResult, BucketPartSummary, BucketSummary, CursorPartSummary,
@@ -350,36 +360,49 @@ mod tests {
         asker_cursor: CursorIndex,
         dirty_bucket: BucketSummary,
         bucket_walk_entered: Rc<Cell<bool>>,
+        /// Parts this fake refuses regardless of what the request names: the
+        /// per-part refusal the wire answer now carries next to the readable
+        /// summaries.
+        refused: Set<PartKey>,
     }
 
     impl BigSyncRpcClient<Local> for FakeRpc {
         fn peer_summary<'a>(
             &'a self,
             req: PeerSummaryRequest,
-        ) -> LocalBoxFuture<'a, BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>
-        {
-            assert_eq!(
-                req.asker_part_cursors
-                    .get(&PartKey::new(PART_BYTES))
-                    .copied(),
-                Some(self.asker_cursor),
-                "the asker must advertise the cursor it holds, otherwise the peer cannot \
-                 count relevance on the scale that cursor belongs to"
-            );
-            let parts = Map::from_iter([(
-                PartKey::new(PART_BYTES),
-                vec![
-                    PartStratSummary::Cursor(CursorPartSummary {
-                        latest_cursor: self.latest_cursor,
-                        dirty_count: self.dirty_count,
-                    }),
-                    PartStratSummary::Bucket(BucketPartSummary {
-                        deepest_bucket_level: 0,
-                        member_count: 1,
-                    }),
-                ],
-            )]);
-            Local::from_future(async move { Ok(Ok(PeerSummaryResult { parts })) })
+        ) -> LocalBoxFuture<'a, BigSyncRpcResult<PeerSummaryResult>> {
+            if let Some(asker_cursor) = req
+                .asker_part_cursors
+                .get(&PartKey::new(PART_BYTES))
+                .copied()
+            {
+                assert_eq!(
+                    asker_cursor, self.asker_cursor,
+                    "the asker must advertise the cursor it holds, otherwise the peer cannot \
+                     count relevance on the scale that cursor belongs to"
+                );
+            }
+            let parts = req
+                .parts
+                .difference(&self.refused)
+                .map(|part_id| {
+                    (
+                        part_id.clone(),
+                        vec![
+                            PartStratSummary::Cursor(CursorPartSummary {
+                                latest_cursor: self.latest_cursor,
+                                dirty_count: self.dirty_count,
+                            }),
+                            PartStratSummary::Bucket(BucketPartSummary {
+                                deepest_bucket_level: 0,
+                                member_count: 1,
+                            }),
+                        ],
+                    )
+                })
+                .collect();
+            let refused = self.refused.intersection(&req.parts).cloned().collect();
+            Local::from_future(async move { Ok(PeerSummaryResult { parts, refused }) })
         }
 
         fn replay_page<'a>(
@@ -491,6 +514,7 @@ mod tests {
                 changed_at: peer_cursor,
             },
             bucket_walk_entered: Rc::clone(&bucket_walk_entered),
+            refused: Set::new(),
         };
         let store = FakeStore {
             peer_cursor,
@@ -587,6 +611,85 @@ mod tests {
         assert!(
             matches!(strat, PeerPartStratDecision::Bucket(_)),
             "expected the bucket band, got {strat:?}"
+        );
+    }
+
+    /// Per-part refusal: a summary batch whose responder refuses one part still
+    /// decides the readable one's strategy. Deciding `Unkown` for the refused
+    /// part is what routes it to `handle_set_peer_strat`'s per-part retry (mark
+    /// it unanswered, re-decide it with backoff), so an ungranted neighbor can
+    /// no longer starve a granted part by failing their shared decision task.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_refused_part_of_a_summary_batch_leaves_the_readable_part_decided() {
+        let peer_id = PeerKey::new(PEER_BYTES);
+        let readable = PartKey::new(PART_BYTES);
+        let refused_part = PartKey::random();
+        let bucket_walk_entered = Rc::new(Cell::new(false));
+        let rpc = FakeRpc {
+            latest_cursor: 100,
+            dirty_count: PartDirtyCount {
+                member_changes: 1,
+                access_changes: 0,
+            },
+            asker_cursor: 0,
+            dirty_bucket: BucketSummary {
+                id: BuckId::ROOT,
+                len: 1,
+                live_count: 1,
+                fp: (0xdead, 0xbeef),
+                changed_at: 0,
+            },
+            bucket_walk_entered: Rc::clone(&bucket_walk_entered),
+            refused: Set::from([refused_part.clone()]),
+        };
+        let (main_tx, _main_rx): (mpsc::Sender<MachineTaskMsg>, mpsc::Receiver<MachineTaskMsg>) =
+            mpsc::unbounded("test".into(), "test".into());
+        let mut cx = TaskCtx {
+            task_id: 1,
+            main_tx,
+            rpc_clients: Map::from_iter([(peer_id.clone(), rpc)]),
+            part_store: FakeStore {
+                peer_cursor: 0,
+                local_bucket: BucketSummary {
+                    id: BuckId::ROOT,
+                    len: 0,
+                    live_count: 0,
+                    fp: (0, 0),
+                    changed_at: 0,
+                },
+            },
+            rng: rand::rng(),
+            _phantom: std::marker::PhantomData,
+        };
+        let task = DecidePeerStrategyTask {
+            peer_id,
+            parts: Set::from([readable.clone(), refused_part.clone()]),
+            // CursorOnly for both: the decision this test watches is the
+            // refusal mapping, not the band choice.
+            sync_modes: Map::from_iter([(readable.clone(), SyncMode::CursorOnly)]),
+            default_sync_mode: SyncMode::CursorOnly,
+        };
+        let deets = task
+            .run(&mut cx)
+            .await
+            .expect("a readable part must be decided beside a refused one");
+        let TaskResultDeets::SetPeerStrategy(strategy) = deets else {
+            panic!("expected a peer strategy result, got {deets:?}");
+        };
+        assert!(
+            matches!(
+                strategy.part_strats.get(&readable),
+                Some(PeerPartStratDecision::Cursor(cursor))
+                    if cursor.latest_cursor == 100 && cursor.last_cursor == 0
+            ),
+            "the readable part keeps its strategy beside the refusal"
+        );
+        assert!(
+            matches!(
+                strategy.part_strats.get(&refused_part),
+                Some(PeerPartStratDecision::Unkown)
+            ),
+            "the refused part decides Unkown: the machine marks exactly it unanswered"
         );
     }
 }
