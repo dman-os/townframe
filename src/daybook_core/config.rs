@@ -23,13 +23,10 @@ pub struct AppBlobInventories {
     pub docs_inventory_doc_id: DocumentId,
     /// The encrypted-representation inventory (ADR 003 §13: ciphertext pins
     /// live in their own inventory so a relay learns only ciphertext digests).
-    ///
-    /// Optional because this value is replicated in the repo config doc: a
-    /// config written before this inventory existed has no field for it, and
-    /// the two plaintext inventory ids above were added the same way. A repo
-    /// without it simply has no encrypted-representation inventory.
-    #[serde(default)]
-    pub encryption_inventory_doc_id: Option<DocumentId>,
+    /// Every repository has one: the init dance creates it, and a clone/carrier
+    /// learns it from the source's config doc before standing up. There is no
+    /// inventory-less repository.
+    pub encryption_inventory_doc_id: DocumentId,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Reconcile, Hydrate)]

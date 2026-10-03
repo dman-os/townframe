@@ -307,14 +307,11 @@ impl IrohSyncRepo {
         let blob_inventory_permission_stop = crate::blobs::spawn_blob_inventory_permission_writer(
             Arc::clone(&rcx.blob_part_store),
             Arc::clone(&rcx.big_repo),
-            [
-                Some(rcx.core_inventory_doc_id.clone()),
-                Some(rcx.docs_inventory_doc_id.clone()),
+            vec![
+                rcx.core_inventory_doc_id.clone(),
+                rcx.docs_inventory_doc_id.clone(),
                 rcx.encryption_inventory_doc_id.clone(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
+            ],
             cancel_token.clone(),
         )
         .await?;
@@ -488,11 +485,8 @@ impl IrohSyncRepo {
         let docs_blob = crate::blobs::blob_inventory_part_id(&self.rcx.docs_inventory_doc_id);
         part_id == &core_blob
             || part_id == &docs_blob
-            || self
-                .rcx
-                .encryption_inventory_doc_id
-                .as_ref()
-                .is_some_and(|doc_id| part_id == &crate::blobs::blob_inventory_part_id(doc_id))
+            || part_id
+                == &crate::blobs::blob_inventory_part_id(&self.rcx.encryption_inventory_doc_id)
     }
 
     fn peer_partition_ids(
@@ -532,12 +526,10 @@ impl IrohSyncRepo {
             // The encrypted-representation inventory is a blob scope too. Left
             // out, no peer ever asks for it, so a relay never learns the
             // ciphertext digests it is meant to retain (ADR 003 §13).
-            if let Some(doc_id) = &self.rcx.encryption_inventory_doc_id {
-                parts.insert(
-                    crate::blobs::blob_inventory_part_id(doc_id),
-                    blob_backend_id,
-                );
-            }
+            parts.insert(
+                crate::blobs::blob_inventory_part_id(&self.rcx.encryption_inventory_doc_id),
+                blob_backend_id,
+            );
         }
         parts
     }

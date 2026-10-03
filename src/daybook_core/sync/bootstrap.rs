@@ -648,6 +648,8 @@ pub async fn clone_repo_init_from_url(
 
         let part_store = big_repo.shared_part_store();
         let blob_part_store = crate::repo::open_blob_part_store(big_repo.sql_ctx()).await?;
+        let blob_presence_store =
+            crate::repo::open_blob_presence_part_store(big_repo.sql_ctx()).await?;
         let blobs_repo =
             crate::blobs::BlobsRepo::new(staging.join("blobs"), "clone-bootstrap".into()).await?;
 
@@ -666,6 +668,16 @@ pub async fn clone_repo_init_from_url(
 
         blobs_repo.shutdown().await?;
 
+        // The source's app doc has been pulled above; its config facet names
+        // the encrypted-representation inventory. Resolved here, ahead of the
+        // init state: a clone/carrier comes with the source's inventories by
+        // definition, so there is no inventory-less state to placehold.
+        let inventories =
+            crate::repo::blob_inventories_from_app_doc(&big_repo, &bootstrap.app_doc_id)
+                .await?
+                .ok_or_else(|| {
+                    eyre::eyre!("clone bootstrap: source app doc carries no blob inventories")
+                })?;
         crate::repo::globals::set_init_state(
             &sql,
             &crate::repo::globals::InitState::Created {
@@ -674,7 +686,7 @@ pub async fn clone_repo_init_from_url(
                 doc_id_config: bootstrap.config_doc_id.clone(),
                 core_inventory_doc_id: None,
                 docs_inventory_doc_id: None,
-                encryption_inventory_doc_id: None,
+                encryption_inventory_doc_id: inventories.encryption_inventory_doc_id,
             },
         )
         .await?;
@@ -688,6 +700,7 @@ pub async fn clone_repo_init_from_url(
             sqlite_local_state_stop: std::sync::Mutex::new(Some(sqlite_local_state_stop)),
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
+            blob_presence_store: Arc::clone(&blob_presence_store),
             frontier_part_store: big_repo.frontier_part_store(),
             derived_part_store: big_repo.derived_part_store(),
             big_repo: Arc::clone(&big_repo),

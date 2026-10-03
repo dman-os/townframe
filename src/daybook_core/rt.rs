@@ -309,6 +309,14 @@ impl Rt {
             &rcx.docs_inventory_doc_id,
         )
         .await?;
+
+        // The blob presence plane's write edge (ADR 003 §13): from here on,
+        // every put/download announces itself, and the boot announce replays
+        // the blobs already on disk. Both are idempotent in the store, so a
+        // restart costs row reads, and the encryption worker's feeder can open
+        // its stream before any of these facts is missed.
+        blobs_repo.set_blob_presence_sink(Arc::clone(&rcx.blob_presence_store));
+        blobs_repo.announce_held_blobs().await?;
         Self::emit_startup_progress_status(
             &progress_repo,
             startup_progress_task_id.as_deref(),
@@ -414,6 +422,9 @@ impl Rt {
                         },
                         // The §15 trigger rides with the worker: the runtime
                         // holds the sender, tests/other callers hold theirs.
+                        feeder_repo_part_store: Arc::clone(&rcx.part_store),
+                        feeder_eligibility_part: authority.encrypted_blob_docs_part_id(),
+                        feeder_presence_store: Arc::clone(&rcx.blob_presence_store),
                     },
                 )
                 .await?,

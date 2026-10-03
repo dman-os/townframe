@@ -1,5 +1,8 @@
 use crate::interlude::*;
 
+use crate::repo::blob_presence_part_id;
+use big_repo::SharedPartStore;
+use big_sync_core::ObjKey;
 use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
 use iroh_blobs::store::fs::FsStore;
 use serde::{Deserialize, Serialize};
@@ -36,7 +39,42 @@ pub fn blob_inventory_part_id_from_doc_id(doc_id: &str) -> PartKey {
     }
 }
 
-#[derive(Clone)]
+/// The blob presence plane's write edge (ADR 003 §13). Implemented over the
+/// local presence part store; `BlobsRepo` invokes it at the exact points the
+/// bytes land, so the membership lands with the fact rather than after it —
+/// the same principle the big repo store's `/seds` partition applies to
+/// sedimentrees. Idempotent: the store no-ops a membership that is already
+/// live, so restart announcements and repeated puts cost one no-op row read.
+#[async_trait::async_trait]
+pub trait BlobPresenceSink: Send + Sync {
+    /// The blob's bytes are now on disk at this node. `length_octets` is the
+    /// byte length the materialization observed.
+    async fn blob_now_held(&self, blob_id: BlobId, length_octets: u64) -> Res<()>;
+}
+
+/// The presence sink over a local part store: payload row with the length,
+/// membership of the `/blobs` partition. Both calls are idempotent and the
+/// store publishes exactly one revision event per state change, so replays
+/// and repeats converge.
+struct BlobPresencePartStoreSink(SharedPartStore);
+
+#[async_trait::async_trait]
+impl BlobPresenceSink for BlobPresencePartStoreSink {
+    async fn blob_now_held(&self, blob_id: BlobId, length_octets: u64) -> Res<()> {
+        let obj_id = ObjKey::from(blob_id);
+        self.0
+            .set_obj_payload(
+                obj_id.clone(),
+                serde_json::json!({ "lengthOctets": length_octets }),
+            )
+            .await?;
+        self.0
+            .add_obj_to_parts(obj_id, vec![blob_presence_part_id()])
+            .await?;
+        Ok(())
+    }
+}
+
 pub struct BlobsRepo {
     root: PathBuf,
     src_local_user_path: UserPathBuf,
@@ -49,6 +87,9 @@ pub struct BlobsRepo {
     // FIXME: use surelock
     hash_locks: Arc<std::sync::Mutex<HashMap<BlobId, Arc<tokio::sync::Mutex<()>>>>>,
     sync_backend: Arc<surelock::mutex::Mutex<Option<crate::blobs::sync::BlobSyncBackend>>>,
+    /// The presence plane's write edge. `None` until the repository boot wires
+    /// it — a standalone `BlobsRepo` (no repo around it) has no presence plane.
+    presence_sink: std::sync::RwLock<Option<std::sync::Arc<dyn BlobPresenceSink>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -287,7 +328,78 @@ impl BlobsRepo {
             cipher_provider,
             hash_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             sync_backend: Arc::new(surelock::mutex::Mutex::new(default())),
+            presence_sink: std::sync::RwLock::new(None),
         }))
+    }
+    /// Wire the presence plane. Called once at repository boot, before any
+    /// caller can put a blob: from the first put on, membership lands with the
+    /// fact.
+    pub fn set_blob_presence_sink(&self, presence_store: SharedPartStore) {
+        let sink: std::sync::Arc<dyn BlobPresenceSink> =
+            std::sync::Arc::new(BlobPresencePartStoreSink(presence_store));
+        *self
+            .presence_sink
+            .write()
+            .expect("presence sink lock poisoned") = Some(sink);
+    }
+
+    async fn blob_now_held(&self, blob_id: BlobId) -> Res<()> {
+        let Some(sink) = self
+            .presence_sink
+            .read()
+            .expect("presence sink lock poisoned")
+            .clone()
+        else {
+            return Ok(());
+        };
+        let length = tokio::fs::metadata(self.object_paths(blob_id.clone())?.blob)
+            .await
+            .ok()
+            .map(|meta| meta.len())
+            .unwrap_or_default();
+        sink.blob_now_held(blob_id, length).await
+    }
+
+    /// Replay every blob currently held on disk into the presence plane. Run
+    /// once at repository boot, after the sink is wired and before anything
+    /// reacts to the plane. Membership is idempotent in the store, so a
+    /// restart's replay collapses to no-op row reads.
+    pub async fn announce_held_blobs(&self) -> Res<()> {
+        let objects = self.root.join("objects");
+        let mut read = 0usize;
+        let mut announcements = std::collections::HashSet::new();
+        let mut level0 = tokio::fs::read_dir(&objects)
+            .await
+            .wrap_err_with(|| format!("blob presence announce: listing {}", objects.display()))?;
+        while let Some(l0) = level0.next_entry().await? {
+            if !l0.path().is_dir() {
+                continue;
+            }
+            let mut level1 = tokio::fs::read_dir(l0.path()).await?;
+            while let Some(l1) = level1.next_entry().await? {
+                if !l1.path().is_dir() {
+                    continue;
+                }
+                let mut leaves = tokio::fs::read_dir(l1.path()).await?;
+                while let Some(entry) = leaves.next_entry().await? {
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str() else { continue };
+                    let Some(hex) = name.strip_suffix(".blob") else {
+                        continue;
+                    };
+                    let Ok(hash) = blake3::Hash::from_hex(hex) else {
+                        continue;
+                    };
+                    let blob_id = BlobId::new(*hash.as_bytes());
+                    if announcements.insert(blob_id.clone()) {
+                        self.blob_now_held(blob_id).await?;
+                        read += 1;
+                    }
+                }
+            }
+        }
+        tracing::debug!(blobs = read, "blob presence plane: boot announce complete");
+        Ok(())
     }
 
     pub fn set_sync_backend(&self, backend: crate::blobs::sync::BlobSyncBackend) {
@@ -354,6 +466,7 @@ impl BlobsRepo {
                 .await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
+            self.blob_now_held(hash.clone()).await?;
 
             Ok(hash)
         }
@@ -408,6 +521,8 @@ impl BlobsRepo {
                 .await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
+            self.blob_now_held(hash.clone()).await?;
+
             Ok(hash)
         }
         .await;
@@ -441,6 +556,7 @@ impl BlobsRepo {
             .await?;
         meta.iroh_ingested = true;
         self.write_meta(&object_paths.meta, &meta).await?;
+        self.blob_now_held(hash.clone()).await?;
 
         Ok(hash)
     }
@@ -551,6 +667,9 @@ impl BlobsRepo {
         let hash = blob_hash_from_id(blob_id.clone());
         self.ensure_local_object_no_meta_rewrite(blob_id.clone())
             .await?;
+        // First materialization *is* the bytes landing: announce presence here
+        // too, or a get/materialize-only blob never joins the presence plane.
+        self.blob_now_held(blob_id.clone()).await?;
         let source_path = self.object_paths(blob_id)?.blob;
         let filename = match request {
             BlobMaterializeRequest::Filename(name) => Self::sanitize_requested_filename(&name)?,
@@ -629,6 +748,7 @@ impl BlobsRepo {
             true,
         );
         self.write_meta(&object_paths.meta, &meta).await?;
+        self.blob_now_held(blob_id.clone()).await?;
 
         Ok(blob_id)
     }

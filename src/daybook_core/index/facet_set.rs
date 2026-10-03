@@ -1012,6 +1012,8 @@ impl DocFacetSetIndexRepo {
               , branch_heads_json TEXT NOT NULL
               , PRIMARY KEY(document_id, branch_id, facet_tag, facet_id)
             ) STRICT
+            CREATE INDEX IF NOT EXISTS facet_set_doc_facets_tag_id
+                ON facet_set_doc_facets (facet_tag, facet_id)
             "#,
         )
         .execute(&sql.write_pool)
@@ -1062,6 +1064,75 @@ impl DocFacetSetIndexRepo {
                     doc_id,
                     branch_id: BranchId(branch_id),
                     facet_tag: facet_tag.to_string(),
+                    origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
+                })
+            })
+            .collect()
+    }
+    /// The association lookup the presence plane drives: documents/branches
+    /// whose facet of `facet_tag` carries `facet_id` as its id. For `Blob`
+    /// facets the id is the plaintext digest, so this is the map from a blob
+    /// arrival to the documents it belongs to (ADR 003 §13).
+    pub async fn list_docs_for_facet_tag_id(
+        &self,
+        facet_tag: &str,
+        facet_id: &str,
+    ) -> Res<Vec<DocFacetTagMembership>> {
+        let rows = sqlx::query_as::<_, (String, String, String)>(
+            r#"
+            SELECT document_id, branch_id, branch_heads_json
+              FROM facet_set_doc_facets
+             WHERE facet_tag = ?1
+               AND facet_id = ?2
+             GROUP BY document_id, branch_id, branch_heads_json
+             ORDER BY document_id ASC, branch_id ASC
+            "#,
+        )
+        .bind(facet_tag)
+        .bind(facet_id)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|(doc_id, branch_id, branch_heads)| {
+                let head_strings: Vec<String> = serde_json::from_str(&branch_heads)?;
+                Ok(DocFacetTagMembership {
+                    doc_id,
+                    branch_id: BranchId(branch_id),
+                    facet_tag: facet_tag.to_string(),
+                    origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
+                })
+            })
+            .collect()
+    }
+
+    /// The same table keyed the other way: the documents/branches a physical
+    /// branch doc carries, for the eligibility-group membership events whose
+    /// member objects are branch docs.
+    pub async fn list_docs_for_branch_id(
+        &self,
+        branch_id: &str,
+    ) -> Res<Vec<DocFacetTagMembership>> {
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(
+            r#"
+            SELECT document_id, branch_id, facet_tag, branch_heads_json
+              FROM facet_set_doc_facets
+             WHERE branch_id = ?1
+             GROUP BY document_id, branch_id, facet_tag, branch_heads_json
+             ORDER BY document_id ASC, branch_id ASC
+            "#,
+        )
+        .bind(branch_id)
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|(doc_id, branch_id, facet_tag, branch_heads)| {
+                let head_strings: Vec<String> = serde_json::from_str(&branch_heads)?;
+                Ok(DocFacetTagMembership {
+                    doc_id,
+                    branch_id: BranchId(branch_id),
+                    facet_tag,
                     origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
                 })
             })

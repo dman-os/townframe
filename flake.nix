@@ -58,7 +58,6 @@
           androidApiLevel = "31";
           rustVersion = "2026-08-16";
 
-+++++++ pzksntyl 79576568 "feat: download resumes" (rebased revision)
           # The browser farm below is keyed by browser *revision*, so the npm runner that
           # drives it must be the same playwright version as `pkgs.playwright-driver` here
           # (1.63.0 <-> chromium 1243). A mismatch makes playwright look for a revision this

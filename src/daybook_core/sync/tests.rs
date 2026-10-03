@@ -622,14 +622,9 @@ async fn iroh_clone_bootstrap_syncs_encrypted_representation_inventory() -> Res<
     rtx.shutdown().await?;
 
     let node_a = open_sync_node(&repo_a_path, true).await?;
-    let encryption_inventory = node_a
-        .ctx
-        .encryption_inventory_doc_id
-        .clone()
-        .ok_or_else(|| eyre::eyre!("a fresh repo has an encrypted-representation inventory"))?;
     let encryption_inventory_doc_id = node_a
         .drawer
-        .resolve_doc_id_for_branch_doc_id(encryption_inventory.clone())
+        .resolve_doc_id_for_branch_doc_id(node_a.ctx.encryption_inventory_doc_id.clone())
         .await?;
 
     // One locally-stored plaintext with a `Blob` facet: the encryption worker
@@ -770,8 +765,7 @@ async fn iroh_clone_bootstrap_syncs_encrypted_representation_inventory() -> Res<
     // Both sides must name the same blob parts: the clone adopts the origin's
     // inventory ids from the shared config doc.
     assert_eq!(
-        node_b.ctx.encryption_inventory_doc_id.as_ref(),
-        Some(&encryption_inventory),
+        &node_b.ctx.encryption_inventory_doc_id, &node_a.ctx.encryption_inventory_doc_id,
         "the clone must name the origin's encrypted-representation inventory"
     );
     wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
@@ -789,7 +783,7 @@ async fn iroh_clone_bootstrap_syncs_encrypted_representation_inventory() -> Res<
             ),
             (
                 "encryption",
-                crate::blobs::blob_inventory_part_id(&encryption_inventory),
+                crate::blobs::blob_inventory_part_id(&node_a.ctx.encryption_inventory_doc_id),
             ),
         ] {
             eprintln!(
@@ -970,10 +964,7 @@ async fn peer_partition_ids_advertise_every_blob_inventory() -> Res<()> {
     let inventories = [
         node.ctx.core_inventory_doc_id.clone(),
         node.ctx.docs_inventory_doc_id.clone(),
-        node.ctx
-            .encryption_inventory_doc_id
-            .clone()
-            .ok_or_else(|| eyre::eyre!("a fresh repo has an encrypted-representation inventory"))?,
+        node.ctx.encryption_inventory_doc_id.clone(),
     ];
     for inventory in &inventories {
         let part = crate::blobs::blob_inventory_part_id(inventory);
@@ -2195,7 +2186,7 @@ async fn init_told_sync_node(
                 doc_id_config: Some(doc_config_id.clone()),
                 core_inventory_doc_id: None,
                 docs_inventory_doc_id: None,
-                encryption_inventory_doc_id: None,
+                encryption_inventory_doc_id: told.encryption_inventory_doc_id.clone(),
             },
         )
         .await?;
@@ -2244,6 +2235,8 @@ async fn init_told_sync_node(
             sqlite_local_state_stop: std::sync::Mutex::new(Some(sqlite_local_state_stop)),
             part_store: big_repo.shared_part_store(),
             blob_part_store: crate::repo::open_blob_part_store(big_repo.sql_ctx()).await?,
+            blob_presence_store: crate::repo::open_blob_presence_part_store(big_repo.sql_ctx())
+                .await?,
             frontier_part_store: big_repo.frontier_part_store(),
             derived_part_store: big_repo.derived_part_store(),
             big_repo: Arc::clone(&big_repo),
@@ -2447,14 +2440,9 @@ async fn told_not_cloned_inventory_part_is_refused_until_the_inventory_document_
     rtx.shutdown().await?;
 
     let node_a = open_sync_node(&repo_a_path, true).await?;
-    let encryption_inventory = node_a
-        .ctx
-        .encryption_inventory_doc_id
-        .clone()
-        .ok_or_else(|| eyre::eyre!("a fresh repo has an encrypted-representation inventory"))?;
     let encryption_inventory_doc_id = node_a
         .drawer
-        .resolve_doc_id_for_branch_doc_id(encryption_inventory.clone())
+        .resolve_doc_id_for_branch_doc_id(node_a.ctx.encryption_inventory_doc_id.clone())
         .await?;
 
     // One locally-stored plaintext with a `Blob` facet: the encryption worker
@@ -2508,20 +2496,20 @@ async fn told_not_cloned_inventory_part_is_refused_until_the_inventory_document_
         crate::config::AppBlobInventories {
             core_inventory_doc_id: node_a.ctx.core_inventory_doc_id.clone(),
             docs_inventory_doc_id: node_a.ctx.docs_inventory_doc_id.clone(),
-            encryption_inventory_doc_id: Some(encryption_inventory.clone()),
+            encryption_inventory_doc_id: node_a.ctx.encryption_inventory_doc_id.clone(),
         },
     )
     .await?;
     assert_eq!(
-        node_b.ctx.encryption_inventory_doc_id.as_ref(),
-        Some(&encryption_inventory),
+        &node_b.ctx.encryption_inventory_doc_id, &node_a.ctx.encryption_inventory_doc_id,
         "the told config must name the origin's inventories without any clone"
     );
     assert_ne!(
         node_b.ctx.repo_id, node_a.ctx.repo_id,
         "the two nodes are independent repos"
     );
-    let encryption_part = crate::blobs::blob_inventory_part_id(&encryption_inventory);
+    let encryption_part =
+        crate::blobs::blob_inventory_part_id(&node_b.ctx.encryption_inventory_doc_id);
     info!(
         told_core_part = %crate::blobs::blob_inventory_part_id(&node_a.ctx.core_inventory_doc_id),
         told_docs_part = %crate::blobs::blob_inventory_part_id(&node_a.ctx.docs_inventory_doc_id),
@@ -2640,7 +2628,13 @@ async fn told_not_cloned_inventory_part_is_refused_until_the_inventory_document_
     node_a
         .ctx
         .big_repo
-        .grant_doc_access(encryption_inventory.clone(), agent_b.clone(), Access::Read)
+        .grant_doc_access(
+            encryption_inventory_doc_id
+                .parse::<big_repo::DocumentId>()
+                .map_err(|_| eyre::eyre!("inventory doc id is not a document id"))?,
+            agent_b.clone(),
+            Access::Read,
+        )
         .await?;
     // Pull the grants' keyhive events on node_b's own connection so both
     // sides' part rows agree.

@@ -455,7 +455,7 @@ pub async fn test_cx_with_options(
         .set_blob_inventories(crate::config::AppBlobInventories {
             core_inventory_doc_id: core_inventory_doc_id.clone(),
             docs_inventory_doc_id: docs_inventory_doc_id.clone(),
-            encryption_inventory_doc_id: Some(encryption_inventory_doc_id.clone()),
+            encryption_inventory_doc_id: encryption_inventory_doc_id.clone(),
         })
         .await?;
 
@@ -488,7 +488,7 @@ pub async fn test_cx_with_options(
         &blob_part_store,
         &core_inventory_doc_id,
         &docs_inventory_doc_id,
-        Some(&encryption_inventory_doc_id),
+        &encryption_inventory_doc_id,
     )
     .await?;
     let rcx = crate::repo::RepoCtx::from_parts(
@@ -501,6 +501,8 @@ pub async fn test_cx_with_options(
             sqlite_local_state_stop: std::sync::Mutex::new(None),
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
+            blob_presence_store: crate::repo::open_blob_presence_part_store(sql_ctx.clone())
+                .await?,
             frontier_part_store: big_repo.frontier_part_store(),
             derived_part_store: big_repo.derived_part_store(),
             big_repo: Arc::clone(&big_repo),
@@ -530,7 +532,7 @@ pub async fn test_cx_with_options(
             .into_ready(config_doc_id)?,
         core_inventory_doc_id,
         docs_inventory_doc_id,
-        Some(encryption_inventory_doc_id),
+        encryption_inventory_doc_id,
     );
 
     let (init_repo, init_stop) = crate::rt::init::InitRepo::load(

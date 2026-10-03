@@ -467,6 +467,48 @@ A relay therefore only learns the physical representations selected for its rete
 Inventories are keyed per encryption domain and derived from the cipherBlob
 facets readable in that domain's groups; no component authors a representation
 pin that no facet entails. See §19.
+#### The blob plane follows the docs plane's stream architecture
+
+The doc plane orders local facts through one primitive: a revisioned store
+whose mutations commit atomic revisions and whose readers replay strictly
+forward (the group-part worker, `/seds`, the automerge frontier worker, and
+the facet-set index are all instances). Its three layers are: a cross-node
+routing plane (doc → keyhive-group partitions), a store-owned physical
+presence plane (`/seds`: membership recorded exactly where the tree is
+saved, a pending want where it is known but not held, removal where the
+tree is deleted), and internal event-driven consumers (the automerge
+frontier worker).
+
+The blob plane now has the same three layers:
+
+* **Routing plane (already):** the blob-inventory partitions — the
+  `pins_part_worker` projects the replicated inventory docs' `BlobPin`
+  facets into per-inventory blob-part rows. Blob objects are not keyhive
+  principals, so inventory-doc membership is their access mapping; that is
+  the blob analog of the group-part mapping.
+* **Presence plane:** a local-only scope (`daybook-blobs-presence`) whose
+  `/blobs` partition records the blobs this node *holds on disk* —
+  membership written where the bytes land (`put`, `put_path_copy`,
+  `put_path_reference`, `put_from_store`: the last covers download
+  completions), a payload row plus membership in one idempotent sink call.
+  Local-only, like the frontier and derived stores: presence is a local
+  fact, and advertising it cross-node is the eager-retention design (a
+  later, deliberate decision), not a side effect. The one-time boot
+  announce replays existing on-disk blobs into the plane; membership is
+  idempotent and single-event per store, so restart announcements cost
+  nothing.
+* **Internal consumers (encryption worker):** the worker follows two
+  durable part-revision streams and converts them into the same keyed
+  tasks the facet walker uses. `/blobs` arrivals re-arm documents whose
+  `Blob` facet names the digest (the facet id *is* the plaintext digest,
+  so the association is an id-keyed facet-set query); membership events on
+  the eligibility group's part re-arm documents whose branch just became
+  eligible. Together with the facet walker, three sources cover every
+  ordering: blob before doc, doc before blob, eligibility before or after
+  either. The two skip shapes that were previously quiet-and-permanent
+  (plaintext not local; document not yet eligible) are each re-armed by one
+  of the streams, so no boot-time re-derivation over the corpus remains:
+  the boot pass is removed rather than demoted.
 
 It does not need to know:
 

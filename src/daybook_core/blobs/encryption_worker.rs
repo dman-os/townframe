@@ -9,9 +9,12 @@
 //! Scope is one keyhive group (§19, "one worker per group"): a document is
 //! eligible when it is a member of `domain_group`, evaluated against live
 //! keyhive state at processing time. That makes eligibility a *state*, and a
-//! state produces no delta of its own — hence the pass over the facet index
-//! before the delta machine, which is also what makes a restarted node servable
-//! again (the virtual-provider registry is in-process; the entries are durable).
+//! state produces no delta of its own — so the worker is fed by three
+//! revision streams and every skip shape is re-armed by one of them (see the
+//! machine comment and ADR 003 §13, "the blob plane follows the docs plane's
+//! stream architecture"); a restarted node is servable again because the
+//! virtual-provider registry re-registers at boot while the entries are
+//! durable.
 //!
 //! Ordering per (document, blob) — the prefixes of this sequence are the only
 //! atomicity available across documents, so every prefix is safe to crash in:
@@ -42,13 +45,21 @@ use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{DocFacetSetIndexRepo, FacetSetRevisionStore, FacetSetSelector};
 use crate::repos::RepoStopToken;
 use big_repo::BigKeyhiveGroup;
+use big_repo::SharedPartStore;
 use big_sync::DeltaWalkerStateRepo as _;
+use big_sync::LocalPartRevisionReader as _;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
+use big_sync::{
+    DeltaWalkerSparseStateRepo as _, DeltaWalkerSparseStateTransaction as _,
+    DeltaWalkerStateTransaction as _,
+};
 use big_sync_core::concurrent_delta_walker::{
     ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
 };
-use big_sync_core::revisioned_store::RevisionedStore as _;
+use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits, RevisionedStore as _};
+use big_sync_core::rpc::PartEvent;
 use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
+use big_sync_core::{ObjKey, PartKey};
 use iroh_blobs::Hash;
 use iroh_blobs::api::proto::BlobStatus;
 
@@ -60,6 +71,9 @@ pub(crate) const ENCRYPTION_WORKER_STATE_ID: &str = "@daybook/core/blob-encrypti
 /// in flight is the entire budget, and it is deliberately *this worker's* own
 /// budget - a minutes-long disk-bound pass must not occupy a pin-reconciliation
 /// slot.
+/// FIXME: use experiment to find the right value for this
+/// since it's not just disk reads but encryption and hashing too
+/// which are CPU bound
 const ENCRYPTION_TASK_BUDGET: usize = 1;
 
 /// A failed document delta is rescheduled with backoff rather than dropped or
@@ -135,10 +149,394 @@ pub(crate) struct BlobEncryptionWorkerArgs {
     pub facet_set_store: Arc<FacetSetRevisionStore>,
     pub facet_index: Arc<DocFacetSetIndexRepo>,
     pub domain_group: BigKeyhiveGroup,
-    pub encryption_inventory_doc_id: Option<DocumentId>,
+    pub encryption_inventory_doc_id: DocumentId,
     pub parent_cancel_token: CancellationToken,
     /// The §15 rotation trigger; `None` where nothing sends rotations.
     pub rotation_rx: Option<RotationRequestRx>,
+    /// The feeders' inputs: the doc part store (eligibility-group membership
+    /// events), the eligibility part itself, and the local-only presence
+    /// store (`/blobs` arrivals). The spawn builds the trigger channel and
+    /// starts the feeder around them; there is no feeder-less encryption
+    /// worker.
+    pub feeder_repo_part_store: SharedPartStore,
+    pub feeder_eligibility_part: PartKey,
+    pub feeder_presence_store: SharedPartStore,
+}
+
+/// One machine request, at the loop head both requester shapes go through:
+/// they buffer ahead of walker reads for the same reason — both carry (or
+/// settle) the branch's pending delta cursor.
+enum TaskRequest {
+    Rotate(RotationRequest),
+    Trigger(EncryptDocTrigger),
+}
+
+/// A document the presence plane has re-armed: the feeder resolved a blob
+/// arrival or an eligibility-group membership event to this document and asks
+/// the machine to run its reconcile-shaped task.
+#[derive(Debug, Clone)]
+pub(crate) struct EncryptDocTrigger {
+    pub doc_id: DocId,
+}
+
+/// The feeder's dependencies over the two presence-plane revision streams.
+///
+/// One loop per line, feeding one trigger channel. The triggers become the
+/// same keyed tasks the delta machine runs, so all re-arm paths serialize per
+/// document by construction.
+#[derive(Clone)]
+pub(crate) struct EncryptionFeederArgs {
+    /// The repository's doc part store: group-part membership events (the
+    /// eligibility plane) are revisions of this store.
+    pub repo_part_store: SharedPartStore,
+    /// The part whose members are the documents eligible for encrypted
+    /// representations.
+    pub eligibility_part: PartKey,
+    /// The local-only presence store: `/blobs` membership events are the
+    /// blob-arrival plane.
+    pub presence_store: SharedPartStore,
+    pub facet_index: Arc<DocFacetSetIndexRepo>,
+    pub sql: SqlCtx,
+    pub trigger_tx: tokio::sync::mpsc::Sender<EncryptDocTrigger>,
+}
+
+/// Spawn the two feeder lines. Each line owns a durable cursor in the walker
+/// state store and opens a *pull* revision reader at that cursor: restarts
+/// resume committed work, never re-walk it, and the reader blocks on the
+/// store's frontier notification between events. Cursors persist per line;
+/// the whole feeder dies with the trigger channel's receiver.
+pub(crate) async fn spawn_encryption_trigger_feeder(
+    args: EncryptionFeederArgs,
+) -> Res<tokio::task::JoinHandle<()>> {
+    let EncryptionFeederArgs {
+        repo_part_store,
+        eligibility_part,
+        presence_store,
+        facet_index,
+        sql,
+        trigger_tx,
+    } = args;
+    let state_repo = big_sync::SqliteDeltaWalkerStateRepo::new(
+        sql.read_pool.clone(),
+        sql.write_pool.clone(),
+        ENCRYPTION_WORKER_STATE_ID.to_string(),
+        "presence-tail".to_string(),
+    )
+    .await
+    .map_err(|error| eyre::eyre!("encryption feeder state store: {error:?}"))?;
+
+    let presence_line = tokio::spawn(tail_presence_line(
+        presence_store,
+        state_repo.clone(),
+        facet_index.clone(),
+        trigger_tx.clone(),
+    ));
+    let eligibility_line = tokio::spawn(tail_eligibility_line(
+        repo_part_store,
+        eligibility_part,
+        state_repo.clone(),
+        facet_index.clone(),
+        trigger_tx,
+    ));
+    Ok(tokio::spawn(async move {
+        // A feeder line that dies while the trigger channel is open must stop
+        // the feeder: a silently dead trigger plane is the boot-pass problem
+        // returning through the back door.
+        let (r1, r2) = tokio::join!(presence_line, eligibility_line);
+        let _ = (&state_repo,);
+        if r1.is_err() || r2.is_err() {
+            tracing::error!("an encryption feeder line exited unexpectedly; feeder stops");
+        }
+    }))
+}
+
+/// Feeder cursors, persisted in the walker state store's key rows. Handling
+/// an event and committing its cursor are not atomic: a crash between the two
+/// replays the event on restart, and at-least-once is the contract here —
+/// triggers are idempotent re-arms (the machine merges them into the pending
+/// per-key task), the event itself was already applied idempotently by the
+/// same keyed task identity.
+const PRESENCE_CURSOR_KEY: &[u8] = b"presence-cursor";
+const ELIGIBILITY_CURSOR_KEY: &[u8] = b"eligibility-cursor";
+
+async fn feeder_cursor(state: &big_sync::SqliteDeltaWalkerStateRepo, key: &[u8]) -> Res<u64> {
+    let raw = state
+        .get(key)
+        .await
+        .map_err(|error| eyre::eyre!("{error:?}"))?;
+    let Some(raw) = raw else {
+        return Ok(0);
+    };
+    let bytes: [u8; 8] = raw
+        .as_slice()
+        .try_into()
+        .map_err(|_| eyre::eyre!("feeder cursor {key:?} is not a u64"))?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+async fn feeder_commit_cursor(
+    state: &big_sync::SqliteDeltaWalkerStateRepo,
+    key: &'static [u8],
+    mut cursor: u64,
+) -> Res<()> {
+    let mut tx = state
+        .begin()
+        .await
+        .map_err(|error| eyre::eyre!("{error:?}"))?;
+    let _ = &mut cursor;
+    tx.put(key.to_vec(), cursor.to_le_bytes().to_vec())
+        .await
+        .map_err(|error| eyre::eyre!("{error:?}"))?;
+    tx.commit().await.map_err(|error| eyre::eyre!("{error:?}"))
+}
+
+/// Which presence-plane line a tail drives. Concrete dispatch instead of a
+/// passed async closure: every borrow lives in one owned enum, the future
+/// stays Send without regional-lifetime puzzles, and the two lines differ
+/// only in their association step.
+#[derive(Clone)]
+enum TailKind {
+    /// `/blobs` arrivals: re-arm documents whose `Blob` facet names the digest.
+    Presence {
+        facet_index: Arc<DocFacetSetIndexRepo>,
+        trigger_tx: tokio::sync::mpsc::Sender<EncryptDocTrigger>,
+    },
+    /// Eligibility-group membership: re-arm the documents a branch doc carries.
+    Eligibility {
+        facet_index: Arc<DocFacetSetIndexRepo>,
+        trigger_tx: tokio::sync::mpsc::Sender<EncryptDocTrigger>,
+    },
+}
+
+impl TailKind {
+    async fn handle(&self, obj_id: ObjKey) -> Res<()> {
+        match self {
+            TailKind::Presence {
+                facet_index,
+                trigger_tx,
+            } => handle_blob_arrival(facet_index, &obj_id, trigger_tx).await,
+            TailKind::Eligibility {
+                facet_index,
+                trigger_tx,
+            } => handle_branch_eligible(facet_index, &obj_id, trigger_tx).await,
+        }
+    }
+}
+
+/// The `line stopped` exits below are deliberate: a feeder line failure must
+/// not be swallowed (the machine's re-derivation would silently rot); the
+/// supervisor join reports it and the machine sees the trigger channel close.
+async fn run_tail(
+    mut reader: Box<dyn big_sync::LocalPartRevisionReader>,
+    cursor_key: &'static [u8],
+    state_repo: SqliteDeltaWalkerStateRepo,
+    kind: TailKind,
+) {
+    loop {
+        let read = reader
+            .next(RevisionReadLimits {
+                max_entries: std::num::NonZeroUsize::new(64).expect("64 is non-zero"),
+            })
+            .await;
+        let read = match read {
+            Ok(read) => read,
+            Err(error) => {
+                tracing::error!(%error, "feeder tail read failed; line stopped");
+                return;
+            }
+        };
+        match read {
+            RevisionRead::Entries { revision, entries } => {
+                for event in &entries {
+                    if let Err(error) = kind.handle(event_obj_id(event)).await {
+                        tracing::error!(
+                            %error,
+                            kind = event_kind(event),
+                            "feeder trigger handler failed; line stopped"
+                        );
+                        return;
+                    }
+                }
+                if let Err(error) =
+                    feeder_commit_cursor(&state_repo, cursor_key, u64::from(revision)).await
+                {
+                    tracing::error!(%error, "feeder cursor commit failed; line stopped");
+                    return;
+                }
+            }
+            RevisionRead::ReplayComplete { .. } => {}
+        }
+    }
+}
+
+/// The `/blobs` arrival line. A member add re-arms every document whose `Blob`
+/// facet names the digest; a removal is nothing here — the release path rides
+/// the pin worker's inventory diff, driven by facet deltas.
+async fn tail_presence_line(
+    presence_store: SharedPartStore,
+    state_repo: SqliteDeltaWalkerStateRepo,
+    facet_index: Arc<DocFacetSetIndexRepo>,
+    trigger_tx: tokio::sync::mpsc::Sender<EncryptDocTrigger>,
+) {
+    let cursor = match feeder_cursor(&state_repo, PRESENCE_CURSOR_KEY).await {
+        Ok(cursor) => cursor,
+        Err(error) => {
+            tracing::error!(%error, "blob-presence feeder cursor unreadable; line stopped");
+            return;
+        }
+    };
+    let req = big_sync_core::rpc::SubPartsRequest {
+        lower_bound: cursor,
+        targets: [big_sync_core::rpc::SubscriptionTarget::Part {
+            part_id: crate::repo::blob_presence_part_id(),
+            cursor: 0,
+        }]
+        .into_iter()
+        .collect(),
+    };
+    let reader = match presence_store.open_revision_reader(req).await {
+        Ok(Ok(reader)) => reader,
+        Ok(Err(error)) => {
+            tracing::error!(%error, "blob-presence feeder reader refused; line stopped");
+            return;
+        }
+        Err(error) => {
+            tracing::error!(%error, "blob-presence feeder reader unavailable; line stopped");
+            return;
+        }
+    };
+    run_tail(
+        reader,
+        PRESENCE_CURSOR_KEY,
+        state_repo,
+        TailKind::Presence {
+            facet_index,
+            trigger_tx,
+        },
+    )
+    .await;
+}
+
+/// The eligibility line. A member add on the eligibility group's part re-arms
+/// the documents the (branch-doc) member carries; a removal means the branch
+/// left the group — a release concern the pin worker already runs (its facet
+/// diff drops the pins; nothing here).
+async fn tail_eligibility_line(
+    repo_part_store: SharedPartStore,
+    eligibility_part: PartKey,
+    state_repo: SqliteDeltaWalkerStateRepo,
+    facet_index: Arc<DocFacetSetIndexRepo>,
+    trigger_tx: tokio::sync::mpsc::Sender<EncryptDocTrigger>,
+) {
+    let cursor = match feeder_cursor(&state_repo, ELIGIBILITY_CURSOR_KEY).await {
+        Ok(cursor) => cursor,
+        Err(error) => {
+            tracing::error!(%error, "eligibility feeder cursor unreadable; line stopped");
+            return;
+        }
+    };
+    let req = big_sync_core::rpc::SubPartsRequest {
+        lower_bound: cursor,
+        targets: [big_sync_core::rpc::SubscriptionTarget::Part {
+            part_id: eligibility_part,
+            cursor: 0,
+        }]
+        .into_iter()
+        .collect(),
+    };
+    let reader = match repo_part_store.open_revision_reader(req).await {
+        Ok(Ok(reader)) => reader,
+        Ok(Err(error)) => {
+            tracing::error!(%error, "eligibility feeder reader refused; line stopped");
+            return;
+        }
+        Err(error) => {
+            tracing::error!(%error, "eligibility feeder reader unavailable; line stopped");
+            return;
+        }
+    };
+    run_tail(
+        reader,
+        ELIGIBILITY_CURSOR_KEY,
+        state_repo,
+        TailKind::Eligibility {
+            facet_index,
+            trigger_tx,
+        },
+    )
+    .await;
+}
+
+/// The object a part event names. Changed events carry the member's key;
+/// removals the same key, so the line's handler sees one shape.
+fn event_obj_id(event: &PartEvent) -> ObjKey {
+    match event {
+        PartEvent::Changed(evt) => evt.obj_id.clone(),
+        PartEvent::Removed(evt) => evt.obj_id.clone(),
+    }
+}
+
+fn event_kind(event: &PartEvent) -> &'static str {
+    match event {
+        PartEvent::Changed(_) => "changed",
+        PartEvent::Removed(_) => "removed",
+    }
+}
+
+/// Blob arrival → the documents whose `Blob` facet names the digest. The
+/// facet id is authored in either digest spelling (ADR 003 §3: multihash
+/// canonical, `db+blob:///` bare), so the association matches both.
+async fn handle_blob_arrival(
+    facet_index: &DocFacetSetIndexRepo,
+    obj_id: &ObjKey,
+    trigger_tx: &tokio::sync::mpsc::Sender<EncryptDocTrigger>,
+) -> Res<()> {
+    let Ok(bytes32) = obj_id.to_bytes32() else {
+        // A key that is not a 32-byte digest is not a blob's presence row.
+        return Ok(());
+    };
+    let blob_id = BlobId::new(bytes32);
+    for digest in [
+        blob_id.to_string(),
+        crate::blobs::blob_id_to_digest_str(blob_id.clone()),
+    ] {
+        let docs = facet_index
+            .list_docs_for_facet_tag_id(WellKnownFacetTag::Blob.as_str(), &digest)
+            .await?;
+        for membership in docs {
+            trigger_tx
+                .send(EncryptDocTrigger {
+                    doc_id: membership.doc_id,
+                })
+                .await
+                .map_err(|_| eyre::eyre!("the encryption worker's trigger channel closed"))?;
+        }
+    }
+    Ok(())
+}
+
+/// A branch doc joined the eligibility group → the documents/branches that
+/// branch doc carries. The membership object is the branch doc's key, which
+/// is the same identity the facet-set rows key branches by.
+async fn handle_branch_eligible(
+    facet_index: &DocFacetSetIndexRepo,
+    obj_id: &ObjKey,
+    trigger_tx: &tokio::sync::mpsc::Sender<EncryptDocTrigger>,
+) -> Res<()> {
+    let bytes = obj_id.as_bytes().to_vec();
+    let branch_doc_id = big_repo::DocumentId::new(bytes);
+    let docs = facet_index
+        .list_docs_for_branch_id(&branch_doc_id.to_string())
+        .await?;
+    for membership in docs {
+        trigger_tx
+            .send(EncryptDocTrigger {
+                doc_id: membership.doc_id,
+            })
+            .await
+            .map_err(|_| eyre::eyre!("the encryption worker's trigger channel closed"))?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn spawn_blob_encryption_worker(
@@ -152,23 +550,20 @@ pub(crate) async fn spawn_blob_encryption_worker(
         facet_index,
         domain_group,
         encryption_inventory_doc_id,
+        feeder_repo_part_store,
+        feeder_eligibility_part,
+        feeder_presence_store,
         parent_cancel_token,
         rotation_rx,
     } = args;
-    let Some(encryption_inventory_doc_id) = encryption_inventory_doc_id else {
-        eyre::bail!(
-            "refusing to run the blob encryption worker: this repo has no encrypted-representation \
-             inventory, so a representation could be neither advertised nor released (ADR 003 §19)"
-        );
-    };
     let encryption_inventory_doc_id = drawer_repo
         .resolve_doc_id_for_branch_doc_id(encryption_inventory_doc_id)
         .await?;
     let store = blobs_repo.iroh_store();
     let provider = blobs_repo.cipher_provider();
     let ctx = Arc::new(Ctx {
-        drawer_repo,
-        sql,
+        drawer_repo: Arc::clone(&drawer_repo),
+        sql: sql.clone(),
         store,
         provider,
         domain_id: domain_facet_id(&domain_group),
@@ -176,17 +571,30 @@ pub(crate) async fn spawn_blob_encryption_worker(
         encryption_inventory_doc_id,
     });
 
+    // The presence-plane feeder and its trigger channel: the feeder resolves
+    // stream events to documents, the machine consumes the channel; the
+    // receiver is dropped when the worker stops, which stops the feeder.
+    let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel::<EncryptDocTrigger>(64);
+    let feeder = spawn_encryption_trigger_feeder(EncryptionFeederArgs {
+        repo_part_store: feeder_repo_part_store,
+        eligibility_part: feeder_eligibility_part,
+        presence_store: feeder_presence_store,
+        facet_index: Arc::clone(&facet_index),
+        sql: sql.clone(),
+        trigger_tx,
+    })
+    .await?;
+
     let cancel_token = parent_cancel_token.child_token();
-    let worker_handle = tokio::spawn({
-        let ctx = Arc::clone(&ctx);
-        let cancel_token = cancel_token.clone();
-        async move {
-            let mut worker = Worker::new(ctx, rotation_rx);
-            worker
-                .run(facet_set_store, facet_index, cancel_token)
-                .await
-                .expect("blob encryption worker error");
-        }
+    // The worker's own child token: the feeder's lines stop with it too.
+    let worker_cancel = cancel_token.child_token();
+    let worker_handle = tokio::spawn(async move {
+        let _feeder = feeder;
+        let mut worker = Worker::new(ctx, rotation_rx, Some(trigger_rx));
+        worker
+            .run(facet_set_store, facet_index, worker_cancel)
+            .await
+            .expect("blob encryption worker error");
     });
     Ok(RepoStopToken {
         cancel_token,
@@ -370,6 +778,8 @@ struct Worker {
     /// The §15 rotation trigger. `None` where nothing rotates (a caller that
     /// never sends simply leaves the machine arm pending).
     rotation_rx: Option<RotationRequestRx>,
+    /// The presence-plane triggers; `None` where no feeder runs.
+    trigger_rx: Option<tokio::sync::mpsc::Receiver<EncryptDocTrigger>>,
 }
 
 /// What a document task does at its branch: make the declared blobs represented
@@ -411,9 +821,24 @@ async fn run_encryption_task(task: EncryptionTask, ctx: Arc<Ctx>) -> Res<Encrypt
     };
     match task.kind {
         EncryptionTaskKind::Reconcile => {
-            let Some(heads) = &task.heads else {
-                return Ok(EncryptionTaskOutput::Applied);
+            let heads = match &task.heads {
+                Some(heads) => heads.clone(),
+                // A presence-plane trigger runs against the state current when
+                // it executes: a trigger enqueued behind other work must not
+                // apply to the heads snapshot of its enqueue.
+                None => {
+                    let branch = BranchPathBuf::from(MAIN_BRANCH);
+                    let Some(heads) = ctx
+                        .drawer_repo
+                        .get_branch_heads_for_path(&task.doc_id, &branch)
+                        .await?
+                    else {
+                        return Ok(EncryptionTaskOutput::Applied);
+                    };
+                    heads
+                }
             };
+            let heads = &heads;
             #[cfg(test)]
             {
                 eyre::ensure!(
@@ -451,8 +876,16 @@ impl std::ops::Deref for Worker {
 }
 
 impl Worker {
-    fn new(ctx: Arc<Ctx>, rotation_rx: Option<RotationRequestRx>) -> Self {
-        Self { ctx, rotation_rx }
+    fn new(
+        ctx: Arc<Ctx>,
+        rotation_rx: Option<RotationRequestRx>,
+        trigger_rx: Option<tokio::sync::mpsc::Receiver<EncryptDocTrigger>>,
+    ) -> Self {
+        Self {
+            ctx,
+            rotation_rx,
+            trigger_rx,
+        }
     }
 
     async fn run(
@@ -466,111 +899,15 @@ impl Worker {
             inventory = %self.encryption_inventory_doc_id,
             "blob-encryption: worker starting"
         );
-        self.reconcile_eligible_documents(&facet_index, cancel_token.clone())
-            .await?;
+        // The worker starts reactive from its first revision: three sources —
+        // the facet-set delta walker, the `/blobs` presence stream and the
+        // eligibility-group membership stream (the last two via the feeder)
+        // — cover every ordering (blob before doc, doc before blob,
+        // eligibility before or after either), so no boot pass over the
+        // corpus precedes the machine. See the feeder's state-id comment and
+        // ADR 003 §13.
         self.run_facet_machine(facet_set_store, cancel_token).await
     }
-
-    /// The pass that makes eligibility-as-a-state work, and the one that makes a
-    /// restarted node servable again.
-    ///
-    /// The facet index answers "which documents declare a blob" without
-    /// replaying history, so this covers documents that became eligible (or
-    /// were written) before this worker existed - a delta-only worker cannot
-    /// see them, because being eligible is not an event.
-    ///
-    /// Each indexed document becomes the *same* keyed task the delta machine
-    /// runs, on this pass's own scheduler with the machine's retry mechanics:
-    /// one task per `EncryptionKey` source, failures rescheduled with
-    /// [`ENCRYPTION_RETRY_DELAY`] backoff until the document's state is durable,
-    /// so a store or drawer failure in one document's step is not a lost
-    /// boot-pass retry ("only at the next boot"). The scheduler budget is
-    /// deliberately still this worker's own; the machine opens only after the
-    /// pass, so the two never run the same document at once.
-    async fn reconcile_eligible_documents(
-        &self,
-        facet_index: &DocFacetSetIndexRepo,
-        cancel_token: CancellationToken,
-    ) -> Res<()> {
-        let memberships = facet_index
-            .list_docs_for_tag(WellKnownFacetTag::Blob.as_str())
-            .await?;
-        let mut seen = std::collections::HashSet::new();
-        let mut tasks = TokioKeyedScheduler::new(ENCRYPTION_TASK_BUDGET);
-        // The number of documents whose state is not durable yet: a failed
-        // completion stays counted, its task comes back on the retry path.
-        let mut outstanding = 0usize;
-        for membership in memberships {
-            if !seen.insert(membership.doc_id.clone()) {
-                continue;
-            }
-            let branch = BranchPathBuf::from(MAIN_BRANCH);
-            let Some(heads) = self
-                .drawer_repo
-                .get_branch_heads_for_path(&membership.doc_id, &branch)
-                .await?
-            else {
-                continue;
-            };
-            let Some(branch_id) = self.main_branch_id(&membership.doc_id).await? else {
-                continue;
-            };
-            let key = encryption_facet_key(&branch_id);
-            let task = EncryptionTask {
-                key,
-                kind: EncryptionTaskKind::Reconcile,
-                cursor: 0,
-                doc_id: membership.doc_id.clone(),
-                branch_id: branch_id.clone(),
-                heads: Some(heads),
-            };
-            let future = run_encryption_task(task.clone(), Arc::clone(&self.ctx));
-            tasks.replace(key, task, future)?;
-            outstanding += 1;
-        }
-        while outstanding > 0 {
-            let next_deadline = tasks.next_deadline();
-            tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => return Ok(()),
-                completion = tasks.next_completion() => {
-                    let completion = completion?;
-                    if completion.result.is_ok() {
-                        // Durable; there is no walker cursor to ack here.
-                        outstanding -= 1;
-                        continue;
-                    }
-                    // Not durable: the document must not be dropped, so it is
-                    // rescheduled with backoff, exactly as a failed delta is.
-                    tracing::warn!(
-                        doc_id = %completion.command.doc_id,
-                        error = %completion.result.as_ref().unwrap_err(),
-                        "blob-encryption: boot-pass document task failed; rescheduling"
-                    );
-                    let task = completion.command;
-                    let future = run_encryption_task(task.clone(), Arc::clone(&self.ctx));
-                    tasks.retry(
-                        task.key,
-                        task.clone(),
-                        completion.retry,
-                        ENCRYPTION_RETRY_DELAY,
-                        future,
-                    )?;
-                }
-                _ = async {
-                    if let Some(deadline) = next_deadline {
-                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => {
-                    tasks.tick(std::time::Instant::now())?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// A `ConcurrentDeltaWalker` over the facet-set source, keyed by branch, and
     /// a keyed scheduler over the same key: one delta becomes one task, and the
     /// walker's cursor advances only in the completion handler, once the
@@ -614,10 +951,15 @@ impl Worker {
         let mut tasks = TokioKeyedScheduler::new(ENCRYPTION_TASK_BUDGET);
         // The newest unacked delta per key.
         let mut pending: HashMap<EncryptionKey, EncryptionTask> = HashMap::new();
-        // A rotation that arrived while the budget was busy, dispatched at the
-        // next loop head ahead of new walker reads, so a rotation request is
-        // not starved by steady delta traffic.
-        let mut buffered: std::collections::VecDeque<RotationRequest> = Default::default();
+        // Requests that arrived while the budget was busy, dispatched at the
+        // next loop head ahead of new walker reads: both shape-carry a pending
+        // delta cursor they settle, so neither may sit behind unbounded
+        // delta traffic.
+        let mut buffered: std::collections::VecDeque<TaskRequest> = Default::default();
+        // Liveness of the two requester channels; a closed recv returns None
+        // instantly, so these flags are what keep the select from spinning.
+        let mut rot_alive = self.rotation_rx.is_some();
+        let mut tri_alive = self.trigger_rx.is_some();
         loop {
             let available = ENCRYPTION_TASK_BUDGET.saturating_sub(tasks.active_count());
             let next_deadline = tasks.next_deadline();
@@ -628,20 +970,40 @@ impl Worker {
                     self.on_task_completion(&mut tasks, &mut walker, &mut pending, completion?)
                         .await?;
                 }
-                // Budget-gated rotation dispatch: a fresh rotation request is
-                // enqueued before any walker read, because it carries the
-                // branch's pending delta cursor and must not sit behind
-                // unbounded delta traffic.
+                // Budget-gated request dispatch: a fresh rotation or presence
+                // trigger is buffered before any walker read, because both
+                // carry the branch's pending delta cursor and must not sit
+                // behind unbounded delta traffic. A channel close ends *that*
+                // arm for good (the flag flips on the first None; a closed
+                // recv returns None instantly, so without the flag the select
+                // would spin); the feeder's exit decides how loud that is.
                 request = async {
-                    match self.rotation_rx.as_mut() {
-                        None => std::future::pending().await,
-                        Some(rx) => rx.recv().await,
+                    tokio::select! {
+                        biased;
+                        r = async {
+                            let received = match (self.rotation_rx.as_mut(), rot_alive) {
+                                (Some(rx), true) => rx.recv().await,
+                                _ => std::future::pending().await,
+                            };
+                            if received.is_none() {
+                                rot_alive = false;
+                            }
+                            received
+                        } => r.map(TaskRequest::Rotate),
+                        t = async {
+                            let received = match (self.trigger_rx.as_mut(), tri_alive) {
+                                (Some(rx), true) => rx.recv().await,
+                                _ => std::future::pending().await,
+                            };
+                            if received.is_none() {
+                                tri_alive = false;
+                            }
+                            received
+                        } => t.map(TaskRequest::Trigger),
                     }
                 }, if available == 0 || buffered.is_empty() => match request {
                     Some(request) => buffered.push_back(request),
-                    None => {
-                        // The trigger side is gone; nothing can enqueue more.
-                    }
+                    None => {}
                 },
                 read = async {
                     if available == 0 {
@@ -672,13 +1034,21 @@ impl Worker {
                     tasks.tick(std::time::Instant::now())?;
                 }
             }
-            // Loop head: dispatch a buffered rotation into now-available
+            // Loop head: dispatch a buffered request into now-available
             // budget, before the next read can claim it.
             if available > 0
                 && let Some(request) = buffered.pop_front()
             {
-                self.enqueue_rotation(&mut tasks, &mut pending, request)
-                    .await?;
+                match request {
+                    TaskRequest::Rotate(request) => {
+                        self.enqueue_rotation(&mut tasks, &mut pending, request)
+                            .await?
+                    }
+                    TaskRequest::Trigger(request) => {
+                        self.enqueue_trigger(&mut tasks, &mut pending, request)
+                            .await?
+                    }
+                }
             }
         }
     }
@@ -717,6 +1087,41 @@ impl Worker {
             doc_id: request.doc_id,
             branch_id,
             // Rotation reads current heads at execution time.
+            heads: None,
+        };
+        self.start_task(tasks, task)
+    }
+
+    /// A presence-plane trigger becomes the same keyed task a delta is, but
+    /// with no walker position of its own: `heads: None` reads the state
+    /// current at execution time, and `cursor` only carries whatever pending
+    /// delta it *subsumed* — a trigger that lands while a delta for the same
+    /// branch is unscheduled has effectively run that delta's reconcile, so
+    /// the delta's cursor settles with the trigger's completion.
+    async fn enqueue_trigger(
+        &mut self,
+        tasks: &mut TokioKeyedScheduler<EncryptionKey, EncryptionTask, EncryptionTaskOutput>,
+        pending: &mut HashMap<EncryptionKey, EncryptionTask>,
+        request: EncryptDocTrigger,
+    ) -> Res<()> {
+        let Some(branch_id) = self.ctx.main_branch_id(&request.doc_id).await? else {
+            tracing::debug!(
+                doc_id = %request.doc_id,
+                "blob-encryption: trigger for a document with no main branch; dropping"
+            );
+            return Ok(());
+        };
+        let key = encryption_facet_key(&branch_id);
+        let carried = pending
+            .remove(&key)
+            .map(|pending| pending.cursor)
+            .unwrap_or(0);
+        let task = EncryptionTask {
+            key,
+            kind: EncryptionTaskKind::Reconcile,
+            cursor: carried,
+            doc_id: request.doc_id,
+            branch_id,
             heads: None,
         };
         self.start_task(tasks, task)
@@ -793,8 +1198,12 @@ impl Worker {
                     return Ok(());
                 }
                 // The document's state is durable; only now may the walker
-                // cursor advance past it.
-                walker.ack(task.key, task.cursor).await?;
+                // cursor advance past it. Cursor 0 attaches no walker position
+                // (a presence trigger that subsumed nothing) and acking it
+                // would be a move through no revisions.
+                if task.cursor != 0 {
+                    walker.ack(task.key, task.cursor).await?;
+                }
                 if pending
                     .get(&task.key)
                     .is_some_and(|existing| existing.cursor == task.cursor)
@@ -843,7 +1252,8 @@ impl Ctx {
 
     /// The physical branch id behind `MAIN_BRANCH`, the same identity the delta
     /// machine keys its tasks with (`encryption_facet_key` collapses it), so a
-    /// boot-pass task and a delta task for the same branch share one key.
+    /// presence-trigger task and a delta task for the same branch share one
+    /// key.
     async fn main_branch_id(&self, doc_id: &DocId) -> Res<Option<BranchId>> {
         let Some(entry) = self.drawer_repo.get_entry(doc_id).await? else {
             return Ok(None);
@@ -1302,9 +1712,9 @@ impl Ctx {
                     .register_pair(&self.store, c_hash, &key, p_hash, encoding)
                     .await?;
             }
-            // A crash between the pass and the facet write can leave the facet
-            // without its entry; re-deriving is deterministic, so the check is
-            // that it reproduces the digest the facet already names.
+            // A crash between the §11 pass and the facet write can leave the
+            // facet without its entry; re-derivation is deterministic, so the
+            // check is that it reproduces the digest the facet already names.
             None => {
                 let recomputed = self
                     .provider
@@ -1505,12 +1915,7 @@ mod tests {
             Some(group) => group,
             None => authority.encrypted_blob_docs.clone(),
         };
-        let inventory = ctx
-            .rt
-            .rcx
-            .encryption_inventory_doc_id
-            .clone()
-            .expect("test repos always create the encrypted-representation inventory");
+        let inventory = ctx.rt.rcx.encryption_inventory_doc_id.clone();
         Ok(Arc::new(Ctx {
             drawer_repo: Arc::clone(&ctx.drawer_repo),
             sql: ctx.rt.rcx.sql.clone(),
@@ -1618,7 +2023,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn eligible_document_gets_a_servable_representation() -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None, None);
         let plaintext_bytes = b"blob-encryption worker: eligible".to_vec();
         let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
         let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
@@ -1701,7 +2106,7 @@ mod tests {
             .big_repo
             .create_group_with_parents(Vec::new())
             .await?;
-        let worker = Worker::new(test_ctx(&ctx, Some(outsider_group)).await?, None);
+        let worker = Worker::new(test_ctx(&ctx, Some(outsider_group)).await?, None, None);
         let plaintext = ctx
             .rt
             .blobs_repo
@@ -1742,7 +2147,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn second_pass_reuses_the_representation() -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None, None);
         let plaintext = ctx
             .rt
             .blobs_repo
@@ -1841,7 +2246,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn released_representation_is_reinstalled_with_a_fresh_key_by_the_next_pass() -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None, None);
         let plaintext_bytes = b"blob-encryption worker: released then redeclared".to_vec();
         let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
         let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
@@ -1922,8 +2327,8 @@ mod tests {
             "the released pair is un-rooted"
         );
 
-        // The same pass mechanics cover the re-install: the Blob facet is
-        // still on the document, so the pass finds a declared blob with no
+        // The same mechanics cover the re-install: the Blob facet is still on
+        // the document, so the keyed task finds a declared blob with no
         // representation and creates one; re-declaring is not a worker input.
         let heads = ctx
             .drawer_repo
@@ -1934,7 +2339,7 @@ mod tests {
 
         let second = read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
             .await?
-            .expect("the pass re-installs the declared blob's representation");
+            .expect("the re-derivation re-installs the declared blob's representation");
         assert_ne!(
             second.representation.digest, first.representation.digest,
             "a re-install after a release mints fresh key material; the old key is released"
@@ -1996,7 +2401,7 @@ mod tests {
     async fn released_inventory_pin_with_absent_plaintext_is_not_resurrected_by_the_pass() -> Res<()>
     {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None, None);
         let plaintext = ctx
             .rt
             .blobs_repo
@@ -2071,6 +2476,7 @@ mod tests {
                 encryption_inventory_doc_id: worker.encryption_inventory_doc_id.clone(),
             }),
             None,
+            None,
         );
 
         bare.reconcile_document(&doc_id, &branch, &worker_heads(&ctx, &doc_id).await?)
@@ -2084,7 +2490,7 @@ mod tests {
         );
         assert!(
             bare.blob_status(c1_hash).await?.is_none(),
-            "the pass must not have written the released ciphertext into the bare store"
+            "the re-derivation must not have written the released ciphertext into the bare store"
         );
         assert!(
             bare.store
@@ -2098,7 +2504,7 @@ mod tests {
                     .get(format!("{TAG_PT_PREFIX}{c1_hash}"))
                     .await?
                     .is_none(),
-            "the pass must not have re-rooted the released pair in the bare store"
+            "the re-derivation must not have re-rooted the released pair in the bare store"
         );
         let pin_key = FacetKey {
             tag: WellKnownFacetTag::BlobPin.into(),
@@ -2133,202 +2539,17 @@ mod tests {
             .await?
             .ok_or_else(|| eyre::eyre!("document {doc_id} has no {MAIN_BRANCH} branch"))
     }
-
-    /// The pass covers documents that were already eligible before the worker
-    /// existed - the case a delta-only worker cannot see, because eligibility is
-    /// a state rather than an event.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn pass_reconciles_documents_that_predate_the_worker() -> Res<()> {
-        let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
-        let plaintext = ctx
-            .rt
-            .blobs_repo
-            .put(b"blob-encryption worker: backfill")
-            .await?;
-        let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext).await?;
-        let cipher_key = worker.cipher_facet_key(&blob_key);
-
-        // The index is populated asynchronously; the pass runs once it can see
-        // the document, which is exactly what a booting repo does.
-        let facet_index = Arc::clone(&ctx.rt.doc_facet_set_index_repo);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            if let Some(membership) = facet_index
-                .list_docs_for_tag(WellKnownFacetTag::Blob.as_str())
-                .await?
-                .into_iter()
-                .find(|membership: &DocFacetTagMembership| membership.doc_id == doc_id)
-            {
-                assert_eq!(membership.facet_tag, WellKnownFacetTag::Blob.as_str());
-                break;
-            }
-            eyre::ensure!(
-                std::time::Instant::now() < deadline,
-                "facet index never listed {doc_id} as a Blob-facet document"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-
-        worker
-            .reconcile_eligible_documents(&facet_index, CancellationToken::new())
-            .await?;
-
-        assert!(
-            read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
-                .await?
-                .is_some(),
-            "the pass must produce a representation for an already-eligible document"
-        );
-        ctx.stop().await?;
-        Ok(())
-    }
-
-    /// A boot-pass document whose work fails is not waved through and not
-    /// dropped: it is rescheduled by the pass's own scheduler with backoff, and
-    /// the representation is applied once the cause clears - without a second
-    /// boot pass. No write to the document happens in between, so the
-    /// rescheduled task is the only thing that can produce it.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn boot_pass_failure_is_rescheduled_and_applied_without_a_second_boot() -> Res<()> {
-        let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Arc::new(Worker::new(test_ctx(&ctx, None).await?, None));
-        let plaintext = ctx
-            .rt
-            .blobs_repo
-            .put(b"boot pass: failure then retry")
-            .await?;
-        let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext).await?;
-        let cipher_key = worker.cipher_facet_key(&blob_key);
-        let facet_index = Arc::clone(&ctx.rt.doc_facet_set_index_repo);
-        await_indexed(&ctx, &doc_id).await?;
-
-        // Armed before the pass starts: the document's boot task is the one
-        // that fails, and every attempt at it fails while the latch holds.
-        faults::FAIL_RECONCILE.store(true, std::sync::atomic::Ordering::SeqCst);
-        let cancel_token = CancellationToken::new();
-        let pass = tokio::spawn({
-            let worker = Arc::clone(&worker);
-            let facet_index = Arc::clone(&facet_index);
-            let cancel_token = cancel_token.clone();
-            async move {
-                worker
-                    .reconcile_eligible_documents(&facet_index, cancel_token)
-                    .await
-            }
-        });
-
-        // More than one attempt is the reschedule itself: the retry delay is
-        // 2s, so reaching a second attempt can only happen on the retry path.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while faults::attempts() < 2 {
-            eyre::ensure!(
-                std::time::Instant::now() < deadline,
-                "the pass never rescheduled the failed boot task, saw {} attempt(s)",
-                faults::attempts()
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        assert!(
-            read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
-                .await?
-                .is_none(),
-            "nothing durable may exist for a boot task whose work failed"
-        );
-
-        // Clearing the cause is what lets the retry succeed, and the pass
-        // finishes on its own: nothing here re-runs it.
-        faults::FAIL_RECONCILE.store(false, std::sync::atomic::Ordering::SeqCst);
-        pass.await??;
-        assert!(
-            read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
-                .await?
-                .is_some(),
-            "the rescheduled boot task must apply without a second boot pass"
-        );
-        ctx.stop().await?;
-        Ok(())
-    }
-
-    /// Without an inventory the worker refuses to start rather than installing a
-    /// representation nothing can advertise or release.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn refuses_to_run_without_an_encryption_inventory() -> Res<()> {
-        let ctx = test_cx(utils_rs::function_full!()).await?;
-        let authority =
-            crate::authority::ensure(&ctx.rt.rcx.big_repo, &ctx.rt.rcx.sql, None).await?;
-        let error = match spawn_blob_encryption_worker(BlobEncryptionWorkerArgs {
-            drawer_repo: Arc::clone(&ctx.drawer_repo),
-            sql: ctx.rt.rcx.sql.clone(),
-            blobs_repo: Arc::clone(&ctx.rt.blobs_repo),
-            facet_set_store: ctx.rt.doc_facet_set_index_repo.revision_store(),
-            facet_index: Arc::clone(&ctx.rt.doc_facet_set_index_repo),
-            domain_group: authority.encrypted_blob_docs.clone(),
-            encryption_inventory_doc_id: None,
-            parent_cancel_token: tokio_util::sync::CancellationToken::new(),
-            rotation_rx: None,
-        })
-        .await
-        {
-            Ok(_) => eyre::bail!("the worker must refuse a repo with no encryption inventory"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("encrypted-representation inventory"),
-            "the refusal must name what is missing, got: {error}"
-        );
-        ctx.stop().await?;
-        Ok(())
-    }
-
-    /// The pure derivations, with no repo in the picture: the blob a `Blob`
-    /// facet names is what decides whether anything gets mirrored at all.
-    #[test]
-    fn plaintext_blob_id_reads_both_digest_spellings() {
-        let blob_id = BlobId::new([3u8; 32]);
-        let base = Blob {
-            mime: "application/octet-stream".to_string(),
-            length_octets: 1,
-            digest: blob_id_to_digest_str(blob_id.clone()),
-            inline: None,
-            urls: None,
-        };
-        assert_eq!(
-            plaintext_blob_id(&base),
-            Some(blob_id.clone()),
-            "ADR 003 §3's canonical multihash spelling"
-        );
-        let url_only = Blob {
-            digest: "not-a-digest".to_string(),
-            urls: Some(vec![format!("db+blob:///{blob_id}")]),
-            ..base.clone()
-        };
-        assert_eq!(
-            plaintext_blob_id(&url_only),
-            Some(blob_id),
-            "a db+blob URL carries the bare spelling"
-        );
-        let neither = Blob {
-            digest: "not-a-digest".to_string(),
-            urls: Some(vec!["https://example.com/not-a-blob".to_string()]),
-            ..base
-        };
-        assert_eq!(plaintext_blob_id(&neither), None);
-    }
-
-    /// Wait until the facet index lists `doc_id` as a Blob-facet document: the
-    /// pass reads exactly this list, so listing it settles the pass's input.
+    /// The facet index has the document listed for the `Blob` tag: the
+    /// precondition every consumer of the facet stream works from.
     async fn await_indexed(ctx: &DaybookTestContext, doc_id: &DocId) -> Res<()> {
-        let facet_index = Arc::clone(&ctx.rt.doc_facet_set_index_repo);
+        let facet_index = &ctx.rt.doc_facet_set_index_repo;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             if facet_index
                 .list_docs_for_tag(WellKnownFacetTag::Blob.as_str())
                 .await?
-                .into_iter()
-                .any(|membership: DocFacetTagMembership| &membership.doc_id == doc_id)
+                .iter()
+                .any(|membership: &DocFacetTagMembership| membership.doc_id == *doc_id)
             {
                 return Ok(());
             }
@@ -2340,30 +2561,31 @@ mod tests {
         }
     }
 
-    /// Wait for a representation at `cipher_key`, naming `what` when it does not
-    /// arrive.
+    /// The keyed task's representation became durable: `read_cipherblob`
+    /// returns it. Named callers pass a label for the deadline error only.
     async fn await_representation(
         ctx: &DaybookTestContext,
         doc_id: &DocId,
         cipher_key: &FacetKey,
-        what: &str,
+        label: &str,
     ) -> Res<CipherBlob> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             if let Some(cipher) = read_cipherblob(&ctx.drawer_repo, doc_id, cipher_key).await? {
                 return Ok(cipher);
             }
             eyre::ensure!(
                 std::time::Instant::now() < deadline,
-                "{what} never wrote a representation for {doc_id} at {cipher_key}"
+                "{label}: the representation never became durable"
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
 
-    /// Start the worker and wait until its pass is done, proven by the
-    /// representation it writes for a document staged before it starts. Every
-    /// document staged after that point is the delta machine's.
+    /// A worker started after a document already exists: the walker replays
+    /// the facet-set revisions from its (fresh) state position, so the
+    /// pre-existing document's representation is the replay's own work. The
+    /// returned handle stays live for the delta tests built on it.
     async fn spawn_worker_after_pass_barrier(
         ctx: &DaybookTestContext,
         worker_ctx: &Arc<Ctx>,
@@ -2371,11 +2593,11 @@ mod tests {
         let before = ctx
             .rt
             .blobs_repo
-            .put(b"delta machine: before the pass")
+            .put(b"walker replay: before the worker")
             .await?;
         let (doc_id, blob_key) = stage_document_with_blob(ctx, before).await?;
         await_indexed(ctx, &doc_id).await?;
-        let mut worker = Worker::new(Arc::clone(worker_ctx), None);
+        let mut worker = Worker::new(Arc::clone(worker_ctx), None, None);
         let cancel_token = CancellationToken::new();
         let facet_index = Arc::clone(&ctx.rt.doc_facet_set_index_repo);
         let handle = tokio::spawn({
@@ -2387,20 +2609,108 @@ mod tests {
             ctx,
             &doc_id,
             &worker_ctx.cipher_facet_key(&blob_key),
-            "the pass",
+            "the replay",
         )
         .await?;
         Ok((handle, cancel_token))
     }
 
-    /// A document written *after* the pass is encrypted by the delta machine.
-    ///
-    /// `run` reconciles the facet index once and only then opens the walker, so
-    /// the pass cannot see a document that did not exist when it walked the
-    /// index. This representation can therefore only come from the
-    /// `ConcurrentDeltaWalker` over the facet-set revisions.
+    /// A document whose blob is not local yet is *skipped* by the delta path —
+    /// and re-armed by the presence stream the moment the bytes land. No
+    /// writer here touches the document again: the re-arm can only come from
+    /// the `/blobs` membership event the put publishes.
     #[tokio::test(flavor = "multi_thread")]
-    async fn document_written_after_the_pass_is_encrypted_by_the_delta_machine() -> Res<()> {
+    async fn blob_arriving_later_is_rearmed_by_the_presence_stream() -> Res<()> {
+        let ctx = test_cx(utils_rs::function_full!()).await?;
+        let worker_ctx = test_ctx(&ctx, None).await?;
+        // The facet names a digest whose bytes do not exist yet: the stage
+        // helper writes the facet for whatever `BlobId` it is handed.
+        let payload = b"presence stream: the bytes arrive second".to_vec();
+        let plaintext = BlobId::new(*blake3::hash(&payload).as_bytes());
+        let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
+        let cipher_key = worker_ctx.cipher_facet_key(&blob_key);
+
+        // The worker (feeder-less machine) sees the facet delta and skips:
+        // plaintext not local.
+        let worker = Worker::new(Arc::clone(&worker_ctx), None, None);
+        let skipped_token = CancellationToken::new();
+        let handle = {
+            let facet_index = Arc::clone(&ctx.rt.doc_facet_set_index_repo);
+            let revision_store = facet_index.revision_store();
+            let cancel_token = skipped_token.clone();
+            let mut worker = worker;
+            tokio::spawn(async move { worker.run(revision_store, facet_index, cancel_token).await })
+        };
+        await_indexed(&ctx, &doc_id).await?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            eyre::ensure!(
+                std::time::Instant::now() < deadline,
+                "the delta path never considered the document"
+            );
+            if faults::attempts() > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+                .await?
+                .is_none(),
+            "a plaintext this node does not hold must not produce a representation"
+        );
+
+        // Now the real trigger: a full worker with the feeder + the presence
+        // stream, and the bytes landing. Everything from here on is the
+        // production spawn; the earlier machine keeps running and cannot be
+        // what produces the representation (its trigger channel is None).
+        let authority =
+            crate::authority::ensure(&ctx.rt.rcx.big_repo, &ctx.rt.rcx.sql, None).await?;
+        let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(64);
+        let _feeder = spawn_encryption_trigger_feeder(EncryptionFeederArgs {
+            repo_part_store: Arc::clone(&ctx.rt.rcx.part_store),
+            eligibility_part: authority.encrypted_blob_docs_part_id(),
+            presence_store: Arc::clone(&ctx.rt.rcx.blob_presence_store),
+            facet_index: Arc::clone(&ctx.rt.doc_facet_set_index_repo),
+            sql: ctx.rt.rcx.sql.clone(),
+            trigger_tx,
+        })
+        .await?;
+        let live_worker = Worker::new(Arc::clone(&worker_ctx), None, Some(trigger_rx));
+        let live_token = CancellationToken::new();
+        let live_handle = {
+            let facet_index = Arc::clone(&ctx.rt.doc_facet_set_index_repo);
+            let revision_store = facet_index.revision_store();
+            let cancel_token = live_token.clone();
+            let mut live_worker = live_worker;
+            tokio::spawn(async move {
+                live_worker
+                    .run(revision_store, facet_index, cancel_token)
+                    .await
+            })
+        };
+        ctx.rt
+            .blobs_repo
+            .set_blob_presence_sink(Arc::clone(&ctx.rt.rcx.blob_presence_store));
+        // The put is the membership-with-the-fact write: this is where the
+        // trigger plane learns the blob exists.
+        let put_back = ctx.rt.blobs_repo.put(&payload).await?;
+        assert_eq!(put_back, plaintext, "the facet named these bytes all along");
+
+        await_representation(&ctx, &doc_id, &cipher_key, "the presence re-arm").await?;
+        skipped_token.cancel();
+        live_token.cancel();
+        handle.await??;
+        live_handle.await??;
+        ctx.stop().await?;
+        Ok(())
+    }
+    /// A document whose facet delta lands after the worker started: this
+    /// representation can only come from the `ConcurrentDeltaWalker` over the
+    /// facet-set revisions — the walker replays the revisions behind its
+    /// position for older documents, and this one's delta arrives live.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn document_written_after_worker_start_is_encrypted_by_the_delta_machine() -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
         let worker_ctx = test_ctx(&ctx, None).await?;
         let (handle, cancel_token) = spawn_worker_after_pass_barrier(&ctx, &worker_ctx).await?;
@@ -2408,7 +2718,7 @@ mod tests {
         let after = ctx
             .rt
             .blobs_repo
-            .put(b"delta machine: after the pass")
+            .put(b"delta machine: after the worker started")
             .await?;
         let (doc_id, blob_key) = stage_document_with_blob(&ctx, after).await?;
         let cipher_key = worker_ctx.cipher_facet_key(&blob_key);
@@ -2704,7 +3014,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn rotation_mints_fresh_keying_material_and_the_old_representation_releases() -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None, None);
         let plaintext_bytes = b"blob-rotation: fresh keying".to_vec();
         let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
         let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
@@ -2875,7 +3185,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn rotation_retry_after_a_fault_at_entry_is_idempotent_and_orphan_free() -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None, None);
         let plaintext_bytes = b"blob-rotation: retry idempotence".to_vec();
         let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
         let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
@@ -2985,7 +3295,7 @@ mod tests {
     async fn crash_after_install_leaves_the_declared_unreferenced_pair_and_the_retry_recovers()
     -> Res<()> {
         let ctx = test_cx(utils_rs::function_full!()).await?;
-        let worker = Worker::new(test_ctx(&ctx, None).await?, None);
+        let worker = Worker::new(test_ctx(&ctx, None).await?, None, None);
         let plaintext_bytes = b"blob-rotation: crash window".to_vec();
         let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
         let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
@@ -3089,7 +3399,7 @@ mod tests {
         // The request may land before or after the document's own delta;
         // either way the machine must produce a representation and keep going.
         let (rotation_tx, rotation_rx) = rotation_channel();
-        let mut worker = Worker::new(Arc::clone(&worker_ctx), Some(rotation_rx));
+        let mut worker = Worker::new(Arc::clone(&worker_ctx), Some(rotation_rx), None);
         let cancel_token = CancellationToken::new();
         let facet_index = Arc::clone(&ctx.rt.doc_facet_set_index_repo);
         let handle = tokio::spawn({

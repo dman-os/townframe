@@ -32,7 +32,7 @@ pub(crate) struct BlobPinWorkerArgs {
     pub sql: SqlCtx,
     pub core_inventory_doc_id: DocumentId,
     pub docs_inventory_doc_id: DocumentId,
-    pub encryption_inventory_doc_id: Option<DocumentId>,
+    pub encryption_inventory_doc_id: DocumentId,
     pub blobs_repo: Arc<crate::blobs::BlobsRepo>,
     pub facet_set_store: Arc<FacetSetRevisionStore>,
     pub plugs_repo: Arc<crate::plugs::PlugsRepo>,
@@ -77,10 +77,9 @@ pub(crate) async fn spawn_blob_pin_worker(args: BlobPinWorkerArgs) -> Res<RepoSt
     let docs_doc_id = drawer_repo
         .resolve_doc_id_for_branch_doc_id(docs_inventory_doc_id)
         .await?;
-    let encryption_doc_id = match encryption_inventory_doc_id {
-        Some(doc_id) => Some(drawer_repo.resolve_doc_id_for_branch_doc_id(doc_id).await?),
-        None => None,
-    };
+    let encryption_doc_id = drawer_repo
+        .resolve_doc_id_for_branch_doc_id(encryption_inventory_doc_id)
+        .await?;
     let ctx = Arc::new(Ctx {
         drawer_repo,
         sql,
@@ -132,7 +131,7 @@ struct Ctx {
     /// a repo created before it existed (ADR 003 §13), in which case ciphertext
     /// pins are not derived at all rather than mixed into a plaintext
     /// inventory.
-    encryption_inventory_doc_id: Option<DocId>,
+    encryption_inventory_doc_id: DocId,
     /// The blob store, for the pair tags the release path deletes. Named tags
     /// are the only GC roots, so releasing a pair is a store write, not just an
     /// inventory edit.
@@ -551,10 +550,10 @@ impl Ctx {
         let docs = self.desired_pins().await?;
         self.apply_inventory_diff(&self.docs_inventory_doc_id, &docs)
             .await?;
-        if let Some(encryption_inventory_doc_id) = &self.encryption_inventory_doc_id {
+        {
             let cipher = self.desired_cipher_pins().await?;
             let removed = self
-                .apply_inventory_diff(encryption_inventory_doc_id, &cipher)
+                .apply_inventory_diff(&self.encryption_inventory_doc_id, &cipher)
                 .await?;
             self.release_pairs(&removed).await?;
         }
@@ -1765,11 +1764,11 @@ mod tests {
         let docs_inventory_doc_id = drawer_repo
             .resolve_doc_id_for_branch_doc_id(test_context.rt.rcx.docs_inventory_doc_id.clone())
             .await?;
-        let encryption_inventory_doc_id =
-            match test_context.rt.rcx.encryption_inventory_doc_id.clone() {
-                Some(doc_id) => Some(drawer_repo.resolve_doc_id_for_branch_doc_id(doc_id).await?),
-                None => None,
-            };
+        let encryption_inventory_doc_id = drawer_repo
+            .resolve_doc_id_for_branch_doc_id(
+                test_context.rt.rcx.encryption_inventory_doc_id.clone(),
+            )
+            .await?;
         // The hand-built context bypasses the spawn path, so it owes the schema
         // the spawn owns (Ctx::ensure_schema at :57) itself.
         Ctx::ensure_schema(&test_context.rt.rcx.sql).await?;
@@ -2071,12 +2070,7 @@ mod tests {
             .await?;
         let encryption_inventory_doc_id = drawer
             .resolve_doc_id_for_branch_doc_id(
-                test_context
-                    .rt
-                    .rcx
-                    .encryption_inventory_doc_id
-                    .clone()
-                    .expect("test repos always create the encrypted-representation inventory"),
+                test_context.rt.rcx.encryption_inventory_doc_id.clone(),
             )
             .await?;
         let store = test_context.rt.blobs_repo.iroh_store();

@@ -5730,6 +5730,7 @@ dependencies = [
 [[package]]
 name = "iroh-blobs"
 version = "0.103.0"
+source = "git+https://github.com/dman-os/iroh-blobs?rev=b3d641036c807b30d9fc62fd22a83801a38386d3#b3d641036c807b30d9fc62fd22a83801a38386d3"
 dependencies = [
  "arrayvec",
  "bao-tree",
