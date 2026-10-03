@@ -2740,6 +2740,7 @@ dependencies = [
  "anyhow",
  "autosurgeon",
  "big_sync_core",
+ "blake3",
  "clap",
  "clap_complete",
  "comfy-table",
@@ -7931,6 +7932,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "displaydoc",
+ "serde",
  "sqlx",
  "tempfile",
  "thiserror 2.0.20",

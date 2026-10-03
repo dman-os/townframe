@@ -402,3 +402,117 @@ async fn explicit_cleanup_reports_failure_and_can_be_retried() {
     assert!(batch.cleaned);
     assert!(!receiver.root.join("a").exists());
 }
+
+// ---- collect: the ingest-side receiver (bytes flow FROM the checkout) ----
+
+fn take(name: &str, expected: ExpectedFile) -> FileTake {
+    FileTake {
+        path: path(name),
+        expected,
+    }
+}
+
+#[tokio::test]
+async fn collect_returns_bytes_and_evidence_from_the_same_read() {
+    let (_directory, receiver) = checkout().await;
+    tokio::fs::write(receiver.root.join("a"), b"edited body").await.unwrap();
+    let expected = receiver.observe(&path("a")).await.unwrap();
+
+    let collected = receiver.collect(&[take("a", expected)], 1 << 20).await.unwrap();
+    assert_eq!(collected.len(), 1);
+    assert_eq!(collected[0].path, path("a"));
+    assert_eq!(collected[0].evidence, expected_evidence(b"edited body"));
+    assert_eq!(collected[0].bytes, b"edited body".to_vec());
+
+    // Destinations are never touched by collection.
+    assert_eq!(
+        tokio::fs::read(receiver.root.join("a")).await.unwrap(),
+        b"edited body".to_vec()
+    );
+}
+
+#[tokio::test]
+async fn collect_rejects_changed_bytes_and_changed_targets() {
+    let (_directory, receiver) = checkout().await;
+    tokio::fs::write(receiver.root.join("a"), b"first").await.unwrap();
+    let stale = receiver.observe(&path("a")).await.unwrap();
+    tokio::fs::write(receiver.root.join("a"), b"second").await.unwrap();
+
+    let failure = receiver.collect(&[take("a", stale)], 1 << 20).await.unwrap_err();
+    assert_eq!(failure.path, path("a"));
+    assert!(matches!(failure.cause, FileError::Changed(_)));
+}
+
+#[tokio::test]
+async fn collect_rechecks_every_path_after_the_whole_batch() {
+    let (_directory, receiver) = checkout().await;
+    tokio::fs::write(receiver.root.join("a"), b"alpha").await.unwrap();
+    tokio::fs::write(receiver.root.join("b"), b"beta").await.unwrap();
+    let expected_a = receiver.observe(&path("a")).await.unwrap();
+    let expected_b = receiver.observe(&path("b")).await.unwrap();
+
+    // The batch itself matches, so the recheck passes...
+    receiver
+        .collect(&[take("a", expected_a.clone()), take("b", expected_b.clone())], 1 << 20)
+        .await
+        .unwrap();
+
+    // ...and a change to an earlier take discovered after collection fails the batch.
+    tokio::fs::write(receiver.root.join("a"), b"alpha changed").await.unwrap();
+    let failure = receiver
+        .collect(&[take("a", expected_a), take("b", expected_b)], 1 << 20)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.path, path("a"));
+    assert!(matches!(failure.cause, FileError::Changed(_)));
+}
+
+#[tokio::test]
+async fn collect_enforces_the_caller_supplied_byte_cap_without_reading() {
+    let (_directory, receiver) = checkout().await;
+    tokio::fs::write(receiver.root.join("big"), vec![0u8; 4096]).await.unwrap();
+    let expected = receiver.observe(&path("big")).await.unwrap();
+
+    let failure = receiver.collect(&[take("big", expected)], 1024).await.unwrap_err();
+    assert_eq!(failure.path, path("big"));
+    assert!(
+        failure.to_string().contains("capped at 1024"),
+        "the cap failure must name the limit: {failure}"
+    );
+}
+
+#[tokio::test]
+async fn collect_refuses_absent_take_targets_non_regular_files_and_ancestors() {
+    let (_directory, receiver) = checkout().await;
+    tokio::fs::write(receiver.root.join("gone"), b"temp").await.unwrap();
+    let expected = receiver.observe(&path("gone")).await.unwrap();
+    tokio::fs::remove_file(receiver.root.join("gone")).await.unwrap();
+
+    let failure = receiver.collect(&[take("gone", expected)], 1 << 20).await.unwrap_err();
+    assert!(matches!(failure.cause, FileError::Changed(_)));
+
+    tokio::fs::create_dir(receiver.root.join("d")).await.unwrap();
+    let observed = receiver.observe(&path("d")).await.unwrap_err();
+    assert!(matches!(observed, FileError::Invalid { .. }), "{observed}");
+
+    let failure = receiver
+        .collect(&[take("d", ExpectedFile::Absent)], 1 << 20)
+        .await
+        .unwrap_err();
+    assert!(
+        failure.to_string().contains("present files"),
+        "absent takes must be refused, never mistaken for reads: {failure}"
+    );
+
+    let ancestor = receiver
+        .collect(
+            &[take("a", ExpectedFile::Absent), take("a/b", ExpectedFile::Absent)],
+            1 << 20,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        ancestor.to_string().contains("ancestor"),
+        "ancestor targets must be refused: {ancestor}"
+    );
+}

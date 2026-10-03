@@ -28,6 +28,10 @@ tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
 blake3.workspace = true
 
 #
+# serialization (FileEvidence serializes into checkout marker receipts)
+serde.workspace = true
+
+#
 # error
 thiserror.workspace = true
 displaydoc.workspace = true

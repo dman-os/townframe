@@ -13,7 +13,8 @@ use crate::backends::RelPath;
 use crate::backends::{ByteAccess, ByteReader, Source};
 
 /// Content evidence at a path. The checkout policy supplies ownership separately.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Serialized into the checkout marker's receipts, so keep the shape stable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileEvidence {
     pub length: u64,
     pub digest: [u8; 32],
@@ -120,6 +121,32 @@ pub struct TokioFs {
     root: PathBuf,
 }
 
+/// The reverse of a `FilePut`: verify the checkout file at `path` still matches
+/// `expected` and capture its bytes for an ingest-side receiver.
+#[derive(Clone, Debug)]
+pub struct FileTake {
+    pub path: RelPath,
+    pub expected: ExpectedFile,
+}
+
+/// Bytes collected from the checkout, with the evidence of the exact read that
+/// captured them: digest and bytes come from one pass, so a file changing
+/// during collection cannot present stale bytes with fresh evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollectedFile {
+    pub path: RelPath,
+    pub evidence: FileEvidence,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("collecting {path} failed: {cause}")]
+pub struct CollectError {
+    pub path: RelPath,
+    #[source]
+    pub cause: FileError,
+}
+
 impl TokioFs {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -128,6 +155,97 @@ impl TokioFs {
     pub async fn observe(&self, path: &RelPath) -> Result<ExpectedFile, FileError> {
         let destination = checked_destination(&self.root, path).await?;
         evidence(&destination).await
+    }
+
+    /// The reverse of `prepare`: reads bytes FROM the checkout for an ingest
+    /// receiver. Each take is verified against its expected evidence in the
+    /// same read that captures the bytes, and every collected path is rechecked
+    /// after the whole batch, so a file changing during collection fails the
+    /// batch instead of presenting stale bytes. Destinations are never written;
+    /// `max_bytes` bounds one collected file and comes from the owning lens
+    /// representation, not from this backend.
+    pub async fn collect(
+        &self,
+        takes: &[FileTake],
+        max_bytes: u64,
+    ) -> Result<Vec<CollectedFile>, CollectError> {
+        let metadata = tokio::fs::symlink_metadata(&self.root)
+            .await
+            .map_err(|error| collect_error(&RelPath::root(), io("inspect checkout", &self.root, error)))?;
+        if !metadata.is_dir() || metadata.is_symlink() {
+            return Err(collect_error(
+                &RelPath::root(),
+                FileError::Invalid {
+                    path: self.root.clone(),
+                    reason: "checkout is not a real directory".into(),
+                },
+            ));
+        }
+        let mut paths = takes.iter().map(|take| &take.path).collect::<Vec<_>>();
+        paths.sort();
+        for adjacent in paths.windows(2) {
+            if adjacent[0].is_prefix_of(adjacent[1]) {
+                return Err(collect_error(
+                    adjacent[1],
+                    FileError::Invalid {
+                        path: self.root.clone(),
+                        reason: "duplicate or ancestor collection targets".into(),
+                    },
+                ));
+            }
+        }
+        let mut collected = Vec::with_capacity(takes.len());
+        for take in takes {
+            let ExpectedFile::Present(expected) = &take.expected else {
+                return Err(collect_error(
+                    &take.path,
+                    FileError::Invalid {
+                        path: self.root.to_owned(),
+                        reason: "collection takes require present files".into(),
+                    },
+                ));
+            };
+            if expected.length > max_bytes {
+                return Err(collect_error(
+                    &take.path,
+                    FileError::Invalid {
+                        path: self.root.to_owned(),
+                        reason: format!(
+                            "file is {} bytes; collection is capped at {max_bytes} bytes by the owning representation",
+                            expected.length
+                        ),
+                    },
+                ));
+            }
+            let destination = checked_destination(&self.root, &take.path)
+                .await
+                .map_err(|cause| collect_error(&take.path, cause))?;
+            let (bytes, evidence) = read_with_digest(&destination)
+                .await
+                .map_err(|cause| collect_error(&take.path, cause))?;
+            if evidence != *expected {
+                return Err(collect_error(&take.path, FileError::Changed(destination)));
+            }
+            collected.push(CollectedFile {
+                path: take.path.clone(),
+                evidence,
+                bytes,
+            });
+        }
+        // Whole-batch recheck: bytes for earlier takes must still be current
+        // bytes before the receiver commits anything.
+        for file in &collected {
+            let destination = checked_destination(&self.root, &file.path)
+                .await
+                .map_err(|cause| collect_error(&file.path, cause))?;
+            let observed = evidence(&destination)
+                .await
+                .map_err(|cause| collect_error(&file.path, cause))?;
+            if observed != ExpectedFile::Present(file.evidence.clone()) {
+                return Err(collect_error(&file.path, FileError::Changed(destination)));
+            }
+        }
+        Ok(collected)
     }
 
     /// Stages a whole batch without touching destinations. Cancellation can leave staging
@@ -209,6 +327,57 @@ fn preparation_error(cause: FileError) -> PrepareError {
         cleanup: None,
         staging_directory: None,
     }
+}
+
+fn collect_error(path: &RelPath, cause: FileError) -> CollectError {
+    CollectError {
+        path: path.clone(),
+        cause,
+    }
+}
+
+/// Reads a whole file and its evidence in one pass: length and digest are
+/// computed from the exact bytes returned. Guards `max_bytes` independently of
+/// the expected evidence, which may be stale.
+async fn read_with_digest(path: &Path) -> Result<(Vec<u8>, FileEvidence), FileError> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(FileError::Changed(path.to_owned()))
+        }
+        Err(error) => return Err(io("inspect file", path, error)),
+        Ok(metadata) => metadata,
+    };
+    if !metadata.is_file() || metadata.is_symlink() {
+        return Err(FileError::Invalid {
+            path: path.to_owned(),
+            reason: "target is not a regular file".into(),
+        });
+    }
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| io("open file", path, error))?;
+    let mut bytes = Vec::new();
+    let mut digest = blake3::Hasher::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .await
+            .map_err(|error| io("read file", path, error))?;
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        digest.update(&buffer[..count]);
+    }
+    let length = bytes.len() as u64;
+    Ok((
+        bytes,
+        FileEvidence {
+            length,
+            digest: *digest.finalize().as_bytes(),
+        },
+    ))
 }
 
 impl PreparedFiles {

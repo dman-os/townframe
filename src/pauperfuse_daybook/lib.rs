@@ -111,7 +111,39 @@ impl Projection {
     }
 }
 
-fn validate_note(value: &serde_json::Value) -> Result<daybook_types::doc::Note, Error> {
+/// Upper bound for the raw-text Note representation, in bytes. Note content
+/// lives inline inside the facet value, so a runaway file would bloat the
+/// Automerge document itself rather than a blob store; oversized files are an
+/// explicit preparation failure, never a silent truncation.
+pub const MAX_RAW_NOTE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Raw-text Note lens inverse (ADR 012 §6): UTF-8 file bytes become the
+/// candidate Note facet for the bound output slot. Oversized and non-UTF-8
+/// files are preparation failures naming the constraint; bytes are never
+/// silently ignored or reinterpreted.
+pub fn prepare_note_ingest(bytes: &[u8]) -> Result<daybook_types::doc::Note, Error> {
+    let length = bytes.len() as u64;
+    if length > MAX_RAW_NOTE_BYTES {
+        return Err(Error::Unsupported(format!(
+            "file is {length} bytes; the raw-text Note representation caps at {MAX_RAW_NOTE_BYTES}"
+        )));
+    }
+    let content = std::str::from_utf8(bytes).map_err(|error| {
+        Error::Unsupported(format!(
+            "file is not valid UTF-8; the raw-text Note representation has no other encoding (byte {}): {error}",
+            error.valid_up_to()
+        ))
+    })?;
+    Ok(daybook_types::doc::Note {
+        mime: "text/plain".into(),
+        content: content.into(),
+    })
+}
+
+/// Validates a facet value is exactly the supported representation: a
+/// text/plain Note. Ingest reads recorded facets at rendered heads through
+/// this guard so stale or foreign facet shapes fail explicitly.
+pub fn validate_note(value: &serde_json::Value) -> Result<daybook_types::doc::Note, Error> {
     let WellKnownFacet::Note(note) = serde_json::from_value(value.clone())? else {
         return Err(Error::Unsupported("Body must select a Note facet".into()));
     };
@@ -254,5 +286,40 @@ impl Producer for Daybook {
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
         Self::Repository(error.into())
+    }
+}
+
+// ---- raw-text Note lens inverse (used by checkout ingest) ----
+
+#[cfg(test)]
+mod ingest_tests {
+    use super::*;
+
+    #[test]
+    fn utf8_bytes_become_a_text_plain_note() {
+        let note = prepare_note_ingest(b"hello notes\nsecond\n").unwrap();
+        assert_eq!(note.mime, "text/plain");
+        assert_eq!(note.content, "hello notes\nsecond\n");
+    }
+
+    #[test]
+    fn non_utf8_files_are_explicit_preparation_failures() {
+        let error = prepare_note_ingest(&[0xC3, 0x28, b'a']).unwrap_err();
+        assert!(error.to_string().contains("not valid UTF-8"), "{error}");
+    }
+
+    #[test]
+    fn oversized_files_are_refused_before_decoding() {
+        // The length guard fires before UTF-8 decoding, so invalid bytes above
+        // the cap still name the cap, not only the encoding failure.
+        let bytes = [0xC3u8, 0x28].repeat((MAX_RAW_NOTE_BYTES as usize) / 2 + 1);
+        let error = prepare_note_ingest(&bytes).unwrap_err();
+        assert!(error.to_string().contains("caps at"), "{error}");
+    }
+
+    #[test]
+    fn empty_files_are_a_legal_raw_text_note() {
+        let note = prepare_note_ingest(b"").unwrap();
+        assert_eq!(note.content, "");
     }
 }
