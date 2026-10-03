@@ -753,7 +753,12 @@ impl DrawerRepo {
                 }
             }
             BranchAuthority::Checkout => {
-                allocation_parents.push(self.big_repo.local_keyhive_agent().await?.into());
+                // Keyhive represents this repository as the *active* user, which
+                // cannot be an explicit coparent (`Agent::Active` is not a
+                // `Peer`). Creating the doc with only the pending group makes
+                // the active user the sole remaining authority once the pending
+                // group is revoked at finalize — independently local, never the
+                // shared content/drawer groups.
             }
         }
         let branch_doc_id = self

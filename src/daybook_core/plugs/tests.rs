@@ -1834,3 +1834,38 @@ fn a_revision_event_projects_only_against_the_config_it_is_applied_to() {
         RevisionAction::RefreshKnown
     );
 }
+
+#[test]
+fn whole_document_dpath_facet_schema_is_registered_and_shape_exact() -> Res<()> {
+    let core = crate::plugs::system_plugs()
+        .into_iter()
+        .next()
+        .ok_or_eyre("system_plugs is empty")?;
+    let manifest = core
+        .facets
+        .iter()
+        .find(|facet| facet.key_tag.to_string() == daybook_types::dpath::DPATH_FACET_TAG)
+        .ok_or_eyre("whole-document dpath facet is not registered")?;
+    assert!(
+        manifest.references.is_empty(),
+        "dpath registration declares no generic references"
+    );
+    let schema = serde_json::to_value(&manifest.value_schema)?;
+    let validator = jsonschema::validator_for(&schema)?;
+
+    assert!(validator.is_valid(&serde_json::json!(null)));
+    assert!(validator.is_valid(&serde_json::json!({})));
+    for rejected in [
+        serde_json::json!({"targets": []}),
+        serde_json::json!({"facetRef": "db+facet:///self/x/y"}),
+        serde_json::json!({"unknown": 1}),
+        serde_json::json!("whole"),
+        serde_json::json!(0),
+    ] {
+        assert!(
+            !validator.is_valid(&rejected),
+            "selective/unknown shapes must be rejected: {rejected}"
+        );
+    }
+    Ok(())
+}

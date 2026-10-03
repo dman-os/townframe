@@ -56,7 +56,8 @@ pub enum FileError {
         operation: &'static str,
         path: RelPath,
         #[source]
-        source: Box<dyn Error>,
+        // Send+Sync flows through async Source-open futures across runtime consumers.
+        source: Box<dyn Error + Send + Sync>,
     },
 }
 
@@ -137,8 +138,8 @@ impl TokioFs {
         access: &A,
     ) -> Result<PreparedFiles, PrepareError>
     where
-        A::Error: 'static,
-        <A::Reader as ByteReader>::Error: 'static,
+        A::Error: Send + Sync + 'static,
+        <A::Reader as ByteReader>::Error: Send + Sync + 'static,
     {
         let metadata = tokio::fs::symlink_metadata(&self.root)
             .await
@@ -418,8 +419,8 @@ async fn stage_file<A: ByteAccess>(
     access: &A,
 ) -> Result<FileEvidence, FileError>
 where
-    A::Error: 'static,
-    <A::Reader as ByteReader>::Error: 'static,
+    A::Error: Send + Sync + 'static,
+    <A::Reader as ByteReader>::Error: Send + Sync + 'static,
 {
     let mut reader = access
         .open(&put.source)

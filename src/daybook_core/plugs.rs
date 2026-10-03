@@ -176,6 +176,22 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                     json_path: "/order".into(),
                 }],
             },
+            FacetManifest {
+                key_tag: daybook_types::dpath::DPATH_FACET_TAG.into(),
+                // Whole-document claims only: `null` or `{}`. Selective
+                // `targets`/`facetRef` values are typed in daybook_types
+                // but are not registered until the reference-validation
+                // engine can represent them.
+                value_schema: serde_json::from_value(serde_json::json!({
+                    "anyOf": [
+                        {"type": "null"},
+                        {"type": "object", "additionalProperties": false},
+                    ]
+                }))
+                .expect("whole-document dpath facet schema is valid"),
+                display_config: default(),
+                references: default(),
+            },
         ],
     }];
     plugs

@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::drawer::{DrawerRepo, cache::FacetCacheState, facet_recovery, types::*};
+use crate::drawer::{BranchKind, DrawerRepo, cache::FacetCacheState, facet_recovery, types::*};
 use crate::repos::Repo;
 use crate::test_support::{boot_disk_repo, boot_repo};
 use utils_rs::lru::KeyedLruPool;
@@ -3724,5 +3724,158 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
         .await
         .inspect_err(|err| error!("error cleaning up temp dir: {err}"))
         .ok();
+    Ok(())
+}
+
+/// A checkout-local branch is independently authorized: allocation grants only
+/// the local agent (plus the pending group during allocation), the branch doc
+/// never joins shared replicated partitions, source heads are unchanged, and
+/// the branch ref lives in the durable local store across a full reopen.
+#[tokio::test(flavor = "multi_thread")]
+async fn checkout_branch_is_independently_authorized() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        big_repo.create_doc(doc).await?.document_id()
+    };
+    let user_path =
+        daybook_types::doc::UserPathBuf::from("/duser-wip-checkout/ddev-wip-iroh-checkout");
+
+    // The meta SQL is file-backed so the drawer can be fully reopened; two
+    // contexts over the same database, never concurrently.
+    let meta_dir = tempfile::tempdir()?;
+    let meta_file = meta_dir.path().join("meta.sqlite");
+    let open_meta = || async {
+        crate::app::open_sql_ctx(crate::app::SqlConfig::file(meta_file.clone()))
+            .await
+    };
+
+        let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        Arc::clone(&big_sync_host.store),
+        drawer_doc_id.clone(),
+        user_path.clone(),
+        open_meta().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        None,
+    )
+    .await?;
+
+    let partition_id = repo.replicated_partition_id();
+    let doc_id = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(
+                FacetKey::from(WellKnownFacetTag::TitleGeneric),
+                WellKnownFacet::TitleGeneric("Checkout base".into()).into(),
+            )]
+            .into(),
+            user_path: None,
+        })
+        .await?;
+
+    let main_heads = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing doc branches")?
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch")?
+        .clone();
+    let main_ref = repo
+        .get_branch_ref(&doc_id, BranchPath::new("main"))
+        .await?
+        .ok_or_eyre("missing main branch ref")?;
+
+    let to_branch = BranchPathBuf::from("/tmp/checkout/authority");
+    repo.create_checkout_branch(&doc_id, &to_branch, BranchPath::new("main"), &main_heads)
+        .await?;
+
+    let ref_doc = repo
+        .get_doc_with_facets_at_branch(&doc_id, &to_branch, None)
+        .await?
+        .ok_or_eyre("checkout branch missing after creation")?;
+    let identity = serde_json::from_value::<WellKnownFacet>(
+        ref_doc
+            .facets
+            .get(&FacetKey::from(WellKnownFacetTag::Branch))
+            .ok_or_eyre("checkout branch facet missing")?
+            .clone(),
+    )?;
+    let WellKnownFacet::Branch(identity) = identity else {
+        eyre::bail!("wrong checkout branch facet type");
+    };
+    let checkout_ref = repo
+        .get_branch_ref(&doc_id, &to_branch)
+        .await?
+        .ok_or_eyre("missing checkout branch ref")?;
+    assert_eq!(checkout_ref.branch_kind, BranchKind::Local);
+    assert_eq!(
+        identity.branch_id.0,
+        checkout_ref.branch_doc_id.to_string()
+    );
+    assert_eq!(main_ref.branch_kind, BranchKind::Replicated);
+
+    // Distinct physical identity; basis recorded; source heads untouched.
+    assert_ne!(identity.branch_id.0, main_ref.branch_doc_id.to_string());
+    assert_eq!(identity.document_id, doc_id);
+    assert_eq!(identity.created_from.as_ref().unwrap().heads, main_heads);
+    assert_eq!(
+        repo.get_doc_with_facets_at_branch(&doc_id, BranchPath::new("main"), Some(Vec::new()))
+            .await?
+            .ok_or_eyre("main doc missing after create")?
+            .facets
+            .get(&FacetKey::from(WellKnownFacetTag::Branches)),
+        None,
+        "checkout branch creation never rewrites the replicated Branches facet"
+    );
+    // The branch doc must never join shared replicated partitions.
+    assert_eq!(big_sync_host.store.member_count(partition_id.clone()).await?, 1);
+
+    let reopened_heads_matched = {
+        stop_token.stop().await?;
+        let (rebuilt, rebuilt_stop) = DrawerRepo::load(
+            Arc::clone(&big_repo),
+            Arc::clone(&big_sync_host.store),
+            drawer_doc_id,
+            user_path,
+            open_meta().await?,
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
+            Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+            Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+            None,
+        )
+        .await?;
+        let reopened_doc = rebuilt
+            .get_doc_with_facets_at_branch(&doc_id, &to_branch, None)
+            .await?
+            .ok_or_eyre("checkout branch missing after reopen")?;
+        let reopened = serde_json::from_value::<WellKnownFacet>(
+            reopened_doc
+                .facets
+                .get(&FacetKey::from(WellKnownFacetTag::Branch))
+                .ok_or_eyre("checkout branch facet missing after reopen")?
+                .clone(),
+        )?;
+        let WellKnownFacet::Branch(reopened) = reopened else {
+            eyre::bail!("wrong reopened branch facet type");
+        };
+        assert_eq!(reopened.branch_id, identity.branch_id);
+        assert_eq!(reopened.created_from.as_ref().unwrap().heads, main_heads);
+        rebuilt_stop.stop().await?;
+        reopened.created_from.as_ref().unwrap().heads == main_heads
+    };
+
+    // Local branch persistence is in local state, not the replicated partition.
+    assert_eq!(big_sync_host.store.member_count(partition_id.clone()).await?, 1);
+
+    acx_stop().await.unwrap();
+    assert!(reopened_heads_matched, "reopened checkout branch must retain its basis");
     Ok(())
 }

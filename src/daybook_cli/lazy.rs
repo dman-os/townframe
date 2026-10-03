@@ -23,6 +23,10 @@ pub fn rt() -> Arc<tokio::runtime::Runtime> {
     match RT.get_or_init(|| {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            // Checkout projection nests through the Daybook runtime's deep
+            // mailbox futures; default 2 MiB worker stacks overflow the poll
+            // chain. Flatten this before shrinking stacks.
+            .thread_stack_size(96 << 20)
             .build()?;
         eyre::Ok(Arc::new(rt))
     }) {

@@ -24,7 +24,9 @@ mod unix {
     use super::*;
     use std::num::NonZeroU32;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
-    use pauperfuse::backends::{BackendId, BackendTree, Description, Producer, ProducerAccess, RelPath};
+    use pauperfuse::backends::{
+        BackendId, BackendTree, Description, Producer, ProducerAccess, RelPath,
+    };
     use pauperfuse::backends::tokio_fs::{ExpectedFile, FilePut, TokioFs};
     use pauperfuse::vtree::VtreeStore;
     use pauperfuse_daybook::{Daybook, Projection};
@@ -83,12 +85,44 @@ mod unix {
         }
     }
 
+    /// Reduced node identity for the checkout path; tests construct this
+    /// directly instead of sourcing ambient configuration.
+    #[derive(Clone, Debug)]
+    struct NodeHandle {
+        repo_root: PathBuf,
+        node_key: String,
+        drawer: String,
+    }
+
+    fn node_handle(context: &daybook_core::repo::RepoCtx) -> NodeHandle {
+        NodeHandle {
+            repo_root: context.layout.repo_root.clone(),
+            node_key: context.iroh_public_key.clone(),
+            drawer: context.doc_drawer.document_id().to_string(),
+        }
+    }
+
+    /// Old nodes have a core manifest that predates checkout support.
+    pub(crate) async fn ensure_checkout_support(plugs: &daybook_core::plugs::PlugsRepo) -> Res<()> {
+        match plugs
+            .get_facet_manifest_by_tag(daybook_types::dpath::DPATH_FACET_TAG)
+            .await
+        {
+            daybook_core::plugs::FacetManifestLookup::Found(_) => Ok(()),
+            _ => eyre::bail!(
+                "node predates checkout support: no whole-document dpath facet is registered; \
+                 checkouts require a node whose core manifest declares them"
+            ),
+        }
+    }
+
     pub(super) async fn run(command: CheckoutCommands) -> Res<ExitCode> {
         match command {
             CheckoutCommands::Create { directory, doc } => {
+                ensure_checkout_support(lazy::plugs_repo().await?.as_ref()).await?;
                 let context = lazy::repo_ctx().await?;
                 let drawer = lazy::drawer_repo().await?;
-                let root = create(&context, drawer, &directory, doc).await?;
+                let root = create(node_handle(&context), drawer, &directory, doc).await?;
                 println!("created checkout {}", root.display());
             }
             CheckoutCommands::Status { directory } => {
@@ -96,13 +130,19 @@ mod unix {
                 let (root, checkout) = discover(&start).await?;
                 lazy::select_checkout_repo(checkout.node_path()?);
                 let context = lazy::repo_ctx().await?;
-                verify_node(&context, &checkout)?;
+                verify_node(&node_handle(&context), &checkout).await?;
                 let drawer = lazy::drawer_repo().await?;
                 if let State::Ready { .. } = checkout.state {
-                    let entry = drawer.get_entry(&checkout.projection.document).await?
+                    drawer.get_entry(&checkout.projection.document).await?
                         .ok_or_eyre("checkout document is no longer registered")?;
-                    let branch = entry.branches.get(&checkout.branch).ok_or_eyre("checkout branch is no longer registered")?;
-                    eyre::ensure!(Some(branch.branch_doc_id.to_string()) == checkout.branch_id, "checkout branch identity changed");
+                    let branch_ref = drawer
+                        .get_branch_ref(&checkout.projection.document, BranchPath::new(&checkout.branch))
+                        .await?
+                        .ok_or_eyre("checkout branch is no longer registered")?;
+                    eyre::ensure!(
+                        branch_ref.branch_doc_id.to_string() == checkout.branch_id.clone().ok_or_eyre("Ready checkout is missing its branch basis")?,
+                        "checkout branch identity changed"
+                    );
                 }
                 for line in status(&root, &checkout).await? { println!("{line}"); }
             }
@@ -110,9 +150,12 @@ mod unix {
         Ok(ExitCode::SUCCESS)
     }
 
-    fn verify_node(context: &daybook_core::repo::RepoCtx, checkout: &Checkout) -> Res<()> {
-        eyre::ensure!(context.iroh_public_key == checkout.node_key, "recorded checkout node identity does not match the node at {}", context.layout.repo_root.display());
-        eyre::ensure!(context.doc_drawer.document_id().to_string() == checkout.drawer, "recorded checkout drawer identity changed");
+    async fn verify_node(node: &NodeHandle, checkout: &Checkout) -> Res<()> {
+        eyre::ensure!(node.node_key == checkout.node_key, "recorded checkout node identity does not match the node at {}", node.repo_root.display());
+        eyre::ensure!(node.drawer == checkout.drawer, "recorded checkout drawer identity changed");
+        let path = checkout.node_path()?;
+        let canonical = tokio::fs::canonicalize(&node.repo_root).await?;
+        eyre::ensure!(path == canonical, "recorded checkout node path is {} but the node is at {}", path.display(), canonical.display());
         Ok(())
     }
 
@@ -154,7 +197,7 @@ mod unix {
         Ok(())
     }
 
-    async fn create(context: &daybook_core::repo::RepoCtx, drawer: Arc<daybook_core::drawer::DrawerRepo>, directory: &Path, document: String) -> Res<PathBuf> {
+    async fn create(node: NodeHandle, drawer: Arc<daybook_core::drawer::DrawerRepo>, directory: &Path, document: String) -> Res<PathBuf> {
         let (projection, basis) = Projection::select(&drawer, document).await?;
         let output = RelPath::parse(&projection.path)?;
         validate_output(&output)?;
@@ -162,19 +205,19 @@ mod unix {
         preflight(&absolute, &output).await?;
         tokio::fs::create_dir_all(&absolute).await?;
         let root = tokio::fs::canonicalize(&absolute).await?;
-        let node_path = tokio::fs::canonicalize(&context.layout.repo_root).await?;
+        let node_root = tokio::fs::canonicalize(&node.repo_root).await?;
         let id = Uuid::new_v4();
         let mut checkout = Checkout {
             version: VERSION, id,
-            node_path: utils_rs::byte_key::encode(node_path.as_os_str().as_bytes()),
-            node_key: context.iroh_public_key.clone(),
-            drawer: context.doc_drawer.document_id().to_string(),
+            node_path: utils_rs::byte_key::encode(node_root.as_os_str().as_bytes()),
+            node_key: node.node_key.clone(),
+            drawer: node.drawer.clone(),
             projection, basis: am_utils_rs::serialize_commit_heads(&basis),
             branch: format!("/tmp/checkout/{id}"), branch_id: None, render_heads: None,
             state: State::Pending { failure: None },
         };
         write_initial(&root, &checkout).await?;
-        let result = project(context, drawer, &root, &mut checkout, basis).await;
+        let result = project(&node, drawer, &root, &mut checkout, basis).await;
         if let Err(error) = result {
             checkout.state = State::Pending { failure: Some(format!("{error:#}")) };
             if let Err(marker_error) = replace_marker(&root, &checkout).await {
@@ -185,14 +228,37 @@ mod unix {
         Ok(root)
     }
 
-    async fn project(context: &daybook_core::repo::RepoCtx, drawer: Arc<daybook_core::drawer::DrawerRepo>, root: &Path, checkout: &mut Checkout, basis: ChangeHashSet) -> Res<()> {
+    async fn project(node: &NodeHandle, drawer: Arc<daybook_core::drawer::DrawerRepo>, root: &Path, checkout: &mut Checkout, basis: ChangeHashSet) -> Res<()> {
         let output = RelPath::parse(&checkout.projection.path)?;
         let native = TokioFs::to_native_path(&output)?;
         tokio::fs::create_dir_all(root.join(native.parent().unwrap())).await?;
-        drawer.create_checkout_branch(&checkout.projection.document, BranchPath::new(&checkout.branch), BranchPath::new("main"), &basis).await?;
-        let bundle = drawer.get_doc_bundle_at_branch(&checkout.projection.document, BranchPath::new(&checkout.branch), Some(Vec::new())).await?
+        drawer
+            .create_checkout_branch(
+                &checkout.projection.document,
+                BranchPath::new(&checkout.branch),
+                BranchPath::new("main"),
+                &basis,
+            )
+            .await?;
+        // Checkout-local branch refs live in the drawer's local store, not the
+        // replicated entry, so resolve through get_branch_ref.
+        let branch_ref = drawer
+            .get_branch_ref(&checkout.projection.document, BranchPath::new(&checkout.branch))
+            .await?
+            .ok_or_eyre("checkout branch reference missing after creation")?;
+        eyre::ensure!(
+            branch_ref.branch_kind == daybook_core::drawer::BranchKind::Local,
+            "checkout branch must stay local"
+        );
+        checkout.branch_id = Some(branch_ref.branch_doc_id.to_string());
+        let bundle = drawer
+            .get_doc_bundle_at_branch(
+                &checkout.projection.document,
+                BranchPath::new(&checkout.branch),
+                Some(Vec::new()),
+            )
+            .await?
             .ok_or_eyre("new checkout branch is missing")?;
-        checkout.branch_id = Some(bundle.entry.branches.get(&checkout.branch).ok_or_eyre("checkout branch reference missing")?.branch_doc_id.to_string());
         checkout.render_heads = Some(am_utils_rs::serialize_commit_heads(&bundle.branch_heads));
         replace_marker(root, checkout).await?;
         let producer = Daybook::new(Arc::clone(&drawer), checkout.backend(), checkout.projection.clone(), checkout.branch.clone(), bundle.branch_heads);
@@ -224,7 +290,7 @@ mod unix {
         eyre::ensure!(installed.path == output, "installed output differs from recorded binding");
         checkout.state = State::Ready { length: installed.evidence.length, digest: installed.evidence.digest, generation: version.generation };
         replace_marker(root, checkout).await?;
-        verify_node(context, checkout)?;
+        verify_node(node, checkout).await?;
         Ok(())
     }
 

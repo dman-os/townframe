@@ -154,8 +154,10 @@ impl MaterializationWake {
     }
 }
 
+/// Replicated branches join the drawer's shared partitions; Local branches
+/// (checkout work) stay in the durable local store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BranchKind {
+pub enum BranchKind {
     Replicated,
     Local,
 }
@@ -217,9 +219,9 @@ struct ValidatedReference {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct BranchRefRow {
-    pub(crate) branch_doc_id: DocumentId,
-    branch_kind: BranchKind,
+pub struct BranchRefRow {
+    pub branch_doc_id: DocumentId,
+    pub branch_kind: BranchKind,
 }
 
 #[cfg(test)]

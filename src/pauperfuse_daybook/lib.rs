@@ -115,7 +115,7 @@ fn validate_note(value: &serde_json::Value) -> Result<daybook_types::doc::Note, 
     let WellKnownFacet::Note(note) = serde_json::from_value(value.clone())? else {
         return Err(Error::Unsupported("Body must select a Note facet".into()));
     };
-    if note.mime.to_string() != "text/plain" {
+    if note.mime != "text/plain" {
         return Err(Error::Unsupported(
             "only text/plain Notes are supported".into(),
         ));

@@ -240,6 +240,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         | Ok(StaticCommands::Devices { .. })
         | Ok(StaticCommands::Plugs { .. })
         | Ok(StaticCommands::Sync { .. })
+        | Ok(StaticCommands::Checkout { .. })
         | Ok(StaticCommands::Server) => {
             unreachable!("static_cli will prevent these");
         }
