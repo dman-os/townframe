@@ -27,6 +27,14 @@ pub enum DispatchStatus {
     Cancelled,
 }
 
+impl DispatchStatus {
+    /// A dispatch in a terminal status has settled its target effects; nothing
+    /// may publish on its behalf or roll it back afterwards.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+}
+
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
 pub enum DispatchOnSuccessHook {
     InitMarkDone {
@@ -145,10 +153,95 @@ pub enum DispatchEvent {
     },
 }
 
+/// An in-process snapshot of one durable dispatch attempt. Metadata snapshots
+/// share the arbitration cell; changing the workflow job creates a new attempt.
+#[derive(Debug, Clone)]
+pub struct DispatchAttempt {
+    dispatch: ActiveDispatch,
+    arbitration: Arc<std::sync::atomic::AtomicU8>,
+}
+
+impl std::ops::Deref for DispatchAttempt {
+    type Target = ActiveDispatch;
+
+    fn deref(&self) -> &Self::Target {
+        &self.dispatch
+    }
+}
+
+const ATTEMPT_ACTIVE: u8 = 0;
+const ATTEMPT_CANCEL_REQUESTED: u8 = 1;
+const ATTEMPT_FINALIZING: u8 = 2;
+const ATTEMPT_SETTLED: u8 = 3;
+const ATTEMPT_PUBLICATION_FAILED: u8 = 4;
+
+impl DispatchAttempt {
+    pub fn new(dispatch: ActiveDispatch) -> Self {
+        let state = if dispatch.status.is_terminal() {
+            ATTEMPT_SETTLED
+        } else {
+            ATTEMPT_ACTIVE
+        };
+        Self {
+            dispatch,
+            arbitration: Arc::new(std::sync::atomic::AtomicU8::new(state)),
+        }
+    }
+
+    pub(crate) fn same_attempt(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.arbitration, &other.arbitration)
+    }
+
+    fn claim_active(&self, outcome: u8) -> bool {
+        self.arbitration
+            .compare_exchange(
+                ATTEMPT_ACTIVE,
+                outcome,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+/// A non-waiting publication claim. Dropping an unfinished successful claim
+/// seals the attempt against cancellation: effects may already have published.
+/// Recovery uses the existing durable dispatch on restart, not an in-process
+/// retry that could mistake partial publication for a rollback.
+pub(crate) struct DispatchFinalization {
+    attempt: Arc<DispatchAttempt>,
+    pub(crate) cancelled: bool,
+    finished: bool,
+}
+
+impl DispatchFinalization {
+    pub(crate) fn finish(mut self) {
+        self.attempt
+            .arbitration
+            .store(ATTEMPT_SETTLED, std::sync::atomic::Ordering::Release);
+        self.finished = true;
+    }
+}
+
+impl Drop for DispatchFinalization {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.attempt.arbitration.store(
+                if self.cancelled {
+                    ATTEMPT_CANCEL_REQUESTED
+                } else {
+                    ATTEMPT_PUBLICATION_FAILED
+                },
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 struct DispatchState {
-    dispatches: HashMap<String, Arc<ActiveDispatch>>,
-    active_dispatches: HashMap<String, Arc<ActiveDispatch>>,
+    dispatches: HashMap<String, Arc<DispatchAttempt>>,
+    active_dispatches: HashMap<String, Arc<DispatchAttempt>>,
     wflow_to_dispatch: HashMap<String, String>,
     cancelled_dispatches: HashSet<String>,
     wflow_partition_frontier: HashMap<String, u64>,
@@ -163,6 +256,20 @@ pub struct DispatchRepo {
     transition_mutex: tokio::sync::Mutex<()>,
     cancel_token: CancellationToken,
     local_actor_id: ActorId,
+}
+
+struct CancellationWrite {
+    arbitration: Arc<std::sync::atomic::AtomicU8>,
+    committed: bool,
+}
+
+impl Drop for CancellationWrite {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.arbitration
+                .store(ATTEMPT_ACTIVE, std::sync::atomic::Ordering::Release);
+        }
+    }
 }
 
 impl crate::repos::Repo for DispatchRepo {
@@ -182,6 +289,120 @@ impl DispatchRepo {
         crate::event_origin::EventOrigin::Local {
             actor_id: self.local_actor_id.to_string(),
         }
+    }
+
+    /// Claim this exact attempt without waiting over target publication.
+    /// The short transition lock fences an accepted cancellation's durable mark.
+    pub(crate) async fn claim_finalization(
+        &self,
+        id: &str,
+        attempt: &Arc<DispatchAttempt>,
+    ) -> Res<Option<DispatchFinalization>> {
+        use std::sync::atomic::Ordering;
+        let state = self.state.lock().await;
+        let Some(current) = state.dispatches.get(id) else {
+            return Ok(None);
+        };
+        if !current.same_attempt(attempt) || current.status.is_terminal() {
+            return Ok(None);
+        }
+        if attempt.claim_active(ATTEMPT_FINALIZING) {
+            return Ok(Some(DispatchFinalization {
+                attempt: Arc::clone(attempt),
+                cancelled: false,
+                finished: false,
+            }));
+        }
+        drop(state);
+        // Cancellation won the CAS. Wait only for its short mark transaction,
+        // never for publication, and revalidate replacement after that fence.
+        let _transition_guard = self.transition_mutex.lock().await;
+        let state = self.state.lock().await;
+        let Some(current) = state.dispatches.get(id) else {
+            return Ok(None);
+        };
+        if !current.same_attempt(attempt) || current.status.is_terminal() {
+            return Ok(None);
+        }
+        let previous = attempt.arbitration.load(Ordering::Acquire);
+        match previous {
+            ATTEMPT_ACTIVE | ATTEMPT_CANCEL_REQUESTED => {
+                if attempt
+                    .arbitration
+                    .compare_exchange(
+                        previous,
+                        ATTEMPT_FINALIZING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    return Ok(None);
+                }
+                Ok(Some(DispatchFinalization {
+                    attempt: Arc::clone(attempt),
+                    cancelled: previous == ATTEMPT_CANCEL_REQUESTED,
+                    finished: false,
+                }))
+            }
+            ATTEMPT_PUBLICATION_FAILED => {
+                eyre::bail!("dispatch {id} publication failed; restart required")
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Persist cancellation for this exact attempt before acknowledging it.
+    /// Finalization that has already claimed publication is immediately too late.
+    pub(crate) async fn cancel(&self, id: &str, attempt: &Arc<DispatchAttempt>) -> Res<bool> {
+        use std::sync::atomic::Ordering;
+        // Fast refusal never waits for publication or unrelated persistence.
+        if attempt.arbitration.load(Ordering::Acquire) >= ATTEMPT_FINALIZING {
+            return Ok(false);
+        }
+        let id = id.to_string();
+        let _transition_guard = self.transition_mutex.lock().await;
+        let state = self.state.lock().await;
+        let Some(dispatch) = state.dispatches.get(&id) else {
+            eyre::bail!("dispatch not found under {id}");
+        };
+        if !dispatch.same_attempt(attempt) || dispatch.status.is_terminal() {
+            return Ok(false);
+        }
+        if state.cancelled_dispatches.contains(&id) {
+            return Ok(false);
+        }
+        drop(state);
+        if !attempt.claim_active(ATTEMPT_CANCEL_REQUESTED) {
+            return Ok(false);
+        }
+        // An interrupted/failed mark write releases the unacknowledged claim.
+        // The transition mutex prevents a finalizer consuming it before commit.
+        let mut cancellation = CancellationWrite {
+            arbitration: Arc::clone(&attempt.arbitration),
+            committed: false,
+        };
+
+        let mut tx = self
+            .repo_sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO dispatch_cancelled_marks(dispatch_id, created_at)\n             VALUES (?1, unixepoch())",
+        )
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+        tx.commit().await?;
+        cancellation.committed = true;
+
+        if inserted {
+            self.state.lock().await.cancelled_dispatches.insert(id);
+        }
+        Ok(inserted)
     }
 
     pub async fn load(
@@ -281,11 +502,11 @@ impl DispatchRepo {
         dispatch_heads_for_dispatches(state.dispatches.iter())
     }
 
-    pub async fn get(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
+    pub async fn get(&self, id: &str) -> Option<Arc<DispatchAttempt>> {
         self.state.lock().await.dispatches.get(id).map(Arc::clone)
     }
 
-    pub async fn get_active(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
+    pub async fn get_active(&self, id: &str) -> Option<Arc<DispatchAttempt>> {
         self.state
             .lock()
             .await
@@ -294,7 +515,7 @@ impl DispatchRepo {
             .map(Arc::clone)
     }
 
-    pub async fn get_any(&self, id: &str) -> Option<Arc<ActiveDispatch>> {
+    pub async fn get_any(&self, id: &str) -> Option<Arc<DispatchAttempt>> {
         self.get(id).await
     }
 
@@ -323,7 +544,7 @@ impl DispatchRepo {
         Ok(())
     }
 
-    pub async fn get_by_wflow_job(&self, job_id: &str) -> Option<Arc<ActiveDispatch>> {
+    pub async fn get_by_wflow_job(&self, job_id: &str) -> Option<Arc<DispatchAttempt>> {
         let state = self.state.lock().await;
         let dispatch_id = state.wflow_to_dispatch.get(job_id)?;
         let found = state.active_dispatches.get(dispatch_id).map(Arc::clone);
@@ -347,7 +568,7 @@ impl DispatchRepo {
     pub async fn get_any_by_wflow_key(
         &self,
         wflow_key: &str,
-    ) -> Option<(String, Arc<ActiveDispatch>)> {
+    ) -> Option<(String, Arc<DispatchAttempt>)> {
         let state = self.state.lock().await;
 
         if let Some((dispatch_id, dispatch)) =
@@ -370,9 +591,12 @@ impl DispatchRepo {
         })
     }
 
-    pub async fn add(&self, id: String, dispatch: Arc<ActiveDispatch>) -> Res<()> {
+    pub async fn add(&self, id: String, dispatch: Arc<DispatchAttempt>) -> Res<()> {
         debug!(?id, "adding dispatch to repo");
         let _transition_guard = self.transition_mutex.lock().await;
+        if self.state.lock().await.dispatches.contains_key(&id) {
+            eyre::bail!("dispatch already exists: {id}");
+        }
         let ActiveDispatchArgs::FacetRoutine(_args) = &dispatch.args;
 
         let mut tx = self
@@ -434,7 +658,8 @@ impl DispatchRepo {
         &self,
         id: String,
         status: DispatchStatus,
-    ) -> Res<Option<Arc<ActiveDispatch>>> {
+        expected: &DispatchAttempt,
+    ) -> Res<Option<Arc<DispatchAttempt>>> {
         assert!(matches!(
             status,
             DispatchStatus::Succeeded | DispatchStatus::Failed | DispatchStatus::Cancelled
@@ -445,9 +670,12 @@ impl DispatchRepo {
         let Some(old_dispatch) = old.clone() else {
             return Ok(None);
         };
+        if !old_dispatch.same_attempt(expected) || old_dispatch.status.is_terminal() {
+            return Ok(None);
+        }
 
         let mut next = (*old_dispatch).clone();
-        next.status = status;
+        next.dispatch.status = status;
         let next = Arc::new(next);
 
         let mut tx = self
@@ -458,6 +686,8 @@ impl DispatchRepo {
         persist_dispatch_tx(&mut tx, &id, &next).await?;
         clear_cancelled_mark_tx(&mut tx, &id).await?;
         tx.commit().await?;
+        next.arbitration
+            .store(ATTEMPT_SETTLED, std::sync::atomic::Ordering::Release);
 
         let mut state = self.state.lock().await;
         state.cancelled_dispatches.remove(&id);
@@ -498,7 +728,7 @@ impl DispatchRepo {
         Ok(old)
     }
 
-    pub async fn list(&self) -> Vec<(String, Arc<ActiveDispatch>)> {
+    pub async fn list(&self) -> Vec<(String, Arc<DispatchAttempt>)> {
         self.state
             .lock()
             .await
@@ -508,52 +738,10 @@ impl DispatchRepo {
             .collect()
     }
 
-    pub async fn mark_cancelled(&self, id: &str) -> Res<bool> {
-        let _transition_guard = self.transition_mutex.lock().await;
-        let state = self.state.lock().await;
-        let Some(dispatch) = state.dispatches.get(id) else {
-            eyre::bail!("dispatch not found under {id}");
-        };
-        if !matches!(
-            dispatch.status,
-            DispatchStatus::Active | DispatchStatus::Waiting
-        ) {
-            eyre::bail!("dispatch not active/waiting under {id}");
-        }
-        if state.cancelled_dispatches.contains(id) {
-            return Ok(false);
-        }
-        drop(state);
-
-        let mut tx = self
-            .repo_sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        let inserted = sqlx::query(
-            "INSERT OR IGNORE INTO dispatch_cancelled_marks(dispatch_id, created_at)\n             VALUES (?1, unixepoch())",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-            > 0;
-        tx.commit().await?;
-
-        if inserted {
-            self.state
-                .lock()
-                .await
-                .cancelled_dispatches
-                .insert(id.to_string());
-        }
-        Ok(inserted)
-    }
-
     pub async fn list_waiting_on(
         &self,
         dependency_dispatch_id: &str,
-    ) -> Vec<(String, Arc<ActiveDispatch>)> {
+    ) -> Vec<(String, Arc<DispatchAttempt>)> {
         let dependency_dispatch_id = dependency_dispatch_id.to_string();
         self.state
             .lock()
@@ -579,7 +767,7 @@ impl DispatchRepo {
         &self,
         dispatch_id: &str,
         dependency_dispatch_id: &str,
-    ) -> Res<Option<Arc<ActiveDispatch>>> {
+    ) -> Res<Option<Arc<DispatchAttempt>>> {
         let _transition_guard = self.transition_mutex.lock().await;
         let cur = self
             .state
@@ -595,6 +783,7 @@ impl DispatchRepo {
 
         let mut updated = (*cur).clone();
         updated
+            .dispatch
             .waiting_on_dispatch_ids
             .retain(|dep| dep != dependency_dispatch_id);
         let ready = updated.waiting_on_dispatch_ids.is_empty();
@@ -628,11 +817,15 @@ impl DispatchRepo {
         if ready { Ok(Some(updated)) } else { Ok(None) }
     }
 
+    /// Activate this exact ready attempt. Cancellation, terminal settlement, or
+    /// replacement returns `None`; missing rows and invalid dependency/state
+    /// transitions remain errors. Metadata refresh preserves the arbitration cell.
     pub async fn activate_waiting(
         &self,
         dispatch_id: &str,
+        expected: &DispatchAttempt,
         deets: ActiveDispatchDeets,
-    ) -> Res<Arc<ActiveDispatch>> {
+    ) -> Res<Option<Arc<DispatchAttempt>>> {
         let _transition_guard = self.transition_mutex.lock().await;
         let cur = self
             .state
@@ -642,16 +835,29 @@ impl DispatchRepo {
             .get(dispatch_id)
             .map(Arc::clone)
             .ok_or_else(|| eyre::eyre!("dispatch not found under {dispatch_id}"))?;
+        // A ready snapshot may outlive cancellation or exact-attempt replacement.
+        // Those contenders own this transition; refusing activation is ordinary,
+        // not a malformed dependency graph or lifecycle invariant violation.
+        if !cur.same_attempt(expected)
+            || cur.status.is_terminal()
+            || cur.arbitration.load(std::sync::atomic::Ordering::Acquire)
+                == ATTEMPT_CANCEL_REQUESTED
+        {
+            return Ok(None);
+        }
         if cur.status != DispatchStatus::Waiting {
             eyre::bail!("dispatch is not waiting: {dispatch_id}");
         }
         if !cur.waiting_on_dispatch_ids.is_empty() {
             eyre::bail!("dispatch still has unresolved dependencies: {dispatch_id}");
         }
+        if cur.arbitration.load(std::sync::atomic::Ordering::Acquire) != ATTEMPT_ACTIVE {
+            eyre::bail!("cannot activate claimed dispatch: {dispatch_id}");
+        }
 
         let mut updated = (*cur).clone();
-        updated.status = DispatchStatus::Active;
-        updated.deets = deets;
+        updated.dispatch.status = DispatchStatus::Active;
+        updated.dispatch.deets = deets;
         let updated = Arc::new(updated);
 
         let mut tx = self
@@ -698,19 +904,20 @@ impl DispatchRepo {
             origin: self.local_origin(),
         }]);
 
-        Ok(updated)
+        Ok(Some(updated))
     }
 
     pub async fn update_active_deets(
         &self,
         dispatch_id: &str,
         deets: ActiveDispatchDeets,
-    ) -> Res<Arc<ActiveDispatch>> {
+    ) -> Res<Arc<DispatchAttempt>> {
         let _transition_guard = self.transition_mutex.lock().await;
-        let cur = self
-            .state
-            .lock()
-            .await
+        // Keep the snapshot stable during this short persistence transition.
+        // An active finalizer claims under the state lock, so replacement cannot
+        // commit between its identity validation and publication CAS.
+        let mut state = self.state.lock().await;
+        let cur = state
             .dispatches
             .get(dispatch_id)
             .map(Arc::clone)
@@ -720,7 +927,22 @@ impl DispatchRepo {
         }
 
         let mut updated = (*cur).clone();
-        updated.deets = deets;
+        let ActiveDispatchDeets::Wflow {
+            wflow_job_id: old_job,
+            ..
+        } = &cur.deets;
+        let ActiveDispatchDeets::Wflow {
+            wflow_job_id: new_job,
+            ..
+        } = &deets;
+        let replaced = old_job != new_job;
+        if replaced {
+            if cur.arbitration.load(std::sync::atomic::Ordering::Acquire) == ATTEMPT_FINALIZING {
+                eyre::bail!("cannot replace finalizing dispatch: {dispatch_id}");
+            }
+            updated.arbitration = Arc::new(std::sync::atomic::AtomicU8::new(ATTEMPT_ACTIVE));
+        }
+        updated.dispatch.deets = deets;
         let updated = Arc::new(updated);
 
         let mut tx = self
@@ -729,9 +951,18 @@ impl DispatchRepo {
             .begin_with("BEGIN IMMEDIATE")
             .await?;
         persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
+        if replaced {
+            clear_cancelled_mark_tx(&mut tx, dispatch_id).await?;
+        }
         tx.commit().await?;
+        if replaced {
+            cur.arbitration
+                .store(ATTEMPT_SETTLED, std::sync::atomic::Ordering::Release);
+        }
 
-        let mut state = self.state.lock().await;
+        if replaced {
+            state.cancelled_dispatches.remove(dispatch_id);
+        }
 
         if let ActiveDispatchDeets::Wflow {
             wflow_job_id: Some(job),
@@ -788,7 +1019,7 @@ impl DispatchRepo {
         };
 
         let mut updated = (*cur).clone();
-        updated.status = DispatchStatus::Failed;
+        updated.dispatch.status = DispatchStatus::Failed;
         let updated = Arc::new(updated);
 
         let mut tx = self
@@ -799,6 +1030,9 @@ impl DispatchRepo {
         persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
         clear_cancelled_mark_tx(&mut tx, dispatch_id).await?;
         tx.commit().await?;
+        updated
+            .arbitration
+            .store(ATTEMPT_SETTLED, std::sync::atomic::Ordering::Release);
 
         let mut state = self.state.lock().await;
         state.cancelled_dispatches.remove(dispatch_id);
@@ -846,7 +1080,7 @@ fn dispatch_head_for_dispatch(id: &str, dispatch: &ActiveDispatch) -> automerge:
 }
 
 fn dispatch_heads_for_dispatches<'a>(
-    dispatches: impl Iterator<Item = (&'a String, &'a Arc<ActiveDispatch>)>,
+    dispatches: impl Iterator<Item = (&'a String, &'a Arc<DispatchAttempt>)>,
 ) -> ChangeHashSet {
     let mut items = dispatches.collect::<Vec<_>>();
     items.sort_unstable_by_key(|(lhs_id, _)| *lhs_id);
@@ -909,7 +1143,7 @@ async fn load_state(repo_sql: &SqlCtx) -> Res<DispatchState> {
 
     for (id, payload_json) in rows {
         let dispatch: ActiveDispatch = serde_json::from_str(&payload_json)?;
-        let dispatch = Arc::new(dispatch);
+        let dispatch = Arc::new(DispatchAttempt::new(dispatch));
         state
             .dispatch_head_index
             .insert(dispatch_head_for_dispatch(&id, &dispatch), id.clone());
@@ -936,6 +1170,16 @@ async fn load_state(repo_sql: &SqlCtx) -> Res<DispatchState> {
             .fetch_all(&repo_sql.write_pool)
             .await?;
     state.cancelled_dispatches = cancelled_ids.into_iter().collect();
+    for id in &state.cancelled_dispatches {
+        if let Some(dispatch) = state.dispatches.get(id)
+            && !dispatch.status.is_terminal()
+        {
+            dispatch.arbitration.store(
+                ATTEMPT_CANCEL_REQUESTED,
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+    }
 
     let frontier_rows: Vec<(String, i64)> =
         sqlx::query_as("SELECT wflow_partition_id, frontier FROM wflow_partition_frontier")
@@ -959,7 +1203,7 @@ async fn load_state(repo_sql: &SqlCtx) -> Res<DispatchState> {
 async fn persist_dispatch_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     id: &str,
-    dispatch: &Arc<ActiveDispatch>,
+    dispatch: &ActiveDispatch,
 ) -> Res<()> {
     let ActiveDispatchArgs::FacetRoutine(args) = &dispatch.args;
     debug!(
@@ -1032,8 +1276,8 @@ mod tests {
         Ok((repo, local_user_path))
     }
 
-    fn active_dispatch(job_id: &str) -> Arc<ActiveDispatch> {
-        Arc::new(ActiveDispatch {
+    fn active_dispatch(job_id: &str) -> Arc<DispatchAttempt> {
+        Arc::new(DispatchAttempt::new(ActiveDispatch {
             deets: ActiveDispatchDeets::Wflow {
                 wflow_partition_id: Some("part-a".into()),
                 entry_id: None,
@@ -1064,11 +1308,11 @@ mod tests {
             status: DispatchStatus::Active,
             waiting_on_dispatch_ids: vec![],
             on_success_hooks: vec![],
-        })
+        }))
     }
 
-    fn waiting_dispatch(job_id: &str, waits_on: &[&str]) -> Arc<ActiveDispatch> {
-        Arc::new(ActiveDispatch {
+    fn waiting_dispatch(job_id: &str, waits_on: &[&str]) -> Arc<DispatchAttempt> {
+        Arc::new(DispatchAttempt::new(ActiveDispatch {
             deets: ActiveDispatchDeets::Wflow {
                 wflow_partition_id: None,
                 entry_id: None,
@@ -1099,7 +1343,7 @@ mod tests {
             status: DispatchStatus::Waiting,
             waiting_on_dispatch_ids: waits_on.iter().map(|value| value.to_string()).collect(),
             on_success_hooks: vec![],
-        })
+        }))
     }
 
     #[tokio::test]
@@ -1129,10 +1373,11 @@ mod tests {
         ));
         assert!(repo.get_by_wflow_job("job-1").await.is_some());
 
-        assert!(repo.mark_cancelled("disp-1").await?);
-        assert!(!repo.mark_cancelled("disp-1").await?);
+        let attempt = repo.get_any("disp-1").await.unwrap();
+        assert!(repo.cancel("disp-1", &attempt).await?);
+        assert!(!repo.cancel("disp-1", &attempt).await?);
 
-        repo.complete("disp-1".into(), DispatchStatus::Succeeded)
+        repo.complete("disp-1".into(), DispatchStatus::Cancelled, &attempt)
             .await?;
         let event = sub
             .recv_async()
@@ -1148,7 +1393,7 @@ mod tests {
         assert!(repo.get_by_wflow_job("job-1").await.is_none());
         assert!(matches!(
             repo.get_any("disp-1").await.as_ref().map(|d| &d.status),
-            Some(DispatchStatus::Succeeded)
+            Some(DispatchStatus::Cancelled)
         ));
         Ok(())
     }
@@ -1172,6 +1417,7 @@ mod tests {
 
         repo.activate_waiting(
             "wait-1",
+            &ready,
             ActiveDispatchDeets::Wflow {
                 wflow_partition_id: Some("part-b".into()),
                 entry_id: Some(9),
@@ -1182,9 +1428,52 @@ mod tests {
                 wflow_job_id: Some("job-wait-1".into()),
             },
         )
-        .await?;
+        .await?
+        .ok_or_eyre("ready waiting dispatch should activate")?;
         assert!(repo.get_active("wait-1").await.is_some());
         assert!(repo.get_by_wflow_job("job-wait-1").await.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn waiting_activation_refuses_cancelled_or_settled_ready_snapshots() -> Res<()> {
+        for settled in [false, true] {
+            let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+            let (repo, _) = setup_repo_with_sql(sql).await?;
+            let blocked = waiting_dispatch("waiting-job", &["dependency"]);
+            repo.add("waiting".into(), Arc::clone(&blocked)).await?;
+            assert!(repo.activate_waiting("waiting", &blocked, blocked.deets.clone()).await.is_err());
+            let ready = repo.remove_waiting_dependency("waiting", "dependency").await?.unwrap();
+            assert!(repo.cancel("waiting", &ready).await?);
+            if settled {
+                repo.complete("waiting".into(), DispatchStatus::Cancelled, &ready).await?;
+            }
+            assert!(repo.activate_waiting("waiting", &ready, ready.deets.clone()).await?.is_none());
+            assert!(repo.get_active("waiting").await.is_none());
+            assert!(repo.get_by_wflow_job("waiting-job").await.is_none());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn waiting_activation_fences_replacement_but_keeps_invalid_transitions_errors() -> Res<()> {
+        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+        let (repo, _) = setup_repo_with_sql(sql).await?;
+        let waiting = waiting_dispatch("old-job", &[]);
+        repo.add("waiting".into(), Arc::clone(&waiting)).await?;
+        assert!(repo.activate_waiting("missing", &waiting, waiting.deets.clone()).await.is_err());
+        let active = repo.activate_waiting("waiting", &waiting, waiting.deets.clone()).await?.unwrap();
+        assert!(repo.activate_waiting("waiting", &active, active.deets.clone()).await.is_err());
+        // Waiting→Active is the same attempt, so the retained waiting snapshot
+        // still participates in cancellation after the metadata transition.
+        assert!(repo.cancel("waiting", &waiting).await?);
+        let mut deets = active.deets.clone();
+        let ActiveDispatchDeets::Wflow { wflow_job_id, .. } = &mut deets;
+        *wflow_job_id = Some("replacement-job".into());
+        let replacement = repo.update_active_deets("waiting", deets).await?;
+        assert!(repo.activate_waiting("waiting", &waiting, waiting.deets.clone()).await?.is_none());
+        assert!(!repo.cancel("waiting", &waiting).await?);
+        assert!(repo.cancel("waiting", &replacement).await?);
         Ok(())
     }
 
@@ -1197,7 +1486,8 @@ mod tests {
         let (repo, _) = setup_repo_with_sql(sql.clone()).await?;
         repo.add("disp-a".into(), active_dispatch("job-a")).await?;
         repo.set_wflow_part_frontier("part-1".into(), 44).await?;
-        assert!(repo.mark_cancelled("disp-a").await?);
+        let attempt = repo.get_any("disp-a").await.unwrap();
+        assert!(repo.cancel("disp-a", &attempt).await?);
         drop(repo);
         drop(sql);
 
@@ -1209,13 +1499,143 @@ mod tests {
             .ok_or_else(|| eyre::eyre!("missing persisted dispatch"))?;
         assert_eq!(loaded.status, DispatchStatus::Active);
         assert_eq!(repo.get_wflow_part_frontier("part-1").await, Some(44));
-        assert!(!repo.mark_cancelled("disp-a").await?);
+        assert!(!repo.cancel("disp-a", &loaded).await?);
+        let claim = repo.claim_finalization("disp-a", &loaded).await?.unwrap();
+        assert!(claim.cancelled);
         assert!(matches!(
             repo.events_for_init().await?.first(),
             Some(DispatchEvent::DispatchAdded { id, origin, .. })
                 if id == "disp-a"
                     && matches!(origin, crate::event_origin::EventOrigin::Local { .. })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_snapshots_choose_one_terminal_owner() {
+        let first = active_dispatch("job");
+        let second = (*first).clone();
+        let barrier = std::sync::Barrier::new(2);
+        let (cancelled, finalizing) = std::thread::scope(|scope| {
+            let cancel = scope.spawn(|| {
+                barrier.wait();
+                first.claim_active(ATTEMPT_CANCEL_REQUESTED)
+            });
+            let finalize = scope.spawn(|| {
+                barrier.wait();
+                second.claim_active(ATTEMPT_FINALIZING)
+            });
+            (cancel.join().unwrap(), finalize.join().unwrap())
+        });
+        assert_ne!(
+            cancelled, finalizing,
+            "exactly one CAS must own the outcome"
+        );
+        assert_eq!(
+            first.arbitration.load(std::sync::atomic::Ordering::Acquire),
+            if cancelled {
+                ATTEMPT_CANCEL_REQUESTED
+            } else {
+                ATTEMPT_FINALIZING
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_snapshots_share_claim_but_replacement_retires_old_attempt() -> Res<()> {
+        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+        let (repo, _) = setup_repo_with_sql(sql).await?;
+        let old = active_dispatch("old-job");
+        repo.add("dispatch".into(), Arc::clone(&old)).await?;
+        let mut deets = old.deets.clone();
+        let ActiveDispatchDeets::Wflow { entry_id, .. } = &mut deets;
+        *entry_id = Some(42);
+        let metadata = repo.update_active_deets("dispatch", deets).await?;
+        let claim = repo.claim_finalization("dispatch", &old).await?.unwrap();
+        assert!(!repo.cancel("dispatch", &metadata).await?);
+        assert!(
+            repo.claim_finalization("dispatch", &metadata)
+                .await?
+                .is_none()
+        );
+        drop(claim);
+        assert!(
+            repo.claim_finalization("dispatch", &metadata)
+                .await
+                .is_err()
+        );
+
+        // Explicit replacement is a new attempt, not an implicit publication retry.
+        let mut deets = metadata.deets.clone();
+        let ActiveDispatchDeets::Wflow { wflow_job_id, .. } = &mut deets;
+        *wflow_job_id = Some("new-job".into());
+        let new = repo.update_active_deets("dispatch", deets).await?;
+        assert!(!repo.cancel("dispatch", &old).await?);
+        assert!(repo.claim_finalization("dispatch", &old).await?.is_none());
+        assert!(
+            repo.complete("dispatch".into(), DispatchStatus::Succeeded, &old)
+                .await?
+                .is_none()
+        );
+        assert_eq!(
+            repo.get_any("dispatch").await.unwrap().status,
+            DispatchStatus::Active
+        );
+        assert!(repo.cancel("dispatch", &new).await?);
+        let claim = repo.claim_finalization("dispatch", &new).await?.unwrap();
+        assert!(claim.cancelled);
+        drop(claim);
+        let resumed = repo.claim_finalization("dispatch", &new).await?.unwrap();
+        assert!(
+            resumed.cancelled,
+            "cancelled cleanup may resume without publishing"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_cancellation_write_releases_unacknowledged_claim() -> Res<()> {
+        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+        let (repo, _) = setup_repo_with_sql(sql.clone()).await?;
+        let attempt = active_dispatch("job");
+        repo.add("dispatch".into(), Arc::clone(&attempt)).await?;
+        sqlx::query("CREATE TRIGGER reject_cancel BEFORE INSERT ON dispatch_cancelled_marks BEGIN SELECT RAISE(ABORT, 'reject cancellation'); END")
+            .execute(&sql.write_pool).await?;
+        assert!(repo.cancel("dispatch", &attempt).await.is_err());
+        let claim = repo
+            .claim_finalization("dispatch", &attempt)
+            .await?
+            .unwrap();
+        assert!(
+            !claim.cancelled,
+            "failed persistence never acknowledges cancellation"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_acknowledgments_and_cleanup_wait_for_durable_mark() -> Res<()> {
+        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+        let (repo, _) = setup_repo_with_sql(sql.clone()).await?;
+        let attempt = active_dispatch("job");
+        repo.add("dispatch".into(), Arc::clone(&attempt)).await?;
+        let tx = sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut first = std::pin::pin!(repo.cancel("dispatch", &attempt));
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert_eq!(
+            attempt
+                .arbitration
+                .load(std::sync::atomic::Ordering::Acquire),
+            ATTEMPT_CANCEL_REQUESTED,
+        );
+        let mut duplicate = std::pin::pin!(repo.cancel("dispatch", &attempt));
+        let mut cleanup = std::pin::pin!(repo.claim_finalization("dispatch", &attempt));
+        assert!(futures::poll!(duplicate.as_mut()).is_pending());
+        assert!(futures::poll!(cleanup.as_mut()).is_pending());
+        tx.rollback().await?;
+        assert!(first.await?);
+        assert!(!duplicate.await?);
+        assert!(cleanup.await?.unwrap().cancelled);
         Ok(())
     }
 

@@ -899,13 +899,13 @@ the authority on what may be removed; it is told. In big_repo, partitions are de
 groups, keyhive tracks the causal relation for object removal with permanent revocations, and a
 removal is therefore derivable from keyhive state rather than from a peer's replay event — which
 is the honest reason removals were modelled this loosely here: the primary consumer of the replay
-stream does not use remote removal events to change content. In triage (ADR 010) the authority is
-the router: a removal traced to a router is respected, and a healed partition re-derives from the
-historical routers, so a removal's validity is a function of which router it came from rather than
-of who still happens to hold the object. That is the "whose membership set wins" rule vacuuming
-was missing; only the plumbing into a part store's pruning decision is, which is why the mechanism
-stays deferred although the authority does not. It also bounds the wire cost honestly: on a
-two-device deployment that syncs everything, per-object authorization is not the question at all,
+stream does not use remote removal events to change content. For triage (ADR 010/011), permanent
+obsolescence is domain-owned processor settlement/supersession, not router authority. The router
+is not the semantic pruning authority. A router signature alone cannot reconstruct removals
+after ticket and tombstone collection, especially on a ciphertext-only relay. The exact
+membership-authority evidence and part-store pruning integration remain to be implemented;
+the domain settlement rule does not by itself establish physical tombstone collection.
+On a two-device deployment that syncs everything, per-object authorization is not the question at all,
 and on a relay the ratio counters are what say when the local cost is worth acting on.
 Two costs and one divergence, all open. Each page is drawn from a fresh subscription, so a
 deep backlog pays setup per page; the page bound was set to 1024 events because 256 made the
