@@ -55,7 +55,11 @@ pub const BY_ID_SURFACE_NAME: &str = "by-id";
 /// (FDR 001 §5), not by rewriting labels here.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
-pub struct Dpath(String);
+/// camino-backed validated label (`Utf8PathBuf`): interoperates with `UserPathBuf`
+/// and `derive_tree`'s real paths, while equality/hash/order stay byte-exact
+/// (camino compares `as_str`). The stored string is exactly the validated label —
+/// camino's rewriting path ops are deliberately not exposed here.
+pub struct Dpath(camino::Utf8PathBuf);
 
 /// The typed read validates: a `Dpath` value is always a well-formed label.
 /// Unvalidated input arrives as a raw facet key-id instead — see
@@ -104,17 +108,17 @@ impl Dpath {
                 });
             }
         }
-        Ok(Self(input.to_string()))
+        Ok(Self(camino::Utf8PathBuf::from(input)))
     }
 
     /// The canonical dpath string, leading `/` included.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 
     /// The path segments, outermost first.
     pub fn segments(&self) -> impl Iterator<Item = &str> {
-        self.0[1..].split('/')
+        self.0.as_str()[1..].split('/')
     }
 
     /// The number of segments.
@@ -124,7 +128,7 @@ impl Dpath {
 
     /// The last segment (the claimed name at its parent).
     pub fn file_name(&self) -> &str {
-        self.0[self.0.rfind('/').unwrap_or(0) + 1..].trim_start_matches('/')
+        self.0.as_str()[self.0.as_str().rfind('/').unwrap_or(0) + 1..].trim_start_matches('/')
     }
 
     /// The extension of the last segment, if any (FDR 001 §9: a lens hint).
@@ -134,7 +138,7 @@ impl Dpath {
 
     /// The parent dpath, or `None` at the top level.
     pub fn parent(&self) -> Option<Self> {
-        let parent = &self.0[..self.0.rfind('/')?];
+        let parent = &self.0.as_str()[..self.0.as_str().rfind('/')?];
         if parent.is_empty() {
             return None;
         }
@@ -145,7 +149,7 @@ impl Dpath {
     pub fn facet_key(&self) -> FacetKey {
         FacetKey {
             tag: FacetTag::Any(DPATH_FACET_TAG.to_string()),
-            id: self.0.clone(),
+            id: self.0.as_str().to_string(),
         }
     }
 
@@ -172,7 +176,7 @@ impl std::str::FromStr for Dpath {
 
 impl std::fmt::Display for Dpath {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(self.0.as_str())
     }
 }
 

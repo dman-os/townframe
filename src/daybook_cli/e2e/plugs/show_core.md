@@ -6,15 +6,15 @@ Manifest summary of the system core plug after a fresh init.
 $ daybook_cli init
 $ daybook_cli plugs show @daybook/core
 id: @daybook/core
-version: 0.0.1
+version: 0.1.0
 title: Daybook Core
 desc: Core keys and routines
 status: enabled
 latest: db+facet:///[..]/org.example.daybook.plugManifest/main?branch=main&at=[..]
-latest_version: 0.0.1
+latest_version: 0.1.0
 last_valid: db+facet:///[..]/org.example.daybook.plugManifest/main?branch=main&at=[..]
-last_valid_version: 0.0.1
-last_enabled_version: 0.0.1
+last_valid_version: 0.1.0
+last_enabled_version: 0.1.0
 config_doc: [..]
 facets:
   org.example.daybook.plugManifest

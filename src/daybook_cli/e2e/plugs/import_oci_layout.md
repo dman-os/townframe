@@ -14,7 +14,7 @@ imported @daybook/test v0.0.1 (doc: [..])
 
 $ daybook_cli plugs list
  ID             Version  Status   Config Doc[..]
- @daybook/core  0.0.1    enabled  [..]
+ @daybook/core  0.1.0    enabled  [..]
  @daybook/test  0.0.1    enabled  [..]
 
 ```
