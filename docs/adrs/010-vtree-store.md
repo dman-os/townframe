@@ -170,3 +170,7 @@ A rep can be rebuilt from backend truth. Bindings, acknowledged bases, and local
 The TypeScript checkout experiment and Unison review are bounded design aids, not evidence that current Rust traits satisfy the contract. Exercise a new checkout, same-result changes, transformed ingest, simultaneous moves, dirty removal, inaccessible inputs, crashes on both sides of acknowledgement, multi-output plans, lazy WASI reads, and version unavailability before freezing interfaces.
 
 Outstanding implementation choices include streaming handle shape, storage of policy-owned correspondence, receiver result encoding, generation-aware bulk progress, byte/cache retention, and plan recovery after interrupted moves. None should change the separation of observed state, applied outcomes, and semantic backend ownership fixed above.
+
+## 11. Measured baseline (lane B, landed)
+
+Scan through the bounded-page reader measures ~350k entries/s at page size 256 (page 16 is roughly 2× slower — 256 holds as the default; the coordinator's tuned page size 512 sits within the 256–2048 acceptance band). Storage cost is ~42 B/entry, flat in tree depth. `StoreError::UnknownSourceKey` is the typed corruption surface for dangling source registry ids. `synchronous=FULL` stays measured-justified; no PRAGMA relaxation. One decode pass dominates scan time (~2.5 µs/row at measurement); further gains belong to ADR 013's chunk/plan work, not micro-optimizing the codec now.
