@@ -22,6 +22,35 @@ use crate::interlude::*;
 use super::Res;
 use super::codec::RECORD_OVERHEAD;
 
+/// This codec version's ceiling on a header-carried record size: the largest
+/// `rs` a peer may name in an RFC 8188 header or an `encodingParameters`
+/// facet. It is the bound that preserves the no-whole-blob-buffering
+/// guarantee of the streaming decryptor — a decoder may buffer at most one
+/// unauthenticated record, so without a ceiling a hostile `rs` of
+/// 0xFFFF_FFFF would force up to 4 GiB of buffering before a single byte was
+/// authenticated — while staying comfortably above the 64 KiB
+/// [`RECORD_SIZE`] default.
+pub(crate) const MAX_WIRE_RECORD_SIZE: u64 = 1 << 20;
+
+/// The one validation rule for a peer-supplied, pre-auth `rs`, shared by every
+/// place such an `rs` enters the codec: the facet's `encodingParameters` (via
+/// [`EncodingParams::new`]) and each header-parse seam (`StreamDecryptor::push`,
+/// `decrypt_bytes_ikm`, `CipherReader::open`). Every consumer of an
+/// unvalidated `rs` — the record-buffering budget, `record_size` strides,
+/// `payload_size` math — must sit behind this.
+pub(crate) fn validate_record_size(record_size: u64) -> Res<()> {
+    eyre::ensure!(
+        record_size > RECORD_OVERHEAD as u64,
+        "record size {record_size} leaves no room for a record payload"
+    );
+    eyre::ensure!(
+        record_size <= MAX_WIRE_RECORD_SIZE,
+        "record size {record_size} exceeds this codec's maximum wire record size \
+         of {MAX_WIRE_RECORD_SIZE} octets"
+    );
+    Ok(())
+}
+
 /// Default record size for new ciphertexts (RFC 8188's recommended 64 KiB).
 pub const RECORD_SIZE: u64 = 64 * 1024;
 
@@ -94,17 +123,12 @@ impl EncodingParams {
     };
 
     /// Check what a peer-supplied `encodingParameters` must satisfy before the
-    /// rest of the codec may assume it: the RFC 8188 header stores `rs` in four
-    /// octets, and a record has to leave room for its own tag and delimiter.
+    /// rest of the codec may assume it: the shared pre-auth record-size rule
+    /// ([`validate_record_size`]). The [`MAX_WIRE_RECORD_SIZE`] ceiling and the
+    /// payload-room floor are exactly what the header-parse seams enforce too,
+    /// so facet-declared and header-carried `rs` cannot diverge in validity.
     pub fn new(record_size: u64, padding: Padding) -> Res<Self> {
-        eyre::ensure!(
-            record_size > RECORD_OVERHEAD as u64,
-            "record size {record_size} leaves no room for a record payload"
-        );
-        eyre::ensure!(
-            record_size <= u32::MAX as u64,
-            "record size {record_size} does not fit the RFC 8188 header field"
-        );
+        validate_record_size(record_size)?;
         Ok(Self {
             record_size,
             padding,

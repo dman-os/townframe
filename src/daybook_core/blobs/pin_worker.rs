@@ -492,6 +492,19 @@ impl Ctx {
         if facets_set.is_empty() && facets_remove.is_empty() {
             return Ok(Vec::new());
         }
+        // Ciphertext-inventory removals release their pairs BEFORE the removal
+        // write. This inventory is the only record a pair exists (see
+        // [`release_pairs`]), so a removed ciphertext pair will never be
+        // claimed again, and the order decides which crash window is harmless:
+        // released-but-still-declared (tags gone, pin row still written) just
+        // serves a not-found, while written-but-unreleased leaves a GC root
+        // that nothing will ever claim again (ADR 003 §19). Only the
+        // ciphertext inventory drives releases - a plaintext pin leaving the
+        // docs inventory means nothing for pairs (`pt:<C>` is keyed by
+        // ciphertext).
+        if *inventory_doc_id == self.encryption_inventory_doc_id {
+            self.release_pairs(&removed).await?;
+        }
         self.drawer_repo
             .update_at_heads(
                 DocPatch {
@@ -516,8 +529,10 @@ impl Ctx {
     /// group. The `ct:`/`pt:` tags are the store-level GC roots for the
     /// ciphertext's outboard and for the plaintext that serves it, so this is
     /// where both become collectable again (ADR 003 §13/§19). Driven by the same
-    /// diff that removed the pin: reconciled, never incidental, and never a
-    /// separate sweep.
+    /// diff that removed the pin - reconciled, never incidental, and never a
+    /// separate sweep - and driven from `apply_inventory_diff` BEFORE its
+    /// removal write, so a crash between the two writes releases rather than
+    /// orphans.
     async fn release_pairs(&self, removed: &[String]) -> Res<()> {
         for hash in removed {
             // The hash is a digest string a facet supplied, so it may use
@@ -552,10 +567,10 @@ impl Ctx {
             .await?;
         {
             let cipher = self.desired_cipher_pins().await?;
-            let removed = self
-                .apply_inventory_diff(&self.encryption_inventory_doc_id, &cipher)
+            // The release for this diff happens inside `apply_inventory_diff`,
+            // before the removal write.
+            self.apply_inventory_diff(&self.encryption_inventory_doc_id, &cipher)
                 .await?;
-            self.release_pairs(&removed).await?;
         }
         Ok(())
     }

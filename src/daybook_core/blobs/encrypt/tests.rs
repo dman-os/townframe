@@ -2,6 +2,7 @@ use super::codec::{
     HEADER_LEN, HeaderFacts, MASTER_KEY_LEN, RECORD_OVERHEAD, SALT_LEN, StreamDecryptor,
     decrypt_bytes_ikm, encrypt_raw_ikm, payload_size,
 };
+use super::params::MAX_WIRE_RECORD_SIZE;
 use super::*;
 
 use crate::interlude::eyre;
@@ -198,13 +199,107 @@ fn wrong_key_is_rejected() {
     assert!(decrypt_bytes(&other, &ct).is_err());
 }
 
+/// A header-carried `rs` is peer-supplied and pre-authenticated, so the
+/// decoder must reject it at each header-parse seam before it can become a
+/// buffering budget or framing arithmetic.
+#[test]
+fn stream_decryptor_push_rejects_out_of_band_record_sizes() -> Res<()> {
+    let key = MasterKey::random();
+    fn header_with_rs(rs: u32) -> [u8; HEADER_LEN] {
+        let mut hdr = [0u8; HEADER_LEN];
+        hdr[HEADER_LEN - 1] = 0; // idlen: no sender key id
+        hdr[SALT_LEN..SALT_LEN + 4].copy_from_slice(&rs.to_be_bytes());
+        hdr
+    }
+    // At the bottom (`rs` <= RECORD_OVERHEAD, no record payload room) and
+    // above the ceiling (the no-whole-blob-buffering guarantee): each is a
+    // rejection at the header seam itself, not after buffering.
+    for bad in [
+        0u32,
+        RECORD_OVERHEAD as u32,
+        MAX_WIRE_RECORD_SIZE as u32 + 1,
+        u32::MAX,
+    ] {
+        let mut dec = StreamDecryptor::new(key.clone());
+        assert!(
+            dec.push(&header_with_rs(bad)).is_err(),
+            "push must reject a header carrying rs={bad}"
+        );
+    }
+    Ok(())
+}
+
+/// The ceiling itself is legal framing: a header-carried `rs` of exactly
+/// `MAX_WIRE_RECORD_SIZE` must round-trip. Empty plaintext under
+/// `Padding::Minimal` keeps the body at one overhead-sized frame, so the test
+/// never has to materialize megabytes.
+#[test]
+fn max_wire_record_size_round_trips() -> Res<()> {
+    let key = MasterKey::random();
+    let ct = encrypt_with_rs(&key, b"", MAX_WIRE_RECORD_SIZE, Padding::Minimal);
+    assert_eq!(
+        ct.len(),
+        HEADER_LEN + RECORD_OVERHEAD,
+        "an empty minimal record is one RECORD_OVERHEAD frame, whatever the rs"
+    );
+    assert_eq!(decrypt_bytes(&key, &ct)?, b"");
+    // The streaming seam accepts the ceiling too.
+    let mut dec = StreamDecryptor::new(key.clone());
+    dec.push(&ct)?;
+    dec.finish()?;
+    assert!(dec.drain_outbox().flatten().collect::<Vec<_>>().is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cipher_reader_open_rejects_out_of_band_record_sizes() -> Res<()> {
+    let (store, _virtuals) =
+        iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+    let store = Store::from(store);
+    let key = MasterKey::random();
+    for bad_rs in [
+        RECORD_OVERHEAD as u32,
+        MAX_WIRE_RECORD_SIZE as u32 + 1,
+        u32::MAX,
+    ] {
+        // Craft a header naming the hostile `rs`, followed by one
+        // overhead-sized record body, so `open` fails on the header seam and
+        // not on store emptiness. A zero salt is fine: the CEK/nonce derive
+        // only feeds the read path, which is never reached.
+        let salt = [0u8; SALT_LEN];
+        let mut ct = salt.to_vec();
+        ct.extend(bad_rs.to_be_bytes());
+        ct.push(0); // idlen: no sender key id
+        ct.extend(std::iter::repeat_n(0u8, RECORD_OVERHEAD));
+        let c_hash = Hash::new(&ct);
+        let _tag = store.blobs().add_bytes(ct).temp_tag().await?;
+        let mut keys = MapKeySource::default();
+        keys.0.insert(c_hash, key.clone());
+        assert!(
+            CipherReader::open(&store, &keys, c_hash, 0).await.is_err(),
+            "open must reject a header carrying rs={bad_rs}"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn truncated_stream_is_rejected() {
     let key = MasterKey::random();
     let ct = encrypt_with_rs(&key, &[9u8; 5000], SMALL_RS, Padding::Record);
-    // Cut into the final record: header + one full record only.
-    let wire = SMALL_RS as usize + RECORD_OVERHEAD;
-    assert!(decrypt_bytes(&key, &ct[..HEADER_LEN + wire]).is_err());
+    // Cut exactly at the end of the first full record: the final record is
+    // missing entirely, which is a framing failure, not an authentication
+    // one.
+    assert!(
+        decrypt_bytes(&key, &ct[..HEADER_LEN + SMALL_RS as usize]).is_err(),
+        "a stream without its final record must be rejected"
+    );
+    // Separately named: a cut into a record's interior leaves a full-length
+    // framed record that cannot authenticate.
+    assert!(
+        decrypt_bytes(&key, &ct[..HEADER_LEN + SMALL_RS as usize + 50]).is_err(),
+        "a stream cut mid-record must fail authentication"
+    );
 }
 #[test]
 fn empty_plaintext_roundtrips_under_minimal_padding() -> Res<()> {
@@ -800,20 +895,41 @@ async fn download_then_serve_over_quic() -> Res<()> {
         "node C must receive exact ciphertext"
     );
 
-    // Negative: unregistered provider => remote GET fails.
+    // Negative: with B's provider unregistered, a fetch of the
+    // genuinely-held `c_hash` must fail. Fetch into a fresh store so the
+    // earlier success into `store_c` cannot mask a broken provider state, and
+    // so the positive restatement below is observable.
     virtuals_b.unregister(PROVIDER_NAME);
     let conn_c2 = r_c
         .endpoint()
         .connect(r_b.endpoint().addr(), ALPN)
         .await
         .map_err(|e| eyre::eyre!("connect failed: {e:?}"))?;
-    let other = Hash::new(b"no such blob");
+    let (probe_mem, _probe_virtuals) =
+        iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+    let store_probe = Store::from(probe_mem);
     assert!(
-        store_c
+        store_probe
             .remote()
-            .fetch(conn_c2.clone(), other)
+            .fetch(conn_c2.clone(), c_hash)
             .await
-            .is_err()
+            .is_err(),
+        "an unregistered provider must not serve the ciphertext it once held"
+    );
+
+    // Positive: re-registering restores service, byte-exactly.
+    provider.register(&virtuals_b)?;
+    let conn_c3 = r_c
+        .endpoint()
+        .connect(r_b.endpoint().addr(), ALPN)
+        .await
+        .map_err(|e| eyre::eyre!("connect failed: {e:?}"))?;
+    store_probe.remote().fetch(conn_c3, c_hash).await?;
+    let probe_ct = store_probe.get_bytes(c_hash).await?;
+    assert_eq!(
+        probe_ct.as_ref(),
+        &ct[..],
+        "re-registered provider must serve the exact ciphertext"
     );
 
     tokio::try_join!(r_a.shutdown(), r_b.shutdown(), r_c.shutdown())?;

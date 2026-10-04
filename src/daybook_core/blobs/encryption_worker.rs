@@ -81,27 +81,65 @@ const ENCRYPTION_TASK_BUDGET: usize = 1;
 /// until the next boot's pass.
 const ENCRYPTION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Test seam for the rescheduling contract. Every production failure this worker
-/// can see is either racy or needs a write to the document - and a document
-/// write would itself produce the delta the contract must be tested without.
-/// Compiled out of production builds.
+/// Test seam for the rescheduling contract. Every production failure this
+/// worker can see is either racy or needs a write to the document - and a
+/// document write would itself produce the delta the contract must be tested
+/// without.
+///
+/// State is per machine, never process-global: one instance is born with its
+/// worker's [`Ctx`] and the spawned feeder carries the same handle, so two
+/// concurrently running workers (and the tests that drive them) cannot
+/// cross-infect each other. Production builds compile a zero-sized no-op so
+/// the machine's plumbing is byte-for-byte the same in both builds.
+/// Fault-injection and attribution state, one instance per machine: test
+/// builds arm failures and count attempts on their own worker's handle, so
+/// concurrently running workers (and the tests that drive them) cannot
+/// cross-infect each other the way the previous process-global statics did.
+/// Production builds carry the zero-sized no-op impl below; the `Ctx` field,
+/// the feeder handle and the exec seams' call sites are identical in both.
 #[cfg(test)]
-mod faults {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    pub(super) static FAIL_RECONCILE: AtomicBool = AtomicBool::new(false);
-    pub(super) static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+pub(crate) struct Faults {
+    /// Reconciliation failure injection.
+    pub(super) fail_reconcile: AtomicBool,
+    /// Rotation failure injection: entry-side and after-install.
+    pub(super) fail_rotate: AtomicBool,
+    pub(super) fail_rotate_after_install: AtomicBool,
+    attempts: AtomicUsize,
+    presence_resolves: AtomicUsize,
+}
 
-    pub(super) fn attempts() -> usize {
-        ATTEMPTS.load(Ordering::SeqCst)
+#[cfg(test)]
+impl Default for Faults {
+    fn default() -> Self {
+        Self {
+            fail_reconcile: AtomicBool::new(false),
+            fail_rotate: AtomicBool::new(false),
+            fail_rotate_after_install: AtomicBool::new(false),
+            attempts: AtomicUsize::new(0),
+            presence_resolves: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Faults {
+    pub(super) fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::SeqCst)
     }
 
-    pub(super) fn fail_next_reconcile() -> bool {
-        // Every attempt counts, armed or not: the stream tests poll this counter
-        // to prove the trigger plane actually ran a document's task, which the
-        // counter can only show if it moves without fault injection.
-        ATTEMPTS.fetch_add(1, Ordering::SeqCst);
-        FAIL_RECONCILE.load(Ordering::SeqCst)
+    pub(super) fn presence_resolves(&self) -> usize {
+        self.presence_resolves.load(Ordering::SeqCst)
+    }
+
+    /// `true` only when this machine's reconcile seam is armed; every call
+    /// counts an attempt, armed or not, because the stream tests poll the
+    /// counter to prove the trigger plane actually ran a document's task.
+    fn fail_next_reconcile(&self) -> bool {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        self.fail_reconcile.load(Ordering::SeqCst)
     }
 
     // The rotation seam's two points are separate because they have different
@@ -110,21 +148,52 @@ mod faults {
     // pair; failing after the §19 step-1 install leaves the interrupted
     // attempt's pair rooted-but-unreferenced, which is the declared crash
     // window, not a bug to assert away.
-    pub(super) static FAIL_ROTATE: AtomicBool = AtomicBool::new(false);
-    pub(super) static FAIL_ROTATE_AFTER_INSTALL: AtomicBool = AtomicBool::new(false);
-
-    pub(super) fn fail_next_rotate(after_install: bool) -> bool {
+    fn fail_next_rotate(&self, after_install: bool) -> bool {
         let armed = if after_install {
-            &FAIL_ROTATE_AFTER_INSTALL
+            &self.fail_rotate_after_install
         } else {
-            &FAIL_ROTATE
+            &self.fail_rotate
         };
         if !armed.load(Ordering::SeqCst) {
             return false;
         }
-        ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+        self.attempts.fetch_add(1, Ordering::SeqCst);
         true
     }
+
+    /// Presence-line attribution: only `handle_blob_arrival`, reading the
+    /// value-digest projection, increments this.
+    fn count_presence(&self) {
+        self.presence_resolves.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[cfg(not(test))]
+pub(crate) struct Faults;
+
+#[cfg(not(test))]
+impl Default for Faults {
+    fn default() -> Self {
+        Faults
+    }
+}
+
+#[cfg(not(test))]
+impl Faults {
+    /// The one live production path (`handle_blob_arrival` compiles in both
+    /// builds); a production handle stores nothing and just does not count.
+    #[inline]
+    fn count_presence(&self) {}
+}
+
+/// A fresh per-machine fault handle: the real state in test builds, the
+/// unit no-op in production.
+pub(crate) fn new_faults() -> Arc<Faults> {
+    #[cfg(test)]
+    let faults = Faults::default();
+    #[cfg(not(test))]
+    let faults = Faults;
+    Arc::new(faults)
 }
 
 /// The branch every writer in the workspace uses; the delta machine resolves
@@ -197,6 +266,9 @@ pub(crate) struct EncryptionFeederArgs {
     pub facet_index: Arc<DocFacetSetIndexRepo>,
     pub sql: SqlCtx,
     pub trigger_tx: tokio::sync::mpsc::Sender<EncryptDocTrigger>,
+    /// The worker machine's fault/attribution handle, shared with the feeder's
+    /// presence line so `count_presence` lands on the same per-machine state.
+    pub faults: Arc<Faults>,
 }
 
 /// Spawn the two feeder lines. Each line owns a durable cursor in the walker
@@ -204,6 +276,25 @@ pub(crate) struct EncryptionFeederArgs {
 /// resume committed work, never re-walk it, and the reader blocks on the
 /// store's frontier notification between events. Cursors persist per line;
 /// the whole feeder dies with the trigger channel's receiver.
+/// The worker stopped and its trigger receiver went away; a line's send ends
+/// with this, and `run_tail` maps it to [`FeederError::Shutdown`].
+#[derive(Debug, thiserror::Error)]
+#[error("the encryption worker's trigger channel closed")]
+pub(crate) struct TriggerChannelClosed;
+
+/// Why a feeder line ended. Shutdown is the worker dropping the trigger
+/// receiver - the designed way lines die (see
+/// `spawn_encryption_trigger_feeder`). Everything else is a real failure.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FeederError {
+    /// The worker dropped the trigger receiver: the designed line end.
+    #[error("trigger channel closed; feeder stops")]
+    Shutdown,
+    /// The line failed: the re-arm plane is dead at one cursor on one part.
+    #[error("{0}")]
+    Failed(eyre::Report),
+}
+
 pub(crate) async fn spawn_encryption_trigger_feeder(
     args: EncryptionFeederArgs,
 ) -> Res<tokio::task::JoinHandle<()>> {
@@ -214,6 +305,7 @@ pub(crate) async fn spawn_encryption_trigger_feeder(
         facet_index,
         sql,
         trigger_tx,
+        faults,
     } = args;
     let state_repo = big_sync::SqliteDeltaWalkerStateRepo::new(
         sql.read_pool.clone(),
@@ -229,6 +321,7 @@ pub(crate) async fn spawn_encryption_trigger_feeder(
         SqliteDeltaWalkerStateRepo::clone(&state_repo),
         Arc::clone(&facet_index),
         trigger_tx.clone(),
+        Arc::clone(&faults),
     ));
     let eligibility_line = tokio::spawn(tail_eligibility_line(
         repo_part_store,
@@ -238,12 +331,25 @@ pub(crate) async fn spawn_encryption_trigger_feeder(
         trigger_tx,
     ));
     Ok(tokio::spawn(async move {
-        // A feeder line that dies while the trigger channel is open must stop
-        // the feeder: a silently dead trigger plane is the boot-pass problem
-        // returning through the back door.
-        let (r1, r2) = tokio::join!(presence_line, eligibility_line);
-        if r1.is_err() || r2.is_err() {
-            tracing::error!("an encryption feeder line exited unexpectedly; feeder stops");
+        // A feeder line ends in exactly two ways: on error (Err), or when the
+        // worker drops the trigger receiver (the machine maps its send
+        // failure to the dedicated shutdown error). Watch the FIRST line to
+        // end - the other line's own end follows on shutdown - and make a
+        // failure fatal: the panic is escalated by the process-wide panic
+        // handler, so a dead trigger plane can never idle until restart.
+        let (line_name, first) = tokio::select! {
+            result = presence_line => ("presence", result),
+            result = eligibility_line => ("eligibility", result),
+        };
+        match first {
+            // The worker shut down and its receiver went away: not a failure.
+            Ok(Err(FeederError::Shutdown)) => {}
+            Ok(Err(err)) => panic!("encryption feeder line {line_name} failed: {err:?}"),
+            // A line never returns Ok in production, and a task abort happens
+            // only when this supervisor itself is aborted for shutdown.
+            Ok(Ok(())) | Err(_) => {
+                tracing::warn!("encryption feeder line {line_name} ended without an error");
+            }
         }
     }))
 }
@@ -297,6 +403,9 @@ enum TailKind {
     Presence {
         facet_index: Arc<DocFacetSetIndexRepo>,
         trigger_tx: tokio::sync::mpsc::Sender<EncryptDocTrigger>,
+        /// The machine's fault/attribution handle: the arrival attribution is
+        /// per machine, not process-global.
+        faults: Arc<Faults>,
     },
     /// Eligibility-group membership: re-arm the documents a branch doc carries.
     Eligibility {
@@ -311,7 +420,8 @@ impl TailKind {
             TailKind::Presence {
                 facet_index,
                 trigger_tx,
-            } => handle_blob_arrival(facet_index, &obj_id, trigger_tx).await,
+                faults,
+            } => handle_blob_arrival(facet_index, &obj_id, trigger_tx, faults).await,
             TailKind::Eligibility {
                 facet_index,
                 trigger_tx,
@@ -328,36 +438,36 @@ async fn run_tail(
     cursor_key: &'static [u8],
     state_repo: SqliteDeltaWalkerStateRepo,
     kind: TailKind,
-) {
+) -> Result<(), FeederError> {
     loop {
         let read = reader
             .next(RevisionReadLimits {
                 max_entries: std::num::NonZeroUsize::new(64).expect("64 is non-zero"),
             })
-            .await;
-        let read = match read {
-            Ok(read) => read,
-            Err(error) => {
-                tracing::error!(%error, "feeder tail read failed; line stopped");
-                return;
-            }
-        };
+            .await
+            .map_err(|error| {
+                FeederError::Failed(eyre::eyre!("feeder tail read failed: {error:?}"))
+            })?;
         match read {
             RevisionRead::Entries { revision, entries } => {
                 for event in &entries {
                     if let Err(error) = kind.handle(event_obj_id(event)).await {
-                        tracing::error!(
-                            %error,
-                            kind = event_kind(event),
-                            "feeder trigger handler failed; line stopped"
-                        );
-                        return;
+                        // The receiver dying is shutdown, not a handler
+                        // failure: the trigger channel IS the line's exit.
+                        if error.is::<TriggerChannelClosed>() {
+                            return Err(FeederError::Shutdown);
+                        }
+                        return Err(FeederError::Failed(eyre::eyre!(
+                            "feeder trigger handler failed kind = {}: {error:?}",
+                            event_kind(event)
+                        )));
                     }
                 }
-                if let Err(error) = feeder_commit_cursor(&state_repo, cursor_key, revision).await {
-                    tracing::error!(%error, "feeder cursor commit failed; line stopped");
-                    return;
-                }
+                feeder_commit_cursor(&state_repo, cursor_key, revision)
+                    .await
+                    .map_err(|error| {
+                        FeederError::Failed(eyre::eyre!("feeder cursor commit failed: {error:?}"))
+                    })?;
             }
             RevisionRead::ReplayComplete { .. } => {}
         }
@@ -372,14 +482,15 @@ async fn tail_presence_line(
     state_repo: SqliteDeltaWalkerStateRepo,
     facet_index: Arc<DocFacetSetIndexRepo>,
     trigger_tx: tokio::sync::mpsc::Sender<EncryptDocTrigger>,
-) {
-    let cursor = match feeder_cursor(&state_repo, PRESENCE_CURSOR_KEY).await {
-        Ok(cursor) => cursor,
-        Err(error) => {
-            tracing::error!(%error, "blob-presence feeder cursor unreadable; line stopped");
-            return;
-        }
-    };
+    faults: Arc<Faults>,
+) -> Result<(), FeederError> {
+    let cursor = feeder_cursor(&state_repo, PRESENCE_CURSOR_KEY)
+        .await
+        .map_err(|error| {
+            FeederError::Failed(eyre::eyre!(
+                "blob-presence feeder cursor unreadable: {error:?}"
+            ))
+        })?;
     let req = big_sync_core::rpc::SubPartsRequest {
         lower_bound: cursor,
         targets: [big_sync_core::rpc::SubscriptionTarget::Part {
@@ -392,12 +503,14 @@ async fn tail_presence_line(
     let reader = match presence_store.open_revision_reader(req).await {
         Ok(Ok(reader)) => reader,
         Ok(Err(error)) => {
-            tracing::error!(%error, "blob-presence feeder reader refused; line stopped");
-            return;
+            return Err(FeederError::Failed(eyre::eyre!(
+                "blob-presence feeder reader refused: {error:?}"
+            )));
         }
         Err(error) => {
-            tracing::error!(%error, "blob-presence feeder reader unavailable; line stopped");
-            return;
+            return Err(FeederError::Failed(eyre::eyre!(
+                "blob-presence feeder reader unavailable: {error:?}"
+            )));
         }
     };
     run_tail(
@@ -407,9 +520,10 @@ async fn tail_presence_line(
         TailKind::Presence {
             facet_index,
             trigger_tx,
+            faults,
         },
     )
-    .await;
+    .await
 }
 
 /// The eligibility line. A member add on the eligibility group's part re-arms
@@ -422,14 +536,14 @@ async fn tail_eligibility_line(
     state_repo: SqliteDeltaWalkerStateRepo,
     facet_index: Arc<DocFacetSetIndexRepo>,
     trigger_tx: tokio::sync::mpsc::Sender<EncryptDocTrigger>,
-) {
-    let cursor = match feeder_cursor(&state_repo, ELIGIBILITY_CURSOR_KEY).await {
-        Ok(cursor) => cursor,
-        Err(error) => {
-            tracing::error!(%error, "eligibility feeder cursor unreadable; line stopped");
-            return;
-        }
-    };
+) -> Result<(), FeederError> {
+    let cursor = feeder_cursor(&state_repo, ELIGIBILITY_CURSOR_KEY)
+        .await
+        .map_err(|error| {
+            FeederError::Failed(eyre::eyre!(
+                "eligibility feeder cursor unreadable: {error:?}"
+            ))
+        })?;
     let req = big_sync_core::rpc::SubPartsRequest {
         lower_bound: cursor,
         targets: [big_sync_core::rpc::SubscriptionTarget::Part {
@@ -442,12 +556,14 @@ async fn tail_eligibility_line(
     let reader = match repo_part_store.open_revision_reader(req).await {
         Ok(Ok(reader)) => reader,
         Ok(Err(error)) => {
-            tracing::error!(%error, "eligibility feeder reader refused; line stopped");
-            return;
+            return Err(FeederError::Failed(eyre::eyre!(
+                "eligibility feeder reader refused: {error:?}"
+            )));
         }
         Err(error) => {
-            tracing::error!(%error, "eligibility feeder reader unavailable; line stopped");
-            return;
+            return Err(FeederError::Failed(eyre::eyre!(
+                "eligibility feeder reader unavailable: {error:?}"
+            )));
         }
     };
     run_tail(
@@ -459,7 +575,7 @@ async fn tail_eligibility_line(
             trigger_tx,
         },
     )
-    .await;
+    .await
 }
 
 /// The object a part event names. Changed events carry the member's key;
@@ -478,34 +594,34 @@ fn event_kind(event: &PartEvent) -> &'static str {
     }
 }
 
-/// Blob arrival → the documents whose `Blob` facet names the digest. The
-/// facet id is authored in either digest spelling (ADR 003 §3: multihash
-/// canonical, `db+blob:///` bare), so the association matches both.
+/// Blob arrival → the documents whose `Blob` facet value names the digest.
+///
+/// The association is the facet-set index's value-digest projection, not the
+/// facet key's id: a production `Blob` facet is authored with
+/// `FacetKey::from(WellKnownFacetTag::Blob)`, so its id is `DEFAULT_FACET_ID`
+/// and only the value carries the digest (in either ADR 003 §3 spelling —
+/// `plaintext_blob_id` canonicalizes to the one `BlobId` compared here).
 async fn handle_blob_arrival(
     facet_index: &DocFacetSetIndexRepo,
     obj_id: &ObjKey,
     trigger_tx: &tokio::sync::mpsc::Sender<EncryptDocTrigger>,
+    faults: &Faults,
 ) -> Res<()> {
     let Ok(bytes32) = obj_id.to_bytes32() else {
         // A key that is not a 32-byte digest is not a blob's presence row.
         return Ok(());
     };
-    let blob_id = BlobId::new(bytes32);
-    for digest in [
-        blob_id.to_string(),
-        crate::blobs::blob_id_to_digest_str(blob_id.clone()),
-    ] {
-        let docs = facet_index
-            .list_docs_for_facet_tag_id(WellKnownFacetTag::Blob.as_str(), &digest)
-            .await?;
-        for membership in docs {
-            trigger_tx
-                .send(EncryptDocTrigger {
-                    doc_id: membership.doc_id,
-                })
-                .await
-                .map_err(|_| eyre::eyre!("the encryption worker's trigger channel closed"))?;
-        }
+    let docs = facet_index
+        .list_docs_for_blob_digest(&BlobId::new(bytes32))
+        .await?;
+    for membership in docs {
+        faults.count_presence();
+        trigger_tx
+            .send(EncryptDocTrigger {
+                doc_id: membership.doc_id,
+            })
+            .await
+            .map_err(|_| TriggerChannelClosed)?;
     }
     Ok(())
 }
@@ -529,7 +645,7 @@ async fn handle_branch_eligible(
                 doc_id: membership.doc_id,
             })
             .await
-            .map_err(|_| eyre::eyre!("the encryption worker's trigger channel closed"))?;
+            .map_err(|_| TriggerChannelClosed)?;
     }
     Ok(())
 }
@@ -556,6 +672,9 @@ pub(crate) async fn spawn_blob_encryption_worker(
         .await?;
     let store = blobs_repo.iroh_store();
     let provider = blobs_repo.cipher_provider();
+    // One fault handle per machine: the Ctx and the presence feeder share it,
+    // so injected fault state never lives outside this worker.
+    let faults = new_faults();
     let ctx = Arc::new(Ctx {
         drawer_repo: Arc::clone(&drawer_repo),
         sql: sql.clone(),
@@ -564,6 +683,7 @@ pub(crate) async fn spawn_blob_encryption_worker(
         domain_id: domain_facet_id(&domain_group),
         domain_group,
         encryption_inventory_doc_id,
+        faults: Arc::clone(&faults),
     });
 
     // The presence-plane feeder and its trigger channel: the feeder resolves
@@ -577,6 +697,7 @@ pub(crate) async fn spawn_blob_encryption_worker(
         facet_index: Arc::clone(&facet_index),
         sql: sql.clone(),
         trigger_tx,
+        faults: Arc::clone(&faults),
     })
     .await?;
 
@@ -631,7 +752,10 @@ fn encryption_facet_key(branch_id: &BranchId) -> EncryptionKey {
 /// The facet's `digest` is authoritative (ADR 003 §3 makes the multihash
 /// spelling canonical), and the `db+blob` URL is the same digest in the bare
 /// spelling, which is what a URL carries (`blob_url_contract_unchanged`).
-fn plaintext_blob_id(blob: &Blob) -> Option<BlobId> {
+/// Shared with the facet-set index's value-digest projection, which is also
+/// keyed by what the facet VALUE names (`plaintext_blob_id` is the one
+/// extraction helper the blob plane reads `Blob` facet values with).
+pub(crate) fn plaintext_blob_id(blob: &Blob) -> Option<BlobId> {
     if let Some(blob_id) = digest_str_to_blob_id_lenient(&blob.digest) {
         return Some(blob_id);
     }
@@ -670,6 +794,13 @@ struct Ctx {
     domain_group: BigKeyhiveGroup,
     /// The encrypted-representation inventory. Required: see the spawn fn.
     encryption_inventory_doc_id: DocId,
+    /// This machine's fault seams and attribution counters (`Faults`).
+    /// Production builds carry the zero-sized no-op; tests hold the same
+    /// handle the machine uses, which is what makes injected state per
+    /// machine instead of process-global. Production code never reads it
+    /// (the seams are test-only), hence the dead-code allowance there.
+    #[cfg_attr(not(test), allow(dead_code))]
+    faults: Arc<Faults>,
 }
 
 impl Ctx {
@@ -837,7 +968,7 @@ async fn run_encryption_task(task: EncryptionTask, ctx: Arc<Ctx>) -> Res<Encrypt
             #[cfg(test)]
             {
                 eyre::ensure!(
-                    !faults::fail_next_reconcile(),
+                    !ctx.faults.fail_next_reconcile(),
                     "injected reconciliation failure for {}",
                     task.doc_id
                 );
@@ -851,7 +982,7 @@ async fn run_encryption_task(task: EncryptionTask, ctx: Arc<Ctx>) -> Res<Encrypt
             #[cfg(test)]
             {
                 eyre::ensure!(
-                    !faults::fail_next_rotate(false),
+                    !ctx.faults.fail_next_rotate(false),
                     "injected rotation failure (entry) for {}",
                     task.doc_id
                 );
@@ -1514,7 +1645,7 @@ impl Ctx {
         #[cfg(test)]
         {
             eyre::ensure!(
-                !faults::fail_next_rotate(false),
+                !self.faults.fail_next_rotate(false),
                 "injected rotation failure (entry) for {doc_id}"
             );
         }
@@ -1539,7 +1670,7 @@ impl Ctx {
         #[cfg(test)]
         {
             eyre::ensure!(
-                !faults::fail_next_rotate(true),
+                !self.faults.fail_next_rotate(true),
                 "injected rotation failure (after install) for {doc_id}"
             );
         }

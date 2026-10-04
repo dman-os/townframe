@@ -26,6 +26,7 @@ use super::codec::{
     Cipher, HEADER_LEN, RECORD_OVERHEAD, SALT_LEN, cipher_from_ikm, n_records_for, payload_size,
 };
 use super::keys::CipherKeySource;
+use super::params::validate_record_size;
 /// Random-access *plaintext* reads over a stored ciphertext: the inverse of
 /// [`CipherSource`], which serves a ciphertext derived from plaintext.
 ///
@@ -80,6 +81,10 @@ impl CipherReader {
         let head = reader.read_bytes_at(0, HEADER_LEN)?;
         let salt: [u8; SALT_LEN] = head[..SALT_LEN].try_into()?;
         let rs = u64::from(u32::from_be_bytes(head[SALT_LEN..SALT_LEN + 4].try_into()?));
+        // Same pre-auth seam as every other header parse: validate before the
+        // framing math below, or a hostile `rs` becomes nonsense record
+        // arithmetic (and at the bottom, `rs`-sized record reads).
+        validate_record_size(rs)?;
         // Foreign encoders may carry a key id; we never encode one, but the
         // record stream starts after it.
         let records_start = HEADER_LEN as u64 + u64::from(head[HEADER_LEN - 1]);

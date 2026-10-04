@@ -117,21 +117,16 @@ impl DecidePeerStrategyTask {
         tracing::debug!(
             peer_id = %self.peer_id,
             part_count = summary.parts.len(),
-            refused_count = summary.refused.len(),
             "decide peer strategy summary"
         );
 
         let mut part_strats: Map<_, _> = default();
         for part_id in self.parts {
-            // A refused part (responder-declared, or missing from the answer map,
-            // which the responder also guarantees is exactly its refused set) is
-            // decided `Unkown`: `handle_set_peer_strat` marks exactly it
-            // unanswered and retries exactly it, so an ungranted neighbor part's
-            // refusal keeps no granted part out of this batch's strategies.
-            if summary.refused.contains(&part_id) {
-                part_strats.insert(part_id, PeerPartStratDecision::Unkown);
-                continue;
-            }
+            // A part named in the request but missing from the answer map is
+            // refused: the answer folds unknown and ungranted together, and a
+            // per-part absence never takes a granted part's summary down with
+            // it. `handle_set_peer_strat` marks exactly the missing part
+            // unanswered and retries exactly it.
             let Some(strat_summaries) = summary.parts.get(&part_id) else {
                 part_strats.insert(part_id, PeerPartStratDecision::Unkown);
                 continue;
@@ -360,10 +355,10 @@ mod tests {
         asker_cursor: CursorIndex,
         dirty_bucket: BucketSummary,
         bucket_walk_entered: Rc<Cell<bool>>,
-        /// Parts this fake refuses regardless of what the request names: the
-        /// per-part refusal the wire answer now carries next to the readable
-        /// summaries.
-        refused: Set<PartKey>,
+        /// Parts this fake refuses regardless of what the request names: they
+        /// are simply absent from the answer map, which is the wire shape's
+        /// refusal.
+        omit: Set<PartKey>,
     }
 
     impl BigSyncRpcClient<Local> for FakeRpc {
@@ -384,7 +379,7 @@ mod tests {
             }
             let parts = req
                 .parts
-                .difference(&self.refused)
+                .difference(&self.omit)
                 .map(|part_id| {
                     (
                         part_id.clone(),
@@ -401,8 +396,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let refused = self.refused.intersection(&req.parts).cloned().collect();
-            Local::from_future(async move { Ok(PeerSummaryResult { parts, refused }) })
+            Local::from_future(async move { Ok(PeerSummaryResult { parts }) })
         }
 
         fn replay_page<'a>(
@@ -514,7 +508,7 @@ mod tests {
                 changed_at: peer_cursor,
             },
             bucket_walk_entered: Rc::clone(&bucket_walk_entered),
-            refused: Set::new(),
+            omit: Set::new(),
         };
         let store = FakeStore {
             peer_cursor,
@@ -640,7 +634,7 @@ mod tests {
                 changed_at: 0,
             },
             bucket_walk_entered: Rc::clone(&bucket_walk_entered),
-            refused: Set::from([refused_part.clone()]),
+            omit: Set::from([refused_part.clone()]),
         };
         let (main_tx, _main_rx): (mpsc::Sender<MachineTaskMsg>, mpsc::Receiver<MachineTaskMsg>) =
             mpsc::unbounded("test".into(), "test".into());

@@ -189,7 +189,7 @@ async fn long_af_test_iroh_sync_randomized_four_node_stress_converges() -> Res<(
             stage = 7,
             "node entering stage 7: reopen transferred node"
         );
-        let reopened = open_sync_node(&repo_paths[leaving_idx], false).await?;
+        let reopened = open_sync_node_no_blobs(&repo_paths[leaving_idx]).await?;
         nodes[leaving_idx] = Some(reopened);
 
         let active_indices: Vec<usize> = nodes
@@ -308,7 +308,7 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
     let source_drawer_doc_id = rtx.doc_drawer.document_id();
     rtx.shutdown().await?;
 
-    let seed_node = open_sync_node(&paths[0], false).await?;
+    let seed_node = open_sync_node_no_blobs(&paths[0]).await?;
     let result = async {
         let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
         for dst in paths.iter().skip(1) {
@@ -355,7 +355,7 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
 async fn open_cluster_nodes(paths: &[PathBuf]) -> Res<Vec<Option<SyncTestNode>>> {
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
-        out.push(Some(open_sync_node(path, false).await?));
+        out.push(Some(open_sync_node_no_blobs(path).await?));
     }
     Ok(out)
 }

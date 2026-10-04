@@ -345,7 +345,7 @@ impl DrawerRepo {
         if let Some(plugs_repo) = &repo.plugs_repo {
             plugs_repo.attach_drawer(Arc::clone(&repo)).await?;
         }
-        repo.migrate_doc_authority().await?;
+        repo.migrate_content_doc_authority().await?;
         repo.ensure_replicated_branch_partitions().await?;
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
@@ -366,46 +366,37 @@ impl DrawerRepo {
         ))
     }
 
-    /// One-shot backfills of the authority groups every document branch must
-    /// belong to. Each entry is keyed independently so a repo that predates a
-    /// group still gets it; without the walk, a document created before the
-    /// group existed would be a silent hole in whatever the group gates
-    /// (encryption eligibility, for `encrypted_blob_docs`).
-    async fn migrate_doc_authority(&self) -> Res<()> {
+    /// One-shot backfill of the authority groups every document branch must
+    /// belong to (see `drawer`'s own groups; keyed so the walk runs once).
+    async fn migrate_content_doc_authority(&self) -> Res<()> {
         const MIGRATION_KEY: &str = "global.authority.content_docs_and_drawer_migrated";
-        const ENCRYPTED_BLOB_DOCS_MIGRATION_KEY: &str =
-            "global.authority.encrypted_blob_docs_migrated";
-        for (migration_key, groups) in [
-            (
-                MIGRATION_KEY,
-                vec![self.content_docs_group.clone(), self.drawer_group.clone()],
-            ),
-            (
-                ENCRYPTED_BLOB_DOCS_MIGRATION_KEY,
-                vec![self.encrypted_blob_docs_group.clone()],
-            ),
-        ] {
-            if crate::repo::globals::get_string_global(&self.meta_store_sql, migration_key)
-                .await?
-                .is_some()
-            {
-                continue;
-            }
-            for item in self.list().await? {
-                let Some(entry) = self.get_entry(&item.doc_id).await? else {
-                    continue;
-                };
-                for branch in entry.branches.values() {
-                    for group in &groups {
-                        self.big_repo
-                            .add_admin_member_to_doc(branch.branch_doc_id.clone(), group.clone())
-                            .await?;
-                    }
-                }
-            }
-            crate::repo::globals::upsert_string_global(&self.meta_store_sql, migration_key, "1")
-                .await?;
+        if crate::repo::globals::get_string_global(&self.meta_store_sql, MIGRATION_KEY)
+            .await?
+            .is_some()
+        {
+            return Ok(());
         }
+        for item in self.list().await? {
+            let Some(entry) = self.get_entry(&item.doc_id).await? else {
+                continue;
+            };
+            for branch in entry.branches.values() {
+                self.big_repo
+                    .add_admin_member_to_doc(
+                        branch.branch_doc_id.clone(),
+                        self.content_docs_group.clone(),
+                    )
+                    .await?;
+                self.big_repo
+                    .add_admin_member_to_doc(
+                        branch.branch_doc_id.clone(),
+                        self.drawer_group.clone(),
+                    )
+                    .await?;
+            }
+        }
+        crate::repo::globals::upsert_string_global(&self.meta_store_sql, MIGRATION_KEY, "1")
+            .await?;
         Ok(())
     }
     fn branch_kind_for_path(

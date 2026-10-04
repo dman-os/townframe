@@ -301,6 +301,21 @@ impl Rt {
         // One cancel token for the whole Rt, created up front so workers
         // booted before the Rt struct is constructed still share it.
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        // A failed boot must not leak the workers it already started: every
+        // task below is a child of `cancel_token` (each worker holds a child
+        // token), so cancelling the token on any error return tears every
+        // child down - the same effect as aborting a task set, expressed
+        // through the runtime's own cancellation primitive. Disarmed exactly
+        // where boot hands the token to the returned stop token.
+        struct CancelTokenOnBootError(Option<tokio_util::sync::CancellationToken>);
+        impl Drop for CancelTokenOnBootError {
+            fn drop(&mut self) {
+                if let Some(token) = self.0.take() {
+                    token.cancel();
+                }
+            }
+        }
+        let mut cancel_on_boot_error = CancelTokenOnBootError(Some(cancel_token.clone()));
         let authority = crate::authority::ensure(&rcx.big_repo, &rcx.sql, None).await?;
         crate::repo::ensure_authority_partitions(
             &rcx.part_store,
@@ -645,6 +660,7 @@ impl Rt {
             async move { repo.keep_up_with_partition().await.unwrap() }
         });
 
+        cancel_on_boot_error.0.take();
         Ok((
             Arc::clone(&rt),
             RtStopToken {

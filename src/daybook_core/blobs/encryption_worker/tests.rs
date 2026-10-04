@@ -25,19 +25,19 @@ async fn test_ctx(ctx: &DaybookTestContext, group: Option<BigKeyhiveGroup>) -> R
             .drawer_repo
             .resolve_doc_id_for_branch_doc_id(inventory)
             .await?,
+        faults: Arc::new(Faults::default()),
     }))
 }
 
 /// A document with one `Blob` facet for a plaintext this node stores: the
-/// shape a photo's document has.
+/// shape a photo's document has. The facet key is the production writer's
+/// (`FacetKey::from(WellKnownFacetTag::Blob)`, id `DEFAULT_FACET_ID`) and the
+/// digest lives in the facet VALUE — the association plane's contract.
 async fn stage_document_with_blob(
     ctx: &DaybookTestContext,
     plaintext: BlobId,
 ) -> Res<(DocId, FacetKey)> {
-    let blob_key = FacetKey {
-        tag: WellKnownFacetTag::Blob.into(),
-        id: plaintext.to_string(),
-    };
+    let blob_key = FacetKey::from(WellKnownFacetTag::Blob);
     let doc_id = ctx
         .drawer_repo
         .add(AddDocArgs {
@@ -567,6 +567,7 @@ async fn released_inventory_pin_with_absent_plaintext_is_not_resurrected_by_the_
             domain_id: worker.domain_id.clone(),
             domain_group: worker.domain_group.clone(),
             encryption_inventory_doc_id: worker.encryption_inventory_doc_id.clone(),
+            faults: Arc::new(Faults::default()),
         }),
         None,
         None,
@@ -649,6 +650,32 @@ async fn await_indexed(ctx: &DaybookTestContext, doc_id: &DocId) -> Res<()> {
         eyre::ensure!(
             std::time::Instant::now() < deadline,
             "facet index never listed {doc_id} as a Blob-facet document"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// The facet index has the document's value-digest projection row: what the
+/// presence line resolves a blob arrival with (`list_docs_for_blob_digest`).
+async fn await_digest_indexed(
+    ctx: &DaybookTestContext,
+    doc_id: &DocId,
+    plaintext: &BlobId,
+) -> Res<()> {
+    let facet_index = &ctx.rt.doc_facet_set_index_repo;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if facet_index
+            .list_docs_for_blob_digest(plaintext)
+            .await?
+            .iter()
+            .any(|membership: &DocFacetTagMembership| membership.doc_id == *doc_id)
+        {
+            return Ok(());
+        }
+        eyre::ensure!(
+            std::time::Instant::now() < deadline,
+            "facet index never projected {plaintext} for {doc_id}'s Blob facet value"
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -741,7 +768,7 @@ async fn blob_arriving_later_is_rearmed_by_the_presence_stream() -> Res<()> {
             std::time::Instant::now() < deadline,
             "the delta path never considered the document"
         );
-        if faults::attempts() > 0 {
+        if worker_ctx.faults.attempts() > 0 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -766,6 +793,7 @@ async fn blob_arriving_later_is_rearmed_by_the_presence_stream() -> Res<()> {
         facet_index: Arc::clone(&ctx.rt.doc_facet_set_index_repo),
         sql: ctx.rt.rcx.sql.clone(),
         trigger_tx,
+        faults: Arc::clone(&worker_ctx.faults),
     })
     .await?;
     let live_worker = Worker::new(Arc::clone(&worker_ctx), None, Some(trigger_rx));
@@ -789,6 +817,127 @@ async fn blob_arriving_later_is_rearmed_by_the_presence_stream() -> Res<()> {
     skipped_token.cancel();
     live_token.cancel();
     handle.await??;
+    live_handle.await??;
+    ctx.stop().await?;
+    Ok(())
+}
+
+/// The other half of the presence stream's contract, with the production
+/// facet shape (facet id `DEFAULT_FACET_ID`, digest in the facet VALUE): the
+/// document is *ineligible* when the blob's bytes land. The arrival must
+/// still resolve the document — by the value-digest projection, the only
+/// association key production facets carry — run its task (the skip), and
+/// leave the re-arm to the later eligibility join. Nothing else mentions the
+/// document between the arrival and the join.
+#[tokio::test(flavor = "multi_thread")]
+async fn blob_arriving_while_ineligible_rearms_the_presence_plane() -> Res<()> {
+    let ctx = test_cx(utils_rs::function_full!()).await?;
+    let worker_ctx = test_ctx(&ctx, None).await?;
+    let authority = crate::authority::ensure(&ctx.rt.rcx.big_repo, &ctx.rt.rcx.sql, None).await?;
+
+    // The facet names a digest whose bytes do not exist yet, and the document
+    // leaves the eligibility group the way the tombstone path revokes it,
+    // before any trigger plane exists to see the revoke.
+    let payload = b"presence stream: the ineligible arrival".to_vec();
+    let plaintext = BlobId::new(*blake3::hash(&payload).as_bytes());
+    let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
+    let cipher_key = worker_ctx.cipher_facet_key(&blob_key);
+    let branch_doc_id = physical_doc_id(&doc_id)?;
+    ctx.rt
+        .rcx
+        .big_repo
+        .revoke_doc_access(branch_doc_id.clone(), authority.encrypted_blob_docs.clone())
+        .await?;
+
+    // Production spawn: both feeder lines + the trigger-fed machine.
+    let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(64);
+    let _feeder = spawn_encryption_trigger_feeder(EncryptionFeederArgs {
+        repo_part_store: Arc::clone(&ctx.rt.rcx.part_store),
+        eligibility_part: authority.encrypted_blob_docs_part_id(),
+        presence_store: Arc::clone(&ctx.rt.rcx.blob_presence_store),
+        facet_index: Arc::clone(&ctx.rt.doc_facet_set_index_repo),
+        sql: ctx.rt.rcx.sql.clone(),
+        trigger_tx,
+        faults: Arc::clone(&worker_ctx.faults),
+    })
+    .await?;
+    let live_worker = Worker::new(Arc::clone(&worker_ctx), None, Some(trigger_rx));
+    let live_token = CancellationToken::new();
+    let live_handle = {
+        let facet_index = Arc::clone(&ctx.rt.doc_facet_set_index_repo);
+        let revision_store = facet_index.revision_store();
+        let cancel_token = live_token.clone();
+        let mut live_worker = live_worker;
+        tokio::spawn(async move { live_worker.run(revision_store, cancel_token).await })
+    };
+
+    // The replayed eligibility history runs the document's task and the skip
+    // on eligibility is pinned before the arrival can add a trigger of its
+    // own.
+    let settled = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        eyre::ensure!(
+            std::time::Instant::now() < settled,
+            "the replayed eligibility history never considered the document"
+        );
+        if worker_ctx.faults.attempts() > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .is_none(),
+        "an ineligible document must not get a representation from the replay"
+    );
+
+    // The digest projection the presence line resolves arrivals with. Both it
+    // and the facet-tag rows land in one projection revision, so the row's
+    // appearance is what makes a subsequent arrival able to resolve the doc.
+    await_digest_indexed(&ctx, &doc_id, &plaintext).await?;
+
+    // The arrival while still ineligible. The resolves counter moves only
+    // when the presence line actually resolved the digest to the document,
+    // which is what old-by-facet-id lookup could never do here.
+    let resolved_baseline = worker_ctx.faults.presence_resolves();
+    ctx.rt
+        .blobs_repo
+        .set_blob_presence_sink(Arc::clone(&ctx.rt.rcx.blob_presence_store));
+    let put_back = ctx.rt.blobs_repo.put(&payload).await?;
+    assert_eq!(put_back, plaintext, "the facet named these bytes all along");
+    loop {
+        eyre::ensure!(
+            std::time::Instant::now() < settled,
+            "the arrival never resolved to the document through the value digest"
+        );
+        if worker_ctx.faults.presence_resolves() > resolved_baseline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        read_cipherblob(&ctx.drawer_repo, &doc_id, &cipher_key)
+            .await?
+            .is_none(),
+        "the arrival's task must still skip on eligibility"
+    );
+
+    // The re-arm: the join flips eligibility live and lands the group's
+    // part-store membership row, the event the eligibility tail tails.
+    ctx.rt
+        .rcx
+        .big_repo
+        .add_admin_member_to_doc(branch_doc_id, authority.encrypted_blob_docs.clone())
+        .await?;
+    await_representation(
+        &ctx,
+        &doc_id,
+        &cipher_key,
+        "the eligibility re-arm after the arrival",
+    )
+    .await?;
+    live_token.cancel();
     live_handle.await??;
     ctx.stop().await?;
     Ok(())
@@ -836,6 +985,7 @@ async fn doc_joining_the_group_later_rearms_the_eligibility_stream() -> Res<()> 
         facet_index: Arc::clone(&ctx.rt.doc_facet_set_index_repo),
         sql: ctx.rt.rcx.sql.clone(),
         trigger_tx,
+        faults: Arc::clone(&worker_ctx.faults),
     })
     .await?;
     let worker = Worker::new(Arc::clone(&worker_ctx), None, Some(trigger_rx));
@@ -857,7 +1007,7 @@ async fn doc_joining_the_group_later_rearms_the_eligibility_stream() -> Res<()> 
             std::time::Instant::now() < deadline,
             "the trigger plane never considered the document"
         );
-        if faults::attempts() > 0 {
+        if worker_ctx.faults.attempts() > 0 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1019,7 +1169,12 @@ async fn failed_document_delta_is_rescheduled_until_its_work_is_durable() -> Res
     // Armed before the document exists: the delta this document produces is
     // the one that fails. Nothing below writes to the document again, so a
     // representation can only come from the rescheduled task.
-    faults::FAIL_RECONCILE.store(true, std::sync::atomic::Ordering::SeqCst);
+    // This machine's handle: the fault lives on the worker's own state, not
+    // in the process, so no other concurrently-running machine sees it.
+    worker_ctx
+        .faults
+        .fail_reconcile
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let stored = ctx
         .rt
         .blobs_repo
@@ -1039,18 +1194,57 @@ async fn failed_document_delta_is_rescheduled_until_its_work_is_durable() -> Res
         "nothing durable may exist for a document whose work failed"
     );
     assert!(
-        faults::attempts() >= 2,
+        worker_ctx.faults.attempts() >= 2,
         "a failed delta must be rescheduled, saw {} attempt(s)",
-        faults::attempts()
+        worker_ctx.faults.attempts()
     );
 
     // Clearing the cause is what lets the retry succeed.
-    faults::FAIL_RECONCILE.store(false, std::sync::atomic::Ordering::SeqCst);
+    worker_ctx
+        .faults
+        .fail_reconcile
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     await_representation(&ctx, &doc_id, &cipher_key, "the rescheduled delta").await?;
 
     cancel_token.cancel();
     handle.await??;
     ctx.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fault_state_is_per_machine_not_process_wide() -> Res<()> {
+    // The previous process-global statics would let machine 2 fire from
+    // machine 1's arming; per-machine handles hold the state on each Ctx.
+    let ctx = test_cx(utils_rs::function_full!()).await?;
+    let machine_1 = test_ctx(&ctx, None).await?;
+    let machine_2 = test_ctx(&ctx, None).await?;
+
+    use std::sync::atomic::Ordering::SeqCst;
+    machine_1.faults.fail_reconcile.store(true, SeqCst);
+    machine_1.faults.fail_rotate.store(true, SeqCst);
+
+    // Machine 1's armed seam fires on its own handle; its attempts move.
+    assert!(machine_1.faults.fail_next_reconcile());
+    assert_eq!(machine_1.faults.attempts(), 1);
+
+    // Machine 2's seams are its own state: machine 1's arming must not reach
+    // it, and counting must not cross in either direction.
+    assert!(!machine_2.faults.fail_next_reconcile());
+    assert_eq!(machine_1.faults.attempts(), 1);
+    assert_eq!(machine_2.faults.attempts(), 1);
+
+    let machine_2_rotate_fired = machine_2.faults.fail_next_rotate(false);
+    assert!(
+        !machine_2_rotate_fired,
+        "machine 1's armed rotation seam must not reach machine 2"
+    );
+    assert_eq!(
+        machine_1.faults.attempts(),
+        1,
+        "machine 2's rotation call stays off machine 1's counter"
+    );
+
     Ok(())
 }
 
@@ -1360,7 +1554,8 @@ async fn rotation_mints_fresh_keying_material_and_the_old_representation_release
 #[tokio::test(flavor = "multi_thread")]
 async fn rotation_retry_after_a_fault_at_entry_is_idempotent_and_orphan_free() -> Res<()> {
     let ctx = test_cx(utils_rs::function_full!()).await?;
-    let worker = Worker::new(test_ctx(&ctx, None).await?, None, None);
+    let worker_ctx = test_ctx(&ctx, None).await?;
+    let worker = Worker::new(Arc::clone(&worker_ctx), None, None);
     let plaintext_bytes = b"blob-rotation: retry idempotence".to_vec();
     let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
     let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
@@ -1380,7 +1575,10 @@ async fn rotation_retry_after_a_fault_at_entry_is_idempotent_and_orphan_free() -
     let ctx_store = ctx.rt.blobs_repo.iroh_store();
     spawn_pin_worker_for_test(&ctx).await?;
 
-    faults::FAIL_ROTATE.store(true, std::sync::atomic::Ordering::SeqCst);
+    worker_ctx
+        .faults
+        .fail_rotate
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let faulted = worker
         .rotate_document(&doc_id, &BranchPathBuf::from(MAIN_BRANCH))
         .await;
@@ -1402,7 +1600,10 @@ async fn rotation_retry_after_a_fault_at_entry_is_idempotent_and_orphan_free() -
         "an entry fault registers no pair: got {after_fault:?}"
     );
 
-    faults::FAIL_ROTATE.store(false, std::sync::atomic::Ordering::SeqCst);
+    worker_ctx
+        .faults
+        .fail_rotate
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     worker
         .rotate_document(&doc_id, &BranchPathBuf::from(MAIN_BRANCH))
         .await?;
@@ -1470,7 +1671,8 @@ async fn rotation_retry_after_a_fault_at_entry_is_idempotent_and_orphan_free() -
 async fn crash_after_install_leaves_the_declared_unreferenced_pair_and_the_retry_recovers()
 -> Res<()> {
     let ctx = test_cx(utils_rs::function_full!()).await?;
-    let worker = Worker::new(test_ctx(&ctx, None).await?, None, None);
+    let worker_ctx = test_ctx(&ctx, None).await?;
+    let worker = Worker::new(Arc::clone(&worker_ctx), None, None);
     let plaintext_bytes = b"blob-rotation: crash window".to_vec();
     let plaintext = ctx.rt.blobs_repo.put(&plaintext_bytes).await?;
     let (doc_id, blob_key) = stage_document_with_blob(&ctx, plaintext.clone()).await?;
@@ -1489,7 +1691,10 @@ async fn crash_after_install_leaves_the_declared_unreferenced_pair_and_the_retry
     let ctx_store = ctx.rt.blobs_repo.iroh_store();
     spawn_pin_worker_for_test(&ctx).await?;
 
-    faults::FAIL_ROTATE_AFTER_INSTALL.store(true, std::sync::atomic::Ordering::SeqCst);
+    worker_ctx
+        .faults
+        .fail_rotate_after_install
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     let faulted = worker
         .rotate_document(&doc_id, &BranchPathBuf::from(MAIN_BRANCH))
         .await;
@@ -1512,7 +1717,10 @@ async fn crash_after_install_leaves_the_declared_unreferenced_pair_and_the_retry
         "the commit point was not reached"
     );
 
-    faults::FAIL_ROTATE_AFTER_INSTALL.store(false, std::sync::atomic::Ordering::SeqCst);
+    worker_ctx
+        .faults
+        .fail_rotate_after_install
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     worker
         .rotate_document(&doc_id, &BranchPathBuf::from(MAIN_BRANCH))
         .await?;

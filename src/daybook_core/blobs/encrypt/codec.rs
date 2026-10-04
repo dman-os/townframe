@@ -31,15 +31,15 @@ use sha2::Sha256;
 
 use super::Res;
 use super::keys::MasterKey;
-use super::params::{DEFAULT_PADDING, EncodingParams, Padding, RECORD_SIZE};
+use super::params::{DEFAULT_PADDING, EncodingParams, Padding, RECORD_SIZE, validate_record_size};
 pub(crate) const SALT_LEN: usize = 16;
 /// GCM tag (16) + record delimiter byte (1).
 pub(crate) const RECORD_OVERHEAD: usize = 17;
 
 /// Payload octets per record: what is left of `rs` after the GCM tag and the
-/// delimiter. Callers that accept `rs` from outside validate it first
-/// ([`EncodingParams::new`]); the clamp only keeps a nonsensical internal `rs`
-/// from panicking on underflow.
+/// delimiter. Every caller that takes `rs` from the wire or a facet validates
+/// it first ([`super::params::validate_record_size`]); the clamp only keeps a
+/// nonsensical internal `rs` from panicking on underflow.
 pub(crate) fn payload_size(rs: u64) -> u64 {
     (rs - RECORD_OVERHEAD as u64).max(1)
 }
@@ -223,7 +223,10 @@ pub(crate) fn decrypt_bytes_ikm(ikm: &[u8], ciphertext: impl AsRef<[u8]>) -> Res
     let records = &ct[HEADER_LEN + idlen..];
     eyre::ensure!(!records.is_empty(), "ciphertext has no records");
     let record_len = rs as usize;
-    eyre::ensure!(record_len > RECORD_OVERHEAD, "record size too small");
+    // The header's rs octets are pre-auth at this point: anything the framing
+    // math below assumes (buffering, pacing, record alignment) must be checked
+    // through the shared rule before use.
+    validate_record_size(rs)?;
     let salt: [u8; SALT_LEN] = ct[..SALT_LEN].try_into()?;
     let cipher = cipher_from_ikm(ikm, &salt);
     let mut out = Vec::with_capacity(records.len());
@@ -359,7 +362,10 @@ impl StreamDecryptor {
                     .try_into()
                     .expect("header holds 4 rs octets"),
             ) as u64;
-            eyre::ensure!(rs > RECORD_OVERHEAD as u64, "record size too small");
+            // Same pre-auth seam as every other header parse: the shared rule
+            // rejects both a too-small and an over-ceiling `rs` before
+            // `record_len` becomes the buffering budget below.
+            validate_record_size(rs)?;
             // Foreign encoders may carry a key id; skip it. We never encode one.
             self.idlen = self.header[HEADER_LEN - 1];
             self.pending_id_skip = self.idlen as usize;

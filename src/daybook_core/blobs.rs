@@ -384,13 +384,17 @@ impl BlobsRepo {
                 while let Some(entry) = leaves.next_entry().await? {
                     let name = entry.file_name();
                     let Some(name) = name.to_str() else { continue };
-                    let Some(hex) = name.strip_suffix(".blob") else {
+                    let Some(stem) = name.strip_suffix(".blob") else {
                         continue;
                     };
-                    let Ok(hash) = blake3::Hash::from_hex(hex) else {
+                    // The filename is the bare multibase base58btc `Display`
+                    // spelling `object_paths` wrote — never hex, and never the
+                    // multihash-framed digest text — so only the blob-id parse
+                    // reads back the spelling the objects tree names files
+                    // with. A name that is not a digest names no blob; skip it.
+                    let Ok(blob_id) = blob_id_from_hash(stem) else {
                         continue;
                     };
-                    let blob_id = BlobId::new(*hash.as_bytes());
                     if announcements.insert(blob_id.clone()) {
                         self.blob_now_held(blob_id).await?;
                         read += 1;
@@ -1486,6 +1490,60 @@ mod tests {
             repo.get_path(from_digest).await?,
             repo.get_path(blob_id).await?,
             "the digest spelling must resolve to the blob's object on disk"
+        );
+        Ok(())
+    }
+
+    /// A presence sink that records what the announce announced, so a test can
+    /// observe the presence plane without wiring a full part store under it.
+    struct RecordingPresenceSink(std::sync::Mutex<Vec<(BlobId, u64)>>);
+
+    #[async_trait::async_trait]
+    impl BlobPresenceSink for RecordingPresenceSink {
+        async fn blob_now_held(&self, blob_id: BlobId, length_octets: u64) -> Res<()> {
+            self.0
+                .lock()
+                .expect("recording presence sink lock poisoned")
+                .push((blob_id, length_octets));
+            Ok(())
+        }
+    }
+
+    /// The boot announce reads back the filenames `object_paths` wrote: the
+    /// bare multibase base58btc `Display` spelling of the digest. Regression:
+    /// the walker once parsed filenames with `blake3::Hash::from_hex`, rejected
+    /// every real filename, and announced zero blobs, so pre-existing blobs
+    /// were never re-armed via the presence plane across a restart.
+    #[tokio::test]
+    async fn boot_announce_reads_bare_base58_object_filenames() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let data = b"boot-announce-payload";
+        let blob_id = BlobId::random();
+        let object_paths = repo.object_paths(blob_id.clone())?;
+        tokio::fs::create_dir_all(&object_paths.dir).await?;
+        tokio::fs::write(&object_paths.blob, data).await?;
+        // A filename that is not a digest names no blob: it must be skipped,
+        // not announced under a zero-padded or guessed identity.
+        tokio::fs::write(object_paths.dir.join("not-a-digest.blob"), b"junk").await?;
+
+        let recording = Arc::new(RecordingPresenceSink(std::sync::Mutex::new(Vec::new())));
+        *repo
+            .presence_sink
+            .write()
+            .expect("presence sink lock poisoned") =
+            Some(Arc::clone(&recording) as Arc<dyn BlobPresenceSink>);
+
+        repo.announce_held_blobs().await?;
+
+        let announced = recording
+            .0
+            .lock()
+            .expect("recording presence sink lock poisoned")
+            .clone();
+        assert_eq!(
+            announced,
+            vec![(blob_id, data.len() as u64)],
+            "the boot announce must re-arm blobs the objects tree already holds"
         );
         Ok(())
     }

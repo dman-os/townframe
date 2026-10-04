@@ -152,8 +152,8 @@ async fn iroh_sync_between_copied_repos() -> Res<()> {
     let repo_b_path = temp_root.path().join("repo-b");
     init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path, false).await?;
-    let node_b = open_sync_node(&repo_b_path, false).await?;
+    let node_a = open_sync_node_no_blobs(&repo_a_path).await?;
+    let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
 
     let mut created_doc_ids = Vec::new();
     for _ in 0..3 {
@@ -213,7 +213,7 @@ async fn shutdown_stops_the_inventory_writer_after_the_workers_that_serve_from_i
     .await?;
     rtx.shutdown().await?;
 
-    let node = open_sync_node(&repo_path, false).await?;
+    let node = open_sync_node_no_blobs(&repo_path).await?;
     // The record is read through a handle taken before the stop, which consumes
     // the token.
     let shutdown_order = node.sync_stop.shutdown_order();
@@ -242,8 +242,8 @@ async fn iroh_live_sync_bidirectional_after_clone() -> Res<()> {
     let repo_b_path = temp_root.path().join("repo-b");
     init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path, false).await?;
-    let node_b = open_sync_node(&repo_b_path, false).await?;
+    let node_a = open_sync_node_no_blobs(&repo_a_path).await?;
+    let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
 
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
@@ -302,13 +302,13 @@ async fn iroh_live_sync_propagates_repeated_doc_updates() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let seed_node = open_sync_node(&repo_a_path, false).await?;
+    let seed_node = open_sync_node_no_blobs(&repo_a_path).await?;
     let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket, &repo_b_path).await?;
     seed_node.stop().await?;
 
-    let node_a = open_sync_node(&repo_a_path, false).await?;
-    let node_b = open_sync_node(&repo_b_path, false).await?;
+    let node_a = open_sync_node_no_blobs(&repo_a_path).await?;
+    let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
 
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
@@ -386,7 +386,7 @@ async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path, false).await?;
+    let node_a = open_sync_node_no_blobs(&repo_a_path).await?;
     let created_doc_id = node_a
         .drawer
         .add(daybook_types::doc::AddDocArgs {
@@ -402,7 +402,7 @@ async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
     bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
     node_a.stop().await?;
 
-    let node_b = open_sync_node(&repo_b_path, false).await?;
+    let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
     let core_partition_id = node_b.sync_repo.authority.core_docs_part_id();
     let partitions = node_b
         .ctx
@@ -441,7 +441,7 @@ async fn bootstrap_ticket_in_tests_omits_relay_addresses() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node = open_sync_node(&repo_path, false).await?;
+    let node = open_sync_node_no_blobs(&repo_path).await?;
     let ticket = node.sync_repo.get_clone_ticket_url().await?;
     let info = crate::sync::resolve_clone_info_from_url(&ticket).await?;
     assert!(!info.repo_name.is_empty());
@@ -460,8 +460,8 @@ async fn long_test_iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
     let run = async {
         init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-        let node_a = open_sync_node(&repo_a_path, false).await?;
-        let node_b = open_sync_node(&repo_b_path, false).await?;
+        let node_a = open_sync_node_no_blobs(&repo_a_path).await?;
+        let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
         let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
         wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
@@ -540,7 +540,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path, false).await?;
+    let node_a = open_sync_node_no_blobs(&repo_a_path).await?;
     let mut blob_payloads = Vec::new();
     let mut args_batch = Vec::new();
     for idx in 0..3usize {
@@ -572,7 +572,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
     bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
 
     // Open node_b as a full node and converge.
-    let node_b = open_sync_node(&repo_b_path, false).await?;
+    let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
     wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
@@ -621,7 +621,7 @@ async fn iroh_clone_bootstrap_syncs_encrypted_representation_inventory() -> Res<
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path, true).await?;
+    let node_a = open_sync_node(&repo_a_path).await?;
     let encryption_inventory_doc_id = node_a
         .drawer
         .resolve_doc_id_for_branch_doc_id(node_a.ctx.encryption_inventory_doc_id.clone())
@@ -760,7 +760,7 @@ async fn iroh_clone_bootstrap_syncs_encrypted_representation_inventory() -> Res<
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
 
-    let node_b = open_sync_node(&repo_b_path, false).await?;
+    let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
     // Both sides must name the same blob parts: the clone adopts the origin's
     // inventory ids from the shared config doc.
@@ -959,7 +959,7 @@ async fn peer_partition_ids_advertise_every_blob_inventory() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node = open_sync_node(&repo_path, false).await?;
+    let node = open_sync_node_no_blobs(&repo_path).await?;
     let advertised = node.sync_repo.peer_partition_ids("", true);
     let inventories = [
         node.ctx.core_inventory_doc_id.clone(),
@@ -993,8 +993,8 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
     let run = async {
         init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-        let node_a = open_sync_node(&repo_a_path, false).await?;
-        let node_b = open_sync_node(&repo_b_path, false).await?;
+        let node_a = open_sync_node_no_blobs(&repo_a_path).await?;
+        let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
         let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
         wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
@@ -1059,8 +1059,8 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
     let run = async {
         init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-        let node_a = open_sync_node(&repo_a_path, false).await?;
-        let node_b = open_sync_node(&repo_b_path, false).await?;
+        let node_a = open_sync_node_no_blobs(&repo_a_path).await?;
+        let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
         let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
         let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
         wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
@@ -1221,7 +1221,7 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path, false).await?;
+    let node_a = open_sync_node_no_blobs(&repo_a_path).await?;
     let mut created_doc_ids = Vec::new();
     for _ in 0..8 {
         let new_doc_id = node_a
@@ -1240,7 +1240,7 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&sync_url, &repo_b_path).await?;
 
-    let node_b = open_sync_node(&repo_b_path, false).await?;
+    let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
     let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
     wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
 
@@ -1280,7 +1280,7 @@ async fn init_and_copy_repo_pair(
     let source_drawer_doc_id = rtx.doc_drawer.document_id();
     rtx.shutdown().await?;
 
-    let seed_node = open_sync_node(repo_a_path, false).await?;
+    let seed_node = open_sync_node_no_blobs(repo_a_path).await?;
     let result = async {
         let ticket = seed_node.sync_repo.get_clone_ticket_url().await?;
         bootstrap_clone_repo_from_url_for_tests(&ticket, repo_b_path).await?;
@@ -1337,12 +1337,11 @@ async fn bootstrap_clone_repo_from_url_for_tests(
     Ok(())
 }
 
-/// Open a sync node over a prepared repo.
-///
-/// `blob_workers` decides whether the production blob workers run: the node
-/// whose inventories a peer pulls needs them (those pins exist only because the
-/// workers derived them), while a node that merely fetches bytes does not.
-async fn open_sync_node(repo_root: &std::path::Path, blob_workers: bool) -> Res<SyncTestNode> {
+/// Open a sync test node over a prepared repo, with the production blob
+/// workers running: the node whose inventories a peer pulls needs them (those
+/// pins exist only because the workers derived them), or whose blob plane is
+/// under test.
+async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
     let rtx = RepoCtx::open(
         repo_root,
         RepoOpenOptions {
@@ -1351,12 +1350,32 @@ async fn open_sync_node(repo_root: &std::path::Path, blob_workers: bool) -> Res<
         "test-device".into(),
     )
     .await?;
-    open_sync_node_over_ctx(rtx, blob_workers).await
+    open_sync_node_over_ctx(rtx, true).await
 }
 
-/// The body of `open_sync_node` over an already-opened repo context: a told
-/// node's test-built ctx (see `init_told_sync_node`) takes the same boot path
-/// as a plain one.
+/// Open a sync test node whose production blob workers do not run: a node
+/// that only fetches bytes or moves document content across the link never
+/// derives or serves blob-plane inventories.
+async fn open_sync_node_no_blobs(repo_root: &std::path::Path) -> Res<SyncTestNode> {
+    let rtx = RepoCtx::open(
+        repo_root,
+        RepoOpenOptions {
+            sync_max_task_backoff: Some(Duration::from_millis(500)),
+        },
+        "test-device".into(),
+    )
+    .await?;
+    open_sync_node_over_ctx(rtx, false).await
+}
+
+/// [`open_sync_node_no_blobs`] over an already-opened repo context.
+async fn open_sync_node_no_blobs_over_ctx(rtx: Arc<RepoCtx>) -> Res<SyncTestNode> {
+    open_sync_node_over_ctx(rtx, false).await
+}
+
+/// The body of the sync-test node boot over an already-opened repo context: a
+/// told node's test-built ctx (see `init_told_sync_node`) takes the same boot
+/// path as a plain one.
 async fn open_sync_node_over_ctx(rtx: Arc<RepoCtx>, blob_workers: bool) -> Res<SyncTestNode> {
     info!(repo_root = %rtx.layout.repo_root.display(), "opening sync test node");
     let blobs_repo =
@@ -1650,8 +1669,8 @@ async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()
     let repo_b_path = temp_root.path().join("repo-b");
     init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path, false).await?;
-    let node_b = open_sync_node(&repo_b_path, false).await?;
+    let node_a = open_sync_node_no_blobs(&repo_a_path).await?;
+    let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
 
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
@@ -1701,8 +1720,8 @@ async fn a_peer_holds_its_revoked_branch_until_the_delete_lands_on_the_doc_chann
     let repo_b_path = temp_root.path().join("repo-b");
     init_and_copy_repo_pair(&repo_a_path, &repo_b_path).await?;
 
-    let node_a = open_sync_node(&repo_a_path, false).await?;
-    let node_b = open_sync_node(&repo_b_path, false).await?;
+    let node_a = open_sync_node_no_blobs(&repo_a_path).await?;
+    let node_b = open_sync_node_no_blobs(&repo_b_path).await?;
 
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     let endpoint_addr_ba = node_b.sync_repo.connect_url(&ticket_a).await?;
@@ -2261,7 +2280,7 @@ async fn init_told_sync_node(
             rtx.core_inventory_doc_id, told.core_inventory_doc_id,
             "the told boot must resolve the core inventory from the config doc",
         );
-        open_sync_node_over_ctx(rtx, false).await
+        open_sync_node_no_blobs_over_ctx(rtx).await
     }
     .await;
     result
@@ -2439,7 +2458,7 @@ async fn told_not_cloned_inventory_part_is_refused_until_the_inventory_document_
     .await?;
     rtx.shutdown().await?;
 
-    let node_a = open_sync_node(&repo_a_path, true).await?;
+    let node_a = open_sync_node(&repo_a_path).await?;
     let encryption_inventory_doc_id = node_a
         .drawer
         .resolve_doc_id_for_branch_doc_id(node_a.ctx.encryption_inventory_doc_id.clone())
@@ -2762,22 +2781,26 @@ async fn told_not_cloned_inventory_part_is_refused_until_the_inventory_document_
                 },
             )
             .collect();
-        let unanswered = for_a_and_ungranted
-            .iter()
-            .any(|(.., unanswered)| *unanswered);
-        if for_a_and_ungranted.len() == ungranted_parts.len() && unanswered {
-            break;
-        }
+        // Held to the FULL window: the refusal is only proven if every
+        // ungranted part is still unanswered AFTER the deadline, not merely
+        // once a momentary snapshot says so.
+        let all_refused = for_a_and_ungranted.len() == ungranted_parts.len()
+            && for_a_and_ungranted
+                .iter()
+                .all(|(.., unanswered)| *unanswered);
         if tokio::time::Instant::now() >= still_deadline {
             dump_sync_state(&node_b, "told node: ungranted parts lost their refusal").await;
-            eyre::bail!(
-                "the ungranted told parts must stay refused (answered=false, \
-                 unanswered=true) beside the granted one; saw {}/{}/{unanswered}, \
-                 snapshot flags: {:?}",
-                for_a_and_ungranted.len(),
-                ungranted_parts.len(),
-                snapshot.peer_part_sync_flags
-            );
+            if !all_refused {
+                eyre::bail!(
+                    "the ungranted told parts must stay refused (answered=false, \
+                     unanswered=true) beside the granted one; saw {}/{}/{all_refused}, \
+                     snapshot flags: {:?}",
+                    for_a_and_ungranted.len(),
+                    ungranted_parts.len(),
+                    snapshot.peer_part_sync_flags
+                );
+            }
+            break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

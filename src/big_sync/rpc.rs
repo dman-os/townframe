@@ -1247,6 +1247,10 @@ impl BigSyncRpcWorker {
     }
 }
 
+/// Ceiling on the parts set one `PeerSummary` request may name. Remote input;
+/// see the refusal in the message handler.
+const MAX_SUMMARY_PARTS: usize = 64;
+
 impl BigSyncRpcWorker {
     #[tracing::instrument(
         skip(self, msg),
@@ -1272,11 +1276,30 @@ impl BigSyncRpcWorker {
         match msg {
             BigSyncRpcMessage::PeerSummary(req) => {
                 let WithChannels { inner, tx, .. } = req;
+                // The parts set is remote input; the handler answers per part.
+                // A peer that names thousands of parts makes this handler run
+                // store work for every one of them; the answer set is bounded
+                // instead (a summary request names a peer's newly pending
+                // parts - the number of told inventories - so this ceiling is
+                // orders of magnitude above any honest request).
+                if inner.inner.parts.len() > MAX_SUMMARY_PARTS {
+                    warn!(
+                        requested = inner.inner.parts.len(),
+                        cap = MAX_SUMMARY_PARTS,
+                        "peer_summary names too many parts; refusing all"
+                    );
+                    tx.send(PeerSummaryResult {
+                        parts: HashMap::new(),
+                    })
+                    .await
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+                    return;
+                }
                 let Some(store) = self.stores.get(&inner.scope_key) else {
                     warn!(scope_key = %inner.scope_key, "peer_summary for unknown scope");
                     tx.send(PeerSummaryResult {
                         parts: HashMap::new(),
-                        refused: inner.inner.parts,
                     })
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1285,13 +1308,11 @@ impl BigSyncRpcWorker {
                 };
                 // An unauthenticated caller is refused on every arm: this surface has
                 // no local caller to serve, and a local in-process caller reaches the
-                // store directly. Refused as unknown rather than empty, so "not for
-                // you" cannot be told apart from "no such part".
+                // store directly. An empty answer refuses every named part.
                 let Some(asker) = authenticated_peer else {
                     warn!(scope_key = %inner.scope_key, "rejecting unauthenticated peer_summary request");
                     tx.send(PeerSummaryResult {
                         parts: HashMap::new(),
-                        refused: inner.inner.parts,
                     })
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1305,16 +1326,16 @@ impl BigSyncRpcWorker {
                         parts,
                         asker_part_cursors,
                     } = inner.inner;
-                    // The answer is per part. A part the asker may not read has to look
-                    // exactly like one this scope does not know (denied and missing fold
-                    // together, per part), but a refusal must never swallow the readable
-                    // parts' summaries riding the same request: a granted part starved
-                    // beside an ungranted one is the batch-refusal defect this shape
-                    // exists to close. The store's own `summarize_parts` contract still
-                    // folds an unknown part into an error, so each part is summarized
-                    // on its own; a summary request names a peer's newly pending parts
-                    // (the number of told inventories), not an unbounded set.
-                    let mut refused = HashSet::new();
+                    // The answer is per part. A part the asker may not read is
+                    // simply absent from the answer map - denied and missing fold
+                    // together in what the map omits - but a part's absence must
+                    // never swallow a readable part's summary riding the same
+                    // request: a granted part starved beside an ungranted one is
+                    // the batch-refusal defect this per-part shape exists to close.
+                    // The store's own `summarize_parts` contract still folds an
+                    // unknown part into an error, so each part is summarized on its
+                    // own; a summary request names a peer's newly pending parts (the
+                    // number of told inventories), not an unbounded set.
                     let mut summaries = HashMap::new();
                     for part_id in parts {
                         if store
@@ -1322,38 +1343,28 @@ impl BigSyncRpcWorker {
                             .await
                             .unwrap()
                         {
-                            refused.insert(part_id);
                             continue;
                         }
-                        match store
+                        if let Ok(mut parts) = store
                             .summarize_parts(HashSet::from([part_id.clone()]))
                             .await
                             .unwrap()
                         {
-                            Ok(mut parts) => {
-                                let Some(summary) = parts.remove(&part_id) else {
-                                    refused.insert(part_id);
-                                    continue;
-                                };
-                                let since = asker_part_cursors.get(&part_id).copied().unwrap_or(0);
-                                let dirty = store
-                                    .part_dirty_count(part_id.clone(), Some(asker.clone()), since)
-                                    .await
-                                    .unwrap();
-                                summaries.insert(part_id, summary.into_strat_summaries(dirty));
-                            }
-                            // The store reports an unknown part by name; a refusal races
-                            // nothing here because this part passed the readability
-                            // pre-pass just above.
-                            Err(ListPartsError::UnkownParts { .. }) => {
-                                refused.insert(part_id);
-                            }
+                            let Some(summary) = parts.remove(&part_id) else {
+                                continue;
+                            };
+                            let since = asker_part_cursors.get(&part_id).copied().unwrap_or(0);
+                            let dirty = store
+                                .part_dirty_count(part_id.clone(), Some(asker.clone()), since)
+                                .await
+                                .unwrap();
+                            summaries.insert(part_id, summary.into_strat_summaries(dirty));
                         }
+                        // The store reports an unknown part by name - that part is
+                        // just absent from the answer; this part passed the
+                        // readability pre-pass so the race is unknown-parts only.
                     }
-                    PeerSummaryResult {
-                        parts: summaries,
-                        refused,
-                    }
+                    PeerSummaryResult { parts: summaries }
                 };
                 tx.send(out)
                     .await
@@ -2263,14 +2274,14 @@ mod tests {
         })
     }
 
-    /// A permitted asker gets the part's own summary; a refused one gets the part named
-    /// refused — the per-part answer that keeps the part's neighbors' summaries on the
-    /// wire — and denied stays indistinguishable from unknown.
+    /// A permitted asker gets the part's own summary; a refused one gets an
+    /// empty answer map (the part's absence is the refusal) — the per-part
+    /// answer that keeps the part's neighbors' summaries on the wire — and
+    /// denied stays indistinguishable from unknown.
     async fn assert_peer_summary_arm(
         caller: Caller<'_>,
         caller_label: &str,
         entitlement: Entitlement,
-        part_id: &PartKey,
         req: ScopedRequest<PeerSummaryRequest>,
         expected: &PeerSummaryResult,
     ) -> Res<()> {
@@ -2281,14 +2292,11 @@ mod tests {
                 "{caller_label}: a permitted asker gets the store's own summary"
             ),
             (Entitlement::Refused, answer) => {
+                // Refusal is an empty answer map: a part the response does not
+                // name is refused by its absence.
                 assert!(
                     answer.parts.is_empty(),
                     "{caller_label}: a refusal answers no part summaries"
-                );
-                assert_eq!(
-                    answer.refused.iter().collect::<Vec<_>>(),
-                    vec![part_id],
-                    "{caller_label}: the refusal names the part it will not answer for"
                 );
             }
         }
@@ -2504,10 +2512,7 @@ mod tests {
             }
             // A granted part is never refused, and the store contract guarantees
             // coverage of every granted part asked.
-            PeerSummaryResult {
-                parts: summaries,
-                refused: HashSet::new(),
-            }
+            PeerSummaryResult { parts: summaries }
         };
         let expected_changed = store
             .get_changed_buckets(changed_request().inner, granted_peer.clone())
@@ -2573,7 +2578,6 @@ mod tests {
                 caller,
                 caller_label,
                 entitlement,
-                &part_id,
                 summary_request(),
                 &expected_summary,
             )

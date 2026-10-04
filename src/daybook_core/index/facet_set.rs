@@ -1,5 +1,6 @@
 #![allow(dead_code)]
-use crate::drawer::{BranchIdentityResolution, DrawerRepo};
+use crate::blobs::{BlobId, encryption_worker::plaintext_blob_id};
+use crate::drawer::{BranchIdentityResolution, DrawerRepo, ExactFacetValueHydration};
 use crate::index::doc_delta_store::{
     DocDelta, DocDeltaBranchFilter, DocDeltaRevisionStore, DocDeltaSelector, begin_settlement,
 };
@@ -18,7 +19,9 @@ use big_sync_core::keyed_frontier::{
 };
 use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore, RevisionedStoreReader};
 use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
-use daybook_types::doc::{BranchId, ChangeHashSet, DocId, FacetKey, FacetTag, WellKnownFacetTag};
+use daybook_types::doc::{
+    BranchId, ChangeHashSet, DocId, FacetKey, FacetTag, WellKnownFacet, WellKnownFacetTag,
+};
 use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use tokio_util::sync::CancellationToken;
@@ -197,6 +200,12 @@ struct PreparedFacetSetProjection {
     branch_heads: BTreeMap<(DocId, String), Option<ChangeHashSet>>,
     removed_local: BTreeSet<(DocId, String, FacetKey)>,
     settled_current_heads: Option<ChangeHashSet>,
+    /// The plaintext digests the projected `Blob` facets name IN THEIR VALUES,
+    /// keyed by (document, physical branch). This is the presence plane's
+    /// association key (ADR 003 §13): a production `Blob` facet's key id is
+    /// `DEFAULT_FACET_ID` (`FacetKey::from(WellKnownFacetTag::Blob)`), so only
+    /// the value names the blob the facet declares.
+    blob_digests: BTreeMap<(DocId, String), BTreeSet<BlobId>>,
 }
 
 impl FacetSetRevisionStore {
@@ -241,6 +250,7 @@ impl FacetSetRevisionStore {
         let mut branch_heads = BTreeMap::<(DocId, String), Option<ChangeHashSet>>::new();
         let mut removed_local = BTreeSet::new();
         let mut settled_current_heads = None;
+        let mut blob_digests = BTreeMap::<(DocId, String), BTreeSet<BlobId>>::new();
         for delta in entries {
             let Some(event_heads) = delta.current_heads.as_ref() else {
                 // A removed branch has no current heads. Its previous heads
@@ -370,6 +380,29 @@ impl FacetSetRevisionStore {
                 }
             }
             for (facet_key, (facet_heads, actor_id)) in state.facets {
+                // The second projection: what the facet VALUE names. Only the
+                // `Blob` tag carries a digest in its value; the digest row
+                // lands beside the route rows in the same settlement, and its
+                // deletion rides `affected`, so a branch's digest projection
+                // always mirrors its facet-set rows.
+                let digests = if let FacetTag::WellKnown(WellKnownFacetTag::Blob) = &facet_key.tag {
+                    let Some(digests) = self
+                        .blob_facet_digests(
+                            drawer,
+                            &delta.branch_id,
+                            &state.branch_heads,
+                            &facet_key,
+                        )
+                        .await?
+                    else {
+                        // The value is not materialized at these heads; defer
+                        // the revision, as every other hydration here does.
+                        return Ok(None);
+                    };
+                    (!digests.is_empty()).then_some(digests)
+                } else {
+                    None
+                };
                 desired.insert(
                     FacetRouteKey {
                         document_id: state.document_id.clone(),
@@ -382,6 +415,12 @@ impl FacetSetRevisionStore {
                         actor_id,
                     },
                 );
+                if let Some(digests) = digests {
+                    blob_digests
+                        .entry((state.document_id.clone(), delta.branch_id.0.clone()))
+                        .or_default()
+                        .extend(digests);
+                }
             }
         }
 
@@ -391,7 +430,56 @@ impl FacetSetRevisionStore {
             branch_heads,
             removed_local,
             settled_current_heads,
+            blob_digests,
         }))
+    }
+
+    /// The plaintext digests one Blob facet's value names, via the same
+    /// helper the reconcile reads Blob facets with (`plaintext_blob_id`): the
+    /// value's `digest` field in either ADR 003 §3 spelling, falling back to
+    /// the digest a `db+blob` URL path names. `None` defers the revision the
+    /// way an unresolved identity does; an absent or untypable value indexes
+    /// no digest rather than failing the machine, because the value is
+    /// peer-authored content the route projection must not stall on.
+    async fn blob_facet_digests(
+        &self,
+        drawer: &DrawerRepo,
+        physical_branch_id: &BranchId,
+        branch_heads: &ChangeHashSet,
+        facet_key: &FacetKey,
+    ) -> Res<Option<Vec<BlobId>>> {
+        match drawer
+            .hydrate_facet_value_at_heads(physical_branch_id, branch_heads, facet_key)
+            .await?
+        {
+            ExactFacetValueHydration::Deferred => Ok(None),
+            ExactFacetValueHydration::Absent => {
+                tracing::warn!(
+                    branch_id = %physical_branch_id.0,
+                    facet = %facet_key,
+                    "facet-set value-digest projection: active Blob facet's value is absent"
+                );
+                Ok(Some(Vec::new()))
+            }
+            ExactFacetValueHydration::Present(raw) => {
+                let blob = match WellKnownFacet::from_json(raw, WellKnownFacetTag::Blob) {
+                    Ok(WellKnownFacet::Blob(blob)) => blob,
+                    Ok(other) => {
+                        tracing::warn!(
+                            facet = %facet_key,
+                            tag = ?other.tag(),
+                            "Blob facet decoded to another variant; indexing no digest"
+                        );
+                        return Ok(Some(Vec::new()));
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, facet = %facet_key, "Blob facet value undecodable");
+                        return Ok(Some(Vec::new()));
+                    }
+                };
+                Ok(Some(plaintext_blob_id(&blob).into_iter().collect()))
+            }
+        }
     }
 
     /// Apply a prepared projection inside the caller-owned walker state
@@ -457,6 +545,10 @@ impl FacetSetRevisionStore {
 
         delete_routes(tx, &prepared.affected).await?;
         insert_routes(tx, &prepared.desired).await?;
+        // The value-digest projection rides the same settlement: a branch's
+        // digest rows are rewritten exactly when its facet rows are.
+        delete_blob_digest_routes(tx, &prepared.affected).await?;
+        insert_blob_digest_routes(tx, &prepared.blob_digests).await?;
         self.frontier
             .apply_in_context(tx, mutations)
             .await
@@ -571,6 +663,68 @@ async fn insert_routes(
             .push(", ")
             .push_bind(serde_json::to_string(&snapshot.branch_heads)?)
             .push(")");
+    }
+    query.build().execute(&mut **tx).await?;
+    Ok(())
+}
+
+async fn delete_blob_digest_routes(
+    tx: &mut Transaction<'_, Sqlite>,
+    affected: &BTreeSet<(DocId, String)>,
+) -> Res<()> {
+    if affected.is_empty() {
+        return Ok(());
+    }
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "DELETE FROM facet_set_doc_blob_facets WHERE (document_id, branch_id) IN (",
+    );
+    let mut first = true;
+    for (document_id, branch_id) in affected {
+        if !first {
+            query.push(", ");
+        }
+        first = false;
+        query
+            .push("(")
+            .push_bind(document_id)
+            .push(", ")
+            .push_bind(branch_id)
+            .push(")");
+    }
+    query.push(")");
+    query.build().execute(&mut **tx).await?;
+    Ok(())
+}
+
+async fn insert_blob_digest_routes(
+    tx: &mut Transaction<'_, Sqlite>,
+    blob_digests: &BTreeMap<(DocId, String), BTreeSet<BlobId>>,
+) -> Res<()> {
+    if blob_digests.is_empty() {
+        return Ok(());
+    }
+    // The digest is stored in the bare multibase spelling (`BlobId`'s
+    // `Display`): one canonical spelling per digest, whatever the facet
+    // value's authored spelling was.
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "INSERT INTO facet_set_doc_blob_facets(document_id, branch_id, blob_digest) VALUES ",
+    );
+    let mut first = true;
+    for (row, digests) in blob_digests {
+        for digest in digests {
+            if !first {
+                query.push(", ");
+            }
+            first = false;
+            query
+                .push("(")
+                .push_bind(&row.0)
+                .push(", ")
+                .push_bind(&row.1)
+                .push(", ")
+                .push_bind(digest.to_string())
+                .push(")");
+        }
     }
     query.build().execute(&mut **tx).await?;
     Ok(())
@@ -1025,6 +1179,31 @@ impl DocFacetSetIndexRepo {
         .execute(&sql.write_pool)
         .await?;
 
+        // The presence-plane projection (ADR 003 §13): rows carry the
+        // plaintext digest the `Blob` facet VALUE names, not the facet key's
+        // id, which is `DEFAULT_FACET_ID` for every production-authored `Blob`
+        // facet. Projected alongside the route table in the streaming
+        // projection write; a store predating this table re-projects its rows
+        // on the next delta for the affected branch, like every other
+        // streamed facet-set state.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS facet_set_doc_blob_facets (
+                document_id TEXT NOT NULL
+              , branch_id TEXT NOT NULL
+              , blob_digest TEXT NOT NULL
+              , PRIMARY KEY(document_id, branch_id, blob_digest)
+            ) STRICT
+            "#,
+        )
+        .execute(&sql.write_pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_facet_set_doc_blob_facets_digest ON facet_set_doc_blob_facets(blob_digest, document_id, branch_id)",
+        )
+        .execute(&sql.write_pool)
+        .await?;
+
         Ok(())
     }
 
@@ -1070,26 +1249,33 @@ impl DocFacetSetIndexRepo {
             .collect()
     }
     /// The association lookup the presence plane drives: documents/branches
-    /// whose facet of `facet_tag` carries `facet_id` as its id. For `Blob`
-    /// facets the id is the plaintext digest, so this is the map from a blob
-    /// arrival to the documents it belongs to (ADR 003 §13).
-    pub async fn list_docs_for_facet_tag_id(
+    /// whose `Blob` facet VALUE names `blob_digest` as its plaintext digest
+    /// (ADR 003 §13). This is not the facet key's id — production authors
+    /// `Blob` facets via `FacetKey::from(WellKnownFacetTag::Blob)` whose id
+    /// is `DEFAULT_FACET_ID` — so the digest projection built by the
+    /// streaming facet-set projection is what a blob arrival resolves here,
+    /// compared in its canonical bare-multibase spelling.
+    pub async fn list_docs_for_blob_digest(
         &self,
-        facet_tag: &str,
-        facet_id: &str,
+        blob_digest: &BlobId,
     ) -> Res<Vec<DocFacetTagMembership>> {
         let rows = sqlx::query_as::<_, (String, String, String)>(
             r#"
-            SELECT document_id, branch_id, branch_heads_json
-              FROM facet_set_doc_facets
-             WHERE facet_tag = ?1
-               AND facet_id = ?2
-             GROUP BY document_id, branch_id, branch_heads_json
-             ORDER BY document_id ASC, branch_id ASC
+            SELECT bf.document_id
+                 , bf.branch_id
+                 , ff.branch_heads_json
+              FROM facet_set_doc_blob_facets AS bf
+              JOIN facet_set_doc_facets AS ff
+                ON ff.document_id = bf.document_id
+               AND ff.branch_id = bf.branch_id
+               AND ff.facet_tag = ?2
+             WHERE bf.blob_digest = ?1
+             GROUP BY bf.document_id, bf.branch_id, ff.branch_heads_json
+             ORDER BY bf.document_id ASC, bf.branch_id ASC
             "#,
         )
-        .bind(facet_tag)
-        .bind(facet_id)
+        .bind(blob_digest.to_string())
+        .bind(WellKnownFacetTag::Blob.as_str())
         .fetch_all(&self.sql.read_pool)
         .await?;
 
@@ -1099,7 +1285,7 @@ impl DocFacetSetIndexRepo {
                 Ok(DocFacetTagMembership {
                     doc_id,
                     branch_id: BranchId(branch_id),
-                    facet_tag: facet_tag.to_string(),
+                    facet_tag: WellKnownFacetTag::Blob.as_str().to_string(),
                     origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
                 })
             })

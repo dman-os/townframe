@@ -229,6 +229,10 @@ impl FsDownloadLedger {
         );
         let salt = bytes[5..21].try_into().expect("16 salt octets");
         let rs = u32::from_be_bytes(bytes[21..25].try_into().unwrap());
+        // The ledger meta was written by our own downloads, but it is local
+        // disk and it was not authenticated: the same header-`rs` bound every
+        // other decode seam applies here too, before any stride math trusts it.
+        crate::blobs::encrypt::params::validate_record_size(u64::from(rs))?;
         let idlen = bytes[25];
         let padding = match bytes[26] {
             0 => Padding::Minimal,
@@ -338,10 +342,7 @@ pub async fn download_encrypted(
             // size comes from its own authenticated header, and only the
             // padding policy - which the wire does not carry - comes from the
             // facet.
-            let encoding = EncodingParams {
-                record_size: u64::from(facts.rs),
-                padding,
-            };
+            let encoding = EncodingParams::new(u64::from(facts.rs), padding)?;
             (Some((file, Some(facts), seq)), encoding)
         }
     };

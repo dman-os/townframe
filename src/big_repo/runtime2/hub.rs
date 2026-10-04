@@ -379,7 +379,7 @@ pub(crate) async fn await_keyhive_channels(
     for done_rx in runs {
         // A peer whose round fails here does not fail the caller: the failure
         // means the settle could not be observed, which leaves exactly the
-        // pre-fix window, and the Keyhive generation's own `MissingPrekeys`
+        // pre-settle window, and the Keyhive generation's own `MissingPrekeys`
         // diagnostics still describe the projection honestly. Only a hub
         // failure (the waiter's response channel closing) is fatal here, as it
         // is for every other caller of these commands.

@@ -208,12 +208,18 @@ pub(crate) async fn install_virtual_encrypted(
     let outboard_len = tree.outboard_size() as usize;
 
     // Producer: re-hash the plaintext while encrypting; write the ciphertext
-    // wire bytes (header + whole records) into the pipe. Ending the future
-    // closes the pipe: that is what tells the hasher the stream is complete.
+    // wire bytes (header + whole records) into the pipe. The producer OWNS the
+    // pipe writer (async move, never a borrow): ending the future on any exit
+    // - the `?` bails below included - drops `c_tx` and so closes the pipe,
+    // which is what tells the consumer's bao tree the input ended. A writer
+    // merely borrowed from this scope would outlive an early producer exit and
+    // only drop when this function returns - after the join - so the spawned
+    // blocking consumer would wait for an EOF that never comes while the
+    // install runs: create/rotate/reuse and resume installs deadlock.
     let enc = RecordEncryptor::new(key, &p_hash, encoding);
     let (mut c_tx, c_rx) = tokio::io::duplex(64 * 1024);
     let (rebuilt_tx, rebuilt_rx) = tokio::sync::oneshot::channel::<blake3::Hash>();
-    let producer = async {
+    let producer = async move {
         let mut enc = enc;
         let mut p_hasher = blake3::Hasher::new();
         c_tx.write_all(&enc.bake_header()).await?;
@@ -242,7 +248,8 @@ pub(crate) async fn install_virtual_encrypted(
 
     // Consumer: incremental bao hashing over the ciphertext stream. Purely
     // synchronous (bao_tree's streaming outboard); bridged off the async
-    // producer through the duplex pipe. Peak memory: chunk-group buffer +
+    // producer through the duplex pipe - its EOF is the producer's drop of
+    // `c_tx`, never this scope's. Peak memory: chunk-group buffer +
     // the outboard bytes (~1/512 of the ciphertext).
     let consumer = tokio::task::spawn_blocking(move || {
         let mut reader = tokio_util::io::SyncIoBridge::new(c_rx);
@@ -303,4 +310,104 @@ pub async fn get_decrypted(
     }
     dec.finish()?;
     Ok(dec.into_plaintext())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::io;
+    use std::sync::Arc;
+
+    use bao_tree::io::mixed::ReadBytesAt;
+    use bao_tree::io::outboard::PreOrderMemOutboard;
+    use iroh_blobs::store::virtual_blob::{DynVirtualSource, Provider};
+
+    /// Provider name for the mid-stream-error source below. Deliberately not
+    /// [`PROVIDER_NAME`] so this test's entry can never be served by real
+    /// cipherblob machinery.
+    const FAILING_SOURCE: &str = "test-failing-source";
+
+    /// A virtual source that serves the first leaf window (offset 0) with the
+    /// real bytes and fails every later window read. `export_bao` surfaces
+    /// that as `Size` .. `Leaf` .. `Error` mid-stream - leaf 0 must serve
+    /// correctly, or its bao validation would fail before any leaf item is
+    /// emitted. Exactly the early producer exit that used to park the
+    /// install's spawned consumer on an EOF that could only arrive after the
+    /// join: the `c_tx`-ownership deadlock.
+    struct FailsAfterFirstLeaf {
+        plain: Vec<u8>,
+    }
+
+    impl ReadBytesAt for FailsAfterFirstLeaf {
+        fn read_bytes_at(&self, offset: u64, size: usize) -> io::Result<bytes::Bytes> {
+            if offset == 0 && size > 0 {
+                let end = size.min(self.plain.len());
+                return Ok(bytes::Bytes::copy_from_slice(&self.plain[..end]));
+            }
+            Err(io::Error::other("mid-stream failure"))
+        }
+    }
+
+    impl Provider for FailsAfterFirstLeaf {
+        fn reader_for(&self, _hash: &Hash) -> Option<DynVirtualSource> {
+            Some(Arc::new(FailsAfterFirstLeaf {
+                plain: self.plain.clone(),
+            }))
+        }
+    }
+
+    /// The install producer must own its pipe writer: when the plaintext
+    /// export fails *mid-stream* (here: a virtual source that errors on the
+    /// second leaf read), every exit path from the producer future drops the
+    /// writer, the spawned consumer sees EOF and finishes, and
+    /// [`install_virtual_encrypted`] returns the export error promptly. With
+    /// the writer merely borrowed, the consumer parked on it until this
+    /// function returned - after the join - and the install hung forever.
+    /// The timeout is only a hang tripwire, generously bounded; the
+    /// assertion under test is a prompt `Err` naming the export failure.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn install_fails_promptly_when_export_errors_mid_stream() -> Res<()> {
+        let (mem, virtuals) =
+            iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
+        let store = Store::from(mem);
+
+        // 40_000 octets = more than the two 16 KiB bao leaves the scenario
+        // needs (leaf 0 serves, a later leaf read errors mid-stream).
+        const PLAIN_LEN: usize = 40_000;
+        let plain = vec![0x11u8; PLAIN_LEN];
+        let ob = PreOrderMemOutboard::create(&plain, iroh_blobs::store::IROH_BLOCK_SIZE);
+        let p_hash: Hash = ob.root.into();
+        store
+            .blobs()
+            .add_virtual_with_outboard(p_hash, plain.len() as u64, ob.data, FAILING_SOURCE)
+            .await?;
+        virtuals
+            .register(
+                FAILING_SOURCE,
+                Arc::new(FailsAfterFirstLeaf {
+                    plain: plain.clone(),
+                }),
+            )
+            .expect("registering the test provider cannot fail");
+
+        let key = MasterKey::random();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            install_virtual_encrypted(&store, &key, p_hash, EncodingParams::DEFAULT),
+        )
+        .await
+        {
+            Err(_) => panic!(
+                "install hung when the export failed mid-stream; \
+                 this is the c_tx-ownership deadlock"
+            ),
+            Ok(Err(err)) => assert!(
+                err.to_string().contains("export of"),
+                "the failure must be the producer's export bail, not a different error: {err}"
+            ),
+            Ok(Ok(c)) => panic!("a mid-stream export failure must not install a ciphertext: {c}"),
+        }
+        Ok(())
+    }
 }

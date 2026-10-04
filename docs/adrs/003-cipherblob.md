@@ -866,8 +866,13 @@ derived pin disappears
 delete ct:/pt: tags
 ```
 
-A domain that skips the last step leaks both the representation's outboard and
-its plaintext permanently. Release therefore belongs to the same component that
+The last two steps happen in that order deliberately: the pin row leaves the
+inventory diff, its pair is released from the store, and only then is the
+removal written. A crash in the gap releases a pair whose pin row still
+exists, which serves a not-found until the retry lands the removal - the
+inverse order would strand a GC root that nothing will ever claim again.
+A domain that skips the release step entirely leaks both the
+representation's outboard and its plaintext permanently. Release therefore belongs to the same component that
 derives pins, and is reconciled the same way - from facets, towards the store -
 rather than being a side effect of deleting a document.
 This release is deliberately reactive, with no positive-evidence scan in

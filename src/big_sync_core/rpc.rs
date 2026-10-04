@@ -329,13 +329,6 @@ structstruck::strike! {
         /// picks a strat per part (cursor diff or bucket working level), so
         /// different parts can be served by different strats.
         pub parts: Map<PartKey, Vec<PartStratSummary>>,
-        /// Parts named in the request this answer refuses: a part unknown to the
-        /// responder or not granted to the asker, denied and missing deliberately
-        /// folded together per part (a denial that answers differently from an
-        /// unknown part confirms the part exists). Refusing a part must never
-        /// swallow a different readable part's summary riding the same request,
-        /// so the refusal travels with the answer instead of replacing it.
-        pub refused: Set<PartKey>,
     }
 }
 
