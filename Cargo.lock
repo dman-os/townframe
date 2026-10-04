@@ -7949,10 +7949,24 @@ dependencies = [
  "daybook_core",
  "daybook_types",
  "pauperfuse",
+ "pauperfuse_lens",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "tokio",
  "utils_rs",
+]
+
+[[package]]
+name = "pauperfuse_lens"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "daybook_types",
+ "displaydoc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

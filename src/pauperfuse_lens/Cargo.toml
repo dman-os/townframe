@@ -1,0 +1,18 @@
+[package]
+name = "pauperfuse_lens"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+daybook_types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+displaydoc.workspace = true
+async-trait.workspace = true

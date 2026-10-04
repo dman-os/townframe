@@ -593,7 +593,33 @@ mod unix {
     }
 
     async fn create(node: NodeHandle, drawer: Arc<daybook_core::drawer::DrawerRepo>, directory: &Path, document: String) -> Res<PathBuf> {
-        let (projection, basis) = Projection::select(&drawer, document).await?;
+        let claims = Projection::select_claims(&drawer, document.clone()).await?;
+        let basis = claims.heads.clone();
+        let projected = claims.projected();
+        // Today's checkout surface handles exactly one projected dpath claim;
+        // everything else is a visible outcome, never a silently ignored
+        // claim (Q5).
+        // Checkout execution stays note-only for now: a raw-blob projection
+        // names the deferred blob-routing phase at the recipe-identity check
+        // inside Daybook (LensFailure::Recipe surfaces as a Pending-marker
+        // failure; nothing silently swallows it).
+        let (_, projection, _) = match projected.as_slice() {
+            [single] => single.clone(),
+            many => {
+                let outcomes = claims
+                    .outcomes
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                eyre::bail!(
+                    "checkout requires exactly one projected dpath claim; document {} projected {} ({}); outcomes: {outcomes}",
+                    document,
+                    many.len(),
+                    claims.outcomes.len()
+                );
+            }
+        };
         let output = RelPath::parse(&projection.path)?;
         validate_output(&output)?;
         let absolute = std::path::absolute(directory)?;

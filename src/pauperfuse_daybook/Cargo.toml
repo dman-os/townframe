@@ -15,6 +15,10 @@ am_utils_rs.workspace = true
 daybook_core.workspace = true
 daybook_types.workspace = true
 pauperfuse.workspace = true
+pauperfuse_lens.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

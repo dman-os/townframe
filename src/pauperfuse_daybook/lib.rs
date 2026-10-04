@@ -1,5 +1,7 @@
-//! The first Daybook producer: one whole-document dpath whose Body selects a text Note.
-//! Selection is explicit; unsupported compound or cross-document interpretations fail.
+//! The first Daybook producer lens stack: whole-document dpath claims whose
+//! Body selects a text/plain Note, routed through the `pauperfuse_lens`
+//! stage contract. Recognition declinations are per-claim visible outcomes
+//! (Q5); unsupported *execution* states stay explicit errors.
 
 mod interlude {
     pub use daybook_types::doc::{
@@ -11,9 +13,10 @@ mod interlude {
     };
     pub use utils_rs::prelude::*;
 }
+pub(crate) mod lens;
 use crate::interlude::*;
 use daybook_core::drawer::DrawerRepo;
-use daybook_types::dpath::{Dpath, DpathFacet};
+use daybook_types::dpath::Dpath;
 use std::collections::VecDeque;
 
 #[derive(Debug, thiserror::Error)]
@@ -22,11 +25,38 @@ pub enum Error {
     Unsupported(String),
     #[error("exact Daybook source unavailable: {0}")]
     Unavailable(String),
+    #[error("lens selection failed: {0}")]
+    Selection(String),
+    #[error("projection preparation failed: {0}")]
+    Preparation(String),
     #[error(transparent)]
     Repository(#[from] eyre::Report),
 }
 
+use pauperfuse_lens::{LensPrepare, LensProduce};
+
+pub use lens::lens_registry;
+pub use lens::{RawBlobLens, RawTextNoteLens};
+
+impl From<pauperfuse_lens::LensFailure> for Error {
+    fn from(failure: pauperfuse_lens::LensFailure) -> Self {
+        match failure {
+            pauperfuse_lens::LensFailure::Preparation(detail) => Self::Preparation(detail),
+            pauperfuse_lens::LensFailure::Unavailable(detail) => Self::Unavailable(detail),
+            pauperfuse_lens::LensFailure::Runtime(detail)
+            | pauperfuse_lens::LensFailure::Recipe(detail) => Self::Repository(eyre::eyre!(detail)),
+        }
+    }
+}
+
 /// Durable recipe for one raw-text output, with no rendered bytes.
+///
+/// This is the v3 marker's per-output record spelling (its `projection`,
+/// `renderHeads`, and `Ready` state's length/digest are exactly the lens
+/// contract's selection provenance for the single output; the marker schema
+/// does not grow this phase). The contract-level types live in
+/// `pauperfuse_lens` — `Recipe`, `SelectionProvenance` — and map onto these
+/// fields mechanically.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Projection {
@@ -35,79 +65,145 @@ pub struct Projection {
     pub path: String,
 }
 
+/// The per-claim projection selection of one document at its main heads
+/// (ADR 012 §1–§5; Q5): every dpath claim gets an outcome — the selected
+/// proposal with its recipe at the evaluated heads, or a visible
+/// uninterpreted reason. Selection recomputes statelessly; nothing here is
+/// persisted until the caller records the claim's projection.
+#[derive(Debug, Clone)]
+pub struct SelectedClaims {
+    pub document: DocId,
+    pub heads: ChangeHashSet,
+    pub outcomes: Vec<pauperfuse_lens::ClaimOutcome>,
+}
+
+impl SelectedClaims {
+    /// The projected claims in claim order with their recipes; today's
+    /// coordinator surfaces expect exactly one.
+    pub fn projected(&self) -> Vec<(pauperfuse_lens::Subject, Projection, pauperfuse_lens::Recipe)> {
+        self.outcomes
+            .iter()
+            .filter_map(|outcome| match outcome {
+                pauperfuse_lens::ClaimOutcome::Projected(projected) => {
+                    let subject = &projected.subject;
+                    let recipe = &projected.recipe;
+                    // A projected recipe has exactly one affected (owned)
+                    // input; the projection path is the first output slot's
+                    // claimed structure (selector-validated non-empty).
+                    let affected = recipe
+                        .affected_inputs
+                        .first()
+                        .cloned()
+                        .expect("a projected recipe has an affected input");
+                    Some((
+                        subject.clone(),
+                        Projection {
+                            document: self.document.clone(),
+                            facet: affected.facet,
+                            path: projected.proposal.outputs[0].path.clone(),
+                        },
+                        recipe.clone(),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 impl Projection {
-    /// Validates the current main-branch interpretation and returns its exact basis.
-    pub async fn select(
+    /// Interprets every dpath claim of the document on `main` through the
+    /// lens registry: proposals → the stateless selector → per-claim
+    /// outcomes. Uninterpretable claims — selective shapes, missing or
+    /// stub/blob Body targets, cross-document/pinned references, malformed
+    /// labels — are *outcomes*, not errors (Q5); repository/surfaces errors
+    /// remain errors.
+    pub async fn select_claims(
         drawer: &DrawerRepo,
         document: DocId,
-    ) -> Result<(Self, ChangeHashSet), Error> {
+    ) -> Result<SelectedClaims, Error> {
         let (doc, heads) = drawer
             .get_with_heads(&document, BranchPath::new("main"), None)
             .await?
             .ok_or_else(|| Error::Unavailable(format!("document {document} on main")))?;
-        let mut dpaths = Vec::new();
-        for (key, value) in &doc.facets {
-            if let Some(path) = Dpath::parse_facet_key(key) {
-                let path = path.map_err(|error| Error::Unsupported(error.to_string()))?;
-                let scope = DpathFacet::from_json_value(value).map_err(Error::Unsupported)?;
-                if !scope.is_whole_document() {
-                    return Err(Error::Unsupported("selective dpath".into()));
+        let heads_wire = am_utils_rs::serialize_commit_heads(&heads);
+        let registry = lens_registry();
+        let config = pauperfuse_lens::SelectionConfig::default();
+
+        // Deterministic claim order (sorted labels); malformed labels stay
+        // enumerated and visible (FDR 001 §4: reported, never silently
+        // dropped).
+        let mut claims = doc
+            .facets
+            .keys()
+            .filter(|key| Dpath::parse_facet_key(key).is_some())
+            .collect::<Vec<_>>();
+        claims.sort_by(|left, right| left.id.cmp(&right.id));
+
+        let mut outcomes = Vec::new();
+        for key in claims {
+            let dpath = match Dpath::parse_facet_key(key) {
+                Some(Ok(dpath)) => dpath,
+                Some(Err(error)) => {
+                    outcomes.push(pauperfuse_lens::ClaimOutcome::Uninterpreted(
+                        pauperfuse_lens::Uninterpreted {
+                            subject: None,
+                            reason: pauperfuse_lens::UninterpretedReason::ClaimMalformed(format!(
+                                "{key}: {error}"
+                            )),
+                        },
+                    ));
+                    continue;
                 }
-                dpaths.push(path);
+                None => unreachable!("filter kept dpath facets only"),
+            };
+            let subject = pauperfuse_lens::Subject::Dpath(dpath.clone());
+            let ctx = pauperfuse_lens::RecognitionContext {
+                subject: &subject,
+                document: &document,
+                facets: &doc.facets,
+            };
+            let mut proposed = Vec::new();
+            let mut declined = Vec::new();
+            for registered in registry.lenses() {
+                match registered.propose(&ctx) {
+                    pauperfuse_lens::LensDecision::Proposed(proposal) => proposed.push(proposal),
+                    pauperfuse_lens::LensDecision::Declined(reason) => declined.push(reason),
+                }
             }
+            if proposed.is_empty() {
+                let reason = pauperfuse_lens::combine_declinations(&declined).unwrap_or_else(
+                    || pauperfuse_lens::UninterpretedReason::NoLens("no lens is installed".into()),
+                );
+                outcomes.push(pauperfuse_lens::ClaimOutcome::Uninterpreted(
+                    pauperfuse_lens::Uninterpreted {
+                        subject: Some(subject),
+                        reason,
+                    },
+                ));
+                continue;
+            }
+            let selection =
+                pauperfuse_lens::select(&proposed, &config).map_err(|error| Error::Selection(error.to_string()))?;
+            let subject_selection = selection
+                .winner(&subject)
+                .expect("a subject with proposals has a winner");
+            outcomes.push(pauperfuse_lens::ClaimOutcome::Projected(Box::new(
+                pauperfuse_lens::ProjectedClaim {
+                    subject,
+                    proposal: subject_selection.winner.clone(),
+                    recipe: pauperfuse_lens::Recipe::from_proposal(
+                        &subject_selection.winner,
+                        heads_wire.clone(),
+                    ),
+                },
+            )));
         }
-        if dpaths.len() != 1 {
-            return Err(Error::Unsupported(
-                "exactly one whole-document dpath is required".into(),
-            ));
-        }
-        let body_key = FacetKey::from(WellKnownFacetTag::Body);
-        let body = doc
-            .facets
-            .get(&body_key)
-            .ok_or_else(|| Error::Unsupported("Body is missing".into()))?;
-        let WellKnownFacet::Body(body) = serde_json::from_value(body.clone())? else {
-            return Err(Error::Unsupported("Body facet has the wrong shape".into()));
-        };
-        if body.order.len() != 1 {
-            return Err(Error::Unsupported(
-                "Body must select exactly one Note".into(),
-            ));
-        }
-        let url = &body.order[0];
-        // Existing Daybook URL parsing does not percent-decode. Never silently misresolve it.
-        if !url.path().is_ascii() || url.path().contains('%') || url.path().contains('\\') {
-            return Err(Error::Unsupported(
-                "encoded/non-ASCII Body references await the facet-URL correction".into(),
-            ));
-        }
-        let reference = daybook_types::url::parse_facet_ref(url)?;
-        if reference.doc_id != "self" && reference.doc_id != document {
-            return Err(Error::Unsupported("cross-document Body reference".into()));
-        }
-        if reference.branch.is_some() || reference.at.is_some() {
-            return Err(Error::Unsupported("pinned Body references".into()));
-        }
-        let value = doc
-            .facets
-            .get(&reference.facet_key)
-            .ok_or_else(|| Error::Unsupported("Body's Note is missing".into()))?;
-        validate_note(value)?;
-        let path = dpaths
-            .pop()
-            .unwrap()
-            .segments()
-            .collect::<Vec<_>>()
-            .join("/");
-        RelPath::parse(&path).map_err(|error| Error::Unsupported(error.to_string()))?;
-        Ok((
-            Self {
-                document,
-                facet: reference.facet_key,
-                path,
-            },
+        Ok(SelectedClaims {
+            document,
             heads,
-        ))
+            outcomes,
+        })
     }
 }
 
@@ -163,13 +259,17 @@ struct Output {
     branch: String,
 }
 
-/// A statically routed producer over an independently owned checkout branch.
+/// A lens-driven producer over an independently owned checkout branch: its
+/// observation is the selected proposal's output plan, and its reads go
+/// through the lens's production stage at exactly the recorded recipe heads.
 pub struct Daybook {
     drawer: Arc<DrawerRepo>,
     id: BackendId,
     projection: Projection,
     branch: String,
     heads: ChangeHashSet,
+    lens: lens::RawTextNoteLens,
+    recipe: pauperfuse_lens::Recipe,
 }
 
 impl Daybook {
@@ -180,12 +280,29 @@ impl Daybook {
         branch: String,
         heads: ChangeHashSet,
     ) -> Self {
+        let current = lens::RawTextNoteLens::new();
+        let heads_wire = am_utils_rs::serialize_commit_heads(&heads);
+        let affected = pauperfuse_lens::DepAtHeads {
+            document: projection.document.clone(),
+            facet: projection.facet.clone(),
+            heads: heads_wire.clone(),
+        };
+        // The Body is the claim's read-only context dependency at the same
+        // heads (ADR 012 §8: every declared input recorded).
+        let context = pauperfuse_lens::DepAtHeads {
+            document: projection.document.clone(),
+            facet: FacetKey::from(WellKnownFacetTag::Body),
+            heads: heads_wire,
+        };
+        let recipe = current.recipe(affected, context);
         Self {
             drawer,
             id,
             projection,
             branch,
             heads,
+            lens: current,
+            recipe,
         }
     }
     fn output(&self) -> Output {
@@ -237,23 +354,46 @@ impl Producer for Daybook {
         &self.id
     }
     async fn observe(&self) -> Result<Self::Tree, Self::Error> {
-        let path = RelPath::parse(&self.projection.path)
-            .map_err(|error| Error::Unsupported(error.to_string()))?;
-        let mut entries = path
-            .ancestors_inclusive()
-            .take(path.len())
-            .map(|path| TreeEntry {
-                path,
-                description: Description::Directory,
+        // The complete output plan comes from the lens (ADR 012 §9: paths/
+        // kinds declared before visible publication); the producer adds the
+        // identity selector and materializes the ancestor chains.
+        let plan = self
+            .lens
+            .prepare_project(&pauperfuse_lens::ProjectWork {
+                recipe: &self.recipe,
+                path: &self.projection.path,
             })
-            .collect::<Vec<_>>();
-        entries.push(TreeEntry {
-            path,
-            description: Description::File {
-                source: self.source(),
-                size: None,
-            },
-        });
+            .await?;
+        let mut entries = Vec::new();
+        for output in &plan.outputs {
+            let path = RelPath::parse(&output.path)
+                .map_err(|error| Error::Unsupported(error.to_string()))?;
+            match output.kind {
+                pauperfuse_lens::OutputKind::File => {
+                    entries.extend(
+                        path.ancestors_inclusive()
+                            .take(path.len())
+                            .map(|path| TreeEntry {
+                                path,
+                                description: Description::Directory,
+                            }),
+                    );
+                    entries.push(TreeEntry {
+                        path,
+                        description: Description::File {
+                            source: self.source(),
+                            size: None,
+                        },
+                    });
+                }
+                pauperfuse_lens::OutputKind::Directory => {
+                    entries.push(TreeEntry {
+                        path,
+                        description: Description::Directory,
+                    });
+                }
+            }
+        }
         Ok(Observation(entries.into()))
     }
     async fn open(&self, selector: &OutputVersion) -> Result<Self::Reader, Self::Error> {
@@ -263,23 +403,27 @@ impl Producer for Daybook {
                 "output does not belong to this projection".into(),
             ));
         }
+        // Production serves exactly the selector's version (never the latest):
+        // the recipe's recorded heads must be the selected ones, or the recipe
+        // provenance is broken (never silently re-rendered elsewhere).
         let heads: Vec<String> = serde_json::from_slice(&selector.version)?;
-        let heads = ChangeHashSet(am_utils_rs::parse_commit_heads(&heads)?);
-        let doc = self
-            .drawer
-            .get_doc_with_facets_at_branch_heads(
-                &output.document,
-                BranchPath::new(&output.branch),
-                &heads,
-                Some(vec![output.facet.clone()]),
-            )
-            .await?
-            .ok_or_else(|| Error::Unavailable(format!("{} at selected heads", output.document)))?;
-        let value = doc
-            .facets
-            .get(&output.facet)
-            .ok_or_else(|| Error::Unavailable("selected Note is absent".into()))?;
-        Ok(Reader(validate_note(value)?.content.into_bytes()))
+        let affected = self
+            .recipe
+            .affected_inputs
+            .first()
+            .expect("Daybook recipes have one affected input");
+        if affected.heads != heads {
+            return Err(Error::Unavailable(
+                "selected version does not match the recorded recipe heads".into(),
+            ));
+        }
+        let access = lens::BranchFacetAccess::new(
+            &self.drawer,
+            self.projection.document.clone(),
+            self.branch.clone(),
+        );
+        let bytes = self.lens.produce(&self.recipe, &access).await?;
+        Ok(Reader(bytes))
     }
 }
 
