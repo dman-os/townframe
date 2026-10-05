@@ -169,7 +169,9 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
             .iter()
             .any(|component_url| matches!(component_url.scheme(), "build"))
     });
-    let wasm_target_dir = workspace_root.join("target/wasm");
+    let wasm_target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root.join("target/wasm"));
     if needs_wasm_build {
         build_plug_wasm_component(&workspace_root, &plug_root, &wasm_target_dir).await?;
     }
@@ -322,6 +324,22 @@ async fn build_plug_wasm_component(
     plug_root: &Path,
     wasm_target_dir: &Path,
 ) -> Res<()> {
+    // Guest bindings read generated wit/deps, not the override source directly.
+    // Refresh before Cargo so a host WIT change cannot ship an old guest ABI.
+    let output = tokio::process::Command::new("deno")
+        .args(["run", "--allow-all"])
+        .arg(workspace_root.join("x/wit-fetch.ts"))
+        .arg("--plug-root")
+        .arg(plug_root)
+        .current_dir(workspace_root)
+        .output()
+        .await?;
+    eyre::ensure!(
+        output.status.success(),
+        "failed to refresh plug WIT dependencies for '{}': {}",
+        plug_root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let mut build = tokio::process::Command::new("cargo");
     build
         .args([

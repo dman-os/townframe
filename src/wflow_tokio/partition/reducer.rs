@@ -43,6 +43,7 @@ impl Drop for TokioPartitionReducerHandle {
     }
 }
 
+#[expect(clippy::too_many_arguments)]
 pub fn start_tokio_partition_reducer(
     pcx: PartitionCtx,
     state: Arc<PartitionWorkingState>,
@@ -51,15 +52,14 @@ pub fn start_tokio_partition_reducer(
     worker_effect_senders: WorkerEffectSenders,
     cancel_token: CancellationToken,
     snap_store: Arc<dyn SnapStore<Snapshot = Arc<[u8]>>>,
+    replay_ready: tokio::sync::oneshot::Sender<()>,
 ) -> TokioPartitionReducerHandle {
-    let start_offset = {
-        let last_applied = state.last_applied_entry_id.load(Ordering::Relaxed);
-        if last_applied == 0 {
-            0
-        } else {
-            last_applied.saturating_add(1)
-        }
-    };
+    // One-based entries make zero an explicit empty incorporated prefix.
+    let start_offset = state
+        .last_applied_entry_id
+        .load(Ordering::Relaxed)
+        .checked_add(1)
+        .expect("workflow log entry ID overflow");
     let span = tracing::info_span!(
         "TokioPartitionReducer",
         partition_id = ?pcx.id,
@@ -68,6 +68,7 @@ pub fn start_tokio_partition_reducer(
     let fut = {
         let cancel_token = cancel_token.clone();
         async move {
+            let mut replay_ready = Some(replay_ready);
             debug!("reducer startup: reading latest log index");
             // The pre-loop awaits are plain awaits: without selecting on the cancel
             // token here, a cancel that lands while the reducer is starting leaves it
@@ -129,6 +130,7 @@ pub fn start_tokio_partition_reducer(
                         res?
                     }
                 }
+                replay_ready.take().expect(ERROR_IMPOSSIBLE).send(()).expect(ERROR_CHANNEL);
             }
             loop {
                 // Poll the stream with cancellation check
@@ -152,10 +154,16 @@ pub fn start_tokio_partition_reducer(
                         let (idx, entry) = entry?;
                         if let Some(entry) = entry {
                             worker.reduce(idx, entry).await?;
-                            if !replay_is_empty && idx >= latest_entry_id_at_start && !worker.did_reschedule_after_replay {
-                                worker.reschedule_effects_after_replay().await?;
-                            }
-                        };
+                        } else {
+                            // Closed historical reservations are incorporated
+                            // even when no event survived the original append.
+                            worker.state.mark_entry_incorporated(idx);
+                            worker.entries_since_snapshot += 1;
+                        }
+                        if !replay_is_empty && idx >= latest_entry_id_at_start && !worker.did_reschedule_after_replay {
+                            worker.reschedule_effects_after_replay().await?;
+                            replay_ready.take().expect(ERROR_IMPOSSIBLE).send(()).expect(ERROR_CHANNEL);
+                        }
                     }
                 }
             }
@@ -304,9 +312,7 @@ impl TokioPartitionReducer {
             }
         };
 
-        self.state
-            .last_applied_entry_id
-            .store(entry_id, Ordering::SeqCst);
+        self.state.mark_entry_incorporated(entry_id);
 
         // Check if we should snapshot (entry-based)
         self.entries_since_snapshot += 1;
@@ -390,6 +396,14 @@ impl TokioPartitionReducer {
     async fn handle_job_event(&mut self, entry_id: u64, evt: log::PartitionLogEntry) -> Res<()> {
         debug!("reducing job event");
 
+        let job_id = match &evt {
+            log::PartitionLogEntry::JobInit(event) => Arc::clone(&event.job_id),
+            log::PartitionLogEntry::JobEffectResult(event) => Arc::clone(&event.job_id),
+            log::PartitionLogEntry::JobCancel(event) => Arc::clone(&event.job_id),
+            log::PartitionLogEntry::JobMessage(event) => Arc::clone(&event.job_id),
+            log::PartitionLogEntry::JobTimerFired(event) => Arc::clone(&event.job_id),
+            log::PartitionLogEntry::JobPartitionEffects(_) => unreachable!(),
+        };
         let new_counts = {
             let mut jobs = self.state.write_jobs().await;
             match evt {
@@ -397,6 +411,7 @@ impl TokioPartitionReducer {
                     wflow_core::partition::reduce::reduce_job_init_event(
                         &mut jobs,
                         &mut self.event_effects,
+                        entry_id,
                         evt,
                     )
                 }
@@ -436,6 +451,11 @@ impl TokioPartitionReducer {
                     unreachable!()
                 }
             };
+            if let Some(job) = jobs.active.get_mut(&job_id) {
+                job.last_event_entry_id = entry_id;
+            } else if let Some(job) = jobs.archive.get_mut(&job_id) {
+                job.last_event_entry_id = entry_id;
+            }
             // Calculate new counts after state update
             JobCounts {
                 active: jobs.active.len(),

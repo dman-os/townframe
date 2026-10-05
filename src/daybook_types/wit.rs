@@ -67,6 +67,7 @@ pub mod doc {
         LabelGeneric(String),
         TitleGeneric(String),
         PathGeneric(String),
+        Jwk(String),
         ImageMetadata(ImageMetadata),
         OcrResult(OcrResult),
         Embedding(Embedding),
@@ -271,6 +272,9 @@ pub mod doc {
                 root_doc::WellKnownFacet::LabelGeneric(val) => Self::LabelGeneric(val),
                 root_doc::WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
                 root_doc::WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val.to_string()),
+                root_doc::WellKnownFacet::Jwk(val) => {
+                    Self::Jwk(serde_json::to_string(&val).expect(ERROR_JSON))
+                }
                 root_doc::WellKnownFacet::ImageMetadata(val) => {
                     Self::ImageMetadata(ImageMetadata {
                         facet_ref: val.facet_ref.to_string(),
@@ -400,6 +404,7 @@ pub mod doc {
                 WellKnownFacet::LabelGeneric(val) => Self::LabelGeneric(val),
                 WellKnownFacet::TitleGeneric(val) => Self::TitleGeneric(val),
                 WellKnownFacet::PathGeneric(val) => Self::PathGeneric(val),
+                WellKnownFacet::Jwk(val) => Self::Jwk(serde_json::from_str(&val)?),
                 WellKnownFacet::ImageMetadata(val) => {
                     Self::ImageMetadata(root_doc::ImageMetadata {
                         facet_ref: val.facet_ref.parse()?,

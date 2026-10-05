@@ -11,6 +11,9 @@ pub struct KvStoreLog {
     local_commited_idx_rx: tokio::sync::watch::Receiver<u64>,
     local_commited_idx_tx: tokio::sync::watch::Sender<u64>,
     kv_store: Arc<dyn KvStore + Send + Sync>,
+    // The previous owner has stopped before reopening this journal. Only this
+    // closed prefix proves that missing reservations cannot still be committed.
+    pre_open_horizon: u64,
 }
 
 impl KvStoreLog {
@@ -30,6 +33,7 @@ impl KvStoreLog {
             local_commited_idx_tx,
             local_commited_idx_rx,
             kv_store,
+            pre_open_horizon: latest_idx,
         })
     }
 }
@@ -83,12 +87,12 @@ impl LogStore for KvStoreLog {
     // a crash hole.
     // - Use a CAS to fix it
     fn tail(&'_ self, offset: u64) -> BoxStream<'_, Res<TailLogEntry>> {
-        futures::stream::unfold(offset, |offset| {
+        futures::stream::unfold(offset.max(1), |offset| {
             let kv_store = Arc::clone(&self.kv_store);
             let mut latest_id_rx = self.local_commited_idx_rx.clone();
+            let pre_open_horizon = self.pre_open_horizon;
             async move {
                 let key = offset.to_le_bytes();
-                let mut last_seen_id = None;
                 loop {
                     if latest_id_rx.has_changed().is_err() {
                         // this means the KvStoreLog has been dropped
@@ -109,31 +113,19 @@ impl LogStore for KvStoreLog {
                         Err(err) => return Some((Err(err), offset)),
                         // no value under offset so we wait until a new value is added
                         Ok(None) => {
-                            if let Some(last_seen_id) = last_seen_id {
-                                // we've already seen a None once
-                                // if we're here
-                                // this must be a crash hole, let's skip
-                                if last_seen_id > offset {
-                                    return Some((
-                                        Ok(TailLogEntry {
-                                            idx: offset,
-                                            val: None,
-                                        }),
-                                        offset + 1,
-                                    ));
-                                }
+                            if offset <= pre_open_horizon {
+                                return Some((
+                                    Ok(TailLogEntry {
+                                        idx: offset,
+                                        val: None,
+                                    }),
+                                    offset + 1,
+                                ));
                             }
-                            let latest_id = *latest_id_rx.borrow_and_update();
-                            last_seen_id = Some(latest_id);
-                            if offset >= latest_id {
-                                // we're up to date, wait for a new value
-                                if let Err(_err) = latest_id_rx.changed().await {
-                                    // KvStoreLog is dropped
-                                    return None;
-                                }
-                            } else {
-                                // we're still behind somehow
-                                continue;
+                            // A newer reservation may belong to a live append.
+                            // Even a later committed entry does not prove a hole.
+                            if latest_id_rx.changed().await.is_err() {
+                                return None;
                             }
                         }
                     }
@@ -141,5 +133,59 @@ impl LogStore for KvStoreLog {
             }
         })
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn storage() -> Arc<dyn KvStore + Send + Sync> {
+        let store = Arc::new(DHashMap::<Arc<[u8]>, Arc<[u8]>>::default());
+        Arc::new(store)
+    }
+
+    #[tokio::test]
+    async fn final_historical_reservation_drains() -> Res<()> {
+        let store = storage();
+        // This is the durable cut between append's increment and value write.
+        assert_eq!(store.increment(KvStoreLog::LATEST_ID_KEY, 1).await?, 1);
+        let reopened = KvStoreLog::new(store).await?;
+        let mut tail = reopened.tail(1);
+        let hole = tail.next().await.unwrap()?;
+        assert_eq!(hole.idx, 1);
+        assert!(hole.val.is_none());
+        assert_eq!(reopened.append(b"after-reopen").await?, 2);
+        let entry = tail.next().await.unwrap()?;
+        assert_eq!(entry.idx, 2);
+        assert_eq!(entry.val.as_deref(), Some(b"after-reopen".as_slice()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_reservation_is_not_skipped_by_later_commit() -> Res<()> {
+        let store = storage();
+        let log = KvStoreLog::new(Arc::clone(&store)).await?;
+        assert_eq!(store.increment(KvStoreLog::LATEST_ID_KEY, 1).await?, 1);
+        assert_eq!(log.append(b"later").await?, 2);
+        let mut tail = log.tail(1);
+        let next = tail.next();
+        futures::pin_mut!(next);
+        assert!(futures::poll!(&mut next).is_pending());
+        assert!(
+            store
+                .set(1u64.to_le_bytes().into(), b"earlier".as_slice().into())
+                .await?
+                .is_none()
+        );
+        // Notify exactly as append does after committing the reserved value.
+        log.local_commited_idx_tx.send(1).unwrap();
+        let entry = next.await.unwrap()?;
+        assert_eq!(entry.idx, 1);
+        assert_eq!(entry.val.as_deref(), Some(b"earlier".as_slice()));
+        let entry = tail.next().await.unwrap()?;
+        assert_eq!(entry.idx, 2);
+        assert_eq!(entry.val.as_deref(), Some(b"later".as_slice()));
+        Ok(())
     }
 }

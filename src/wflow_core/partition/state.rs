@@ -14,6 +14,10 @@ pub struct PartitionJobsState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobState {
+    /// Immutable admission identity retained across active/archive snapshots.
+    pub init_entry_id: u64,
+    /// Incorporated event identity used when recovering terminal settlement.
+    pub last_event_entry_id: u64,
     pub init_args_json: Arc<str>,
     pub wflow: WflowMeta,
     pub override_wflow_retry_policy: Option<RetryPolicy>,

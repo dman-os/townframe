@@ -89,21 +89,24 @@ pub async fn start_partition_worker(
     wcx: &Ctx,
     wflow_plugin: Arc<wash_plugin_wflow::WflowPlugin>,
     partition_id: PartitionId,
+    execution_gate: Arc<wflow_tokio::partition::ExecutionGate>,
 ) -> Res<(
     wflow_tokio::partition::TokioPartitionWorkerHandle,
     Arc<wflow_tokio::partition::state::PartitionWorkingState>,
 )> {
     // Load state from snapshot if available
     let (next_entry_id, initial_jobs_state, initial_effects) =
-        match wcx.snapstore.load_latest_snapshot(partition_id).await? {
+        match wcx.snapstore.load_latest_snapshot(partition_id).await
+            .wrap_err("unsupported or invalid workflow snapshot admission identity; explicit migration is required")? {
             Some((entry_id, snapshot)) => {
+                eyre::ensure!(entry_id > 0, "workflow snapshots cannot name entry zero; log entries are one-based");
                 tracing::info!(partition_id, entry_id, "loaded state from snapshot");
                 (entry_id + 1, snapshot.jobs, snapshot.effects) // Resume from next entry after snapshot
             }
             None => {
                 tracing::info!(partition_id, "no snapshot found, starting from beginning");
                 (
-                    0,
+                    1,
                     wflow_core::partition::state::PartitionJobsState::default(),
                     default(),
                 )
@@ -117,9 +120,11 @@ pub async fn start_partition_worker(
         next_entry_id,
         wflow_plugin,
         Arc::new(wflow_tokio::local_native_host::LocalNativeHost {}),
+        execution_gate,
     );
 
-    let last_applied_entry_id = next_entry_id.saturating_sub(1);
+    // Zero explicitly means no incorporated entry, never a real snapshot entry.
+    let last_applied_entry_id = next_entry_id - 1;
     let active_state = wflow_tokio::partition::state::PartitionWorkingState::new(
         last_applied_entry_id,
         initial_jobs_state,
@@ -132,7 +137,54 @@ pub async fn start_partition_worker(
         Arc::clone(&active_state),
         Arc::clone(&wcx.snapstore),
     )
-    .await;
+    .await?;
 
     Ok((worker, active_state))
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disk_worker_replay_ready_incorporates_final_reserved_hole() -> Res<()> {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("journal.db");
+        {
+            let cx = Ctx::init(Some(path.clone())).await?;
+            let store = cx
+                .factory
+                .as_ref()
+                .unwrap()
+                .open_store("wflow_logstore")
+                .await?;
+            assert_eq!(store.increment(b"___kv_store_log_latest_id", 1).await?, 1);
+        }
+        // Reopening freezes the historical reservation before starting the
+        // actual reducer. Startup can return only after its replay-ready fence.
+        for _ in 0..2 {
+            let cx = Ctx::init(Some(path.clone())).await?;
+            let plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(Arc::clone(
+                &cx.metastore,
+            )));
+            let execution_gate = wflow_tokio::partition::ExecutionGate::paused();
+            let (worker, state) =
+                start_partition_worker(&cx, plugin, 0, Arc::clone(&execution_gate)).await?;
+            execution_gate.activate();
+            assert_eq!(
+                state
+                    .last_applied_entry_id
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            let jobs = state.read_jobs().await;
+            assert!(jobs.active.is_empty());
+            assert!(jobs.archive.is_empty());
+            drop(jobs);
+            worker.stop().await?;
+            let (idx, _) = cx.snapstore.load_latest_snapshot(0).await?.unwrap();
+            assert_eq!(idx, 1);
+        }
+        Ok(())
+    }
 }

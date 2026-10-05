@@ -29,6 +29,53 @@ pub type DirectEffectTx = async_channel::Sender<effects::EffectId>;
 pub type DirectEffectRx = async_channel::Receiver<effects::EffectId>;
 pub type WorkerEffectSenders = Arc<HashMap<WorkerId, DirectEffectTx>>;
 
+pub struct ExecutionGate {
+    state: tokio::sync::watch::Sender<ExecutionAdmission>,
+}
+
+#[derive(Default)]
+pub(crate) struct ExecutionAdmission {
+    active: bool,
+    held_jobs: std::collections::HashSet<Arc<str>>,
+}
+
+impl ExecutionGate {
+    pub fn paused() -> Arc<Self> {
+        Arc::new(Self {
+            state: tokio::sync::watch::channel(ExecutionAdmission::default()).0,
+        })
+    }
+
+    pub fn hold(&self, job_id: Arc<str>) {
+        self.state.send_modify(|state| {
+            state.held_jobs.insert(job_id);
+        });
+    }
+
+    pub fn release(&self, job_id: &str) {
+        self.state.send_modify(|state| {
+            state.held_jobs.remove(job_id);
+        });
+    }
+
+    pub fn activate(&self) {
+        self.state.send_modify(|state| {
+            state.active = true;
+        });
+    }
+
+    pub(crate) fn changes(&self) -> tokio::sync::watch::Receiver<ExecutionAdmission> {
+        self.state.subscribe()
+    }
+
+    pub(crate) fn permits(&self, effect: &effects::PartitionEffect) -> bool {
+        let state = self.state.borrow();
+        state.active
+            && (!matches!(effect.deets, effects::PartitionEffectDeets::RunJob(_))
+                || !state.held_jobs.contains(&effect.job_id))
+    }
+}
+
 #[derive(Clone)]
 pub struct PartitionCtx {
     pub id: PartitionId,
@@ -41,6 +88,7 @@ pub struct PartitionCtx {
             + Send,
     >,
     pub local_native_host: Arc<dyn self::service::WflowServiceHost<ExtraArgs = ()> + Sync + Send>,
+    pub execution_gate: Arc<ExecutionGate>,
 }
 
 impl PartitionCtx {
@@ -55,6 +103,7 @@ impl PartitionCtx {
                 + Send,
         >,
         local_native_host: Arc<dyn self::service::WflowServiceHost<ExtraArgs = ()> + Sync + Send>,
+        execution_gate: Arc<ExecutionGate>,
     ) -> Self {
         Self {
             id,
@@ -63,6 +112,7 @@ impl PartitionCtx {
             log,
             local_wasmcloud_host,
             local_native_host,
+            execution_gate,
         }
     }
 
@@ -130,11 +180,22 @@ impl TokioPartitionWorkerHandle {
     pub async fn stop(mut self) -> Res<()> {
         self.cancel_token.cancel();
         // Close all effect workers first
+        let mut stop_error = None;
         for worker in self.effect_workers.take().unwrap() {
-            worker.stop().await?;
+            if let Err(error) = worker.stop().await
+                && stop_error.is_none()
+            {
+                stop_error = Some(error);
+            }
         }
-        // Then close the event worker
-        self.part_reducer.take().unwrap().stop().await?;
+        if let Err(error) = self.part_reducer.take().unwrap().stop().await
+            && stop_error.is_none()
+        {
+            stop_error = Some(error);
+        }
+        if let Some(error) = stop_error {
+            return Err(error);
+        }
         // Drop will cancel again, which is safe (idempotent)
         Ok(())
     }
@@ -150,7 +211,7 @@ pub async fn start_tokio_worker(
     pcx: PartitionCtx,
     working_state: Arc<state::PartitionWorkingState>,
     snap_store: Arc<dyn SnapStore<Snapshot = Arc<[u8]>>>,
-) -> TokioPartitionWorkerHandle {
+) -> Res<TokioPartitionWorkerHandle> {
     let cancel_token = CancellationToken::new();
     let effect_cancel_tokens: EffectCancelTokens = Arc::new(Mutex::new(HashMap::new()));
     let job_to_effect_id: JobToEffectId = Arc::new(Mutex::new(HashMap::new()));
@@ -175,6 +236,7 @@ pub async fn start_tokio_worker(
         ));
     }
     let direct_effect_senders = Arc::new(direct_effect_senders);
+    let (replay_ready_tx, replay_ready_rx) = tokio::sync::oneshot::channel();
     let part_reducer = reducer::start_tokio_partition_reducer(
         pcx.clone(),
         Arc::clone(&working_state),
@@ -183,11 +245,23 @@ pub async fn start_tokio_worker(
         direct_effect_senders,
         cancel_token.child_token(),
         snap_store,
+        replay_ready_tx,
     );
 
-    TokioPartitionWorkerHandle {
+    let handle = TokioPartitionWorkerHandle {
         part_reducer: Some(part_reducer),
         effect_workers: Some(effect_workers),
         cancel_token,
+    };
+    // Prepared admission may query absence only after retained journal replay.
+    if let Err(error) = replay_ready_rx.await {
+        let original = ferr!("workflow journal replay failed before admission: {error}");
+        return match handle.stop().await {
+            Ok(()) => Err(original),
+            Err(cleanup) => {
+                Err(original.wrap_err(format!("replay startup teardown also failed: {cleanup:#}")))
+            }
+        };
     }
+    Ok(handle)
 }

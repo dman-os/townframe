@@ -3,10 +3,16 @@
 // FIXME: remove generate-auth-types flag to a gen-types-btress-auth cmd
 
 import { $ } from "./utils.ts";
+import { basename, join } from "node:path";
 
 const clean = $.argv.includes("--clean");
 const generateAuthTypes = $.argv.includes("--generate-auth-types");
 const witConfigFiles = ["wkg.toml", "wkg.lock"];
+const rootOption = $.argv.indexOf("--plug-root");
+const requestedRoot = rootOption < 0 ? undefined : $.argv[rootOption + 1];
+if (rootOption >= 0 && (!requestedRoot || requestedRoot.startsWith("--"))) {
+  throw new Error("--plug-root requires a directory");
+}
 
 // `wit_bindgen::generate!` copies WIT doc comments into the generated Rust
 // bindings, and rustdoc treats a fenced block in a doc comment as a doctest.
@@ -64,16 +70,20 @@ async function tagBareDocFences(depsDir: string): Promise<string[]> {
 }
 
 const dirs: string[] = [];
-for await (const entry of Deno.readDir("src")) {
-  if (!entry.isDirectory) continue;
+if (requestedRoot) {
+  dirs.push(await Deno.realPath(requestedRoot));
+} else {
+  for await (const entry of Deno.readDir("src")) {
+    if (!entry.isDirectory) continue;
 
-  for (const configFile of witConfigFiles) {
-    try {
-      await Deno.stat(`src/${entry.name}/${configFile}`);
-      dirs.push(entry.name);
-      break;
-    } catch {
-      // Try the next WIT package configuration file.
+    for (const configFile of witConfigFiles) {
+      try {
+        await Deno.stat(`src/${entry.name}/${configFile}`);
+        dirs.push(await Deno.realPath(`src/${entry.name}`));
+        break;
+      } catch {
+        // Try the next WIT package configuration file.
+      }
     }
   }
 }
@@ -86,16 +96,16 @@ if (dirs.length === 0) {
 
 for (const dir of dirs) {
   const args = clean ? ["wit", "fetch", "--clean"] : ["wit", "fetch"];
-  const crateDir = $.relativeDir(`../src/${dir}/`);
-
   console.log(`== wash wit fetch in ${dir} ==`);
+
+  const crateDir = dir;
   await $`wash ${args}`.cwd(crateDir);
 
-  for (const path of await tagBareDocFences(`src/${dir}/wit/deps`)) {
+  for (const path of await tagBareDocFences(join(dir, "wit/deps"))) {
     console.log(`tagged bare doc-comment fences in ${path}`);
   }
 
-  if (dir === "btress_auth") {
+  if (basename(dir) === "btress_auth") {
     console.log("== patch btress_auth WIT dependencies ==");
     await $`node patch-wit-deps.mjs`.cwd(crateDir);
 

@@ -134,6 +134,8 @@ interface facet-routine {
     record processor-invocation {
         trigger-doc-id: doc-id,
         changed-facet-keys: list<string>,
+        /// Stable distributed obligation identity for external idempotency.
+        task-id: option<string>,
     }
 
     variant routine-invocation {
