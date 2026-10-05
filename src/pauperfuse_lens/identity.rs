@@ -47,7 +47,11 @@ impl core::fmt::Display for LensIdentity {
                 self.version.0,
                 hex_digest(&digest)
             ),
-            None => write!(formatter, "{}/{}/{}", self.plug_id, self.lens_name, self.version.0),
+            None => write!(
+                formatter,
+                "{}/{}/{}",
+                self.plug_id, self.lens_name, self.version.0
+            ),
         }
     }
 }

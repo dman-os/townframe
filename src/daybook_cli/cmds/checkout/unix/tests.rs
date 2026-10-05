@@ -109,7 +109,11 @@ async fn read_checkout(root: &Path) -> Res<Checkout> {
 
 /// Loads and runs ingest in one step: the verbs own the marker wrapper, the
 /// tests only need the observable effects on disk and the drawer.
-async fn ingest_at(root: &Path, drawer: &daybook_core::drawer::DrawerRepo, allow: &[PathBuf]) -> Res<()> {
+async fn ingest_at(
+    root: &Path,
+    drawer: &daybook_core::drawer::DrawerRepo,
+    allow: &[PathBuf],
+) -> Res<()> {
     let mut marker = read_marker(root).await?;
     ingest_checked(root, &mut marker, drawer, allow).await?;
     drop(marker);
@@ -126,9 +130,14 @@ fn create_projects_note_and_status_reports_clean_modified_and_untracked() -> Res
         let base = tempfile::tempdir()?;
 
         // Nested output directories start absent; projection creates them.
-        let root = create(node.clone(), Arc::clone(&drawer), &base.path().join("sub"), document)
-            .await
-            .wrap_err("create checkout")?;
+        let root = create(
+            node.clone(),
+            Arc::clone(&drawer),
+            &base.path().join("sub"),
+            document,
+        )
+        .await
+        .wrap_err("create checkout")?;
 
         // Marker: Ready, recorded node association, exact backend identity.
         let checkout = read_checkout(&root).await?;
@@ -457,7 +466,10 @@ async fn marker_projected_path_conflicting_with_marker_is_rejected() -> Res<()> 
     // cannot validate.
     let mut marker = read_marker(&created).await?;
     marker.checkout_mut().projection.path = format!("{MARKER}/stolen");
-    let error = marker.checkout().validate().expect_err("conflicting path rejected");
+    let error = marker
+        .checkout()
+        .validate()
+        .expect_err("conflicting path rejected");
     assert!(error.to_string().contains(".daybook-checkout"), "{error:#}");
     ctx.stop().await?;
     Ok(())
@@ -492,7 +504,10 @@ fn ingest_stages_edits_on_the_checkout_branch_and_never_touches_main() -> Res<()
         assert_eq!(staged.receipts[0].path, "notes/hello.md");
         assert_eq!(
             staged.receipts[0].file,
-            FileEvidence { length: "locally edited\n".len() as u64, digest: *blake3::hash(b"locally edited\n").as_bytes() }
+            FileEvidence {
+                length: "locally edited\n".len() as u64,
+                digest: *blake3::hash(b"locally edited\n").as_bytes()
+            }
         );
 
         let bundle = drawer
@@ -565,7 +580,13 @@ fn ingest_blocks_on_non_utf8_preserves_bytes_and_clears_on_retry() -> Res<()> {
         // Blocking is durable; observation and the file stay available.
         let blocked = read_checkout(&root).await?;
         assert!(
-            matches!(&blocked.state, State::Ready { blocked: Some(_), .. }),
+            matches!(
+                &blocked.state,
+                State::Ready {
+                    blocked: Some(_),
+                    ..
+                }
+            ),
             "blocked ingest must be recorded in the marker"
         );
         assert_eq!(tokio::fs::read(root.join("notes/hello.md")).await?, invalid);
@@ -627,7 +648,10 @@ fn ingest_imports_untracked_files_only_through_explicit_allow() -> Res<()> {
             .get_branch_ref(&import.projection.document, BranchPath::new(&import.branch))
             .await?
             .expect("import branch registered");
-        assert_eq!(branch_ref.branch_kind, daybook_core::drawer::BranchKind::Local);
+        assert_eq!(
+            branch_ref.branch_kind,
+            daybook_core::drawer::BranchKind::Local
+        );
         assert_eq!(branch_ref.branch_doc_id.to_string(), import.branch_id);
 
         // The imported content is the imported bytes, on main too.
@@ -644,7 +668,11 @@ fn ingest_imports_untracked_files_only_through_explicit_allow() -> Res<()> {
             import.render_heads
         );
         let note = validate_note(
-            bundle.doc.facets.get(&import.projection.facet).expect("imported Note expected"),
+            bundle
+                .doc
+                .facets
+                .get(&import.projection.facet)
+                .expect("imported Note expected"),
         )?;
         assert_eq!(note.content, "imported body\n");
 
@@ -662,7 +690,10 @@ fn ingest_imports_untracked_files_only_through_explicit_allow() -> Res<()> {
             .get_with_heads(&imported.projection.document, BranchPath::new("main"), None)
             .await?
             .expect("primary document on main");
-        assert_eq!(am_utils_rs::serialize_commit_heads(&primary_main), imported.basis);
+        assert_eq!(
+            am_utils_rs::serialize_commit_heads(&primary_main),
+            imported.basis
+        );
 
         ctx.stop().await?;
         Ok(())
@@ -738,7 +769,9 @@ fn ingest_stages_a_revert_of_restored_render_bytes() -> Res<()> {
             .wrap_err("create checkout")?;
         let render = read_checkout(&root).await?;
         assert_eq!(
-            branch_note(&drawer, &render.projection, &render.branch).await?.content,
+            branch_note(&drawer, &render.projection, &render.branch)
+                .await?
+                .content,
             NOTE_CONTENT,
             "a fresh checkout serves the acknowledged render content"
         );
@@ -776,7 +809,10 @@ fn ingest_stages_a_revert_of_restored_render_bytes() -> Res<()> {
             .get_with_heads(&reverted.projection.document, BranchPath::new("main"), None)
             .await?
             .expect("document still on main");
-        assert_eq!(am_utils_rs::serialize_commit_heads(&main_heads), reverted.basis);
+        assert_eq!(
+            am_utils_rs::serialize_commit_heads(&main_heads),
+            reverted.basis
+        );
 
         // The branch now holds the render content again while its heads moved:
         // that state reads as ingested, never as clean, because heads diverged.
@@ -858,7 +894,10 @@ fn claim_resolution_adopts_or_drops_and_never_duplicates_identity() -> Res<()> {
 
         // Simulate an interrupted import: claim written, add not completed.
         let mut claimed = read_marker(&root).await?;
-        claimed.checkout_mut().pending_imports.push("stray.md".into());
+        claimed
+            .checkout_mut()
+            .pending_imports
+            .push("stray.md".into());
         replace_marker(&root, &claimed).await?;
 
         // While a claim exists, ingestion is blocked outright.
@@ -882,7 +921,11 @@ fn claim_resolution_adopts_or_drops_and_never_duplicates_identity() -> Res<()> {
         // reports until a successful ingest clears it.
         let lines = status(&root, &dropped, &drawer).await?;
         assert_eq!(lines.len(), 3, "{lines:?}");
-        assert!(lines[0].starts_with("blocked ingest unresolved import claim for stray.md"), "{}", lines[0]);
+        assert!(
+            lines[0].starts_with("blocked ingest unresolved import claim for stray.md"),
+            "{}",
+            lines[0]
+        );
         assert_eq!(&lines[1..], ["clean notes/hello.md", "untracked stray.md"]);
 
         // Adopt: the interrupted add actually completed upstream — i.e. a
@@ -893,13 +936,20 @@ fn claim_resolution_adopts_or_drops_and_never_duplicates_identity() -> Res<()> {
             .add(AddDocArgs {
                 branch_path: BranchPathBuf::from("main"),
                 facets: [
-                    (note_key.clone(), WellKnownFacet::Note(Note {
-                        mime: "text/plain".into(),
-                        content: "imported body\n".into(),
-                    }).into()),
+                    (
+                        note_key.clone(),
+                        WellKnownFacet::Note(Note {
+                            mime: "text/plain".into(),
+                            content: "imported body\n".into(),
+                        })
+                        .into(),
+                    ),
                     (
                         FacetKey::from(WellKnownFacetTag::Body),
-                        WellKnownFacet::Body(Body { order: vec![note_url] }).into(),
+                        WellKnownFacet::Body(Body {
+                            order: vec![note_url],
+                        })
+                        .into(),
                     ),
                     (
                         Dpath::parse("/stray.md")?.facet_key(),
@@ -912,7 +962,10 @@ fn claim_resolution_adopts_or_drops_and_never_duplicates_identity() -> Res<()> {
             .await
             .map_err(eyre::Report::from)?;
         let mut claimed = read_marker(&root).await?;
-        claimed.checkout_mut().pending_imports.push("stray.md".into());
+        claimed
+            .checkout_mut()
+            .pending_imports
+            .push("stray.md".into());
         replace_marker(&root, &claimed).await?;
 
         let mut claimed = read_marker(&root).await?;
@@ -935,12 +988,14 @@ fn claim_resolution_adopts_or_drops_and_never_duplicates_identity() -> Res<()> {
             .get_branch_ref(&adopted_doc, BranchPath::new(&import.branch))
             .await?
             .expect("adopted branch registered");
-        assert_eq!(branch_ref.branch_kind, daybook_core::drawer::BranchKind::Local);
+        assert_eq!(
+            branch_ref.branch_kind,
+            daybook_core::drawer::BranchKind::Local
+        );
         assert_eq!(branch_ref.branch_doc_id.to_string(), import.branch_id);
         let note = branch_note(&drawer, &import.projection, &import.branch).await?;
         assert_eq!(
-            note.content,
-            "imported body\n",
+            note.content, "imported body\n",
             "adopted branch serves the imported bytes"
         );
         let receipt = adopted
@@ -956,8 +1011,8 @@ fn claim_resolution_adopts_or_drops_and_never_duplicates_identity() -> Res<()> {
         // The negative the mechanism exists for: re-importing the adopted path
         // must not create a second document identity for the same bytes.
         let mut current = read_marker(&root).await?;
-        let Err(error) = ingest_checked(&root, &mut current, &drawer, std::slice::from_ref(&stray))
-        .await
+        let Err(error) =
+            ingest_checked(&root, &mut current, &drawer, std::slice::from_ref(&stray)).await
         else {
             panic!("re-importing an adopted path must be refused");
         };
@@ -971,16 +1026,21 @@ fn claim_resolution_adopts_or_drops_and_never_duplicates_identity() -> Res<()> {
         // And a claim on a claimed-but-unadopted path blocks --allow too: the
         // claim guard fires before any entry (allowed or edit) is classified.
         let mut claimed = read_marker(&root).await?;
-        claimed.checkout_mut().pending_imports.push("stray.md".into());
+        claimed
+            .checkout_mut()
+            .pending_imports
+            .push("stray.md".into());
         replace_marker(&root, &claimed).await?;
         let mut current = read_marker(&root).await?;
-        let Err(error) = ingest_checked(&root, &mut current, &drawer, std::slice::from_ref(&stray))
-        .await
+        let Err(error) =
+            ingest_checked(&root, &mut current, &drawer, std::slice::from_ref(&stray)).await
         else {
             panic!("--allow onto a claimed path must be refused");
         };
         assert!(
-            error.to_string().contains("unresolved import claim for stray.md"),
+            error
+                .to_string()
+                .contains("unresolved import claim for stray.md"),
             "{error:#}"
         );
 
@@ -1015,9 +1075,17 @@ async fn arm_publish_racer(
         .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
         .lock()
         .expect("publish race registry")
-        .insert(document.clone(), PublishRaceChannel { requests, signals: signal_rx });
+        .insert(
+            document.clone(),
+            PublishRaceChannel {
+                requests,
+                signals: signal_rx,
+            },
+        );
     let drawer = Arc::clone(drawer);
-    Ok(tokio::spawn(racer_loop(drawer, document, signal, races, request_rx)))
+    Ok(tokio::spawn(racer_loop(
+        drawer, document, signal, races, request_rx,
+    )))
 }
 
 /// The racing upstream writer: a benign Title change on main committed at
@@ -1031,7 +1099,9 @@ async fn racer_loop(
 ) -> Res<()> {
     let mut number = 0_usize;
     while races > 0 {
-        let Some(()) = requests.recv().await else { break };
+        let Some(()) = requests.recv().await else {
+            break;
+        };
         let (_, main_heads) = drawer
             .get_with_heads(&document, BranchPath::new("main"), None)
             .await?
@@ -1099,11 +1169,11 @@ async fn staged_edit_checkout(
     Ok((ctx, base, drawer, root, document))
 }
 
-
 #[test]
 fn publish_round_trip_records_the_publication_and_leaves_staging_alone() -> Res<()> {
     block_on_big_stack(async {
-        let (ctx, _base, drawer, root, document) = staged_edit_checkout("checkout_publish_round_trip").await?;
+        let (ctx, _base, drawer, root, document) =
+            staged_edit_checkout("checkout_publish_round_trip").await?;
         let staged = read_checkout(&root).await?;
         let disk_before = tokio::fs::read(root.join("notes/hello.md")).await?;
 
@@ -1114,8 +1184,14 @@ fn publish_round_trip_records_the_publication_and_leaves_staging_alone() -> Res<
         // the staged bytes were already the merged render, so nothing re-
         // rendered and the disk is untouched.
         assert_eq!(published.receipts, staged.receipts);
-        assert_eq!(tokio::fs::read(root.join("notes/hello.md")).await?, disk_before);
-        assert!(matches!(published.state, State::Ready { blocked: None, .. }));
+        assert_eq!(
+            tokio::fs::read(root.join("notes/hello.md")).await?,
+            disk_before
+        );
+        assert!(matches!(
+            published.state,
+            State::Ready { blocked: None, .. }
+        ));
 
         // The record carries the §4.1 spellings with heads read through the
         // live branch-doc seam.
@@ -1131,19 +1207,39 @@ fn publish_round_trip_records_the_publication_and_leaves_staging_alone() -> Res<
             .await?
             .expect("document still on main");
         let live_main = am_utils_rs::serialize_commit_heads(&live_main);
-        assert_eq!(record.published_heads.as_deref(), Some(live_main.as_slice()));
+        assert_eq!(
+            record.published_heads.as_deref(),
+            Some(live_main.as_slice())
+        );
 
         // Upstream carries the staged bytes; the staged branch keeps them too.
-        assert_eq!(branch_note(&drawer, &published.projection, "main").await?.content, "locally edited\n");
-        assert_eq!(branch_note(&drawer, &published.projection, &published.branch).await?.content, "locally edited\n");
+        assert_eq!(
+            branch_note(&drawer, &published.projection, "main")
+                .await?
+                .content,
+            "locally edited\n"
+        );
+        assert_eq!(
+            branch_note(&drawer, &published.projection, &published.branch)
+                .await?
+                .content,
+            "locally edited\n"
+        );
 
         // T11: status derives the published marker from the record, never the
         // receipt, and reports the publication line.
-        let heads = record.published_heads.as_deref().unwrap_or_default().join(" ");
+        let heads = record
+            .published_heads
+            .as_deref()
+            .unwrap_or_default()
+            .join(" ");
         let lines = status(&root, &published, &drawer).await?;
         assert_eq!(
             lines,
-            vec!["ingested notes/hello.md published".to_string(), format!("publish {document} published {heads}")]
+            vec![
+                "ingested notes/hello.md published".to_string(),
+                format!("publish {document} published {heads}")
+            ]
         );
 
         // T8: re-ingest after publish stays a no-op against the branch, and
@@ -1154,7 +1250,10 @@ fn publish_round_trip_records_the_publication_and_leaves_staging_alone() -> Res<
         let receipt = &reaffirmed.receipts[0];
         assert_eq!(
             receipt.file,
-            FileEvidence { length: "locally edited\n".len() as u64, digest: *blake3::hash(b"locally edited\n").as_bytes() }
+            FileEvidence {
+                length: "locally edited\n".len() as u64,
+                digest: *blake3::hash(b"locally edited\n").as_bytes()
+            }
         );
         // The no-op ingest re-confirmed the receipt against the live branch.
         let (live_heads, _) = binding_state(&drawer, &tracked_bindings(&reaffirmed)?[0]).await?;
@@ -1172,7 +1271,8 @@ fn publish_round_trip_records_the_publication_and_leaves_staging_alone() -> Res<
 #[test]
 fn publish_retries_a_moved_upstream_within_the_cas_bound() -> Res<()> {
     block_on_big_stack(async {
-        let (ctx, _base, drawer, root, document) = staged_edit_checkout("checkout_publish_cas_retry").await?;
+        let (ctx, _base, drawer, root, document) =
+            staged_edit_checkout("checkout_publish_cas_retry").await?;
         let racer = arm_publish_racer(&drawer, document.clone(), 1).await?;
 
         publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await?;
@@ -1190,16 +1290,33 @@ fn publish_retries_a_moved_upstream_within_the_cas_bound() -> Res<()> {
             .await?
             .expect("document still on main");
         let live_main = am_utils_rs::serialize_commit_heads(&live_main);
-        assert_eq!(record.published_heads.as_deref(), Some(live_main.as_slice()));
-        assert_ne!(record.expected_heads, record.published_heads.as_deref().unwrap(), "the upstream movement must have been absorbed");
+        assert_eq!(
+            record.published_heads.as_deref(),
+            Some(live_main.as_slice())
+        );
+        assert_ne!(
+            record.expected_heads,
+            record.published_heads.as_deref().unwrap(),
+            "the upstream movement must have been absorbed"
+        );
 
         // The staged note landed and the upstream title movement merged in.
-        assert_eq!(branch_note(&drawer, &published.projection, "main").await?.content, "locally edited\n");
+        assert_eq!(
+            branch_note(&drawer, &published.projection, "main")
+                .await?
+                .content,
+            "locally edited\n"
+        );
         // The facet value is the bare title string (the facet enum is
         // untagged; a typed re-parse would match RefGeneric first).
-        let title = facet_value(&drawer, &document, "main", &FacetKey::from(WellKnownFacetTag::TitleGeneric))
-            .await?
-            .expect("title facet survives the publish");
+        let title = facet_value(
+            &drawer,
+            &document,
+            "main",
+            &FacetKey::from(WellKnownFacetTag::TitleGeneric),
+        )
+        .await?
+        .expect("title facet survives the publish");
         assert_eq!(title, serde_json::json!("upstream 1"));
 
         ctx.stop().await?;
@@ -1210,16 +1327,25 @@ fn publish_retries_a_moved_upstream_within_the_cas_bound() -> Res<()> {
 #[test]
 fn publish_blocks_when_upstream_keeps_moving_and_the_retry_resumes() -> Res<()> {
     block_on_big_stack(async {
-        let (ctx, _base, drawer, root, document) = staged_edit_checkout("checkout_publish_cas_exhaustion").await?;
+        let (ctx, _base, drawer, root, document) =
+            staged_edit_checkout("checkout_publish_cas_exhaustion").await?;
         let racer = arm_publish_racer(&drawer, document.clone(), 4).await?;
 
-        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await else {
+        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await
+        else {
             panic!("a continuously racing upstream must exhaust the CAS bound");
         };
-        assert!(error.to_string().contains("publish incomplete"), "{error:#}");
+        assert!(
+            error.to_string().contains("publish incomplete"),
+            "{error:#}"
+        );
 
         let blocked = read_checkout(&root).await?;
-        let State::Ready { blocked: Some(recorded), .. } = &blocked.state else {
+        let State::Ready {
+            blocked: Some(recorded),
+            ..
+        } = &blocked.state
+        else {
             panic!("the exhausted publish must block the checkout");
         };
         assert_eq!(recorded.operation, Operation::Publish);
@@ -1229,14 +1355,23 @@ fn publish_blocks_when_upstream_keeps_moving_and_the_retry_resumes() -> Res<()> 
         assert_eq!(record.attempts, PUBLISH_MAX_CAS_ATTEMPTS);
         assert_eq!(record.published_heads, None);
         assert!(
-            record.failure.as_deref().expect("blocked failure recorded").contains("kept moving"),
+            record
+                .failure
+                .as_deref()
+                .expect("blocked failure recorded")
+                .contains("kept moving"),
             "{}",
             record.failure.as_deref().expect("present")
         );
 
         // Our publish never landed on main: the Note is still the original
         // while the racing writer's title changes are the only movement.
-        assert_eq!(branch_note(&drawer, &blocked.projection, "main").await?.content, NOTE_CONTENT);
+        assert_eq!(
+            branch_note(&drawer, &blocked.projection, "main")
+                .await?
+                .content,
+            NOTE_CONTENT
+        );
         let (_, live_main) = drawer
             .get_with_heads(&document, BranchPath::new("main"), None)
             .await?
@@ -1246,20 +1381,41 @@ fn publish_blocks_when_upstream_keeps_moving_and_the_retry_resumes() -> Res<()> 
             am_utils_rs::serialize_commit_heads(&live_main),
             "main stopped past every attempt's basis: only the racer's commits moved it"
         );
-        let title = facet_value(&drawer, &document, "main", &FacetKey::from(WellKnownFacetTag::TitleGeneric))
-            .await?
-            .expect("title facet");
+        let title = facet_value(
+            &drawer,
+            &document,
+            "main",
+            &FacetKey::from(WellKnownFacetTag::TitleGeneric),
+        )
+        .await?
+        .expect("title facet");
         assert!(
-            title.as_str().expect("title is the bare title string").starts_with("upstream "),
+            title
+                .as_str()
+                .expect("title is the bare title string")
+                .starts_with("upstream "),
             "{title}"
         );
         let staged = branch_note(&drawer, &blocked.projection, &blocked.branch).await?;
-        assert_eq!(staged.content, "locally edited\n", "staged work is preserved");
+        assert_eq!(
+            staged.content, "locally edited\n",
+            "staged work is preserved"
+        );
 
         // T11 status: the checkout-level block and the blocked record show.
         let lines = status(&root, &blocked, &drawer).await?;
-        assert!(lines.iter().any(|line| line.starts_with("blocked publish ")), "{lines:?}");
-        assert!(lines.iter().any(|line| line.starts_with(&format!("publish {document} blocked: "))), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("blocked publish ")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with(&format!("publish {document} blocked: "))),
+            "{lines:?}"
+        );
 
         // The explicit retry resumes while the racer is still armed (it spends
         // its last race in it); the racer joins before the assertions.
@@ -1267,11 +1423,27 @@ fn publish_blocks_when_upstream_keeps_moving_and_the_retry_resumes() -> Res<()> 
         racer.await.expect("racer task crashed")?;
         let resumed = read_checkout(&root).await?;
         assert!(matches!(resumed.state, State::Ready { blocked: None, .. }));
-        assert_eq!(resumed.publications.len(), 2, "the blocked record stays; the retry records the publish");
-        let record = resumed.publications.iter().max_by_key(|record| record.seq).expect("a published record exists");
+        assert_eq!(
+            resumed.publications.len(),
+            2,
+            "the blocked record stays; the retry records the publish"
+        );
+        let record = resumed
+            .publications
+            .iter()
+            .max_by_key(|record| record.seq)
+            .expect("a published record exists");
         assert_eq!(record.outcome, Outcome::Published);
-        assert_eq!(record.attempts, 2, "the retry's first attempt is raced by the racer's last armed commit");
-        assert_eq!(branch_note(&drawer, &resumed.projection, "main").await?.content, "locally edited\n");
+        assert_eq!(
+            record.attempts, 2,
+            "the retry's first attempt is raced by the racer's last armed commit"
+        );
+        assert_eq!(
+            branch_note(&drawer, &resumed.projection, "main")
+                .await?
+                .content,
+            "locally edited\n"
+        );
 
         ctx.stop().await?;
         Ok(())
@@ -1281,7 +1453,8 @@ fn publish_blocks_when_upstream_keeps_moving_and_the_retry_resumes() -> Res<()> 
 #[test]
 fn publish_blocks_when_upstream_removes_the_bound_note() -> Res<()> {
     block_on_big_stack(async {
-        let (ctx, _base, drawer, root, document) = staged_edit_checkout("checkout_publish_upstream_facet_removal").await?;
+        let (ctx, _base, drawer, root, document) =
+            staged_edit_checkout("checkout_publish_upstream_facet_removal").await?;
 
         // Upstream removes the bound Note facet before publish.
         let (_, heads) = drawer
@@ -1302,13 +1475,21 @@ fn publish_blocks_when_upstream_removes_the_bound_note() -> Res<()> {
             .await
             .map_err(eyre::Report::from)?;
 
-        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await else {
+        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await
+        else {
             panic!("publishing onto a facet removal must block");
         };
-        assert!(error.to_string().contains("publish incomplete"), "{error:#}");
+        assert!(
+            error.to_string().contains("publish incomplete"),
+            "{error:#}"
+        );
 
         let blocked = read_checkout(&root).await?;
-        let State::Ready { blocked: Some(recorded), .. } = &blocked.state else {
+        let State::Ready {
+            blocked: Some(recorded),
+            ..
+        } = &blocked.state
+        else {
             panic!("the invalid candidate must block the checkout");
         };
         assert_eq!(recorded.operation, Operation::Publish);
@@ -1316,16 +1497,29 @@ fn publish_blocks_when_upstream_removes_the_bound_note() -> Res<()> {
         assert_eq!(blocked.publications.len(), 1);
         let record = &blocked.publications[0];
         assert_eq!(record.outcome, Outcome::Blocked);
-        assert_eq!(record.attempts, 1, "an invalid candidate blocks on its first attempt");
+        assert_eq!(
+            record.attempts, 1,
+            "an invalid candidate blocks on its first attempt"
+        );
         assert_eq!(record.published_heads, None);
 
         // Nothing was persisted or published: the staged branch kept its work
         // and main is left to the upstream removal alone.
-        assert_eq!(branch_note(&drawer, &blocked.projection, &blocked.branch).await?.content, "locally edited\n");
-        assert!(
-            facet_value(&drawer, &document, "main", &FacetKey::from(WellKnownFacetTag::Note))
+        assert_eq!(
+            branch_note(&drawer, &blocked.projection, &blocked.branch)
                 .await?
-                .is_none(),
+                .content,
+            "locally edited\n"
+        );
+        assert!(
+            facet_value(
+                &drawer,
+                &document,
+                "main",
+                &FacetKey::from(WellKnownFacetTag::Note)
+            )
+            .await?
+            .is_none(),
             "publish must not restore the removed facet"
         );
 
@@ -1337,7 +1531,8 @@ fn publish_blocks_when_upstream_removes_the_bound_note() -> Res<()> {
 #[test]
 fn publish_blocks_when_upstream_breaks_the_projection() -> Res<()> {
     block_on_big_stack(async {
-        let (ctx, _base, drawer, root, document) = staged_edit_checkout("checkout_publish_projection_break").await?;
+        let (ctx, _base, drawer, root, document) =
+            staged_edit_checkout("checkout_publish_projection_break").await?;
 
         // Upstream writes a projection-breaking Body: two Notes selected.
         let note_url = build_facet_ref("self", &FacetKey::from(WellKnownFacetTag::Note))?;
@@ -1351,7 +1546,10 @@ fn publish_blocks_when_upstream_breaks_the_projection() -> Res<()> {
                     id: document.clone(),
                     facets_set: HashMap::from([(
                         FacetKey::from(WellKnownFacetTag::Body),
-                        WellKnownFacet::Body(Body { order: vec![note_url.clone(), note_url] }).into(),
+                        WellKnownFacet::Body(Body {
+                            order: vec![note_url.clone(), note_url],
+                        })
+                        .into(),
                     )]),
                     facets_remove: Vec::new(),
                     user_path: None,
@@ -1362,20 +1560,37 @@ fn publish_blocks_when_upstream_breaks_the_projection() -> Res<()> {
             .await
             .map_err(eyre::Report::from)?;
 
-        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await else {
+        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await
+        else {
             panic!("a projection-breaking candidate must block");
         };
-        assert!(error.to_string().contains("publish incomplete"), "{error:#}");
+        assert!(
+            error.to_string().contains("publish incomplete"),
+            "{error:#}"
+        );
 
         let blocked = read_checkout(&root).await?;
-        let State::Ready { blocked: Some(recorded), .. } = &blocked.state else {
+        let State::Ready {
+            blocked: Some(recorded),
+            ..
+        } = &blocked.state
+        else {
             panic!("the invalid candidate must block the checkout");
         };
-        assert!(recorded.failure.contains("exactly one Note"), "{}", recorded.failure);
+        assert!(
+            recorded.failure.contains("exactly one Note"),
+            "{}",
+            recorded.failure
+        );
         assert_eq!(blocked.publications.len(), 1);
         assert_eq!(blocked.publications[0].outcome, Outcome::Blocked);
         assert_eq!(blocked.publications[0].attempts, 1);
-        assert_eq!(branch_note(&drawer, &blocked.projection, &blocked.branch).await?.content, "locally edited\n");
+        assert_eq!(
+            branch_note(&drawer, &blocked.projection, &blocked.branch)
+                .await?
+                .content,
+            "locally edited\n"
+        );
 
         ctx.stop().await?;
         Ok(())
@@ -1385,7 +1600,8 @@ fn publish_blocks_when_upstream_breaks_the_projection() -> Res<()> {
 #[test]
 fn publish_resume_after_a_lost_record_recomputes_without_duplication() -> Res<()> {
     block_on_big_stack(async {
-        let (ctx, _base, drawer, root, _document) = staged_edit_checkout("checkout_publish_record_crash_window").await?;
+        let (ctx, _base, drawer, root, _document) =
+            staged_edit_checkout("checkout_publish_record_crash_window").await?;
         publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await?;
         let first = read_checkout(&root).await?;
         assert_eq!(first.publications.len(), 1);
@@ -1401,12 +1617,24 @@ fn publish_resume_after_a_lost_record_recomputes_without_duplication() -> Res<()
 
         publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await?;
         let resumed = read_checkout(&root).await?;
-        assert_eq!(resumed.publications.len(), 1, "the record is written once, not duplicated");
+        assert_eq!(
+            resumed.publications.len(),
+            1,
+            "the record is written once, not duplicated"
+        );
         assert_eq!(resumed.publications[0].seq, 1);
         assert_eq!(resumed.publications[0].outcome, Outcome::Published);
         // No duplicate import: the merged render is still exactly one Note.
-        assert_eq!(branch_note(&drawer, &resumed.projection, "main").await?.content, "locally edited\n");
-        assert_eq!(tokio::fs::read(root.join("notes/hello.md")).await?, disk_before);
+        assert_eq!(
+            branch_note(&drawer, &resumed.projection, "main")
+                .await?
+                .content,
+            "locally edited\n"
+        );
+        assert_eq!(
+            tokio::fs::read(root.join("notes/hello.md")).await?,
+            disk_before
+        );
 
         // Settled again: the next publish needs no work.
         publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await?;
@@ -1420,7 +1648,8 @@ fn publish_resume_after_a_lost_record_recomputes_without_duplication() -> Res<()
 #[test]
 fn resume_skips_settled_destinations_and_publishes_only_the_contested_one() -> Res<()> {
     block_on_big_stack(async {
-        let (ctx, _base, drawer, root, document) = staged_edit_checkout("checkout_publish_multi_destination").await?;
+        let (ctx, _base, drawer, root, document) =
+            staged_edit_checkout("checkout_publish_multi_destination").await?;
 
         // Second destination through the --allow import; its content is already
         // on main (the import created the document), so its first publish is a
@@ -1434,7 +1663,11 @@ fn resume_skips_settled_destinations_and_publishes_only_the_contested_one() -> R
 
         publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await?;
         let first = read_checkout(&root).await?;
-        assert_eq!(first.publications.len(), 1, "the import's already-upstream content publishes nothing");
+        assert_eq!(
+            first.publications.len(),
+            1,
+            "the import's already-upstream content publishes nothing"
+        );
         assert_eq!(first.publications[0].document, document);
 
         // Fresh staged work only on the imported destination; arm the race
@@ -1443,18 +1676,30 @@ fn resume_skips_settled_destinations_and_publishes_only_the_contested_one() -> R
         ingest_at(&root, &drawer, &[]).await?;
         let racer = arm_publish_racer(&drawer, stray_document.clone(), 4).await?;
 
-        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await else {
+        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await
+        else {
             panic!("the contested destination must block this publish");
         };
-        assert!(error.to_string().contains("publish incomplete"), "{error:#}");
+        assert!(
+            error.to_string().contains("publish incomplete"),
+            "{error:#}"
+        );
 
         let blocked = read_checkout(&root).await?;
         // The settled primary record was skipped, not republished.
-        let primary_records: Vec<&Publication> = blocked.publications.iter().filter(|record| record.document == document).collect();
+        let primary_records: Vec<&Publication> = blocked
+            .publications
+            .iter()
+            .filter(|record| record.document == document)
+            .collect();
         assert_eq!(primary_records.len(), 1);
         assert_eq!(primary_records[0].seq, 1);
         assert_eq!(primary_records[0].outcome, Outcome::Published);
-        let stray_records: Vec<&Publication> = blocked.publications.iter().filter(|record| record.document == stray_document).collect();
+        let stray_records: Vec<&Publication> = blocked
+            .publications
+            .iter()
+            .filter(|record| record.document == stray_document)
+            .collect();
         assert_eq!(stray_records.len(), 1);
         assert_eq!(stray_records[0].outcome, Outcome::Blocked);
         assert_eq!(stray_records[0].seq, 2);
@@ -1465,13 +1710,30 @@ fn resume_skips_settled_destinations_and_publishes_only_the_contested_one() -> R
         racer.await.expect("racer task crashed")?;
         let resumed = read_checkout(&root).await?;
         assert!(matches!(resumed.state, State::Ready { blocked: None, .. }));
-        let stray_records: Vec<&Publication> = resumed.publications.iter().filter(|record| record.document == stray_document).collect();
+        let stray_records: Vec<&Publication> = resumed
+            .publications
+            .iter()
+            .filter(|record| record.document == stray_document)
+            .collect();
         assert_eq!(stray_records.len(), 2);
         assert_eq!(stray_records[0].outcome, Outcome::Blocked);
         assert_eq!(stray_records[1].outcome, Outcome::Published);
         assert_eq!(stray_records[1].seq, 3);
-        assert_eq!(resumed.publications.iter().filter(|record| record.document == document).count(), 1, "the settled destination was never republished");
-        assert_eq!(branch_note(&drawer, &resumed.imports[0].projection, "main").await?.content, "first stray edit\n");
+        assert_eq!(
+            resumed
+                .publications
+                .iter()
+                .filter(|record| record.document == document)
+                .count(),
+            1,
+            "the settled destination was never republished"
+        );
+        assert_eq!(
+            branch_note(&drawer, &resumed.imports[0].projection, "main")
+                .await?
+                .content,
+            "first stray edit\n"
+        );
 
         ctx.stop().await?;
         Ok(())
@@ -1481,7 +1743,8 @@ fn resume_skips_settled_destinations_and_publishes_only_the_contested_one() -> R
 #[test]
 fn publish_re_renders_when_upstream_intake_changes_the_render() -> Res<()> {
     block_on_big_stack(async {
-        let (ctx, _base, drawer, root, document) = staged_edit_checkout("checkout_publish_rerender").await?;
+        let (ctx, _base, drawer, root, document) =
+            staged_edit_checkout("checkout_publish_rerender").await?;
 
         // Upstream rewrites the Note before publish.
         let (_, heads) = drawer
@@ -1494,7 +1757,11 @@ fn publish_re_renders_when_upstream_intake_changes_the_render() -> Res<()> {
                     id: document.clone(),
                     facets_set: HashMap::from([(
                         FacetKey::from(WellKnownFacetTag::Note),
-                        WellKnownFacet::Note(Note { mime: "text/plain".into(), content: "upstream rewrite\n".into() }).into(),
+                        WellKnownFacet::Note(Note {
+                            mime: "text/plain".into(),
+                            content: "upstream rewrite\n".into(),
+                        })
+                        .into(),
                     )]),
                     facets_remove: Vec::new(),
                     user_path: None,
@@ -1521,16 +1788,27 @@ fn publish_re_renders_when_upstream_intake_changes_the_render() -> Res<()> {
             .await?
             .expect("document on main");
         let published_heads = am_utils_rs::serialize_commit_heads(&live_main);
-        assert_eq!(record.published_heads.as_deref(), Some(published_heads.as_slice()));
+        assert_eq!(
+            record.published_heads.as_deref(),
+            Some(published_heads.as_slice())
+        );
         if merged.content == "locally edited\n" {
             // The staged content won the concurrent facet conflict: the disk
             // already matches the merged render, step-10 is a verified no-op,
             // and the recorded basis stays untouched (T9's no-op honesty).
-            assert_eq!(tokio::fs::read(root.join("notes/hello.md")).await?, b"locally edited\n");
+            assert_eq!(
+                tokio::fs::read(root.join("notes/hello.md")).await?,
+                b"locally edited\n"
+            );
             let State::Ready { length, digest, .. } = &published.state else {
                 panic!("published checkout stays Ready");
             };
-            let State::Ready { length: pre_length, digest: pre_digest, .. } = &staged_check.state else {
+            let State::Ready {
+                length: pre_length,
+                digest: pre_digest,
+                ..
+            } = &staged_check.state
+            else {
                 panic!("pre-publish checkout is Ready");
             };
             assert_eq!(length, pre_length);
@@ -1538,13 +1816,19 @@ fn publish_re_renders_when_upstream_intake_changes_the_render() -> Res<()> {
             assert_eq!(published.render_heads, staged_check.render_heads);
         } else {
             assert_eq!(merged.content, "upstream rewrite\n", "{merged:?}");
-            assert_eq!(tokio::fs::read(root.join("notes/hello.md")).await?, merged.content.as_bytes());
+            assert_eq!(
+                tokio::fs::read(root.join("notes/hello.md")).await?,
+                merged.content.as_bytes()
+            );
             let State::Ready { length, digest, .. } = &published.state else {
                 panic!("published checkout stays Ready");
             };
             assert_eq!(*length as usize, merged.content.len());
             assert_eq!(*digest, *blake3::hash(merged.content.as_bytes()).as_bytes());
-            assert_eq!(published.render_heads.as_deref(), Some(published_heads.as_slice()));
+            assert_eq!(
+                published.render_heads.as_deref(),
+                Some(published_heads.as_slice())
+            );
         }
 
         ctx.stop().await?;
@@ -1555,7 +1839,8 @@ fn publish_re_renders_when_upstream_intake_changes_the_render() -> Res<()> {
 #[test]
 fn project_published_refuses_a_dirty_target_without_overwriting() -> Res<()> {
     block_on_big_stack(async {
-        let (ctx, _base, drawer, root, document) = staged_edit_checkout("checkout_publish_dirty_target").await?;
+        let (ctx, _base, drawer, root, document) =
+            staged_edit_checkout("checkout_publish_dirty_target").await?;
 
         // Upstream rewrites the Note; the step-10 path re-renders the state.
         let (_, heads) = drawer
@@ -1568,7 +1853,11 @@ fn project_published_refuses_a_dirty_target_without_overwriting() -> Res<()> {
                     id: document.clone(),
                     facets_set: HashMap::from([(
                         FacetKey::from(WellKnownFacetTag::Note),
-                        WellKnownFacet::Note(Note { mime: "text/plain".into(), content: "upstream rewrite\n".into() }).into(),
+                        WellKnownFacet::Note(Note {
+                            mime: "text/plain".into(),
+                            content: "upstream rewrite\n".into(),
+                        })
+                        .into(),
                     )]),
                     facets_remove: Vec::new(),
                     user_path: None,
@@ -1582,21 +1871,35 @@ fn project_published_refuses_a_dirty_target_without_overwriting() -> Res<()> {
         let receiver = TokioFs::new(&root);
         {
             let mut marker = read_marker(&root).await?;
-            let destination = Destination { track: tracked_bindings(marker.checkout())?[0].clone() };
+            let destination = Destination {
+                track: tracked_bindings(marker.checkout())?[0].clone(),
+            };
             let (_, heads) = drawer
                 .get_with_heads(&document, BranchPath::new("main"), None)
                 .await?
                 .expect("document on main");
-            project_published(&receiver, &mut marker, &drawer, &destination, am_utils_rs::serialize_commit_heads(&heads)).await?;
+            project_published(
+                &receiver,
+                &mut marker,
+                &drawer,
+                &destination,
+                am_utils_rs::serialize_commit_heads(&heads),
+            )
+            .await?;
         }
-        assert_eq!(tokio::fs::read(root.join("notes/hello.md")).await?, b"upstream rewrite\n");
+        assert_eq!(
+            tokio::fs::read(root.join("notes/hello.md")).await?,
+            b"upstream rewrite\n"
+        );
 
         // A disk state that matches neither the merged render nor the recorded
         // render evidence refuses through prepare's expected-evidence
         // precondition and stays untouched (F6, no overwrite).
         tokio::fs::write(root.join("notes/hello.md"), "third hand\n").await?;
         let mut marker = read_marker(&root).await?;
-        let destination = Destination { track: tracked_bindings(marker.checkout())?[0].clone() };
+        let destination = Destination {
+            track: tracked_bindings(marker.checkout())?[0].clone(),
+        };
         let (_, heads) = drawer
             .get_with_heads(&document, BranchPath::new("main"), None)
             .await?
@@ -1613,7 +1916,11 @@ fn project_published_refuses_a_dirty_target_without_overwriting() -> Res<()> {
             panic!("a dirty target must refuse the overwrite");
         };
         assert!(!error.to_string().is_empty());
-        assert_eq!(tokio::fs::read(root.join("notes/hello.md")).await?, b"third hand\n", "no overwrite");
+        assert_eq!(
+            tokio::fs::read(root.join("notes/hello.md")).await?,
+            b"third hand\n",
+            "no overwrite"
+        );
 
         ctx.stop().await?;
         Ok(())
@@ -1623,15 +1930,24 @@ fn project_published_refuses_a_dirty_target_without_overwriting() -> Res<()> {
 #[test]
 fn publish_refuses_unsettled_staging_paths() -> Res<()> {
     block_on_big_stack(async {
-        let (ctx, _base, drawer, root, document) = staged_edit_checkout("checkout_publish_refusals").await?;
+        let (ctx, _base, drawer, root, document) =
+            staged_edit_checkout("checkout_publish_refusals").await?;
 
         // Modified: bytes changed post-ingest without a new staging.
         tokio::fs::write(root.join("notes/hello.md"), "dirty\n").await?;
-        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await else {
+        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await
+        else {
             panic!("a modified path must refuse the publish");
         };
-        assert!(error.to_string().contains("modified notes/hello.md"), "{error:#}");
-        assert!(error.to_string().contains("ingest must complete before publish"));
+        assert!(
+            error.to_string().contains("modified notes/hello.md"),
+            "{error:#}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("ingest must complete before publish")
+        );
 
         let refused = read_checkout(&root).await?;
         assert!(refused.publications.is_empty(), "nothing published");
@@ -1639,24 +1955,36 @@ fn publish_refuses_unsettled_staging_paths() -> Res<()> {
             .get_with_heads(&document, BranchPath::new("main"), None)
             .await?
             .expect("document on main");
-        assert_eq!(am_utils_rs::serialize_commit_heads(&live_main), refused.basis, "main untouched");
+        assert_eq!(
+            am_utils_rs::serialize_commit_heads(&live_main),
+            refused.basis,
+            "main untouched"
+        );
 
         // Missing: the bound file is absent.
         tokio::fs::remove_file(root.join("notes/hello.md")).await?;
-        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await else {
+        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await
+        else {
             panic!("a missing path must refuse the publish");
         };
-        assert!(error.to_string().contains("missing notes/hello.md"), "{error:#}");
+        assert!(
+            error.to_string().contains("missing notes/hello.md"),
+            "{error:#}"
+        );
 
         // An ingest block refuses publish outright.
         tokio::fs::write(root.join("notes/hello.md"), b"\xff\xfe not utf-8").await?;
         let Err(_) = ingest_at(&root, &drawer, &[]).await else {
             panic!("non-UTF-8 bytes must block ingest");
         };
-        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await else {
+        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await
+        else {
             panic!("a blocked checkout must refuse publish until the block clears");
         };
-        assert!(error.to_string().contains("ingest block stands"), "{error:#}");
+        assert!(
+            error.to_string().contains("ingest block stands"),
+            "{error:#}"
+        );
 
         // A Pending checkout refuses before anything else.
         tokio::fs::write(root.join("notes/hello.md"), "locally edited\n").await?;
@@ -1664,10 +1992,14 @@ fn publish_refuses_unsettled_staging_paths() -> Res<()> {
         let mut marker = read_marker(&root).await?;
         marker.checkout_mut().state = State::Pending { failure: None };
         replace_marker(&root, &marker).await?;
-        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await else {
+        let Err(error) = publish_pipeline(&root, &mut read_marker(&root).await?, &drawer).await
+        else {
             panic!("a Pending checkout must refuse publish");
         };
-        assert!(error.to_string().contains("incomplete (Pending)"), "{error:#}");
+        assert!(
+            error.to_string().contains("incomplete (Pending)"),
+            "{error:#}"
+        );
 
         ctx.stop().await?;
         Ok(())
@@ -1713,7 +2045,6 @@ fn run_cli(args: &[&str]) -> Res<std::process::Output> {
         .map_err(Into::into)
 }
 
-
 #[test]
 fn checkout_cli_grammar_drives_the_real_binary_grammar_surface() -> Res<()> {
     block_on_big_stack(async {
@@ -1726,17 +2057,33 @@ fn checkout_cli_grammar_drives_the_real_binary_grammar_surface() -> Res<()> {
 
         // Grammar: the ratified ingest surface through the real binary.
         let output = run_cli(&["checkout", "--help"])?;
-        assert!(output.status.success(), "{:?}\n{}", output.stderr, String::from_utf8_lossy(&output.stdout));
+        assert!(
+            output.status.success(),
+            "{:?}\n{}",
+            output.stderr,
+            String::from_utf8_lossy(&output.stdout)
+        );
         let help = String::from_utf8_lossy(&output.stdout);
         for verb in ["create", "ingest", "status", "publish"] {
-            assert!(help.contains(verb), "checkout --help must list {verb}\n{help}");
+            assert!(
+                help.contains(verb),
+                "checkout --help must list {verb}\n{help}"
+            );
         }
 
         let output = run_cli(&["checkout", "ingest", "--help"])?;
-        assert!(output.status.success(), "{:?}\n{}", output.stderr, String::from_utf8_lossy(&output.stdout));
+        assert!(
+            output.status.success(),
+            "{:?}\n{}",
+            output.stderr,
+            String::from_utf8_lossy(&output.stdout)
+        );
         let help = String::from_utf8_lossy(&output.stdout);
         for flag in ["--allow", "--adopt-import-claim", "--drop-import-claim"] {
-            assert!(help.contains(flag), "ingest --help must list {flag}\n{help}");
+            assert!(
+                help.contains(flag),
+                "ingest --help must list {flag}\n{help}"
+            );
         }
         // The adopt spelling parses one PATH=DOC value, not two positional values.
         assert!(
@@ -1751,18 +2098,33 @@ fn checkout_cli_grammar_drives_the_real_binary_grammar_surface() -> Res<()> {
         // assertable without a repo (T12).
         let output = run_cli(&["checkout", "publish", checkout_dir])?;
         assert!(!output.status.success(), "publish outside a repo must fail");
-        let report = format!("{}{}", String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
         assert!(report.contains("repo not initialized"), "{report}");
         let output = run_cli(&["checkout", "status", checkout_dir])?;
-        assert!(!output.status.success(), "status outside a checkout must fail");
-        let report = format!("{}{}", String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
+        assert!(
+            !output.status.success(),
+            "status outside a checkout must fail"
+        );
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
         assert!(report.contains("no checkout marker found"), "{report}");
 
         // Ingest resolves the repo (lazy singletons for the plug check) before
         // discovery, so its refusal names the missing repo instead.
         let output = run_cli(&["checkout", "ingest", checkout_dir])?;
         assert!(!output.status.success(), "ingest outside a repo must fail");
-        let report = format!("{}{}", String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
         assert!(report.contains("repo not initialized"), "{report}");
 
         Ok(())
@@ -1788,9 +2150,7 @@ fn batch_gate_refuses_everything_when_one_entry_fails_to_prepare() -> Res<()> {
         // One unprepared --allow entry refuses the whole batch: the valid edit
         // is NOT staged either, and the block is recorded durably.
         let before = read_checkout(&root).await?;
-        let Err(error) =
-            ingest_at(&root, &drawer, std::slice::from_ref(&valid)).await
-        else {
+        let Err(error) = ingest_at(&root, &drawer, std::slice::from_ref(&valid)).await else {
             panic!("a single unprepared entry must refuse the whole batch");
         };
         assert!(error.to_string().contains("not valid UTF-8"), "{error:#}");
@@ -1799,19 +2159,32 @@ fn batch_gate_refuses_everything_when_one_entry_fails_to_prepare() -> Res<()> {
         assert!(gated.imports.is_empty(), "no imports: nothing staged");
         assert!(gated.pending_imports.is_empty());
         assert!(
-            matches!(gated.state, State::Ready { blocked: Some(_), .. }),
+            matches!(
+                gated.state,
+                State::Ready {
+                    blocked: Some(_),
+                    ..
+                }
+            ),
             "the refusal is recorded as a durable block"
         );
 
         let note = branch_note(&drawer, &before.projection, &before.branch).await?;
-        assert_eq!(note.content, NOTE_CONTENT, "the branch held the render content");
+        assert_eq!(
+            note.content, NOTE_CONTENT,
+            "the branch held the render content"
+        );
 
         // Preparing the input and retrying clears the block and stages both.
         tokio::fs::write(&valid, "fixed stray\n").await?;
         ingest_at(&root, &drawer, std::slice::from_ref(&valid)).await?;
         let resolved = read_checkout(&root).await?;
         assert!(matches!(resolved.state, State::Ready { blocked: None, .. }));
-        assert_eq!(resolved.receipts.len(), 2, "the retried batch stages both paths");
+        assert_eq!(
+            resolved.receipts.len(),
+            2,
+            "the retried batch stages both paths"
+        );
         assert_eq!(resolved.imports.len(), 1);
         let lines = status(&root, &resolved, &drawer).await?;
         assert_eq!(lines, ["ingested notes/hello.md", "clean stray.md"]);

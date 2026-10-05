@@ -5,7 +5,7 @@
 //! falls back.
 
 use crate::identity::LensIdentity;
-use crate::proposal::{DocumentAccess, LensInput, LensCategory, Proposal, Subject};
+use crate::proposal::{DocumentAccess, LensCategory, LensInput, Proposal, Subject};
 
 /// Why a proposal won its subject from the selector's viewpoint (selection is
 /// stateless recompute; the reason is surfaced with the alternatives).
@@ -75,7 +75,10 @@ pub fn effective_authority(proposal: &Proposal) -> Authority {
     let any_read_only = proposal.inputs.iter().any(|input| {
         matches!(
             input,
-            LensInput::Document { access: DocumentAccess::ReadOnlyContext, .. }
+            LensInput::Document {
+                access: DocumentAccess::ReadOnlyContext,
+                ..
+            }
         )
     });
     if any_read_only {
@@ -138,7 +141,9 @@ pub struct Selection {
 
 impl Selection {
     pub fn winner(&self, subject: &Subject) -> Option<&SubjectSelection> {
-        self.subjects.iter().find(|selection| &selection.subject == subject)
+        self.subjects
+            .iter()
+            .find(|selection| &selection.subject == subject)
     }
 }
 
@@ -159,10 +164,11 @@ pub fn select(
     subjects.dedup();
 
     for (index, choice) in config.explicit.iter().enumerate() {
-        if config.explicit[index + 1..]
-            .iter()
-            .any(|other| other.subject == choice.subject && other.lens_name == choice.lens_name && other.plug_id == choice.plug_id)
-        {
+        if config.explicit[index + 1..].iter().any(|other| {
+            other.subject == choice.subject
+                && other.lens_name == choice.lens_name
+                && other.plug_id == choice.plug_id
+        }) {
             return Err(SelectionError::DuplicateExplicitChoice {
                 subject: choice.subject.to_string(),
             });
@@ -175,7 +181,9 @@ pub fn select(
     }
 
     check_output_path_collisions(&selections)?;
-    Ok(Selection { subjects: selections })
+    Ok(Selection {
+        subjects: selections,
+    })
 }
 
 /// Ranks one subject's candidates and returns its settled selection. The
@@ -189,14 +197,16 @@ fn select_subject(
         .explicit
         .iter()
         .find(|choice| &choice.subject == subject)
-        .map(|choice| (
-            choice,
-            all_proposals.iter().position(|proposal| {
-                proposal.subject == *subject
-                    && proposal.lens.plug_id == choice.plug_id
-                    && proposal.lens.lens_name == choice.lens_name
-            }),
-        ));
+        .map(|choice| {
+            (
+                choice,
+                all_proposals.iter().position(|proposal| {
+                    proposal.subject == *subject
+                        && proposal.lens.plug_id == choice.plug_id
+                        && proposal.lens.lens_name == choice.lens_name
+                }),
+            )
+        });
 
     if let Some((choice, None)) = &explicit {
         return Err(SelectionError::ExplicitChoiceUnmatched {
@@ -209,16 +219,24 @@ fn select_subject(
         explicit
             .as_ref()
             .map(|(choice, _)| {
-                proposal.lens.plug_id == choice.plug_id && proposal.lens.lens_name == choice.lens_name
+                proposal.lens.plug_id == choice.plug_id
+                    && proposal.lens.lens_name == choice.lens_name
             })
             .unwrap_or(false)
     };
 
-    let candidates = all_proposals.iter().filter(|proposal| proposal.subject == *subject);
+    let candidates = all_proposals
+        .iter()
+        .filter(|proposal| proposal.subject == *subject);
     // Total ordering, strongest first (ADR 012 §4: category > declared
     // specificity > configured default > deterministic identity ordering).
     let mut candidate_ranks = candidates
-        .map(|proposal| (rank(proposal, &config.defaults, is_explicit(proposal)), proposal))
+        .map(|proposal| {
+            (
+                rank(proposal, &config.defaults, is_explicit(proposal)),
+                proposal,
+            )
+        })
         .collect::<Vec<_>>();
     candidate_ranks.sort_by(|(rank_left, _), (rank_right, _)| rank_right.cmp(rank_left));
 
@@ -313,7 +331,10 @@ fn validate_proposals(proposals: &[Proposal]) -> Result<(), SelectionError> {
         }
         let mut slots = proposal.outputs.clone();
         slots.sort_by(|left, right| left.slot.cmp(&right.slot));
-        if let Some(duplicate) = slots.windows(2).find(|window| window[0].slot == window[1].slot) {
+        if let Some(duplicate) = slots
+            .windows(2)
+            .find(|window| window[0].slot == window[1].slot)
+        {
             return Err(SelectionError::InvalidProposal {
                 lens: proposal.lens.to_string(),
                 detail: format!("duplicate internal slot {}", duplicate[0].slot),

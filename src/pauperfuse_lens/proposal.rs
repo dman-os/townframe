@@ -90,11 +90,18 @@ pub enum LensInput {
     /// A named document under this interpretation. The document access is the
     /// per-invocation authorization surface; facet values inside it follow the
     /// facet role.
-    Document { document: DocId, access: DocumentAccess },
+    Document {
+        document: DocId,
+        access: DocumentAccess,
+    },
     /// A facet dependency: `Owned` inputs are the write destinations on ingest
     /// and the affected production dependencies; `Context` inputs are
     /// read-only and recorded as recipe context (ADR 012 §3, §8).
-    Facet { document: DocId, facet: FacetKey, role: FacetRole },
+    Facet {
+        document: DocId,
+        facet: FacetKey,
+        role: FacetRole,
+    },
 }
 
 /// How a facet participates (ADR 012 §3/§8). Facet-level spelling of ADR 012
@@ -129,7 +136,11 @@ impl Proposal {
     /// The Owned facet dependencies: the write destinations on ingest.
     pub fn owned_facets(&self) -> impl Iterator<Item = (&DocId, &FacetKey)> {
         self.inputs.iter().filter_map(|input| match input {
-            LensInput::Facet { document, facet, role: FacetRole::Owned } => Some((document, facet)),
+            LensInput::Facet {
+                document,
+                facet,
+                role: FacetRole::Owned,
+            } => Some((document, facet)),
             _ => None,
         })
     }

@@ -181,16 +181,7 @@ pub struct FacetManifest {
     pub references: Vec<FacetReferenceManifest>,
 }
 
-#[derive(
-    Debug,
-    Validate,
-    Clone,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Hash,
-)]
+#[derive(Debug, Validate, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FacetReferenceManifest {
@@ -236,16 +227,7 @@ impl FacetReferenceManifest {
 
 /// Where each value selected by a [`FacetReferenceManifest`] carries its
 /// facet URL and heads pins.
-#[derive(
-    Debug,
-    Validate,
-    Clone,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    Hash,
-)]
+#[derive(Debug, Validate, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(tag = "ty", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum FacetReferenceValue {
@@ -995,8 +977,7 @@ fn facet_has_reference_to_tag(
     reference_specs: &[FacetReferenceManifest],
 ) -> bool {
     for reference_spec in reference_specs {
-        let selected_values = match select_json_path_values(facet_raw, &reference_spec.json_path)
-        {
+        let selected_values = match select_json_path_values(facet_raw, &reference_spec.json_path) {
             Ok(values) => values,
             Err(err) => {
                 debug!(
@@ -1026,8 +1007,7 @@ fn facet_has_reference_to_tag(
             };
 
             for url_str in url_strings {
-                let Ok(matches_target) =
-                    facet_ref_str_targets_tag(url_str, &target_tag.into())
+                let Ok(matches_target) = facet_ref_str_targets_tag(url_str, &target_tag.into())
                 else {
                     continue;
                 };

@@ -1930,19 +1930,20 @@ async fn core_plug_reference_registrations_match_pre_engine_break_semantics() ->
     };
 
     for split_tag in [
-        daybook_types::doc::WellKnownFacetTag::ImageMetadata
-            .to_string(),
+        daybook_types::doc::WellKnownFacetTag::ImageMetadata.to_string(),
         daybook_types::doc::WellKnownFacetTag::Embedding.to_string(),
     ] {
         let refs = references_of(&split_tag)?;
         match refs.as_slice() {
-            [manifest::FacetReferenceManifest {
-                json_path,
-                optional,
-                value,
-                at_commit_json_path: Some(at_commit),
-                heads_optional,
-            }] => {
+            [
+                manifest::FacetReferenceManifest {
+                    json_path,
+                    optional,
+                    value,
+                    at_commit_json_path: Some(at_commit),
+                    heads_optional,
+                },
+            ] => {
                 assert_eq!(json_path, "/facetRef");
                 assert!(!optional, "{split_tag} facetRef must be required");
                 assert!(matches!(value, manifest::FacetReferenceValue::UrlString));
@@ -1953,17 +1954,16 @@ async fn core_plug_reference_registrations_match_pre_engine_break_semantics() ->
         }
     }
 
-    match references_of(
-        &daybook_types::doc::WellKnownFacetTag::Body
-            .to_string(),
-    )?.as_slice() {
-        [manifest::FacetReferenceManifest {
-            json_path,
-            optional,
-            value,
-            at_commit_json_path: None,
-            heads_optional,
-        }] => {
+    match references_of(&daybook_types::doc::WellKnownFacetTag::Body.to_string())?.as_slice() {
+        [
+            manifest::FacetReferenceManifest {
+                json_path,
+                optional,
+                value,
+                at_commit_json_path: None,
+                heads_optional,
+            },
+        ] => {
             assert_eq!(json_path, "/order");
             assert!(!optional);
             assert!(matches!(value, manifest::FacetReferenceValue::UrlString));
@@ -1976,7 +1976,10 @@ async fn core_plug_reference_registrations_match_pre_engine_break_semantics() ->
     match dpath_refs.as_slice() {
         [targets, shorthand] => {
             assert_eq!(targets.json_path, "$.targets[*]");
-            assert!(targets.optional, "targets manifest must serve whole-doc values");
+            assert!(
+                targets.optional,
+                "targets manifest must serve whole-doc values"
+            );
             assert!(matches!(
                 &targets.value,
                 manifest::FacetReferenceValue::UrlObject { ref_field, heads_field }
@@ -1989,7 +1992,10 @@ async fn core_plug_reference_registrations_match_pre_engine_break_semantics() ->
             );
             assert_eq!(shorthand.json_path, "$.facetRef");
             assert!(shorthand.optional);
-            assert!(matches!(shorthand.value, manifest::FacetReferenceValue::UrlString));
+            assert!(matches!(
+                shorthand.value,
+                manifest::FacetReferenceValue::UrlString
+            ));
             assert_eq!(shorthand.at_commit_json_path.as_deref(), Some("$.refHeads"));
             assert!(shorthand.heads_optional);
         }

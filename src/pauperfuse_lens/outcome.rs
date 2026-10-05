@@ -88,7 +88,10 @@ impl core::fmt::Display for TargetStateClass {
             TargetStateClass::Missing => write!(formatter, "missing"),
             TargetStateClass::StubOrBlob(stub) => write!(formatter, "{stub}"),
             TargetStateClass::RepresentableNoLens => {
-                write!(formatter, "representable (no selective-claim lens installed)")
+                write!(
+                    formatter,
+                    "representable (no selective-claim lens installed)"
+                )
             }
             TargetStateClass::NotRepresentable => write!(formatter, "not representable"),
             TargetStateClass::UnknownShape => write!(formatter, "unknown shape"),
@@ -110,7 +113,10 @@ pub enum UninterpretedReason {
     /// Solved-visible (Q5): the addressed facet is a stub (Pending) or Blob
     /// state the interpreters cannot render; blob retrieval is later backend
     /// strategy work (ADR 013).
-    TargetStubOrBlob { target: String, stub: TargetStubState },
+    TargetStubOrBlob {
+        target: String,
+        stub: TargetStubState,
+    },
     /// The target exists but is not the shape any interpreter represents.
     TargetShape(String),
     /// The claim's declared Body/reference resolution is outside the
@@ -186,7 +192,11 @@ pub struct Uninterpreted {
 impl core::fmt::Display for Uninterpreted {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match &self.subject {
-            Some(subject) => write!(formatter, "claim {}: uninterpreted — {}", subject, self.reason),
+            Some(subject) => write!(
+                formatter,
+                "claim {}: uninterpreted — {}",
+                subject, self.reason
+            ),
             None => write!(formatter, "uninterpreted — {}", self.reason),
         }
     }

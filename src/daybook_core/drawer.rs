@@ -17,8 +17,8 @@ mod queries;
 mod tests;
 pub mod types;
 
-pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
 pub use crate::drawer::types::MergeCandidate;
+pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
 pub use meta::doc_version_updates;
 pub use meta::version_updates;
 
@@ -1134,10 +1134,7 @@ impl DrawerRepo {
             }
         };
         let parsed = Self::validate_reference_url(url_value, origin_facet_key)?;
-        Ok(ValidatedReference {
-            heads,
-            ..parsed
-        })
+        Ok(ValidatedReference { heads, ..parsed })
     }
     fn validate_reference_url(
         url_value: &str,

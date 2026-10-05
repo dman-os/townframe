@@ -82,13 +82,15 @@ impl Recipe {
                 .inputs
                 .iter()
                 .filter_map(|input| match input {
-                    LensInput::Facet { document, facet, role: input_role } if *input_role == role => {
-                        Some(DepAtHeads {
-                            document: document.clone(),
-                            facet: facet.clone(),
-                            heads: heads.clone(),
-                        })
-                    }
+                    LensInput::Facet {
+                        document,
+                        facet,
+                        role: input_role,
+                    } if *input_role == role => Some(DepAtHeads {
+                        document: document.clone(),
+                        facet: facet.clone(),
+                        heads: heads.clone(),
+                    }),
                     _ => None,
                 })
                 .collect()

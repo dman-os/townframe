@@ -35,7 +35,10 @@ pub enum Signal {
     /// File-side: an accepted byte-size range. Size is a cheap exclusion
     /// signal (ADR 012 §2): zero-length or oversized inputs may be declined
     /// before parsing.
-    SizeRange { min_bytes: u64, max_bytes: Option<u64> },
+    SizeRange {
+        min_bytes: u64,
+        max_bytes: Option<u64>,
+    },
 }
 
 impl Signal {

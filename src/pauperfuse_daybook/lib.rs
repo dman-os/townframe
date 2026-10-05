@@ -80,7 +80,13 @@ pub struct SelectedClaims {
 impl SelectedClaims {
     /// The projected claims in claim order with their recipes; today's
     /// coordinator surfaces expect exactly one.
-    pub fn projected(&self) -> Vec<(pauperfuse_lens::Subject, Projection, pauperfuse_lens::Recipe)> {
+    pub fn projected(
+        &self,
+    ) -> Vec<(
+        pauperfuse_lens::Subject,
+        Projection,
+        pauperfuse_lens::Recipe,
+    )> {
         self.outcomes
             .iter()
             .filter_map(|outcome| match outcome {
@@ -172,9 +178,10 @@ impl Projection {
                 }
             }
             if proposed.is_empty() {
-                let reason = pauperfuse_lens::combine_declinations(&declined).unwrap_or_else(
-                    || pauperfuse_lens::UninterpretedReason::NoLens("no lens is installed".into()),
-                );
+                let reason =
+                    pauperfuse_lens::combine_declinations(&declined).unwrap_or_else(|| {
+                        pauperfuse_lens::UninterpretedReason::NoLens("no lens is installed".into())
+                    });
                 outcomes.push(pauperfuse_lens::ClaimOutcome::Uninterpreted(
                     pauperfuse_lens::Uninterpreted {
                         subject: Some(subject),
@@ -183,8 +190,8 @@ impl Projection {
                 ));
                 continue;
             }
-            let selection =
-                pauperfuse_lens::select(&proposed, &config).map_err(|error| Error::Selection(error.to_string()))?;
+            let selection = pauperfuse_lens::select(&proposed, &config)
+                .map_err(|error| Error::Selection(error.to_string()))?;
             let subject_selection = selection
                 .winner(&subject)
                 .expect("a subject with proposals has a winner");
@@ -370,14 +377,12 @@ impl Producer for Daybook {
                 .map_err(|error| Error::Unsupported(error.to_string()))?;
             match output.kind {
                 pauperfuse_lens::OutputKind::File => {
-                    entries.extend(
-                        path.ancestors_inclusive()
-                            .take(path.len())
-                            .map(|path| TreeEntry {
-                                path,
-                                description: Description::Directory,
-                            }),
-                    );
+                    entries.extend(path.ancestors_inclusive().take(path.len()).map(|path| {
+                        TreeEntry {
+                            path,
+                            description: Description::Directory,
+                        }
+                    }));
                     entries.push(TreeEntry {
                         path,
                         description: Description::File {

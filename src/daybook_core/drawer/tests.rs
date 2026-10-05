@@ -2128,8 +2128,15 @@ async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() 
             .get(&branch_a.to_string())
             .ok_or_eyre("missing branch-a state after update")?
             .clone();
-        repo.merge_from_heads(&doc_id, BranchPath::new("main"), None, &branch_a, &a_heads, None)
-            .await?;
+        repo.merge_from_heads(
+            &doc_id,
+            BranchPath::new("main"),
+            None,
+            &branch_a,
+            &a_heads,
+            None,
+        )
+        .await?;
         let heads_after_a = repo
             .get_doc_branches(&doc_id)
             .await?
@@ -2171,8 +2178,15 @@ async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() 
             .get(&branch_b.to_string())
             .ok_or_eyre("missing branch-b state after update")?
             .clone();
-        repo.merge_from_heads(&doc_id, BranchPath::new("main"), None, &branch_b, &b_heads, None)
-            .await?;
+        repo.merge_from_heads(
+            &doc_id,
+            BranchPath::new("main"),
+            None,
+            &branch_b,
+            &b_heads,
+            None,
+        )
+        .await?;
 
         // Recreate the stale-heads path: materialize a new branch from an older main head set
         // after main has already advanced through an intervening merge.
@@ -4170,12 +4184,10 @@ async fn checkout_branch_is_independently_authorized() -> Res<()> {
     // contexts over the same database, never concurrently.
     let meta_dir = tempfile::tempdir()?;
     let meta_file = meta_dir.path().join("meta.sqlite");
-    let open_meta = || async {
-        crate::app::open_sql_ctx(crate::app::SqlConfig::file(meta_file.clone()))
-            .await
-    };
+    let open_meta =
+        || async { crate::app::open_sql_ctx(crate::app::SqlConfig::file(meta_file.clone())).await };
 
-        let (repo, stop_token) = DrawerRepo::load(
+    let (repo, stop_token) = DrawerRepo::load(
         Arc::clone(&big_repo),
         Arc::clone(&big_sync_host.store),
         drawer_doc_id.clone(),
@@ -4237,10 +4249,7 @@ async fn checkout_branch_is_independently_authorized() -> Res<()> {
         .await?
         .ok_or_eyre("missing checkout branch ref")?;
     assert_eq!(checkout_ref.branch_kind, BranchKind::Local);
-    assert_eq!(
-        identity.branch_id.0,
-        checkout_ref.branch_doc_id.to_string()
-    );
+    assert_eq!(identity.branch_id.0, checkout_ref.branch_doc_id.to_string());
     assert_eq!(main_ref.branch_kind, BranchKind::Replicated);
 
     // Distinct physical identity; basis recorded; source heads untouched.
@@ -4257,7 +4266,13 @@ async fn checkout_branch_is_independently_authorized() -> Res<()> {
         "checkout branch creation never rewrites the replicated Branches facet"
     );
     // The branch doc must never join shared replicated partitions.
-    assert_eq!(big_sync_host.store.member_count(partition_id.clone()).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
 
     let reopened_heads_matched = {
         stop_token.stop().await?;
@@ -4294,10 +4309,19 @@ async fn checkout_branch_is_independently_authorized() -> Res<()> {
     };
 
     // Local branch persistence is in local state, not the replicated partition.
-    assert_eq!(big_sync_host.store.member_count(partition_id.clone()).await?, 1);
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
 
     acx_stop().await.unwrap();
-    assert!(reopened_heads_matched, "reopened checkout branch must retain its basis");
+    assert!(
+        reopened_heads_matched,
+        "reopened checkout branch must retain its basis"
+    );
     Ok(())
 }
 
@@ -4436,7 +4460,8 @@ async fn test_add_accepts_selective_dpath_self_target_facet_in_same_write() -> R
         note_key.clone(),
         serde_json::Value::from(WellKnownFacet::Note("same write".into())),
     );
-    let shorthand = dpath_shorthand_claim(daybook_types::url::FACET_SELF_DOC_ID, &note_key, vec![])?;
+    let shorthand =
+        dpath_shorthand_claim(daybook_types::url::FACET_SELF_DOC_ID, &note_key, vec![])?;
     repo.add(AddDocArgs {
         branch_path: BranchPathBuf::from("main"),
         facets: dpath_facets(shorthand, vec![same_write_note]),
@@ -4564,7 +4589,9 @@ async fn test_add_cross_doc_dpath_target_head_rules_match_pre_migration_engine()
             user_path: None,
         })
         .await
-        .map_err(|err| eyre::eyre!("legacy empty-at-commit-array cross-doc ref must stay accepted: {err:#}"))?;
+        .map_err(|err| {
+            eyre::eyre!("legacy empty-at-commit-array cross-doc ref must stay accepted: {err:#}")
+        })?;
     }
 
     stop_token.stop().await?;

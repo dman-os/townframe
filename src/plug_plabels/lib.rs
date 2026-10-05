@@ -55,9 +55,8 @@ mod wflows;
 
 use daybook_types::manifest::{
     CommandDeets, CommandManifest, DocPredicateClause, FacetDependencyManifest, FacetManifest,
-    FacetReferenceManifest, FacetReferenceValue, PlugManifest, ProcessorDeets,
-    ProcessorManifest, RoutineDocAcl, RoutineFacetAccess, RoutineImpl, RoutineLocalStateAccess,
-    RoutineManifest,
+    FacetReferenceManifest, FacetReferenceValue, PlugManifest, ProcessorDeets, ProcessorManifest,
+    RoutineDocAcl, RoutineFacetAccess, RoutineImpl, RoutineLocalStateAccess, RoutineManifest,
 };
 use std::sync::Arc;
 
@@ -598,9 +597,7 @@ pub fn plug_manifest() -> PlugManifest {
 mod tests {
     use super::*;
     use daybook_types::manifest::FacetReferenceValue;
-    use daybook_types::reference::{
-        schema_allows_url_reference, schema_node_for_json_path,
-    };
+    use daybook_types::reference::{schema_allows_url_reference, schema_node_for_json_path};
 
     /// The plabel registration survived the reference engine break with
     /// identical semantics: one required URL-string reference at `$.sourceRef`
@@ -610,7 +607,9 @@ mod tests {
         let facet = plug_manifest()
             .facets
             .into_iter()
-            .find(|facet| facet.key_tag.to_string() == crate::types::PlabelFacetTag::PseudoLabel.as_str())
+            .find(|facet| {
+                facet.key_tag.to_string() == crate::types::PlabelFacetTag::PseudoLabel.as_str()
+            })
             .expect("pseudo label facet not registered");
         let [reference] = facet.references.as_slice() else {
             panic!("pseudo label must hold exactly one reference");

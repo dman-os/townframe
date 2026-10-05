@@ -12,27 +12,30 @@
 //! ingest coordinator keeps consuming it unchanged.
 
 use crate::interlude::*;
+use crate::{prepare_note_ingest, validate_note};
+#[cfg(test)]
+use daybook_types::doc::Note;
 use daybook_types::doc::{Blob, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
 use daybook_types::dpath::DpathFacet;
 use daybook_types::url::{FacetRef, parse_facet_ref};
+#[cfg(test)]
+use pauperfuse_lens::TargetStubState;
 use pauperfuse_lens::{
     ClaimScope, Constraint, DepAtHeads, DifferenceView, ExecCompat, FacetAccessError, FacetOp,
     FacetRole, IngestWork, LensCategory, LensDecision, LensFailure, LensIdentity, LensRegistry,
-    LensVersion, OutputKind, PreparedDocOps, PreparedPlan, PlanOutput, ProjectWork, Recipe,
+    LensVersion, OutputKind, PlanOutput, PreparedDocOps, PreparedPlan, ProjectWork, Recipe,
     RecognitionContext, Signal, SignalSet, Specificity, Subject, TargetStateClass,
     UninterpretedReason,
 };
-#[cfg(test)]
-use pauperfuse_lens::TargetStubState;
-#[cfg(test)]
-use daybook_types::doc::Note;
-use crate::{prepare_note_ingest, validate_note};
 
 /// The built-in lens set of the Daybook producer surface: v1 is the raw-text
 /// Note lens only. The blob lens (lens #2) registers here once its design
 /// phase lands (`pf-lane-c-lens-design.md` §9).
 pub fn lens_registry() -> LensRegistry {
-    LensRegistry::new(vec![Box::new(RawTextNoteLens::new()), Box::new(RawBlobLens::new())])
+    LensRegistry::new(vec![
+        Box::new(RawTextNoteLens::new()),
+        Box::new(RawBlobLens::new()),
+    ])
 }
 
 /// Lens #1. v1 is unparameterized; plug-lens registration (ADR 007) names the
@@ -59,8 +62,12 @@ impl RawTextNoteLens {
                 config_digest: None,
             },
             signal_set: SignalSet::new([
-                Signal::Claim { scope: ClaimScope::WholeDocument },
-                Signal::FacetTag { tag: WellKnownFacetTag::Body },
+                Signal::Claim {
+                    scope: ClaimScope::WholeDocument,
+                },
+                Signal::FacetTag {
+                    tag: WellKnownFacetTag::Body,
+                },
             ]),
             constraints: vec![Constraint::BodySelectsNote {
                 mime_types: vec!["text/plain".into()],
@@ -103,7 +110,9 @@ struct WholeDocumentBody {
     target_value: Option<serde_json::Value>,
 }
 
-fn propose_whole_document(ctx: &RecognitionContext<'_>) -> Result<WholeDocumentBody, UninterpretedReason> {
+fn propose_whole_document(
+    ctx: &RecognitionContext<'_>,
+) -> Result<WholeDocumentBody, UninterpretedReason> {
     let Subject::Dpath(dpath) = ctx.subject;
     // The claim's own facet value decides its scope. Values this codebase
     // writes are well-formed; other shapes are visible claim outcomes
@@ -138,7 +147,9 @@ fn propose_whole_document(ctx: &RecognitionContext<'_>) -> Result<WholeDocumentB
                     _ if reference.branch.is_some() || reference.at.is_some() => {
                         "pinned target awaiting the pinned-resolution surface".into()
                     }
-                    _ => TargetStateClass::of_value(ctx.facets.get(&reference.facet_key)).to_string(),
+                    _ => {
+                        TargetStateClass::of_value(ctx.facets.get(&reference.facet_key)).to_string()
+                    }
                 },
             };
             states.push(format!("{}: {state}", target.facet_ref));
@@ -152,7 +163,9 @@ fn propose_whole_document(ctx: &RecognitionContext<'_>) -> Result<WholeDocumentB
     // Whole-document claim: resolve the Body target.
     let body_key = FacetKey::from(WellKnownFacetTag::Body);
     let Some(body_value) = ctx.facets.get(&body_key) else {
-        return Err(UninterpretedReason::ClaimShape("Body facet is missing".into()));
+        return Err(UninterpretedReason::ClaimShape(
+            "Body facet is missing".into(),
+        ));
     };
     let body = match serde_json::from_value::<WellKnownFacet>(body_value.clone()) {
         Ok(WellKnownFacet::Body(body)) => body,
@@ -304,10 +317,15 @@ impl pauperfuse_lens::LensProposal for RawTextNoteLens {
             Some(WellKnownFacet::Note(_)) => {
                 return decline(UninterpretedReason::TargetShape(
                     "only text/plain Notes are supported".into(),
-                ))
+                ));
             }
             // Absent/foreign/wrong-shape targets: the Q5 outcome vocabulary.
-            _ => return decline(body_target_reason(&body.target_url, body.target_value.as_ref())),
+            _ => {
+                return decline(body_target_reason(
+                    &body.target_url,
+                    body.target_value.as_ref(),
+                ));
+            }
         }
         whole_document_proposal(self.identity.clone(), ctx, &body, &body.reference)
     }
@@ -392,11 +410,10 @@ impl pauperfuse_lens::LensProduce for RawTextNoteLens {
         };
         // The exact render contract at the recorded heads: stale/foreign
         // facet shapes fail explicitly; nothing renders "closest" state.
-        let note = validate_note(&value)
-            .map_err(|error| match error {
-                crate::Error::Unsupported(detail) => LensFailure::Preparation(detail),
-                other => LensFailure::Runtime(other.to_string()),
-            })?;
+        let note = validate_note(&value).map_err(|error| match error {
+            crate::Error::Unsupported(detail) => LensFailure::Preparation(detail),
+            other => LensFailure::Runtime(other.to_string()),
+        })?;
         Ok(note.content.into_bytes())
     }
 }
@@ -467,8 +484,12 @@ impl RawBlobLens {
                 config_digest: None,
             },
             signal_set: SignalSet::new([
-                Signal::Claim { scope: ClaimScope::WholeDocument },
-                Signal::FacetTag { tag: WellKnownFacetTag::Body },
+                Signal::Claim {
+                    scope: ClaimScope::WholeDocument,
+                },
+                Signal::FacetTag {
+                    tag: WellKnownFacetTag::Body,
+                },
             ]),
             constraints: vec![Constraint::BodySelectsBlob],
         }
@@ -516,9 +537,14 @@ impl pauperfuse_lens::LensProposal for RawBlobLens {
             Some(_) => {
                 return decline(UninterpretedReason::TargetShape(
                     "Body must select a Blob facet".into(),
-                ))
+                ));
             }
-            _ => return decline(body_target_reason(&body.target_url, body.target_value.as_ref())),
+            _ => {
+                return decline(body_target_reason(
+                    &body.target_url,
+                    body.target_value.as_ref(),
+                ));
+            }
         }
         whole_document_proposal(self.identity.clone(), ctx, &body, &body.reference)
     }
@@ -557,7 +583,10 @@ impl pauperfuse_lens::LensPrepare for RawBlobLens {
         };
         // Round-trip stability (ADR 012 §8): base equality by the byte
         // evidence (digest + length + inline), zero operations on re-read.
-        if let Some(base) = work.base.and_then(|base| serde_json::from_value::<WellKnownFacet>(base.clone()).ok()) {
+        if let Some(base) = work
+            .base
+            .and_then(|base| serde_json::from_value::<WellKnownFacet>(base.clone()).ok())
+        {
             let WellKnownFacet::Blob(base_blob) = base else {
                 return Err(LensFailure::Preparation(
                     "recipe records a non-Blob render base".into(),
@@ -766,10 +795,10 @@ mod tests {
     use super::*;
     use crate::MAX_RAW_NOTE_BYTES;
     use daybook_types::doc::Blob;
-    use std::collections::HashMap;
     use daybook_types::dpath::Dpath;
     use daybook_types::url::{FACET_SELF_DOC_ID, build_facet_ref};
     use pauperfuse_lens::{FacetAccess, FacetRole, LensDiff, LensPrepare, LensProduce};
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn whole_document_note_claim_is_proposed_and_produces() {
@@ -819,7 +848,13 @@ mod tests {
             decision => panic!("blob target must decline, not propose: {decision:?}"),
         };
         assert!(
-            matches!(&reason, UninterpretedReason::TargetStubOrBlob { stub: TargetStubState::Blob, .. }),
+            matches!(
+                &reason,
+                UninterpretedReason::TargetStubOrBlob {
+                    stub: TargetStubState::Blob,
+                    ..
+                }
+            ),
             "{reason:?}"
         );
         assert!(reason.solved_visible(), "{reason}");
@@ -1050,9 +1085,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(refused, LensFailure::Preparation(_)), "{refused}");
-        assert!(refused.to_string().contains("exceeds the inline representation cap"), "{refused}");
         assert!(
-            refused.to_string().contains("chunked/fetched blob storage is not implemented"),
+            refused
+                .to_string()
+                .contains("exceeds the inline representation cap"),
+            "{refused}"
+        );
+        assert!(
+            refused
+                .to_string()
+                .contains("chunked/fetched blob storage is not implemented"),
             "{refused}"
         );
     }
@@ -1112,7 +1154,11 @@ mod tests {
             .describe_difference(Some(&before), Some(&digest_only))
             .expect("diff between Blobs describes itself");
         assert_eq!(view.entries.len(), 1);
-        assert!(view.entries[0].starts_with("blob digest changed"), "{:?}", view.entries);
+        assert!(
+            view.entries[0].starts_with("blob digest changed"),
+            "{:?}",
+            view.entries
+        );
         // Mime + length + digest all move: three entries.
         let after = blob("image/png", 9, "sha256-bbb");
         let view = lens

@@ -171,7 +171,9 @@ impl TokioFs {
     ) -> Result<Vec<CollectedFile>, CollectError> {
         let metadata = tokio::fs::symlink_metadata(&self.root)
             .await
-            .map_err(|error| collect_error(&RelPath::root(), io("inspect checkout", &self.root, error)))?;
+            .map_err(|error| {
+                collect_error(&RelPath::root(), io("inspect checkout", &self.root, error))
+            })?;
         if !metadata.is_dir() || metadata.is_symlink() {
             return Err(collect_error(
                 &RelPath::root(),
@@ -342,7 +344,7 @@ fn collect_error(path: &RelPath, cause: FileError) -> CollectError {
 async fn read_with_digest(path: &Path) -> Result<(Vec<u8>, FileEvidence), FileError> {
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(FileError::Changed(path.to_owned()))
+            return Err(FileError::Changed(path.to_owned()));
         }
         Err(error) => return Err(io("inspect file", path, error)),
         Ok(metadata) => metadata,

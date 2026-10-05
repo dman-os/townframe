@@ -598,9 +598,9 @@ impl capabilities::HostFacetToken for SharedWashCtx {
             Err(crate::drawer::types::DrawerError::InvalidKey {
                 inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Ok(Err(capabilities::UpdateDocError::InvalidKey(tag)))),
-            Err(crate::drawer::types::DrawerError::HeadConcurrency { .. }) => {
-                Err(wasmtime_err("unexpected heads concurrency refusal on update_at_heads"))
-            }
+            Err(crate::drawer::types::DrawerError::HeadConcurrency { .. }) => Err(wasmtime_err(
+                "unexpected heads concurrency refusal on update_at_heads",
+            )),
             Err(crate::drawer::types::DrawerError::Other { inner }) => {
                 Err(wasmtime_err(format!("unexpected error: {inner}")))
             }
@@ -742,9 +742,9 @@ impl capabilities::HostFacetCreateToken for SharedWashCtx {
             Err(crate::drawer::types::DrawerError::Other { inner }) => {
                 Err(wasmtime_err(format!("unexpected error: {inner}")))
             }
-            Err(crate::drawer::types::DrawerError::HeadConcurrency { .. }) => {
-                Err(wasmtime_err("unexpected heads concurrency refusal on update_at_heads"))
-            }
+            Err(crate::drawer::types::DrawerError::HeadConcurrency { .. }) => Err(wasmtime_err(
+                "unexpected heads concurrency refusal on update_at_heads",
+            )),
             Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => {
                 Err(wasmtime_err("unexpected branch already exists"))
             }
@@ -1044,9 +1044,9 @@ impl capabilities::HostFacetTagToken for SharedWashCtx {
             Err(crate::drawer::types::DrawerError::Other { inner }) => {
                 Err(wasmtime_err(format!("unexpected error: {inner}")))
             }
-            Err(crate::drawer::types::DrawerError::HeadConcurrency { .. }) => {
-                Err(wasmtime_err("unexpected heads concurrency refusal on update_at_heads"))
-            }
+            Err(crate::drawer::types::DrawerError::HeadConcurrency { .. }) => Err(wasmtime_err(
+                "unexpected heads concurrency refusal on update_at_heads",
+            )),
             Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => {
                 Err(wasmtime_err("unexpected branch already exists"))
             }
@@ -1174,9 +1174,9 @@ impl capabilities::Host for SharedWashCtx {
             Err(crate::drawer::types::DrawerError::InvalidKey { .. }) => {
                 Err(wasmtime_err("unexpected invalid key"))
             }
-            Err(crate::drawer::types::DrawerError::HeadConcurrency { .. }) => {
-                Err(wasmtime_err("unexpected heads concurrency refusal on update_at_heads"))
-            }
+            Err(crate::drawer::types::DrawerError::HeadConcurrency { .. }) => Err(wasmtime_err(
+                "unexpected heads concurrency refusal on update_at_heads",
+            )),
             Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => {
                 Err(wasmtime_err("unexpected branch already exists"))
             }

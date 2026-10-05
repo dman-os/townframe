@@ -180,7 +180,10 @@ pub trait FacetAccess: Send + Sync {
     /// The facet value at exactly these heads on the access surface; `None`
     /// when the facet is absent there — an availability condition the lens
     /// surfaces, never empty bytes.
-    async fn facet_at_heads(&self, dependency: &DepAtHeads) -> Result<Option<FacetRaw>, FacetAccessError>;
+    async fn facet_at_heads(
+        &self,
+        dependency: &DepAtHeads,
+    ) -> Result<Option<FacetRaw>, FacetAccessError>;
 }
 
 /// Why facet access failed (ADR 012 §6: availability stays distinct from
@@ -234,7 +237,10 @@ pub trait LensDiff {
 /// One lens object implementing every stage with its shared state (design
 /// §1.1): the traits are the seams; splitting into five independent objects
 /// would be a later refactor.
-pub trait Lens: LensInterest + LensProposal + LensPrepare + LensProduce + LensDiff + Send + Sync {}
+pub trait Lens:
+    LensInterest + LensProposal + LensPrepare + LensProduce + LensDiff + Send + Sync
+{
+}
 impl<T> Lens for T where
     T: LensInterest + LensProposal + LensPrepare + LensProduce + LensDiff + Send + Sync
 {

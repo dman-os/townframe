@@ -10,30 +10,33 @@
 //! §5).
 
 pub mod identity;
-pub mod signals;
-pub mod proposal;
-pub mod recipe;
-pub mod stages;
 pub mod outcome;
-pub mod selector;
+pub mod proposal;
 pub mod provenance;
+pub mod recipe;
+pub mod selector;
+pub mod signals;
+pub mod stages;
 
 pub use identity::{LensIdentity, LensVersion};
-pub use outcome::{ClaimOutcome, ProjectedClaim, TargetStateClass, TargetStubState, Uninterpreted, UninterpretedReason, combine_declinations};
+pub use outcome::{
+    ClaimOutcome, ProjectedClaim, TargetStateClass, TargetStubState, Uninterpreted,
+    UninterpretedReason, combine_declinations,
+};
 pub use proposal::{
     DocumentAccess, FacetRole, LensCategory, LensInput, OutputKind, OutputSlot, Proposal,
     Specificity, Subject,
 };
+pub use provenance::{ByteEvidence, OutputProvenance, SelectionProvenance};
 pub use recipe::{DepAtHeads, ExecCompat, Recipe};
 pub use selector::{
     Authority, ExplicitChoice, LensDefault, Selection, SelectionConfig, SelectionError,
     SelectionReason, SubjectSelection, effective_authority, select,
 };
-pub use stages::FacetAccess;
-pub use provenance::{ByteEvidence, OutputProvenance, SelectionProvenance};
 pub use signals::{ClaimScope, Constraint, Signal, SignalSet};
+pub use stages::FacetAccess;
 pub use stages::{
-    DifferenceView, FacetAccessError, FacetOp, IngestWork, Lens, LensDecision,
-    LensFailure, LensDiff, LensInterest, LensPrepare, LensProduce, LensProposal, LensRegistry,
-    PlanOutput, PreparedDocOps, PreparedPlan, ProjectWork, RecognitionContext,
+    DifferenceView, FacetAccessError, FacetOp, IngestWork, Lens, LensDecision, LensDiff,
+    LensFailure, LensInterest, LensPrepare, LensProduce, LensProposal, LensRegistry, PlanOutput,
+    PreparedDocOps, PreparedPlan, ProjectWork, RecognitionContext,
 };

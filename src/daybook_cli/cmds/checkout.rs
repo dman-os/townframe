@@ -38,26 +38,37 @@ pub enum CheckoutCommands {
 
 pub async fn run(command: CheckoutCommands) -> Res<ExitCode> {
     #[cfg(unix)]
-    { unix::run(command).await }
+    {
+        unix::run(command).await
+    }
     #[cfg(not(unix))]
-    { let _ = command; eyre::bail!("checkout filesystem delivery currently requires Unix"); }
+    {
+        let _ = command;
+        eyre::bail!("checkout filesystem delivery currently requires Unix");
+    }
 }
 
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use std::collections::{BTreeSet, HashMap, HashSet};
-    use std::num::NonZeroU32;
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use daybook_types::doc::{
+        BranchPath, ChangeHashSet, DocPatch, FacetKey, WellKnownFacet, WellKnownFacetTag,
+    };
+    use daybook_types::dpath::{Dpath, DpathFacet};
+    use daybook_types::url::build_facet_ref;
+    use pauperfuse::backends::tokio_fs::{
+        CollectedFile, ExpectedFile, FileEvidence, FilePut, FileTake, TokioFs,
+    };
     use pauperfuse::backends::{
         BackendId, BackendTree, Description, Producer, ProducerAccess, RelPath,
     };
-    use pauperfuse::backends::tokio_fs::{CollectedFile, ExpectedFile, FileEvidence, FilePut, FileTake, TokioFs};
     use pauperfuse::vtree::VtreeStore;
-    use pauperfuse_daybook::{Daybook, Projection, MAX_RAW_NOTE_BYTES, prepare_note_ingest, validate_note};
-    use daybook_types::doc::{BranchPath, ChangeHashSet, DocPatch, FacetKey, WellKnownFacet, WellKnownFacetTag};
-    use daybook_types::dpath::{Dpath, DpathFacet};
-    use daybook_types::url::build_facet_ref;
+    use pauperfuse_daybook::{
+        Daybook, MAX_RAW_NOTE_BYTES, Projection, prepare_note_ingest, validate_note,
+    };
+    use std::collections::{BTreeSet, HashMap, HashSet};
+    use std::num::NonZeroU32;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use tokio::io::AsyncWriteExt;
 
     const MARKER: &str = ".daybook-checkout";
@@ -155,8 +166,15 @@ mod unix {
     #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
     #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
     enum State {
-        Pending { failure: Option<String> },
-        Ready { length: u64, digest: [u8; 32], generation: u64, blocked: Option<Blocked> },
+        Pending {
+            failure: Option<String>,
+        },
+        Ready {
+            length: u64,
+            digest: [u8; 32],
+            generation: u64,
+            blocked: Option<Blocked>,
+        },
     }
 
     /// A blocked checkout: a preceding operation failed and, under the
@@ -181,8 +199,15 @@ mod unix {
     #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
     #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
     enum StateV2 {
-        Pending { failure: Option<String> },
-        Ready { length: u64, digest: [u8; 32], generation: u64, blocked: Option<BlockedV2> },
+        Pending {
+            failure: Option<String>,
+        },
+        Ready {
+            length: u64,
+            digest: [u8; 32],
+            generation: u64,
+            blocked: Option<BlockedV2>,
+        },
     }
 
     /// The landed v2 marker. Status and ingest keep working against it
@@ -313,7 +338,12 @@ mod unix {
                 render_heads,
                 state: match state {
                     StateV2::Pending { failure } => State::Pending { failure },
-                    StateV2::Ready { length, digest, generation, blocked } => State::Ready {
+                    StateV2::Ready {
+                        length,
+                        digest,
+                        generation,
+                        blocked,
+                    } => State::Ready {
                         length,
                         digest,
                         generation,
@@ -342,7 +372,9 @@ mod unix {
         /// A converted v2 record keeps its blocking state with the operation
         /// the layout could not name (ingest, the only v2 blocker).
         fn upgrade(&mut self) {
-            if self.disk_version == VERSION { return; }
+            if self.disk_version == VERSION {
+                return;
+            }
             self.checkout.version = VERSION;
             self.disk_version = VERSION;
         }
@@ -381,14 +413,21 @@ mod unix {
                 branch_id: branch_id.clone(),
                 render_heads: render_heads.clone(),
                 state: match state {
-                    State::Pending { failure } => StateV2::Pending { failure: failure.clone() },
-                    State::Ready { length, digest, generation, blocked } => StateV2::Ready {
+                    State::Pending { failure } => StateV2::Pending {
+                        failure: failure.clone(),
+                    },
+                    State::Ready {
+                        length,
+                        digest,
+                        generation,
+                        blocked,
+                    } => StateV2::Ready {
                         length: *length,
                         digest: *digest,
                         generation: *generation,
-                        blocked: blocked
-                            .as_ref()
-                            .map(|blocked| BlockedV2 { failure: blocked.failure.clone() }),
+                        blocked: blocked.as_ref().map(|blocked| BlockedV2 {
+                            failure: blocked.failure.clone(),
+                        }),
                     },
                 },
                 receipts: receipts.clone(),
@@ -398,7 +437,9 @@ mod unix {
     }
 
     impl Checkout {
-        fn backend(&self) -> BackendId { BackendId(format!("daybook:{}:{}", self.node_key, self.id)) }
+        fn backend(&self) -> BackendId {
+            BackendId(format!("daybook:{}:{}", self.node_key, self.id))
+        }
         fn node_path(&self) -> Res<PathBuf> {
             let bytes = utils_rs::byte_key::decode(&self.node_path)?;
             eyre::ensure!(!bytes.contains(&0), "NUL in recorded node path");
@@ -407,7 +448,11 @@ mod unix {
             Ok(path)
         }
         fn store_path(&self) -> Res<PathBuf> {
-            Ok(self.node_path()?.join("local_state/checkouts").join(self.id.to_string()).join("vtree.sqlite"))
+            Ok(self
+                .node_path()?
+                .join("local_state/checkouts")
+                .join(self.id.to_string())
+                .join("vtree.sqlite"))
         }
         fn validate(&self) -> Res<()> {
             eyre::ensure!(
@@ -415,7 +460,10 @@ mod unix {
                 "unsupported checkout marker version {}",
                 self.version
             );
-            eyre::ensure!(self.branch == format!("/tmp/checkout/{}", self.id), "checkout branch does not match its identity");
+            eyre::ensure!(
+                self.branch == format!("/tmp/checkout/{}", self.id),
+                "checkout branch does not match its identity"
+            );
             let path = RelPath::parse(&self.projection.path)?;
             validate_output(&path)?;
             self.node_path()?;
@@ -424,7 +472,8 @@ mod unix {
                 let path = RelPath::parse(&import.projection.path)?;
                 validate_output(&path)?;
                 eyre::ensure!(
-                    import.branch == format!("/tmp/checkout/{}/{}", self.id, import.projection.document),
+                    import.branch
+                        == format!("/tmp/checkout/{}/{}", self.id, import.projection.document),
                     "import branch does not match its identity"
                 );
                 am_utils_rs::parse_commit_heads(&import.render_heads)?;
@@ -452,13 +501,17 @@ mod unix {
                     );
                     latest_seq = publication.seq;
                     eyre::ensure!(
-                        (publication.outcome == Outcome::Published) == publication.published_heads.is_some(),
+                        (publication.outcome == Outcome::Published)
+                            == publication.published_heads.is_some(),
                         "only published records carry publishedHeads"
                     );
                 }
             }
             if let State::Ready { .. } = self.state {
-                eyre::ensure!(self.branch_id.is_some() && self.render_heads.is_some(), "Ready checkout is missing its branch/render basis");
+                eyre::ensure!(
+                    self.branch_id.is_some() && self.render_heads.is_some(),
+                    "Ready checkout is missing its branch/render basis"
+                );
             }
             Ok(())
         }
@@ -504,7 +557,12 @@ mod unix {
                 let root = create(node_handle(&context), drawer, &directory, doc).await?;
                 println!("created checkout {}", root.display());
             }
-            CheckoutCommands::Ingest { directory, allow, adopt_import_claim, drop_import_claim } => {
+            CheckoutCommands::Ingest {
+                directory,
+                allow,
+                adopt_import_claim,
+                drop_import_claim,
+            } => {
                 ensure_checkout_support(lazy::plugs_repo().await?.as_ref()).await?;
                 let start = directory.unwrap_or(std::env::current_dir()?);
                 let (root, mut marker) = discover(&start).await?;
@@ -512,7 +570,14 @@ mod unix {
                 let context = lazy::repo_ctx().await?;
                 verify_node(&node_handle(&context), marker.checkout()).await?;
                 let drawer = lazy::drawer_repo().await?;
-                resolve_claims(&root, &mut marker, drawer.as_ref(), &adopt_import_claim, &drop_import_claim).await?;
+                resolve_claims(
+                    &root,
+                    &mut marker,
+                    drawer.as_ref(),
+                    &adopt_import_claim,
+                    &drop_import_claim,
+                )
+                .await?;
                 ingest_checked(&root, &mut marker, drawer.as_ref(), &allow).await?;
             }
             CheckoutCommands::Publish { directory } => {
@@ -546,17 +611,32 @@ mod unix {
     }
 
     async fn verify_node(node: &NodeHandle, checkout: &Checkout) -> Res<()> {
-        eyre::ensure!(node.node_key == checkout.node_key, "recorded checkout node identity does not match the node at {}", node.repo_root.display());
-        eyre::ensure!(node.drawer == checkout.drawer, "recorded checkout drawer identity changed");
+        eyre::ensure!(
+            node.node_key == checkout.node_key,
+            "recorded checkout node identity does not match the node at {}",
+            node.repo_root.display()
+        );
+        eyre::ensure!(
+            node.drawer == checkout.drawer,
+            "recorded checkout drawer identity changed"
+        );
         let path = checkout.node_path()?;
         let canonical = tokio::fs::canonicalize(&node.repo_root).await?;
-        eyre::ensure!(path == canonical, "recorded checkout node path is {} but the node is at {}", path.display(), canonical.display());
+        eyre::ensure!(
+            path == canonical,
+            "recorded checkout node path is {} but the node is at {}",
+            path.display(),
+            canonical.display()
+        );
         Ok(())
     }
 
     fn validate_output(path: &RelPath) -> Res<()> {
         eyre::ensure!(!path.is_root(), "checkout output cannot be the root");
-        eyre::ensure!(path.components().first().map(String::as_str) != Some(MARKER), "checkout output conflicts with {MARKER}");
+        eyre::ensure!(
+            path.components().first().map(String::as_str) != Some(MARKER),
+            "checkout output conflicts with {MARKER}"
+        );
         TokioFs::to_native_path(path)?;
         Ok(())
     }
@@ -575,24 +655,43 @@ mod unix {
         for component in root.components() {
             prefix.push(component);
             if let Some(metadata) = inspect(&prefix).await? {
-                eyre::ensure!(metadata.is_dir() && !metadata.is_symlink(), "checkout ancestor is not a real directory: {}", prefix.display());
+                eyre::ensure!(
+                    metadata.is_dir() && !metadata.is_symlink(),
+                    "checkout ancestor is not a real directory: {}",
+                    prefix.display()
+                );
             }
         }
-        eyre::ensure!(inspect(&root.join(MARKER)).await?.is_none(), "checkout marker already exists at {}", root.join(MARKER).display());
+        eyre::ensure!(
+            inspect(&root.join(MARKER)).await?.is_none(),
+            "checkout marker already exists at {}",
+            root.join(MARKER).display()
+        );
         let native = TokioFs::to_native_path(output)?;
         let mut destination = root.to_path_buf();
         let count = native.components().count();
         for (index, component) in native.components().enumerate() {
             destination.push(component);
             if let Some(metadata) = inspect(&destination).await? {
-                if index + 1 == count { eyre::bail!("checkout output is occupied: {}", destination.display()); }
-                eyre::ensure!(metadata.is_dir() && !metadata.is_symlink(), "output ancestor is not a real directory: {}", destination.display());
+                if index + 1 == count {
+                    eyre::bail!("checkout output is occupied: {}", destination.display());
+                }
+                eyre::ensure!(
+                    metadata.is_dir() && !metadata.is_symlink(),
+                    "output ancestor is not a real directory: {}",
+                    destination.display()
+                );
             }
         }
         Ok(())
     }
 
-    async fn create(node: NodeHandle, drawer: Arc<daybook_core::drawer::DrawerRepo>, directory: &Path, document: String) -> Res<PathBuf> {
+    async fn create(
+        node: NodeHandle,
+        drawer: Arc<daybook_core::drawer::DrawerRepo>,
+        directory: &Path,
+        document: String,
+    ) -> Res<PathBuf> {
         let claims = Projection::select_claims(&drawer, document.clone()).await?;
         let basis = claims.heads.clone();
         let projected = claims.projected();
@@ -629,33 +728,55 @@ mod unix {
         let node_root = tokio::fs::canonicalize(&node.repo_root).await?;
         let id = Uuid::new_v4();
         let checkout = Checkout {
-            version: VERSION, id,
+            version: VERSION,
+            id,
             node_path: utils_rs::byte_key::encode(node_root.as_os_str().as_bytes()),
             node_key: node.node_key.clone(),
             drawer: node.drawer.clone(),
             projection,
             imports: Vec::new(),
             basis: am_utils_rs::serialize_commit_heads(&basis),
-            branch: format!("/tmp/checkout/{id}"), branch_id: None, render_heads: None,
+            branch: format!("/tmp/checkout/{id}"),
+            branch_id: None,
+            render_heads: None,
             state: State::Pending { failure: None },
             receipts: Vec::new(),
             pending_imports: Vec::new(),
             publications: Vec::new(),
         };
-        let mut marker = Marker { checkout, disk_version: VERSION };
+        let mut marker = Marker {
+            checkout,
+            disk_version: VERSION,
+        };
         write_initial(&root, marker.checkout()).await?;
         let result = project(&node, drawer, &root, &mut marker, basis).await;
         if let Err(error) = result {
-            marker.checkout_mut().state = State::Pending { failure: Some(format!("{error:#}")) };
+            marker.checkout_mut().state = State::Pending {
+                failure: Some(format!("{error:#}")),
+            };
             if let Err(marker_error) = replace_marker(&root, &marker).await {
-                eyre::bail!("projection failed: {error:#}; recording failure at {} also failed: {marker_error:#}", root.join(MARKER).display());
+                eyre::bail!(
+                    "projection failed: {error:#}; recording failure at {} also failed: {marker_error:#}",
+                    root.join(MARKER).display()
+                );
             }
-            return Err(error).wrap_err_with(|| format!("checkout incomplete at {} (Pending marker retained)", root.display()));
+            return Err(error).wrap_err_with(|| {
+                format!(
+                    "checkout incomplete at {} (Pending marker retained)",
+                    root.display()
+                )
+            });
         }
         Ok(root)
     }
 
-    async fn project(node: &NodeHandle, drawer: Arc<daybook_core::drawer::DrawerRepo>, root: &Path, marker: &mut Marker, basis: ChangeHashSet) -> Res<()> {
+    async fn project(
+        node: &NodeHandle,
+        drawer: Arc<daybook_core::drawer::DrawerRepo>,
+        root: &Path,
+        marker: &mut Marker,
+        basis: ChangeHashSet,
+    ) -> Res<()> {
         let checkout = marker.checkout_mut();
         let output = RelPath::parse(&checkout.projection.path)?;
         let native = TokioFs::to_native_path(&output)?;
@@ -671,7 +792,10 @@ mod unix {
         // Checkout-local branch refs live in the drawer's local store, not the
         // replicated entry, so resolve through get_branch_ref.
         let branch_ref = drawer
-            .get_branch_ref(&checkout.projection.document, BranchPath::new(&checkout.branch))
+            .get_branch_ref(
+                &checkout.projection.document,
+                BranchPath::new(&checkout.branch),
+            )
             .await?
             .ok_or_eyre("checkout branch reference missing after creation")?;
         eyre::ensure!(
@@ -696,24 +820,41 @@ mod unix {
         // Rebound after the marker write: the producer reads the recorded
         // fields, not the mutable borrow.
         let checkout = marker.checkout();
-        let producer = Daybook::new(Arc::clone(&drawer), checkout.backend(), checkout.projection.clone(), checkout.branch.clone(), bundle.branch_heads);
+        let producer = Daybook::new(
+            Arc::clone(&drawer),
+            checkout.backend(),
+            checkout.projection.clone(),
+            checkout.branch.clone(),
+            bundle.branch_heads,
+        );
         let store_path = checkout.store_path()?;
         tokio::fs::create_dir_all(store_path.parent().unwrap()).await?;
         let store = VtreeStore::open(&store_path).await?;
         let backend = store.register(producer.id()).await?;
-        let version = store.replace(backend, &mut producer.observe().await?).await?;
+        let version = store
+            .replace(backend, &mut producer.observe().await?)
+            .await?;
         // Lane B guidance (256-2048) for scan page size: one page per scan round
         // instead of the placeholder 16, without unbounded chunking.
         let mut scan = store.scan(version, NonZeroU32::new(512).unwrap());
         let mut puts = Vec::new();
         while let Some(entry) = scan.next_entry().await? {
             if let Description::File { source, .. } = entry.description {
-                puts.push(FilePut { path: entry.path, source, expected: ExpectedFile::Absent });
+                puts.push(FilePut {
+                    path: entry.path,
+                    source,
+                    expected: ExpectedFile::Absent,
+                });
             }
         }
-        eyre::ensure!(puts.len() == 1, "single-document text projection must describe exactly one file");
+        eyre::ensure!(
+            puts.len() == 1,
+            "single-document text projection must describe exactly one file"
+        );
         let receiver = TokioFs::new(root);
-        let mut prepared = receiver.prepare(puts, &ProducerAccess::new(&producer)).await?;
+        let mut prepared = receiver
+            .prepare(puts, &ProducerAccess::new(&producer))
+            .await?;
         let applied = prepared.apply().await;
         // Cleanup never removes installed targets. Preserve both failures if cleanup fails.
         let cleanup = prepared.cleanup().await;
@@ -721,12 +862,24 @@ mod unix {
             (Ok(installed), Ok(())) => installed,
             (Err(error), Ok(())) => return Err(error.into()),
             (Ok(_), Err(error)) => return Err(error.into()),
-            (Err(error), Err(cleanup)) => eyre::bail!("application failed: {error}; staging cleanup also failed: {cleanup}"),
+            (Err(error), Err(cleanup)) => {
+                eyre::bail!("application failed: {error}; staging cleanup also failed: {cleanup}")
+            }
         };
-        let [installed] = installed.as_slice() else { panic!("single-file batch returned unexpected outcomes"); };
-        eyre::ensure!(installed.path == output, "installed output differs from recorded binding");
+        let [installed] = installed.as_slice() else {
+            panic!("single-file batch returned unexpected outcomes");
+        };
+        eyre::ensure!(
+            installed.path == output,
+            "installed output differs from recorded binding"
+        );
         let checkout = marker.checkout_mut();
-        checkout.state = State::Ready { length: installed.evidence.length, digest: installed.evidence.digest, generation: version.generation, blocked: None };
+        checkout.state = State::Ready {
+            length: installed.evidence.length,
+            digest: installed.evidence.digest,
+            generation: version.generation,
+            blocked: None,
+        };
         replace_marker(root, marker).await?;
         verify_node(node, marker.checkout()).await?;
         Ok(())
@@ -735,7 +888,11 @@ mod unix {
     async fn read_marker(root: &Path) -> Res<Marker> {
         let path = root.join(MARKER);
         let metadata = tokio::fs::symlink_metadata(&path).await?;
-        eyre::ensure!(metadata.is_file() && !metadata.is_symlink(), "checkout marker is not a regular file: {}", path.display());
+        eyre::ensure!(
+            metadata.is_file() && !metadata.is_symlink(),
+            "checkout marker is not a regular file: {}",
+            path.display()
+        );
         let bytes = tokio::fs::read(&path).await?;
         // The v2↔v3 distinction is explicit at load: the version byte picks
         // the exact layout, an old (unwritable) version refuses loudly, and a
@@ -744,7 +901,9 @@ mod unix {
             .ok()
             .and_then(|value| value.get("version").and_then(|version| version.as_u64()))
             .and_then(|version| version.try_into().ok())
-            .ok_or_else(|| eyre::eyre!("checkout marker {} has no readable version", path.display()))?;
+            .ok_or_else(|| {
+                eyre::eyre!("checkout marker {} has no readable version", path.display())
+            })?;
         let marker = match version {
             VERSION => Marker {
                 checkout: serde_json::from_slice(&bytes)
@@ -773,17 +932,27 @@ mod unix {
 
     async fn write_initial(root: &Path, checkout: &Checkout) -> Res<()> {
         let path = root.join(MARKER);
-        let mut file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&path).await?;
-        file.write_all(&serde_json::to_vec_pretty(checkout)?).await?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await?;
+        file.write_all(&serde_json::to_vec_pretty(checkout)?)
+            .await?;
         file.flush().await?;
         Ok(())
     }
 
     async fn replace_marker(root: &Path, marker: &Marker) -> Res<()> {
         let previous = read_marker(root).await?;
-        eyre::ensure!(previous.checkout().id == marker.checkout().id, "checkout marker identity changed at {}", root.join(MARKER).display());
         eyre::ensure!(
-            previous.disk_version == marker.disk_version && previous.checkout().version == marker.checkout().version,
+            previous.checkout().id == marker.checkout().id,
+            "checkout marker identity changed at {}",
+            root.join(MARKER).display()
+        );
+        eyre::ensure!(
+            previous.disk_version == marker.disk_version
+                && previous.checkout().version == marker.checkout().version,
             "checkout marker version changed under the running verb at {}",
             root.join(MARKER).display()
         );
@@ -793,26 +962,46 @@ mod unix {
             other => eyre::bail!("unsupported on-disk marker version {other} for write-back"),
         };
         let temporary = root.join(format!("{MARKER}.{}", Uuid::new_v4()));
-        let mut file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&temporary).await?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await?;
         file.write_all(&bytes).await?;
         file.flush().await?;
         drop(file);
         // Recheck ownership before replacing; hostile namespace races remain out of scope.
-        eyre::ensure!(read_marker(root).await?.checkout().id == marker.checkout().id, "checkout marker identity changed before replacement");
-        tokio::fs::rename(&temporary, root.join(MARKER)).await
-            .wrap_err_with(|| format!("replacing {} from {}", root.join(MARKER).display(), temporary.display()))?;
+        eyre::ensure!(
+            read_marker(root).await?.checkout().id == marker.checkout().id,
+            "checkout marker identity changed before replacement"
+        );
+        tokio::fs::rename(&temporary, root.join(MARKER))
+            .await
+            .wrap_err_with(|| {
+                format!(
+                    "replacing {} from {}",
+                    root.join(MARKER).display(),
+                    temporary.display()
+                )
+            })?;
         Ok(())
     }
 
     async fn discover(start: &Path) -> Res<(PathBuf, Marker)> {
         let mut root = std::path::absolute(start)?;
-        eyre::ensure!(root.is_dir(), "checkout search must start at a directory: {}", root.display());
+        eyre::ensure!(
+            root.is_dir(),
+            "checkout search must start at a directory: {}",
+            root.display()
+        );
         loop {
             if inspect(&root.join(MARKER)).await?.is_some() {
                 let marker = read_marker(&root).await?;
                 return Ok((root, marker));
             }
-            if !root.pop() { eyre::bail!("no checkout marker found from {}", start.display()); }
+            if !root.pop() {
+                eyre::bail!("no checkout marker found from {}", start.display());
+            }
         }
     }
 
@@ -833,13 +1022,24 @@ mod unix {
         let State::Ready { length, digest, .. } = &checkout.state else {
             eyre::bail!("checkout is not Ready")
         };
-        let render_evidence = FileEvidence { length: *length, digest: *digest };
+        let render_evidence = FileEvidence {
+            length: *length,
+            digest: *digest,
+        };
         let primary = Tracked {
             projection: checkout.projection.clone(),
             branch: checkout.branch.clone(),
-            branch_id: checkout.branch_id.clone().ok_or_eyre("Ready checkout is missing its branch basis")?,
+            branch_id: checkout
+                .branch_id
+                .clone()
+                .ok_or_eyre("Ready checkout is missing its branch basis")?,
             render_evidence: Some(render_evidence),
-            render_heads: Some(checkout.render_heads.clone().ok_or_eyre("Ready checkout is missing its render heads")?),
+            render_heads: Some(
+                checkout
+                    .render_heads
+                    .clone()
+                    .ok_or_eyre("Ready checkout is missing its render heads")?,
+            ),
         };
         let imports = checkout.imports.iter().map(|import| Tracked {
             projection: import.projection.clone(),
@@ -853,19 +1053,29 @@ mod unix {
 
     /// Verifies every recorded binding still resolves: document registered,
     /// local-branch ref present with unchanged identity.
-    async fn verify_bindings(drawer: &daybook_core::drawer::DrawerRepo, checkout: &Checkout) -> Res<()> {
-        if !matches!(checkout.state, State::Ready { .. }) { return Ok(()); }
+    async fn verify_bindings(
+        drawer: &daybook_core::drawer::DrawerRepo,
+        checkout: &Checkout,
+    ) -> Res<()> {
+        if !matches!(checkout.state, State::Ready { .. }) {
+            return Ok(());
+        }
         for track in tracked_bindings(checkout)? {
             let document = &track.projection.document;
-            drawer.get_entry(document).await?
-                .ok_or_eyre(format!("checkout document {document} is no longer registered"))?;
+            drawer.get_entry(document).await?.ok_or_eyre(format!(
+                "checkout document {document} is no longer registered"
+            ))?;
             let branch_ref = drawer
                 .get_branch_ref(document, BranchPath::new(&track.branch))
                 .await?
-                .ok_or_eyre(format!("checkout branch {} is no longer registered", track.branch))?;
+                .ok_or_eyre(format!(
+                    "checkout branch {} is no longer registered",
+                    track.branch
+                ))?;
             eyre::ensure!(
                 branch_ref.branch_kind == daybook_core::drawer::BranchKind::Local,
-                "checkout branch {} must stay local", track.branch
+                "checkout branch {} must stay local",
+                track.branch
             );
             eyre::ensure!(
                 branch_ref.branch_doc_id.to_string() == track.branch_id,
@@ -897,7 +1107,10 @@ mod unix {
             Some(value) => Some(validate_note(value)?),
             None => None,
         };
-        Ok((am_utils_rs::serialize_commit_heads(&bundle.branch_heads), note))
+        Ok((
+            am_utils_rs::serialize_commit_heads(&bundle.branch_heads),
+            note,
+        ))
     }
 
     fn note_evidence(note: &daybook_types::doc::Note) -> FileEvidence {
@@ -936,14 +1149,20 @@ mod unix {
         branch_note: Option<&daybook_types::doc::Note>,
         receipt: Option<&Receipt>,
     ) -> Disposition {
-        let ExpectedFile::Present(evidence) = observed else { return Disposition::Missing };
+        let ExpectedFile::Present(evidence) = observed else {
+            return Disposition::Missing;
+        };
         let staged = live_heads != render_heads;
         if staged && branch_note.map(note_evidence).as_ref() == Some(evidence) {
             let confirmed = matches!(receipt, Some(receipt) if &receipt.file == evidence && receipt.branch_heads == live_heads);
             return Disposition::Ingested(confirmed);
         }
         if Some(evidence) == render_evidence {
-            return if staged { Disposition::StagedDiverged } else { Disposition::Clean };
+            return if staged {
+                Disposition::StagedDiverged
+            } else {
+                Disposition::Clean
+            };
         }
         Disposition::Modified
     }
@@ -969,7 +1188,9 @@ mod unix {
             while let Some(entry) = entries.next_entry().await? {
                 let native = entry.path();
                 let relative = native.strip_prefix(root).unwrap();
-                if relative == Path::new(MARKER) { continue; }
+                if relative == Path::new(MARKER) {
+                    continue;
+                }
                 let kind = entry.file_type().await?;
                 if kind.is_dir() {
                     directories.push(native);
@@ -998,7 +1219,11 @@ mod unix {
         Ok(excluded)
     }
 
-    async fn status(root: &Path, checkout: &Checkout, drawer: &daybook_core::drawer::DrawerRepo) -> Res<Vec<String>> {
+    async fn status(
+        root: &Path,
+        checkout: &Checkout,
+        drawer: &daybook_core::drawer::DrawerRepo,
+    ) -> Res<Vec<String>> {
         let mut lines = Vec::new();
         // Per-destination publication vocabulary (design §7): the derived
         // markers and publication lines derive from publication records;
@@ -1013,7 +1238,9 @@ mod unix {
         match &checkout.state {
             State::Pending { failure } => {
                 lines.push(format!("incomplete {}", checkout.projection.path));
-                if let Some(failure) = failure { lines.push(format!("failure {failure}")); }
+                if let Some(failure) = failure {
+                    lines.push(format!("failure {failure}"));
+                }
             }
             State::Ready { blocked, .. } => {
                 if let Some(blocked) = blocked {
@@ -1027,18 +1254,32 @@ mod unix {
                     let rel = RelPath::parse(&path_key)?;
                     let observed = TokioFs::new(root).observe(&rel).await?;
                     let (live_heads, branch_note) = binding_state(drawer, &track).await?;
-                    let render_heads = track.render_heads.as_ref().ok_or_eyre("Ready checkout is missing its render heads")?;
-                    let receipt = checkout.receipts.iter().rev().find(|receipt| receipt.path == path_key);
-                    let settled = disposition(&observed, track.render_evidence.as_ref(), render_heads, &live_heads, branch_note.as_ref(), receipt);
+                    let render_heads = track
+                        .render_heads
+                        .as_ref()
+                        .ok_or_eyre("Ready checkout is missing its render heads")?;
+                    let receipt = checkout
+                        .receipts
+                        .iter()
+                        .rev()
+                        .find(|receipt| receipt.path == path_key);
+                    let settled = disposition(
+                        &observed,
+                        track.render_evidence.as_ref(),
+                        render_heads,
+                        &live_heads,
+                        branch_note.as_ref(),
+                        receipt,
+                    );
                     let mut line = display(&settled, &path_key);
                     // Derived published marker: the destination's record and
                     // not the receipt is the publication truth (§5).
                     // T11: the derived published marker is the destination's
-                // record's truth (§5), not the receipt's: a staged path whose
-                // record says published is published regardless of the
-                // receipt's confirming heads (publish's own intake persist
-                // legitimately leaves the receipt behind).
-                if matches!(settled, Disposition::Clean | Disposition::Ingested(_))
+                    // record's truth (§5), not the receipt's: a staged path whose
+                    // record says published is published regardless of the
+                    // receipt's confirming heads (publish's own intake persist
+                    // legitimately leaves the receipt behind).
+                    if matches!(settled, Disposition::Clean | Disposition::Ingested(_))
                         && latest_by_document(&track.projection.document)
                             .is_some_and(|publication| publication.outcome == Outcome::Published)
                     {
@@ -1054,8 +1295,17 @@ mod unix {
         // Per-destination publication lines: destination-scoped truth.
         let mut seen_documents = HashSet::new();
         for track in tracked_bindings(checkout)? {
-            if !seen_documents.insert(track.projection.document.clone()) { continue; }
-            lines.extend(publication_lines(drawer, &track, latest_by_document(&track.projection.document)).await?);
+            if !seen_documents.insert(track.projection.document.clone()) {
+                continue;
+            }
+            lines.extend(
+                publication_lines(
+                    drawer,
+                    &track,
+                    latest_by_document(&track.projection.document),
+                )
+                .await?,
+            );
         }
         let mut excluded = tracked_exclusions(checkout)?;
         for claim in &checkout.pending_imports {
@@ -1071,11 +1321,19 @@ mod unix {
     /// stays Pending: its create-phase failure already blocks everything.
     /// Best-effort marker write: the operation's own failure propagates
     /// regardless; a failed write compounds both errors explicitly.
-    async fn record_blocked(marker: &mut Marker, root: &Path, error: &eyre::Report, operation: Operation) -> Res<()> {
+    async fn record_blocked(
+        marker: &mut Marker,
+        root: &Path,
+        error: &eyre::Report,
+        operation: Operation,
+    ) -> Res<()> {
         let State::Ready { blocked, .. } = &mut marker.checkout_mut().state else {
             return Ok(());
         };
-        *blocked = Some(Blocked { operation, failure: format!("{error:#}") });
+        *blocked = Some(Blocked {
+            operation,
+            failure: format!("{error:#}"),
+        });
         replace_marker(root, marker).await?;
         Ok(())
     }
@@ -1083,10 +1341,19 @@ mod unix {
     /// Ingest entry with the failure-blocking contract: any failure records the
     /// blocked state in the marker (best effort) before propagating. A loaded
     /// v2 marker keeps its v2 disk shape (ingest never upgrades).
-    async fn ingest_checked(root: &Path, marker: &mut Marker, drawer: &daybook_core::drawer::DrawerRepo, allow: &[PathBuf]) -> Res<()> {
+    async fn ingest_checked(
+        root: &Path,
+        marker: &mut Marker,
+        drawer: &daybook_core::drawer::DrawerRepo,
+        allow: &[PathBuf],
+    ) -> Res<()> {
         if let Err(error) = ingest(root, marker, drawer, allow).await {
-            if let Err(marker_error) = record_blocked(marker, root, &error, Operation::Ingest).await {
-                eyre::bail!("ingest failed: {error:#}; recording the block at {} also failed: {marker_error:#}", root.join(MARKER).display());
+            if let Err(marker_error) = record_blocked(marker, root, &error, Operation::Ingest).await
+            {
+                eyre::bail!(
+                    "ingest failed: {error:#}; recording the block at {} also failed: {marker_error:#}",
+                    root.join(MARKER).display()
+                );
             }
             return Err(error);
         }
@@ -1103,18 +1370,27 @@ mod unix {
         adopt: &[String],
         drop_claims: &[String],
     ) -> Res<()> {
-        if adopt.is_empty() && drop_claims.is_empty() { return Ok(()); }
+        if adopt.is_empty() && drop_claims.is_empty() {
+            return Ok(());
+        }
         eyre::ensure!(
             matches!(marker.checkout().state, State::Ready { .. }),
             "incomplete (Pending) checkouts cannot resolve import claims"
         );
         for pair in adopt {
-            eyre::ensure!(pair.split('=').count() == 2, "--adopt-import-claim expects PATH=DOC, got {pair:?}");
+            eyre::ensure!(
+                pair.split('=').count() == 2,
+                "--adopt-import-claim expects PATH=DOC, got {pair:?}"
+            );
             let (path_arg, document) = pair.split_once('=').expect("checked above");
             let document: daybook_types::doc::DocId = document.to_string();
             let key = allowed_key(root, Path::new(path_arg))?;
             eyre::ensure!(
-                marker.checkout().pending_imports.iter().any(|claim| claim == &key),
+                marker
+                    .checkout()
+                    .pending_imports
+                    .iter()
+                    .any(|claim| claim == &key),
                 "no pending import claim for {key}"
             );
             let note_key = FacetKey::from(WellKnownFacetTag::Note);
@@ -1122,7 +1398,11 @@ mod unix {
             // Select exactly the dpath claim: an empty Some(Vec::new()) hydrates
             // nothing even when the facets object exists.
             let bundle = drawer
-                .get_doc_bundle_at_branch(&document, BranchPath::new("main"), Some(vec![dpath_key.clone()]))
+                .get_doc_bundle_at_branch(
+                    &document,
+                    BranchPath::new("main"),
+                    Some(vec![dpath_key.clone()]),
+                )
                 .await?
                 .ok_or_eyre(format!("document {document} is not registered on main"))?;
             eyre::ensure!(
@@ -1131,7 +1411,12 @@ mod unix {
             );
             let import_branch = format!("/tmp/checkout/{}/{}", marker.checkout().id, document);
             drawer
-                .create_checkout_branch(&document, BranchPath::new(&import_branch), BranchPath::new("main"), &bundle.branch_heads)
+                .create_checkout_branch(
+                    &document,
+                    BranchPath::new(&import_branch),
+                    BranchPath::new("main"),
+                    &bundle.branch_heads,
+                )
                 .await?;
             let branch_ref = drawer
                 .get_branch_ref(&document, BranchPath::new(&import_branch))
@@ -1142,7 +1427,11 @@ mod unix {
                 "import branch must stay local"
             );
             let bundle = drawer
-                .get_doc_bundle_at_branch(&document, BranchPath::new(&import_branch), Some(Vec::new()))
+                .get_doc_bundle_at_branch(
+                    &document,
+                    BranchPath::new(&import_branch),
+                    Some(Vec::new()),
+                )
                 .await?
                 .ok_or_eyre("import branch is missing after adoption")?;
             let observed = TokioFs::new(root).observe(&RelPath::parse(&key)?).await?;
@@ -1164,7 +1453,12 @@ mod unix {
             });
             checkout.pending_imports.retain(|claim| claim != &key);
             if let Some(evidence) = file {
-                push_receipt(checkout, key.clone(), evidence, am_utils_rs::serialize_commit_heads(&bundle.branch_heads));
+                push_receipt(
+                    checkout,
+                    key.clone(),
+                    evidence,
+                    am_utils_rs::serialize_commit_heads(&bundle.branch_heads),
+                );
             }
             replace_marker(root, marker).await?;
             println!("adopted import claim {key} -> {document}");
@@ -1174,23 +1468,50 @@ mod unix {
             // file it named. Claims are printed as checkout-relative keys, so
             // that exact spelling is what drop takes.
             let key = RelPath::parse(path_arg)
-                .map_err(|error| eyre::eyre!("--drop-import-claim expects a checkout-relative path ({error}): {path_arg}"))?
+                .map_err(|error| {
+                    eyre::eyre!(
+                        "--drop-import-claim expects a checkout-relative path ({error}): {path_arg}"
+                    )
+                })?
                 .to_string();
             eyre::ensure!(
-                marker.checkout().pending_imports.iter().any(|claim| claim == &key),
+                marker
+                    .checkout()
+                    .pending_imports
+                    .iter()
+                    .any(|claim| claim == &key),
                 "no pending import claim for {key}"
             );
-            marker.checkout_mut().pending_imports.retain(|claim| claim != &key);
+            marker
+                .checkout_mut()
+                .pending_imports
+                .retain(|claim| claim != &key);
             replace_marker(root, marker).await?;
             println!("dropped import claim {key}");
         }
         Ok(())
     }
 
-    fn push_receipt(checkout: &mut Checkout, path: String, file: FileEvidence, branch_heads: Vec<String>) {
-        let sequence = checkout.receipts.iter().map(|receipt| receipt.sequence).max().unwrap_or(0) + 1;
+    fn push_receipt(
+        checkout: &mut Checkout,
+        path: String,
+        file: FileEvidence,
+        branch_heads: Vec<String>,
+    ) {
+        let sequence = checkout
+            .receipts
+            .iter()
+            .map(|receipt| receipt.sequence)
+            .max()
+            .unwrap_or(0)
+            + 1;
         checkout.receipts.retain(|receipt| receipt.path != path);
-        checkout.receipts.push(Receipt { path, file, branch_heads, sequence });
+        checkout.receipts.push(Receipt {
+            path,
+            file,
+            branch_heads,
+            sequence,
+        });
     }
 
     /// Resolves an `--allow` argument into a checkout-relative RelPath key.
@@ -1199,17 +1520,31 @@ mod unix {
     fn allowed_key(root: &Path, argument: &Path) -> Res<String> {
         let metadata = std::fs::symlink_metadata(argument)
             .wrap_err_with(|| format!("inspecting --allow argument {}", argument.display()))?;
-        eyre::ensure!(!metadata.is_symlink(), "--allow refuses symlinks: {}", argument.display());
-        eyre::ensure!(metadata.is_file(), "--allow expects a regular file: {}", argument.display());
+        eyre::ensure!(
+            !metadata.is_symlink(),
+            "--allow refuses symlinks: {}",
+            argument.display()
+        );
+        eyre::ensure!(
+            metadata.is_file(),
+            "--allow expects a regular file: {}",
+            argument.display()
+        );
         let real = std::fs::canonicalize(argument)?;
-        let relative = real
-            .strip_prefix(root)
-            .map_err(|_| eyre::eyre!("--allow path {} is not under the checkout root {}", real.display(), root.display()))?;
+        let relative = real.strip_prefix(root).map_err(|_| {
+            eyre::eyre!(
+                "--allow path {} is not under the checkout root {}",
+                real.display(),
+                root.display()
+            )
+        })?;
         let key = TokioFs::from_native_path(relative)?;
-        eyre::ensure!(!relative.as_os_str().is_empty(), "--allow cannot be the checkout root");
+        eyre::ensure!(
+            !relative.as_os_str().is_empty(),
+            "--allow cannot be the checkout root"
+        );
         Ok(key.to_string())
     }
-
 
     struct EditTarget {
         track: Tracked,
@@ -1264,7 +1599,9 @@ mod unix {
             let rel = match RelPath::parse(&path_key) {
                 Ok(rel) => rel,
                 Err(error) => {
-                    failures.push(format!("{path_key}: recorded binding path does not parse: {error:#}"));
+                    failures.push(format!(
+                        "{path_key}: recorded binding path does not parse: {error:#}"
+                    ));
                     continue;
                 }
             };
@@ -1278,29 +1615,53 @@ mod unix {
             let (live_heads, branch_note) = match binding_state(drawer, track).await {
                 Ok(state) => state,
                 Err(error) => {
-                    failures.push(format!("{path_key}: checkout branch state unavailable: {error:#}"));
+                    failures.push(format!(
+                        "{path_key}: checkout branch state unavailable: {error:#}"
+                    ));
                     continue;
                 }
             };
             let Some(branch_note) = branch_note else {
-                failures.push(format!("{path_key}: checkout Note is missing on its branch"));
+                failures.push(format!(
+                    "{path_key}: checkout Note is missing on its branch"
+                ));
                 continue;
             };
-            let render_heads = track.render_heads.as_ref().ok_or_eyre("Ready checkout is missing its render heads")?;
-            let receipt = marker.checkout().receipts.iter().rev().find(|receipt| receipt.path == path_key);
-            let settled = disposition(&observed, track.render_evidence.as_ref(), render_heads, &live_heads, Some(&branch_note), receipt);
+            let render_heads = track
+                .render_heads
+                .as_ref()
+                .ok_or_eyre("Ready checkout is missing its render heads")?;
+            let receipt = marker
+                .checkout()
+                .receipts
+                .iter()
+                .rev()
+                .find(|receipt| receipt.path == path_key);
+            let settled = disposition(
+                &observed,
+                track.render_evidence.as_ref(),
+                render_heads,
+                &live_heads,
+                Some(&branch_note),
+                receipt,
+            );
             let ExpectedFile::Present(_) = &observed else {
                 println!("missing {path_key}");
                 continue;
             };
             match settled {
-                Disposition::Clean | Disposition::Ingested(true) => println!("{}", display(&settled, &path_key)),
+                Disposition::Clean | Disposition::Ingested(true) => {
+                    println!("{}", display(&settled, &path_key))
+                }
                 // Ingested(false), StagedDiverged, and Modified all enter the
                 // batch: the no-op rule against the live branch confirms
                 // already-staged bytes or stages their revert.
                 _ => {
                     entries.push((
-                        FileTake { path: rel, expected: observed },
+                        FileTake {
+                            path: rel,
+                            expected: observed,
+                        },
                         Target::Edit(Box::new(EditTarget {
                             track: track.clone(),
                             live_heads,
@@ -1324,13 +1685,17 @@ mod unix {
                 continue;
             }
             if marker.checkout().pending_imports.contains(&key) {
-                failures.push(format!("--allow {key}: unresolved import claim blocks re-import"));
+                failures.push(format!(
+                    "--allow {key}: unresolved import claim blocks re-import"
+                ));
                 continue;
             }
             let rel = match RelPath::parse(&key) {
                 Ok(rel) => rel,
                 Err(_) => {
-                    failures.push(format!("--allow {key}: path does not convert to a checkout tree key"));
+                    failures.push(format!(
+                        "--allow {key}: path does not convert to a checkout tree key"
+                    ));
                     continue;
                 }
             };
@@ -1349,7 +1714,13 @@ mod unix {
                 failures.push(format!("--allow {key}: no such untracked file"));
                 continue;
             }
-            entries.push((FileTake { path: rel, expected: observed }, Target::Import(key)));
+            entries.push((
+                FileTake {
+                    path: rel,
+                    expected: observed,
+                },
+                Target::Import(key),
+            ));
         }
 
         if !failures.is_empty() {
@@ -1369,16 +1740,29 @@ mod unix {
                     for (take, target) in entries {
                         match receiver.observe(&take.path).await {
                             Ok(observed @ ExpectedFile::Present(_)) => {
-                                refreshed.push((FileTake { path: take.path, expected: observed }, target));
+                                refreshed.push((
+                                    FileTake {
+                                        path: take.path,
+                                        expected: observed,
+                                    },
+                                    target,
+                                ));
                             }
                             Ok(ExpectedFile::Absent) => println!("missing {}", take.path),
                             Err(error) => {
-                                eyre::bail!("ingest failed at {} and refresh could not re-observe it: {error}; first failure: {first}", take.path);
+                                eyre::bail!(
+                                    "ingest failed at {} and refresh could not re-observe it: {error}; first failure: {first}",
+                                    take.path
+                                );
                             }
                         }
                     }
-                    eyre::ensure!(!refreshed.is_empty(), "ingest failed and no files remained to retry: {first}");
-                    let take_list: Vec<FileTake> = refreshed.iter().map(|(take, _)| take.clone()).collect();
+                    eyre::ensure!(
+                        !refreshed.is_empty(),
+                        "ingest failed and no files remained to retry: {first}"
+                    );
+                    let take_list: Vec<FileTake> =
+                        refreshed.iter().map(|(take, _)| take.clone()).collect();
                     let collected = receiver
                         .collect(&take_list, MAX_RAW_NOTE_BYTES)
                         .await
@@ -1422,7 +1806,9 @@ mod unix {
             *blocked = None;
         }
         replace_marker(root, marker).await?;
-        println!("staged {staged} document operation(s) on the checkout-local branch; nothing published upstream");
+        println!(
+            "staged {staged} document operation(s) on the checkout-local branch; nothing published upstream"
+        );
         Ok(())
     }
 
@@ -1441,15 +1827,29 @@ mod unix {
         // Prepared by the batch gate before any staging begins.
         note: daybook_types::doc::Note,
     ) -> Res<()> {
-        let EditTarget { track, live_heads, branch_note } = edit;
+        let EditTarget {
+            track,
+            live_heads,
+            branch_note,
+        } = edit;
         let path_key = track.projection.path.clone();
         if note == branch_note {
             // Already staged (round-trip stability, ADR 012 §8): only a
             // confirming receipt is written when one is missing or behind.
-            let receipt = marker.checkout().receipts.iter().rev().find(|receipt| receipt.path == path_key);
+            let receipt = marker
+                .checkout()
+                .receipts
+                .iter()
+                .rev()
+                .find(|receipt| receipt.path == path_key);
             let confirmed = matches!(receipt, Some(receipt) if receipt.file == collected.evidence && receipt.branch_heads == live_heads);
             if !confirmed {
-                push_receipt(marker.checkout_mut(), path_key.clone(), collected.evidence, live_heads);
+                push_receipt(
+                    marker.checkout_mut(),
+                    path_key.clone(),
+                    collected.evidence,
+                    live_heads,
+                );
                 replace_marker(root, marker).await?;
             }
             println!("ingested {path_key}");
@@ -1477,8 +1877,16 @@ mod unix {
             .await?;
         // The staged heads come from a fresh readback, not an assumption.
         let (fresh_heads, _) = binding_state(drawer, &track).await?;
-        eyre::ensure!(fresh_heads != live_heads, "staging {path_key} did not advance the checkout branch");
-        push_receipt(marker.checkout_mut(), path_key.clone(), collected.evidence, fresh_heads);
+        eyre::ensure!(
+            fresh_heads != live_heads,
+            "staging {path_key} did not advance the checkout branch"
+        );
+        push_receipt(
+            marker.checkout_mut(),
+            path_key.clone(),
+            collected.evidence,
+            fresh_heads,
+        );
         replace_marker(root, marker).await?;
         println!("ingested {path_key}");
         Ok(())
@@ -1505,14 +1913,20 @@ mod unix {
         let args = daybook_types::doc::AddDocArgs {
             branch_path: daybook_types::doc::BranchPathBuf::from("main"),
             facets: HashMap::from([
-                (note_key.clone(), serde_json::Value::from(WellKnownFacet::Note(note.clone()))),
+                (
+                    note_key.clone(),
+                    serde_json::Value::from(WellKnownFacet::Note(note.clone())),
+                ),
                 (
                     FacetKey::from(WellKnownFacetTag::Body),
                     serde_json::Value::from(WellKnownFacet::Body(daybook_types::doc::Body {
                         order: vec![note_url],
                     })),
                 ),
-                (Dpath::parse(&format!("/{key}"))?.facet_key(), serde_json::json!({})),
+                (
+                    Dpath::parse(&format!("/{key}"))?.facet_key(),
+                    serde_json::json!({}),
+                ),
             ]),
             user_path: None,
         };
@@ -1520,10 +1934,17 @@ mod unix {
         let (_, heads) = drawer
             .get_with_heads(&document, BranchPath::new("main"), None)
             .await?
-            .ok_or_eyre(format!("imported document {document} is missing on main after creation"))?;
+            .ok_or_eyre(format!(
+                "imported document {document} is missing on main after creation"
+            ))?;
         let import_branch = format!("/tmp/checkout/{}/{}", marker.checkout().id, document);
         drawer
-            .create_checkout_branch(&document, BranchPath::new(&import_branch), BranchPath::new("main"), &heads)
+            .create_checkout_branch(
+                &document,
+                BranchPath::new(&import_branch),
+                BranchPath::new("main"),
+                &heads,
+            )
             .await?;
         let branch_ref = drawer
             .get_branch_ref(&document, BranchPath::new(&import_branch))
@@ -1550,7 +1971,12 @@ mod unix {
             file: Some(collected.evidence.clone()),
         });
         checkout.pending_imports.retain(|claim| claim != &key);
-        push_receipt(checkout, key.clone(), collected.evidence, am_utils_rs::serialize_commit_heads(&bundle.branch_heads));
+        push_receipt(
+            checkout,
+            key.clone(),
+            collected.evidence,
+            am_utils_rs::serialize_commit_heads(&bundle.branch_heads),
+        );
         replace_marker(root, marker).await?;
         println!("imported {key} -> {document}");
         Ok(())
@@ -1574,7 +2000,10 @@ mod unix {
         let live_main_heads = am_utils_rs::serialize_commit_heads(&main_heads);
         match (&publication.outcome, &publication.published_heads) {
             (&Outcome::Published, Some(published)) if *published == live_main_heads => {
-                Ok(vec![format!("publish {document} published {}", published.join(" "))])
+                Ok(vec![format!(
+                    "publish {document} published {}",
+                    published.join(" ")
+                )])
             }
             (&Outcome::Published, Some(published)) => Ok(vec![
                 format!("publish {document} published {}", published.join(" ")),
@@ -1586,14 +2015,22 @@ mod unix {
             ]),
             // validate() makes a published record without recorded heads
             // unrepresentable; loading enforces the invariant.
-            (&Outcome::Published, &None) => unreachable!("published records always carry publishedHeads"),
+            (&Outcome::Published, &None) => {
+                unreachable!("published records always carry publishedHeads")
+            }
             (Outcome::Blocked, ..) => Ok(vec![format!(
                 "publish {document} blocked: {}",
-                publication.failure.clone().unwrap_or_else(|| "invalid merge candidate".into())
+                publication
+                    .failure
+                    .clone()
+                    .unwrap_or_else(|| "invalid merge candidate".into())
             )]),
             (Outcome::Refused, ..) => Ok(vec![format!(
                 "publish {document} refused: {}",
-                publication.failure.clone().unwrap_or_else(|| "publish was refused".into())
+                publication
+                    .failure
+                    .clone()
+                    .unwrap_or_else(|| "publish was refused".into())
             )]),
         }
     }
@@ -1610,8 +2047,11 @@ mod unix {
     ) -> Res<()> {
         let mut dpaths = Vec::new();
         for (key, value) in &candidate.facets {
-            let Some(path) = Dpath::parse_facet_key(key) else { continue };
-            let path = path.map_err(|error| eyre::eyre!("candidate dpath does not parse: {error}"))?;
+            let Some(path) = Dpath::parse_facet_key(key) else {
+                continue;
+            };
+            let path =
+                path.map_err(|error| eyre::eyre!("candidate dpath does not parse: {error}"))?;
             let scope = DpathFacet::from_json_value(value)
                 .map_err(|error| eyre::eyre!("candidate dpath facet does not parse: {error}"))?;
             eyre::ensure!(
@@ -1694,7 +2134,10 @@ mod unix {
     ) -> Res<Vec<String>> {
         let path_key = track.projection.path.clone();
         let rel = RelPath::parse(&path_key)?;
-        let observed = receiver.observe(&rel).await.wrap_err_with(|| format!("observing {path_key}"))?;
+        let observed = receiver
+            .observe(&rel)
+            .await
+            .wrap_err_with(|| format!("observing {path_key}"))?;
         let ExpectedFile::Present(observed_evidence) = observed else {
             eyre::bail!("missing {path_key}; ingest must complete before publish");
         };
@@ -1745,7 +2188,7 @@ mod unix {
                 // Wait for the racer's post-commit signal; a closed channel is
                 // a racer that failed or exited mid-window.
                 let _signal = channel.signals.recv().await;
-                }
+            }
         }
         if let Some(channel) = taken {
             PUBLISH_RACE_CHANNELS
@@ -1785,7 +2228,12 @@ mod unix {
             };
             let serialized_h = am_utils_rs::serialize_commit_heads(&main_heads);
             let candidate = match drawer
-                .prepare_merge_candidate(document, checkout_branch, BranchPath::new("main"), &main_heads)
+                .prepare_merge_candidate(
+                    document,
+                    checkout_branch,
+                    BranchPath::new("main"),
+                    &main_heads,
+                )
                 .await
             {
                 Ok(candidate) => candidate,
@@ -1809,20 +2257,34 @@ mod unix {
             if let Err(error) = drawer.validate_merge_candidate(&candidate).await {
                 return Ok(DestinationOutcome::Blocked {
                     expected_heads: serialized_h,
-                    failure: format!("candidate for {document} failed facet schema validation: {error:#}"),
+                    failure: format!(
+                        "candidate for {document} failed facet schema validation: {error:#}"
+                    ),
                     attempts: attempts.max(1),
                 });
             }
             // §1.1 step 7: validated candidate persists into the checkout
             // branch under the target-side CAS on its live heads.
             match drawer
-                .merge_from_heads(document, checkout_branch, Some(&checkout_heads), BranchPath::new("main"), &main_heads, None)
+                .merge_from_heads(
+                    document,
+                    checkout_branch,
+                    Some(&checkout_heads),
+                    BranchPath::new("main"),
+                    &main_heads,
+                    None,
+                )
                 .await
             {
                 Ok(()) => {
                     #[cfg(test)]
                     publish_race_wait(document).await;
-                }                Err(daybook_core::drawer::types::DrawerError::HeadConcurrency { expected, actual, .. }) => {
+                }
+                Err(daybook_core::drawer::types::DrawerError::HeadConcurrency {
+                    expected,
+                    actual,
+                    ..
+                }) => {
                     attempts += 1;
                     if attempts >= PUBLISH_MAX_CAS_ATTEMPTS {
                         return Ok(DestinationOutcome::Blocked {
@@ -1845,19 +2307,34 @@ mod unix {
             let branch_heads_persisted = drawer
                 .get_doc_bundle_at_branch(document, checkout_branch, Some(Vec::new()))
                 .await?
-                .ok_or_else(|| eyre::eyre!("checkout branch {checkout_branch} is missing after persist"))?
+                .ok_or_else(|| {
+                    eyre::eyre!("checkout branch {checkout_branch} is missing after persist")
+                })?
                 .branch_heads;
             // §1.1 step 8: publish only if upstream is still at H; refusal
             // means others moved upstream, retrying with fresh heads.
             match drawer
-                .merge_from_heads(document, BranchPath::new("main"), Some(&main_heads), checkout_branch, &branch_heads_persisted, None)
+                .merge_from_heads(
+                    document,
+                    BranchPath::new("main"),
+                    Some(&main_heads),
+                    checkout_branch,
+                    &branch_heads_persisted,
+                    None,
+                )
                 .await
             {
                 Ok(()) => {
                     let published_heads = drawer
-                        .get_doc_bundle_at_branch(document, BranchPath::new("main"), Some(Vec::new()))
+                        .get_doc_bundle_at_branch(
+                            document,
+                            BranchPath::new("main"),
+                            Some(Vec::new()),
+                        )
                         .await?
-                        .ok_or_else(|| eyre::eyre!("document {document} missing from main after publish"))?
+                        .ok_or_else(|| {
+                            eyre::eyre!("document {document} missing from main after publish")
+                        })?
                         .branch_heads;
                     return Ok(DestinationOutcome::Published {
                         expected_heads: am_utils_rs::serialize_commit_heads(&main_heads),
@@ -1866,7 +2343,11 @@ mod unix {
                         attempts: attempts + 1,
                     });
                 }
-                Err(daybook_core::drawer::types::DrawerError::HeadConcurrency { expected, actual, .. }) => {
+                Err(daybook_core::drawer::types::DrawerError::HeadConcurrency {
+                    expected,
+                    actual,
+                    ..
+                }) => {
                     attempts += 1;
                     if attempts >= PUBLISH_MAX_CAS_ATTEMPTS {
                         return Ok(DestinationOutcome::Blocked {
@@ -1903,7 +2384,8 @@ mod unix {
         published_heads: Vec<String>,
     ) -> Res<()> {
         let track = &destination.track;
-        let published_heads: ChangeHashSet = ChangeHashSet(am_utils_rs::parse_commit_heads(&published_heads)?);
+        let published_heads: ChangeHashSet =
+            ChangeHashSet(am_utils_rs::parse_commit_heads(&published_heads)?);
         let bundle = drawer
             .get_doc_bundle_at_branch(
                 &track.projection.document,
@@ -1946,7 +2428,9 @@ mod unix {
                 rel
             ),
         }
-        let expected = acknowledged.map(ExpectedFile::Present).unwrap_or(ExpectedFile::Absent);
+        let expected = acknowledged
+            .map(ExpectedFile::Present)
+            .unwrap_or(ExpectedFile::Absent);
         let producer = Daybook::new(
             Arc::clone(drawer),
             marker.checkout().backend(),
@@ -1958,7 +2442,9 @@ mod unix {
         tokio::fs::create_dir_all(store_path.parent().unwrap()).await?;
         let store = VtreeStore::open(&store_path).await?;
         let registered = store.register(producer.id()).await?;
-        let version = store.replace(registered, &mut producer.observe().await?).await?;
+        let version = store
+            .replace(registered, &mut producer.observe().await?)
+            .await?;
         let mut scan = store.scan(version, NonZeroU32::new(512).unwrap());
         let mut puts = Vec::new();
         while let Some(entry) = scan.next_entry().await? {
@@ -1970,18 +2456,30 @@ mod unix {
                 });
             }
         }
-        eyre::ensure!(puts.len() == 1, "single-document text projection must describe exactly one file");
-        let mut prepared = receiver.prepare(puts, &ProducerAccess::new(&producer)).await?;
+        eyre::ensure!(
+            puts.len() == 1,
+            "single-document text projection must describe exactly one file"
+        );
+        let mut prepared = receiver
+            .prepare(puts, &ProducerAccess::new(&producer))
+            .await?;
         let applied = prepared.apply().await;
         let cleanup = prepared.cleanup().await;
         let installed = match (applied, cleanup) {
             (Ok(installed), Ok(())) => installed,
             (Err(error), Ok(())) => return Err(error.into()),
             (Ok(_), Err(error)) => return Err(error.into()),
-            (Err(error), Err(cleanup)) => eyre::bail!("application failed: {error}; staging cleanup also failed: {cleanup}"),
+            (Err(error), Err(cleanup)) => {
+                eyre::bail!("application failed: {error}; staging cleanup also failed: {cleanup}")
+            }
         };
-        let [installed] = installed.as_slice() else { panic!("single-file batch returned unexpected outcomes"); };
-        eyre::ensure!(installed.path == rel, "installed output differs from the recorded binding");
+        let [installed] = installed.as_slice() else {
+            panic!("single-file batch returned unexpected outcomes");
+        };
+        eyre::ensure!(
+            installed.path == rel,
+            "installed output differs from the recorded binding"
+        );
         let checkout = marker.checkout_mut();
         if track.projection.path == checkout.projection.path {
             checkout.render_heads = Some(am_utils_rs::serialize_commit_heads(&published_heads));
@@ -1999,7 +2497,10 @@ mod unix {
             binding.render_heads = am_utils_rs::serialize_commit_heads(&published_heads);
             binding.file = Some(installed.evidence.clone());
         } else {
-            eyre::bail!("published re-render has no tracked binding: {}", track.projection.path);
+            eyre::bail!(
+                "published re-render has no tracked binding: {}",
+                track.projection.path
+            );
         }
         Ok(())
     }
@@ -2017,23 +2518,38 @@ mod unix {
         },
         /// Invalid candidate (F2) or CAS exhaustion (F3). The checkout-level
         /// block records `publish`; a retry resumes after fixing the cause.
-        Blocked { expected_heads: Vec<String>, failure: String, attempts: u32 },
+        Blocked {
+            expected_heads: Vec<String>,
+            failure: String,
+            attempts: u32,
+        },
         /// Denied or downstream failure (F4/F5); local bytes and staged
         /// history are untouched.
-        Refused { expected_heads: Option<Vec<String>>, failure: String },
+        Refused {
+            expected_heads: Option<Vec<String>>,
+            failure: String,
+        },
     }
 
     struct Destination {
         track: Tracked,
     }
 
-    async fn publish_pipeline(root: &Path, marker: &mut Marker, drawer: &Arc<daybook_core::drawer::DrawerRepo>) -> Res<()> {
+    async fn publish_pipeline(
+        root: &Path,
+        marker: &mut Marker,
+        drawer: &Arc<daybook_core::drawer::DrawerRepo>,
+    ) -> Res<()> {
         let checkout = marker.checkout_mut();
         eyre::ensure!(
             matches!(checkout.state, State::Ready { .. }),
             "checkout is incomplete (Pending); complete create before publish"
         );
-        if let State::Ready { blocked: Some(blocked), .. } = &checkout.state {
+        if let State::Ready {
+            blocked: Some(blocked),
+            ..
+        } = &checkout.state
+        {
             // An ingest block must be cleared by the operation that resolves
             // it (a successful ingest); publish's own explicit retry is the
             // operation that resumes a publish block (ADR 011 §7: the
@@ -2072,13 +2588,14 @@ mod unix {
                 .rev()
                 .find(|receipt| receipt.path == path_key)
                 .cloned();
-            let checkout_live_heads = match publish_settlement(drawer, &receiver, track, receipt.as_ref()).await {
-                Ok(heads) => heads,
-                Err(error) => {
-                    failures.push(format!("{error:#}"));
-                    continue;
-                }
-            };
+            let checkout_live_heads =
+                match publish_settlement(drawer, &receiver, track, receipt.as_ref()).await {
+                    Ok(heads) => heads,
+                    Err(error) => {
+                        failures.push(format!("{error:#}"));
+                        continue;
+                    }
+                };
             // §4.2 resume rule first: a destination whose latest publication
             // record still matches both sides' live heads is settled and
             // needs no work. Fresh staged work or an upstream move re-enters
@@ -2104,16 +2621,16 @@ mod unix {
             } else {
                 false
             };
-            if settled
-                || track.render_heads.as_deref() == Some(checkout_live_heads.as_slice())
-            {
+            if settled || track.render_heads.as_deref() == Some(checkout_live_heads.as_slice()) {
                 // A settled publication record, or no staged work beyond the
                 // recorded render basis: nothing to publish (the §7 no-op
                 // honesty — publish never ingests, so upstream intake alone
                 // is not this verb's business).
                 continue;
             }
-            destinations.push(Destination { track: track.clone() });
+            destinations.push(Destination {
+                track: track.clone(),
+            });
         }
         if !failures.is_empty() {
             eyre::bail!("publish refused:\n  {}", failures.join("\n  "));
@@ -2127,7 +2644,12 @@ mod unix {
         for destination in &destinations {
             let document = destination.track.projection.document.clone();
             match publish_destination(drawer, destination).await? {
-                DestinationOutcome::Published { expected_heads, branch_heads, published_heads, attempts } => {
+                DestinationOutcome::Published {
+                    expected_heads,
+                    branch_heads,
+                    published_heads,
+                    attempts,
+                } => {
                     {
                         let checkout = marker.checkout_mut();
                         let seq = checkout
@@ -2135,7 +2657,8 @@ mod unix {
                             .iter()
                             .map(|publication| publication.seq)
                             .max()
-                            .unwrap_or(0) + 1;
+                            .unwrap_or(0)
+                            + 1;
                         checkout.publications.push(Publication {
                             seq,
                             document: document.clone(),
@@ -2150,24 +2673,22 @@ mod unix {
                     replace_marker(root, marker).await?;
                     // §1.1 step 10: the published state re-renders when the
                     // merged bytes differ from the acknowledged disk state.
-                    project_published(&receiver, marker, drawer, destination, published_heads).await?;
+                    project_published(&receiver, marker, drawer, destination, published_heads)
+                        .await?;
                     let path = destination.track.projection.path.clone();
                     println!("published {path}");
                 }
                 other => {
                     let (outcome, failure, expected_heads, attempts) = match other {
-                        DestinationOutcome::Blocked { expected_heads, failure, attempts } => (
-                            Outcome::Blocked,
-                            failure,
-                            Some(expected_heads),
-                            attempts,
-                        ),
-                        DestinationOutcome::Refused { expected_heads, failure } => (
-                            Outcome::Refused,
-                            failure,
+                        DestinationOutcome::Blocked {
                             expected_heads,
-                            1,
-                        ),
+                            failure,
+                            attempts,
+                        } => (Outcome::Blocked, failure, Some(expected_heads), attempts),
+                        DestinationOutcome::Refused {
+                            expected_heads,
+                            failure,
+                        } => (Outcome::Refused, failure, expected_heads, 1),
                         DestinationOutcome::Published { .. } => unreachable!("matched above"),
                     };
                     let diag = format!("{failure:#}; explicit retry resumes this destination");
@@ -2178,7 +2699,8 @@ mod unix {
                             .iter()
                             .map(|publication| publication.seq)
                             .max()
-                            .unwrap_or(0) + 1;
+                            .unwrap_or(0)
+                            + 1;
                         checkout.publications.push(Publication {
                             seq,
                             document: document.clone(),

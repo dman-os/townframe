@@ -144,8 +144,7 @@ use daybook_types::doc::{Note, WellKnownFacetTag};
 use daybook_types::manifest::{
     CompareOp, DocChangePredicate, DocPredicateClause, FacetDependencyManifest, FacetDisplayDeets,
     FacetDisplayHint, FacetManifest, FacetReferenceManifest, FacetReferenceValue, FacetViewMode,
-    InitDeets,
-    InitManifest, InitRunMode, PlugDependencyManifest, PlugManifest, ProcessorDeets,
+    InitDeets, InitManifest, InitRunMode, PlugDependencyManifest, PlugManifest, ProcessorDeets,
     ProcessorEventPredicate, ProcessorManifest, RoutineDocAcl, RoutineFacetAccess, RoutineImpl,
     RoutineManifest, ViewManifest, ViewProviderManifest, ViewRef,
 };
@@ -760,7 +759,9 @@ mod claim_reference_tests {
         let facet = plug_manifest()
             .facets
             .into_iter()
-            .find(|facet| facet.key_tag.to_string() == crate::types::DayledgerFacetTag::Claim.as_str())
+            .find(|facet| {
+                facet.key_tag.to_string() == crate::types::DayledgerFacetTag::Claim.as_str()
+            })
             .expect("claim facet not registered");
         let [reference] = facet.references.as_slice() else {
             panic!("claim facet must hold exactly one reference");

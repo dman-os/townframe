@@ -122,8 +122,7 @@ fn snapshot_branch_doc_at(
             missing_before_fork
         );
     }
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| from_doc.fork_at(ctx.heads)))
-    {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| from_doc.fork_at(ctx.heads))) {
         Ok(res) => res.map_err(eyre::Report::from),
         Err(payload) => {
             let missing_after_panic: Vec<String> = ctx
