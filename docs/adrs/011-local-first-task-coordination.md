@@ -2,6 +2,24 @@
 
 **Status:** Proposed
 
+**Implementation transport:** use standard iroh/IRPC following the existing BigRepo RPC design. XRPC and service-interface migration are deferred to a separate PR; ADR 016 is an unaccepted draft, not a dependency.
+
+The current `tasks::store::TaskStore` adapter projects versioned immutable declarations and writer-owned terminal facts from authenticated encrypted register lanes. It owns its register host, serializes local semantic publication, rejects declaration collisions and unknown payload schemas, and preserves local success against later cancellation. `RegisterBinding::part` is selected explicitly by the domain descriptor; register scope and cryptographic incarnation do not implicitly select network subscription identity. `TaskSyncBackend` retains one owner per explicitly attached pool in the dedicated `daybook-tasks` scope, sharing its SQLite store and revision notifications with native BigSync worker/RPC. Checked register admission commits before transport completion. Native document parts and local derived/run-log state are not served through this scope. Fresh document/group Relay audiences replace persisted permissions before serving; unresolved native authority remains fail-closed and retains its refresh obligation. Physical membership removal is not authenticated retirement and is rejected. The native two-node scenario exercises opaque Relay, late Read, durable consumer checkpoint/effect, reverse publication, revocation, reopen and stale/incarnation rejection; this is transport proof, not distributed allocation/execution.
+
+The live wire contract uses `townframe/task-coordination/2` and advertises scheduling protocol 2. Optional source origins change the positional postcard declaration encoding, so version 1 is not wire-compatible. Its native ingress resolves the application peer from the existing authenticated BigRepo endpoint mapping on every request, rejects missing mappings and mismatched session identities, and carries the authenticated identity separately into the request queue. This identity boundary does not grant pool authority: the pool driver must check current document/group access and exact session ownership before applying scheduling events. Native ingress and connection lifecycle errors remain explicit rather than silently manufacturing an identity.
+
+The native pool actor owns independently scheduled Tokio jobs for publication,
+classification and execution observation. A handler may await the same SQLite
+writer as a publication job, so jobs cannot depend on that actor polling their
+futures. Shutdown aborts and joins all owned jobs before releasing actor resources;
+dropping detached handles is not a shutdown barrier.
+
+Classification and offer freshness fences use `TaskTicket::version_digest`,
+separate from the immutable declaration digest. It includes publisher evidence
+and ordered terminal lanes, so incorporation invalidates stale asynchronous
+decisions without JSON-serializing non-string public-key map keys. The digest
+streams framed fields directly into BLAKE3 without constructing encoded ticket bytes.
+
 ## Context
 
 Daybook needs to allocate work across intermittently connected nodes without requiring an always-available server or consensus system. Distributed triage is the first consumer, but commands, recurring automation, collaborative batches, GPU work, and personal agents need the same networking and scheduling machinery.
@@ -257,13 +275,23 @@ TaskPoolDescriptorV1 {
 
 The descriptor is a configuration and authority touchstone. It contains no task array, executor list, heartbeat, or allocation history. One router process may lead multiple pools.
 
+The implemented metadata API uses a caller-provisioned, existing common Automerge rendezvous document. Its `task_pool_directory` map contains additive pool/group/document references: lookup hints, never authority grants. A stable processor pool ID hashes the stable plug ID and processor name, excluding plug upgrades, drawer placement and physical task parts. That hash does not create a common descriptor document identity, and discovery never implicitly creates a document on a local miss.
+
+For triage, the named adapter is the existing `RepoCtx::doc_config` document; management explicitly supplies the descriptor document and an existing authority group for each managed distributed processor. `PoolRepo::lookup_binding(pool_id)` examines all additive references for that requested stable pool across groups: zero returns `Absent`, one returns a non-authoritative `Hint`, and multiple distinct document/group bindings return `Conflict`. An unavailable rendezvous is `Pending`, and malformed lookup metadata is rejected. A recovered hint must separately pass `load_descriptor`'s current document/group Read admission. Neither lookup nor document/facet arrival creates a pool or starts a role; triage owns that lifecycle explicitly. The directory is a lookup adapter, not a required generic registry or duplicate typed pool facet.
+
+The actual referenced document is the CGKA authority locus. Its `task_pool_descriptors` map stores each complete versioned descriptor as one atomic JSON value; multiple pools and unrelated metadata may share that document. Readers enumerate conflicting map objects and scalar values rather than accepting an arbitrary Automerge winner. Independently registered descriptor documents for one pool/group, or unequal complete descriptor alternatives, produce `Conflict`. Known references whose bytes or keys are unavailable produce `Pending`; `Absent` means only that the locally readable directory has no reference.
+
+`Ready` is a descriptor snapshot, not an ongoing authority grant. Loading captures private descriptor bytes and heads before final checked admission under current document **and named-group Read**. Registration prepares the exact descriptor and reference before final checked document/group Edit admission, which linearizes the accepted operation; subsequent group revocation does not undo that admitted mutation. Ordinary document commit still enforces document Edit and supplies durability. Descriptor publication and non-authoritative directory publication are two independent commits, with no cross-document atomicity: a failure between them may leave an unadvertised descriptor, and repeating registration is idempotent.
+
+An owned, taskless watch subscribes to descriptor/directory changes, materialization and authority notifications before its initial query. Notifications trigger fresh durable queries and authority admission, not cached permission. Group membership events name only their direct target, so every group membership change conservatively wakes discovery to cover transitive nested-group changes even when independent direct document Read survives. Dropping the watch unregisters its listeners before repository shutdown. This metadata API does not implement the generic task backend, physical-part migration or an authenticated retirement/deletion fence; additive directory hints do not make those retention claims.
+
 ### 3. One task-coordination BigSync backend
 
 ADR 011 introduces one logical BigSync backend, `daybook/task-coordination/v1`, with two object schemas:
 
 ```text
 RouterSlotPayloadV1
-TaskTicketPayloadV1
+TaskTicketPayloadV2
 ```
 
 Separate parts allow separate incremental consumers, but they are not separate task backends. Pool descriptor documents continue to use the existing Automerge/BigRepo backend.
@@ -274,6 +302,8 @@ Every router slot and task ticket carries:
 - the same Keyhive `group_part_id` used by its pool descriptor.
 
 Existing group-part policy therefore filters task coordination objects by authority. Pool-specific parts express interest and replay. Future BigSync intersection filters can request `group AND pool` without composite parts.
+
+Task/router payloads use the reusable `big_sync_core::encrypted_register` CRDT building block described in ADR 012, rather than a task-owned coordination primitive. The encrypted register owns authenticated causal versions and encrypted representations; task interpretation, current authority, JWK resolution, SQL durability, and task-specific retention remain backend/domain adapters. A distributed triage processor has one explicitly managed pool with one active application JWK in its pool document; historical JWK versions remain resolvable. Different processors may have different sharing audiences.
 
 ### 4. Authorization and encryption
 
@@ -287,7 +317,144 @@ Possession of a part ID is not authority. The pool's Keyhive group controls:
 
 BigEphemeral currently uses an open policy in BigRepo; implementation of a Keyhive-backed ephemeral policy is required. It maps pool topics to the descriptor's authority group.
 
-Task bodies and router semantics are encrypted under domain-separated keys derived from the applicable Keyhive/Beekem epoch. Relay-visible authenticated envelopes expose only identifiers, part membership, framing, ciphertext size, and data required for admission/routing policy.
+Task bodies and router semantics use application keys stored as generic JWK facets in the Keyhive-protected pool document, following ADR 003 §5–6. Keyhive/Beekem CGKA and the document causal-encryption mechanism protect and recover the key-bearing document; custom task payloads do not invoke CGKA directly or maintain a second causal-encryption/checkpoint DAG. A representation binds its JWK facet reference and the exact key-document heads used to resolve it, following ADR 003 `keyRef`/`keyRefHeads`; resolution must never silently substitute the latest key. The key write is durable before dependent ciphertext is published. Relay-visible authenticated envelopes expose only identifiers, part membership, framing, ciphertext size, key-reference metadata, and data required for admission/routing policy, never the JWK secret. Cipher suite and reusable key-resolution integration require source review before implementation.
+
+Replacing a JWK does not erase historical key material. Existing ciphertext retains its pinned key reference; current authorized readers obtain that key through the document historical-recovery contract. Former readers may retain keys already learned. A new access domain may require a new key-bearing document and migration rather than overwriting a facet, as described in ADR 003 §16. Application-key rotation is distinct from both CGKA membership rotation and transport-part rotation.
+
+Removing a reader first removes permission to deliver new protected bytes. Rotate the application JWK on audience reduction or suspected compromise as additional protection against future ciphertext disclosure; neither operation retracts previously learned keys or plaintext. Adding a reader does not require application-key rotation. Part rotation and garbage collection do not rotate JWKs, and there is no default calendar-driven application-key churn. Offline writers cannot promise immediate global exclusion before learning new authority/key state.
+
+Registers may contain valid representations using different pinned JWK versions concurrently. There is no store-wide current-key or CGKA-epoch eligibility gate, and missing local key material is not obsolescence or a reason to mutate convergent state. Future-publication key selection is separate from historical decryption. Re-encrypting an unchanged original statement preserves its original signature, writer sequence, and causal observations; only the representation changes. Concurrent key rotations must leave both published key references resolvable and use an explicit domain-agreed rule for future publication/wrapper preference, never node-local decryptability as a merge tie-break.
+
+The generic register does not own membership, depend on Keyhive, or impose concurrent-revocation exclusion. It joins correctly bound signed evidence deterministically. Partition policies govern network admission and may be Keyhive-backed or use another authority system; domain consumers separately decide which router claims, tasks, or results are actionable. Original author identity and delivering-peer identity are distinct. Node-local delivery origin, arrival time, current membership, and decryptability do not determine register merge or causal dominance. Cryptographic validity is not permission to execute an effect.
+
+Backdating resistance remains open ([issue 53](https://github.com/dman-os/townframe/issues/53)). Signatures, author timestamps, writer sequences, and blocking a revoked transport peer do not alone distinguish fresh old-context records relayed by another peer from legitimate delayed work. A domain may define deterministic concurrent-removal exclusion or signed historical finality, but neither is a mandatory generic register feature. A router checkpoint would require explicit authority for the affected records, an authenticated accepted set/frontier, and competing-checkpoint rules; no such protocol is established here. No centralized timestamp authority or relay consensus is introduced. Temporary acceptance before authority converges, eventual domain eligibility, and irreversible effects are distinct risks; historical key disclosure cannot be undone.
+
+BigRepo's coordination bridge produces opaque `CoordinationAuthority` views
+from the actual descriptor document and its transitive binding to the existing
+pool group. Effective writers require Edit on **both** that group and document;
+local register reads and `admit_coordination_read` require Read on both. A direct document
+grant outside the pool group does not grant pool eligibility, and Relay never
+permits plaintext. Missing authority nodes are Pending; a known wrong group
+binding is Unauthorized. Authority admission does not require document CGKA keys.
+
+`with_coordination_signer` supplies a borrowed opaque private signer only inside
+a synchronous callback under the document lock. It implements the existing
+`Signer<Signature>` and `Verifiable` traits, so original statement/header and
+Representation signatures cover the domain's exact transcripts rather than a
+different serialized `Signed<T>` wrapper. No raw key or owned signer escapes.
+Payload encryption is application-owned: coordination registers use the shared
+RFC 8188 codec and domain-provisioned document JWK facets. The former direct
+CGKA `CoordinationCiphertext`, sealing/opening APIs, and their rewrap-specific
+tests are removed. Native CGKA continues to secure document/key distribution.
+The authority adapter checks native group/document membership independently of
+application payload keys, so ciphertext-only Relay does not need a JWK or CGKA key.
+
+Shared Keyhive generation brackets membership traversal and invalidates stale
+nested-group views even when document heads do not change. The final generation
+check holds the authority document lock; generation is freshness evidence, not
+an epoch clock or a register merge rank.
+Checked admission linearizes at its final successful
+check, not a later SQL/document durability commit. Revocation observed before
+that check rejects the operation; later revocation cannot undo an already
+accepted write. Returned views and their local-access diagnostics are not
+long-lived cached permission grants.
+
+Historical keys are recovered from the exact JWK facet at signed `keyRefHeads`,
+using native document history. No latest-key fallback, create-on-miss key,
+repo-wide triage key, or blob-worker-only ownership is introduced. Generic
+register joins do not require plaintext or current writer membership.
+Checked local Read/Edit admission remains a concrete host policy, not a
+universal historical authorization rule.
+
+#### Latest coordination lanes
+
+`big_sync_core::encrypted_register` implements the policy-neutral signed latest-state reducer. The task-owned reducer and its epoch/membership-dependent admission rules are removed from main. The core has no Keyhive, document, SQL, or task interpretation. Stable binary `RegisterKey` framing independently length-prefixes opaque scope and slot bytes; writer sequences and work generations do not create new physical keys.
+
+Writers sign exact original statements and public headers containing their record identity, sequence, compact frontier, and commitment to the complete signed plaintext. Frontiers authenticate writer assertions, not Byzantine causal completeness or historical permission. Domain consumers resolve dependencies and interpret actionable state; the core does not reconstruct membership or a historical DAG.
+
+Each writer retains only its greatest sequence. Concurrent writers remain distinct. Equal-sequence unequal semantic identities retain exactly two canonical signed witnesses and exclude that lane from head projection; a higher sequence advances it. Same-record observations affect projection without deleting writer replay fences. Missing remote lanes never delete retained lanes. Historical-writer retirement and total writer-count bounds require a separate protocol.
+
+Representations preserve the signed original and bind a publisher, opaque incarnation, key reference, exact sorted unique key heads, encoding token, encoding parameters, and ciphertext. All binding fields participate in signatures and canonical wrapper ordering. Mixed historical key versions join independently of current membership, local key availability, delivery origin, or arrival order. Canonical selection does not implement a preferred fresh-container migration policy.
+
+`RegisterSnapshot` binds schema and record identity to writer/value pairs, rejects duplicate writer entries during decoding, and serializes borrowed state without copying ciphertext. Structural key/body/frontier/metadata budgets precede cryptographic verification; all remote lanes are verified before mutation. `restore` uses the same verification as remote merge and makes no historical-authorization claim. Hosts must separately bound transport decoding and durable resource growth.
+
+Nine focused core regressions cover component framing, concurrent projection/replay fences, mixed-version wrapper convergence and restore, transferable equivocation, atomic invalid-map rejection, original/outer binding, cross-record frontier semantics, duplicate-writer decoding, and structural limits. A standalone core executable completed 2,000 signed turns across two serialized replicas with 20 snapshot restores, mixed pinned-key metadata, stale replay rejection, and exactly two retained writer lanes (4,225 final wire bytes). Core and daybook_core all-targets/all-features clippy passed. This proves signed opaque-register behavior, not encryption, disk restart, host JWK resolution, durable publication, partition-policy integration, or physical reclamation.
+
+`daybook_core::tasks::storage::RegisterStore` binds an opaque domain scope,
+native document/group authority, configured allowed JWK facet references, a
+publication key with exact heads, and a transport incarnation. Opening admits
+Relay without resolving payload keys; publication resolves the already-provisioned
+key without minting one. Plaintext recovery requires Read. Writer sequences
+are durably reserved before signing; failures leave gaps rather than reuse.
+Admitted current snapshots and their identical BigSync payload publish in one
+SQLite transaction. Consumer checkpoints and derived SQL settle together.
+
+A standalone disk-backed host executable exercised ordinary owner JWK writes,
+K1/H1 publication, K2/H2 rotation, store reopen, exact H1 recovery and unchanged
+signed-original verification, sequence advancement, and stale replay remaining
+unchanged. A wrong current K2 could not decrypt the old ciphertext. This proves
+the concrete pinned-key publication path, not process restart, late-reader
+Drawer integration, task-driver composition, preferred-container rewrap, or
+authenticated physical reclamation.
+
+A disk-backed executable completed 2,000 encrypted durable publications after
+the initial K1/K2 scenario. Scoped object, part, membership, pending membership,
+peer-cursor, current-register and sequence-row counts stayed exactly
+`(1, 1, 2, 0, 0, 1, 1)`; the revision advanced by 2,000 and the final writer
+sequence was 2,002. The final JSON payload was 236,071 bytes, including the
+shared codec's 64-KiB padded ciphertext represented as JSON bytes. This is a
+single-writer fixed-slot growth proof, not retired-writer/slot reclamation or
+nonzero peer-cursor accounting. A separate ten-turn executable fully stopped
+and reopened the disk-backed native repository, blob store, Plugs and Drawer
+in one process (the test keyring is process-local). It recovered the identical
+current payload, decrypted through exact pinned JWK heads, replayed one current
+slot rather than a turn journal, durably advanced the consumer checkpoint, and
+published the next writer sequence 13. The replay boundary follows the shared
+revision clock, including native repository bootstrap writes.
+
+A two-peer native regression bootstraps shared Drawer metadata before private
+key publication. A Relay-only peer retains and republishes identical signed
+ciphertext without JWK access; plaintext recovery and local publication reject
+that permission. After owner K1/H1 to K2/H2 rotation, a later Read grant and
+native history synchronization recover the exact H1 statement without changing
+the original signature or current register. Loading already-populated foreign
+Drawer metadata still encounters its separate legacy authority migration; this
+scenario does not claim to fix that bootstrap path.
+All-targets/all-features clippy passed for `big_sync_core`, `big_repo`,
+`daybook_types` and `daybook_core` after smoke scaffolding was removed. Native
+FFI generation and the Compose application check passed; the Gradle check
+required IPv4 JVM networking after dependency downloads failed over the default
+network path. These checks do not establish authenticated retirement or task
+backend/rotation integration.
+
+
+#### SQLite publication boundary
+
+BigSync's `SqlitePartStore::begin_obj_write` binds a SQLite write transaction to
+one object. `SqliteObjWrite::payload` reads its current content in that same
+transaction; `context_mut` permits domain-owned SQL, not direct mutation of
+BigSync tables or raw transaction commit/rollback. A caller can atomically persist an admitted domain
+snapshot or counter with `publish` and `commit`, without exposing separate
+payload, membership and frontier writes.
+
+One publication replaces the object's payload and touches the union of existing
+live parts, its pending parts and caller-admitted parts. Duplicate targets are
+joined once. Bucket summaries, pending promotion, memberships, part cursors and
+current frontier entries share the transaction and revision. Unrelated pending
+memberships remain untouched. Dropping the transaction rolls everything back;
+live readers are notified only after commit. A failed or cancelled publication
+cannot be committed, and a transaction permits at most one publication.
+
+The generic boundary has been exercised against real disk SQLite: dropped writes
+roll back domain state, payload and pending promotion; committed deduplicated
+targets and domain state survive pool close/reopen while unrelated pending
+membership survives. Failure after bucket changes leaves the durable cursor,
+original payload and original targets unchanged. Live readers see nothing before
+commit, then receive one coalesced object event with the committed target union.
+It is not a task repository, an authorization check, an epoch fence, a remote
+merge backend or a retirement implementation. Those callers must supply their
+own admission and durable counter rules before using this publication boundary.
+
 
 ### 5. Router election over BigSync
 
@@ -353,6 +520,16 @@ BigEphemeral is appropriate for repeated heartbeats because messages are useful 
 
 After discovery, executor nodes establish a live routing session using an advertised transport. A pool may advertise a dedicated BigEphemeral request/response topic as a lossy fallback, but reliable iRPC/HTTP is preferred and targeted traffic must not be broadcast to every pool subscriber.
 
+#### RPC compatibility and rolling upgrades
+
+The initial cross-node transport follows the existing BigRepo iroh/IRPC pattern: an explicitly versioned ALPN identifies a supported wire protocol. Incompatible peers need not allocate work together; unsupported ALPN fails connection establishment rather than translating task messages. No cross-version shim is required. ALPN selection is an application-defined compatibility gate, not automatic schema negotiation by IRPC.
+
+IRPC uses postcard. Derived structs are positional, not named-field maps: Serde JSON-style unknown-field tolerance does not establish wire compatibility. Adding, removing, reordering, or changing fields, or changing enum variant indices, can fail decoding or silently change meaning. Keep an ALPN only when old/new byte fixtures demonstrate compatibility in both directions and operation semantics remain compatible; otherwise bump it. Optional fields and Serde defaults alone do not establish compatibility. Any skippable extension mechanism must be explicitly framed and distinguish optional hints from required execution, authority, or placement semantics.
+
+Rolling upgrades retain one shared router election per pool, not independent version cohorts. Authenticated claims advertise a scheduling protocol version and supported live RPC versions, independently of pool-descriptor and ticket-payload schema versions. Prefer the newer live scheduling version among otherwise eligible candidates; workers incompatible with the selected router do not accept offers and do not form a second version-specific election. The shared election envelope/projection must remain understandable to supported older participants so they can stand down. A dead newer-version historical claim must not block compatible takeover: version preference applies to live candidacy, not permanent retention of an old claim. Heartbeats/session discovery expose compatibility and unavailability. Changing these election semantics requires an explicit versioned contract, not merely bumping an RPC ALPN.
+
+Live RPC versions are distinct from persisted task-ticket, processor-slot, and router-slot payload versions. An ALPN bump does not migrate retained data. Unknown persisted versions are unsupported data, not proof of cancellation or permission to prune; schema upgrades require their own compatibility or migration decision.
+
 ### 7. Executor registration and allocation
 
 On every router change or executor restart, an interested executor registers:
@@ -378,25 +555,46 @@ Executor -> AttemptChanged(...)
 
 The exact start handshake may be collapsed after implementation testing. The executor must never begin solely because it received an unauthenticated or stale offer.
 
+For each accepted or origin attempt, the executor captures the domain's `ResolvedInvocation { args: Vec<u8> }` and the canonical declaration digest. `PersistAttempt` writes both before its exact attempt acknowledgement permits `StartDispatch`. Dispatch consumes that captured invocation, even if classification changes while persistence is pending or the executor reconnects; a fresh attempt resolves anew. Argument encoding belongs to the domain/handler, not the generic task protocol.
+
+The local dispatch boundary persists concrete source/configuration document heads and versioned `CapturedWflowExecution` before enqueueing. The capture identifies exact main-manifest heads, the original workflow handler and version-specific workload, ordered immutable component blob IDs, and bundle handler keys. File components are copied into owned blob storage at admission; execution verifies captured bytes against their digests. Immediate, delayed and boot workload loading consume this retained capture, not current enablement. Boot waits for the workflow journal replay boundary before reconciling dispatch state, including archived outcomes and prepared admissions with or without durable JobInit. Native disk-reopen scenarios exercise waiting/queued WASM, both prepared admission crash cuts, archived settlement and missing/corrupt captures. These local runtime recovery checks do not yet provide remote artifact materialization or production task-driver recovery.
+
+Pool descriptor protocol v2 provisions the register scope, representation
+incarnation, allowed canonical native-document JWK facet references, and exact
+publication-key heads. The descriptor snapshot builds the register binding under
+fresh document/group Read admission; opening opaque Relay storage does not need
+payload-key materialization. JWK facets remain in the pool authority document:
+Drawer registration would add broader admin grants. Plaintext release rechecks
+current Read after asynchronous exact-head key resolution. This is provisioning
+and storage admission, not an integrated scheduler or historical writer proof.
+
+`PoolWorkerMachine::restore_running_attempt` accepts an existing authorized
+workflow attempt before routing registration. It preserves the attempt ID and
+capacity reservation, discards the old connection allocation, and emits no new
+dispatch or input classification. Prepared offers are not running jobs and must
+not use this entry point. The driver still owns durable DispatchRepo/wflow
+reconciliation, domain settlement checks, and registration of the new executor
+incarnation; the machine entry point alone is not production restart recovery.
+
 Allocations live only in router/executor memory and local DispatchRepo state. If all live witnesses disappear, the pending BigSync ticket becomes allocatable again. Router heartbeat and RPC session liveness do not prove useful task progress; DispatchRepo/wflow must report or fail unexpected hung attempts according to local policy.
 
 ### 8. Task ticket payload
 
 ```text
-TaskTicketPayloadV1 {
-    protocol: "daybook/task-ticket/v1"
+TaskTicketPayloadV2 {
+    schema: 2
     task_id: TaskId
     declaration: SignedEncryptedTaskDeclaration
     terminal_lanes: Map<NodePubkey, SignedTerminalCell>
 }
 
-TaskDeclarationV1 {
+TaskDeclarationV2 {
     task_id: TaskId
     pool_id: TaskPoolId
     domain: TaskDomainId
-    producer: NodePubkey
+    producer: Optional<NodePubkey> // source origin, not publishing authority
     handler: HandlerRef
-    encrypted_input: Vec<u8>
+    input: Vec<u8>
     coordination_ref: Optional<DomainCoordinationRef>
     placement: Placement
     preference: Preference
@@ -418,6 +616,10 @@ enum TerminalFactV1 {
 ```
 
 A task declaration is immutable for one TaskId. Concurrent unequal declarations for the same ID are an invalid collision/equivocation, not “desired revision siblings.” Replacement creates a different TaskId and retires the old ticket.
+
+Canonical equality and the declaration digest include the domain-owned input bytes, not encryption envelopes or publisher evidence. Different input under one TaskId is rejected atomically as a collision. Local invalid declarations are programming-invariant failures; malformed remote declarations are rejected before publisher, terminal, readiness, or admission state changes. `AuthoritativePlacement` requires `Preference::Only`; ordinary preference is not an execution-authority constraint.
+
+Publisher evidence carries an authenticated domain-owned `input_witness` outside canonical declaration meaning. The native writer lane signs both declaration and witness; projection obtains publisher identity and witness from the verified original, never from an RPC caller's claimed publisher. Equivalent publishers may retain different exact-history witnesses under one task identity. The domain validates a selected witness and its actual publisher's current rights; source-origin attribution is only scheduling input. Task payload schema 2 rejects older retained schemas as unsupported data, not as cancellation or permission to prune. Router-slot payload schema and its shared election remain unchanged.
 
 Terminal lanes use latest signed per-writer sequence and preserve concurrent authenticated facts. Any valid success or cancellation stops ordinary scheduling. Detailed logs, retries, and intermediate failures remain in DispatchRepo or domain state; a failed attempt leaves the task pending unless policy makes it terminal.
 
@@ -467,11 +669,28 @@ enum ResultRetention {
 
 For `ExternalSettlement`, task data may be fully removed after the local domain state proves the obligation settled or obsolete. Multiple authorized domain replicas may race to remove it; removal is idempotent. The router is not the semantic pruning authority.
 
-For `TaskTicketAuthoritative`, the ticket leaves the active part but remains in the authority/archive part. With no retention horizon it is retained until explicit deletion. With a horizon, `not_after` must ensure stale pending copies are permanently non-runnable before terminal evidence can be discarded.
+For `TaskTicketAuthoritative`, the ticket leaves the active part but remains in the authority/archive part. With no retention horizon it is retained until explicit deletion and no execution deadline is required. With a finite horizon, an immutable `not_after` is required and must be less than or equal to `retain_until`; equality is valid. Stale pending copies must be permanently non-runnable when terminal evidence can be discarded.
 
 BigSync removal/tombstone mechanics prevent ordinary local resurrection, but no permanent task tombstone is required for domains whose durable compact settlement rejects stale tasks. An old replica may temporarily reintroduce a ticket; domain classification makes it inert and removes it again.
 
+This semantic task-retention rule does not imply physical BigSync tombstone collection. ADR 012 decision 9 retains dead membership rows until an authority/reconstruction rule makes their removal safe. Dropping a ticket payload leaves such metadata behind; a drained active pool can therefore still accumulate historical dead rows and dead fingerprints. Request-cursor filtering avoids sending removals to readers that never saw the add, but does not bound local storage. The task/domain backend needs an explicit membership-authority and stale-reintroduction rule, including what a ciphertext-only relay can verify, before claiming bounded total pool storage. Arbitrary tombstone TTL or cursor rotation is not a substitute.
 Relay-local eviction is never published as cancellation or protocol removal.
+
+#### Task-part rotation
+
+Rotation uses a pool-local unsigned 64-bit generation, starting at zero. This is transport retention identity, not the router election generation, a writer sequence, a task identity, or a CGKA epoch. Advancing from an observed generation uses checked addition by one; exhaustion is an invariant failure, not wraparound.
+
+Part keys are arbitrary bytes. The canonical key is the concatenation of `daybook/task-part/v1\0`, the byte length of the UTF-8 pool ID as unsigned 32-bit big-endian, those pool-ID bytes, the 32-byte authority-group ID, the rotation generation as unsigned 64-bit big-endian, and one role byte (`0` active, `1` archive). Other roles require an explicit protocol extension. An optional archive is derived only when configured. Keys depend on neither the proposing node nor its clock, signature, CGKA epoch, or router claim. Knowing a key does not grant authority to declare a rotation or access the part.
+
+Every generation has a predetermined successor. Nodes partitioned for several rotations derive the same chain, even when they reach different depths. The greatest valid authenticated rotation generation is selected on reconnection; equal generations name the same parts, so they require no proposer tie-break. A node never regresses its accepted generation. Authentication and fresh-node bootstrap of this current control state remain implementation obligations; an unauthenticated large integer or router endpoint is not evidence of advancement.
+
+Automatic rotation is garbage-triggered, not calendar-triggered. Pool management configures positive absolute budgets for dead membership rows and retained garbage bytes; reaching either requests advancement to the next generation. These are local observations, not a global agreement on counters. Counters are attributed to the current generation: predecessor garbage awaiting cleanup must not repeatedly rotate an otherwise clean successor. A ratio alone is not a trigger, because a tiny idle pool can have a large dead-to-live ratio. Numerical defaults require measured storage-growth acceptance evidence.
+
+A router considers tasks only in its accepted current active part. Router contact and synchronization advertise current rotation control so an old producer can learn the successor. On learning a valid newer generation, each node locally migrates still-required state directly into the selected generation; it need not publish through every intervening part. This does not wait for acknowledgement from all writers. An offline producer retains its pending state until successor publication is durable. Local adoption fences new old-generation publication and reconciles writes admitted before that fence, so a concurrent write cannot fall between migration and switching the selector.
+
+Rotation preserves stable logical task/slot identity, exact original signed statements, and the existing ciphertext with its pinned JWK reference. Transport generation is authenticated separately; moving between parts alone does not require decrypting or resealing. Fresh domain admission rejects already-settled or obsolete obligations instead of blindly resurrecting them. Learning an old task never authorizes recreating its retired transport part or its memberships. Relay-held required state must also have a carry-forward path before its only retained copy is deleted.
+
+This is a local carry-forward protocol, not a certificate that one node observed every offline task. Physical purge still requires authenticated old-generation fencing at every allocation surface, including object payloads, live/dead/pending memberships, part metadata, buckets, peer cursors, and obsolete consumer state. Consumer selector changes require an explicit successor checkpoint, not cursor reset to zero. The bounded control-state/bootstrap rule, relay carry mechanism, and all-target purge integration remain unimplemented acceptance requirements; deterministic names alone do not prove bounded storage.
 
 ### 12. Producer and router cursors
 
