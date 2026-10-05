@@ -11,8 +11,8 @@ use big_sync_core::concurrent_delta_walker::{
 };
 use big_sync_core::revisioned_store::RevisionedStore as _;
 use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
-use daybook_types::doc::{ArcFacetRaw, ChangeHashSet, DocId, FacetKey, FacetRef};
-use daybook_types::manifest::{FacetReferenceKind, FacetReferenceManifest};
+use daybook_types::doc::{ArcFacetRaw, ChangeHashSet, DocId, FacetKey};
+use daybook_types::manifest::{FacetReferenceKind, FacetReferenceManifest, FacetReferenceValue};
 use daybook_types::reference::select_json_path_values;
 use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
 use sqlx::{Sqlite, Transaction};
@@ -355,29 +355,26 @@ fn extract_references(
     origin_doc_id: &DocId,
     origin_facet_key: &FacetKey,
 ) -> Res<Vec<ExtractedReference>> {
-    let selected_values = select_json_path_values(facet_value, spec.json_path())?;
+    let selected_values = select_json_path_values(facet_value, &spec.json_path)?;
     let mut out = Vec::new();
     for selected_value in selected_values {
-        match spec {
-            FacetReferenceManifest::UrlString { .. }
-            | FacetReferenceManifest::UrlStringSplit { .. }
-            | FacetReferenceManifest::UrlStringMany { .. } => {
+        match &spec.value {
+            FacetReferenceValue::UrlString => {
                 append_url_references(
                     &mut out,
                     selected_value,
                     origin_doc_id,
                     origin_facet_key,
-                    spec.json_path(),
+                    &spec.json_path,
                 )?;
             }
-            FacetReferenceManifest::UrlObject { .. }
-            | FacetReferenceManifest::UrlObjectMany { .. } => {
-                append_object_references(
+            FacetReferenceValue::UrlObject { .. } => {
+                append_field_object_references(
                     &mut out,
                     selected_value,
+                    spec,
                     origin_doc_id,
                     origin_facet_key,
-                    spec.json_path(),
                 )?;
             }
         }
@@ -772,22 +769,78 @@ impl DocFacetRefIndexRepo {
     }
 }
 
-fn append_object_references(
+fn append_field_object_references(
     out: &mut Vec<ExtractedReference>,
     selected_value: &serde_json::Value,
+    spec: &FacetReferenceManifest,
     origin_doc_id: &DocId,
     origin_facet_key: &FacetKey,
-    json_path: &str,
 ) -> Res<()> {
-    let facet_ref: FacetRef =
-        serde_json::from_value(selected_value.clone()).wrap_err_with(|| {
-            format!(
-                "expected reference object at path '{}' for facet '{}' but found {}",
-                json_path, origin_facet_key, selected_value
-            )
-        })?;
-    out.push(parse_object_reference(
-        facet_ref,
+    let FacetReferenceValue::UrlObject {
+        ref_field,
+        heads_field,
+    } = &spec.value
+    else {
+        // Programming error: the caller must dispatch on the value kind.
+        panic!(
+            "append_field_object_references called on non-object reference kind {:?}",
+            spec.value
+        );
+    };
+    let json_path = spec.json_path.as_str();
+    let serde_json::Value::Object(fields) = selected_value else {
+        eyre::bail!(
+            "expected reference object at path '{}' for facet '{}' but found {}",
+            json_path,
+            origin_facet_key,
+            selected_value
+        );
+    };
+    let Some(serde_json::Value::String(url_value)) = fields.get(ref_field) else {
+        eyre::bail!(
+            "reference objects at path '{}' for facet '{}' must carry a URL string in '{}'",
+            json_path,
+            origin_facet_key,
+            ref_field
+        );
+    };
+    // Shape parity with the write gate: the heads field must be an array of
+    // strings when present, and may only be absent when the manifest says the
+    // heads source is optional (same-transaction convention).
+    match fields.get(heads_field) {
+        Some(serde_json::Value::Array(head_values)) => {
+            for head in head_values {
+                if !head.is_string() {
+                    eyre::bail!(
+                        "heads field '{}' at path '{}' for facet '{}' must contain strings",
+                        heads_field,
+                        json_path,
+                        origin_facet_key
+                    );
+                }
+            }
+        }
+        Some(other) => {
+            eyre::bail!(
+                "heads field '{}' at path '{}' for facet '{}' must be an array of strings but found {}",
+                heads_field,
+                json_path,
+                origin_facet_key,
+                other
+            );
+        }
+        None if spec.heads_optional => {}
+        None => {
+            eyre::bail!(
+                "reference objects at path '{}' for facet '{}' are missing their heads field '{}'",
+                json_path,
+                origin_facet_key,
+                heads_field
+            );
+        }
+    }
+    out.push(parse_url_reference(
+        url_value,
         origin_doc_id,
         origin_facet_key,
         json_path,
@@ -811,31 +864,6 @@ fn parse_url_reference(
         format!(
             "invalid facet reference URL '{}' at path '{}' for facet '{}'",
             url_value, json_path, origin_facet_key
-        )
-    })?;
-
-    let target_doc_id = if parsed_ref.doc_id == FACET_SELF_DOC_ID {
-        origin_doc_id.clone()
-    } else {
-        parsed_ref.doc_id
-    };
-
-    Ok(ExtractedReference {
-        target_doc_id,
-        target_facet_key: parsed_ref.facet_key,
-    })
-}
-
-fn parse_object_reference(
-    facet_ref: FacetRef,
-    origin_doc_id: &DocId,
-    origin_facet_key: &FacetKey,
-    json_path: &str,
-) -> Res<ExtractedReference> {
-    let parsed_ref = parse_facet_ref(&facet_ref.r#ref).wrap_err_with(|| {
-        format!(
-            "invalid facet reference URL '{}' at path '{}' for facet '{}'",
-            facet_ref.r#ref, json_path, origin_facet_key
         )
     })?;
 

@@ -7,6 +7,6 @@ cache, so a fresh repo lists it as enabled.
 $ daybook_cli init
 $ daybook_cli plugs list
  ID             Version  Status   Config Doc[..]
- @daybook/core  0.0.1    enabled  [..]
+ @daybook/core  0.1.0    enabled  [..]
 
 ```

@@ -1,0 +1,24 @@
+[package]
+name = "pauperfuse_wasi"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+utils_rs = { workspace = true, default-features = false }
+pauperfuse.workspace = true
+pauperfuse_virtual_fs = { path = "../pauperfuse_virtual_fs" }
+wasmtime.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+pauperfuse = { workspace = true, features = ["sqlite"] }

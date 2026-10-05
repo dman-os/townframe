@@ -12,7 +12,7 @@ enabled [..] at db+facet:///[..]/org.example.daybook.plugManifest/main?branch=ma
 
 $ daybook_cli plugs list
  ID             Version  Status   Config Doc[..]
- @daybook/core  0.0.1    enabled  [..]
+ @daybook/core  0.1.0    enabled  [..]
  @daybook/test  0.0.1    enabled  [..]
 
 $ daybook_cli plugs disable @daybook/test
@@ -20,7 +20,7 @@ disabled @daybook/test (config heads: [..])
 
 $ daybook_cli plugs list
  ID             Version  Status    Config Doc[..]
- @daybook/core  0.0.1    enabled   [..]
+ @daybook/core  0.1.0    enabled   [..]
  @daybook/test  0.0.1    disabled  [..]
 
 $ sh -c 'DOC=$(cat .docid); "$DAYBOOK_CLI" plugs enable "$DOC"'
@@ -28,7 +28,7 @@ enabled [..] at db+facet:///[..]/org.example.daybook.plugManifest/main?branch=ma
 
 $ daybook_cli plugs list
  ID             Version  Status   Config Doc[..]
- @daybook/core  0.0.1    enabled  [..]
+ @daybook/core  0.1.0    enabled  [..]
  @daybook/test  0.0.1    enabled  [..]
 
 ```

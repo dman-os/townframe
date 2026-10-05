@@ -3,16 +3,20 @@ resolver = "3"
 members = [
   "./src/am_utils_rs",
   "./src/api_utils_rs",
+  "./src/big_repo/",
   "./src/big_sync/",
   "./src/big_sync_core/",
-  "./src/big_repo/",
-  "./src/btress_sysadmin/",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
   "./src/daybook_pdk",
   "./src/daybook_types",
   "./src/mltools/",
+  "./src/pauperfuse/",
+  "./src/pauperfuse_daybook/",
+  "./src/pauperfuse_lens/",
+  "./src/pauperfuse_virtual_fs/",
+  "./src/pauperfuse_wasi/",
   "./src/plug_dayledger/",
   "./src/secrets_rs",
   "./src/plug_plabels/",
@@ -41,6 +45,9 @@ repository = ""
 #
 # internal
 utils_rs = { path = "./src/utils_rs", default-features = false }
+pauperfuse = { path = "./src/pauperfuse", default-features = false }
+pauperfuse_daybook = { path = "./src/pauperfuse_daybook" }
+pauperfuse_lens = { path = "./src/pauperfuse_lens" }
 sqlx_utils_rs = { path = "./src/sqlx_utils_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
@@ -269,6 +276,8 @@ clippy.let_underscore_must_use = "warn"
 clippy.let_underscore_untyped = "deny"
 rust.let_underscore_drop = "deny"
 # clippy.used_underscore_binding = "warn"
+# Project convention: module files are named after their module (foo/ dir + foo.rs), never foo/mod.rs.
+clippy.mod_module_files = "deny"
 
 # Subduction is taken straight from the local checkout by the path dependencies above: its own
 # workspace members depend on each other by path, so nothing has to negotiate versions and the graph

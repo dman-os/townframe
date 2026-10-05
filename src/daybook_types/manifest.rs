@@ -3,8 +3,8 @@
 
 use crate::interlude::*;
 
-use crate::doc::FacetRef;
 use crate::reference::select_json_path_values;
+use crate::url::facet_ref_str_targets_tag;
 
 use autosurgeon::{Hydrate, Reconcile};
 
@@ -181,71 +181,69 @@ pub struct FacetManifest {
     pub references: Vec<FacetReferenceManifest>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Validate, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(tag = "ty", rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum FacetReferenceManifest {
-    UrlString {
-        /// JSON pointer (e.g. `/facetRef`) or root-dot path (e.g. `$.facetRef`)
-        #[garde(length(min = 1))]
-        json_path: String,
-    },
-    UrlStringSplit {
-        /// JSON pointer (e.g. `/facetRef`) or root-dot path (e.g. `$.facetRef`)
-        #[garde(length(min = 1))]
-        json_path: String,
-        /// Optional JSON path for commit-heads associated with this reference.
-        #[garde(length(min = 1))]
-        at_commit_json_path: String,
-    },
-    UrlStringMany {
-        /// JSON pointer (e.g. `/order`) or root-dot path (e.g. `$.order`)
-        #[garde(length(min = 1))]
-        json_path: String,
-    },
-    UrlObject {
-        /// JSON pointer (e.g. `/srcRef`) or root-dot path (e.g. `$.srcRef`)
-        #[garde(length(min = 1))]
-        json_path: String,
-    },
-    UrlObjectMany {
-        /// JSON pointer (e.g. `/srcRefs`) or root-dot path (e.g. `$.srcRefs[*]`)
-        #[garde(length(min = 1))]
-        json_path: String,
-    },
+#[serde(rename_all = "camelCase")]
+pub struct FacetReferenceManifest {
+    /// JSON pointer (e.g. `/facetRef`) or root-dot path (e.g. `$.facetRef`)
+    /// selecting the values this manifest reads references from.
+    #[garde(length(min = 1))]
+    pub json_path: String,
+    /// What an empty selection means. `false` (the default): the selected
+    /// path is missing — a write-gate error, as for required references.
+    /// `true`: the facet holds no reference of this shape and contributes
+    /// nothing, so several differently-shaped reference declarations can
+    /// share one facet tag (a selective dpath claim alongside whole-doc
+    /// `null`/`{}` values, FDR 001 §2).
+    #[serde(default)]
+    #[garde(skip)]
+    pub optional: bool,
+    /// How each selected value decodes into (facet URL, heads pins).
+    #[garde(dive)]
+    pub value: FacetReferenceValue,
+    /// Optional JSON path (e.g. `$.refHeads`) supplying commit heads for
+    /// string-style values; must select exactly one array of commit-hash
+    /// strings. Absent ⇒ heads come from the URL `?at=` fragment (dict.md)
+    /// or the same-transaction convention.
+    #[serde(default)]
+    #[garde(length(min = 1))]
+    pub at_commit_json_path: Option<String>,
+    /// The heads source may be absent: absent ⇒ dict.md same-transaction
+    /// semantics (empty heads). `false` (the default): absent heads — a
+    /// missing `refHeads` sibling, an `at_commit` path selecting nothing, or
+    /// an object without its heads field — is an error.
+    #[serde(default)]
+    #[garde(skip)]
+    pub heads_optional: bool,
 }
 
 impl FacetReferenceManifest {
+    /// Reference flavor recorded in the facet-ref index edge table; every
+    /// reference manifest names a `db+facet` URL facet today.
     pub fn reference_kind(&self) -> FacetReferenceKind {
         FacetReferenceKind::UrlFacet
     }
+}
 
-    pub fn json_path(&self) -> &str {
-        match self {
-            Self::UrlString { json_path }
-            | Self::UrlStringSplit { json_path, .. }
-            | Self::UrlStringMany { json_path }
-            | Self::UrlObject { json_path }
-            | Self::UrlObjectMany { json_path } => json_path,
-        }
-    }
-
-    pub fn is_many(&self) -> bool {
-        matches!(
-            self,
-            Self::UrlStringMany { .. } | Self::UrlObjectMany { .. }
-        )
-    }
-
-    pub fn at_commit_json_path(&self) -> Option<&str> {
-        match self {
-            Self::UrlStringSplit {
-                at_commit_json_path,
-                ..
-            } => Some(at_commit_json_path),
-            _ => None,
-        }
-    }
+/// Where each value selected by a [`FacetReferenceManifest`] carries its
+/// facet URL and heads pins.
+#[derive(Debug, Validate, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(tag = "ty", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum FacetReferenceValue {
+    /// A db+facet URL string, or an array of such strings (arrays are read
+    /// item-by-item so one declaration serves both scalar and list shapes).
+    UrlString,
+    /// An object carrying the URL in one field and its heads in another
+    /// (dict.md: imagemetadata's `{facetRef, refHeads}`, the FacetRef
+    /// spelling `{ref, heads}`) — the fields are declared, so differently
+    /// named reference objects are all the same generic kind.
+    UrlObject {
+        #[garde(length(min = 1))]
+        ref_field: String,
+        #[garde(length(min = 1))]
+        heads_field: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone, PartialEq, Eq, Hash)]
@@ -979,53 +977,42 @@ fn facet_has_reference_to_tag(
     reference_specs: &[FacetReferenceManifest],
 ) -> bool {
     for reference_spec in reference_specs {
-        let selected_values = match select_json_path_values(facet_raw, reference_spec.json_path()) {
+        let selected_values = match select_json_path_values(facet_raw, &reference_spec.json_path) {
             Ok(values) => values,
             Err(err) => {
-                debug!(error = %err, json_path = %reference_spec.json_path(), "invalid facet reference json_path");
+                debug!(
+                    error = %err,
+                    json_path = %reference_spec.json_path,
+                    "invalid facet reference json_path"
+                );
                 continue;
             }
         };
 
         for selected in selected_values {
-            match reference_spec {
-                FacetReferenceManifest::UrlString { .. }
-                | FacetReferenceManifest::UrlStringSplit { .. }
-                | FacetReferenceManifest::UrlStringMany { .. } => {
-                    let url_strings: Vec<&str> = match selected {
-                        serde_json::Value::String(value) => vec![value.as_str()],
-                        serde_json::Value::Array(items) => {
-                            items.iter().filter_map(|item| item.as_str()).collect()
-                        }
-                        _ => Vec::new(),
-                    };
-
-                    for url_str in url_strings {
-                        let Ok(matches_target) = crate::url::facet_ref_str_targets_tag(
-                            url_str,
-                            &crate::doc::FacetTag::from(target_tag),
-                        ) else {
-                            continue;
-                        };
-                        if matches_target {
-                            return true;
-                        }
+            let url_strings: Vec<&str> = match &reference_spec.value {
+                FacetReferenceValue::UrlString => match selected {
+                    serde_json::Value::String(value) => vec![value.as_str()],
+                    serde_json::Value::Array(items) => {
+                        items.iter().filter_map(|item| item.as_str()).collect()
                     }
+                    _ => Vec::new(),
+                },
+                FacetReferenceValue::UrlObject { ref_field, .. } => {
+                    let Some(url) = selected.get(ref_field).and_then(|item| item.as_str()) else {
+                        continue;
+                    };
+                    vec![url]
                 }
-                FacetReferenceManifest::UrlObject { .. }
-                | FacetReferenceManifest::UrlObjectMany { .. } => {
-                    let Ok(facet_ref) = serde_json::from_value::<FacetRef>(selected.clone()) else {
-                        continue;
-                    };
-                    let Ok(matches_target) = crate::url::facet_ref_targets_tag(
-                        &facet_ref.r#ref,
-                        &crate::doc::FacetTag::from(target_tag),
-                    ) else {
-                        continue;
-                    };
-                    if matches_target {
-                        return true;
-                    }
+            };
+
+            for url_str in url_strings {
+                let Ok(matches_target) = facet_ref_str_targets_tag(url_str, &target_tag.into())
+                else {
+                    continue;
+                };
+                if matches_target {
+                    return true;
                 }
             }
         }

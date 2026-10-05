@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use crate::drawer::{DrawerRepo, cache::FacetCacheState, facet_recovery, types::*};
+use crate::drawer::{BranchKind, DrawerRepo, cache::FacetCacheState, facet_recovery, types::*};
 use crate::repos::Repo;
 use crate::test_support::{boot_disk_repo, boot_repo};
 use utils_rs::lru::KeyedLruPool;
@@ -665,6 +665,7 @@ async fn a_branch_whose_branch_doc_access_is_revoked_leaves_the_listing_and_is_r
     repo.merge_from_heads(
         &doc_id,
         BranchPath::new("main"),
+        None,
         &branch,
         &stress_heads,
         None,
@@ -768,6 +769,7 @@ async fn a_branch_whose_branch_doc_access_is_revoked_leaves_the_listing_and_is_r
         .merge_from_heads(
             &doc_id,
             BranchPath::new("main"),
+            None,
             &branch,
             &stress_heads,
             None,
@@ -789,6 +791,7 @@ async fn a_branch_whose_branch_doc_access_is_revoked_leaves_the_listing_and_is_r
         .merge_from_heads(
             &doc_id,
             &branch,
+            None,
             BranchPath::new("main"),
             &main_heads_after_merge,
             None,
@@ -1494,6 +1497,7 @@ async fn test_v2_merge() -> Res<()> {
     repo.merge_from_heads(
         &doc_id,
         BranchPath::new("main"),
+        None,
         &local_branch("branch-a"),
         &a_heads,
         None,
@@ -1510,6 +1514,7 @@ async fn test_v2_merge() -> Res<()> {
     repo.merge_from_heads(
         &doc_id,
         BranchPath::new("main"),
+        None,
         &local_branch("branch-b"),
         &b_heads,
         None,
@@ -1548,6 +1553,414 @@ async fn test_v2_merge() -> Res<()> {
         branch_identity.branch_id,
         BranchId::from(main_ref.branch_doc_id.to_string()),
         "merging branch history must preserve the destination's physical identity",
+    );
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+/// The drawer fixture shared by the merge CAS / publication-slice tests: one
+/// drawer repo over an empty partition store with the standard local user path.
+async fn boot_merge_fixture() -> Res<(
+    Arc<DrawerRepo>,
+    crate::repos::RepoStopToken,
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+)> {
+    let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
+
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        let handle = big_repo.create_doc(doc).await?;
+        handle.document_id()
+    };
+
+    let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        big_sync_host.store,
+        drawer_doc_id,
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_store_sql().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        None,
+    )
+    .await?;
+    Ok((repo, stop_token, acx_stop))
+}
+
+// The heads seam every merged/checked-out basis flows through: live branch
+// content-doc heads via `get_doc_bundle_at_branch` — the same read the
+// publication loop races against and the CAS inside `merge_from_heads`
+// compares in its lock scope. The replicated entry bookkeeping doc lags these
+// writes, so CAS inputs must come from here, not from `get_doc_branches`.
+async fn branch_heads_at(
+    repo: &DrawerRepo,
+    doc_id: &DocId,
+    branch_path: &BranchPath,
+) -> Res<ChangeHashSet> {
+    let bundle = repo
+        .get_doc_bundle_at_branch(doc_id, branch_path, None)
+        .await?
+        .ok_or_else(|| eyre::eyre!("branch {} missing", branch_path))?;
+    Ok(bundle.branch_heads)
+}
+
+/// ADR 011 §6 step 7 mechanics: `merge_from_heads` with an
+/// `expected_to_heads` basis the target has already left refuses with
+/// `HeadConcurrency` and commits nothing; committing with the live basis
+/// succeeds and writes through.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_merge_from_heads_cas_refusal_writes_nothing() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_merge_fixture().await?;
+
+    let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let doc_id = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(
+                facet_title.clone(),
+                WellKnownFacet::TitleGeneric("Base".into()).into(),
+            )]
+            .into(),
+            user_path: None,
+        })
+        .await?;
+
+    let main_heads_base = branch_heads_at(&repo, &doc_id, BranchPath::new("main")).await?;
+
+    // Upstream work on branch-a: title "A".
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-a"),
+        BranchPath::new("main"),
+        &main_heads_base,
+        None,
+    )
+    .await?;
+    repo.update_at_heads(
+        DocPatch {
+            id: doc_id.clone(),
+            facets_set: [(
+                facet_title.clone(),
+                WellKnownFacet::TitleGeneric("A".into()).into(),
+            )]
+            .into(),
+            facets_remove: vec![],
+            user_path: None,
+        },
+        &local_branch("branch-a"),
+        Some(main_heads_base.clone()),
+    )
+    .await?;
+    let a_heads = branch_heads_at(&repo, &doc_id, &local_branch("branch-a")).await?;
+
+    // Advance main past the CAS basis: the stale `main_heads_base` is now
+    // exactly the heads ADR §6 warns about — still present, in history, but
+    // not the target's current heads.
+    repo.update_at_heads(
+        DocPatch {
+            id: doc_id.clone(),
+            facets_set: [(
+                facet_title.clone(),
+                WellKnownFacet::TitleGeneric("MainMove".into()).into(),
+            )]
+            .into(),
+            facets_remove: vec![],
+            user_path: None,
+        },
+        BranchPath::new("main"),
+        Some(main_heads_base.clone()),
+    )
+    .await?;
+    let main_heads_moved = branch_heads_at(&repo, &doc_id, BranchPath::new("main")).await?;
+    assert_ne!(main_heads_moved, main_heads_base);
+
+    let err = repo
+        .merge_from_heads(
+            &doc_id,
+            BranchPath::new("main"),
+            Some(&main_heads_base),
+            &local_branch("branch-a"),
+            &a_heads,
+            None,
+        )
+        .await
+        .expect_err("a stale expected_to_heads basis must refuse the merge");
+    assert!(
+        matches!(err, DrawerError::HeadConcurrency { .. }),
+        "refusal must be the CAS variant, got {err:?}"
+    );
+
+    // Nothing was written: the target is exactly where it was and still holds
+    // the value the concurrent main-side write put there.
+    let heads_after_refusal = branch_heads_at(&repo, &doc_id, BranchPath::new("main")).await?;
+    assert_eq!(
+        heads_after_refusal, main_heads_moved,
+        "a CAS-refused merge must not advance the target branch"
+    );
+    let main_doc = repo
+        .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("main"), None)
+        .await?
+        .ok_or_eyre("main missing after refusal")?;
+    assert_eq!(
+        main_doc.facets.get(&facet_title).unwrap(),
+        &serde_json::Value::from(WellKnownFacet::TitleGeneric("MainMove".into()))
+    );
+
+    // Committing with the live basis goes through and writes the merged
+    // content (the Title conflict resolution is automerge's, exercised by
+    // test_v2_merge; the CAS test pins the gate, not the conflict winner).
+    repo.merge_from_heads(
+        &doc_id,
+        BranchPath::new("main"),
+        Some(&main_heads_moved),
+        &local_branch("branch-a"),
+        &a_heads,
+        None,
+    )
+    .await?;
+    let heads_after_cas_merge = branch_heads_at(&repo, &doc_id, BranchPath::new("main")).await?;
+    assert_ne!(
+        heads_after_cas_merge, main_heads_moved,
+        "a CAS pass must advance the target branch"
+    );
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+/// ADR 011 §6 step 5 offline candidate, step 7 persist-then-publish CAS
+/// chain: `prepare_merge_candidate` commits nothing anywhere, the validated
+/// candidate's facets persist exactly through the `expected_to_heads` persist,
+/// and publishing the checkout into `main` is refused by the same CAS unless
+/// main is still at the observed heads.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_prepare_merge_candidate_is_offline_then_cas_commit_persists_it() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_merge_fixture().await?;
+
+    let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let doc_id = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(
+                facet_title.clone(),
+                WellKnownFacet::TitleGeneric("Base".into()).into(),
+            )]
+            .into(),
+            user_path: None,
+        })
+        .await?;
+    let main_heads = branch_heads_at(&repo, &doc_id, BranchPath::new("main")).await?;
+
+    // The upstream change lives on branch-b; the staged checkout branch was
+    // created at main's current heads.
+    let checkout_path = BranchPathBuf::from("/tmp/checkout-a");
+    repo.create_checkout_branch(
+        &doc_id,
+        &checkout_path,
+        BranchPath::new("main"),
+        &main_heads,
+    )
+    .await?;
+    let checkout_heads = branch_heads_at(&repo, &doc_id, &checkout_path).await?;
+
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-b"),
+        BranchPath::new("main"),
+        &main_heads,
+        None,
+    )
+    .await?;
+    repo.update_at_heads(
+        DocPatch {
+            id: doc_id.clone(),
+            facets_set: [(
+                facet_title.clone(),
+                WellKnownFacet::TitleGeneric("A".into()).into(),
+            )]
+            .into(),
+            facets_remove: vec![],
+            user_path: None,
+        },
+        &local_branch("branch-b"),
+        Some(main_heads.clone()),
+    )
+    .await?;
+    let b_heads = branch_heads_at(&repo, &doc_id, &local_branch("branch-b")).await?;
+    // Upstream baseline as the publication loop would read it after staging:
+    // branch-b's replicated declaration write (System-scoped Branches facet)
+    // legitimately advanced main's content doc, so the create-time heads are
+    // history, not the publish-CAS basis.
+    let main_heads = branch_heads_at(&repo, &doc_id, BranchPath::new("main")).await?;
+
+    let candidate = repo
+        .prepare_merge_candidate(&doc_id, &checkout_path, &local_branch("branch-b"), &b_heads)
+        .await?;
+    assert_eq!(
+        candidate.to_branch_heads, checkout_heads,
+        "the candidate must be computed against the checkout's current heads"
+    );
+    assert!(
+        candidate.modified_facet_keys.contains(&facet_title),
+        "the merge's facet changes must be enumerated: {:?}",
+        candidate.modified_facet_keys
+    );
+    assert_eq!(
+        candidate.facets.get(&facet_title).unwrap(),
+        &serde_json::Value::from(WellKnownFacet::TitleGeneric("A".into()))
+    );
+
+    // Offline proof: no branch moved by preparing the candidate.
+    assert_eq!(
+        branch_heads_at(&repo, &doc_id, &checkout_path).await?,
+        checkout_heads,
+        "preparing a candidate must not advance the checkout branch"
+    );
+    assert_eq!(
+        candidate.to_branch_heads, checkout_heads,
+        "preparing a candidate must not change its basis"
+    );
+    assert_eq!(
+        branch_heads_at(&repo, &doc_id, BranchPath::new("main")).await?,
+        main_heads,
+        "preparing a candidate must not touch main"
+    );
+
+    // Validate (facets schema slice; the lens re-run is the CLI-side caller),
+    // then persist through the CAS.
+    repo.validate_merge_candidate(&candidate).await?;
+    repo.merge_from_heads(
+        &doc_id,
+        &checkout_path,
+        Some(&candidate.to_branch_heads),
+        &local_branch("branch-b"),
+        &b_heads,
+        None,
+    )
+    .await?;
+    let checkout_persisted = branch_heads_at(&repo, &doc_id, &checkout_path).await?;
+    assert_ne!(
+        checkout_persisted, checkout_heads,
+        "persisting the candidate must advance the checkout branch"
+    );
+
+    // Publish with the observed main heads: the validated state reaches main.
+    repo.merge_from_heads(
+        &doc_id,
+        BranchPath::new("main"),
+        Some(&main_heads),
+        &checkout_path,
+        &checkout_persisted,
+        None,
+    )
+    .await?;
+    let main_doc = repo
+        .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("main"), None)
+        .await?
+        .ok_or_eyre("main missing after publish")?;
+    assert_eq!(
+        main_doc.facets.get(&facet_title).unwrap(),
+        &serde_json::Value::from(WellKnownFacet::TitleGeneric("A".into()))
+    );
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+/// Candidate validation (ADR 011 §6 step 6 / §7 merge-if-valid): a candidate
+/// whose hydrated facets violate a facet manifest schema is refused, so the
+/// publication caller blocks instead of persisting through the CAS.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_validate_merge_candidate_rejects_schema_violating_candidate() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_merge_fixture().await?;
+
+    let facet_title = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let doc_id = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(
+                facet_title.clone(),
+                WellKnownFacet::TitleGeneric("Base".into()).into(),
+            )]
+            .into(),
+            user_path: None,
+        })
+        .await?;
+    let main_heads = branch_heads_at(&repo, &doc_id, BranchPath::new("main")).await?;
+
+    let checkout_path = BranchPathBuf::from("/tmp/checkout-b");
+    repo.create_checkout_branch(
+        &doc_id,
+        &checkout_path,
+        BranchPath::new("main"),
+        &main_heads,
+    )
+    .await?;
+    let checkout_heads = branch_heads_at(&repo, &doc_id, &checkout_path).await?;
+
+    repo.create_branch_at_heads_from_branch(
+        &doc_id,
+        &local_branch("branch-c"),
+        BranchPath::new("main"),
+        &main_heads,
+        None,
+    )
+    .await?;
+    repo.update_at_heads(
+        DocPatch {
+            id: doc_id.clone(),
+            facets_set: [(
+                facet_title.clone(),
+                WellKnownFacet::TitleGeneric("C".into()).into(),
+            )]
+            .into(),
+            facets_remove: vec![],
+            user_path: None,
+        },
+        &local_branch("branch-c"),
+        Some(main_heads.clone()),
+    )
+    .await?;
+    let c_heads = branch_heads_at(&repo, &doc_id, &local_branch("branch-c")).await?;
+
+    let mut candidate = repo
+        .prepare_merge_candidate(&doc_id, &checkout_path, &local_branch("branch-c"), &c_heads)
+        .await?;
+    assert!(
+        candidate.modified_facet_keys.contains(&facet_title),
+        "the Title change in the merge must be enumerated: {:?}",
+        candidate.modified_facet_keys
+    );
+    // Fabricate the schema violation on the modified key, the way it would
+    // arrive from a manifest the candidate hydrated under.
+    candidate
+        .facets
+        .insert(facet_title.clone(), serde_json::Value::Bool(false));
+    let err = repo
+        .validate_merge_candidate(&candidate)
+        .await
+        .expect_err("a schema-violating candidate must be refused");
+    assert!(
+        err.to_string().contains("failed schema validation"),
+        "refusal must come from the manifest schema, got {err}"
+    );
+
+    // Nothing persisted by the failed validation.
+    assert_eq!(
+        branch_heads_at(&repo, &doc_id, &checkout_path).await?,
+        checkout_heads,
+        "an invalid candidate must persist nothing"
     );
 
     stop_token.stop().await?;
@@ -1715,8 +2128,15 @@ async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() 
             .get(&branch_a.to_string())
             .ok_or_eyre("missing branch-a state after update")?
             .clone();
-        repo.merge_from_heads(&doc_id, BranchPath::new("main"), &branch_a, &a_heads, None)
-            .await?;
+        repo.merge_from_heads(
+            &doc_id,
+            BranchPath::new("main"),
+            None,
+            &branch_a,
+            &a_heads,
+            None,
+        )
+        .await?;
         let heads_after_a = repo
             .get_doc_branches(&doc_id)
             .await?
@@ -1758,8 +2178,15 @@ async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() 
             .get(&branch_b.to_string())
             .ok_or_eyre("missing branch-b state after update")?
             .clone();
-        repo.merge_from_heads(&doc_id, BranchPath::new("main"), &branch_b, &b_heads, None)
-            .await?;
+        repo.merge_from_heads(
+            &doc_id,
+            BranchPath::new("main"),
+            None,
+            &branch_b,
+            &b_heads,
+            None,
+        )
+        .await?;
 
         // Recreate the stale-heads path: materialize a new branch from an older main head set
         // after main has already advanced through an intervening merge.
@@ -1798,6 +2225,7 @@ async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() 
         repo.merge_from_heads(
             &doc_id,
             BranchPath::new("main"),
+            None,
             &stale_branch,
             &stale_heads,
             None,
@@ -2104,6 +2532,7 @@ async fn test_v2_additional_apis() -> Res<()> {
     repo.merge_from_branch(
         &doc_id,
         BranchPath::new("main"),
+        None,
         &local_branch("branch-a"),
         None,
     )
@@ -2357,6 +2786,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     repo.merge_from_heads(
         &doc_id,
         BranchPath::new("main"),
+        None,
         &local_branch("branch-a"),
         &a_heads,
         Some(&user_path),
@@ -2549,6 +2979,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
     repo.merge_from_heads(
         &doc_id,
         BranchPath::new("main"),
+        None,
         &local_branch("branch-a"),
         &branch_heads,
         Some(&merge_user_path),
@@ -2895,6 +3326,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     repo.merge_from_heads(
         &doc_id,
         BranchPath::new("main"),
+        None,
         &local_branch("branch-a"),
         &a_heads,
         None,
@@ -2903,6 +3335,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
     repo.merge_from_heads(
         &doc_id,
         BranchPath::new("main"),
+        None,
         &local_branch("branch-b"),
         &b_heads,
         None,
@@ -3081,6 +3514,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     repo.merge_from_heads(
         &doc_id,
         BranchPath::new("main"),
+        None,
         &local_branch("branch-a"),
         &a_heads,
         None,
@@ -3099,6 +3533,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
     repo.merge_from_heads(
         &doc_id,
         BranchPath::new("main"),
+        None,
         &local_branch("branch-b"),
         &b_heads,
         None,
@@ -3724,5 +4159,488 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
         .await
         .inspect_err(|err| error!("error cleaning up temp dir: {err}"))
         .ok();
+    Ok(())
+}
+
+/// A checkout-local branch is independently authorized: allocation grants only
+/// the local agent (plus the pending group during allocation), the branch doc
+/// never joins shared replicated partitions, source heads are unchanged, and
+/// the branch ref lives in the durable local store across a full reopen.
+#[tokio::test(flavor = "multi_thread")]
+async fn checkout_branch_is_independently_authorized() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        big_repo.create_doc(doc).await?.document_id()
+    };
+    let user_path =
+        daybook_types::doc::UserPathBuf::from("/duser-wip-checkout/ddev-wip-iroh-checkout");
+
+    // The meta SQL is file-backed so the drawer can be fully reopened; two
+    // contexts over the same database, never concurrently.
+    let meta_dir = tempfile::tempdir()?;
+    let meta_file = meta_dir.path().join("meta.sqlite");
+    let open_meta =
+        || async { crate::app::open_sql_ctx(crate::app::SqlConfig::file(meta_file.clone())).await };
+
+    let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        Arc::clone(&big_sync_host.store),
+        drawer_doc_id.clone(),
+        user_path.clone(),
+        open_meta().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        None,
+    )
+    .await?;
+
+    let partition_id = repo.replicated_partition_id();
+    let doc_id = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(
+                FacetKey::from(WellKnownFacetTag::TitleGeneric),
+                WellKnownFacet::TitleGeneric("Checkout base".into()).into(),
+            )]
+            .into(),
+            user_path: None,
+        })
+        .await?;
+
+    let main_heads = repo
+        .get_doc_branches(&doc_id)
+        .await?
+        .ok_or_eyre("missing doc branches")?
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch")?
+        .clone();
+    let main_ref = repo
+        .get_branch_ref(&doc_id, BranchPath::new("main"))
+        .await?
+        .ok_or_eyre("missing main branch ref")?;
+
+    let to_branch = BranchPathBuf::from("/tmp/checkout/authority");
+    repo.create_checkout_branch(&doc_id, &to_branch, BranchPath::new("main"), &main_heads)
+        .await?;
+
+    let ref_doc = repo
+        .get_doc_with_facets_at_branch(&doc_id, &to_branch, None)
+        .await?
+        .ok_or_eyre("checkout branch missing after creation")?;
+    let identity = serde_json::from_value::<WellKnownFacet>(
+        ref_doc
+            .facets
+            .get(&FacetKey::from(WellKnownFacetTag::Branch))
+            .ok_or_eyre("checkout branch facet missing")?
+            .clone(),
+    )?;
+    let WellKnownFacet::Branch(identity) = identity else {
+        eyre::bail!("wrong checkout branch facet type");
+    };
+    let checkout_ref = repo
+        .get_branch_ref(&doc_id, &to_branch)
+        .await?
+        .ok_or_eyre("missing checkout branch ref")?;
+    assert_eq!(checkout_ref.branch_kind, BranchKind::Local);
+    assert_eq!(identity.branch_id.0, checkout_ref.branch_doc_id.to_string());
+    assert_eq!(main_ref.branch_kind, BranchKind::Replicated);
+
+    // Distinct physical identity; basis recorded; source heads untouched.
+    assert_ne!(identity.branch_id.0, main_ref.branch_doc_id.to_string());
+    assert_eq!(identity.document_id, doc_id);
+    assert_eq!(identity.created_from.as_ref().unwrap().heads, main_heads);
+    assert_eq!(
+        repo.get_doc_with_facets_at_branch(&doc_id, BranchPath::new("main"), Some(Vec::new()))
+            .await?
+            .ok_or_eyre("main doc missing after create")?
+            .facets
+            .get(&FacetKey::from(WellKnownFacetTag::Branches)),
+        None,
+        "checkout branch creation never rewrites the replicated Branches facet"
+    );
+    // The branch doc must never join shared replicated partitions.
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
+
+    let reopened_heads_matched = {
+        stop_token.stop().await?;
+        let (rebuilt, rebuilt_stop) = DrawerRepo::load(
+            Arc::clone(&big_repo),
+            Arc::clone(&big_sync_host.store),
+            drawer_doc_id,
+            user_path,
+            open_meta().await?,
+            std::env::temp_dir().join(Uuid::new_v4().to_string()),
+            Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+            Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+            None,
+        )
+        .await?;
+        let reopened_doc = rebuilt
+            .get_doc_with_facets_at_branch(&doc_id, &to_branch, None)
+            .await?
+            .ok_or_eyre("checkout branch missing after reopen")?;
+        let reopened = serde_json::from_value::<WellKnownFacet>(
+            reopened_doc
+                .facets
+                .get(&FacetKey::from(WellKnownFacetTag::Branch))
+                .ok_or_eyre("checkout branch facet missing after reopen")?
+                .clone(),
+        )?;
+        let WellKnownFacet::Branch(reopened) = reopened else {
+            eyre::bail!("wrong reopened branch facet type");
+        };
+        assert_eq!(reopened.branch_id, identity.branch_id);
+        assert_eq!(reopened.created_from.as_ref().unwrap().heads, main_heads);
+        rebuilt_stop.stop().await?;
+        reopened.created_from.as_ref().unwrap().heads == main_heads
+    };
+
+    // Local branch persistence is in local state, not the replicated partition.
+    assert_eq!(
+        big_sync_host
+            .store
+            .member_count(partition_id.clone())
+            .await?,
+        1
+    );
+
+    acx_stop().await.unwrap();
+    assert!(
+        reopened_heads_matched,
+        "reopened checkout branch must retain its basis"
+    );
+    Ok(())
+}
+
+// -- dpath selective claims: write-gate matrix (FDR 001 §2; lane D design §5) --
+//
+// The dpath facet is registered by the core plug's manifest through the
+// GENERIC reference engine (optional manifests on `$.targets[*]` and
+// `$.facetRef`), so these claims are exercised through the ordinary
+// `repo.add` validated path. Presence is re-governed by `optional`
+// (whole-doc claims select nothing and pass); the heads rules —
+// same-transaction self-references must exist in the validated facet set,
+// cross-doc empty heads must pin heads in the URL `?at=` fragment — are the
+// pre-existing engine rules. Cross-doc target existence is never checked
+// (a missing target is a state, FDR 001 §6), so cross-doc writes with
+// pinned heads are accepted with an arbitrary doc id.
+
+async fn boot_dpath_drawer() -> Res<(
+    Arc<DrawerRepo>,
+    crate::repos::RepoStopToken,
+    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
+)> {
+    let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
+
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        let handle = big_repo.create_doc(doc).await?;
+        handle.document_id()
+    };
+
+    let (repo, stop_token) = DrawerRepo::load(
+        big_repo,
+        big_sync_host.store,
+        drawer_doc_id,
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_store_sql().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        None,
+    )
+    .await?;
+
+    Ok((repo, stop_token, acx_stop))
+}
+
+fn dpath_facet_key() -> FacetKey {
+    FacetKey::from(format!("{}/main", daybook_types::dpath::DPATH_FACET_TAG))
+}
+
+/// A syntactically valid pinned heads array, produced through the shared
+/// commit-heads codec (base58 multibase). The write gate only checks heads
+/// syntax — existence is never a write-gate rule for cross-doc targets.
+fn pinned_heads() -> Vec<String> {
+    am_utils_rs::serialize_commit_heads(&[automerge::ChangeHash([7u8; 32])])
+}
+
+fn dpath_targets_claim(
+    doc_id: &str,
+    facet_key: &FacetKey,
+    heads: Vec<String>,
+) -> Res<serde_json::Value> {
+    Ok(serde_json::json!({ "targets": [{
+        "facetRef": build_facet_ref(doc_id, facet_key)?.as_str(),
+        "refHeads": heads,
+    }]}))
+}
+
+fn dpath_shorthand_claim(
+    doc_id: &str,
+    facet_key: &FacetKey,
+    heads: Vec<String>,
+) -> Res<serde_json::Value> {
+    Ok(serde_json::json!({
+        "facetRef": build_facet_ref(doc_id, facet_key)?.as_str(),
+        "refHeads": heads,
+    }))
+}
+
+fn dpath_facets(
+    value: serde_json::Value,
+    extra: Vec<(FacetKey, serde_json::Value)>,
+) -> HashMap<FacetKey, serde_json::Value> {
+    let mut facets = extra;
+    facets.push((dpath_facet_key(), value));
+    facets.into_iter().collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_accepts_dpath_whole_doc_claims_with_selective_references_registered() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Whole-doc claims select nothing on both optional manifests: exactly the
+    // registration shape where the pre-selection gate would have bailed.
+    for value in [serde_json::json!(null), serde_json::json!({})] {
+        repo.add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: dpath_facets(value, vec![]),
+            user_path: None,
+        })
+        .await?;
+    }
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_accepts_selective_dpath_self_target_facet_in_same_write() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Empty/absent heads are the dict.md same-transaction convention: a self
+    // target must name a facet in the same validated write.
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let same_write_title = (
+        title_key.clone(),
+        serde_json::Value::from(WellKnownFacet::TitleGeneric("same write".to_string())),
+    );
+
+    let claim = dpath_targets_claim(daybook_types::url::FACET_SELF_DOC_ID, &title_key, vec![])?;
+    repo.add(AddDocArgs {
+        branch_path: BranchPathBuf::from("main"),
+        facets: dpath_facets(claim, vec![same_write_title]),
+        user_path: None,
+    })
+    .await?;
+
+    // Shorthand spelling, same rule.
+    let note_key = FacetKey::from(WellKnownFacetTag::Note);
+    let same_write_note = (
+        note_key.clone(),
+        serde_json::Value::from(WellKnownFacet::Note("same write".into())),
+    );
+    let shorthand =
+        dpath_shorthand_claim(daybook_types::url::FACET_SELF_DOC_ID, &note_key, vec![])?;
+    repo.add(AddDocArgs {
+        branch_path: BranchPathBuf::from("main"),
+        facets: dpath_facets(shorthand, vec![same_write_note]),
+        user_path: None,
+    })
+    .await?;
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_rejects_selective_dpath_self_target_without_target_facet() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Same-transaction self target whose facet is NOT in the write: must pin
+    // heads instead (existing self-reference rule, untouched).
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let claim = dpath_targets_claim(daybook_types::url::FACET_SELF_DOC_ID, &title_key, vec![])?;
+    let result = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: dpath_facets(claim, vec![]),
+            user_path: None,
+        })
+        .await;
+    assert!(result.is_err());
+    // Empty-heads self target outside the write is rejected by the existing
+    // heads rule (must pin heads or carry an `?at=` fragment).
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("must include commit heads in URL fragment"),
+        "same-transaction self target outside the write must be rejected"
+    );
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_accepts_selective_dpath_target_with_pinned_heads_without_target_facet() -> Res<()>
+{
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Pinned heads bypass the same-transaction requirement — and cross-doc
+    // target existence is never checked, so any doc id works.
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let claim = dpath_targets_claim("crossdoc-no-such-doc", &title_key, pinned_heads())?;
+    repo.add(AddDocArgs {
+        branch_path: BranchPathBuf::from("main"),
+        facets: dpath_facets(claim, vec![]),
+        user_path: None,
+    })
+    .await?;
+
+    // Shorthand spelling with pinned heads, same acceptance.
+    let note_key = FacetKey::from(WellKnownFacetTag::Note);
+    let shorthand = dpath_shorthand_claim("crossdoc-no-such-doc", &note_key, pinned_heads())?;
+    repo.add(AddDocArgs {
+        branch_path: BranchPathBuf::from("main"),
+        facets: dpath_facets(shorthand, vec![]),
+        user_path: None,
+    })
+    .await?;
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_cross_doc_dpath_target_head_rules_match_pre_migration_engine() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Cross-doc target with no heads at all (`refHeads` absent): the existing
+    // "must include commit heads in URL fragment" rule (dict.md), untouched.
+    // Absent ⇒ empty heads ⇒ the same-transaction convention demands an
+    // `?at=` fragment for a cross-doc tag, exactly as before the engine break.
+    let title_ref = build_facet_ref(
+        "crossdoc-no-such-doc",
+        &FacetKey::from(WellKnownFacetTag::TitleGeneric),
+    )?;
+    for claim in [
+        serde_json::json!({"targets": [{"facetRef": title_ref.as_str()}]}),
+        serde_json::json!({"facetRef": title_ref.as_str()}),
+    ] {
+        let result = repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: dpath_facets(claim, vec![]),
+                user_path: None,
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must include commit heads in URL fragment"),
+            "cross-doc target without heads/fragment must be rejected"
+        );
+    }
+
+    // Legacy engine oddity preserved exactly as it was: an EXPLICIT empty
+    // heads-source array selects one value ⇒ self/whole mode, which only
+    // gates self targets — a cross-doc doc id slips through ungated. This is
+    // pre-migration behavior (documented in the read-tolerant/write-strict
+    // matrix), not new dpath semantics.
+    for claim_builder in [&dpath_shorthand_claim] {
+        let claim = claim_builder(
+            "crossdoc-no-such-doc",
+            &FacetKey::from(WellKnownFacetTag::Note),
+            vec![],
+        )?;
+        repo.add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: dpath_facets(claim, vec![]),
+            user_path: None,
+        })
+        .await
+        .map_err(|err| {
+            eyre::eyre!("legacy empty-at-commit-array cross-doc ref must stay accepted: {err:#}")
+        })?;
+    }
+
+    stop_token.stop().await?;
+    acx_stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_add_rejects_malformed_dpath_reference_shapes() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let (repo, stop_token, acx_stop) = boot_dpath_drawer().await?;
+
+    // Malformed URL string in the selective target.
+    let no_target_scheme = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: dpath_facets(
+                serde_json::json!({"targets": [{"facetRef": "not-a-facet-url", "refHeads": []}]}),
+                vec![],
+            ),
+            user_path: None,
+        })
+        .await;
+    assert!(no_target_scheme.is_err());
+
+    // Malformed heads: heads are validated through parse_commit_heads either way.
+    let bad_heads = dpath_targets_claim(
+        "crossdoc-no-such-doc",
+        &FacetKey::from(WellKnownFacetTag::TitleGeneric),
+        vec!["not-a-hash".to_string()],
+    )?;
+    let result = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: dpath_facets(bad_heads, vec![]),
+            user_path: None,
+        })
+        .await;
+    assert!(result.is_err());
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .to_lowercase()
+            .contains("commit"),
+        "malformed heads must be rejected"
+    );
+
+    stop_token.stop().await?;
+    acx_stop().await?;
     Ok(())
 }

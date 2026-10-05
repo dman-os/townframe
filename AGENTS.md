@@ -190,7 +190,9 @@ Does the task graze by a FIXME seen in code, flag those ahead of time in case th
 
 ## Cargo
 
-- Never specify your own custom target dir like /tmp/target. Always use the target dir that is configured by default.
+- Never share a target dir across checkouts: each workspace (jj workspace or repo clone) uses its OWN target directory, e.g. `CARGO_TARGET_DIR=/run/media/asdf/p3N/tmp/townframe-target-<workspace-suffix>`. Reason: cargo fingerprints path-dep sources by mtime, not content, so sibling checkouts of the same revision falsely validate each other's artifacts and poison builds (same `-C metadata` slot, last writer wins). Separate dirs = one cold rebuild per new checkout, then reliable.
+  - Keep it on the same big temp disk (`/run/media/asdf/p3N/tmp`), scoped `-p` builds, and report final dir size when a lane/workspace finishes so it can be pruned.
+  - Never write into another checkout's target dir; never run broad `cargo clean`.
   - This also applies to GRADLE_HOME.
 - Always prefer cargo-nextest of cargo-test.
 - Always prefer cargo-clippy over cargo-check.
