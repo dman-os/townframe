@@ -101,6 +101,14 @@ pub struct IrohSyncRepo {
     reconnect_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
     big_sync_worker: big_sync::BigSyncWorkerHandle,
     blob_sync_worker: big_sync::BigSyncWorkerHandle,
+    task_sync_worker: big_sync::BigSyncWorkerHandle,
+    task_transport: Arc<crate::tasks::transport::TaskSyncBackend>,
+    task_driver: Arc<crate::tasks::driver::NativeTaskDriver>,
+    task_route_lock: Arc<tokio::sync::Mutex<()>>,
+    task_peer_clients:
+        std::sync::Mutex<HashMap<PeerKey, Arc<dyn big_sync::rpc::WireBigSyncRpcClient>>>,
+    #[cfg(test)]
+    task_permission_progress: tokio::sync::watch::Sender<u64>,
     big_repo_rpc: big_repo::rpc::BigRepoRpcHandle,
     _big_sync_rpc: big_sync::rpc::BigSyncRpcHandle,
 }
@@ -208,6 +216,7 @@ pub struct IrohSyncRepoStopToken {
     worker_handle: JoinHandle<()>,
     reconnect_task: Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
     router: iroh::protocol::Router,
+    task_sync_worker_stop: big_sync::StopToken,
     // partition_sync_stop_token: am_utils_rs::sync::node::SyncNodeStopToken,
     big_repo_rpc_stop_token: big_repo::rpc::BigRepoRpcStopToken,
     big_sync_rpc_stop: big_sync::rpc::BigSyncRpcStopToken,
@@ -216,6 +225,10 @@ pub struct IrohSyncRepoStopToken {
     /// The blob-inventory access-row writer. It writes into the store the blob worker and the
     /// RPC server serve from, so it stops after both are down.
     blob_inventory_permission_stop: crate::repos::RepoStopToken,
+    /// Task authority rows remain maintained while the common worker/RPC serve.
+    task_permission_stop: crate::repos::RepoStopToken,
+    task_route_lock: Arc<tokio::sync::Mutex<()>>,
+    task_driver: Arc<crate::tasks::driver::NativeTaskDriver>,
     /// The order the children above were stopped in. Zero-sized outside tests.
     shutdown_order: ShutdownOrder,
     // partition_sync_store_stop_token: am_utils_rs::sync::store::SyncStoreStopToken,
@@ -238,15 +251,27 @@ impl IrohSyncRepoStopToken {
             )
             .await?;
         }
+        // Stop actual scheduling consumers/streams before their native identity,
+        // retained store, ephemeral and endpoint dependencies.
+        self.task_driver.stop().await?;
+        self.shutdown_order.record("task_driver_stop");
+        // Quiesce route mutation before stopping its worker dependency. The
+        // authority task is independently cancellable even while waiting here.
+        let quiesced_routes = self.task_route_lock.lock().await;
         // pre light the stop signal to the full worker
         self.big_sync_worker_stop.stop().await?;
         self.shutdown_order.record("big_sync_worker_stop");
+        self.task_sync_worker_stop.stop().await?;
+        self.shutdown_order.record("task_sync_worker_stop");
         self.big_sync_rpc_stop.stop().await?;
         self.shutdown_order.record("big_sync_rpc_stop");
         self.blob_sync_worker_stop.stop().await?;
         self.shutdown_order.record("blob_sync_worker_stop");
         self.big_repo_rpc_stop_token.stop().await?;
         self.shutdown_order.record("big_repo_rpc_stop_token");
+        self.task_permission_stop.stop().await?;
+        self.shutdown_order.record("task_permission_stop");
+        drop(quiesced_routes);
         // The inventory writer serves the store the blob worker and the RPC
         // server serve from, so its stop is issued once both are down — and the
         // record after it is what makes that order assertable.
@@ -326,6 +351,14 @@ impl IrohSyncRepo {
                 .await
                 .wrap_err("failed booting big repo sync backend")?,
         );
+        let task_transport =
+            Arc::new(crate::tasks::transport::TaskSyncBackend::boot(Arc::clone(&rcx)).await?);
+        let (task_driver, scheduling_requests) = crate::tasks::driver::NativeTaskDriver::boot(
+            Arc::clone(&rcx.big_repo),
+            Arc::clone(&task_transport),
+            endpoint.clone(),
+            big_repo_rpc.clone(),
+        );
         let blob_sync_backend: Arc<dyn big_sync::SyncBackend> =
             Arc::clone(&blobs_sync_backend) as _;
         let mut doc_sync_backends = std::collections::HashMap::new();
@@ -359,6 +392,18 @@ impl IrohSyncRepo {
                 Some(big_sync::SyncMode::Bucket),
                 Arc::from(crate::repo::BLOB_SCOPE_KEY),
             )?;
+        let (task_sync_worker, task_sync_worker_stop) =
+            big_sync::spawn_big_sync_worker_with_options(
+                task_transport.shared_store(),
+                HashMap::from([(
+                    crate::tasks::transport::TASK_BACKEND_ID.into(),
+                    Arc::clone(&task_transport) as Arc<dyn big_sync::SyncBackend>,
+                )]),
+                crate::tasks::transport::TASK_SCOPE_KEY,
+                max_task_backoff,
+                Some(big_sync::SyncMode::Bucket),
+                Arc::from(crate::tasks::transport::TASK_SCOPE_KEY),
+            )?;
 
         let (big_sync_rpc, big_sync_rpc_stop) =
             big_sync::rpc::spawn_big_sync_rpc(std::collections::HashMap::from([
@@ -366,6 +411,10 @@ impl IrohSyncRepo {
                 (
                     Arc::from(crate::repo::BLOB_SCOPE_KEY),
                     Arc::clone(&rcx.blob_part_store) as _,
+                ),
+                (
+                    Arc::from(crate::tasks::transport::TASK_SCOPE_KEY),
+                    task_transport.shared_store() as _,
                 ),
             ]))
             .await?;
@@ -399,6 +448,13 @@ impl IrohSyncRepo {
                 iroh_blobs::ALPN,
                 iroh_blobs::BlobsProtocol::new(&blobs, None),
             )
+            .accept(
+                crate::tasks::rpc::TASK_COORDINATION_ALPN,
+                crate::tasks::rpc::TaskCoordinationProtocolHandler::new(
+                    big_repo_rpc.clone(),
+                    scheduling_requests,
+                ),
+            )
             .spawn();
 
         config_repo
@@ -422,9 +478,17 @@ impl IrohSyncRepo {
             reconnect_task: Arc::clone(&reconnect_task),
             big_sync_worker,
             blob_sync_worker,
+            task_sync_worker,
+            task_transport,
+            task_driver,
+            task_route_lock: Arc::new(tokio::sync::Mutex::new(())),
+            task_peer_clients: Default::default(),
+            #[cfg(test)]
+            task_permission_progress: tokio::sync::watch::channel(0).0,
             big_repo_rpc: big_repo_rpc.clone(),
             _big_sync_rpc: big_sync_rpc,
         });
+        let task_permission_stop = repo.spawn_task_permission_writer().await?;
         #[cfg(test)]
         bootstrap::register_test_clone_rpc_sender(router.endpoint().id(), clone_rpc_tx.clone())
             .await;
@@ -445,6 +509,8 @@ impl IrohSyncRepo {
             }
             .instrument(tracing::info_span!("IrohSyncRepo listen task"))
         });
+        let task_route_lock = Arc::clone(&repo.task_route_lock);
+        let task_driver = Arc::clone(&repo.task_driver);
 
         Ok((
             repo,
@@ -457,7 +523,11 @@ impl IrohSyncRepo {
                 big_sync_rpc_stop,
                 big_sync_worker_stop,
                 blob_sync_worker_stop,
+                task_sync_worker_stop,
                 blob_inventory_permission_stop,
+                task_permission_stop,
+                task_route_lock,
+                task_driver,
                 shutdown_order: ShutdownOrder::for_build(),
             },
         ))
@@ -472,6 +542,307 @@ impl IrohSyncRepo {
 }
 
 impl IrohSyncRepo {
+    /// Attach an explicitly provisioned pool to the native daybook-tasks worker
+    /// and currently connected peers. Repeated opens share the retained owner.
+    /// An opaque relay must receive this metadata from its provisioner; this
+    /// operation neither discovers private descriptors nor grants payload Read.
+    pub async fn attach_task_pool(
+        &self,
+        snapshot: crate::tasks::pool::PoolDescriptorSnapshot,
+    ) -> Res<Arc<crate::tasks::store::TaskStore>> {
+        let _routes = self.task_route_lock.lock().await;
+        self.ensure_repo_live()?;
+        let tasks = self.task_transport.attach(snapshot).await?;
+        self.refresh_task_peer_routes().await?;
+        Ok(tasks)
+    }
+
+    /// Attach provisioner-supplied processor-slot metadata without enabling execution.
+    /// This also supports opaque relays: native Relay is rechecked locally, and
+    /// neither private domain discovery nor payload-key materialization is required.
+    pub async fn attach_processor_domain(
+        &self,
+        snapshot: &crate::rt::triage::domain::ProcessorDomainSnapshot,
+    ) -> Res<()> {
+        self.ensure_repo_live()?;
+        let slots = self.rcx.attach_processor_slot_store(snapshot).await?;
+        let _routes = self.task_route_lock.lock().await;
+        self.ensure_repo_live()?;
+        self.task_transport
+            .attach_processor(snapshot, slots)
+            .await?;
+        self.refresh_task_peer_routes().await?;
+        Ok(())
+    }
+
+    /// Enable distributed execution only after management supplies both native
+    /// authority loci. Descriptor attachment by itself never starts processors.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Explicit native bindings and scheduling policy must be supplied together"
+    )]
+    pub async fn attach_distributed_processor(
+        &self,
+        rt: Arc<crate::rt::Rt>,
+        processor_full_id: String,
+        reference: crate::rt::triage::domain::ProcessorDomainReference,
+        pool: crate::tasks::PoolDescriptorSnapshot,
+        capabilities: crate::tasks::CapabilitySummary,
+        capacity: crate::tasks::Capacity,
+        timing: crate::tasks::driver::SchedulingTiming,
+    ) -> Res<bool> {
+        let repo = crate::rt::triage::domain::ProcessorDomainRepo::new(
+            Arc::clone(&self.rcx.big_repo),
+            self.rcx.local_actor_id.clone(),
+        );
+        let domain = match repo.load(&reference, &processor_full_id).await? {
+            crate::rt::triage::domain::ProcessorDomainLoad::Ready(snapshot) => snapshot,
+            crate::rt::triage::domain::ProcessorDomainLoad::Pending { .. } => return Ok(false),
+            crate::rt::triage::domain::ProcessorDomainLoad::Rejected(error) => {
+                return Err(error.into());
+            }
+        };
+        eyre::ensure!(
+            domain.pool == pool.reference,
+            "processor domain names another task pool"
+        );
+        self.attach_processor_domain(&domain).await?;
+        let mut processors = rt.distributed_processors.write().await;
+        if let Some(existing) = processors.get(&processor_full_id) {
+            eyre::ensure!(
+                existing.domain == reference
+                    && existing.pool.reference == pool.reference
+                    && existing.pool.descriptor == pool.descriptor,
+                "processor attachment changed; explicit migration is required"
+            );
+            return Ok(true);
+        }
+        eyre::ensure!(
+            processors
+                .values()
+                .all(|existing| existing.pool.descriptor.pool_id != pool.descriptor.pool_id),
+            "a task pool is already bound to another processor adapter"
+        );
+        let adapter = Arc::new(
+            crate::rt::task_adapter::CapturedRoutineAdapter::for_processor(
+                Arc::clone(&rt),
+                pool.clone(),
+                processor_full_id.clone(),
+                reference.clone(),
+                self.attach_task_pool(pool.clone()).await?,
+            ),
+        );
+        let driver = self
+            .attach_scheduling_pool(pool.clone(), adapter, capabilities, capacity, timing)
+            .await?;
+        // Serialize attachment ownership through actor creation, so concurrent
+        // management calls cannot bind one pool to different domain adapters.
+        processors.insert(
+            processor_full_id,
+            Arc::new(crate::rt::triage::DistributedProcessor {
+                domain: reference,
+                driver,
+                pool,
+            }),
+        );
+        drop(processors);
+        rt.triage_worker.wake_coordination();
+        Ok(true)
+    }
+
+    /// Start one real scheduling actor on an explicitly provisioned pool.
+    /// Relay/Read storage attachment alone never grants scheduling authority.
+    pub async fn attach_scheduling_pool(
+        &self,
+        snapshot: crate::tasks::PoolDescriptorSnapshot,
+        adapter: Arc<dyn crate::tasks::driver::TaskExecutionAdapter>,
+        capabilities: crate::tasks::CapabilitySummary,
+        capacity: crate::tasks::Capacity,
+        timing: crate::tasks::driver::SchedulingTiming,
+    ) -> Res<crate::tasks::driver::PoolDriverHandle> {
+        self.attach_task_pool(snapshot.clone()).await?;
+        self.task_driver
+            .attach(snapshot, adapter, capabilities, capacity, timing)
+            .await
+    }
+
+    pub fn task_store(
+        &self,
+        pool: &crate::tasks::TaskPoolId,
+    ) -> Option<Arc<crate::tasks::store::TaskStore>> {
+        self.task_transport.get(pool)
+    }
+
+    // Caller holds task_route_lock: attachment, authority updates and connection
+    // establishment cannot overwrite one another with an older route snapshot.
+    async fn refresh_task_peer_routes(&self) -> Res<()> {
+        let clients = self
+            .task_peer_clients
+            .lock()
+            .expect(ERROR_MUTEX)
+            .iter()
+            .map(|(peer, client)| (peer.clone(), Arc::clone(client)))
+            .collect::<Vec<_>>();
+        for (peer, client) in clients {
+            let parts = self.task_transport.routes(&peer);
+            self.task_sync_worker
+                .set_peer(peer, client, parts, HashMap::new())
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn spawn_task_permission_writer(self: &Arc<Self>) -> Res<crate::repos::RepoStopToken> {
+        use big_sync::DeltaWalkerStateRepo as _;
+        use big_sync_core::concurrent_delta_walker::{ConcurrentDeltaRead, ConcurrentDeltaWalker};
+        use big_sync_core::delta_walker_state::DeltaWalkerStateTransaction as _;
+        use big_sync_core::revisioned_store::RevisionedStore as _;
+        // Subscribe before any sampling so native completion hints cannot fall
+        // between a Pending result and its wait. Hints never supply grants.
+        let (domain_ticket, mut domain_rx) = self
+            .rcx
+            .big_repo
+            .subscribe_domain_listener(big_repo::BigRepoDomainFilter)
+            .await?;
+        let (local_ticket, mut local_rx) = self
+            .rcx
+            .big_repo
+            .subscribe_local_listener(big_repo::BigRepoLocalFilter { doc_id: None })
+            .await?;
+        let sql = self.rcx.big_repo.sql_ctx();
+        let state = big_sync::SqliteDeltaWalkerStateRepo::new(
+            sql.read_pool.clone(),
+            sql.write_pool.clone(),
+            "@daybook/core/task-pool-permissions",
+            "keyhive-access",
+        )
+        .await?;
+        let stream = big_repo::KeyhiveAccessRevisionStore::new(&self.rcx.big_repo);
+        let durable = state.progress().await?.upstream_revision;
+        let resume = durable.max(stream.archived_through().await?);
+        if resume > durable {
+            // Only explicitly attached pools are served. Boot cleared persisted
+            // task permission rows, and attachment seeds current native authority.
+            let mut tx = state.begin().await?;
+            tx.advance_from(durable, resume).await?;
+            tx.commit().await?;
+        }
+        stream.note_retention(&state).await?;
+        let reader = stream
+            .open(
+                big_repo::KeyhiveAccessSelector {
+                    watch: big_repo::AccessSubjectSet::All,
+                    memory: state.clone(),
+                },
+                resume,
+            )
+            .await?;
+        let mut walker: ConcurrentDeltaWalker<
+            '_,
+            big_repo::KeyhiveAccessRevisionStore<big_sync::SqliteDeltaWalkerStateRepo>,
+            _,
+            _,
+        > = ConcurrentDeltaWalker::open(reader, state, |entry: &big_repo::KeyhiveAccessDelta| {
+            entry.subject
+        })
+        .await?;
+        let weak = Arc::downgrade(self);
+        let cancel_token = CancellationToken::new();
+        let worker_cancel = cancel_token.clone();
+        let worker_handle = tokio::spawn(async move {
+            let run = async {
+                let _registrations = (domain_ticket, local_ticket);
+                let mut pending_entries = Vec::new();
+                loop {
+                    let Some(repo) = weak.upgrade() else {
+                        return eyre::Ok(());
+                    };
+                    let pending = repo.task_transport.refresh_pending();
+                    let mut refresh_all = false;
+                    tokio::select! {
+                        batch = walker.next(std::num::NonZeroUsize::new(32).expect(ERROR_IMPOSSIBLE)),
+                            if pending_entries.is_empty() => {
+                            match batch? {
+                                ConcurrentDeltaRead::ReplayComplete { .. } => continue,
+                                ConcurrentDeltaRead::Entries { entries, .. } => {
+                                    pending_entries.extend(entries);
+                                    refresh_all = true;
+                                }
+                            }
+                        }
+                        _ = repo.task_transport.refresh_notified() => {}
+                        notification = domain_rx.recv() => {
+                            notification.expect(ERROR_CHANNEL);
+                            if !pending { continue; }
+                        }
+                        notification = local_rx.recv() => {
+                            notification.expect(ERROR_CHANNEL);
+                            if !pending { continue; }
+                        }
+                        // Native access reads themselves use this idle bound
+                        // while proof application is Pending: there is no
+                        // complete notification for every generation race.
+                        _ = tokio::time::sleep(big_repo::CoordinationAuthority::PENDING_RECHECK_DELAY),
+                            if pending => {}
+                    }
+                    let _routes = repo.task_route_lock.lock().await;
+                    repo.task_transport.refresh_authority(!refresh_all).await?;
+                    // Also repairs cancellation after an attachment committed
+                    // rows but before its caller installed native peer routes.
+                    if !repo.cancel_token.is_cancelled() {
+                        repo.refresh_task_peer_routes().await?;
+                    }
+                    // Fail-closed denial during Pending is not a completed
+                    // projection. Retain the exact batch until fresh sampling
+                    // succeeds; cancellation leaves its durable cursor unacked.
+                    if !repo.task_transport.refresh_pending() {
+                        for delta in pending_entries.drain(..) {
+                            walker.ack(delta.key, delta.cursor).await?;
+                        }
+                        #[cfg(test)]
+                        repo.task_permission_progress
+                            .send_replace(walker.durable_revision());
+                    }
+                }
+            };
+            // Cancellation drops an uncommitted row/cursor update or a route-lock
+            // wait. Already committed permissions are idempotent on durable replay.
+            tokio::select! {
+                _ = worker_cancel.cancelled() => {}
+                result = run => result.unwrap(),
+            }
+        });
+        Ok(crate::repos::RepoStopToken {
+            cancel_token,
+            worker_handle: Some(worker_handle),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_permission_progress(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.task_permission_progress.subscribe()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_backend(&self) -> Arc<crate::tasks::transport::TaskSyncBackend> {
+        Arc::clone(&self.task_transport)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn native_rpc_client(
+        &self,
+        peer: iroh::EndpointAddr,
+    ) -> big_sync::rpc::BigSyncRpcClient {
+        big_sync::rpc::BigSyncRpcClient::over_iroh(self.router.endpoint().clone(), peer)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_sync_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<big_sync_core::SyncStatEvent> {
+        self.task_sync_worker.subscribe_stats()
+    }
+
     #[inline]
     pub fn is_blob_part(&self, part_id: &PartKey) -> bool {
         let core_blob = crate::blobs::blob_inventory_part_id(&self.rcx.core_inventory_doc_id);
@@ -694,8 +1065,7 @@ impl IrohSyncRepo {
             .cloned()
             .collect::<Vec<_>>();
         for peer_id in active_peers {
-            self.big_repo_rpc.unregister_peer(peer_id.clone());
-            self.big_sync_worker.remove_peer(peer_id).await.ok();
+            self.teardown_peer_registration(peer_id).await;
         }
         self.active_peers.write().await.clear();
         eyre::Ok(())
@@ -781,8 +1151,23 @@ impl IrohSyncRepo {
             let doc_rpc_client = Arc::new(doc_rpc_client);
             let blob_rpc_client = Arc::new(blob_rpc_client);
 
+            let _routes = self.task_route_lock.lock().await;
             let partition_ids = self.peer_partition_ids(&peer_key, true);
             let (doc_parts, blob_parts) = Self::split_partitions(partition_ids);
+            let task_client: Arc<dyn big_sync::rpc::WireBigSyncRpcClient> =
+                Arc::clone(&doc_rpc_client) as _;
+            self.task_peer_clients
+                .lock()
+                .expect(ERROR_MUTEX)
+                .insert(peer_id.clone(), Arc::clone(&task_client));
+            self.task_sync_worker
+                .set_peer(
+                    peer_id.clone(),
+                    task_client,
+                    self.task_transport.routes(&peer_id),
+                    HashMap::new(),
+                )
+                .await?;
             self.big_sync_worker
                 .set_peer(peer_id.clone(), doc_rpc_client, doc_parts, HashMap::new())
                 .await?;
@@ -810,7 +1195,7 @@ impl IrohSyncRepo {
         .await;
         if let Err(error) = &res {
             error!(%peer_id, ?error, "incoming BigRepo connection setup failed");
-            self.big_repo_rpc.unregister_peer(peer_id.clone());
+            self.teardown_peer_registration(peer_id.clone()).await;
             let old = self.active_peers.write().await.remove(&peer_id);
             assert!(
                 matches!(old, Some(ActivePeerState::Connecting { .. })),
@@ -892,10 +1277,21 @@ impl IrohSyncRepo {
     /// Tear down a peer's registration without touching `active_peers` (the
     /// caller manages that). Idempotent per peer.
     async fn teardown_peer_registration(&self, peer_id: PeerKey) {
+        let _routes = self.task_route_lock.lock().await;
+        self.task_peer_clients
+            .lock()
+            .expect(ERROR_MUTEX)
+            .remove(&peer_id);
         self.big_repo_rpc.unregister_peer(peer_id.clone());
         self.blobs_sync_backend
             .unregister_peer_addr(peer_id.clone());
         self.big_sync_worker.remove_peer(peer_id.clone()).await.ok();
+        if !self.cancel_token.is_cancelled() {
+            self.task_sync_worker
+                .remove_peer(peer_id.clone())
+                .await
+                .expect(ERROR_CHANNEL);
+        }
         self.blob_sync_worker.remove_peer(peer_id).await.ok();
     }
 
@@ -1040,8 +1436,6 @@ impl IrohSyncRepo {
                 peer_key: Arc::clone(&peer_key),
             }];
 
-            let partition_ids = self.peer_partition_ids(&peer_key, true);
-            let (doc_parts, blob_parts) = Self::split_partitions(partition_ids);
             let conn = self
                 .rcx
                 .big_repo
@@ -1064,6 +1458,23 @@ impl IrohSyncRepo {
                 .register_peer_addr(conn.peer_id.clone(), endpoint_addr.clone());
             self.big_repo_rpc
                 .register_peer(endpoint_id, conn.peer_id.clone());
+            let _routes = self.task_route_lock.lock().await;
+            let partition_ids = self.peer_partition_ids(&peer_key, true);
+            let (doc_parts, blob_parts) = Self::split_partitions(partition_ids);
+            let task_client: Arc<dyn big_sync::rpc::WireBigSyncRpcClient> =
+                Arc::clone(&doc_rpc_client) as _;
+            self.task_peer_clients
+                .lock()
+                .expect(ERROR_MUTEX)
+                .insert(conn.peer_id.clone(), Arc::clone(&task_client));
+            self.task_sync_worker
+                .set_peer(
+                    conn.peer_id.clone(),
+                    task_client,
+                    self.task_transport.routes(&conn.peer_id),
+                    HashMap::new(),
+                )
+                .await?;
             self.big_sync_worker
                 .set_peer(
                     conn.peer_id.clone(),
@@ -1110,7 +1521,7 @@ impl IrohSyncRepo {
         }
         .await;
         if res.is_err() {
-            self.big_repo_rpc.unregister_peer(peer_id.clone());
+            self.teardown_peer_registration(peer_id.clone()).await;
             let old = self.active_peers.write().await.remove(&peer_id);
             assert!(
                 matches!(old, Some(ActivePeerState::Connecting { .. })),

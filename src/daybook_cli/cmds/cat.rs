@@ -26,7 +26,21 @@ pub async fn run(id: String, branch: Option<String>) -> Res<ExitCode> {
         .get_doc_with_facets_at_branch(&id, &branch_path, None)
         .await?
         .expect("document from entry missing");
-    println!("{:#?}", doc);
-    println!("{}", serde_json::to_string_pretty(&*doc)?);
+    use std::io::{ErrorKind, Write};
+    let mut output = std::io::stdout().lock();
+    // A reader such as grep -q may finish before the document ends. Pipe closure
+    // is normal consumer completion, not a panic that bypasses repository shutdown.
+    match serde_json::to_writer_pretty(&mut output, &*doc) {
+        Ok(()) => {}
+        Err(error) if error.io_error_kind() == Some(ErrorKind::BrokenPipe) => {
+            return Ok(ExitCode::SUCCESS);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    if let Err(error) = writeln!(output)
+        && error.kind() != ErrorKind::BrokenPipe
+    {
+        return Err(error.into());
+    }
     Ok(ExitCode::SUCCESS)
 }

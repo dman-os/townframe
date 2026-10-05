@@ -29,24 +29,16 @@ use wflow::{
 
 pub mod dispatch;
 pub mod init;
+pub mod task_adapter;
 pub mod triage;
 pub mod wash_plugin;
 
 use dispatch::{
-    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchOnSuccessHook, DispatchRepo,
-    FacetRoutineArgs, facet_routine_args_fingerprint,
+    ActiveDispatch, ActiveDispatchArgs, ActiveDispatchDeets, DispatchAttempt,
+    DispatchOnSuccessHook, DispatchRepo, FacetRoutineArgs, facet_routine_args_fingerprint,
 };
 use init::InitRepo;
 use wash_plugin::stateless_view;
-
-pub const PROCESSOR_RUNLOG_PARTITION_ID: &str = "processor-runlog/v1";
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProcessorRunlogDone {
-    pub done_by_peer_id: String,
-    pub done_token: String,
-    pub done_at: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RenderedFacetView {
@@ -353,7 +345,6 @@ impl Rt {
             Arc::clone(&blobs_repo),
             Arc::clone(&sqlite_local_state_repo),
             Arc::clone(&config_repo),
-            Arc::clone(&plugs_repo),
         ));
         let stateless_view_plugin = Arc::new(wash_plugin::StatelessViewPlugin::new());
         let sqlite_plugin = Arc::new(wash_plugin_sqlite::SqlPlugin::new());
@@ -374,45 +365,61 @@ impl Rt {
             .await
             .to_eyre()
             .wrap_err("error starting wash host")?;
-        Self::emit_startup_progress_status(
-            &progress_repo,
-            startup_progress_task_id.as_deref(),
-            "rt boot: wash host started".to_string(),
-        )
-        .await?;
+        let boot_cancel = cancel_token.clone();
+        let boot_host = Arc::clone(&wash_host);
+        let mut boot_facet_set = None;
+        let mut boot_blob_parts = None;
+        let mut boot_blob_pin = None;
+        let mut boot_facet_ref = None;
+        let mut boot_plugs_config = None;
+        let mut boot_plugs_manifest = None;
+        let mut boot_partition = None;
+        let mut boot_processor = None;
+        let execution_gate = wflow::wflow_tokio::partition::ExecutionGate::paused();
+        let result = async {
+            Self::emit_startup_progress_status(
+                &progress_repo,
+                startup_progress_task_id.as_deref(),
+                "rt boot: wash host started".to_string(),
+            )
+            .await?;
 
-        let mut bundles_to_load: HashSet<(String, String)> = default();
-        for (_dispatch_id, dispach) in dispatch_repo.list().await {
-            match &dispach.deets {
-                ActiveDispatchDeets::Wflow {
+            let mut loaded_workloads = HashSet::new();
+            let mut restore_errors = Vec::new();
+            for (dispatch_id, dispatch) in dispatch_repo.list_unsettled().await {
+                if let Some(attempt) = dispatch_repo
+                    .task_attempt_for_dispatch(&dispatch_id)
+                    .await?
+                    && let Some(job) = attempt.job_id
+                {
+                    execution_gate.hold(Arc::from(job));
+                }
+                if dispatch.status.is_terminal()
+                    || loaded_workloads.contains(dispatch.execution.workload_id())
+                {
+                    continue;
+                }
+                let ActiveDispatchDeets::Wflow {
                     plug_id,
                     bundle_name,
                     ..
-                } => {
-                    bundles_to_load.insert((plug_id.clone(), bundle_name.clone()));
+                } = &dispatch.deets;
+                let plug_id_for_log = plug_id.clone();
+                let bundle_name_for_log = bundle_name.clone();
+                if let Err(error) = ensure_bundle_workload_running(
+                    &wash_host,
+                    &blobs_repo,
+                    plug_id,
+                    bundle_name,
+                    &dispatch.execution,
+                )
+                .await
+                {
+                    restore_errors.push((dispatch_id, dispatch, error));
+                    continue;
                 }
-            }
-        }
-        for (plug_id, bundle_name) in bundles_to_load {
-            let plug_id_for_log = plug_id.clone();
-            let bundle_name_for_log = bundle_name.clone();
-            let plug_man = plugs_repo.get(&plug_id).await.ok_or_else(|| {
-                ferr!("plug with active dispatch not found in repo: plug={plug_id} bundle={bundle_name}")
-            })?;
-            let bundle_man = plug_man.wflow_bundles.get(&bundle_name[..]).ok_or_else(|| {
-                ferr!("bundle with active dispatch not found in repo: plug={plug_id} bundle={bundle_name}")
-            })?;
-
-            let _workload_id = ensure_bundle_workload_running(
-                &wcx,
-                &wash_host,
-                &blobs_repo,
-                plug_id,
-                bundle_name,
-                bundle_man,
-            )
-            .await?;
-            Self::emit_startup_progress_status(
+                loaded_workloads.insert(dispatch.execution.workload_id().to_owned());
+                Self::emit_startup_progress_status(
                 &progress_repo,
                 startup_progress_task_id.as_deref(),
                 format!(
@@ -420,147 +427,306 @@ impl Rt {
                 ),
             )
             .await?;
-        }
-
-        let part_idx = 0;
-        let (wflow_part_handle, wflow_part_state) =
-            wflow::start_partition_worker(&wcx, Arc::clone(&wflow_plugin), part_idx).await?;
-        Self::emit_startup_progress_status(
-            &progress_repo,
-            startup_progress_task_id.as_deref(),
-            "rt boot: partition worker started".to_string(),
-        )
-        .await?;
-        let part_log = PartitionLogRef::new(Arc::clone(&wcx.logstore));
-        let wflow_ingress = Arc::new(wflow::ingress::PartitionLogIngress::new(
-            part_log,
-            Arc::clone(&wcx.metastore),
-        ));
-        let local_wflow_part_id = format!("{}/{part_idx}", config.device_id);
-
-        let rt = Arc::new(Self {
-            config,
-            local_wflow_part_id,
-            cancel_token,
-            plugs_repo,
-            drawer,
-            rcx,
-            wflow_ingress,
-            dispatch_repo,
-            init_repo,
-            progress_repo,
-            wcx,
-            wash_host,
-            wflow_plugin,
-            daybook_plugin,
-            stateless_view_plugin,
-            sqlite_plugin,
-            blobs_repo,
-            doc_facet_set_index_repo: Arc::clone(&doc_facet_set_index_repo),
-            doc_facet_ref_index_repo: Arc::clone(&doc_facet_ref_index_repo),
-            sqlite_local_state_repo: Arc::clone(&sqlite_local_state_repo),
-            config_repo,
-            wflow_part_state,
-        });
-        rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
-
-        let plugs_config_sql = sqlite_local_state_repo
-            .ensure_sqlite_ctx(crate::plugs::PLUGS_CONFIG_CONSUMER_STATE_ID)
-            .await?;
-        let plugs_config_consumer_stop = crate::plugs::spawn_plugs_config_consumer(
-            rt.doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&rt.drawer),
-            Arc::clone(&rt.plugs_repo),
-            plugs_config_sql,
-            rt.cancel_token.clone(),
-        )
-        .await?;
-        let plugs_manifest_sql = sqlite_local_state_repo
-            .ensure_sqlite_ctx(crate::plugs::PLUG_MANIFEST_CONSUMER_STATE_ID)
-            .await?;
-        let plugs_manifest_consumer_stop = crate::plugs::spawn_facet_set_plugs_manifest_consumer(
-            rt.doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&rt.plugs_repo),
-            plugs_manifest_sql,
-            rt.cancel_token.clone(),
-        )
-        .await?;
-        // Ensure init routines are queued at boot according to each init run mode.
-        // ADR 007 §6: boot queues inits for the active set only.
-        let mut plug_ids = rt
-            .plugs_repo
-            .list_active_plugs()
-            .await
-            .into_iter()
-            .map(|plug| plug.id())
-            .collect::<Vec<_>>();
-        plug_ids.sort();
-        let stage_started = std::time::Instant::now();
-        for plug_id in plug_ids {
-            rt.ensure_plug_init_dispatches(
-                &plug_id,
+            }
+            let stage_started = std::time::Instant::now();
+            let (doc_facet_set_index_repo, doc_facet_set_index_stop) =
+                crate::index::DocFacetSetIndexRepo::boot(
+                    Arc::clone(&sqlite_local_state_repo),
+                    Arc::clone(&drawer),
+                    Arc::clone(&rcx.frontier_part_store),
+                    cancel_token.clone(),
+                )
+                .await?;
+            boot_facet_set = Some(doc_facet_set_index_stop);
+            Self::emit_startup_progress_status(
+                &progress_repo,
                 startup_progress_task_id.as_deref(),
-                Some(total_started),
+                format!(
+                    "rt boot: loaded facet-set index ({})",
+                    Self::startup_timing_note(stage_started, total_started)
+                ),
             )
             .await?;
+            let stage_started = std::time::Instant::now();
+            let blob_pins_part_worker_stop = crate::blobs::spawn_blob_pins_part_worker(
+                Arc::clone(&rcx.blob_part_store),
+                Arc::clone(&sqlite_local_state_repo),
+                Arc::clone(&drawer),
+                doc_facet_set_index_repo.revision_store(),
+                cancel_token.clone(),
+            )
+            .await?;
+            boot_blob_parts = Some(blob_pins_part_worker_stop);
+            let blob_pin_worker_stop = crate::blobs::spawn_blob_pin_worker(
+                Arc::clone(&drawer),
+                rcx.sql.clone(),
+                rcx.core_inventory_doc_id.clone(),
+                rcx.docs_inventory_doc_id.clone(),
+                doc_facet_set_index_repo.revision_store(),
+                Arc::clone(&plugs_repo),
+                cancel_token.clone(),
+            )
+            .await?;
+            boot_blob_pin = Some(blob_pin_worker_stop);
+            // The blob-inventory access rows (ADR 013) belong to whoever serves those parts to
+            // peers, so `IrohSyncRepo::boot` owns that writer, not this runtime.
+            Self::emit_startup_progress_status(
+                &progress_repo,
+                startup_progress_task_id.as_deref(),
+                format!(
+                    "rt boot: blob pin workers started ({})",
+                    Self::startup_timing_note(stage_started, total_started)
+                ),
+            )
+            .await?;
+            let stage_started = std::time::Instant::now();
+            let (doc_facet_ref_index_repo, doc_facet_ref_index_stop) =
+                crate::index::DocFacetRefIndexRepo::boot(
+                    Arc::clone(&drawer),
+                    Arc::clone(&plugs_repo),
+                    Arc::clone(&sqlite_local_state_repo),
+                    doc_facet_set_index_repo.revision_store(),
+                    cancel_token.clone(),
+                )
+                .await?;
+            boot_facet_ref = Some(doc_facet_ref_index_stop);
+            Self::emit_startup_progress_status(
+                &progress_repo,
+                startup_progress_task_id.as_deref(),
+                format!(
+                    "rt boot: loaded facet-ref index ({})",
+                    Self::startup_timing_note(stage_started, total_started)
+                ),
+            )
+            .await?;
+
+            let part_idx = 0;
+            let (wflow_part_handle, wflow_part_state) = wflow::start_partition_worker(
+                &wcx,
+                Arc::clone(&wflow_plugin),
+                part_idx,
+                Arc::clone(&execution_gate),
+            )
+            .await?;
+            boot_partition = Some(wflow_part_handle);
+            Self::emit_startup_progress_status(
+                &progress_repo,
+                startup_progress_task_id.as_deref(),
+                "rt boot: partition worker started".to_string(),
+            )
+            .await?;
+            let part_log = PartitionLogRef::new(Arc::clone(&wcx.logstore));
+            let wflow_ingress = Arc::new(wflow::ingress::PartitionLogIngress::new(part_log));
+            let local_wflow_part_id = format!("{}/{part_idx}", config.device_id);
+
+            let rt = Arc::new(Self {
+                config,
+                local_wflow_part_id,
+                cancel_token,
+                #[cfg(test)]
+                finalization_gate: tokio::sync::Mutex::new(None),
+                #[cfg(test)]
+                waiting_activation_gate: tokio::sync::Mutex::new(None),
+                #[cfg(test)]
+                admission_gate: tokio::sync::Mutex::new(None),
+                task_admission: tokio::sync::Mutex::new(()),
+                execution_gate,
+                plugs_repo,
+                triage_worker: triage::TriageWorker::new(),
+                processor_slots: Arc::new(triage::slots::ProcessorSlotStore::local(
+                    Arc::clone(&rcx.derived_part_store),
+                    rcx.iroh_secret_key.public().as_bytes().to_owned(),
+                )),
+                distributed_processors: tokio::sync::RwLock::new(HashMap::new()),
+                drawer,
+                rcx,
+                wflow_ingress,
+                dispatch_repo,
+                init_repo,
+                progress_repo,
+                wcx,
+                wash_host,
+                wflow_plugin,
+                daybook_plugin,
+                stateless_view_plugin,
+                sqlite_plugin,
+                blobs_repo,
+                doc_facet_set_index_repo: Arc::clone(&doc_facet_set_index_repo),
+                doc_facet_ref_index_repo: Arc::clone(&doc_facet_ref_index_repo),
+                sqlite_local_state_repo: Arc::clone(&sqlite_local_state_repo),
+                config_repo,
+                wflow_part_state,
+            });
+            rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
+            let reconciliation = async {
+                // Terminal journal outcomes outrank artifact availability: archived
+                // jobs need settlement, not another component execution.
+                rt.reconcile_retained_dispatches(true).await?;
+                let mut restore_error = None;
+                for (dispatch_id, expected, error) in restore_errors {
+                    if rt
+                        .dispatch_repo
+                        .task_attempt_for_dispatch(&dispatch_id)
+                        .await?
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    if let Some(current) = rt.dispatch_repo.get_any(&dispatch_id).await
+                        && !current.status.is_terminal()
+                        && current.same_attempt(&expected)
+                    {
+                        rt.dispatch_repo
+                            .complete(
+                                dispatch_id.clone(),
+                                dispatch::DispatchStatus::Failed,
+                                &current,
+                            )
+                            .await?;
+                        if restore_error.is_none() {
+                            restore_error = Some(error.wrap_err(format!(
+                                "cannot restore captured execution for dispatch {dispatch_id}"
+                            )));
+                        }
+                    }
+                }
+                if let Some(error) = restore_error {
+                    return Err(error);
+                }
+                rt.reconcile_retained_dispatches(false).await
+            }
+            .await;
+            reconciliation?;
+            task_adapter::CapturedRoutineAdapter::authorize_retained_boot(Arc::clone(&rt)).await?;
+            rt.execution_gate.activate();
+
+            let plugs_config_sql = sqlite_local_state_repo
+                .ensure_sqlite_ctx(crate::plugs::PLUGS_CONFIG_CONSUMER_STATE_ID)
+                .await?;
+            let plugs_config_consumer_stop = crate::plugs::spawn_plugs_config_consumer(
+                rt.doc_facet_set_index_repo.revision_store(),
+                Arc::clone(&rt.drawer),
+                Arc::clone(&rt.plugs_repo),
+                plugs_config_sql,
+                rt.cancel_token.clone(),
+            )
+            .await?;
+            boot_plugs_config = Some(plugs_config_consumer_stop);
+            let plugs_manifest_sql = sqlite_local_state_repo
+                .ensure_sqlite_ctx(crate::plugs::PLUG_MANIFEST_CONSUMER_STATE_ID)
+                .await?;
+            let plugs_manifest_consumer_stop =
+                crate::plugs::spawn_facet_set_plugs_manifest_consumer(
+                    rt.doc_facet_set_index_repo.revision_store(),
+                    Arc::clone(&rt.plugs_repo),
+                    plugs_manifest_sql,
+                    rt.cancel_token.clone(),
+                )
+                .await?;
+            boot_plugs_manifest = Some(plugs_manifest_consumer_stop);
+            // Ensure init routines are queued at boot according to each init run mode.
+            // ADR 007 §6: boot queues inits for the active set only.
+            let mut plug_ids = rt
+                .plugs_repo
+                .list_active_plugs()
+                .await
+                .into_iter()
+                .map(|plug| plug.id())
+                .collect::<Vec<_>>();
+            plug_ids.sort();
+            let stage_started = std::time::Instant::now();
+            for plug_id in plug_ids {
+                rt.ensure_plug_init_dispatches(
+                    &plug_id,
+                    startup_progress_task_id.as_deref(),
+                    Some(total_started),
+                )
+                .await?;
+            }
+            Self::emit_startup_progress_status(
+                &rt.progress_repo,
+                startup_progress_task_id.as_deref(),
+                format!(
+                    "rt boot: plug init queue complete ({})",
+                    Self::startup_timing_note(stage_started, total_started)
+                ),
+            )
+            .await?;
+
+            let doc_processor_stop = crate::rt::triage::spawn_doc_processor_driver(
+                Arc::clone(&rt),
+                rt.doc_facet_set_index_repo.revision_store(),
+                Arc::clone(&rt.plugs_repo),
+                rt.cancel_token.clone(),
+            )
+            .await?;
+            boot_processor = Some(doc_processor_stop);
+
+            let partition_watcher = tokio::spawn({
+                let repo = Arc::clone(&rt);
+                async move { repo.keep_up_with_partition().await.unwrap() }
+            });
+
+            Ok((
+                Arc::clone(&rt),
+                RtStopToken {
+                    rt,
+                    partition_watcher,
+                    doc_processor_stop: boot_processor.take().expect(ERROR_IMPOSSIBLE),
+                    plugs_manifest_consumer_stop: boot_plugs_manifest
+                        .take()
+                        .expect(ERROR_IMPOSSIBLE),
+                    plugs_config_consumer_stop: boot_plugs_config.take().expect(ERROR_IMPOSSIBLE),
+                    doc_facet_ref_index_stop: boot_facet_ref.take().expect(ERROR_IMPOSSIBLE),
+                    blob_pin_worker_stop: boot_blob_pin.take().expect(ERROR_IMPOSSIBLE),
+                    blob_pins_part_worker_stop: boot_blob_parts.take().expect(ERROR_IMPOSSIBLE),
+                    doc_facet_set_index_stop: boot_facet_set.take().expect(ERROR_IMPOSSIBLE),
+                    wflow_part_handle: boot_partition.take().expect(ERROR_IMPOSSIBLE),
+                },
+            ))
         }
-        Self::emit_startup_progress_status(
-            &rt.progress_repo,
-            startup_progress_task_id.as_deref(),
-            format!(
-                "rt boot: plug init queue complete ({})",
-                Self::startup_timing_note(stage_started, total_started)
-            ),
-        )
-        .await?;
-
-        let doc_processor_stop = crate::rt::triage::spawn_doc_processor_driver(
-            Arc::clone(&rt),
-            rt.doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&rt.plugs_repo),
-            rt.cancel_token.clone(),
-        )
-        .await?;
-
-        let partition_watcher = tokio::spawn({
-            let repo = Arc::clone(&rt);
-            async move { repo.keep_up_with_partition().await.unwrap() }
-        });
-
-        Ok((
-            Arc::clone(&rt),
-            RtStopToken {
-                rt,
-                partition_watcher,
-                doc_processor_stop,
-                blob_pin_worker_stop,
-                blob_pins_part_worker_stop,
-                doc_facet_set_index_stop,
-                plugs_config_consumer_stop,
-                plugs_manifest_consumer_stop,
-                doc_facet_ref_index_stop,
-                wflow_part_handle,
-            },
-        ))
-    }
-    pub fn processor_runlog_item_id(doc_id: &str, processor_full_id: &str) -> ObjKey {
-        let bytes = format!("v1|doc:{doc_id}|proc:{processor_full_id}");
-        let digest = blake3::hash(bytes.as_bytes());
-        ObjKey::new(*digest.as_bytes())
-    }
-
-    pub async fn get_processor_runlog_done(
-        &self,
-        doc_id: &str,
-        processor_full_id: &str,
-    ) -> Res<Option<ProcessorRunlogDone>> {
-        let item_id = Self::processor_runlog_item_id(doc_id, processor_full_id);
-        let payload = self.rcx.derived_part_store.obj_payload(item_id).await?;
-        let Some(payload) = payload else {
-            return Ok(None);
-        };
-        let done = serde_json::from_value::<ProcessorRunlogDone>(payload)?;
-        Ok(Some(done))
+        .await;
+        if result.is_err() {
+            boot_cancel.cancel();
+            let mut cleanup_error = None;
+            if let Some(worker) = boot_processor
+                && let Err(error) = worker.stop().await
+            {
+                cleanup_error = Some(error);
+            }
+            if let Some(worker) = boot_partition
+                && let Err(error) = worker.stop().await
+                && cleanup_error.is_none()
+            {
+                cleanup_error = Some(error);
+            }
+            for worker in [
+                boot_plugs_manifest,
+                boot_plugs_config,
+                boot_facet_ref,
+                boot_blob_pin,
+                boot_blob_parts,
+                boot_facet_set,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if let Err(error) = worker.stop().await
+                    && cleanup_error.is_none()
+                {
+                    cleanup_error = Some(error);
+                }
+            }
+            if let Err(error) = boot_host.stop().await.to_eyre()
+                && cleanup_error.is_none()
+            {
+                cleanup_error = Some(error);
+            }
+            if let Some(error) = cleanup_error {
+                return result.wrap_err(format!("runtime startup teardown also failed: {error:#}"));
+            }
+        }
+        result
     }
 
     pub async fn render_facet_view(
@@ -2537,123 +2703,8 @@ impl Rt {
         }
 
         if !is_waiting {
-            let Some(bundle_man) = plug_man.wflow_bundles.get(bundle_name.as_str()) else {
-                if let Err(cleanup_err) = self
-                    .dispatch_repo
-                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
-                    .await
-                {
-                    warn!(
-                        %dispatch_id,
-                        ?cleanup_err,
-                        "failed to mark dispatch failed after missing bundle error"
-                    );
-                }
-                return Err(ferr!(
-                    "bundle not found in plug manifest: routine={plug_id}/{routine_name} bundle={bundle_name} key={wflow_key}"
-                ));
-            };
-            if let Err(err) = ensure_bundle_workload_running(
-                &self.wcx,
-                &self.wash_host,
-                &self.blobs_repo,
-                plug_id.into(),
-                bundle_name.clone(),
-                bundle_man,
-            )
-            .await
-            {
-                if let Err(cleanup_err) = self
-                    .dispatch_repo
-                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
-                    .await
-                {
-                    warn!(
-                        %dispatch_id,
-                        ?cleanup_err,
-                        "failed to mark dispatch failed after workload start error"
-                    );
-                }
-                return Err(err);
-            }
-
-            let wflow_args_json = {
-                let ActiveDispatchArgs::FacetRoutine(ref facet_args) = active_dispatch.args;
-                facet_args
-                    .wflow_args_json
-                    .clone()
-                    .unwrap_or_else(|| serde_json::to_string(&()).expect(ERROR_JSON))
-            };
-            let entry_id = match self
-                .wflow_ingress
-                .add_job(
-                    job_id.clone().into(),
-                    wflow_key.as_str(),
-                    wflow_args_json,
-                    None,
-                )
-                .await
-            {
-                Ok(value) => value,
-                Err(err) => {
-                    if let Err(cleanup_err) = self
-                        .dispatch_repo
-                        .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
-                        .await
-                    {
-                        warn!(
-                            %dispatch_id,
-                            ?cleanup_err,
-                            "failed to mark dispatch failed after job scheduling error"
-                        );
-                    }
-                    return Err(err).wrap_err_with(|| {
-                        format!("error scheduling job for {plug_id}/{routine_name}")
-                    });
-                }
-            };
-            let deets = ActiveDispatchDeets::Wflow {
-                wflow_partition_id: Some(self.local_wflow_part_id.clone()),
-                entry_id: Some(entry_id),
-                plug_id: plug_id.into(),
-                routine_name: routine_name.to_string(),
-                bundle_name: bundle_name.clone(),
-                wflow_key: wflow_key.clone(),
-                wflow_job_id: Some(job_id.clone()),
-            };
-            if let Err(err) = self
-                .dispatch_repo
-                .update_active_deets(&dispatch_id, deets)
-                .await
-            {
-                if let Err(cancel_err) = self
-                    .wflow_ingress
-                    .cancel_job(
-                        Arc::from(job_id.as_str()),
-                        format!("rollback scheduling for dispatch {dispatch_id}"),
-                    )
-                    .await
-                {
-                    warn!(
-                        %dispatch_id,
-                        %job_id,
-                        ?cancel_err,
-                        "failed to rollback queued wflow job after dispatch deets update failure"
-                    );
-                }
-                if let Err(cleanup_err) = self
-                    .dispatch_repo
-                    .complete(dispatch_id.clone(), dispatch::DispatchStatus::Failed)
-                    .await
-                {
-                    warn!(
-                        %dispatch_id,
-                        ?cleanup_err,
-                        "failed to mark dispatch failed after deets update error"
-                    );
-                }
-                return Err(err);
-            }
+            self.start_active_dispatch(&dispatch_id, &active_dispatch)
+                .await?;
         }
         let mut tags = vec![
             "/type/dispatch".to_string(),
