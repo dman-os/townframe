@@ -23,20 +23,19 @@ uname -a
 lscpu | rg 'Vendor ID|Model name'
 ```
 
-For AMD Zen, a root operator must load MSR access and apply the rr workaround. The workaround is system-wide and normally must be repeated after reboot/suspend. If building rr from the source-tarball workflow above, acquire the exact script from that source tree:
+For AMD Zen, a root operator must load MSR access and apply the rr workaround. The workaround is system-wide and normally must be repeated after reboot/suspend. The official script is bundled at `scripts/zen_workaround.py` relative to this skill; the commands below run from the repository root.
 
-```bash
-cp /tmp/rr-master-src/source/scripts/zen_workaround.py /tmp/zen_workaround.py
-sha256sum /tmp/zen_workaround.py
-```
+Bundled source: https://raw.githubusercontent.com/rr-debugger/rr/master/scripts/zen_workaround.py
+SHA-256: `a346c4b10885f9df0952957507454a9be7cb846e40a9fbd9fc61d0a792378e1e`.
+If using a separately built rr source version, compare its script before replacing the bundled copy.
 
 Apply and check it noninteractively (a password prompt is not safe in an agent command; ask the operator to run these if `sudo -n` fails):
 
 ```bash
 sudo -n true || { echo 'root access required for the Zen workaround' >&2; exit 1; }
 sudo modprobe msr
-sudo python3 /tmp/zen_workaround.py
-sudo python3 /tmp/zen_workaround.py --check
+sudo python3 .agents/skills/rr-debugging/scripts/zen_workaround.py
+sudo python3 .agents/skills/rr-debugging/scripts/zen_workaround.py --check
 ls -l /dev/cpu/0/msr
 ```
 
@@ -104,10 +103,25 @@ Record one test, not the whole suite:
 RR=/tmp/rr-master-build/bin/rr
 TRACE=/tmp/rr-focused-test
 rm -rf "$TRACE"
-"$RR" record -o "$TRACE" "$TEST_BIN" \
-  module::tests::target_test --exact --nocapture \
-  > /tmp/rr-record.log 2>&1
+(
+  flock 9
+  record_status=0
+  "$RR" record -o "$TRACE" "$TEST_BIN" \
+    module::tests::target_test --exact --nocapture \
+    > /tmp/rr-record.log 2>&1 || record_status=$?
+  "$RR" pack "$TRACE" > /tmp/rr-pack.log 2>&1 || exit $?
+  exit "$record_status"
+) 9>/tmp/townframe-cargo-validation.lock
 ```
+
+Do not rebuild the recorded executable while recording or replaying. rr can hard-link
+Cargo artifacts into its trace; Cargo may rewrite that same inode. A confirmed
+concurrent rebuild changed the test binary size/mtime, terminated recording with
+SIGBUS, and made replay diverge before the test started. Hold the existing Cargo
+validation lock across recording and packing. Pack each retained trace before
+allowing later builds; an already changed binary cannot be repaired by packing.
+Preserve matching split-DWARF files separately for GDB. A trace reporting
+executable metadata changes is invalid evidence, not an application failure.
 
 First validate deterministic replay without GDB:
 
