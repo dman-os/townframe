@@ -36,6 +36,7 @@
     - Reuse the other machinery
     - [ ] Make BigSyncM.set_peer incremental
   - [ ] Evalute every storage layer/API with regards to evolution
+  - [ ] Sensitive facets
 
 - [ ] ~Replace sqlx with seaorm~ use sqlx query macros (compile times?)
 - [ ] Plugs

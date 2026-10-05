@@ -42,12 +42,12 @@ async fn import_plug_oci(
     let ref_url: Url =
         format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
             .parse()?;
-    test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
-    // TEMPORARY HACK: let the async config-consumer walker publish the
-    // enablement broadcasts (both plugs) and the DocProcessor refresh its
-    // processor set before tests add docs; otherwise the doc-add can be
-    // triaged against a stale processor set and settle with no dispatch
-    // (CI flake). Remove when the TriageRepo observability fence lands.
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    let target = test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
+    let status = test_cx.rt.triage_worker
+        .wait_for_activation(&test_cx.rt.plugs_repo, target).await?;
+    eyre::ensure!(
+        matches!(status, daybook_core::rt::triage::ActivationStatus::Active(_)),
+        "plug activation failed: {status:?}",
+    );
     Ok(())
 }

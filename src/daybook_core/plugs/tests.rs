@@ -48,6 +48,127 @@ fn mock_plug(name: &str) -> manifest::PlugManifest {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn activation_target_preserves_unrelated_entries_and_fences_reenable() -> Res<()> {
+    let ctx = crate::test_support::test_cx(utils_rs::function_full!()).await?;
+    let plugs = &ctx.rt.plugs_repo;
+    let first_doc = plugs.add(mock_plug("activation-a")).await?;
+    let first_ref: url::Url =
+        format!("db+facet:///{first_doc}/org.example.daybook.plugManifest/main?branch=main")
+            .parse()?;
+    let first = plugs.enable_plug(&first_ref).await?;
+    let active = ctx
+        .rt
+        .triage_worker
+        .wait_for_activation(plugs, first.clone())
+        .await?;
+    let crate::rt::triage::ActivationStatus::Active(first_ack) = active else {
+        eyre::bail!("first activation failed: {active:?}");
+    };
+    assert_eq!(plugs.enable_plug(&first_ref).await?, first);
+    let second_doc = plugs.add(mock_plug("activation-b")).await?;
+    let second_ref: url::Url =
+        format!("db+facet:///{second_doc}/org.example.daybook.plugManifest/main?branch=main")
+            .parse()?;
+    let second = plugs.enable_plug(&second_ref).await?;
+    let second_status = ctx
+        .rt
+        .triage_worker
+        .wait_for_activation(plugs, second)
+        .await?;
+    assert!(matches!(
+        second_status,
+        crate::rt::triage::ActivationStatus::Active(_)
+    ));
+    assert_eq!(
+        ctx.rt.triage_worker.query_activation(plugs, &first).await?,
+        crate::rt::triage::ActivationStatus::Active(first_ack),
+    );
+    plugs.disable_plug(&first.plug_id).await?;
+    assert_eq!(
+        ctx.rt.triage_worker.query_activation(plugs, &first).await?,
+        crate::rt::triage::ActivationStatus::Disabled
+    );
+    let replacement = plugs.enable_plug(&first_ref).await?;
+    assert_ne!(replacement.enablement_entry_id, first.enablement_entry_id);
+    assert_eq!(
+        ctx.rt.triage_worker.query_activation(plugs, &first).await?,
+        crate::rt::triage::ActivationStatus::Superseded(replacement.clone()),
+    );
+    let replacement_status = ctx
+        .rt
+        .triage_worker
+        .wait_for_activation(plugs, replacement.clone())
+        .await?;
+    assert!(
+        matches!(replacement_status, crate::rt::triage::ActivationStatus::Active(ack) if ack.target == replacement)
+    );
+    ctx.stop().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn activation_target_tracks_its_mapped_configuration() -> Res<()> {
+    let ctx = crate::test_support::test_cx(utils_rs::function_full!()).await?;
+    let plugs = &ctx.rt.plugs_repo;
+    let doc = plugs.add(mock_plug("activation-config")).await?;
+    let reference: url::Url =
+        format!("db+facet:///{doc}/org.example.daybook.plugManifest/main?branch=main").parse()?;
+    let target = plugs.enable_plug(&reference).await?;
+    let status = ctx
+        .rt
+        .triage_worker
+        .wait_for_activation(plugs, target.clone())
+        .await?;
+    assert!(matches!(
+        status,
+        crate::rt::triage::ActivationStatus::Active(_)
+    ));
+    ctx.drawer_repo
+        .update_at_heads(
+            daybook_types::doc::DocPatch {
+                id: target.config_doc_id.clone(),
+                facets_set: [(
+                    daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::Note),
+                    daybook_types::doc::WellKnownFacet::Note("Changed plug configuration".into())
+                        .into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            daybook_types::doc::BranchPath::new("main"),
+            Some(target.config_doc_heads.clone()),
+        )
+        .await?;
+    let current = plugs
+        .processor_activation_snapshot()
+        .await?
+        .targets
+        .remove(&target.plug_id)
+        .ok_or_eyre("configuration target missing")?;
+    assert_eq!(current.enablement_entry_id, target.enablement_entry_id);
+    assert_ne!(current.config_doc_heads, target.config_doc_heads);
+    assert_eq!(
+        ctx.rt
+            .triage_worker
+            .query_activation(plugs, &target)
+            .await?,
+        crate::rt::triage::ActivationStatus::Superseded(current.clone())
+    );
+    let status = ctx
+        .rt
+        .triage_worker
+        .wait_for_activation(plugs, current)
+        .await?;
+    assert!(matches!(
+        status,
+        crate::rt::triage::ActivationStatus::Active(_)
+    ));
+    ctx.stop().await?;
+    Ok(())
+}
+
 async fn temp_component_url() -> Res<(tempfile::TempDir, url::Url)> {
     let temp_dir = tempfile::tempdir()?;
     let temp_path = temp_dir.path().join("component.wasm");
@@ -696,6 +817,9 @@ async fn test_processor_routine_must_exist() -> Res<()> {
         "proc1".into(),
         manifest::ProcessorManifest {
             desc: "Processor".into(),
+            input: manifest::ProcessorInput::Snapshot,
+            coordination: manifest::ProcessorCoordination::PerNode,
+            effects: manifest::ProcessorEffects::SyncedDocumentWrites,
             deets: manifest::ProcessorDeets::DocProcessor {
                 event_predicate: default(),
                 predicate: manifest::DocPredicateClause::HasTag("org.test.tag".into()),
@@ -757,6 +881,9 @@ async fn test_processor_predicate_tags_must_be_in_scope() -> Res<()> {
         "proc1".into(),
         manifest::ProcessorManifest {
             desc: "Processor".into(),
+            input: manifest::ProcessorInput::Snapshot,
+            coordination: manifest::ProcessorCoordination::PerNode,
+            effects: manifest::ProcessorEffects::SyncedDocumentWrites,
             deets: manifest::ProcessorDeets::DocProcessor {
                 event_predicate: default(),
                 predicate: manifest::DocPredicateClause::HasTag("org.test.missing".into()),

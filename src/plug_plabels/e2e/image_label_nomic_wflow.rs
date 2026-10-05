@@ -3,7 +3,6 @@ use utils_rs::prelude::*;
 use daybook_types::doc::{AddDocArgs, Blob, FacetKey, WellKnownFacet, WellKnownFacetTag};
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "flaky: label-image processor intermittently never fires; see CI 12_rust tests"]
 async fn long_af_test_image_label_fallback_nomic_pipeline() -> Res<()> {
     let test_cx = daybook_core::test_support::test_cx_with_options(
         utils_rs::function_full!(),
@@ -86,8 +85,14 @@ async fn long_af_test_image_label_fallback_nomic_pipeline() -> Res<()> {
         .ok_or_eyre("image classifier did not write pseudo label facet")?;
     let labels: crate::types::PseudoLabel = serde_json::from_value(label_raw.clone())?;
     assert_eq!(labels.algorithm_tag, "label-image/embed-gauntlet-nomic-v1");
-    assert!(!labels.source_ref.as_str().is_empty());
-    assert!(!labels.candidate_set_ref.as_str().is_empty());
+    let source_ref = daybook_types::url::parse_facet_ref(&labels.source_ref)?;
+    assert_eq!(source_ref.doc_id, parsed_ref.doc_id);
+    assert_eq!(source_ref.facet_key, parsed_ref.facet_key);
+    let candidate_ref = daybook_types::url::parse_facet_ref(&labels.candidate_set_ref)?;
+    assert_eq!(
+        candidate_ref.facet_key,
+        crate::types::pseudo_label_candidates_key("label-candidates")
+    );
     assert!(
         labels
             .labels

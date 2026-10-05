@@ -597,8 +597,76 @@ pub enum InitDeets {
 pub struct ProcessorManifest {
     #[garde(length(min = 1))]
     pub desc: String,
+    #[serde(default)]
+    #[garde(dive)]
+    pub input: ProcessorInput,
+    #[serde(default)]
+    #[garde(dive)]
+    pub coordination: ProcessorCoordination,
+    #[serde(default)]
+    #[garde(dive)]
+    pub effects: ProcessorEffects,
     #[garde(dive)]
     pub deets: ProcessorDeets,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ProcessorInput {
+    #[default]
+    Snapshot,
+    /// Changed facet keys are derived from the last successful settlement.
+    Delta,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone, Default)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ProcessorCoordination {
+    #[default]
+    PerNode,
+    Distributed(#[garde(dive)] DistributedProcessorPolicy),
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DistributedProcessorPolicy {
+    #[garde(dive)]
+    pub placement: ProcessorPlacement,
+    #[garde(dive)]
+    pub duplicates: ProcessorDuplicatePolicy,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ProcessorPlacement {
+    AnyNode,
+    PreferOrigin,
+    Only(#[garde(length(min = 1))] String),
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ProcessorDuplicatePolicy {
+    Idempotent,
+    ExternalIdempotencyKey,
+    AuthoritativePlacement,
+    AcceptsDuplicates,
+}
+
+#[derive(Debug, Serialize, Deserialize, Validate, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum ProcessorEffects {
+    #[default]
+    LocalState,
+    SyncedDocumentWrites,
+    ExternalIdempotent,
+    ExternalNonIdempotent,
 }
 
 #[derive(Debug, Serialize, Deserialize, Validate, Clone)]

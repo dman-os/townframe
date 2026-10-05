@@ -46,6 +46,7 @@ async fn dispatch_and_wait(
                         daybook_core::rt::dispatch::ProcessorInvocation {
                             trigger_doc_id: doc_id.clone(),
                             changed_facet_keys: changed_facet_keys.clone(),
+                            task_id: None,
                         },
                     )
                 },
@@ -138,13 +139,7 @@ async fn setup_and_dispatch_case(
     routine_name: &str,
     changed_facet_keys: Vec<String>,
 ) -> Res<(daybook_core::test_support::DaybookTestContext, String)> {
-    let test_cx = daybook_core::test_support::test_cx_with_options(
-        test_name,
-        daybook_core::test_support::DaybookTestCxOptions {
-            provision_mltools_models: true,
-        },
-    )
-    .await?;
+    let test_cx = daybook_core::test_support::test_cx(test_name).await?;
     super::common::import_test_plug_oci(&test_cx).await?;
 
     let doc_id = setup_doc(&test_cx).await?;

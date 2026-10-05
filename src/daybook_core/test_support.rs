@@ -453,10 +453,7 @@ pub async fn test_cx_with_options(
         .await?;
 
     let (rt, rt_stop) = crate::rt::Rt::boot(
-        crate::rt::RtConfig {
-            device_id: device_id.clone(),
-            startup_progress_task_id: None,
-        },
+        crate::rt::RtConfig::new(device_id.clone(), /*startup_progress_task_id*/ None),
         rcx,
         Arc::clone(&drawer_repo),
         Arc::clone(&plugs_repo),
@@ -517,7 +514,9 @@ pub async fn import_and_enable_test_plug(test_cx: &DaybookTestContext) -> Res<()
     let ref_url: url::Url =
         format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
             .parse()?;
-    test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
+    let target = test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
+    let status = test_cx.rt.triage_worker.wait_for_activation(&test_cx.rt.plugs_repo, target).await?;
+    eyre::ensure!(matches!(status, crate::rt::triage::ActivationStatus::Active(_)), "test plug activation failed: {status:?}");
     Ok(())
 }
 pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::StopToken)> {

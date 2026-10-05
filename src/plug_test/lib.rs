@@ -530,9 +530,14 @@ mod wasm_runtime {
         Ok(())
     }
 
-    fn report_capabilities(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+    fn report_capabilities(cx: &mut WflowCtx, input: serde_json::Value) -> Result<(), JobErrorX> {
         use crate::wit::townframe::daybook::facet_routine;
         use crate::wit::townframe::sqlite::types::SqlValue;
+        // Recovery fixtures stop the actual component at a durable inbox wait,
+        // then resume this same handler to publish its ordinary SQLite report.
+        if input["await_message"] == true {
+            let Json(_) = cx.recv::<Json<serde_json::Value>>()?;
+        }
 
         let args = facet_routine::get_args();
 
@@ -665,7 +670,7 @@ mod wasm_runtime {
                 "invoke-child-failure" => |cx, _args: serde_json::Value| invoke_child_failure(cx),
                 "child-success" => |cx, args: ChildArgs| child_success(cx, args),
                 "child-failure" => |cx, args: ChildArgs| child_failure(cx, args),
-                "report-capabilities" => |cx, _args: serde_json::Value| report_capabilities(cx),
+                "report-capabilities" => |cx, args: serde_json::Value| report_capabilities(cx, args),
                 "test-downscope" => |cx, _args: serde_json::Value| test_downscope(cx),
                 "test-denied-update" => |cx, _args: serde_json::Value| test_denied_update(cx),
                 "test-acl-aggregate" => |cx, _args: serde_json::Value| test_acl_aggregate(cx),
@@ -1657,6 +1662,9 @@ pub fn plug_manifest() -> PlugManifest {
                 "test-label".into(),
                 Arc::new(daybook_types::manifest::ProcessorManifest {
                     desc: "Add a test LabelGeneric for testing".into(),
+                    input: daybook_types::manifest::ProcessorInput::Snapshot,
+                    coordination: daybook_types::manifest::ProcessorCoordination::PerNode,
+                    effects: daybook_types::manifest::ProcessorEffects::SyncedDocumentWrites,
                     deets: daybook_types::manifest::ProcessorDeets::DocProcessor {
                         event_predicate: default(),
                         routine_name: "test-label".into(),
@@ -1676,6 +1684,9 @@ pub fn plug_manifest() -> PlugManifest {
                 "ocr-image".into(),
                 Arc::new(daybook_types::manifest::ProcessorManifest {
                     desc: "Extract OCR text from blob image into note".into(),
+                    input: daybook_types::manifest::ProcessorInput::Snapshot,
+                    coordination: daybook_types::manifest::ProcessorCoordination::PerNode,
+                    effects: daybook_types::manifest::ProcessorEffects::SyncedDocumentWrites,
                     deets: daybook_types::manifest::ProcessorDeets::DocProcessor {
                         event_predicate: default(),
                         routine_name: "ocr-image".into(),
@@ -1692,6 +1703,9 @@ pub fn plug_manifest() -> PlugManifest {
                 "embed-image".into(),
                 Arc::new(daybook_types::manifest::ProcessorManifest {
                     desc: "Compute image embedding facet from image blob".into(),
+                    input: daybook_types::manifest::ProcessorInput::Snapshot,
+                    coordination: daybook_types::manifest::ProcessorCoordination::PerNode,
+                    effects: daybook_types::manifest::ProcessorEffects::SyncedDocumentWrites,
                     deets: daybook_types::manifest::ProcessorDeets::DocProcessor {
                         event_predicate: default(),
                         routine_name: "embed-image".into(),
@@ -1711,6 +1725,9 @@ pub fn plug_manifest() -> PlugManifest {
                 "embed-text".into(),
                 Arc::new(daybook_types::manifest::ProcessorManifest {
                     desc: "Compute embedding facet from note content".into(),
+                    input: daybook_types::manifest::ProcessorInput::Snapshot,
+                    coordination: daybook_types::manifest::ProcessorCoordination::PerNode,
+                    effects: daybook_types::manifest::ProcessorEffects::SyncedDocumentWrites,
                     deets: daybook_types::manifest::ProcessorDeets::DocProcessor {
                         event_predicate: default(),
                         routine_name: "embed-text".into(),
@@ -1730,6 +1747,9 @@ pub fn plug_manifest() -> PlugManifest {
                 "index-embedding".into(),
                 Arc::new(daybook_types::manifest::ProcessorManifest {
                     desc: "Index embedding facets into local sqlite vec store".into(),
+                    input: daybook_types::manifest::ProcessorInput::Delta,
+                    coordination: daybook_types::manifest::ProcessorCoordination::PerNode,
+                    effects: daybook_types::manifest::ProcessorEffects::LocalState,
                     deets: daybook_types::manifest::ProcessorDeets::DocProcessor {
                         event_predicate: default(),
                         routine_name: "index-embedding".into(),

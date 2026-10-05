@@ -59,13 +59,66 @@ struct ResolvedStatelessViewProvider {
 pub struct RtConfig {
     pub device_id: String,
     pub startup_progress_task_id: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) triage_startup_gate: tokio::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
+}
+
+impl RtConfig {
+    pub fn new(device_id: String, startup_progress_task_id: Option<String>) -> Self {
+        Self {
+            device_id,
+            startup_progress_task_id,
+            #[cfg(any(test, feature = "test-support"))]
+            triage_startup_gate: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Pause the production driver after recovery load, before initial installation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_triage_startup_gate(
+        mut self,
+        reached: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) -> Self {
+        *self.triage_startup_gate.get_mut() = Some((reached, resume));
+        self
+    }
+}
+
+#[cfg(test)]
+struct DispatchTestGate {
+    reached: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DispatchAdmissionCut {
+    BeforeJobInit,
+    AfterJobInit,
 }
 
 pub struct Rt {
     pub config: RtConfig,
     pub rcx: Arc<RepoCtx>,
     pub cancel_token: tokio_util::sync::CancellationToken,
+    #[cfg(test)]
+    finalization_gate: tokio::sync::Mutex<Option<DispatchTestGate>>,
+    #[cfg(test)]
+    waiting_activation_gate: tokio::sync::Mutex<Option<DispatchTestGate>>,
+    #[cfg(test)]
+    admission_gate: tokio::sync::Mutex<Option<(DispatchAdmissionCut, DispatchTestGate)>>,
+    task_admission: tokio::sync::Mutex<()>,
+    execution_gate: Arc<wflow::wflow_tokio::partition::ExecutionGate>,
     pub plugs_repo: Arc<PlugsRepo>,
+    pub triage_worker: triage::TriageWorker,
+    pub(crate) processor_slots: Arc<triage::slots::ProcessorSlotStore>,
+    pub(crate) distributed_processors:
+        tokio::sync::RwLock<HashMap<String, Arc<triage::DistributedProcessor>>>,
     pub drawer: Arc<DrawerRepo>,
     pub config_repo: Arc<ConfigRepo>,
     pub wflow_ingress: Arc<dyn wflow::WflowIngress>,
@@ -265,74 +318,6 @@ impl Rt {
             &progress_repo,
             startup_progress_task_id.as_deref(),
             "rt boot: init repo and local-state repos ready".to_string(),
-        )
-        .await?;
-
-        let stage_started = std::time::Instant::now();
-        let (doc_facet_set_index_repo, doc_facet_set_index_stop) =
-            crate::index::DocFacetSetIndexRepo::boot(
-                Arc::clone(&sqlite_local_state_repo),
-                Arc::clone(&drawer),
-                Arc::clone(&rcx.frontier_part_store),
-                cancel_token.clone(),
-            )
-            .await?;
-        Self::emit_startup_progress_status(
-            &progress_repo,
-            startup_progress_task_id.as_deref(),
-            format!(
-                "rt boot: loaded facet-set index ({})",
-                Self::startup_timing_note(stage_started, total_started)
-            ),
-        )
-        .await?;
-        let stage_started = std::time::Instant::now();
-        let blob_pins_part_worker_stop = crate::blobs::spawn_blob_pins_part_worker(
-            Arc::clone(&rcx.blob_part_store),
-            Arc::clone(&sqlite_local_state_repo),
-            Arc::clone(&drawer),
-            doc_facet_set_index_repo.revision_store(),
-            cancel_token.clone(),
-        )
-        .await?;
-        let blob_pin_worker_stop = crate::blobs::spawn_blob_pin_worker(
-            Arc::clone(&drawer),
-            rcx.sql.clone(),
-            rcx.core_inventory_doc_id.clone(),
-            rcx.docs_inventory_doc_id.clone(),
-            doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&plugs_repo),
-            cancel_token.clone(),
-        )
-        .await?;
-        // The blob-inventory access rows (ADR 013) belong to whoever serves those parts to
-        // peers, so `IrohSyncRepo::boot` owns that writer, not this runtime.
-        Self::emit_startup_progress_status(
-            &progress_repo,
-            startup_progress_task_id.as_deref(),
-            format!(
-                "rt boot: blob pin workers started ({})",
-                Self::startup_timing_note(stage_started, total_started)
-            ),
-        )
-        .await?;
-        let stage_started = std::time::Instant::now();
-        let (doc_facet_ref_index_repo, doc_facet_ref_index_stop) =
-            crate::index::DocFacetRefIndexRepo::boot(
-                Arc::clone(&drawer),
-                Arc::clone(&plugs_repo),
-                Arc::clone(&sqlite_local_state_repo),
-                doc_facet_set_index_repo.revision_store(),
-                cancel_token.clone(),
-            )
-            .await?;
-        Self::emit_startup_progress_status(
-            &progress_repo,
-            startup_progress_task_id.as_deref(),
-            format!(
-                "rt boot: loaded facet-ref index ({})",
-                Self::startup_timing_note(stage_started, total_started)
-            ),
         )
         .await?;
 
@@ -2894,33 +2879,6 @@ impl Rt {
     }
 }
 
-async fn upsert_processor_runlog_item(
-    partition_store: &SharedPartStore,
-    done_by_peer_id: &str,
-    doc_id: &str,
-    processor_full_id: &str,
-    done_token: &str,
-) -> Res<()> {
-    let item_id = Rt::processor_runlog_item_id(doc_id, processor_full_id);
-    let payload = serde_json::json!({
-        "done_by_peer_id": done_by_peer_id,
-        "done_token": done_token,
-        "done_at": jiff::Timestamp::now().to_string(),
-    });
-    partition_store
-        .set_obj_payload(item_id.clone(), payload)
-        .await?;
-    partition_store
-        .add_obj_to_parts(
-            item_id,
-            vec![crate::part_id_from_label(
-                crate::rt::PROCESSOR_RUNLOG_PARTITION_ID,
-            )],
-        )
-        .await?;
-    Ok(())
-}
-
 fn dispatch_stable_identity(dispatch: &ActiveDispatch) -> String {
     match (&dispatch.deets, &dispatch.args) {
         (
@@ -3600,36 +3558,39 @@ mod tests {
         )
         .await?;
 
-        let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
-        let item_id = Rt::processor_runlog_item_id("doc-1", "@daybook/plabels/label-note");
-
-        // Open ensures the partition in the derived scope.
-        assert!(
-            rtx.derived_part_store
-                .summarize_parts(std::collections::HashSet::from([part_id.clone()]))
-                .await??
-                .contains_key(&part_id),
-            "open should ensure the processor-runlog partition in the derived scope"
-        );
-
-        upsert_processor_runlog_item(
-            &rtx.derived_part_store,
-            "peer-a",
-            "doc-1",
-            "@daybook/plabels/label-note",
-            "token-1",
-        )
-        .await?;
+        let slot_key = triage::slots::ProcessorSlotKey {
+            document_id: "doc-1".into(),
+            branch_path: "main".into(),
+            processor_full_id: "@daybook/plabels/label-note".into(),
+        };
+        let part_id = crate::part_id_from_label(triage::slots::LOCAL_SLOT_PART);
+        let item_id = ObjKey::new(slot_key.id());
+        let slots =
+            triage::slots::ProcessorSlotStore::local(Arc::clone(&rtx.derived_part_store), [1; 32]);
+        slots
+            .evaluate(
+                &slot_key,
+                triage::slots::ProcessorDesired {
+                    capture: triage::slots::ProcessorCapture::new(
+                        ChangeHashSet::default(),
+                        None,
+                        [1; 32],
+                        [2; 32],
+                    ),
+                    matches: true,
+                },
+            )
+            .await?;
 
         // The document scope must not learn about the item at all: the automerge
         // frontier worker reads that scope's match-all part stream as documents.
         assert!(
             rtx.part_store.obj_payload(item_id.clone()).await?.is_none(),
-            "processor-runlog items must not be written to the document scope"
+            "per-node processor slots must not be written to the document scope"
         );
         assert!(
             rtx.part_store.obj_parts(item_id.clone()).await?.is_empty(),
-            "processor-runlog items must not join a document-scope partition"
+            "per-node processor slots must not join a document-scope partition"
         );
         assert_eq!(
             rtx.derived_part_store.obj_parts(item_id).await?,

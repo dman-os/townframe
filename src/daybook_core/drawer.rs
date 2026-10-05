@@ -118,24 +118,43 @@ impl MaterializationWake {
             let Some(batch) = self.receiver.recv().await else {
                 return Err(ferr!("Drawer materialization listener closed"));
             };
-            self.pending.extend(batch.into_iter().map(|notification| {
-                let (doc_id, heads) = match notification {
-                    BigRepoLocalNotification::DocCreated { doc_id, heads }
-                    | BigRepoLocalNotification::DocImported { doc_id, heads }
-                    | BigRepoLocalNotification::DocHeadsUpdated { doc_id, heads }
-                    | BigRepoLocalNotification::DocMaterializationReady { doc_id, heads } => {
-                        (doc_id, Some(heads))
-                    }
-                    BigRepoLocalNotification::DocMaterializationPending { doc_id } => {
-                        (doc_id, None)
-                    }
-                };
-                MaterializationChange {
-                    branch_id: daybook_types::doc::BranchId(doc_id.to_string()),
-                    heads: heads.map(ChangeHashSet),
-                }
-            }));
+            self.pending
+                .extend(batch.into_iter().map(Self::materialization_change));
         }
+    }
+
+    fn materialization_change(notification: BigRepoLocalNotification) -> MaterializationChange {
+        let (doc_id, heads) = match notification {
+            BigRepoLocalNotification::DocCreated { doc_id, heads }
+            | BigRepoLocalNotification::DocImported { doc_id, heads }
+            | BigRepoLocalNotification::DocHeadsUpdated { doc_id, heads }
+            | BigRepoLocalNotification::DocMaterializationReady { doc_id, heads } => {
+                (doc_id, Some(heads))
+            }
+            BigRepoLocalNotification::DocMaterializationPending { doc_id } => (doc_id, None),
+        };
+        MaterializationChange {
+            branch_id: daybook_types::doc::BranchId(doc_id.to_string()),
+            heads: heads.map(ChangeHashSet),
+        }
+    }
+
+    /// Visit the finite prefix admitted now, not notifications arriving during the visit.
+    pub(crate) fn drain_ready(&mut self, mut visit: impl FnMut(MaterializationChange)) -> Res<()> {
+        let batches = self.receiver.len();
+        for change in self.pending.drain(..) {
+            visit(change);
+        }
+        for _ in 0..batches {
+            let batch = self
+                .receiver
+                .try_recv()
+                .map_err(|error| ferr!("draining admitted materialization batch: {error}"))?;
+            for notification in batch {
+                visit(Self::materialization_change(notification));
+            }
+        }
+        Ok(())
     }
 
     /// Wait for a notification that may make the document readable. Pending
@@ -147,10 +166,6 @@ impl MaterializationWake {
                 return Ok(change);
             }
         }
-    }
-
-    pub(crate) async fn wait(&mut self) -> Res<()> {
-        self.changed().await.map(|_| ())
     }
 }
 
@@ -193,6 +208,7 @@ pub struct DrawerRepo {
     doc_pool: SharedKeyedLruPool<FacetCacheKey>,
 
     pub registry: Arc<crate::repos::ListenersRegistry>,
+    metadata_events_tx: tokio::sync::broadcast::Sender<Vec<DocId>>,
     cancel_token: CancellationToken,
     _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
     current_heads: surelock::mutex::Mutex<ChangeHashSet>,
@@ -324,6 +340,7 @@ impl DrawerRepo {
             entry_pool,
             doc_pool,
             registry: crate::repos::ListenersRegistry::new(),
+            metadata_events_tx: tokio::sync::broadcast::channel(256).0,
             cancel_token: main_cancel_token.child_token(),
             _change_listener_tickets: vec![ticket],
             current_heads: surelock::mutex::Mutex::new(initial_heads),
@@ -531,6 +548,52 @@ impl DrawerRepo {
     }
     pub(crate) fn local_author(&self) -> &automerge::Author<'static> {
         &self.local_author
+    }
+
+    pub(crate) fn subscribe_metadata_events(&self) -> tokio::sync::broadcast::Receiver<Vec<DocId>> {
+        self.metadata_events_tx.subscribe()
+    }
+
+    /// Current main mapping and materialized content, without retained cache authority.
+    pub(crate) async fn ready_main_branch_heads(
+        &self,
+        doc_id: &DocId,
+    ) -> Res<Option<ChangeHashSet>> {
+        let witness = self
+            .drawer_doc_handle
+            .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+            .await;
+        let Some(branch) = self
+            .hydrate_entry_at_heads(doc_id, &witness)
+            .await?
+            .and_then(|entry| entry.branches.get("main").cloned())
+        else {
+            return Ok(None);
+        };
+        let big_repo::DocLookup::Ready(handle) =
+            self.big_repo.get_doc(&branch.branch_doc_id).await?
+        else {
+            return Ok(None);
+        };
+        let heads = handle
+            .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+            .await;
+        let latest_witness = self
+            .drawer_doc_handle
+            .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+            .await;
+        if latest_witness != witness {
+            // One recheck, not a retry: a concurrent remap makes this capture unavailable.
+            // Its processed metadata notification wakes the activation installer.
+            let current = self
+                .hydrate_entry_at_heads(doc_id, &latest_witness)
+                .await?
+                .and_then(|entry| entry.branches.get("main").cloned());
+            if current.as_ref().map(|branch| &branch.branch_doc_id) != Some(&branch.branch_doc_id) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(heads))
     }
 
     pub(crate) async fn get_branch_heads_by_doc_id(

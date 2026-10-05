@@ -188,6 +188,39 @@ impl PlugsRepo {
         }
 
         for (processor_name, processor_manifest) in &manifest.processors {
+            if let manifest::ProcessorCoordination::Distributed(policy) =
+                &processor_manifest.coordination
+            {
+                use manifest::{
+                    ProcessorDuplicatePolicy as Duplicates, ProcessorEffects as Effects,
+                    ProcessorPlacement,
+                };
+                eyre::ensure!(
+                    processor_manifest.effects != Effects::LocalState,
+                    "distributed processor {processor_name} cannot produce node-local state"
+                );
+                match (processor_manifest.effects, policy.duplicates) {
+                    (
+                        Effects::ExternalNonIdempotent,
+                        Duplicates::Idempotent | Duplicates::ExternalIdempotencyKey,
+                    )
+                    | (Effects::SyncedDocumentWrites, Duplicates::ExternalIdempotencyKey) => {
+                        eyre::bail!(
+                            "processor {processor_name} effect declaration contradicts duplicate policy"
+                        );
+                    }
+                    _ => {}
+                }
+                if policy.duplicates == Duplicates::AuthoritativePlacement {
+                    eyre::ensure!(
+                        matches!(policy.placement, ProcessorPlacement::Only(_)),
+                        "processor {processor_name} authoritative execution requires explicit Only placement"
+                    );
+                }
+                if let ProcessorPlacement::Only(node) = &policy.placement {
+                    node.parse::<iroh::PublicKey>()?;
+                }
+            }
             match &processor_manifest.deets {
                 manifest::ProcessorDeets::DocProcessor {
                     routine_name,

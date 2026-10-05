@@ -1,6 +1,159 @@
 use super::*;
 
 impl PlugsRepo {
+    pub(crate) async fn processor_activation_snapshot(&self) -> Res<ProcessorActivationSnapshot> {
+        let _guard = self.mutation_mutex.lock().await;
+        self.processor_activation_snapshot_locked().await
+    }
+
+    pub(crate) async fn processor_activation_snapshot_locked(
+        &self,
+    ) -> Res<ProcessorActivationSnapshot> {
+        self.processor_activation_snapshot_with_heads(None).await
+    }
+
+    pub(crate) async fn cached_processor_activation_snapshot(
+        &self,
+        heads: &HashMap<String, ChangeHashSet>,
+    ) -> Res<ProcessorActivationSnapshot> {
+        let _guard = self.mutation_mutex.lock().await;
+        self.processor_activation_snapshot_with_heads(Some(heads))
+            .await
+    }
+
+    async fn processor_activation_snapshot_with_heads(
+        &self,
+        cached_heads: Option<&HashMap<String, ChangeHashSet>>,
+    ) -> Res<ProcessorActivationSnapshot> {
+        use automerge::ReadDoc as _;
+        let (config, heads) = self.config_store()?.latest_snapshot().await?;
+        let mut snapshot = ProcessorActivationSnapshot {
+            targets: HashMap::new(),
+            manifests: HashMap::new(),
+            rejected: HashMap::new(),
+        };
+        let Some(heads) = heads else {
+            return Ok(snapshot);
+        };
+        let config_document_id: big_repo::DocumentId = self.doc_config_id.parse()?;
+        let handle = self
+            .big_repo
+            .get_doc(&config_document_id)
+            .await?
+            .into_ready(config_document_id)?;
+        let enabled_ids = handle
+            .with_document_read(|doc| -> Res<HashMap<String, String>> {
+                let facets = doc
+                    .get_at(automerge::ROOT, "facets", heads.as_ref())?
+                    .ok_or_eyre("plugs config facets missing")?
+                    .1;
+                let facet = doc
+                    .get_at(
+                        &facets,
+                        <PlugsConfig as crate::stores::FacetStore>::facet_key().to_string(),
+                        heads.as_ref(),
+                    )?
+                    .ok_or_eyre("plugs config facet missing")?
+                    .1;
+                let enabled = doc
+                    .get_at(&facet, "enabled", heads.as_ref())?
+                    .ok_or_eyre("plugs enabled map missing")?
+                    .1;
+                config
+                    .enabled
+                    .iter()
+                    .map(|(plug_id, expected)| {
+                        // JSON URLs reconcile as scalar strings. get_at returns the winning
+                        // scalar put's operation identity, matching hydration's winner.
+                        let (value, operation) = doc
+                            .get_at(&enabled, plug_id.as_str(), heads.as_ref())?
+                            .ok_or_eyre("enabled entry missing")?;
+                        eyre::ensure!(
+                            value.as_str() == Some(expected.as_str()),
+                            "enabled winner differs from hydrated config"
+                        );
+                        Ok((plug_id.clone(), operation.to_string()))
+                    })
+                    .collect()
+            })
+            .await?;
+        let drawer = self.drawer.get().ok_or_eyre("plugs drawer missing")?;
+        for (plug_id, enabled_ref) in config.enabled {
+            let config_doc_id = config
+                .plug_config_doc_ids
+                .get(&plug_id)
+                .ok_or_eyre("enabled plug has no configuration document")?
+                .clone();
+            let config_doc_heads =
+                if let Some(heads) = cached_heads.and_then(|heads| heads.get(&config_doc_id)) {
+                    Some(heads.clone())
+                } else {
+                    drawer.ready_main_branch_heads(&config_doc_id).await?
+                };
+            let config_doc_heads = config_doc_heads.map(|heads| {
+                let mut hashes = heads.as_ref().to_vec();
+                hashes.sort();
+                ChangeHashSet(hashes.into())
+            });
+            let parsed = Self::parse_enabled_ref(&enabled_ref)?;
+            let pinned = parsed
+                .at
+                .as_ref()
+                .map(|at| am_utils_rs::parse_commit_heads(at))
+                .transpose()?
+                .map(|heads| {
+                    let mut hashes = heads.as_ref().to_vec();
+                    hashes.sort();
+                    ChangeHashSet(hashes.into())
+                });
+            let exact_ref = if let Some(heads) = &pinned {
+                Self::build_enabled_ref(
+                    &parsed.doc_id,
+                    parsed.branch.as_deref().unwrap_or("main"),
+                    heads,
+                )?
+            } else {
+                enabled_ref.clone()
+            };
+            let target = PlugActivationTarget {
+                enablement_entry_id: enabled_ids[&plug_id].clone(),
+                plug_id: plug_id.clone(),
+                enabled_ref: exact_ref,
+                config_doc_id,
+                config_doc_heads: config_doc_heads.clone().unwrap_or_default(),
+            };
+            if let Some(track) = config.known_plugs.get(&plug_id)
+                && track.latest == enabled_ref
+                && let Some(reason) = &track.latest_rejection
+            {
+                snapshot
+                    .rejected
+                    .insert(plug_id.clone(), format!("{reason:?}"));
+            }
+            if config_doc_heads.is_some() && !snapshot.rejected.contains_key(&plug_id) {
+                let manifest = surelock::key::lock_scope(|key| {
+                    let (cache, _key) = key.lock(&self.cache);
+                    cache
+                        .active_manifests
+                        .get(&plug_id)
+                        .and_then(|(manifest_heads, manifest)| {
+                            pinned
+                                .as_ref()
+                                .is_some_and(|pinned| {
+                                    pinned.len() == manifest_heads.len()
+                                        && pinned.iter().all(|head| manifest_heads.contains(head))
+                                })
+                                .then(|| Arc::clone(manifest))
+                        })
+                });
+                if let Some(manifest) = manifest {
+                    snapshot.manifests.insert(plug_id.clone(), manifest);
+                }
+            }
+            snapshot.targets.insert(plug_id, target);
+        }
+        Ok(snapshot)
+    }
     pub(crate) async fn read_manifest_doc(
         &self,
         doc_id: &daybook_types::doc::DocId,
@@ -28,6 +181,52 @@ impl PlugsRepo {
         Ok(Some(Arc::new(manifest)))
     }
 
+    pub(crate) fn configuration_document_id(&self) -> &str {
+        &self.doc_config_id
+    }
+
+    pub(crate) async fn capture_config_bindings(
+        &self,
+    ) -> Res<(String, ChangeHashSet, HashMap<String, String>)> {
+        let (config, heads) = self.config_store()?.latest_snapshot().await?;
+        let heads = heads.ok_or_eyre("plugs configuration has no retained heads")?;
+        Ok((
+            self.doc_config_id.clone(),
+            heads,
+            config.plug_config_doc_ids.clone(),
+        ))
+    }
+
+    pub(crate) async fn config_bindings_at(
+        &self,
+        document_id: &str,
+        heads: &ChangeHashSet,
+    ) -> Res<Option<HashMap<String, String>>> {
+        eyre::ensure!(
+            document_id == self.doc_config_id,
+            "configuration association proof is not the native plugs configuration"
+        );
+        let id: big_repo::DocumentId = document_id.parse()?;
+        let big_repo::DocLookup::Ready(handle) = self.big_repo.get_doc(&id).await? else {
+            return Ok(None);
+        };
+        let config = handle
+            .hydrate_path_at_heads::<am_utils_rs::codecs::ThroughJson<PlugsConfig>>(
+                &heads.0,
+                automerge::ROOT,
+                vec![
+                    "facets".into(),
+                    autosurgeon::Prop::Key(
+                        <PlugsConfig as crate::stores::FacetStore>::facet_key()
+                            .to_string()
+                            .into(),
+                    ),
+                ],
+            )
+            .await?;
+        Ok(config.map(|config| config.0.plug_config_doc_ids))
+    }
+
     /// The plug's current enabled ref from the live config facet, if enabled.
     /// Used by broadcast-driven consumers that carry no config snapshot (the
     /// durable rev-store path uses each revision's own config instead).
@@ -51,6 +250,10 @@ impl PlugsRepo {
         {
             eyre::bail!("enabled ref must point at org.example.daybook.plugManifest/main: {url}");
         }
+        eyre::ensure!(
+            parsed.branch.as_deref().unwrap_or("main") == "main",
+            "plug manifest references must use the main branch: {url}"
+        );
         Ok(parsed)
     }
 

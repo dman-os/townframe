@@ -44,11 +44,28 @@ matching task is cancelled and pruned
 
 Source, processor-slot, and task-ticket data synchronize independently. Their ordering is never assumed to be atomic. Triage therefore retains explicit unwitnessed-candidate and reconciliation semantics.
 
+### Source authorship and session identity
+
+Drawer writes use Automerge 0.12 authors containing the native node's 32-byte public key. Automerge manages actor IDs as sequential write sessions; branch creation uses `fork()`, not `clone()`, so independently writable branches cannot reuse a session sequence. Caller-supplied role paths do not change the node author. History attribution resolves authors through `get_author_for_actor`, including changes after the first change in a session and saved/reloaded documents. Older unlabelled changes retain unknown authorship; their actor IDs are not substituted for node keys.
+
+This follows townframe-2 ADR015's separation between node-authored Automerge history and delegated facet actors. The existing dmeta path-hash directory and fixed-width version-tag IDs remain legacy role metadata, not session identity or delegation proofs. Node author bytes are attribution labels, not signatures: authenticating a node change, its role delegation, and a facet claim requires the three distinct signed claims specified there. Storage/forwarding signatures do not replace those claims. A concurrent target containing writes from multiple authors also does not imply one unique triggering origin.
+
+Scheduling origin is the author of the latest visible relevant facet marker operation at the captured target heads. The selector considers both `updatedAt` and `deletedAt`, orders operations by Automerge's Lamport counter and actor bytes, and resolves the introducing change's actor through `get_author_for_actor`. Timestamp values and delivery order do not participate. Concurrent writes use this deterministic scheduling tie-break, not a claim that one author exclusively owns the merged target. Unknown legacy authors stay unknown; `PreferOrigin` then becomes `AnyNode` rather than preferring the observer.
+
+Source-origin labels grant no authority. The execution adapter selects an authenticated publisher lane from the locally retained task register and checks that publisher's current pool, source, manifest, configuration, and processor-domain rights separately from executor rights. A prepared attempt retains that actual checked publisher and its exact input witness for later rechecks. No additional source-change signing protocol is required for this scheduling preference.
+
+Equivalent processor declarations contain semantic slot/capture/domain identity, routine and document identities, pool binding, canonical invocation keys, and workflow arguments. Exact manifest and configuration heads belong to each publisher's authenticated witness; they are not declaration identity when they hydrate to the same manifest/artifact and configuration generations. Executors validate the selected witness against the canonical declaration and execute those retained heads, never a fresh current-head capture. Concurrent branch settlements can supply a delta baseline, but only exact merged-generation settlement suppresses the merged target.
+
+
 ## Terminology
 
-**Processor slot:** Persistent distributed triage coordination for one `(document, branch, stable processor identity)`. It records current desired work and accepted settlement compactly after task tickets are pruned.
+**Processor slot:** Persistent triage bookkeeping for one `(document, branch, stable processor identity)`. It records current desired work and accepted settlement compactly after task tickets are pruned; replication participation depends on processor distribution mode.
 
-**Processor work generation:** Digest of the exact source version, processor generation, and effective configuration generation to process.
+Local-only and distributed processors use the same slot bookkeeping and retained processed heads. Local-only slot parts are neither remotely subscribed, advertised, nor served; distributed parts replicate through their explicit native authority. Changing a processor between these modes is outside this implementation scope.
+
+For delta-dependent execution, the comparison baseline is the last successfully incorporated processing settlement, not the last admitted or evaluated heads. Admission, enqueueing, cancellation, and failed execution do not advance that baseline. Each invocation captures its exact baseline and target heads, and its deterministic identity binds the baseline when it affects execution input. A successful older attempt that wins the local finalization race contributes its own exact settlement; it does not satisfy a newer generation or rewrite an already captured invocation. Overlapping deltas while earlier work is in flight are permitted.
+
+**Processor work generation:** Digest of the exact source version, processor generation, effective configuration generation, and any captured baseline that affects execution input.
 
 **Processor task:** One ADR 011 task ticket derived from one processor slot and one work generation.
 
@@ -69,7 +86,7 @@ For `ProcessorCoordination::PerNode`:
 1. node B replays existing document routes from its local cursor;
 2. matching processors dispatch locally;
 3. B records local evaluation and dispatch settlement; and
-4. no distributed processor slot or task ticket is required for execution allocation.
+4. no replicated processor slot or distributed task ticket is required for execution allocation; the processor uses the same node-local slot bookkeeping.
 
 Initial replay is real work because B needs its own local derived state.
 
@@ -131,6 +148,8 @@ H2 no longer satisfies P's predicate.
 4. No replacement task is created.
 
 A disappeared task alone never proves that the processor stopped matching; the processor slot carries that durable meaning.
+
+Source deletion invalidates every desired generation observed in its processor slot even when the execution event/origin filter would reject that deletion. Its nonmatching receipt uses empty source heads and an observed processor/configuration fingerprint; no routine, source materialization, or executable task is prepared. It preserves accepted settlement and the processed-head baseline. An unseen concurrent desire is not implicitly acknowledged by that receipt.
 
 !> very interesting scenario that i haven't thought aobut before, do succesive processor mismatches deschedule work from previous matches? I agree that's a yay
 
@@ -365,6 +384,60 @@ processor-slot projection cursor
 task-pool projection cursor
 ```
 
+Processor tag predicates inspect the complete facet-key set at the captured
+source heads, not just keys appearing in the current delta. Triage reads that
+set without hydrating facet bodies; unchanged facets must remain visible to
+both `HasTag` and its negation. Delta keys still determine change interest and
+provenance. If the captured key set is not materialized, evaluation is deferred
+without acknowledging that source revision. Deleted-document evaluation uses
+the removed keys.
+
+#### Exact processor activation fence
+
+`PlugsRepo::enable_plug` and `enable_known_plug` return a
+`PlugActivationTarget`, not a runtime readiness receipt. The target identifies
+the plug, canonical pinned manifest reference, winning enablement scalar
+operation, mapped configuration document, and its sorted exact content heads.
+Global plugs-config heads are a coherent read witness, not target identity:
+changing another plug does not supersede this target. Disabling and reenabling
+the same reference produces a new enablement operation.
+
+`Rt::triage_worker.query_activation` and `wait_for_activation` report `Pending`,
+`Active(ActivationAck)`, `Disabled`, `Rejected`, or `Superseded` for that exact
+target. Wait subscribes before querying; queries consult current desired
+configuration before accepting an installed acknowledgement. Drawer resolves
+the mapped main branch from live metadata using its uncached semantic query,
+then captures content heads only from an authoritative ready BigRepo document.
+A final metadata-witness check rejects a concurrent main remap without a retry
+loop; an unrelated metadata change with the same main mapping remains usable.
+Retained Drawer entry or document handles are not readiness authority.
+
+`Active` means evaluator state, read scopes, reference configuration, and source
+policy are installed and the acknowledgement transaction has committed.
+The current policy is `FutureObservedDeltasOnly`: installation captures source
+frontier revision B and only source revisions R > B are eligible. This is an
+observation boundary, not wall-clock edit ordering or an upstream indexing
+catch-up fence; an earlier edit indexed after B can still be eligible.
+Activation never scans history or resets the source cursor.
+
+The driver subscribes before its initial desired snapshot and drains finite
+already-admitted configuration-notification prefixes before planning selected
+or deferred source work. Drawer owns a crate-private batched logical-document
+metadata notification: its existing patch interpreter identifies affected
+documents, completes processing, invalidates entry and facet caches, then
+publishes. This covers logical main removal and registration of a replacement
+physical main even when no content FacetDelta is produced. Only mapped
+configuration IDs invalidate activation; lag conservatively invalidates all
+mapped IDs. Facet content changes also invalidate mapped configuration before
+planning. Unrelated metadata and source work do not reload configuration.
+
+SQLite `triage_activation` retains one latest acknowledgement per installed
+plug, including processor generations and boundary. On restart, live status
+starts `Pending`; an unchanged durable target keeps its boundary but becomes
+`Active` only after the production installer has rebuilt its live state.
+Runtime shutdown stops triage before its configuration consumers and source
+index; waiting callers receive a stopped-worker error.
+
 ### 2. Processor classes
 
 ```text
@@ -386,6 +459,33 @@ ExternalNonIdempotent
 ```
 
 Validation rejects or requires explicit acknowledgement for dangerous combinations. In particular, distributed execution does not make arbitrary external effects exactly-once.
+
+The manifest fields are `input` (`snapshot` or `delta`), `coordination`, and
+`effects`. Per-node snapshots remain the default. A distributed policy names
+placement (`anyNode`, `preferOrigin`, or `only` with an iroh public key) and an
+explicit duplicate-effect contract. Local-state effects cannot be distributed;
+non-idempotent external effects require authoritative placement or acknowledged
+duplicates. External idempotency keys are only valid for external-idempotent
+effects. `only` is required for authoritative placement.
+
+Snapshot processor invocation keys describe the complete captured target read
+set, not the replica-local triggering delta. Delta keys compare target facet
+membership and write points against the exact settled baseline, including
+deleted keys. This distinction keeps independently captured snapshots from
+varying with source observation history.
+
+The native management API attaches processor-domain storage separately from
+execution: `IrohSyncRepo::attach_processor_domain` installs explicit native
+authority routes, while `attach_distributed_processor` additionally attaches
+the actual pool scheduling adapter. Missing document/key history returns pending;
+neither call creates a domain, JWK, or pool. The guest processor invocation
+exposes an optional stable `task_id`, identical across attempts of a distributed
+obligation, for the declared external idempotency contract. Local-only invocations
+do not manufacture a pool identity.
+
+Successful task incorporation first materializes the exact processor-slot
+settlement. Slot and task parts can arrive in either order; a signed task terminal
+alone does not create a processor receipt or advance the settled-head baseline.
 
 ### 3. Branch selection
 
@@ -464,18 +564,42 @@ DesiredProcessorState {
     generation: ProcessorWorkGeneration
     matches: bool
     source_version: OpaqueBytes
+    execution_baseline: Optional<OpaqueBytes> // exact settled heads for baseline-dependent input
     processor_generation: Digest32
     configuration_generation: Digest32
 }
 
 ProcessorSettlement {
     generation: ProcessorWorkGeneration
+    source_version: OpaqueBytes // exact successfully incorporated target heads
+    processor_generation: Digest32
+    configuration_generation: Digest32
     result_ref: Optional<OpaqueResultRef>
     attempt_id: AttemptId
 }
 ```
 
 Signed per-writer lanes retain causal observations. Concurrent desired siblings survive until a later source evaluation writes a desired state observing them. A settlement satisfies only an equal work generation. The bounded settlement projection must retain enough current/concurrent evidence to reject stale tasks without preserving every historical attempt.
+
+Processor-slot ciphertext uses generic JWK facets in an explicitly selected per-distributed-processor triage-domain document, separate from the pool document used for task/router keys (ADR 011 §4 and ADR 003 §5–6). There is no repo-wide triage JWK shared across processors with different audiences. The processor-domain document has the intended slot-reader authority boundary; it holds stable processor identity, explicit pool binding, and the slot JWK, not the growing slot collection. Its key references pin exact document heads. Existing document causal encryption supplies historical key recovery, so slots do not introduce another CGKA or checkpoint DAG. Slot identity and transport-part generation are independent of key location and key version. Key mutation ownership and cipher/key-resolution integration must reuse the sister cipherBlob implementation rather than introduce a second JWK parser or unchecked facet-write path.
+
+Current runtime configuration is per plug through `PlugsConfig::plug_config_doc_ids`; a general mutable per-processor configuration override is not implemented. Processor-domain metadata must not duplicate or weaken manifest safety declarations. Additional shared instance settings require defined consumers and exact inclusion in semantic work generation when they affect evaluation/execution. Node-local participation, capacity, activation acknowledgements, and cursors remain local.
+
+#### Per-processor domain document
+
+Each configured distributed processor has an explicitly provisioned, Keyhive-protected domain document. Its stable identity is the plug ID plus processor name, independent of plug artifact/configuration revisions. Its initial shared state is:
+
+- the stable processor identity;
+- a reference to its managed pool descriptor document and the explicitly selected pool authority group; and
+- the generic JWK facet for encrypting that processor’s persistent slot records.
+
+The pool reference is mutable domain-instance state, not a plug-manifest declaration. It is loaded through the processor document rather than inferred from corpus contents, source-document membership, or the presence of a key. Pool descriptor loading separately checks current authority; neither the reference nor possession of its JWK starts a router or executor. Management supplies the processor document binding explicitly; lookup miss does not provision another document. Different processors may be shared with different node sets, so their key documents cannot be combined merely because they run on the same local node.
+
+The pool document separately holds its task/router JWK and generic pool metadata. The processor-domain document does not embed slots, task arrays, completion history, or local worker state: those remain encrypted-register records and local projections. Its JWK references pin the exact heads used by each ciphertext, allowing mixed historical key versions and ciphertext-preserving part rotation.
+
+`IrohSyncRepo::attach_processor_domain` accepts explicit provisioner-supplied domain metadata for storage-only attachment. A headless Relay node need not discover/decrypt that private document or materialize its slot JWK. The receiver checks the native document/group intersection for Relay and validates the processor/register binding; sender authority is not a local grant. RepoCtx retains the same register/publication owner for headless synchronization and later runtime activation. Key-reference/head refresh needs Relay only; plaintext release and publication retain their independent Read/Edit gates. Execution attachment still discovers the private metadata with Read before starting its explicitly managed pool adapter.
+
+Future runtime settings belong here only when they are shared processor-instance choices with defined consumers. Manifest predicates/routines/effect constraints remain declaration-time policy; per-plug application configuration remains in its existing configuration document. Node-local enablement/participation, execution capacity, acknowledgements, and cursors do not become shared settings. Changing a pool reference or encryption key alone is not a new semantic processor work generation; a setting that changes evaluation or execution meaning must participate in that generation’s exact configuration identity.
 
 ### 7. Processor pool descriptor
 
@@ -490,18 +614,23 @@ Each stable distributed processor has an ADR 011 pool descriptor. It supplies:
 
 The descriptor may expose opaque identifiers to relays while processor semantics remain encrypted. Processor pool identity does not change on plug upgrades.
 
+Triage explicitly manages one pool per configured distributed processor; discovering corpus facets does not launch pools. Its explicitly named repo configuration document is a rendezvous lookup adapter for a descriptor document and a management-selected existing authority group. Missing bindings remain unconfigured/pending, and multiple distinct document/group bindings conflict rather than selecting an arbitrary winner. A binding is a hint, not an access grant: descriptor loading performs current document/group Read admission. Processor pool identity remains stable across configuration changes and the numeric task-part rotations defined in ADR 011.
+
+An executor-local `NotReady` decline blocks only that executor/task pair; the router immediately considers other eligible executors. The executor driver installs the domain-provided local readiness watch and sends a task-specific reconsideration hint when it fires. The router does not create the subscription and does not infer readiness from the hint; a subsequent offer requires fresh executor classification.
+
 ### 8. Task declaration
 
 For matching desired generation G, TriageRepo ensures:
 
 ```text
-TaskDeclarationV1 {
+TaskDeclarationV2 {
     task_id: H(processor_slot_id, G)
     pool_id: processor_pool_id
-    domain: "daybook/distributed-triage/v1"
+    domain: "daybook.processor.v1"
+    producer: Optional<NodePubkey> // captured source-marker origin
     coordination_ref: processor_slot_id
     handler: processor routine and artifact generation
-    encrypted_input: document, branch, source, processor and configuration data
+    input: canonical semantic processor capture // exact heads in publisher witness
     placement: processor placement policy
     preference: PreferNode(trigger_origin) | None
     effect_policy: processor effect policy

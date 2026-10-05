@@ -107,6 +107,17 @@ pub struct RepoCtx {
     /// Local-only store backing consumer-derived objects that are not documents.
     pub derived_part_store: SharedPartStore,
     coordination_parts: tokio::sync::OnceCell<Arc<big_sync::SqlitePartStore>>,
+    // Headless relay attachment and later runtime activation retain the same
+    // per-domain publication lock and native register owner.
+    pub(crate) processor_slot_stores: tokio::sync::Mutex<
+        HashMap<
+            String,
+            (
+                crate::rt::triage::domain::ProcessorDomainReference,
+                Arc<crate::rt::triage::slots::ProcessorSlotStore>,
+            ),
+        >,
+    >,
 
     pub big_repo: SharedBigRepo,
     big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
@@ -220,6 +231,7 @@ impl RepoCtx {
             frontier_part_store: parts.frontier_part_store,
             derived_part_store: parts.derived_part_store,
             coordination_parts: tokio::sync::OnceCell::new(),
+            processor_slot_stores: Default::default(),
             big_repo: parts.big_repo,
             big_repo_stop: parts.big_repo_stop,
             doc_app,
@@ -1014,14 +1026,14 @@ pub(crate) async fn ensure_authority_partitions(
 
 /// Ensure the derived-scope partitions exist in the local-only derived store.
 ///
-/// The processor runlog is local derived state, so it must not live in the
+/// Per-node processor slots are local derived state, so they must not live in the
 /// document scope: the automerge frontier worker reads that scope's match-all
 /// part stream as documents. The derived scope is deliberately not registered
 /// with the big-sync RPC server, so nothing here is replicated.
 pub(crate) async fn ensure_derived_partitions(partition_store: &SharedPartStore) -> Res<()> {
     partition_store
         .ensure_part(crate::part_id_from_label(
-            crate::rt::PROCESSOR_RUNLOG_PARTITION_ID,
+            crate::rt::triage::slots::LOCAL_SLOT_PART,
         ))
         .await?;
     Ok(())
