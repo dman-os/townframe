@@ -46,6 +46,258 @@ pub struct SqlitePartStore {
     hidden_parts: Arc<HashSet<PartKey>>,
 }
 
+/// A single object's domain state and publication share one SQLite transaction.
+/// Dropping this value rolls back; readers are notified only after commit.
+pub struct SqliteObjWrite<'a> {
+    store: &'a SqlitePartStore,
+    obj_id: ObjKey,
+    frontier: super::sqlite_write::SqliteFrontierWrite<'a>,
+    publishing: bool,
+    published: bool,
+}
+
+impl<'a> SqliteObjWrite<'a> {
+    pub fn scope_id(&self) -> i64 {
+        self.store.core.scope_id
+    }
+
+    /// Execute domain-owned SQL in this object/scope transaction. Do not commit or
+    /// roll back this raw context, or mutate BigSync's tables: [`Self::publish`]
+    /// and [`Self::commit`] own those operations and their invariants.
+    pub fn context_mut(&mut self) -> &mut sqlx::Transaction<'a, sqlx::Sqlite> {
+        self.frontier.context_mut()
+    }
+
+    pub async fn payload(&mut self) -> Res<Option<ObjPayload>> {
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM big_sync_objs WHERE scope_id = ? AND obj_id = ?",
+        )
+        .bind(self.scope_id())
+        .bind(self.obj_id.0.as_bytes())
+        .fetch_optional(&mut **self.frontier.context_mut())
+        .await?
+        .flatten();
+        raw.as_deref()
+            .filter(|value| !value.is_empty())
+            .map(|value| serde_json::from_str(value).wrap_err(ERROR_JSON))
+            .transpose()
+    }
+
+    async fn touch_part(
+        &mut self,
+        obj_ref: i64,
+        part_id: PartKey,
+        old: &MemberState,
+        new: &MemberState,
+        cursor: CursorIndex,
+    ) -> Res<()> {
+        let MemberState::Live(payload) = new else {
+            unreachable!("object publication installs live content")
+        };
+        let part_ref = self
+            .store
+            .core
+            .ensure_part_ref(self.frontier.context_mut(), part_id.clone())
+            .await?;
+        self.store
+            .core
+            .apply_bucket_transition(
+                self.frontier.context_mut(),
+                part_id.clone(),
+                self.obj_id.clone(),
+                cursor,
+                old,
+                new,
+            )
+            .await?;
+        sqlx::query(
+            "DELETE FROM big_sync_pending_members WHERE scope_id = ? AND obj_ref = ? AND part_ref = ?",
+        )
+        .bind(self.scope_id()).bind(obj_ref).bind(part_ref)
+        .execute(&mut **self.frontier.context_mut()).await?;
+        self.frontier
+            .put(
+                PartFrontierKey::Part {
+                    obj_id: self.obj_id.clone(),
+                    part_id: part_id.clone(),
+                },
+                PartEvent::Changed(ObjChanged {
+                    cursor,
+                    part_ids: vec![part_id],
+                    obj_id: self.obj_id.clone(),
+                    payload: payload.clone(),
+                }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Replace content, touching existing memberships and promoting this object's
+    /// pending memberships together with the caller's admitted target set.
+    /// Exactly one publication is allowed, including failed or cancelled attempts.
+    pub async fn publish(&mut self, payload: ObjPayload, admitted_parts: &[PartKey]) -> Res<()> {
+        assert!(
+            !self.publishing && !self.published,
+            "one object publication per transaction"
+        );
+        self.publishing = true;
+        let old = self
+            .payload()
+            .await?
+            .map(MemberState::Live)
+            .unwrap_or(MemberState::Absent);
+        let encoded = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
+        let new = MemberState::Live(payload);
+        let obj_ref = self
+            .store
+            .core
+            .ensure_obj_ref(self.frontier.context_mut(), self.obj_id.clone())
+            .await?;
+        let targets: Vec<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT p.part_id
+               FROM big_sync_parts p
+              WHERE p.scope_id = ?
+                AND (EXISTS (SELECT 1 FROM big_sync_members m
+                             WHERE m.obj_ref = ? AND m.maybe_part_ref = p.part_ref
+                               AND m.event_type != ?)
+                     OR EXISTS (SELECT 1 FROM big_sync_pending_members m
+                                WHERE m.obj_ref = ? AND m.part_ref = p.part_ref))",
+        )
+        .bind(self.scope_id())
+        .bind(obj_ref)
+        .bind(EVENT_REMOVED)
+        .bind(obj_ref)
+        .fetch_all(&mut **self.frontier.context_mut())
+        .await?;
+        let mut parts: std::collections::BTreeSet<PartKey> = targets
+            .into_iter()
+            .map(|(bytes,)| SqlitePartStore::part_from_blob(bytes))
+            .collect();
+        parts.extend(admitted_parts.iter().cloned());
+        let cursor = self.frontier.revision().await?;
+        let mut had_live = false;
+        for part in parts {
+            let event_type: Option<i64> = sqlx::query_scalar(
+                "SELECT m.event_type
+                   FROM big_sync_members m
+                   JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
+                  WHERE m.scope_id = ? AND m.obj_ref = ? AND p.part_id = ?",
+            )
+            .bind(self.scope_id())
+            .bind(obj_ref)
+            .bind(part.0.as_bytes())
+            .fetch_optional(&mut **self.frontier.context_mut())
+            .await?;
+            let previous = match event_type {
+                None => &MemberState::Absent,
+                Some(EVENT_REMOVED) => &MemberState::Dead,
+                Some(_) => {
+                    had_live = true;
+                    &old
+                }
+            };
+            self.touch_part(obj_ref, part, previous, &new, cursor)
+                .await?;
+        }
+        sqlx::query("UPDATE big_sync_objs SET payload_json = ? WHERE scope_id = ? AND obj_ref = ?")
+            .bind(encoded)
+            .bind(self.scope_id())
+            .bind(obj_ref)
+            .execute(&mut **self.frontier.context_mut())
+            .await?;
+        if !had_live {
+            let MemberState::Live(payload) = new else {
+                unreachable!()
+            };
+            self.frontier
+                .put(
+                    PartFrontierKey::Object(self.obj_id.clone()),
+                    PartEvent::Changed(ObjChanged {
+                        cursor,
+                        part_ids: Vec::new(),
+                        obj_id: self.obj_id.clone(),
+                        payload,
+                    }),
+                )
+                .await?;
+        }
+        self.publishing = false;
+        self.published = true;
+        Ok(())
+    }
+
+    async fn add_parts(&mut self, parts: Vec<PartKey>) -> Res<()> {
+        self.publishing = true;
+        let payload = self.payload().await?;
+        let obj_ref = self
+            .store
+            .core
+            .ensure_obj_ref(self.frontier.context_mut(), self.obj_id.clone())
+            .await?;
+        let parts: std::collections::BTreeSet<_> = parts.into_iter().collect();
+        if let Some(payload) = payload {
+            let new = MemberState::Live(payload);
+            for part in parts {
+                let old = self
+                    .store
+                    .core
+                    .load_member_state(
+                        self.frontier.context_mut(),
+                        part.clone(),
+                        self.obj_id.clone(),
+                    )
+                    .await?;
+                if matches!(old, MemberState::Live(_)) {
+                    continue;
+                }
+                let cursor = self.frontier.revision().await?;
+                self.touch_part(obj_ref, part, &old, &new, cursor).await?;
+            }
+        } else {
+            for part in parts {
+                let part_ref = self
+                    .store
+                    .core
+                    .ensure_part_ref(self.frontier.context_mut(), part)
+                    .await?;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO big_sync_pending_members(
+                         scope_id
+                       , obj_ref
+                       , part_ref
+                     ) VALUES (
+                         ?
+                       , ?
+                       , ?
+                     )",
+                )
+                .bind(self.scope_id())
+                .bind(obj_ref)
+                .bind(part_ref)
+                .execute(&mut **self.frontier.context_mut())
+                .await?;
+            }
+        }
+        self.publishing = false;
+        self.published = true;
+        Ok(())
+    }
+
+    /// Commit this scope/object transaction, then notify readers of publication.
+    /// A domain-only or no-op commit without publication is legal. A failed or
+    /// cancelled [`Self::publish`] forbids commit; drop the write to roll back.
+    pub async fn commit(self) -> Res<()> {
+        assert!(
+            !self.publishing,
+            "cannot commit an incomplete object publication"
+        );
+
+        self.frontier.commit().await?;
+
+        Ok(())
+    }
+}
+
 /// Open a durable revision reader over a set of targets against an existing BigSync SQLite
 /// schema, handing the caller what the log holds — tombstones included. Callers that own a
 /// different store facade can supply its read pool, scope, and commit wakeup. This is the
@@ -235,6 +487,24 @@ impl SqlitePartStore {
             core,
             frontier,
             hidden_parts: Arc::new(config.hidden_parts),
+        })
+    }
+
+    /// Begin a write bound to this store's scope and exactly `obj_id`.
+    /// Domain SQL and at most one publication commit atomically. Domain-only or
+    /// no-op commits are legal; failed/cancelled publication must be rolled back
+    /// by dropping the write. The raw context must not commit, roll back, or
+    /// directly mutate BigSync's tables.
+    pub async fn begin_obj_write(&self, obj_id: ObjKey) -> Res<SqliteObjWrite<'_>> {
+        let mut frontier = self.frontier.begin().await?;
+
+        frontier.payloads_written_in_context();
+        Ok(SqliteObjWrite {
+            store: self,
+            obj_id,
+            frontier,
+            publishing: false,
+            published: false,
         })
     }
 }
@@ -639,152 +909,9 @@ impl HostPartStore for SqlitePartStore {
     }
 
     async fn set_obj_payload(&self, obj_id: ObjKey, payload: ObjPayload) -> Res<()> {
-        let payload_json = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
-        let mut frontier_tx = self.frontier.begin().await?;
-        let cursor = frontier_tx.revision().await?;
-        let tx = frontier_tx.context_mut();
-        let obj_ref = self.core.ensure_obj_ref(tx, obj_id.clone()).await?;
-        let old_payload_json: Option<String> = sqlx::query_scalar!(
-            "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
-            obj_ref
-        )
-        .fetch_optional(&mut **tx)
-        .await?
-        .flatten();
-        sqlx::query!(
-            "UPDATE big_sync_objs SET payload_json = ?1 WHERE obj_ref = ?2",
-            payload_json,
-            obj_ref
-        )
-        .execute(&mut **tx)
-        .await?;
-        let live_parts = sqlx::query!(
-            "SELECT m.maybe_part_ref, p.part_id
-             FROM big_sync_members m
-             JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-             WHERE m.scope_id = ?1 AND m.obj_ref = ?2
-               AND m.maybe_part_ref > 0 AND m.event_type != ?3",
-            self.core.scope_id,
-            obj_ref,
-            EVENT_REMOVED
-        )
-        .fetch_all(&mut **tx)
-        .await?;
-        let pending_parts = sqlx::query!(
-            "SELECT p.part_ref, p.part_id
-             FROM big_sync_pending_members m
-             JOIN big_sync_parts p ON p.part_ref = m.part_ref
-             WHERE m.scope_id = ?1 AND m.obj_ref = ?2",
-            self.core.scope_id,
-            obj_ref
-        )
-        .fetch_all(&mut **tx)
-        .await?;
-        let old_payload: ObjPayload = old_payload_json
-            .as_deref()
-            .filter(|str| !str.is_empty())
-            .map(|str| serde_json::from_str(str).wrap_err(ERROR_JSON))
-            .transpose()?
-            .unwrap_or(serde_json::Value::Null);
-        for part in &live_parts {
-            let old_state = MemberState::Live(old_payload.clone());
-            self.core
-                .apply_bucket_transition(
-                    &mut *tx,
-                    Self::part_from_blob(part.part_id.clone()),
-                    obj_id.clone(),
-                    cursor,
-                    &old_state,
-                    &MemberState::Live(payload.clone()),
-                )
-                .await?;
-        }
-        let mut events = vec![PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-            cursor,
-            part_ids: live_parts
-                .iter()
-                .map(|row| Self::part_from_blob(row.part_id.clone()))
-                .collect(),
-            obj_id: obj_id.clone(),
-            payload: payload.clone(),
-        })];
-        for part in &pending_parts {
-            let part_id = Self::part_from_blob(part.part_id.clone());
-            let part_ref = part.part_ref;
-            self.core
-                .apply_bucket_transition(
-                    &mut *tx,
-                    part_id.clone(),
-                    obj_id.clone(),
-                    cursor,
-                    &MemberState::Absent,
-                    &MemberState::Live(payload.clone()),
-                )
-                .await?;
-            sqlx::query!(
-                "DELETE FROM big_sync_pending_members
-                 WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
-                self.core.scope_id,
-                obj_ref,
-                part_ref
-            )
-            .execute(&mut **tx)
-            .await?;
-            events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                cursor,
-                part_ids: vec![part_id],
-                obj_id: obj_id.clone(),
-                payload: payload.clone(),
-            }));
-        }
-        if live_parts.is_empty() {
-            frontier_tx
-                .put(
-                    PartFrontierKey::Object(obj_id.clone()),
-                    PartEvent::Changed(ObjChanged {
-                        cursor,
-                        part_ids: Vec::new(),
-                        obj_id: obj_id.clone(),
-                        payload: payload.clone(),
-                    }),
-                )
-                .await?;
-        }
-        for part in &live_parts {
-            frontier_tx
-                .put(
-                    PartFrontierKey::Part {
-                        obj_id: obj_id.clone(),
-                        part_id: Self::part_from_blob(part.part_id.clone()),
-                    },
-                    PartEvent::Changed(ObjChanged {
-                        cursor,
-                        part_ids: vec![Self::part_from_blob(part.part_id.clone())],
-                        obj_id: obj_id.clone(),
-                        payload: payload.clone(),
-                    }),
-                )
-                .await?;
-        }
-        for part in &pending_parts {
-            let part_id = Self::part_from_blob(part.part_id.clone());
-            frontier_tx
-                .put(
-                    PartFrontierKey::Part {
-                        obj_id: obj_id.clone(),
-                        part_id: part_id.clone(),
-                    },
-                    PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                        cursor,
-                        part_ids: vec![part_id],
-                        obj_id: obj_id.clone(),
-                        payload: payload.clone(),
-                    }),
-                )
-                .await?;
-        }
-        frontier_tx.commit().await?;
-        Ok(())
+        let mut write = self.begin_obj_write(obj_id).await?;
+        write.publish(payload, &[]).await?;
+        write.commit().await
     }
 
     async fn obj_parts(&self, obj_id: ObjKey) -> Res<Vec<PartKey>> {
@@ -1134,87 +1261,9 @@ impl HostPartStore for SqlitePartStore {
     }
 
     async fn add_obj_to_parts(&self, obj_id: ObjKey, parts: Vec<PartKey>) -> Res<()> {
-        let mut frontier_tx = self.frontier.begin().await?;
-        let tx = frontier_tx.context_mut();
-        let obj_ref = self.core.ensure_obj_ref(tx, obj_id.clone()).await?;
-        let payload_json: Option<String> = sqlx::query_scalar!(
-            "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
-            obj_ref
-        )
-        .fetch_optional(&mut **tx)
-        .await?
-        .flatten();
-        let Some(payload_json) = payload_json.filter(|str| !str.is_empty()) else {
-            for part_id in parts {
-                let part_ref = self.core.ensure_part_ref(&mut *tx, part_id).await?;
-                sqlx::query!(
-                    "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, obj_ref, part_ref)
-                     VALUES (?1, ?2, ?3)",
-                    self.core.scope_id,
-                    obj_ref,
-                    part_ref
-                )
-                .execute(&mut **tx)
-                .await?;
-            }
-            frontier_tx.commit().await?;
-            return Ok(());
-        };
-        let payload: ObjPayload = serde_json::from_str(&payload_json).wrap_err(ERROR_JSON)?;
-        let cursor = frontier_tx.revision().await?;
-        let tx = frontier_tx.context_mut();
-        let mut events = Vec::new();
-        for part_id in parts {
-            let part_ref = self.core.ensure_part_ref(&mut *tx, part_id.clone()).await?;
-            let old_state = self
-                .core
-                .load_member_state(&mut *tx, part_id.clone(), obj_id.clone())
-                .await?;
-            if matches!(old_state, MemberState::Live(_)) {
-                continue;
-            }
-            self.core
-                .apply_bucket_transition(
-                    &mut *tx,
-                    part_id.clone(),
-                    obj_id.clone(),
-                    cursor,
-                    &old_state,
-                    &MemberState::Live(payload.clone()),
-                )
-                .await?;
-            sqlx::query!(
-                "DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
-                self.core.scope_id, obj_ref, part_ref
-            ).execute(&mut **tx).await?;
-            events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
-                cursor,
-                part_ids: vec![part_id],
-                obj_id: obj_id.clone(),
-                payload: payload.clone(),
-            }));
-        }
-        for event in &events {
-            let PartEvent::Changed(changed) = event else {
-                continue;
-            };
-            for event_part in &changed.part_ids {
-                // One frontier row per key, and the row's value is that part's touch.
-                let mut narrowed = changed.clone();
-                narrowed.part_ids = vec![event_part.clone()];
-                frontier_tx
-                    .put(
-                        PartFrontierKey::Part {
-                            obj_id: changed.obj_id.clone(),
-                            part_id: event_part.clone(),
-                        },
-                        PartEvent::Changed(narrowed),
-                    )
-                    .await?;
-            }
-        }
-        frontier_tx.commit().await?;
-        Ok(())
+        let mut write = self.begin_obj_write(obj_id).await?;
+        write.add_parts(parts).await?;
+        write.commit().await
     }
 
     async fn remove_obj_from_part(&self, obj_id: ObjKey, part_id: PartKey) -> Res<()> {
@@ -1911,6 +1960,256 @@ mod tests {
     async fn test_store(scope_key: &str) -> Res<SqlitePartStore> {
         let sql = test_sql().await?;
         SqlitePartStore::new(sql, scope_key, BuckId::MAX_LEVEL).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_obj_write_failed_publication_cannot_commit_partial_effects() -> Res<()> {
+        use futures::FutureExt;
+        let store = test_store("object-write-failure").await?;
+        let obj = test_obj_id(92);
+        let part = test_part_id(92);
+        store
+            .set_obj_payload(obj.clone(), serde_json::json!({"value": 1}))
+            .await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part.clone()])
+            .await?;
+        let before_cursor: i64 =
+            sqlx::query_scalar("SELECT value FROM big_sync_meta WHERE key = 'global_cursor'")
+                .fetch_one(&store.core.sql.read_pool)
+                .await?;
+        sqlx::query(
+            "CREATE TRIGGER reject_publication BEFORE UPDATE OF payload_json ON big_sync_objs
+             BEGIN SELECT RAISE(ABORT, 'publication rejected'); END",
+        )
+        .execute(&store.core.sql.write_pool)
+        .await?;
+        let mut write = store.begin_obj_write(obj.clone()).await?;
+        assert!(
+            write
+                .publish(serde_json::json!({"value": 2}), &[test_part_id(93)])
+                .await
+                .is_err()
+        );
+        assert!(
+            std::panic::AssertUnwindSafe(write.commit())
+                .catch_unwind()
+                .await
+                .is_err()
+        );
+        let after_cursor: i64 =
+            sqlx::query_scalar("SELECT value FROM big_sync_meta WHERE key = 'global_cursor'")
+                .fetch_one(&store.core.sql.read_pool)
+                .await?;
+        assert_eq!(
+            after_cursor, before_cursor,
+            "failed publication did not advance durable cursor"
+        );
+        assert_eq!(
+            HostPartStore::obj_parts(&store, obj.clone()).await?,
+            vec![part.clone()],
+            "failed admitted target is absent and original membership survives"
+        );
+        let mut read = store.begin_obj_write(obj.clone()).await?;
+        assert_eq!(read.payload().await?, Some(serde_json::json!({"value": 1})));
+        read.commit().await?;
+        crate::part_store::contract::assert_root_bucket_contract(
+            &store,
+            part,
+            big_sync_core::FingerprintSeed::new(1, 2),
+            &[obj],
+            &[],
+            0,
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_obj_write_notifies_only_committed_publication() -> Res<()> {
+        use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
+        let store = test_store("object-write-notification").await?;
+        let mut reader = store.open_revision_reader_all(0).await??;
+        let limits = RevisionReadLimits {
+            max_entries: std::num::NonZeroUsize::new(32).unwrap(),
+        };
+        assert!(matches!(
+            reader.next(limits).await?,
+            RevisionRead::ReplayComplete { .. }
+        ));
+        let obj = test_obj_id(90);
+        let part = test_part_id(90);
+        let mut write = store.begin_obj_write(obj.clone()).await?;
+        write
+            .publish(
+                serde_json::json!({"atomic": true}),
+                std::slice::from_ref(&part),
+            )
+            .await?;
+        let next = reader.next(limits);
+        tokio::pin!(next);
+        assert!(
+            futures::poll!(&mut next).is_pending(),
+            "uncommitted frontier stays invisible"
+        );
+        write.commit().await?;
+        let committed = next.await?;
+        let cursor: i64 =
+            sqlx::query_scalar("SELECT value FROM big_sync_meta WHERE key = 'global_cursor'")
+                .fetch_one(&store.core.sql.read_pool)
+                .await?;
+        let cursor = u64::try_from(cursor).expect("durable revision is nonnegative");
+        // The public reader coalesces object and part rows into one object event.
+        assert_eq!(
+            committed,
+            RevisionRead::Entries {
+                revision: cursor,
+                entries: vec![PartEvent::Changed(ObjChanged {
+                    cursor,
+                    part_ids: vec![part],
+                    obj_id: obj,
+                    payload: serde_json::json!({"atomic": true}),
+                })],
+            },
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_obj_write_reintroduces_dead_membership_without_duplicate_fingerprint() -> Res<()>
+    {
+        let store = test_store("object-write-reintroduction").await?;
+        let obj = test_obj_id(91);
+        let part = test_part_id(91);
+        store
+            .set_obj_payload(obj.clone(), serde_json::json!({"value": 1}))
+            .await?;
+        store
+            .add_obj_to_parts(obj.clone(), vec![part.clone()])
+            .await?;
+        store
+            .remove_obj_from_part(obj.clone(), part.clone())
+            .await?;
+        let mut write = store.begin_obj_write(obj.clone()).await?;
+        write
+            .publish(
+                serde_json::json!({"value": 2}),
+                &[part.clone(), part.clone()],
+            )
+            .await?;
+        write.commit().await?;
+        crate::part_store::contract::assert_root_bucket_contract(
+            &store,
+            part.clone(),
+            big_sync_core::FingerprintSeed::new(1, 2),
+            std::slice::from_ref(&obj),
+            &[],
+            0,
+        )
+        .await?;
+        let mut write = store.begin_obj_write(obj.clone()).await?;
+        write
+            .publish(serde_json::json!({"value": 3}), std::slice::from_ref(&part))
+            .await?;
+        write.commit().await?;
+        crate::part_store::contract::assert_root_bucket_contract(
+            &store,
+            part,
+            big_sync_core::FingerprintSeed::new(1, 2),
+            &[obj],
+            &[],
+            0,
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sqlite_obj_write_atomic_publication() -> Res<()> {
+        let store = test_store("object-write").await?;
+        let obj = test_obj_id(81);
+        let unrelated = test_obj_id(82);
+        let first = test_part_id(81);
+        let second = test_part_id(82);
+        HostPartStore::add_obj_to_parts(&store, obj.clone(), vec![first.clone()]).await?;
+        HostPartStore::add_obj_to_parts(&store, unrelated.clone(), vec![second.clone()]).await?;
+        sqlx::query("CREATE TABLE object_write_domain(value INTEGER NOT NULL)")
+            .execute(&store.core.sql.write_pool)
+            .await?;
+        let payload = serde_json::json!({"published": 1});
+        {
+            let mut write = store.begin_obj_write(obj.clone()).await?;
+            sqlx::query("INSERT INTO object_write_domain VALUES (1)")
+                .execute(&mut **write.context_mut())
+                .await?;
+            write
+                .publish(
+                    payload.clone(),
+                    &[first.clone(), second.clone(), second.clone()],
+                )
+                .await?;
+            assert_eq!(write.payload().await?, Some(payload.clone()));
+        }
+        let mut read = store.begin_obj_write(obj.clone()).await?;
+        assert_eq!(read.payload().await?, None);
+        read.commit().await?;
+        let domain_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM object_write_domain")
+            .fetch_one(&store.core.sql.read_pool)
+            .await?;
+        assert_eq!(domain_count, 0);
+        let members: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM big_sync_members")
+            .fetch_one(&store.core.sql.read_pool)
+            .await?;
+        assert_eq!(members, 0);
+        let buckets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM big_sync_buckets")
+            .fetch_one(&store.core.sql.read_pool)
+            .await?;
+        assert_eq!(buckets, 0);
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM big_sync_pending_members")
+            .fetch_one(&store.core.sql.read_pool)
+            .await?;
+        assert_eq!(pending, 2);
+        let mut write = store.begin_obj_write(obj.clone()).await?;
+        sqlx::query("INSERT INTO object_write_domain VALUES (1)")
+            .execute(&mut **write.context_mut())
+            .await?;
+        write
+            .publish(payload, &[first.clone(), second.clone(), second.clone()])
+            .await?;
+        write.commit().await?;
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM big_sync_pending_members")
+            .fetch_one(&store.core.sql.read_pool)
+            .await?;
+        assert_eq!(pending, 1, "unrelated pending membership survives");
+        let domain_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM object_write_domain")
+            .fetch_one(&store.core.sql.read_pool)
+            .await?;
+        assert_eq!(domain_count, 1);
+        let revisions: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT txid
+                      , COUNT(*)
+                   FROM big_sync_members
+                  GROUP BY txid",
+        )
+        .fetch_all(&store.core.sql.read_pool)
+        .await?;
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(
+            revisions[0].1, 3,
+            "two deduplicated targets and object frontier"
+        );
+        for part in [first, second] {
+            crate::part_store::contract::assert_root_bucket_contract(
+                &store,
+                part,
+                big_sync_core::FingerprintSeed::new(1, 2),
+                std::slice::from_ref(&obj),
+                &[],
+                0,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// A hidden part stays physically present but is invisible to remote part access

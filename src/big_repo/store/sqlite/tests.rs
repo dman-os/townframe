@@ -2510,16 +2510,19 @@ async fn reconcile_group_part_batch_adds_managed_parts() -> Res<()> {
             .map(|part| (part.clone(), Arc::new(HashMap::new())))
             .collect(),
     }];
+    // A native write must not need another pooled reader while it owns the
+    // writer: projection readers can legitimately occupy the entire read pool.
+    let mut readers = Vec::new();
+    for _ in 0..store.sql.read_pool.options().get_max_connections() {
+        readers.push(store.sql.read_pool.acquire().await?);
+    }
     store.reconcile_group_part_batch(&mutations).await?;
+    drop(readers);
 
     let parts = HostPartStore::obj_parts(&store, doc).await?;
-    assert!(
-        parts.contains(&group_part),
-        "doc should be in the managed group part"
-    );
-    assert!(
-        parts.contains(&crate::seds_part_id()),
-        "doc should be in `/seds` when the reconciliation desires it"
+    assert_eq!(
+        parts.into_iter().collect::<HashSet<_>>(),
+        HashSet::from([group_part, crate::seds_part_id()]),
     );
     Ok(())
 }

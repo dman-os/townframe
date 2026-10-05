@@ -156,6 +156,7 @@ pub struct BigKeyhiveHandle {
     keyhive: Arc<BigKeyhiveKeyhive>,
     contact_card: Arc<keyhive_core::contact_card::ContactCard>,
     keyhive_peer_id: subduction_keyhive::KeyhivePeerId,
+    signer: MemorySigner,
     /// Test-only: when `Some`, [`Self::prekeys`] reports this set instead of folding the
     /// local individual's current prekey ops.
     ///
@@ -193,16 +194,22 @@ pub(crate) enum EventSubject {
 
 // a background task. rename to new
 impl BigKeyhiveHandle {
+    pub(crate) fn coordination_signer(&self) -> &MemorySigner {
+        &self.signer
+    }
+
+
     pub(crate) async fn new(seed: [u8; 32], listener: BigRepoKeyhiveListener) -> Res<Self> {
         let signer = MemorySigner::from(ed25519_dalek::SigningKey::from_bytes(&seed));
         let (keyhive, keyhive_peer_id, contact_card) =
-            subduction_keyhive::runtime::init_sendable_keyhive(signer.clone(), listener)
+            subduction_keyhive::runtime::init_sendable_keyhive(signer.clone(), listener.clone())
                 .await
                 .map_err(|err| ferr!("error on keyhive init: {err:?}"))?;
         Ok(Self {
             keyhive: Arc::new(keyhive),
             contact_card: Arc::new(contact_card),
             keyhive_peer_id,
+            signer,
             #[cfg(test)]
             pinned_prekey_view: Arc::new(std::sync::Mutex::new(None)),
         })
@@ -231,7 +238,7 @@ impl BigKeyhiveHandle {
             signer.clone(),
             keyhive_core::store::ciphertext::memory::MemoryCiphertextStore::<Vec<u8>, Vec<u8>>::new(
             ),
-            listener,
+            listener.clone(),
             Arc::new(futures::lock::Mutex::new(rand_08::rngs::OsRng)),
         )
         .await
@@ -243,6 +250,7 @@ impl BigKeyhiveHandle {
             keyhive: Arc::new(restored),
             contact_card: Arc::new(contact_card),
             keyhive_peer_id,
+            signer,
             #[cfg(test)]
             pinned_prekey_view: Arc::new(std::sync::Mutex::new(None)),
         }))
@@ -1194,6 +1202,31 @@ impl BigKeyhiveHandle {
             }
         }
         Ok(hashes)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn revoke_member_from_group_for_test(
+        &self,
+        member: impl Into<BigKeyhiveAuthority>,
+        group: &BigKeyhiveGroup,
+        protocol: &BigRepoKeyhiveProtocol,
+    ) -> Res<()> {
+        let update = self.keyhive
+            .revoke_member(
+                member.into().into_identifier(),
+                /*retain_all_other_members*/ true,
+                group.id(),
+            )
+            .await
+            .map_err(|error| ferr!("group test revocation failed: {error}"))?;
+        persist_cgka_update_ops(protocol, update.cgka_ops().to_vec()).await?;
+        for revocation in update.revocations() {
+            persist_revocation(protocol, Arc::clone(revocation)).await?;
+        }
+        for redelegation in update.redelegations() {
+            persist_delegation(protocol, Arc::clone(redelegation)).await?;
+        }
+        Ok(())
     }
 
     /// Get an agent by peer ID (after contact card exchange).

@@ -97,6 +97,13 @@ impl BigRepoRpcHandle {
             .unregister(peer_id);
     }
 
+    /// Resolve only an identity authenticated by the native BigRepo connection.
+    /// Consumers must separately check current domain authority; transport keys
+    /// are never a fallback application identity.
+    pub fn peer_for_endpoint(&self, endpoint_id: iroh::EndpointId) -> Option<PeerKey> {
+        self.peer_map.read().expect(ERROR_MUTEX).lookup(endpoint_id)
+    }
+
     pub fn protocol_handler(&self) -> BigRepoRpcProtocolHandler {
         BigRepoRpcProtocolHandler {
             tx: self.rpc_tx.clone(),

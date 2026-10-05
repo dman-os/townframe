@@ -98,6 +98,7 @@ impl SqliteDeltaWalkerStateRepo {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(backend)?;
+
         Ok(self.begin_with_context(transaction))
     }
 

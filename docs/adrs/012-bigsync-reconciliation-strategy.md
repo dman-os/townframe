@@ -33,6 +33,14 @@ which parts it resides in.
   `big_sync_syncable(scope_id, obj_ref, principal_id, access_level)`, consulted by
   `event_permitted` / `is_event_permitted` for delivery.
 
+### Register-based custom CRDT backends
+
+BigSync supplies reconciliation and storage primitives for building domain-specific CRDT backends, not a single application data model. The reusable `big_sync_core::encrypted_register` building block owns signed versions, authenticated causal observations, concurrent writer branches, equivocation evidence, opaque encrypted representations, and deterministic merge. Domain payload meaning, live permission checks, JWK-document resolution, and durable publication are host/backend responsibilities; the core encrypted register has no Keyhive, Automerge, Drawer, task, or SQLite dependency. The register accepts encoded ciphertext and signed framing metadata; application-key encryption stays in the shared pure codec at the host boundary, not in repository key handles.
+
+A causal frontier preserves competing histories without retaining an append-only log of every turn. A domain requiring additional DAG nodes chooses what records to retain; the register does not silently grow a historical archive. Different records may reference different historical JWK versions. Key-reference availability affects local materialization, not deterministic merge or semantic version ordering. Allowed historical references are distinct from a preferred key for future publication.
+
+Relay-compatible backends expose authenticated outer version/causal and transport-retention evidence so a ciphertext-only relay can apply the specified replacement and retirement rules without interpreting application plaintext. The backend must still prove authorization and fencing of every physical allocation surface; a causal observation alone is not permission to delete an independent record or rotate a part. Numeric task-part rotation in ADR 011 is one application of this methodology, not generic tombstone-vacuuming permission. This layering is the approved cutover direction, not a claim that the extracted register or relay retirement gates are already implemented.
+
 ### BigSync is a layer over a KV store for parts and permissions
 
 Object-to-part assignment and object payload storage are **causally unrelated**.
@@ -899,13 +907,15 @@ the authority on what may be removed; it is told. In big_repo, partitions are de
 groups, keyhive tracks the causal relation for object removal with permanent revocations, and a
 removal is therefore derivable from keyhive state rather than from a peer's replay event — which
 is the honest reason removals were modelled this loosely here: the primary consumer of the replay
-stream does not use remote removal events to change content. In triage (ADR 010) the authority is
-the router: a removal traced to a router is respected, and a healed partition re-derives from the
-historical routers, so a removal's validity is a function of which router it came from rather than
-of who still happens to hold the object. That is the "whose membership set wins" rule vacuuming
-was missing; only the plumbing into a part store's pruning decision is, which is why the mechanism
-stays deferred although the authority does not. It also bounds the wire cost honestly: on a
-two-device deployment that syncs everything, per-object authorization is not the question at all,
+stream does not use remote removal events to change content. For triage (ADR 010/011), permanent
+obsolescence is domain-owned processor settlement/supersession, not router authority. The router
+is not the semantic pruning authority. A router signature alone cannot reconstruct removals
+after ticket and tombstone collection, especially on a ciphertext-only relay. The exact
+membership-authority evidence and part-store pruning integration remain to be implemented;
+the domain settlement rule does not by itself establish physical tombstone collection.
+
+ADR 011 now selects backend-owned task-part rotation: deterministic arbitrary-byte successor keys indexed by a numeric generation, with local carry-forward on learning the greatest authenticated generation and garbage-budget triggers rather than calendar periods. This creates new part identities; it does not reinterpret a cursor epoch or change generic symmetric-difference semantics. Offline producers migrate their retained required state on reconnection rather than blocking rotation. The backend must reject retired identities before every membership/cursor allocation surface and preserve relay-only recovery state before purge; until those mechanisms are implemented and exercised, this decision does not authorize generic tombstone vacuuming.
+On a two-device deployment that syncs everything, per-object authorization is not the question at all,
 and on a relay the ratio counters are what say when the local cost is worth acting on.
 Two costs and one divergence, all open. Each page is drawn from a fresh subscription, so a
 deep backlog pays setup per page; the page bound was set to 1024 events because 256 made the
