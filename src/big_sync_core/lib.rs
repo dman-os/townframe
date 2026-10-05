@@ -1491,6 +1491,12 @@ impl BigSyncMachine {
             DecidePeerStrategyErrorDeets::Rpc(_) => {
                 // noop, retry with backoff
             }
+            DecidePeerStrategyErrorDeets::PeerSummary(_) => {
+                // noop, retry with backoff. Unlike an unknown part, the ceiling is a
+                // property of the request the asker itself built - its part set for
+                // this peer - so no retry clears it until the asker chunks that set.
+                // The warning above this match carries the count and the ceiling.
+            }
         }
         let mut parts_retry = Set::new();
 

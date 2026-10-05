@@ -179,7 +179,7 @@ For blob encryption:
 
 The facet value SHOULD remain a valid JWK rather than wrapping it inside a Daybook-specific key structure. The schema requires `kty` and carries every other member verbatim, so a key type Daybook never interprets still round-trips unchanged. Requiring `kty` is not cosmetic: facets are also read by untagged deserialization in some paths, where a variant accepting a bare JSON value would match any payload at all and answer for facets it has no relation to.
 
-For RFC 8188 `aes128gcm`, the JWK secret is used as the Input Keying Material (IKM). Daybook derives the representation salt from `(IKM, plaintext content digest)` (see §9); the AEAD content-encryption key and nonce base are then derived by RFC 8188's own HKDF-SHA256 from `(salt, IKM)`, so Daybook performs no additional key schedule beyond that derivation. Because the salt depends on both the secret and the plaintext digest, reusing one JWK across many cipherBlobs yields a different content-encryption key per representation and does not correlate their ciphertexts — with no per-representation random state to create, store, or coordinate across devices.
+For RFC 8188 `aes128gcm`, the JWK secret is used as the Input Keying Material (IKM). Daybook derives the representation salt from the referenced JWK secret, the plaintext content digest and the persisted framing fields — the record size and the padding-domain octet are hashed in too (see §9); the AEAD content-encryption key and nonce base are then derived by RFC 8188's own HKDF-SHA256 from `(salt, IKM)`, so Daybook performs no additional key schedule beyond that derivation. Because the salt depends on the secret, the plaintext digest and the framing fields, two different representations under one JWK — a different plaintext, or the same plaintext under a different framing — get a different content-encryption key, so their ciphertexts are uncorrelated, with no per-representation random state to create, store, or coordinate across devices. Identical plaintext under the same JWK and the same framing is the deliberate exception that §9's determinism requires: the salt, the key and the ciphertext are byte-identical, so ciphertext equality — and therefore `representation.digest` equality — is observable within one key scope and reveals plaintext equality there. That is a metadata property, not a confidentiality or integrity break: the uncorrelation claimed here holds across different representations, not across identical ones. Separating representations that share a JWK into distinct encryption domains is future work.
 
 cipherBlob's `keyRef` is a general URI. It does not require the key to live in a Daybook facet.
 
@@ -289,14 +289,15 @@ The key is instead resolved through the private cipherBlob `keyRef`.
 Creating a new cipherBlob selects fresh random keying material and fixed encoding parameters. The RFC 8188 salt is not selected: it is derived per representation as
 
 ```text
-salt = BLAKE3-derive-key("daybook.cipherblob.salt.v1", K || P)[..16]
+salt = BLAKE3-derive("daybook.cipherblob.salt.v1",
+    key ‖ P-hash ‖ BE32(rs) ‖ padding-domain-octet)[..16]
 ```
 
-where `K` is the referenced JWK secret and `P` the plaintext content digest.
+where `key` is the referenced JWK secret, `P-hash` is the raw BLAKE3 digest of the plaintext, and `rs` and the padding-domain octet are the two persisted framing fields, encoded byte-for-byte as the list below fixes.
 
 The reason is GCM safety. RFC 8188 derives per-message nonces from the salt, and a `(CEK, nonce)` pair reused over different plaintexts is catastrophic, not an inconvenient collision. Under a shared key, a salt collision could only arise from persisting the same salt for two representations, and no distributed write path in Daybook can enforce binding uniqueness. Deriving the salt from both inputs makes the collision unrepresentable: two different plaintexts under the same key cannot share a salt, on any device, without any coordination.
 
-Determinism for serving is preserved: the derivation is a pure function of `(K, P)`, so re-encrypting a given plaintext with a given key reproduces byte-identical ciphertext (see §10, §12).
+Determinism for serving is preserved: the derivation is a pure function of `(key, P, framing)`, so re-encrypting a given plaintext with a given key reproduces byte-identical ciphertext (see §10, §12).
 
 Because the key is mixed into the derivation, independent encryption domains that mint independent keys still produce uncorrelated ciphertext for identical plaintext (contrast with convergent encryption, below).
 
@@ -315,23 +316,16 @@ Encrypt(
 same ciphertext bytes
 ```
 
-The salt is absent from this list because it is a function of the first two inputs. The reproducible inputs are exactly the values persisted in `encodingParameters` (`recordSize`, `padding`) together with the referenced JWK; reproducing a representation is a pure function of the plaintext P and the referenced key. The facet contents alone are deliberately insufficient, since the cipherBlob does not contain the plaintext digest.
+The salt is absent from this list because it is a function of every input above: the plaintext, the key, and both framing fields. The reproducible inputs are exactly the values persisted in `encodingParameters` (`recordSize`, `padding`) together with the plaintext P and the referenced JWK; reproducing a representation is a pure function of those four. The facet contents alone are deliberately insufficient, since the cipherBlob does not contain the plaintext digest.
 
-The equivalence's inputs are also load-bearing for nonce safety, not just reproducibility, which is why the salt derivation binds the framing. Two representations of the same plaintext under the same JWK with different framings (a different `rs`, or a different padding policy) produce different record plaintexts - where the final delimiter lands, and what zero-padding follows it, both move. RFC 8188 derives every record's `(CEK, nonce)` from the salt alone (§2.2/§2.3), so a shared salt across framings would encrypt differing record contents under the identical key stream. The derivation therefore mixes the framing into the salt:
-
-```text
-salt = BLAKE3-derive("daybook.cipherblob.salt.v2",
-    key ‖ P-hash ‖ BE32(rs) ‖ padding-domain-octet)
-```
-
-with the canonical input encoding fixed byte-exactly:
+The equivalence's inputs are also load-bearing for nonce safety, not just reproducibility, which is why the salt derivation binds the framing. Two representations of the same plaintext under the same JWK with different framings (a different `rs`, or a different padding policy) produce different record plaintexts - where the final delimiter lands, and what zero-padding follows it, both move. RFC 8188 derives every record's `(CEK, nonce)` from the salt alone (§2.2/§2.3), so a shared salt across framings would encrypt differing record contents under the identical key stream. The derivation therefore binds the framing, with the canonical input encoding fixed byte-exactly:
 
 * the raw 32-octet JWK secret;
 * the raw 32-octet BLAKE3 digest of the plaintext - the multihash payload of `representation.digest`, not its multihash-framed spelling;
 * `rs` as a 4-octet big-endian value, the exact width the RFC 8188 header field carries (a value that does not fit is rejected at `encodingParameters` parse time, §3), so no framing can be derived that the header could not name;
 * one octet identifying the padding policy (`Minimal = 1`, `Record = 2`; the values are frozen, and a future policy takes a fresh value rather than reshuffling existing ones, so derivations under pre-existing policies keep reproducing).
 
-The `.v2` context bump is the derivation's version pin: the v1 derivation mixed only the key and the plaintext digest, under-bound w.r.t. framing. No ciphertext persists across the bump (nothing reads a stored salt - §3 takes it from each representation's own header), so the bump re-digests only future re-encryptions. Deliberately absent from the input list: the record sequence number, which participates per-record through RFC 8188's own nonce derivation; and the key-id header octets, which this implementation always encodes at length zero and skips when foreign - if key ids ever become load-bearing, they must join this list, and the context bump would move to `.v3`.
+The context string's `.v1` is the version pin, and it is deliberately *not* a bump: no earlier form of this derivation ever shipped, so there is nothing to migrate from — the concept and the derivation arrive together with this ADR, and `.v1` is frozen from the first release onward. A future change to the input list above moves the context to `.v2`; nothing else does. Deliberately absent from that list: the record sequence number, which participates per-record through RFC 8188's own nonce derivation; and the key-id header octets, which this implementation always encodes at length zero and skips when foreign — if key ids ever become load-bearing they must join the list, and the context moves accordingly.
 
 This is deliberately different from convergent encryption.
 
@@ -454,7 +448,7 @@ Integration with iroh-blobs is implemented on a fork. The intended design, in it
 
 The cipherBlob codec (RFC 8188 `aes128gcm`), the store flows, and the virtual ciphertext provider live in `daybook_core`'s `blobs` module (`daybook_core::blobs::encrypt`). Key storage follows §6: the JWK facet lives in the Keyhive-protected Automerge document, and encrypted-at-rest protection is inherited from the document layer - no key material is ever persisted in the blob store. Key resolution is a `CipherKeySource` over the document layer: ciphertext → cipherBlob facet (matched by `representation.digest`) → `keyRef` → JWK facet → secret. The store flows carry only `ct:`/`pt:` pair tags; key linkage goes through the facet graph. If blob plumbing is later extracted into a dedicated crate, preserve the dependency inversion by which the host application supplies the post-decrypt plaintext sink.
 
-Receiving (download) is resumable: decrypted plaintext records are appended to a temporary spill file as their ciphertext records verify, and an interrupted attempt leaves the spill plus the decryption header facts on disk. The next attempt re-derives the progress watermark from the spill length (plaintext arrives in whole records until the final one) and requests only the missing ciphertext record suffix as a chunk-ranged fetch - the provider serves any byte window. This holds only for the ledger-backed path (`FsDownloadLedger`): the eager-retention import path (`ensure_local_blob_from_active_peers`) carries no ledger and no spill, so an interrupted eager fetch restarts from scratch rather than resuming. Resumability is therefore a property of a store configuration, not of the protocol.
+Receiving (download) is resumable: decrypted plaintext records are appended to a temporary spill file as their ciphertext records verify, and an interrupted attempt leaves the spill plus the decryption header facts on disk. The next attempt re-derives the progress watermark from the spill length (plaintext arrives in whole records until the final one) and requests only the missing ciphertext record suffix as a chunk-ranged fetch - the provider serves any byte window. This holds only for the ledger-backed path (`FsDownloadLedger`): the eager-retention import path — the read-path fallback in `BlobsRepo::ensure_hash_materialized` — carries no ledger and no spill, so an interrupted eager fetch restarts from scratch rather than resuming. Resumability is therefore a property of a store configuration, not of the protocol.
 
 A resumed download does not reuse the received ciphertext outboard fragments. A range-limited transfer only carries the parent fragments that verify the requested suffix, so the fragment set has gaps and cannot be reassembled by concatenation the way a full transfer's pre-order stream can. Instead, once the plaintext is complete, the receiving node re-generates `C` deterministically (the §11 pass) to install its own virtual outboard. This deliberately trades one extra local sequential read of `P` at resume completion against persisting an outboard scratch file. Warning for future investigation: if a resumed download appears to cost a full extra local read of `P` beyond the plaintext import itself, this re-encryption-for-outboard step is why. If it ever matters (very large blobs, frequent resumes), the alternative is to persist received `(TreeNode, pair)` fragments in the download ledger and scatter-merge them into the outboard via `BaoTree::pre_order_offset` at completion.
 
@@ -560,7 +554,7 @@ for each Blob P:
 
 The relay pin is added only after the representation is locally ready to be served, either physically or virtually.
 
-These operations SHOULD be designed to be idempotent so crashes can leave harmless unreferenced JWK/cipherBlob state that can later be resumed or garbage-collected.
+These operations SHOULD be designed to be idempotent so crashes can leave unreferenced JWK/cipherBlob state that can later be resumed. Such state is harmless only when the key is durable *and findable*: a pair whose key was lost cannot be resumed, and neither the release path nor the store GC can collect it (§19), so it is a permanent leak — and with `pt:` it retains the plaintext.
 
 ### 15. Rotation semantics
 
@@ -599,10 +593,11 @@ relay rotation above are realized as the pin worker's release leaf observing
 the facet delta. The rotation task carries the branch's pending delta cursor
 through the scheduler and acknowledges it on durable success, so a rotated
 delta cannot gate the walker's durable prefix forever. Crash windows: a fault
-at entry leaves nothing registered (retry is idempotent and orphan-free); a
 fault after §11 install leaves the new pair rooted-but-unreferenced — the
-declared window, whose eventual collect is GC-era work on the same fork, and
-the retry recovers to the correct end state.
+declared window. The retry recovers to the correct end state only when it can
+find the key document; otherwise the pair is a permanent leak, because neither
+the diff-driven release nor the store GC can observe a pair whose only record is
+its own tags.
 Generate fresh keying material and a fresh encrypted representation:
 
 ```text
@@ -838,15 +833,24 @@ sequence is safe to be crashed in:
 The representation is fully servable before anything points at it, and the
 resolution that lets a reader reach C is written last. A crash before step 5
 leaves the virtual entry and the pair tags unreferenced but inert: nothing
-reads `ct:`/`pt:` tags without a cipherBlob facet naming `representation.digest`
-(pins are derived from facets, below), so no reader error can surface from the
-gap. There is deliberately no rescanning mechanism - no outbox, no boot-time
-orphan sweep. Because the §11 pass is deterministic, the same document's next
-encryption attempt re-derives the identical digests, finds the registered pair,
-and completes the facet write; the retry IS the collector. The one case no
-retry reaches - the document deleted before any retry, leaving a forever-
-unreferenced pair - is left for the release path below to collect, and costs
-nothing until then: an inert pair tag is dead storage, not a correctness hazard.
+There is deliberately no rescanning mechanism - no outbox, no boot-time orphan
+sweep. From the point the cipherBlob facet exists, recovery is by re-derivation:
+the §11 pass is deterministic, so the same document's next encryption attempt
+re-derives the identical digests, finds the registered pair and completes the
+facet write - the retry IS the collector.
+
+Before that point it is not, and the gap is a leak rather than dead storage. The
+pair tags are rooted by `install` while the key that makes `C` usable is written
+later, into a key document whose id is random and whose only durable pointer is
+the cipherBlob facet written after that. A crash in between leaves a pair that
+nothing can release: release is driven by the ciphertext inventory's pin rows, so
+a pair that was never pinned is invisible to that diff, and the store's GC cannot
+help either because its mark phase seeds the live set *from the named tags* - a
+pair whose only record is its own tags is by construction live to it. Since
+`pt:<C>` roots the plaintext, such a pair keeps the plaintext on disk even after
+its document is deleted. Closing this requires the key to be durable *and
+findable* before any tag is rooted (so a retry re-derives the same `C`), plus a
+record written before the root for the cases no retry reaches at all.
 
 A pin is written only after the representation is servable, per §14. That is
 the same ordering constraint expressed from the other side: servability is

@@ -52,10 +52,15 @@ impl MasterKey {
     /// different plaintexts under one key always derive a different salt, so
     /// a nonce collision across messages is unrepresentable either way.
     pub(crate) fn salt_for(&self, p_hash: &Hash, framing: &EncodingParams) -> [u8; SALT_LEN] {
-        let mut hasher = blake3::Hasher::new_derive_key("daybook.cipherblob.salt.v2");
+        let mut hasher = blake3::Hasher::new_derive_key("daybook.cipherblob.salt.v1");
         hasher.update(&self.0);
         hasher.update(p_hash.as_bytes());
-        hasher.update(&framing.record_size.to_be_bytes());
+        // `rs` participates at the exact width the RFC 8188 header carries: four
+        // big-endian octets. `EncodingParams::new` rejects anything above the wire
+        // ceiling, so this narrowing cannot truncate.
+        let rs = u32::try_from(framing.record_size)
+            .expect("record size is validated at construction and fits the header");
+        hasher.update(&rs.to_be_bytes());
         hasher.update([framing.padding.domain_byte()].as_slice());
         let mut salt = [0u8; SALT_LEN];
         salt.copy_from_slice(&hasher.finalize().as_bytes()[..SALT_LEN]);

@@ -304,17 +304,6 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         content_heads: nonempty::NonEmpty<[u8; 32]>,
     ) -> F::Future<'_, eyre::Result<()>>;
 
-    /// The parent peers this document's id reservation records, in
-    /// reservation order — the coparents a finalized Keyhive document will
-    /// be generated with. Empty when there is no reservation (never
-    /// allocated or already finalized), which leaves the caller no
-    /// coparent channel to settle and nothing the projection could be
-    /// racing out from under it.
-    fn reserved_doc_parents(
-        &self,
-        doc_id: crate::DocumentId,
-    ) -> F::Future<'_, eyre::Result<Vec<big_sync_core::PeerKey>>>;
-
     fn complete_document_authority(
         &self,
         doc_id: crate::DocumentId,

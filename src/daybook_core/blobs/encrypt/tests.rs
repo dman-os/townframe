@@ -5,9 +5,18 @@ use super::codec::{
 use super::params::MAX_WIRE_RECORD_SIZE;
 use super::*;
 
+use crate::app::SqlCtx;
+use crate::blobs::pair_roots::PairRoots;
 use crate::interlude::eyre;
 
 use iroh_blobs::{Hash, api::Store};
+
+/// A throwaway root record: these tests exercise the store-level provider, so
+/// the record only has to exist because every rooting path writes it before
+/// the tags it guards. Its own behaviour is covered where `PairRoots` is drained.
+async fn test_pair_roots() -> Res<PairRoots> {
+    PairRoots::boot(SqlCtx::memory().await?).await
+}
 
 // The store's bao leaf size: the granularity its export path reads the
 // ciphertext at. Re-declared next to the serving tests that actually issue
@@ -410,8 +419,15 @@ async fn add_get_roundtrip_and_tags_mem() -> Res<()> {
     // `add_encrypted` installs and registers as one act, and registering
     // is what roots both entries under the named tags.
     let provider = Arc::new(CipherBlobProvider::new());
-    let (c, p_hash) =
-        add_encrypted(&store, &provider, &key, EncodingParams::DEFAULT, &plaintext).await?;
+    let (c, p_hash) = add_encrypted(
+        &store,
+        &provider,
+        &test_pair_roots().await?,
+        &key,
+        EncodingParams::DEFAULT,
+        &plaintext,
+    )
+    .await?;
     let mut keys_map = MapKeySource::default();
     keys_map.0.insert(c, key.clone());
     let keys = keys_map;
@@ -483,6 +499,7 @@ async fn streaming_matches_buffered() -> Res<()> {
         let (c_streamed, _p_hash) = add_encrypted_stream(
             &store,
             &provider,
+            &test_pair_roots().await?,
             &key,
             encoding,
             futures::stream::iter(pieces),
@@ -497,8 +514,15 @@ async fn streaming_matches_buffered() -> Res<()> {
             "streamed digest under {encoding:?}"
         );
         // P must be stored unmodified.
-        let (c_buffered, p_hash) =
-            add_encrypted(&store, &provider, &key, encoding, &plaintext).await?;
+        let (c_buffered, p_hash) = add_encrypted(
+            &store,
+            &provider,
+            &test_pair_roots().await?,
+            &key,
+            encoding,
+            &plaintext,
+        )
+        .await?;
         assert_eq!(c_streamed, c_buffered);
         let stored_p = store.blobs().get_bytes(p_hash).await?;
         assert_eq!(stored_p.as_ref(), &plaintext[..]);
@@ -510,7 +534,15 @@ async fn streaming_matches_buffered() -> Res<()> {
         let store2 = Store::from(store2);
         // A provider serves one store's storage, so store2 needs its own.
         let provider2 = Arc::new(CipherBlobProvider::new());
-        let (c2, p2) = add_encrypted(&store2, &provider2, &key, encoding, &plaintext).await?;
+        let (c2, p2) = add_encrypted(
+            &store2,
+            &provider2,
+            &test_pair_roots().await?,
+            &key,
+            encoding,
+            &plaintext,
+        )
+        .await?;
         assert_eq!(c2, c_streamed, "buffered path must match streamed path");
         assert_eq!(
             Hash::new(&plaintext),
@@ -582,7 +614,7 @@ async fn served_windows_match_full_encryption() -> Res<()> {
 
             let provider = CipherBlobProvider::new();
             provider
-                .register_pair(&store, c, &key, p_hash, encoding)
+                .register_pair(&store, &test_pair_roots().await?, c, &key, p_hash, encoding)
                 .await?;
             let src = provider.reader_for(&c).expect("registered pair is served");
 
@@ -755,7 +787,13 @@ async fn serves_virtual_ciphertext_from_fs_store() -> Res<()> {
             .temp_tag()
             .await?;
         let c = provider
-            .install(&store, &key, p_hash, EncodingParams::DEFAULT)
+            .install(
+                &store,
+                &test_pair_roots().await?,
+                &key,
+                p_hash,
+                EncodingParams::DEFAULT,
+            )
             .await?;
         assert_eq!(c, Hash::new(encrypt_bytes(&key, &plaintext)));
 
@@ -814,7 +852,13 @@ async fn install_rejects_foreign_digest() -> Res<()> {
     let lie = Hash::new(b"different content entirely");
     assert!(
         provider
-            .install(&store, &key, lie, EncodingParams::DEFAULT)
+            .install(
+                &store,
+                &test_pair_roots().await?,
+                &key,
+                lie,
+                EncodingParams::DEFAULT
+            )
             .await
             .is_err(),
         "digest that does not match the stored bytes must abort the install"
@@ -822,7 +866,13 @@ async fn install_rejects_foreign_digest() -> Res<()> {
 
     // The honest digest installs fine and the entry decrypts.
     let c = provider
-        .install(&store, &key, p_hash, EncodingParams::DEFAULT)
+        .install(
+            &store,
+            &test_pair_roots().await?,
+            &key,
+            p_hash,
+            EncodingParams::DEFAULT,
+        )
         .await?;
     provider.register(&virtuals)?;
     let mut keys_map = MapKeySource::default();
@@ -860,7 +910,16 @@ async fn download_then_serve_over_quic() -> Res<()> {
     // Node B serves C virtually; node C GETs it over QUIC. Downloading
     // installs and registers, so B can serve what it just decrypted.
     let provider = Arc::new(CipherBlobProvider::new());
-    let p_hash = download_encrypted(&store_b, &provider, conn, c_hash, keys.as_ref(), None).await?;
+    let p_hash = download_encrypted(
+        &store_b,
+        &provider,
+        &test_pair_roots().await?,
+        conn,
+        c_hash,
+        keys.as_ref(),
+        None,
+    )
+    .await?;
     assert_eq!(
         store_b.blobs().get_bytes(p_hash).await?.as_ref(),
         &plaintext[..],
@@ -972,9 +1031,11 @@ async fn download_interrupted_then_resume() -> Res<()> {
     // Drive the first attempt in place and interrupt it once progress is
     // observable: dropping the pinned future cancels the download mid-
     // transfer, which is exactly the crash we want to survive.
+    let roots = test_pair_roots().await?;
     let mut attempt = Box::pin(download_encrypted(
         &store_b,
         &provider_b,
+        &roots,
         conn,
         c_hash,
         keys2.as_ref(),
@@ -1025,6 +1086,7 @@ async fn download_interrupted_then_resume() -> Res<()> {
     let p_hash = download_encrypted(
         &store_b,
         &provider_b,
+        &test_pair_roots().await?,
         conn,
         c_hash,
         keys.as_ref(),
@@ -1083,8 +1145,16 @@ async fn resume_with_final_record_already_spilled() -> Res<()> {
         .connect(r_a.endpoint().addr(), iroh_blobs::ALPN)
         .await?;
     let provider = Arc::new(CipherBlobProvider::new());
-    let p_hash =
-        download_encrypted(&store_b, &provider, conn, c_hash, &keys_map, Some(&ledger)).await?;
+    let p_hash = download_encrypted(
+        &store_b,
+        &provider,
+        &test_pair_roots().await?,
+        conn,
+        c_hash,
+        &keys_map,
+        Some(&ledger),
+    )
+    .await?;
     assert_eq!(p_hash, Hash::new(&plaintext));
     let got = store_b.blobs().get_bytes(p_hash).await?;
     assert_eq!(got.as_ref(), &plaintext[..]);

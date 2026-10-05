@@ -451,6 +451,12 @@ impl RepoCtx {
         let frontier_part_store = big_repo.frontier_part_store();
         let derived_part_store = big_repo.derived_part_store();
         let authority = crate::authority::ensure(&big_repo, &sql, None).await?;
+        // The pending-allocation boot sweep lives here, at the one site that
+        // births the `BigRepo`: an external temporary allocation is valid only
+        // until the next boot, so the per-construction `ensure` calls
+        // (`rt.rs`, `sync.rs`, `drawer.rs`) must not re-run it mid-session
+        // where it could race a live in-flight allocation.
+        crate::authority::recover_pending_documents(&big_repo, &authority, &sql).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: BigRepo and authority booted");
 
         let (
@@ -503,11 +509,14 @@ impl RepoCtx {
                 ],
             )
             .await?;
-            // The core docs are encrypted like content and plug docs
-            // (ADR 003 §19). The inventories are deliberately NOT: the
-            // encrypted-representation inventory is what a relay reads to
-            // learn which ciphertext digests to hold, so encrypting it
-            // would make the advertisement unreadable to its audience.
+            // Every doc created on this node joins the local encryption-eligibility
+            // set: there is one drawer per node and no way to sort docs into sets yet,
+            // so the worker's candidate set is exactly "the docs this node created".
+            // The three inventories are included for uniformity and it is inert for
+            // them: the encrypted-representation inventory names ciphertext digests
+            // and never plaintexts, and the docs inventory names plaintexts whose own
+            // documents are eligible in their own right. Sponsorship narrows this to
+            // the sponsored set (ADR 005).
             crate::authority::grant_docs_admin(
                 &big_repo,
                 &authority.encrypted_blob_docs,
@@ -515,6 +524,9 @@ impl RepoCtx {
                     doc_app.document_id(),
                     doc_drawer.document_id(),
                     doc_config.document_id(),
+                    core_id.clone(),
+                    docs_id.clone(),
+                    encryption_id.clone(),
                 ],
             )
             .await?;

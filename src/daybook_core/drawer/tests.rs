@@ -3729,3 +3729,84 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
         .ok();
     Ok(())
 }
+
+/// The staging facility's finalize order, pinned at the drawer: the
+/// advertising groups are granted BEFORE the `docs.map` commit that registers
+/// the document, and the pending coparent is revoked only after it. The
+/// injected commit failure pins the mid-window state — grants present, pending
+/// still membered, reservation durable, nothing registered — which the boot
+/// sweep's registration read resolves (registered → replay grants + complete;
+/// unregistered → discard).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_drawer_commit_failure_pins_the_granted_not_registered_window() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    node.repo.fail_next_drawer_doc_commit_for_test();
+    let error = node
+        .repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+        })
+        .await
+        .expect_err("the injected drawer-doc commit failure must fail the add");
+    assert!(
+        error
+            .to_string()
+            .contains("injected drawer-doc commit failure"),
+        "expected the injected failure, got {error:?}"
+    );
+
+    let reserved = node.big_repo.reserved_doc_ids().await?;
+    assert_eq!(
+        reserved.len(),
+        1,
+        "exactly the failed add's allocation stays pending"
+    );
+    let doc_id = reserved.first().expect("checked above").clone();
+    let doc_identity = big_repo::keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &doc_id
+                .to_bytes32()
+                .expect("generated branch identity is 32 bytes"),
+        )?,
+    );
+
+    // The finalize grants landed before the failing commit.
+    let granted_groups = [
+        node.repo.content_docs_group.id().into(),
+        node.repo.encrypted_blob_docs_group.id().into(),
+        node.repo.drawer_group.id().into(),
+    ];
+    for group in &granted_groups {
+        assert!(
+            node.big_repo
+                .keyhive()
+                .agent_access_on(group, doc_identity)
+                .await
+                .is_some(),
+            "group {group} must be granted before the failed registration"
+        );
+    }
+
+    // ... while the pending coparent and the reservation survive, and nothing
+    // registered the document.
+    assert!(
+        node.big_repo
+            .documents_in_group(&node.repo.pending_documents_group)
+            .await
+            .contains(&doc_id),
+        "the pending coparent must still be membered before registration"
+    );
+    assert!(
+        node.repo
+            .get_entry(&DocId::from(doc_id.to_string()))
+            .await?
+            .is_none(),
+        "nothing registered the document"
+    );
+
+    node.stop().await?;
+    Ok(())
+}

@@ -5,9 +5,10 @@ use crate::part_store::{HostPartStore, ReadTarget, validate_replay_targets};
 use big_sync_core::PeerKey;
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
-    LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, ReplayPage,
-    ReplayPageRequest, ReplaySessionId, ReplaySubscriptionPage, ReplaySubscriptionRequest,
-    ReplaySubscriptionResponse, ReplaySubscriptionTarget, RpcError, TargetVerdict,
+    LeafBucketsRequest, ListPartsError, PeerSummaryError, PeerSummaryRequest, PeerSummaryResult,
+    ReplayPage, ReplayPageRequest, ReplaySessionId, ReplaySubscriptionPage,
+    ReplaySubscriptionRequest, ReplaySubscriptionResponse, ReplaySubscriptionTarget, RpcError,
+    TargetVerdict,
 };
 use irpc::{WithChannels, channel, rpc_requests};
 use tokio::sync::mpsc;
@@ -91,7 +92,7 @@ pub trait WireBigSyncRpcClient: Send + Sync {
     async fn peer_summary(
         &self,
         req: ScopedRequest<PeerSummaryRequest>,
-    ) -> Res<BigSyncRpcResult<PeerSummaryResult>>;
+    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, PeerSummaryError>>>;
 
     async fn replay_page(
         &self,
@@ -126,7 +127,7 @@ impl HostBigRpcClient for ScopedRpcClient {
     async fn peer_summary(
         &self,
         req: PeerSummaryRequest,
-    ) -> Res<BigSyncRpcResult<PeerSummaryResult>> {
+    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, PeerSummaryError>>> {
         self.inner
             .peer_summary(ScopedRequest {
                 scope_key: Arc::clone(&self.scope_key),
@@ -185,7 +186,7 @@ pub trait HostBigRpcClient: Send + Sync {
     async fn peer_summary(
         &self,
         req: PeerSummaryRequest,
-    ) -> Res<BigSyncRpcResult<PeerSummaryResult>>;
+    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, PeerSummaryError>>>;
 
     async fn replay_page(&self, req: ReplayPageRequest) -> Res<BigSyncRpcResult<ReplayPage>>;
     async fn replay_subscription(
@@ -207,7 +208,7 @@ pub trait HostBigRpcClient: Send + Sync {
 #[rpc_requests(message = BigSyncRpcMessage)]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum BigSyncIrpc {
-    #[rpc(tx = channel::oneshot::Sender<PeerSummaryResult>)]
+    #[rpc(tx = channel::oneshot::Sender<Result<PeerSummaryResult, PeerSummaryError>>)]
     PeerSummary(ScopedRequest<PeerSummaryRequest>),
     #[rpc(tx = channel::oneshot::Sender<Result<ReplayPage, RpcError>>)]
     ReplayPage(ScopedRequest<ReplayPageRequest>),
@@ -462,7 +463,7 @@ impl WireBigSyncRpcClient for BigSyncRpcClient {
     async fn peer_summary(
         &self,
         req: ScopedRequest<PeerSummaryRequest>,
-    ) -> Res<BigSyncRpcResult<PeerSummaryResult>> {
+    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, PeerSummaryError>>> {
         let response = match self.client.rpc(req).await {
             Ok(response) => response,
             Err(err) => {
@@ -1282,15 +1283,20 @@ impl BigSyncRpcWorker {
                 // instead (a summary request names a peer's newly pending
                 // parts - the number of told inventories - so this ceiling is
                 // orders of magnitude above any honest request).
+                //
+                // Over the ceiling the refusal is the whole request, and it is answered
+                // as an error: an empty answer map would read to the asker as an idle peer.
                 if inner.inner.parts.len() > MAX_SUMMARY_PARTS {
+                    let requested = inner.inner.parts.len();
                     warn!(
-                        requested = inner.inner.parts.len(),
+                        requested,
                         cap = MAX_SUMMARY_PARTS,
                         "peer_summary names too many parts; refusing all"
                     );
-                    tx.send(PeerSummaryResult {
-                        parts: HashMap::new(),
-                    })
+                    tx.send(Err(PeerSummaryError::TooManyParts {
+                        requested,
+                        cap: MAX_SUMMARY_PARTS,
+                    }))
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
@@ -1298,9 +1304,9 @@ impl BigSyncRpcWorker {
                 }
                 let Some(store) = self.stores.get(&inner.scope_key) else {
                     warn!(scope_key = %inner.scope_key, "peer_summary for unknown scope");
-                    tx.send(PeerSummaryResult {
+                    tx.send(Ok(PeerSummaryResult {
                         parts: HashMap::new(),
-                    })
+                    }))
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
@@ -1311,9 +1317,9 @@ impl BigSyncRpcWorker {
                 // store directly. An empty answer refuses every named part.
                 let Some(asker) = authenticated_peer else {
                     warn!(scope_key = %inner.scope_key, "rejecting unauthenticated peer_summary request");
-                    tx.send(PeerSummaryResult {
+                    tx.send(Ok(PeerSummaryResult {
                         parts: HashMap::new(),
-                    })
+                    }))
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
@@ -1341,14 +1347,14 @@ impl BigSyncRpcWorker {
                         if store
                             .read_denied(ReadTarget::Part(part_id.clone()), asker.clone())
                             .await
-                            .unwrap()
+                            .expect(ERROR_IMPOSSIBLE)
                         {
                             continue;
                         }
                         if let Ok(mut parts) = store
                             .summarize_parts(HashSet::from([part_id.clone()]))
                             .await
-                            .unwrap()
+                            .expect(ERROR_IMPOSSIBLE)
                         {
                             let Some(summary) = parts.remove(&part_id) else {
                                 continue;
@@ -1357,7 +1363,7 @@ impl BigSyncRpcWorker {
                             let dirty = store
                                 .part_dirty_count(part_id.clone(), Some(asker.clone()), since)
                                 .await
-                                .unwrap();
+                                .expect(ERROR_IMPOSSIBLE);
                             summaries.insert(part_id, summary.into_strat_summaries(dirty));
                         }
                         // The store reports an unknown part by name - that part is
@@ -1366,7 +1372,7 @@ impl BigSyncRpcWorker {
                     }
                     PeerSummaryResult { parts: summaries }
                 };
-                tx.send(out)
+                tx.send(Ok(out))
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
@@ -2237,7 +2243,7 @@ mod tests {
     async fn summary_answer(
         caller: Caller<'_>,
         req: ScopedRequest<PeerSummaryRequest>,
-    ) -> Res<PeerSummaryResult> {
+    ) -> Res<Result<PeerSummaryResult, PeerSummaryError>> {
         Ok(match caller {
             Caller::Peer(client) => client.peer_summary(req).await??,
             Caller::Unauthenticated(client) => client.rpc(req).await?,
@@ -2285,7 +2291,9 @@ mod tests {
         req: ScopedRequest<PeerSummaryRequest>,
         expected: &PeerSummaryResult,
     ) -> Res<()> {
-        let answer = summary_answer(caller, req).await?;
+        let answer = summary_answer(caller, req).await?.expect(
+            "these arms name a legal part count, so a refusal here is per part, not TooManyParts",
+        );
         match (entitlement, answer) {
             (Entitlement::Permitted, answer) => assert_eq!(
                 &answer, expected,
@@ -2405,6 +2413,58 @@ mod tests {
                 panic!("{caller_label}: no page carried the granted events");
             }
         }
+    }
+
+    /// A request naming more parts than the responder will answer is refused whole, by
+    /// name.
+    ///
+    /// An empty answer map would be indistinguishable from an idle peer: the asker would
+    /// mark every part unknown and re-ask, which is the starvation the per-part answer
+    /// exists to prevent, only silent. The ceiling itself still answers - what is refused
+    /// is the request that exceeds it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_over_ceiling_summary_request_is_refused_by_name() -> Res<()> {
+        let store: Arc<dyn HostPartStore> = Arc::new(MemoryPartStore::new());
+        let (rpc_handle, _rpc_stop) =
+            spawn_big_sync_rpc(HashMap::from([(Arc::from("test-scope"), store)])).await?;
+
+        // The refusal happens before any part is looked up, so none of these parts has to
+        // exist in the store. The ceiling is 64, so one byte indexes them.
+        let part_at = |i: usize| {
+            let mut bytes = [0u8; 32];
+            bytes[0] = i as u8;
+            PartKey(ByteKey::new(bytes))
+        };
+        let request_naming = |count: usize| ScopedRequest {
+            scope_key: Arc::from("test-scope"),
+            inner: PeerSummaryRequest {
+                parts: (0..count).map(part_at).collect(),
+                asker_part_cursors: HashMap::new(),
+            },
+        };
+
+        let at_ceiling = rpc_handle
+            .client
+            .rpc(request_naming(MAX_SUMMARY_PARTS))
+            .await?;
+        assert!(
+            at_ceiling.is_ok(),
+            "a request at the ceiling is answered, not refused whole: {at_ceiling:?}"
+        );
+
+        let over_ceiling = rpc_handle
+            .client
+            .rpc(request_naming(MAX_SUMMARY_PARTS + 1))
+            .await?;
+        assert_eq!(
+            over_ceiling,
+            Err(PeerSummaryError::TooManyParts {
+                requested: MAX_SUMMARY_PARTS + 1,
+                cap: MAX_SUMMARY_PARTS,
+            }),
+            "an over-ceiling request names the count that tripped the ceiling"
+        );
+        Ok(())
     }
 
     /// The peer-facing read arms are authorized in one place, and this table is what

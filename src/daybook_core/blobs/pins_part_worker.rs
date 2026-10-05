@@ -1171,6 +1171,11 @@ mod tests {
             Vec::<PartKey>::new(),
             "a facet key that names no blob became a part store object"
         );
+        // The part store and the pin rows are written by two different workers of
+        // this machine, so the control object landing above says nothing about the
+        // row list below: wait on the record this asserts. A key that is not a blob
+        // digest can never add a row, so waiting on the count is the whole of it.
+        wait_for_pin_row_count(&sql, &doc_id, 1).await?;
         assert_eq!(
             list_hashes_for_doc(&sql, &doc_id).await?,
             vec![control_hash]

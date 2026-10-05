@@ -119,24 +119,6 @@ impl BigKeyhiveAuthority {
     }
 }
 
-/// The sync-plane peer keys of the authorities a Keyhive generation will
-/// address, in the same order, using `[BigKeyhiveAuthority::into_peer]`
-/// exactly as the generation sites do — so a caller that settles its
-/// Keyhive channel with these peers cannot settle a peer the generation
-/// would reject.
-pub(crate) fn authority_peer_keys(
-    parents: &[BigKeyhiveAuthority],
-) -> Res<Vec<big_sync_core::PeerKey>> {
-    Ok(parents
-        .iter()
-        .cloned()
-        .map(BigKeyhiveAuthority::into_peer)
-        .collect::<Res<Vec<_>>>()?
-        .into_iter()
-        .map(|peer| big_sync_core::PeerKey::new(peer.id().to_bytes()))
-        .collect())
-}
-
 type BigKeyhivePeer = keyhive_core::principal::peer::Peer<
     future_form::Sendable,
     keyhive_crypto::signer::memory::MemorySigner,
@@ -778,13 +760,11 @@ impl BigKeyhiveHandle {
             Ok(kh_doc_id) => kh_doc_id,
             Err(err) => {
                 // A coparent's prekey is published by its own hive and only reaches us through
-                // sync. The hub future settled every *connected* coparent's Keyhive channel
-                // before calling in here, so this error now means one of the following, in
-                // that order: the coparent is not connected (nothing of its was pullable), we
-                // never pulled it (no connected peer serves its publication), or it genuinely
-                // has not published a prekey. A retry here would paper over the second and
-                // third; these are logged rather than retried, with the diagnostics below
-                // saying which of the three it is.
+                // sync, so this error means an individual we are about to co-sign with has no
+                // published prekey here yet. Either its publication is still in flight, or we
+                // never pulled it; it is logged rather than retried because a retry would hide
+                // the second case. Say which of the two it is rather than leaving the caller
+                // to guess.
                 if let keyhive_core::principal::document::GenerateDocError::MissingPrekeys(
                     missing,
                 ) = &err
@@ -800,15 +780,12 @@ impl BigKeyhiveHandle {
     }
 
     /// Distinguish the two ways a coparent can have no prekey here, because they have different
-    /// owners. The doc-generation hub futures settle every connected coparent's Keyhive channel
-    /// before generating, so a prekey mid-ingest can no longer land in the failure path: an
-    /// individual that is not registered at all means its own prekey op never reached us (the
-    /// identifier travels in other principals' events — a delegation names the delegate — but
-    /// the node is only ever born from the individual's own op, so a member we learned about
-    /// from someone else's delegation is simply absent, or not connected so it was not
-    /// pullable). A registered individual holding no prekey ops is the other case, and not one
-    /// the wire can produce: `Individual::new` builds the state from the op that registers it,
-    /// so an empty state is something we restored or pruned.
+    /// owners. An individual that is not registered at all means its own prekey op never reached
+    /// us: the identifier travels in other principals' events (a delegation names the delegate),
+    /// but the node is only ever born from the individual's own op, so a member we learned about
+    /// from someone else's delegation is simply absent. A registered individual holding no prekey
+    /// ops is the other case, and not one the wire can produce: `Individual::new` builds the state
+    /// from the op that registers it, so an empty state is something we restored or pruned.
     async fn explain_missing_prekeys(
         &self,
         missing: &keyhive_core::principal::individual::MissingPrekeys,
@@ -820,10 +797,19 @@ impl BigKeyhiveHandle {
         let missing_id = **missing_id;
         let detail = match self.keyhive.get_individual(missing_id).await {
             None => "individual not registered locally: no op of its own was applied".to_owned(),
-            Some(individual) => format!(
-                "individual registered: held prekey ops={}",
-                individual.lock().await.prekey_ops().len()
-            ),
+            Some(individual) => {
+                let locked = individual.lock().await;
+                // TEMP-INSTRUMENTATION(prekey-dive): `pick_prekey` reads the live set, which
+                // `PrekeyState::build` provably cannot empty while the op log is non-empty
+                // (it skips a tombstone that would empty the set). A zero beside a non-zero
+                // op count therefore means this field was deserialized stale, or that the
+                // selection used a different copy of the same individual.
+                format!(
+                    "individual registered: held prekey ops={}, live prekeys={}",
+                    locked.prekey_ops().len(),
+                    locked.prekeys().len(),
+                )
+            }
         };
         tracing::warn!(
             %missing_id,
@@ -832,6 +818,77 @@ impl BigKeyhiveHandle {
             detail = %detail,
             "document creation has no published prekey for a coparent"
         );
+    }
+
+    /// TEMP-INSTRUMENTATION(prekey-dive): which copy of a coparent's individual the prekey
+    /// selection walks, and how it compares with the hive registry's.
+    ///
+    /// A `Peer::Individual` selects from the `Individual` it carries; a group or document
+    /// peer walks the individuals embedded in its members' delegation payloads. Neither is
+    /// necessarily the registry's copy, and only the registry's is what
+    /// [`Self::explain_missing_prekeys`] reports on.
+    async fn probe_coparent_prekeys(&self, coparents: &[BigKeyhivePeer], doc_id: &DocumentId) {
+        let probe_doc_id = match keyhive_doc_id(doc_id.clone()) {
+            Ok(id) => id,
+            Err(err) => {
+                tracing::warn!(%err, "prekey probe: cannot compute the keyhive document id");
+                return;
+            }
+        };
+        for peer in coparents {
+            let selected = peer.pick_individual_prekeys(probe_doc_id).await;
+            match peer {
+                BigKeyhivePeer::Individual(id, indie) => {
+                    let (peer_ops, peer_live) = {
+                        let locked = indie.lock().await;
+                        (locked.prekey_ops().len(), locked.prekeys().len())
+                    };
+                    let registry = self.keyhive.get_individual(*id).await;
+                    let (reg_ops, reg_live, same_arc) = match registry {
+                        Some(registry) => {
+                            let locked = registry.lock().await;
+                            (
+                                locked.prekey_ops().len(),
+                                locked.prekeys().len(),
+                                Arc::ptr_eq(&registry, indie),
+                            )
+                        }
+                        None => (0, 0, false),
+                    };
+                    tracing::warn!(
+                        %id,
+                        peer_ops,
+                        peer_live,
+                        reg_ops,
+                        reg_live,
+                        same_arc,
+                        selection_ok = selected.is_ok(),
+                        selection_err = %selected.as_ref().err().map(ToString::to_string).unwrap_or_default(),
+                        "prekey probe: individual coparent"
+                    );
+                }
+                BigKeyhivePeer::Group(id, group) => {
+                    tracing::warn!(group = %id, "prekey probe: group coparent");
+                    let members = group.lock().await.transitive_members().await;
+                    for (member, (agent, _access)) in members {
+                        if let BigKeyhiveAgent::Individual(member_id, indie) = agent {
+                            let locked = indie.lock().await;
+                            tracing::warn!(
+                                group = %id,
+                                %member,
+                                %member_id,
+                                member_ops = locked.prekey_ops().len(),
+                                member_live = locked.prekeys().len(),
+                                "prekey probe: group member's embedded individual"
+                            );
+                        }
+                    }
+                }
+                BigKeyhivePeer::Document(id, _doc) => {
+                    tracing::warn!(document = %id, "prekey probe: document coparent");
+                }
+            }
+        }
     }
 
     pub(crate) async fn reserve_doc_id(
@@ -946,6 +1003,11 @@ impl BigKeyhiveHandle {
             tail: content_heads.tail.into_iter().map(Vec::from).collect(),
         };
         let coparent_count = coparents.len();
+        // TEMP-INSTRUMENTATION(prekey-dive): the selection reads the individual each
+        // coparent `Peer` carries, and a group/document peer walks the individuals embedded
+        // in its delegation payloads -- neither is necessarily the hive registry's copy.
+        // Keep them so the error branch can say which copy failed to produce a prekey.
+        let coparents_for_probe = coparents.clone();
         let kh_doc_id = match self
             .keyhive
             .generate_doc_with_reserved_signer(signing_key, coparents, initial_content_heads)
@@ -953,10 +1015,8 @@ impl BigKeyhiveHandle {
         {
             Ok(kh_doc_id) => kh_doc_id,
             Err(err) => {
-                // Same reasoning as `create_doc` (whose channel settle this
-                // path's hub future also ran): a coparent prekey that has not
-                // reached us after the channel settle is a publication-or-
-                // reachability question, so record which individual is missing it.
+                // Same reasoning as `create_doc`: a coparent prekey that has not reached us is
+                // a pull/publication question first, so record which individual is missing it.
                 if let keyhive_core::principal::document::GenerateDocError::MissingPrekeys(
                     missing,
                 ) = &err
@@ -964,6 +1024,8 @@ impl BigKeyhiveHandle {
                     self.explain_missing_prekeys(missing, coparent_count, "reserved")
                         .await;
                 }
+                self.probe_coparent_prekeys(&coparents_for_probe, &doc_id)
+                    .await;
                 return Err(ferr!("failed creating keyhive document: {err}"));
             }
         };

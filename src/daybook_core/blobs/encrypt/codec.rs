@@ -90,9 +90,31 @@ impl Cipher {
         masked
     }
 
+    /// Encrypt one record in place: `buf` holds the record content (without the
+    /// delimiter) and grows by the delimiter, `pad_zeros` zero octets and the GCM
+    /// tag. A caller on a hot path reserves `RECORD_OVERHEAD + pad_zeros` up front
+    /// so the tag's append does not reallocate the frame.
+    pub(crate) fn encrypt_record_in_place(
+        &self,
+        seq: u64,
+        last: bool,
+        buf: &mut Vec<u8>,
+        pad_zeros: usize,
+    ) {
+        buf.push(if last {
+            LAST_RECORD_DELIMITER
+        } else {
+            DELIMITER
+        });
+        buf.extend(std::iter::repeat_n(0u8, pad_zeros));
+        self.aead
+            .encrypt_in_place(Nonce::from_slice(&self.nonce(seq)), &[], buf)
+            .expect("aes-gcm encryption cannot fail");
+    }
+
     /// Encrypt one record: `plaintext` is the record content (without the
-    /// delimiter); `pad_zeros` zero octets follow the delimiter so the
-    /// AEAD input reaches the chosen framing length.
+    /// delimiter); `pad_zeros` zero octets follow the delimiter so the AEAD
+    /// input reaches the chosen framing length.
     pub(crate) fn encrypt_record(
         &self,
         seq: u64,
@@ -100,15 +122,7 @@ impl Cipher {
         mut plaintext: Vec<u8>,
         pad_zeros: usize,
     ) -> Vec<u8> {
-        plaintext.push(if last {
-            LAST_RECORD_DELIMITER
-        } else {
-            DELIMITER
-        });
-        plaintext.extend(std::iter::repeat_n(0u8, pad_zeros));
-        self.aead
-            .encrypt_in_place(Nonce::from_slice(&self.nonce(seq)), &[], &mut plaintext)
-            .expect("aes-gcm encryption cannot fail");
+        self.encrypt_record_in_place(seq, last, &mut plaintext, pad_zeros);
         plaintext
     }
 

@@ -40,12 +40,12 @@ impl DrawerRepo {
         }
         let branch_doc_id = self
             .big_repo
-            .allocate_doc(vec![
-                self.pending_documents_group.clone().into(),
-                self.content_docs_group.clone().into(),
-                self.encrypted_blob_docs_group.clone().into(),
-                self.drawer_group.clone().into(),
-            ])
+            // The staging facility: allocation grants ONLY the pending marker
+            // group, whose membership is empty (`authority.rs`), so nothing
+            // between allocation and finalize advertises the document — its
+            // events cannot leave the node. The advertising groups are granted
+            // at finalize, in the commit sequence below.
+            .allocate_doc(vec![self.pending_documents_group.clone().into()])
             .await
             .map_err(|err| eyre::eyre!("{err}"))
             .wrap_err("error allocating doc in big repo")?;
@@ -122,11 +122,7 @@ impl DrawerRepo {
         })()?;
         let handle = self
             .big_repo
-            .finalize_allocated_doc(
-                branch_doc_id.clone(),
-                doc_am,
-                self.pending_documents_group.clone(),
-            )
+            .finalize_allocated_doc(branch_doc_id.clone(), doc_am)
             .await
             .map_err(|err| eyre::eyre!("{err}"))
             .wrap_err("error finalizing allocated doc in big repo")?;
@@ -203,9 +199,44 @@ impl DrawerRepo {
             prepared_docs.push(self.prepare_add_doc(args).await?);
         }
 
+        // Finalize grants — the embedder's commit sequence: the advertising
+        // groups become coparents here, before the docs.map commit that
+        // registers the documents — the same shape `register_existing_doc`
+        // grants at registration. From allocation until this point nothing
+        // advertised the documents: the only membered coparent was the memberless
+        // pending group. `prepare_add_doc` grants the drawer group
+        // unconditionally; a completion (pending revocation) follows the
+        // registration below.
+        for prepared in &prepared_docs {
+            self.big_repo
+                .add_admin_member_to_doc(
+                    prepared.branch_doc_id.clone(),
+                    self.content_docs_group.clone(),
+                )
+                .await?;
+            self.big_repo
+                .add_admin_member_to_doc(
+                    prepared.branch_doc_id.clone(),
+                    self.encrypted_blob_docs_group.clone(),
+                )
+                .await?;
+            self.big_repo
+                .add_admin_member_to_doc(prepared.branch_doc_id.clone(), self.drawer_group.clone())
+                .await?;
+        }
+
         let drawer_heads = self
             .drawer_doc_handle
             .with_document(|doc| {
+                // Test-only: refuse before the commit. Every allocation in this batch has
+                // already created its Keyhive authority and received its finalize
+                // grants, so failing here pins the node in the window between the
+                // grants and the registration write, where the id reservation and the
+                // pending-group authority must still exist.
+                #[cfg(test)]
+                if self.take_fail_next_drawer_doc_commit() {
+                    eyre::bail!("injected drawer-doc commit failure (test only)");
+                }
                 doc.set_actor(self.local_actor_id.clone());
                 let mut tx = doc.transaction();
                 let docs_obj = match tx.get(automerge::ROOT, "docs")? {
@@ -259,8 +290,24 @@ impl DrawerRepo {
             doc_ids.push(prepared.doc_id.clone());
             surelock::key::lock_scope(|key| {
                 let (mut handles, _key) = key.lock(&self.branch_handles);
-                handles.insert(prepared.branch_doc_id, prepared.handle);
+                handles.insert(prepared.branch_doc_id.clone(), prepared.handle);
             });
+            // The `docs.map` entry committed above is what registers the document, so only
+            // now may the allocation's durable records go. Releasing them during finalize
+            // instead would drop them before the entry exists: a crash in between leaves a
+            // document with a Keyhive authority that nothing enumerates. The finalize
+            // grants landed before this commit precisely so the entry never names a
+            // document its readers cannot yet authorize.
+            self.big_repo
+                .complete_allocated_doc(
+                    prepared.branch_doc_id.clone(),
+                    self.pending_documents_group.clone(),
+                    prepared.branch_heads.iter().map(|head| head.0).collect(),
+                )
+                .await
+                .map_err(|err| DrawerError::Other {
+                    inner: eyre::eyre!("{err}"),
+                })?;
         }
         surelock::key::lock_scope(|key| {
             let (mut heads, _key) = key.lock(&self.current_heads);
@@ -707,17 +754,14 @@ impl DrawerRepo {
                 }
             })
             .await?;
-        let mut allocation_parents = vec![
-            self.pending_documents_group.clone().into(),
-            self.content_docs_group.clone().into(),
-            self.encrypted_blob_docs_group.clone().into(),
-        ];
-        if branch_kind == BranchKind::Replicated {
-            allocation_parents.push(self.drawer_group.clone().into());
-        }
+        // The staging facility: allocation grants ONLY the pending marker group,
+        // whose membership is empty (`authority.rs`), so nothing between
+        // allocation and finalize advertises the branch document — its events
+        // cannot leave the node. The advertising groups are granted at finalize,
+        // in the commit sequence below.
         let branch_doc_id = self
             .big_repo
-            .allocate_doc(allocation_parents)
+            .allocate_doc(vec![self.pending_documents_group.clone().into()])
             .await
             .map_err(|err| eyre::eyre!("{err}"))
             .wrap_err("error allocating branch doc in big repo")?;
@@ -797,15 +841,32 @@ impl DrawerRepo {
         })()?;
         let handle = self
             .big_repo
-            .finalize_allocated_doc_from_parent(
-                branch_doc_id.clone(),
-                branch_doc,
-                self.pending_documents_group.clone(),
-                &from_handle,
-            )
+            .finalize_allocated_doc_from_parent(branch_doc_id.clone(), branch_doc, &from_handle)
             .await
             .map_err(|err| eyre::eyre!("{err}"))
             .wrap_err("error finalizing allocated branch doc in big repo")?;
+        // Finalize grants — the embedder's commit sequence: the advertising
+        // groups become coparents here, before any write that names the branch
+        // (the Branches facet below, the partition, the branch-ref registration) —
+        // the same shape `register_existing_doc` grants at registration. From
+        // allocation until this point nothing advertised the branch document: the
+        // only membered coparent was the memberless pending group. A replicated
+        // branch grants the drawer group; a local branch does not. The
+        // pending-group revocation follows the registration below.
+        self.big_repo
+            .add_admin_member_to_doc(branch_doc_id.clone(), self.content_docs_group.clone())
+            .await?;
+        self.big_repo
+            .add_admin_member_to_doc(
+                branch_doc_id.clone(),
+                self.encrypted_blob_docs_group.clone(),
+            )
+            .await?;
+        if branch_kind == BranchKind::Replicated {
+            self.big_repo
+                .add_admin_member_to_doc(branch_doc_id.clone(), self.drawer_group.clone())
+                .await?;
+        }
         if branch_kind == BranchKind::Replicated {
             let mut branches = self
                 .get_doc_with_facets_at_branch(
@@ -918,6 +979,22 @@ impl DrawerRepo {
             });
             drawer_heads
         };
+        // The branch ref is durable in the drawer document by now — `upsert_local_branch_ref`
+        // for a local branch, the entry update for a replicated one — so the allocation's
+        // durable records may go. Never earlier: a crash before this point has to leave a
+        // pending allocation that recovery can still find. The finalize grants landed
+        // before every write naming the branch, so nothing ever points at a branch its
+        // readers cannot yet authorize.
+        self.big_repo
+            .complete_allocated_doc(
+                branch_doc_id.clone(),
+                self.pending_documents_group.clone(),
+                heads.iter().map(|head| head.0).collect(),
+            )
+            .await
+            .map_err(|err| DrawerError::Other {
+                inner: eyre::eyre!("{err}"),
+            })?;
         surelock::key::lock_scope(|key| {
             let (mut handles, _key) = key.lock(&self.branch_handles);
             handles.insert(branch_doc_id, handle);

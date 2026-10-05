@@ -17,6 +17,7 @@ async fn test_ctx(ctx: &DaybookTestContext, group: Option<BigKeyhiveGroup>) -> R
     Ok(Arc::new(Ctx {
         drawer_repo: Arc::clone(&ctx.drawer_repo),
         sql: ctx.rt.rcx.sql.clone(),
+        pair_roots: PairRoots::boot(ctx.rt.rcx.sql.clone()).await?,
         store: ctx.rt.blobs_repo.iroh_store(),
         provider: ctx.rt.blobs_repo.cipher_provider(),
         domain_id: domain_facet_id(&group),
@@ -562,6 +563,7 @@ async fn released_inventory_pin_with_absent_plaintext_is_not_resurrected_by_the_
         Arc::new(Ctx {
             drawer_repo: Arc::clone(&ctx.drawer_repo),
             sql: ctx.rt.rcx.sql.clone(),
+            pair_roots: PairRoots::boot(ctx.rt.rcx.sql.clone()).await?,
             store: fresh_repo.iroh_store(),
             provider: fresh_repo.cipher_provider(),
             domain_id: worker.domain_id.clone(),

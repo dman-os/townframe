@@ -43,52 +43,58 @@ use crate::stores::VersionTag;
 use automerge::ReadDoc;
 use daybook_types::doc::{ChangeHashSet, DocId};
 
+/// Create the local-branch SQL tables if the db predates them. Idempotent;
+/// also called by the boot sweep's registration read, which can run before
+/// a drawer boot ever created the schema.
+pub(crate) async fn ensure_local_branch_schema(sql: &SqlCtx) -> Res<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS drawer_local_branches (
+            doc_id TEXT NOT NULL,
+            branch_path TEXT NOT NULL,
+            branch_doc_id BLOB NOT NULL,
+            vtag_version TEXT NOT NULL,
+            vtag_actor_id TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (doc_id, branch_path)
+        ) STRICT
+        "#,
+    )
+    .execute(&sql.write_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS drawer_local_branches_deleted (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id TEXT NOT NULL,
+            branch_path TEXT NOT NULL,
+            branch_doc_id BLOB NOT NULL,
+            branch_heads_json TEXT NOT NULL,
+            vtag_version TEXT NOT NULL,
+            vtag_actor_id TEXT NOT NULL,
+            deleted_at INTEGER NOT NULL
+        ) STRICT
+        "#,
+    )
+    .execute(&sql.write_pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_doc_id ON drawer_local_branches(doc_id)",
+    )
+    .execute(&sql.write_pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_deleted_doc_path ON drawer_local_branches_deleted(doc_id, branch_path, deleted_at DESC)",
+    )
+    .execute(&sql.write_pool)
+    .await?;
+    Ok(())
+}
+
 impl DrawerRepo {
     pub(super) async fn ensure_local_branch_schema(&self) -> Res<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS drawer_local_branches (
-                doc_id TEXT NOT NULL,
-                branch_path TEXT NOT NULL,
-                branch_doc_id BLOB NOT NULL,
-                vtag_version TEXT NOT NULL,
-                vtag_actor_id TEXT NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY (doc_id, branch_path)
-            ) STRICT
-            "#,
-        )
-        .execute(&self.meta_store_sql.write_pool)
-        .await?;
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS drawer_local_branches_deleted (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                doc_id TEXT NOT NULL,
-                branch_path TEXT NOT NULL,
-                branch_doc_id BLOB NOT NULL,
-                branch_heads_json TEXT NOT NULL,
-                vtag_version TEXT NOT NULL,
-                vtag_actor_id TEXT NOT NULL,
-                deleted_at INTEGER NOT NULL
-            ) STRICT
-            "#,
-        )
-        .execute(&self.meta_store_sql.write_pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_doc_id ON drawer_local_branches(doc_id)",
-        )
-        .execute(&self.meta_store_sql.write_pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_deleted_doc_path ON drawer_local_branches_deleted(doc_id, branch_path, deleted_at DESC)",
-        )
-        .execute(&self.meta_store_sql.write_pool)
-        .await?;
-        Ok(())
+        ensure_local_branch_schema(&self.meta_store_sql).await
     }
-
     pub(super) async fn upsert_local_branch_ref(
         &self,
         doc_id: &DocId,
@@ -382,4 +388,90 @@ impl DrawerRepo {
             .await?;
         Ok(entry)
     }
+}
+
+/// The registration shape of a pending allocation as the drawer's durable
+/// surfaces record it — the surface is the kind: content docs are `docs.map`
+/// keys, replicated branches ride an entry's branch refs, and a local branch
+/// ref never travels on the drawer document at all (it lives in the
+/// `drawer_local_branches` SQL table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegisteredAllocationShape {
+    ContentDoc,
+    ReplicatedBranch,
+    LocalBranch,
+}
+
+/// Read every pending allocation's registration off the drawer's durable
+/// surfaces in one pass: one read of the drawer document's `docs.map` plus one
+/// query over the local-branch SQL (whose schema may not exist yet — the sweep
+/// can run before a drawer boot created it).
+///
+/// Returns `Ok(None)` when the drawer document is not readable at this boot
+/// stage (missing, or still pending materialization on a fresh clone): the
+/// boot sweep then keeps every reservation instead of classifying, since a
+/// registered-but-unreadable allocation must never be discarded.
+pub(crate) async fn registered_allocation_shapes(
+    sql: &SqlCtx,
+    big_repo: &big_repo::SharedBigRepo,
+    drawer_doc_id: &big_repo::DocumentId,
+) -> Res<Option<HashMap<big_repo::DocumentId, RegisteredAllocationShape>>> {
+    let big_repo::DocLookup::Ready(drawer_handle) = big_repo.get_doc(drawer_doc_id).await? else {
+        tracing::warn!(
+            %drawer_doc_id,
+            "pending allocations keep their boot sweep: the drawer document is not readable here"
+        );
+        return Ok(None);
+    };
+
+    let mut shapes = HashMap::new();
+    drawer_handle
+        .with_document_read(|doc| {
+            let map_id = match doc.get(automerge::ROOT, "docs")? {
+                Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => {
+                    match doc.get(&docs_id, "map")? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => map_id,
+                        _ => eyre::bail!("invalid drawer shape"),
+                    }
+                }
+                None => return eyre::Ok(()),
+                _ => eyre::bail!("invalid drawer shape"),
+            };
+            for item in doc.map_range(&map_id, ..) {
+                let doc_id = DocId::from(item.key.clone());
+                let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, item.key)?;
+                let Some(entry) = entry else {
+                    continue;
+                };
+                let doc_id = doc_id
+                    .to_string()
+                    .parse::<big_repo::DocumentId>()
+                    .map_err(|err| ferr!("drawer docs.map key is not a document id: {err}"))?;
+                for branch_ref in entry.branches.values() {
+                    shapes.insert(
+                        branch_ref.branch_doc_id.clone(),
+                        RegisteredAllocationShape::ReplicatedBranch,
+                    );
+                }
+                shapes.insert(doc_id, RegisteredAllocationShape::ContentDoc);
+            }
+            eyre::Ok(())
+        })
+        .await?;
+
+    ensure_local_branch_schema(sql).await?;
+    let local_rows: Vec<(Vec<u8>,)> =
+        sqlx::query_as("SELECT branch_doc_id FROM drawer_local_branches")
+            .fetch_all(&sql.write_pool)
+            .await?;
+    for (branch_doc_id,) in local_rows {
+        let branch_doc_id: [u8; 32] = branch_doc_id
+            .try_into()
+            .map_err(|err| ferr!("drawer local branch doc id is not 32 bytes: {err:?}"))?;
+        shapes.insert(
+            big_repo::DocumentId::new(branch_doc_id),
+            RegisteredAllocationShape::LocalBranch,
+        );
+    }
+    Ok(Some(shapes))
 }

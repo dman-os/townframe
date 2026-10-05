@@ -1269,27 +1269,6 @@ where
         })
     }
 
-    fn reserved_doc_parents(
-        &self,
-        doc_id: DocumentId,
-    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<Vec<big_sync_core::PeerKey>>> {
-        Sendable::from_future(async move {
-            let Some(reservation) = self
-                .keyhive_storage
-                .load_doc_reservation(doc_id.to_bytes32()?)
-                .await
-                .map_err(|err| ferr!("failed loading document id reservation: {err}"))?
-            else {
-                return Ok(Vec::new());
-            };
-            Ok(reservation
-                .parents
-                .into_iter()
-                .map(big_sync_core::PeerKey::new)
-                .collect())
-        })
-    }
-
     fn complete_document_authority(
         &self,
         doc_id: DocumentId,

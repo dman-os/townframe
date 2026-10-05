@@ -1148,31 +1148,6 @@ impl IrohSyncRepo {
         Ok(endpoint_addr)
     }
 
-    pub async fn ensure_local_blob_from_active_peers(
-        &self,
-        blob_id: crate::blobs::BlobId,
-    ) -> Res<()> {
-        let peers = self
-            .active_peers
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for peer_id in peers {
-            if let Err(err) = self
-                .blobs_sync_backend
-                .ensure_local_blob(peer_id.clone(), blob_id.clone())
-                .await
-            {
-                tracing::warn!(%peer_id, %blob_id, ?err, "failed to download missing blob from active peer");
-            } else {
-                return Ok(());
-            }
-        }
-        eyre::bail!("unable to download missing blob {blob_id} from any active peer");
-    }
-
     pub async fn connect_known_devices_once(&self) -> Res<()> {
         self.ensure_repo_live()?;
         #[cfg(not(test))]

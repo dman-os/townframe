@@ -255,13 +255,22 @@ fn master_key_from_jwk(jwk: &Jwk, ct_hash: &Hash) -> Res<MasterKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::SqlCtx;
     use crate::blobs::encrypt::{
         CONTENT_ENCODING_AES128GCM, CipherBlobProvider, Padding, add_encrypted, get_decrypted,
     };
+    use crate::blobs::pair_roots::PairRoots;
     use crate::test_support::{stage_key_doc, test_cx, write_jwk_facet};
     use daybook_types::doc::{AddDocArgs, BranchPath, ChangeHashSet, DocPatch, Representation};
     use iroh_blobs::api::{Store, proto::BlobStatus};
     use iroh_blobs::store::mem::MemStore;
+
+    /// A throwaway root record: these tests exercise the store-level provider, so
+    /// the record only has to exist because every rooting path writes it before
+    /// the tags it guards.
+    async fn test_pair_roots() -> Res<PairRoots> {
+        PairRoots::boot(SqlCtx::memory().await?).await
+    }
 
     /// ADR 003 §3 makes the multihash spelling canonical for a facet digest.
     fn multihash_digest(c: Hash) -> String {
@@ -367,7 +376,15 @@ mod tests {
 
         let small = EncodingParams::new(1024, Padding::Record)?;
         let plain_a = b"key source round trip at a non-default record size".to_vec();
-        let (c_a, _) = add_encrypted(&store, &provider, &key, small, &plain_a).await?;
+        let (c_a, _) = add_encrypted(
+            &store,
+            &provider,
+            &test_pair_roots().await?,
+            &key,
+            small,
+            &plain_a,
+        )
+        .await?;
         provider.register(&virtuals)?;
         stage_cipherblob(
             &drawer,
@@ -396,7 +413,15 @@ mod tests {
         // Minimal padding, under the plain id spelling of the same 32 octets.
         let minimal = EncodingParams::new(EncodingParams::DEFAULT.record_size, Padding::Minimal)?;
         let plain_b = b"a short payload, so the final record is the short one".to_vec();
-        let (c_b, _) = add_encrypted(&store, &provider, &key, minimal, &plain_b).await?;
+        let (c_b, _) = add_encrypted(
+            &store,
+            &provider,
+            &test_pair_roots().await?,
+            &key,
+            minimal,
+            &plain_b,
+        )
+        .await?;
         stage_cipherblob(
             &drawer,
             &doc_id,
@@ -444,7 +469,15 @@ mod tests {
 
         let plaintext = b"encrypted under the key the facet pinned".to_vec();
         let encoding = EncodingParams::DEFAULT;
-        let (c, _) = add_encrypted(&store, &provider, &key_a, encoding, &plaintext).await?;
+        let (c, _) = add_encrypted(
+            &store,
+            &provider,
+            &test_pair_roots().await?,
+            &key_a,
+            encoding,
+            &plaintext,
+        )
+        .await?;
         provider.register(&virtuals)?;
         let pinned_doc = stage_content_doc(&drawer).await?;
         stage_cipherblob(

@@ -217,7 +217,8 @@ impl crate::rpc::WireBigSyncRpcClient for OfflineGatedRpcClient {
     async fn peer_summary(
         &self,
         req: crate::rpc::ScopedRequest<PeerSummaryRequest>,
-    ) -> Res<BigSyncRpcResult<PeerSummaryResult>> {
+    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, big_sync_core::rpc::PeerSummaryError>>>
+    {
         if !self.online() {
             return Ok(Err(big_sync_core::rpc::RpcError::TransportError));
         }

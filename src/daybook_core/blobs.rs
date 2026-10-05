@@ -15,6 +15,7 @@ pub mod permission_writer;
 pub(crate) use permission_writer::spawn_blob_inventory_permission_writer;
 pub mod encryption_worker;
 pub mod key_source;
+pub mod pair_roots;
 pub mod pin_worker;
 pub mod pins_part_worker;
 pub mod sync;

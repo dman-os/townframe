@@ -5,6 +5,7 @@ use daybook_types::doc::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::blobs::pair_roots::{PairRoots, UnresolvedPair};
 use crate::drawer::{DrawerRepo, MaterializationWake};
 use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
@@ -70,6 +71,9 @@ pub(crate) async fn spawn_blob_pin_worker(args: BlobPinWorkerArgs) -> Res<RepoSt
         parent_cancel_token,
     } = args;
     Ctx::ensure_schema(&sql).await?;
+    // The pair-root ledger, booted before the machines so the drain below can
+    // resolve pairs an earlier run left rooted (ADR 003 §19).
+    let pair_roots = PairRoots::boot(sql.clone()).await?;
 
     let core_doc_id = drawer_repo
         .resolve_doc_id_for_branch_doc_id(core_inventory_doc_id)
@@ -88,6 +92,7 @@ pub(crate) async fn spawn_blob_pin_worker(args: BlobPinWorkerArgs) -> Res<RepoSt
         encryption_inventory_doc_id: encryption_doc_id,
         store: blobs_repo.iroh_store(),
         inventory_lock: Arc::new(tokio::sync::Mutex::new(())),
+        pair_roots,
     });
     let event_store = Arc::new(crate::plugs::PlugsConfigEventStore::new(
         Arc::clone(&facet_set_store),
@@ -95,6 +100,9 @@ pub(crate) async fn spawn_blob_pin_worker(args: BlobPinWorkerArgs) -> Res<RepoSt
         &plugs_repo,
     ));
     let cancel_token = parent_cancel_token.child_token();
+    // Resolve pairs a crash left rooted but unclaimed BEFORE the machines run:
+    // they are what derives pins, and the drain has to read their state as of boot.
+    ctx.drain_pair_roots().await?;
     // One supervisor joins both machines; a panic in either takes the
     // task down per the task-panic-handler convention.
     let worker_handle = tokio::spawn({
@@ -136,9 +144,28 @@ struct Ctx {
     /// are the only GC roots, so releasing a pair is a store write, not just an
     /// inventory edit.
     store: iroh_blobs::api::Store,
+    /// The durable root record for pairs: rows written before their tags and
+    /// retired once a durable facet or a ciphertext pin claims the pair. It is the
+    /// only trace of a pair the encryption inventory never recorded, so
+    /// [`Ctx::drain_pair_roots`] reads it before the machines start, and every pin
+    /// write retires the rows it owns.
+    pair_roots: PairRoots,
     /// One lock shared by both machines: plug-pin upserts and facet-driven
     /// inventory diffs must not interleave.
     inventory_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// What the boot drain decided for one pair-root row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DrainAction {
+    /// Retire the row: nothing is rooted, or the pin machinery owns the pair.
+    ClearRow,
+    /// Leave the row: the facet machine is about to derive the pair's pin.
+    Keep,
+    /// Drop the pair's tags and its row: nothing will ever claim the pair.
+    Release,
+    /// Leave the row and warn: the facets cannot be checked, so no release.
+    KeepUnprovenanced,
 }
 
 /// Private machine owner. The context is shared with task futures, while each
@@ -551,6 +578,144 @@ impl Ctx {
         Ok(())
     }
 
+    /// What the boot drain decides for one ledger row.
+    ///
+    /// A pure function because the decision, not the plumbing, is what has to be
+    /// right: releasing a pair a document still names unroots a live
+    /// representation, while leaving a pair nothing names strands its ciphertext
+    /// and its plaintext forever.
+    fn drain_action(rooted: bool, pin_recorded: bool, facet_names: Option<bool>) -> DrainAction {
+        if !rooted {
+            // Nothing is rooted, so there is nothing to release and nothing to
+            // keep alive: only the row is stale.
+            return DrainAction::ClearRow;
+        }
+        if pin_recorded {
+            // The pin machinery owns the pair now, and it is what releases a pair
+            // whose facets go away. The row has done its job.
+            return DrainAction::ClearRow;
+        }
+        match facet_names {
+            // A durable facet still names the pair, so the facet machine will
+            // derive its pin: the pair is live and has to stay rooted.
+            Some(true) => DrainAction::Keep,
+            // Nothing names it and nothing pinned it, so nothing ever will: this
+            // is exactly the window the ledger exists for.
+            Some(false) => DrainAction::Release,
+            // Without provenance the facets cannot be checked, and releasing would
+            // be a guess. Leave the row: a row is visible (and logged), whereas a
+            // dropped tag is a silent serve failure.
+            None => DrainAction::KeepUnprovenanced,
+        }
+    }
+
+    /// Resolve pairs a crash left rooted but unclaimed.
+    ///
+    /// The ciphertext inventory is the only record a pair exists, and it is built
+    /// from facets, so a pair whose facet write never landed is invisible to the
+    /// release path and its tags become permanent (ADR 003 §19). Every row here was
+    /// written before those tags, which makes this the one place that can see such
+    /// a pair; it runs at boot, before the machines start writing pins.
+    ///
+    /// The cost is one query on a clean boot: rows only exist between a pair's
+    /// tags and the pin that claims it.
+    async fn drain_pair_roots(&self) -> Res<()> {
+        let unresolved: Vec<UnresolvedPair> = self.pair_roots.unresolved().await?;
+        if unresolved.is_empty() {
+            return Ok(());
+        }
+        // Spelling is not stable between the two planes: pin rows are keyed by
+        // whatever digest the facet supplied, the ledger by canonical hex. Compare
+        // by blob id, leaning on the pin worker's own check that only parseable
+        // digests reach the table.
+        let pinned: HashSet<crate::blobs::BlobId> = self
+            .desired_cipher_pins()
+            .await?
+            .keys()
+            .filter_map(|digest| crate::blobs::digest_str_to_blob_id_lenient(digest))
+            .collect();
+        for pair in unresolved {
+            let rooted =
+                crate::blobs::encrypt::has_pair_tags(&self.store, pair.cipher_hash).await?;
+            let blob_id = crate::blobs::BlobId::new(*pair.cipher_hash.as_bytes());
+            let pin_recorded = pinned.contains(&blob_id);
+            let facet_names = match &pair.claimed_by {
+                Some((doc_id, branch_path)) => Some(
+                    Self::branch_facets_name(
+                        &self.drawer_repo,
+                        doc_id,
+                        daybook_types::doc::BranchPath::new(branch_path),
+                        &blob_id,
+                    )
+                    .await?,
+                ),
+                None => None,
+            };
+            match Self::drain_action(rooted, pin_recorded, facet_names) {
+                DrainAction::ClearRow => {
+                    self.pair_roots.clear(pair.cipher_hash).await?;
+                }
+                DrainAction::Keep => {}
+                DrainAction::Release => {
+                    tracing::warn!(
+                        cipher = %pair.cipher_hash,
+                        "releasing a pair an earlier run rooted but no facet or pin ever \
+                         claimed: its tags were the only roots (ADR 003 §19)"
+                    );
+                    crate::blobs::encrypt::drop_pair_tags(&self.store, pair.cipher_hash).await?;
+                    self.pair_roots.clear(pair.cipher_hash).await?;
+                }
+                DrainAction::KeepUnprovenanced => {
+                    tracing::warn!(
+                        cipher = %pair.cipher_hash,
+                        "a rooted pair has no recorded provenance, so its facets cannot be \
+                         checked: leaving its tags rooted rather than risking a live pair"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether any facet of `doc_id`'s `branch_path` names `blob_id` as its
+    /// ciphertext representation.
+    ///
+    /// A `cipherBlob` facet's key id is `{domain}/{facet}`, so the representation
+    /// digest lives in the facet *value* and no tag+id index can answer this: the
+    /// branch's facets are read and their digests compared. `None` heads means the
+    /// branch's current heads, which is what the facet machine derives pins from.
+    async fn branch_facets_name(
+        drawer: &DrawerRepo,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+        blob_id: &crate::blobs::BlobId,
+    ) -> Res<bool> {
+        let Some(doc) = drawer
+            .get_doc_with_facets_at_branch(doc_id, branch_path, None)
+            .await?
+        else {
+            // No such branch (or no such document): it names nothing, which is a
+            // real answer rather than an unknown.
+            return Ok(false);
+        };
+        for (key, raw) in &doc.facets {
+            if key.tag != WellKnownFacetTag::CipherBlob.into() {
+                continue;
+            }
+            let WellKnownFacet::CipherBlob(cipher) =
+                WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::CipherBlob)?
+            else {
+                unreachable!("cipherBlob facet decoded to another well-known variant");
+            };
+            if crate::blobs::digest_str_to_blob_id_lenient(&cipher.representation.digest).as_ref()
+                == Some(blob_id)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Apply one branch's derived pin sets: replace its rows, then reconcile
     /// both inventories from the global desired sets.
     ///
@@ -580,6 +745,7 @@ impl Ctx {
             return Ok(());
         }
         let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut newly_pinned = Vec::new();
         for branch in branches {
             sqlx::query("DELETE FROM blob_pin_doc_state WHERE doc_id = ? AND branch_id = ?")
                 .bind(&branch.doc_id)
@@ -615,9 +781,28 @@ impl Ctx {
                         .push_bind(*length);
                 });
                 query.build().execute(&mut *tx).await?;
+                if hash_column == "cipher_hash" {
+                    // Freshly written ciphertext pins retire their ledger rows: the
+                    // pin state is now the durable record that keeps this pair (and
+                    // its diff-driven release) visible.
+                    for (hash, _) in &rows {
+                        let hash: &str = hash;
+                        let Some(blob_id) = crate::blobs::digest_str_to_blob_id_lenient(hash)
+                        else {
+                            eyre::bail!("pinned ciphertext {hash} is not a blob digest");
+                        };
+                        newly_pinned.push(crate::blobs::blob_id_to_iroh_hash(blob_id));
+                    }
+                }
             }
         }
         tx.commit().await?;
+        // Retiring rows is a plain delete on the ledger, outside the pin write's
+        // transaction. It runs after the commit, so a crash in between leaves the
+        // row to the boot drain, which resolves the same pair from the same facts.
+        for c_hash in newly_pinned {
+            self.pair_roots.clear(c_hash).await?;
+        }
         Ok(())
     }
 
@@ -1794,6 +1979,8 @@ mod tests {
             docs_inventory_doc_id: docs_inventory_doc_id.clone(),
             encryption_inventory_doc_id,
             store: test_context.rt.blobs_repo.iroh_store(),
+            pair_roots: crate::blobs::pair_roots::PairRoots::boot(test_context.rt.rcx.sql.clone())
+                .await?,
             inventory_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         let watched_doc_id = core_inventory_doc_id.clone();
@@ -1970,6 +2157,200 @@ mod tests {
             durable_row,
             "a restart of the walker resumes at its own progress row"
         );
+        Ok(())
+    }
+
+    /// The drain's decision table, without a database or a blob store.
+    ///
+    /// The decision is what has to be right: releasing a pair a document still
+    /// names unroots a live representation, while leaving a pair nothing names
+    /// strands its ciphertext and the plaintext serving it (ADR 003 §19).
+    #[test]
+    fn test_pair_root_drain_decision_table() {
+        use DrainAction::*;
+        // Nothing rooted: only the row is stale.
+        assert_eq!(Ctx::drain_action(false, false, None), ClearRow);
+        assert_eq!(Ctx::drain_action(false, true, Some(true)), ClearRow);
+        // Rooted and pinned: the pin machinery owns the pair and its release.
+        assert_eq!(Ctx::drain_action(true, true, None), ClearRow);
+        assert_eq!(Ctx::drain_action(true, true, Some(false)), ClearRow);
+        // Rooted, unpinned, and a durable facet names it: the machine will pin it.
+        assert_eq!(Ctx::drain_action(true, false, Some(true)), Keep);
+        // Rooted, unpinned, and nothing names it: the crash window.
+        assert_eq!(Ctx::drain_action(true, false, Some(false)), Release);
+        // Rooted, unpinned, and uncheckable: never release.
+        assert_eq!(Ctx::drain_action(true, false, None), KeepUnprovenanced);
+    }
+
+    /// The boot drain resolves exactly the pairs a crash left rooted and unclaimed.
+    ///
+    /// Both pairs here have the shape a crash between the tags and the facet write
+    /// leaves: rooted, and invisible to the release path, which is built from
+    /// facets. One carries provenance to a document that names no representation,
+    /// so nothing will ever claim it and the tags must go; one carries no
+    /// provenance at all, so the drain cannot check it and must leave the pair
+    /// rooted (ADR 003 §19).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_pair_root_drain_releases_only_unclaimed_pairs() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let sql = test_context.rt.rcx.sql.clone();
+        let store = test_context.rt.blobs_repo.iroh_store();
+        let roots = crate::blobs::pair_roots::PairRoots::boot(sql.clone()).await?;
+
+        let plaintext = test_context
+            .rt
+            .blobs_repo
+            .put(b"unclaimed plaintext")
+            .await?;
+        let unprovenanced = test_context
+            .rt
+            .blobs_repo
+            .put(b"pair with no provenance")
+            .await?;
+        let checked = test_context.rt.blobs_repo.put(b"pair to check").await?;
+        root_pair_tags(&store, unprovenanced.clone(), plaintext.clone()).await?;
+        root_pair_tags(&store, checked.clone(), plaintext).await?;
+        roots
+            .record_before_root(crate::blobs::blob_id_to_iroh_hash(unprovenanced.clone()))
+            .await?;
+        roots
+            .record_before_root(crate::blobs::blob_id_to_iroh_hash(checked.clone()))
+            .await?;
+
+        // A document that exists and names no representation. Provenance lets the
+        // drain read it, and reading it is what answers "nothing claims this pair".
+        let doc_id = test_context
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Note),
+                    FacetRaw::from(WellKnownFacet::Note("names no representation".into())),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+        roots
+            .attach_provenance(
+                crate::blobs::blob_id_to_iroh_hash(checked.clone()),
+                &doc_id,
+                "main",
+            )
+            .await?;
+
+        let _pin_worker = spawn_pin_worker_for_test(&test_context).await?;
+
+        wait_for_pair_tags_absent(&store, &checked).await?;
+        assert!(
+            pair_tags_present(&store, &unprovenanced).await?,
+            "a pair the drain cannot check must stay rooted rather than be released blind"
+        );
+        let unresolved = roots.unresolved().await?;
+        assert_eq!(
+            unresolved.len(),
+            1,
+            "the drain retires the row it resolves and leaves the one it cannot"
+        );
+        assert_eq!(
+            unresolved[0].cipher_hash,
+            crate::blobs::blob_id_to_iroh_hash(unprovenanced)
+        );
+
+        test_context.stop().await?;
+        Ok(())
+    }
+
+    /// A pair a durable facet still names is live, even with no pin derived yet.
+    ///
+    /// This is the window the ledger must *not* release in: the facet exists, so the
+    /// facet machine is about to derive the pin, and dropping the tags now would
+    /// unroot a representation a document serves. The pin write then retires the
+    /// row without touching the tags (ADR 003 §19).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_pair_root_drain_keeps_a_pair_a_facet_still_names() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let drawer = Arc::clone(&test_context.drawer_repo);
+        let sql = test_context.rt.rcx.sql.clone();
+        let store = test_context.rt.blobs_repo.iroh_store();
+        let roots = crate::blobs::pair_roots::PairRoots::boot(sql.clone()).await?;
+        let encryption_inventory_doc_id = drawer
+            .resolve_doc_id_for_branch_doc_id(
+                test_context.rt.rcx.encryption_inventory_doc_id.clone(),
+            )
+            .await?;
+
+        let plaintext = test_context
+            .rt
+            .blobs_repo
+            .put(b"live pair plaintext")
+            .await?;
+        let cipher = test_context
+            .rt
+            .blobs_repo
+            .put(b"live pair representation")
+            .await?;
+        root_pair_tags(&store, cipher.clone(), plaintext).await?;
+        let c_hash = crate::blobs::blob_id_to_iroh_hash(cipher.clone());
+        roots.record_before_root(c_hash).await?;
+
+        // The facet the crash did not get to write, authored the way the encryption
+        // worker writes it: a cipherBlob facet carries the digest in the multihash
+        // spelling, and it is the facet's value - not its key - that names `C`.
+        let (key_doc_id, key_heads) = crate::test_support::stage_key_doc(
+            &drawer,
+            &crate::blobs::encrypt::MasterKey::random(),
+        )
+        .await?;
+        let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
+        let cipher_digest = crate::blobs::blob_id_to_digest_str(cipher.clone());
+        // A plain document first: a cipherBlob facet is system-managed, so it takes
+        // the scope the encryption worker writes it with rather than a user write.
+        let doc_id = drawer
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Note),
+                    FacetRaw::from(WellKnownFacet::Note("names a representation".into())),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+        drawer
+            .update_at_heads_with_scope(
+                DocPatch {
+                    id: doc_id.clone(),
+                    facets_set: [(
+                        FacetKey::from(WellKnownFacetTag::CipherBlob),
+                        cipher_blob_facet(&cipher_digest, 4096, &key_ref, key_heads)?,
+                    )]
+                    .into(),
+                    facets_remove: vec![],
+                    user_path: None,
+                },
+                BranchPath::new("main"),
+                None,
+                crate::drawer::FacetWriteScope::System,
+            )
+            .await?;
+        roots.attach_provenance(c_hash, &doc_id, "main").await?;
+
+        let _pin_worker = spawn_pin_worker_for_test(&test_context).await?;
+
+        // The machine claims the pair: the pin lands in the encryption inventory and
+        // the tags the drain left alone are still there.
+        wait_for_pin_presence(&drawer, &encryption_inventory_doc_id, &cipher_digest, true).await?;
+        assert!(
+            pair_tags_present(&store, &cipher).await?,
+            "a pair a durable facet names is live, so its tags must survive the drain"
+        );
+        assert!(
+            roots.unresolved().await?.is_empty(),
+            "the pin write retires the ledger row it now owns"
+        );
+
+        test_context.stop().await?;
         Ok(())
     }
 

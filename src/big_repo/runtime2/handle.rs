@@ -88,7 +88,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
         &self,
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
-        pending_group: crate::keyhive::BigKeyhiveGroup,
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
     ) -> eyre::Result<crate::runtime2::types::LiveDocHandle> {
         let (resp, rx) = futures::channel::oneshot::channel();
@@ -97,7 +96,27 @@ impl<F: FutureForm> Runtime2Handle<F> {
                 doc_id,
                 initial_content: Box::new(initial_content),
                 initial_keys,
+                resp,
+            })
+            .await
+            .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
+    }
+
+    /// Release an allocation's durable records once its registration is durable. See
+    /// [`Runtime2Cmd::CompleteAllocatedDoc`] for why this is not part of finalize.
+    pub async fn complete_allocated_doc(
+        &self,
+        doc_id: DocumentId,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
+        content_heads: Vec<[u8; 32]>,
+    ) -> eyre::Result<()> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::CompleteAllocatedDoc {
+                doc_id,
                 pending_group,
+                content_heads,
                 resp,
             })
             .await
@@ -365,15 +384,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
     //   already pending are retried).
     // - `wait_for_keyhive_reconciliation` waits for the projection watermark
     //   that admission updates.
-    // - Keyhive *generation* (document and group creation, and finalize of a
-    //   reserved document id) reads the coparents' state out of the Keyhive
-    //   projection, so it orders against that channel first: the hub future
-    //   settles every connected coparent's Keyhive channel (`await_keyhive_channels`
-    //   — active rounds run to their incorporated completion; idle-connected
-    //   peers get a fresh pull) before the generation runs. A coparent that
-    //   is not connected is skipped: nothing of its is ingesting, and its
-    //   absence from the projection is the legitimate `MissingPrekeys`
-    //   failure, which keeps its own diagnostics.
     //
     // Work deliberately outside these waits is still tracked, so
     // `wait_for_quiescence` (tests) and shutdown drain it anyway.
@@ -499,25 +509,6 @@ impl<F: FutureForm> Runtime2Handle<F> {
             .await
             .map_err(|_| eyre::eyre!("runtime dropped keyhive reconciliation response"))?
             .wrap_err("keyhive post-sync reconciliation failed")
-    }
-
-    /// Settle the Keyhive channel with each peer in `peers` before reading
-    /// Keyhive generation state off them: every round already active for a
-    /// peer runs to its incorporated completion (a round's waiter resolves
-    /// only once the hub's admission watermark covers the round's own
-    /// admissions), and a connected idle peer gets a fresh pull round now
-    /// (`keyhive.rs` generation sites — `create_doc`, `finalize_reserved_doc`,
-    /// `generate_group` — read coparent prekeys out of the projection, which
-    /// an in-flight exchange may still be about to change).
-    ///
-    /// Peers that are not connected are skipped: nothing of theirs is
-    /// ingesting right now, so their absence from the projection is the
-    /// legitimate `MissingPrekeys` failure the generation reports on its own.
-    /// A peer whose settle round fails is logged and skipped too: the wait
-    /// must not turn a pre-existing `MissingPrekeys`-shaped failure into a
-    /// different failure.
-    pub async fn await_keyhive_channel_settled(&self, peers: Vec<PeerKey>) -> eyre::Result<()> {
-        crate::runtime2::hub::await_keyhive_channels(&self.cmd_tx, peers).await
     }
 
     /// Wait until every Keyhive admission already incorporated locally reaches

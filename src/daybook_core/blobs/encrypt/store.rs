@@ -26,6 +26,7 @@
 //! (see [`super::keys::CipherKeySource`]), and the salt is re-derived from
 //! the plaintext digest when encrypting (see [`MasterKey::salt_for`]).
 
+use crate::blobs::pair_roots::PairRoots;
 use crate::interlude::*;
 
 use iroh_blobs::{BlobFormat, Hash, HashAndFormat, api::Store};
@@ -93,6 +94,28 @@ pub(crate) async fn drop_pair_tags(store: &Store, c_hash: Hash) -> Res<()> {
     Ok(())
 }
 
+/// Whether either half of a pair is still rooted.
+///
+/// The boot drain asks this first: a row whose tags are already gone describes a
+/// pair that was released before the crash that left the row, so there is nothing
+/// left to release and the row is only stale. A read, not a guard - deleting an
+/// absent tag is a no-op.
+pub(crate) async fn has_pair_tags(store: &Store, c_hash: Hash) -> Res<bool> {
+    if store
+        .tags()
+        .get(format!("{TAG_CT_PREFIX}{c_hash}"))
+        .await?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    Ok(store
+        .tags()
+        .get(format!("{TAG_PT_PREFIX}{c_hash}"))
+        .await?
+        .is_some())
+}
+
 /// Import a plaintext stream without whole-blob buffering; returns a temp tag
 /// (keep alive until a named tag roots the entry) and the plaintext digest.
 pub async fn ensure_stored<S>(store: &Store, p_stream: S) -> Res<(iroh_blobs::api::TempTag, Hash)>
@@ -111,6 +134,7 @@ where
 pub async fn add_encrypted_stream<S>(
     store: &Store,
     provider: &CipherBlobProvider,
+    roots: &PairRoots,
     key: &MasterKey,
     encoding: EncodingParams,
     p_stream: S,
@@ -121,7 +145,7 @@ where
     let (p_tag, p_hash) = ensure_stored(store, p_stream).await?;
     // The framing is the caller's policy - in production it is the facet's
     // `encodingParameters` - so the codec never picks one for them.
-    let c_hash = match provider.install(store, key, p_hash, encoding).await {
+    let c_hash = match provider.install(store, roots, key, p_hash, encoding).await {
         Ok(c_hash) => c_hash,
         Err(err) => {
             drop(p_tag);
@@ -137,6 +161,7 @@ where
 pub async fn add_encrypted(
     store: &Store,
     provider: &CipherBlobProvider,
+    roots: &PairRoots,
     key: &MasterKey,
     encoding: EncodingParams,
     plaintext: &[u8],
@@ -144,7 +169,7 @@ pub async fn add_encrypted(
     let chunk = futures::stream::iter([Ok::<_, std::io::Error>(bytes::Bytes::from(
         plaintext.to_vec(),
     ))]);
-    add_encrypted_stream(store, provider, key, encoding, chunk).await
+    add_encrypted_stream(store, provider, roots, key, encoding, chunk).await
 }
 
 /// Drive an add/import progress stream to completion, returning its temp tag.

@@ -25,6 +25,7 @@
 //! against a second scratch file; see ADR 003 §12 if the trade ever needs
 //! revisiting).
 
+use crate::blobs::pair_roots::PairRoots;
 use crate::interlude::*;
 
 use iroh_blobs::{
@@ -277,6 +278,7 @@ struct LedgerConsume<'a> {
 pub async fn download_encrypted(
     store: &Store,
     provider: &CipherBlobProvider,
+    roots: &PairRoots,
     conn: impl GetStreamPair,
     c_hash: Hash,
     keys: &dyn CipherKeySource,
@@ -447,12 +449,14 @@ pub async fn download_encrypted(
             .add_virtual_with_outboard(c_hash, ciphertext_len, outboard, PROVIDER_NAME)
             .await?;
         provider
-            .register_pair(store, c_hash, &key, p_hash, encoding)
+            .register_pair(store, roots, c_hash, &key, p_hash, encoding)
             .await?;
     } else {
         // Resume: re-derive C deterministically (see the fn doc + ADR 003 §12
         // for why the received fragments are not reused).
-        let c2 = provider.install(store, &key, p_hash, encoding).await?;
+        let c2 = provider
+            .install(store, roots, &key, p_hash, encoding)
+            .await?;
         eyre::ensure!(
             c2 == c_hash,
             "re-encrypted ciphertext {c2} differs from the downloaded {c_hash}: corrupt spill?"

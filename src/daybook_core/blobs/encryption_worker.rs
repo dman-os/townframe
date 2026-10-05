@@ -26,6 +26,7 @@
 //! 4. (no step) the pin is derived from that facet, never written here
 //! 5. append the `?via=` resolution URL to the `Blob` facet — the commit point
 
+use crate::blobs::pair_roots::PairRoots;
 use crate::interlude::*;
 
 use daybook_types::doc::{
@@ -678,6 +679,7 @@ pub(crate) async fn spawn_blob_encryption_worker(
     let ctx = Arc::new(Ctx {
         drawer_repo: Arc::clone(&drawer_repo),
         sql: sql.clone(),
+        pair_roots: PairRoots::boot(sql.clone()).await?,
         store,
         provider,
         domain_id: domain_facet_id(&domain_group),
@@ -787,6 +789,7 @@ fn resolves_through(blob: &Blob, cipher_key: &FacetKey) -> bool {
 struct Ctx {
     drawer_repo: Arc<DrawerRepo>,
     sql: SqlCtx,
+    pair_roots: PairRoots,
     store: iroh_blobs::api::Store,
     provider: Arc<CipherBlobProvider>,
     /// The facet key id naming this worker's domain.
@@ -1655,10 +1658,14 @@ impl Ctx {
             .provider
             .install(
                 &self.store,
+                &self.pair_roots,
                 &new_key,
                 crate::blobs::blob_id_to_iroh_hash(plaintext.clone()),
                 encoding,
             )
+            .await?;
+        self.pair_roots
+            .attach_provenance(c2_hash, doc_id, branch.as_ref())
             .await?;
         eyre::ensure!(
             c2_hash != crate::blobs::blob_id_to_iroh_hash(plaintext.clone()),
@@ -1735,10 +1742,17 @@ impl Ctx {
             .provider
             .install(
                 &self.store,
+                &self.pair_roots,
                 &key,
                 crate::blobs::blob_id_to_iroh_hash(plaintext),
                 EncodingParams::DEFAULT,
             )
+            .await?;
+        // Provenance for the pair the install just rooted: if this process dies
+        // before the facet write below lands, the drain needs to know which
+        // document's facet to check (ADR 003 §19).
+        self.pair_roots
+            .attach_provenance(c_hash, doc_id, branch.as_ref())
             .await?;
         let c_len = self.blob_status(c_hash).await?.ok_or_else(|| {
             eyre::eyre!("representation {c_hash} is not complete immediately after install")
@@ -1834,7 +1848,14 @@ impl Ctx {
             // The entry is still there: only the in-process pair is missing.
             Some(_) => {
                 self.provider
-                    .register_pair(&self.store, c_hash, &key, p_hash, encoding)
+                    .register_pair(
+                        &self.store,
+                        &self.pair_roots,
+                        c_hash,
+                        &key,
+                        p_hash,
+                        encoding,
+                    )
                     .await?;
             }
             // A crash between the §11 pass and the facet write can leave the
@@ -1843,7 +1864,7 @@ impl Ctx {
             None => {
                 let recomputed = self
                     .provider
-                    .install(&self.store, &key, p_hash, encoding)
+                    .install(&self.store, &self.pair_roots, &key, p_hash, encoding)
                     .await?;
                 eyre::ensure!(
                     recomputed == c_hash,

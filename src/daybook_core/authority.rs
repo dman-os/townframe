@@ -176,8 +176,6 @@ pub(crate) async fn ensure(
         }
     }
 
-    recover_pending_documents(big_repo, &pending_documents).await?;
-
     let auth = RepoAuthority {
         repo_agents,
         core_docs,
@@ -191,24 +189,91 @@ pub(crate) async fn ensure(
     Ok(auth)
 }
 
-async fn recover_pending_documents(
+/// Boot sweep over every durable doc reservation — the pending-allocation
+/// drain (the drawer staging facility for transactional doc creation).
+///
+/// The drawer's durable registration surfaces (`docs.map` entries, branch
+/// refs, local-branch refs) settle each reservation:
+///
+/// - **Registered** → mechanically replay the finalize sequence the
+///   registering caller owns: the advertising grants, then completion (revoke
+///   the pending coparent, drop the reservation). This is the
+///   registered-not-finalized crash window.
+/// - **Not registered** → discard: drop the reservation and revoke the
+///   pending coparent. Discard is purely local — allocations grant ONLY the
+///   pending group at genesis and it has no members, so the document's events
+///   can never have left the node and no peer can hold authorization; the
+///   events, sedimentree and bytes are never deleted.
+/// - Anything whose registration cannot be read, or that contradicts the
+///   finalize ordering (registration implies staged content and the
+///   finalize grants), is kept and warned, never released.
+///
+/// Runs ONLY at the repo's boot site (`repo.rs:open_inner`), never on the
+/// per-construction `ensure` calls: an external temporary allocation is valid
+/// until the next boot by contract, so a mid-session sweep must not be able
+/// to race a live in-flight allocation.
+pub(crate) async fn recover_pending_documents(
     big_repo: &SharedBigRepo,
-    pending_documents: &BigKeyhiveGroup,
+    authority: &RepoAuthority,
+    sql: &SqlCtx,
 ) -> Res<()> {
-    // Reservations are the durable enumeration of allocated-but-unfinalized
-    // document IDs; the pending group cannot enumerate a merely reserved
-    // public key before a signed Keyhive authority exists.
-    for document_id in big_repo.reserved_doc_ids().await? {
-        if !big_repo
-            .recover_allocated_doc(document_id.clone(), pending_documents.clone())
-            .await
-            .map_err(eyre::Report::from)
-            .wrap_err_with(|| format!("finalizing pending document {document_id}"))?
-        {
-            // Allocation without staged content remains a GC candidate.
-            continue;
-        }
+    let reserved = big_repo.reserved_doc_ids().await?;
+    if reserved.is_empty() {
+        return Ok(());
     }
+    // The registration read goes through the drawer document, whose id the
+    // repo records in its init state once initialization (or clone) produced
+    // the core docs. Reservations without it — a fresh repo mid-init-dance, or
+    // a test harness — cannot be classified; keep them.
+    let crate::repo::globals::InitState::Created { doc_id_drawer, .. } =
+        crate::repo::globals::get_init_state(sql).await?
+    else {
+        tracing::warn!(
+            reservations = reserved.len(),
+            "pending doc reservations keep their boot sweep: the drawer document id is not \
+             registered yet, so registration cannot be read"
+        );
+        return Ok(());
+    };
+    let Some(shapes) =
+        crate::drawer::registered_allocation_shapes(sql, big_repo, &doc_id_drawer).await?
+    else {
+        return Ok(());
+    };
+    let registration = reserved
+        .iter()
+        .map(|doc_id| {
+            // The finalize grants of the registering path, exactly as the
+            // drawer grants them between finalize and its registration write
+            // (content docs and replicated branches advertise the drawer
+            // group, local branches do not).
+            let registration = match shapes.get(doc_id) {
+                Some(
+                    crate::drawer::RegisteredAllocationShape::ContentDoc
+                    | crate::drawer::RegisteredAllocationShape::ReplicatedBranch,
+                ) => big_repo::AllocationRegistration::Registered(vec![
+                    authority.content_docs.clone(),
+                    authority.encrypted_blob_docs.clone(),
+                    authority.default_drawer.clone(),
+                ]),
+                Some(crate::drawer::RegisteredAllocationShape::LocalBranch) => {
+                    big_repo::AllocationRegistration::Registered(vec![
+                        authority.content_docs.clone(),
+                        authority.encrypted_blob_docs.clone(),
+                    ])
+                }
+                None => big_repo::AllocationRegistration::Unregistered(vec![
+                    authority.content_docs.clone(),
+                    authority.encrypted_blob_docs.clone(),
+                    authority.default_drawer.clone(),
+                ]),
+            };
+            (doc_id.clone(), registration)
+        })
+        .collect();
+    big_repo
+        .drain_pending_allocations(authority.pending_documents_group(), &registration)
+        .await?;
     Ok(())
 }
 

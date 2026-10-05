@@ -19,6 +19,7 @@
 //! - The pair holds no bytes, only a reader into the store; if `P` is later
 //!   collected, reads fail rather than serve stale bytes.
 
+use crate::blobs::pair_roots::PairRoots;
 use crate::interlude::*;
 
 use bao_tree::io::mixed::ReadBytesAt as _;
@@ -31,7 +32,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::Res;
-use super::codec::{Cipher, HEADER_LEN, ciphertext_len, header, n_records_for, payload_size};
+use super::codec::{
+    Cipher, HEADER_LEN, RECORD_OVERHEAD, ciphertext_len, header, n_records_for, payload_size,
+};
 use super::keys::MasterKey;
 use super::params::{EncodingParams, Padding};
 use super::store::{PROVIDER_NAME, install_virtual_encrypted, set_pair_tags};
@@ -172,9 +175,16 @@ impl PlainPair {
         } else {
             0
         };
-        Ok(self
-            .cipher
-            .encrypt_record(idx, last, plain.to_vec(), pad_zeros))
+        // The frame is content + delimiter + pad + tag, written once. This runs per
+        // 64 KiB record for every read that lands in it (four of five bao leaves), so
+        // the buffer is reserved to its exact length rather than grown through
+        // reallocations, and the reader's bytes are copied straight into it instead of
+        // through an intermediate Vec.
+        let mut frame = Vec::with_capacity(plain.len() + RECORD_OVERHEAD + pad_zeros);
+        frame.extend_from_slice(&plain);
+        self.cipher
+            .encrypt_record_in_place(idx, last, &mut frame, pad_zeros);
+        Ok(frame)
     }
 }
 
@@ -215,6 +225,7 @@ impl CipherBlobProvider {
     pub async fn register_pair(
         &self,
         store: &Store,
+        roots: &PairRoots,
         c_hash: Hash,
         key: &MasterKey,
         p_hash: Hash,
@@ -223,6 +234,11 @@ impl CipherBlobProvider {
         let Some(reader) = store.sync_reader(p_hash).await? else {
             eyre::bail!("cannot serve {c_hash}: plaintext {p_hash} has no readable stored data");
         };
+        // The record goes in before the tags, and that ordering is the contract:
+        // a rooted pair therefore always has a row, which is what lets the boot
+        // drain tell a pair the inventory never recorded (release it) from one
+        // the inventory has not caught up with yet (leave it). See `PairRoots`.
+        roots.record_before_root(c_hash).await?;
         set_pair_tags(store, c_hash, p_hash).await?;
         let pair = Arc::new(PlainPair::new(key, p_hash, reader, encoding));
         self.pairs
@@ -246,12 +262,13 @@ impl CipherBlobProvider {
     pub async fn install(
         &self,
         store: &Store,
+        roots: &PairRoots,
         key: &MasterKey,
         p_hash: Hash,
         encoding: EncodingParams,
     ) -> Res<Hash> {
         let c_hash = install_virtual_encrypted(store, key, p_hash, encoding).await?;
-        self.register_pair(store, c_hash, key, p_hash, encoding)
+        self.register_pair(store, roots, c_hash, key, p_hash, encoding)
             .await?;
         Ok(c_hash)
     }

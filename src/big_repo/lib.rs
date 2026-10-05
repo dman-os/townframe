@@ -10,7 +10,7 @@ use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
 use sqlx_utils_rs::SqlCtx;
 use tracing::Instrument;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use automerge::ChangeHash;
@@ -224,6 +224,34 @@ pub struct BigRepo {
 }
 
 pub type SharedBigRepo = Arc<BigRepo>;
+
+/// The registration side of a pending allocation, as the boot sweep's caller
+/// reads it off the allocation-owning layer's durable surfaces (`docs.map`
+/// entries, branch refs, local-branch refs).
+///
+/// A registered allocation carries the finalize grants — the advertising
+/// groups the registering path grants between finalize and its registration
+/// write — so the sweep replays exactly what that caller would have
+/// written.
+#[derive(Debug, Clone)]
+pub enum AllocationRegistration {
+    /// A durable registration names the document; the finalize grants to
+    /// replay ride along.
+    Registered(Vec<BigKeyhiveGroup>),
+    /// Nothing registers the document. Discard: revert every advertising
+    /// coparent the crash window may have granted — a shared coparent grant
+    /// IS replication authorization (subduction-keyhive gates pulls on group
+    /// membership), so leaving one standing would keep the dead document in
+    /// the replicated access graph — then revoke the pending coparent and
+    /// drop the reservation in [`Self::complete_reserved_doc`]. Grants are
+    /// skipped for documents they never landed on, so the candidates ride
+    /// along and the revert is idempotent across every finalize point.
+    Unregistered(Vec<BigKeyhiveGroup>),
+    /// The registration surfaces could not be read at this boot stage
+    /// (fresh init, or the drawer document not materialized yet).
+    /// Never discard on Unknown, and never complete blind.
+    Unknown,
+}
 
 impl BigRepo {
     pub const BACKEND_ID: &'static str = "BigRepoSyncBackend";
@@ -825,9 +853,10 @@ impl BigRepo {
         self.keyhive.group_document_ids(group).await
     }
 
-    /// List document IDs with a durable reservation but no Keyhive document
-    /// yet (or whose reservation cleanup is pending). These are the crash-
-    /// recovery candidates between ID allocation and finalization.
+    /// List document IDs with a durable reservation. A reservation outlives
+    /// finalization: it is dropped only when the allocation is completed, which is the
+    /// step that follows a caller's registration write. These are therefore the
+    /// crash-recovery candidates between ID allocation and completion.
     pub async fn reserved_doc_ids(&self) -> Res<Vec<DocumentId>> {
         let reservations = self
             .keyhive_storage
@@ -840,10 +869,17 @@ impl BigRepo {
             .collect())
     }
 
+    /// Recreate the Keyhive authority of an allocation whose staged content survived a
+    /// crash, and stop there.
+    ///
+    /// Finishing the allocation — revoking the pending-group authority and dropping the
+    /// reservation — belongs to whoever has registered the document. Recovery has no such
+    /// caller, so completing here would erase the only records that name an unregistered
+    /// document; the allocation instead stays pending and is recovered again on the next
+    /// boot, which is cheap because both steps are idempotent.
     pub async fn recover_allocated_doc(
         self: &Arc<Self>,
         doc_id: DocumentId,
-        pending_group: BigKeyhiveGroup,
     ) -> Result<bool, CreateDocError> {
         let Some((bytes, initial_keys)) = self
             .keyhive_storage
@@ -864,7 +900,7 @@ impl BigRepo {
                 "failed decoding staged document content: {err}"
             ))
         })?;
-        self.finalize_allocated_doc_with_keys(doc_id, content, pending_group, initial_keys)
+        self.finalize_allocated_doc_with_keys(doc_id, content, initial_keys)
             .await?;
         Ok(true)
     }
@@ -880,9 +916,8 @@ impl BigRepo {
         self: &Arc<Self>,
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
-        pending_group: BigKeyhiveGroup,
     ) -> Result<BigDocHandle, CreateDocError> {
-        self.finalize_allocated_doc_with_keys(doc_id, initial_content, pending_group, Vec::new())
+        self.finalize_allocated_doc_with_keys(doc_id, initial_content, Vec::new())
             .await
     }
 
@@ -890,17 +925,191 @@ impl BigRepo {
         self: &Arc<Self>,
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
-        pending_group: BigKeyhiveGroup,
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
     ) -> Result<BigDocHandle, CreateDocError> {
         let handle = self
             .runtime
-            .finalize_allocated_doc(doc_id, initial_content, pending_group, initial_keys)
+            .finalize_allocated_doc(doc_id, initial_content, initial_keys)
             .await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
             handle,
         })
+    }
+
+    /// Drop an allocation's durable records — its pending-group authority and its id
+    /// reservation — once its registration is durable.
+    ///
+    /// [`Self::finalize_allocated_doc`] deliberately leaves both in place: the caller that
+    /// registers the document (the drawer writes its `docs.map` entry) owns the completion
+    /// and reaches here only after that write has committed. Anything that fails earlier
+    /// leaves a pending allocation that [`Self::recover_allocated_doc`] finds again.
+    pub async fn complete_allocated_doc(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        pending_group: BigKeyhiveGroup,
+        content_heads: Vec<[u8; 32]>,
+    ) -> Res<()> {
+        self.runtime
+            .complete_allocated_doc(doc_id, pending_group, content_heads)
+            .await?;
+        Ok(())
+    }
+
+    /// The boot sweep over every durable doc reservation — the
+    /// pending-allocation drain.
+    ///
+    /// `registration` classifies each reservation by its registration read;
+    /// a reservation absent from the map counts as [`AllocationRegistration::Unknown`].
+    ///
+    /// Registered allocations mechanically replay the embedder's finalize
+    /// sequence: grants first, then completion (revoke the pending coparent,
+    /// drop the reservation). Unregistered ones are dropped: the reservation
+    /// goes and the pending membership is revoked, while the document's
+    /// events, sedimentree and bytes — where any exist — are never touched.
+    /// Anything whose registration is unreadable, or that contradicts the
+    /// finalize ordering (registration implies staged content, which the
+    /// drawer writes before it can ever register), is kept and warned, never
+    /// released.
+    pub async fn drain_pending_allocations(
+        self: &Arc<Self>,
+        pending_group: BigKeyhiveGroup,
+        registration: &HashMap<DocumentId, AllocationRegistration>,
+    ) -> Res<()> {
+        for doc_id in self.reserved_doc_ids().await? {
+            let registration = registration
+                .get(&doc_id)
+                .cloned()
+                .unwrap_or(AllocationRegistration::Unknown);
+            match registration {
+                AllocationRegistration::Unknown => {
+                    tracing::warn!(
+                        %doc_id,
+                        "pending allocation keeps its reservation: registration \
+                        could not be read at this boot stage"
+                    );
+                }
+                AllocationRegistration::Registered(grants) => {
+                    let staged = self
+                        .keyhive_storage
+                        .staged_doc_content(doc_id.to_bytes32().map_err(|err| {
+                            ferr!("staged document id is not a fixed-width key: {err}")
+                        })?)
+                        .await
+                        .map_err(|err| ferr!("failed loading staged document content: {err}"))?
+                        .is_some();
+                    if !staged {
+                        // Registration implies staged content (the drawer stages
+                        // before it finalizes and registers after); a reservation
+                        // that contradicts this stays, loudly.
+                        tracing::warn!(
+                            %doc_id,
+                            "registered pending allocation has no staged content: \
+                            it contradicts the finalize ordering, so the reservation is kept"
+                        );
+                        continue;
+                    }
+                    if !self.keyhive().document_has_content(doc_id.clone()).await? {
+                        // The Keyhive authority did not survive: recreate it from
+                        // the staged content exactly as recovery does, then drain
+                        // the rest of the finalize sequence.
+                        self.recover_allocated_doc(doc_id.clone())
+                            .await
+                            .map_err(eyre::Report::from)?;
+                    }
+                    for group in &grants {
+                        // Idempotent replay: grants precede the registration write,
+                        // so a registered allocation usually carries them already.
+                        let group_ident =
+                            keyhive_core::principal::identifier::Identifier::from(group.id());
+                        let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?);
+                        let doc_ident = keyhive_core::principal::identifier::Identifier::from(
+                            vk.map_err(|err| ferr!("invalid doc_id verifying key: {err}"))?,
+                        );
+                        if matches!(
+                            self.keyhive()
+                                .agent_access_on(&group_ident, doc_ident)
+                                .await,
+                            Some(keyhive_core::access::Access::Admin)
+                        ) {
+                            continue;
+                        }
+                        self.add_admin_member_to_doc(doc_id.clone(), group.clone())
+                            .await?;
+                    }
+                    self.keyhive()
+                        .complete_reserved_doc(
+                            &pending_group,
+                            doc_id.clone(),
+                            self.drain_revocation_frontier(&doc_id).await?,
+                            &self.keyhive_protocol,
+                            &self.keyhive_storage,
+                        )
+                        .await?;
+                }
+                AllocationRegistration::Unregistered(revertible) => {
+                    // Discard. First the advertising coparents the granted-not-
+                    // registered window may have left: a shared coparent grant
+                    // is replication authorization, so the revert runs BEFORE
+                    // the pending revocation and skips grants whose coparent
+                    // never landed (`group_document_ids` read), keeping the
+                    // discard idempotent across every finalize point. Then the
+                    // pending coparent revocation and the reservation deletion
+                    // in `complete_reserved_doc` — and nothing else: no keyhive
+                    // document, sedimentree, event or byte is deleted.
+                    for group in &revertible {
+                        if !self
+                            .keyhive()
+                            .group_document_ids(group)
+                            .await
+                            .contains(&doc_id)
+                        {
+                            continue;
+                        }
+                        self.keyhive()
+                            .revoke_group_from_doc(
+                                group,
+                                doc_id.clone(),
+                                self.drain_revocation_frontier(&doc_id).await?,
+                                &self.keyhive_protocol,
+                            )
+                            .await?;
+                    }
+                    self.keyhive()
+                        .complete_reserved_doc(
+                            &pending_group,
+                            doc_id.clone(),
+                            self.drain_revocation_frontier(&doc_id).await?,
+                            &self.keyhive_protocol,
+                            &self.keyhive_storage,
+                        )
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The content frontier a sweep revocation carries: the document's
+    /// sedimentree heads when the allocation persisted one, empty when it never
+    /// did (never-created or pre-sedimentree authority).
+    async fn drain_revocation_frontier(&self, doc_id: &DocumentId) -> Res<Vec<Vec<u8>>> {
+        match self.doc_head_state(doc_id.clone()).await {
+            Ok(state) => Ok(state
+                .sedimentree_heads
+                .iter()
+                .map(|head| head.0.to_vec())
+                .collect()),
+            Err(err) => {
+                tracing::debug!(
+                    %doc_id,
+                    %err,
+                    "doc_head_state unavailable for the pending-allocation sweep; \
+                    revoking over an empty frontier"
+                );
+                Ok(Vec::new())
+            }
+        }
     }
 
     pub async fn create_doc(
@@ -930,13 +1139,6 @@ impl BigRepo {
         self: &Arc<Self>,
         parents: Vec<BigKeyhiveAuthority>,
     ) -> Res<BigKeyhiveGroup> {
-        // `generate_group` reads the coparents' prekeys out of the Keyhive
-        // projection; settle their channels first (same ordering as the doc
-        // generation paths).
-        let coparent_peers = crate::keyhive::authority_peer_keys(&parents)?;
-        self.runtime
-            .await_keyhive_channel_settled(coparent_peers)
-            .await?;
         let (group, _hashes) = self
             .keyhive
             .create_group_with_parents(parents, &self.keyhive_protocol)
@@ -956,8 +1158,29 @@ impl BigRepo {
     ) -> Res<()> {
         let mut docs = BTreeMap::new();
         for doc_id in self.keyhive.group_document_ids(group).await {
-            let doc = self.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
-            docs.insert(doc_id, doc);
+            // A document can be created concurrently with this grant - the encryption
+            // worker creates key documents at runtime - and such a document is already in
+            // Keyhive's graph (`group_document_ids` sees it) while big_repo cannot hand out
+            // a handle for it yet. Both `GetDocError` variants mean only that, and neither
+            // is fatal: the document joins `affected_docs` below, where its checkpoint is
+            // derived per document; it has no pre-grant history to record, because it did
+            // not exist when the grant was conceived; and Keyhive accepts the delegation
+            // without an entry for it (the raced-in shape this replaces proved as much by
+            // completing the grant). Failing here over an unmaterialized member killed
+            // clone provisions outright.
+            match self.get_doc(&doc_id).await?.into_ready(doc_id.clone()) {
+                Ok(doc) => {
+                    docs.insert(doc_id, doc);
+                }
+                Err(err @ (GetDocError::NotFound(_) | GetDocError::PendingMaterialization(_))) => {
+                    tracing::debug!(
+                        %doc_id,
+                        %err,
+                        "group document is not locally materialized at grant preflight; its \
+                         checkpoint is derived after the grant"
+                    );
+                }
+            }
         }
 
         let mut after_content = BTreeMap::new();
@@ -975,9 +1198,23 @@ impl BigRepo {
         // key-only post-grant entrypoint without mutating the Automerge doc.
         if access.is_reader() {
             for doc_id in &affected_docs {
-                let _doc = docs
-                    .get(doc_id)
-                    .ok_or_else(|| ferr!("affected document was not preflighted: {doc_id}"))?;
+                // `affected_docs` is read off the live Keyhive graph after the grant has
+                // landed, while `docs` above is the snapshot taken before it. A document
+                // created inside that window joins the group and is legitimately affected
+                // without having been preflighted: the encryption worker creates key
+                // documents at runtime, so the snapshot is not stable across the grant.
+                // The invariant "every affected document was preflighted" is therefore not
+                // enforceable, and enforcing it failed the whole grant - a clone provision
+                // that raced a key-document creation died outright. The checkpoint does not
+                // need the snapshot: it is derived per document here, and when the causal
+                // keys are still in flight the durable event consumer retries.
+                if !docs.contains_key(doc_id) {
+                    tracing::debug!(
+                        %doc_id,
+                        "document joined the group between the pre-grant snapshot and the \
+                         grant; checkpointing it without a recorded pre-grant head set"
+                    );
+                }
                 if !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
                     tracing::debug!(%doc_id, "group grant causal checkpoint deferred to durable event reconciliation");
                 }
@@ -1327,11 +1564,10 @@ impl BigRepo {
         self: &Arc<BigRepo>,
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
-        pending_group: BigKeyhiveGroup,
         source: &BigDocHandle,
     ) -> Result<BigDocHandle, CreateDocError> {
         let initial_keys = source.content_keys().await?;
-        self.finalize_allocated_doc_with_keys(doc_id, initial_content, pending_group, initial_keys)
+        self.finalize_allocated_doc_with_keys(doc_id, initial_content, initial_keys)
             .await
     }
 }

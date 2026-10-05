@@ -6,7 +6,7 @@ use crate::{
     part_store::{CursorIndex, PartStoreReadOnly},
     rpc::{
         BigSyncRpcClient, BuckLevel, BucketSummary, GetChangedBucketsRequest, ListPartsError,
-        PartStratSummary, PeerSummaryRequest, RpcError,
+        PartStratSummary, PeerSummaryError, PeerSummaryRequest, RpcError,
     },
     tasks::{TaskCtx, TaskResultDeets},
 };
@@ -58,6 +58,8 @@ structstruck::strike! {
                 ListError(#[from] ListPartsError)
                 /// {0}
                 Rpc(#[from] RpcError),
+                /// {0}
+                PeerSummary(#[from] PeerSummaryError),
             }
 
     }
@@ -108,12 +110,28 @@ impl DecidePeerStrategyTask {
                 .await;
             asker_part_cursors.insert(part_id.clone(), cursor);
         }
-        let summary = peer_rpc
+        // A whole-request refusal is not a per-part answer. Folding it into the
+        // part-absent-from-the-map case would decide every part `Unkown` and re-ask,
+        // which is the same starvation the per-part answer avoids, only silent: the
+        // refusal fails the round loudly, naming the count and the ceiling it broke.
+        let summary = match peer_rpc
             .peer_summary(PeerSummaryRequest {
                 parts: self.parts.clone(),
                 asker_part_cursors: asker_part_cursors.clone(),
             })
-            .await?;
+            .await?
+        {
+            Ok(summary) => summary,
+            Err(err) => {
+                tracing::error!(
+                    peer_id = %self.peer_id,
+                    part_count = self.parts.len(),
+                    %err,
+                    "peer refused the whole summary request"
+                );
+                return Err(err.into());
+            }
+        };
         tracing::debug!(
             peer_id = %self.peer_id,
             part_count = summary.parts.len(),
@@ -365,18 +383,16 @@ mod tests {
         fn peer_summary<'a>(
             &'a self,
             req: PeerSummaryRequest,
-        ) -> LocalBoxFuture<'a, BigSyncRpcResult<PeerSummaryResult>> {
-            if let Some(asker_cursor) = req
-                .asker_part_cursors
-                .get(&PartKey::new(PART_BYTES))
-                .copied()
-            {
-                assert_eq!(
-                    asker_cursor, self.asker_cursor,
-                    "the asker must advertise the cursor it holds, otherwise the peer cannot \
-                     count relevance on the scale that cursor belongs to"
-                );
-            }
+        ) -> LocalBoxFuture<'a, BigSyncRpcResult<Result<PeerSummaryResult, PeerSummaryError>>>
+        {
+            assert_eq!(
+                req.asker_part_cursors
+                    .get(&PartKey::new(PART_BYTES))
+                    .copied(),
+                Some(self.asker_cursor),
+                "the asker must advertise the cursor it holds, otherwise the peer cannot \
+                 count relevance on the scale that cursor belongs to"
+            );
             let parts = req
                 .parts
                 .difference(&self.omit)
@@ -396,7 +412,7 @@ mod tests {
                     )
                 })
                 .collect();
-            Local::from_future(async move { Ok(PeerSummaryResult { parts }) })
+            Local::from_future(async move { Ok(Ok(PeerSummaryResult { parts })) })
         }
 
         fn replay_page<'a>(

@@ -82,10 +82,25 @@ pub enum Runtime2Cmd {
         initial_content: Box<automerge::Automerge>,
         #[educe(Debug(ignore))]
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
-        pending_group: crate::keyhive::BigKeyhiveGroup,
         #[educe(Debug(ignore))]
         resp:
             futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::types::LiveDocHandle>>,
+    },
+    /// Release an allocation's durable records: its pending-group authority and its id
+    /// reservation. Deliberately separate from [`Self::FinalizeAllocatedDoc`]: those two
+    /// records are the only things that name an allocation, so they have to outlive every
+    /// step that can still fail, including the caller's own registration write. The caller
+    /// that registers the document (the drawer's `docs.map` entry) sends this once that
+    /// write is durable, so a crash in between leaves a pending allocation that boot
+    /// recovery still finds through its reservation.
+    CompleteAllocatedDoc {
+        doc_id: DocumentId,
+        pending_group: crate::keyhive::BigKeyhiveGroup,
+        /// Content heads the registration made durable; the pending-group revocation is
+        /// ordered after them.
+        content_heads: Vec<[u8; 32]>,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
     GetDocHandle {
         doc_id: DocumentId,
@@ -221,13 +236,6 @@ pub enum Runtime2Cmd {
     /// directly instead of inferring it from an asynchronous sync failure.
     #[cfg(any(test, feature = "test-support"))]
     HasConnectedPeer {
-        peer_id: PeerKey,
-        #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
-    },
-    /// Production connectivity read for waits issued from inside the runtime's
-    /// own futures (the test-only `HasConnectedPeer` cannot serve a lib build).
-    IsConnectedPeer {
         peer_id: PeerKey,
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<eyre::Result<bool>>,
@@ -542,15 +550,6 @@ pub enum DocWorkerMsg {
 /// Monotonic waiter-id counters (shared handle↔hub).
 pub fn fresh_waiter_id(counter: &AtomicU64) -> u64 {
     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Internal waiter ids for Keyhive-sync waits issued by hub futures (doc
-/// creation, finalize). Handles count up from 1; these count down from the
-/// top, so the two namespaces cannot collide inside the hub's waiter id set.
-static INTERNAL_KEYHIVE_WAITER_IDS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(u64::MAX);
-pub fn fresh_internal_waiter_id() -> u64 {
-    INTERNAL_KEYHIVE_WAITER_IDS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Classification of a tracked finite background future, for diagnostics.

@@ -18,7 +18,7 @@
 //!
 //! Salt derivation (a deliberate deviation from vanilla RFC 8188): the salt
 //! is not persisted state but derived as
-//! `BLAKE3("daybook.cipherblob.salt.v1" || master_key || P_hash)[..16]`.
+//! `BLAKE3-derive("daybook.cipherblob.salt.v1", master_key ‖ P_hash ‖ BE32(rs) ‖ padding-octet)[..16]`.
 //! GCM is catastrophic under (CEK, nonce) reuse, and nonces reset per
 //! message, so two plaintexts under one shared master key MUST NOT share a
 //! salt; content-deriving the salt makes that collision impossible by
@@ -72,11 +72,11 @@ pub use params::{
     CONTENT_ENCODING_AES128GCM, DEFAULT_PADDING, EncodingParams, Padding, RECORD_SIZE,
 };
 pub use serve::CipherBlobProvider;
-pub(crate) use store::drop_pair_tags;
 pub use store::{
     PROVIDER_NAME, TAG_CT_PREFIX, TAG_PT_PREFIX, add_encrypted, add_encrypted_stream,
     ensure_stored, get_decrypted,
 };
+pub(crate) use store::{drop_pair_tags, has_pair_tags};
 pub use windowed::CipherReader;
 
 // Crate-internal plumbing, reachable under the umbrella path (tests read it

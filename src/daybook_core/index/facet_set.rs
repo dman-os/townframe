@@ -1,11 +1,13 @@
-#![allow(dead_code)]
+#![expect(dead_code)]
+
+use crate::interlude::*;
+
 use crate::blobs::{BlobId, encryption_worker::plaintext_blob_id};
 use crate::drawer::{BranchIdentityResolution, DrawerRepo, ExactFacetValueHydration};
 use crate::index::doc_delta_store::{
     DocDelta, DocDeltaBranchFilter, DocDeltaRevisionStore, DocDeltaSelector, begin_settlement,
 };
 use crate::index::facet_delta::{FacetDelta, FacetRouteKey, FacetSnapshot};
-use crate::interlude::*;
 use big_repo::{
     AutomergeFrontierRevisionStore, AutomergeFrontierSelector, AutomergeFrontierTarget,
 };
