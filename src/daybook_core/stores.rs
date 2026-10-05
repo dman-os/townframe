@@ -16,20 +16,19 @@ pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
     async fn flush(
         &mut self,
         doc_handle: &BigDocHandle,
-        actor_id: Option<ActorId>,
+        author: Option<automerge::Author<'static>>,
     ) -> Res<Option<automerge::ChangeHash>> {
-        self.flush_with_prop(doc_handle, Self::prop(), actor_id)
-            .await
+        self.flush_with_prop(doc_handle, Self::prop(), author).await
     }
 
     async fn flush_with_prop(
         &mut self,
         doc_handle: &BigDocHandle,
         prop: Cow<'static, str>,
-        actor_id: Option<ActorId>,
+        author: Option<automerge::Author<'static>>,
     ) -> Res<Option<automerge::ChangeHash>> {
         doc_handle
-            .reconcile_prop_with_actor(automerge::ROOT, prop, self, actor_id)
+            .reconcile_prop_with_author(automerge::ROOT, prop, self, author)
             .await
     }
 
@@ -80,20 +79,20 @@ struct Inner<S> {
     store: S,
     doc_handle: BigDocHandle,
     store_prop: Option<String>,
-    local_actor_id: ActorId,
+    local_author: automerge::Author<'static>,
     // flush_args: S::FlushArgs,
 }
 
 impl<S: AmStore> Inner<S> {
     async fn flush(&mut self) -> Res<Option<automerge::ChangeHash>> {
-        let actor_id = self.local_actor_id.clone();
+        let author = self.local_author.clone();
         match &self.store_prop {
             Some(prop) => {
                 self.store
-                    .flush_with_prop(&self.doc_handle, Cow::Owned(prop.clone()), Some(actor_id))
+                    .flush_with_prop(&self.doc_handle, Cow::Owned(prop.clone()), Some(author))
                     .await
             }
-            None => self.store.flush(&self.doc_handle, Some(actor_id)).await,
+            None => self.store.flush(&self.doc_handle, Some(author)).await,
         }
     }
 }
@@ -117,23 +116,23 @@ where
         store: S,
         //flush_args: S::FlushArgs,
         doc_handle: BigDocHandle,
-        local_actor_id: ActorId,
+        local_author: automerge::Author<'static>,
     ) -> Self {
-        Self::new_with_prop(store, doc_handle, None, local_actor_id)
+        Self::new_with_prop(store, doc_handle, None, local_author)
     }
 
     pub fn new_with_prop(
         store: S,
         doc_handle: BigDocHandle,
         store_prop: Option<String>,
-        local_actor_id: ActorId,
+        local_author: automerge::Author<'static>,
     ) -> Self {
         Self {
             inner: Arc::new(tokio::sync::RwLock::new(Inner {
                 store,
                 doc_handle,
                 store_prop,
-                local_actor_id,
+                local_author,
             })),
         }
     }
@@ -211,6 +210,7 @@ pub struct Versioned<T> {
 #[derive(Clone, Debug)]
 pub struct VersionTag {
     pub version: Uuid,
+    /// Fixed-width legacy role ID in the 32-byte version-tag encoding; not an Automerge write session or node author.
     pub actor_id: ActorId,
 }
 
@@ -358,7 +358,7 @@ pub trait FacetStore:
 pub struct FacetStoreVersion<S> {
     pub heads: ChangeHashSet,
     pub value: S,
-    pub actor_id: ActorId,
+    pub author: Option<automerge::Author<'static>>,
 }
 /// Handle to a `FacetStore`: the in-memory projection plus explicit snapshot
 /// updates from its revision consumer. Writes go through the drawer at the
@@ -385,11 +385,6 @@ struct FacetStoreInner<S> {
     /// The heads the in-memory projection was loaded/updated at — the base
     /// for the next write.
     loaded_heads: Option<ChangeHashSet>,
-    /// The drawer's content actor for this doc — the author of every write
-    /// this store makes (via its flush). Consumers use it to filter local
-    /// writes out of version histories. Resolved lazily (the doc may not be
-    /// registered in the drawer yet at load time).
-    local_writer_actor: Option<ActorId>,
 }
 
 impl<S: FacetStore> FacetStoreHandle<S> {
@@ -407,7 +402,6 @@ impl<S: FacetStore> FacetStoreHandle<S> {
                 drawer,
                 branch,
                 loaded_heads,
-                local_writer_actor: None,
             })),
             doc_id,
         })
@@ -418,22 +412,9 @@ impl<S: FacetStore> FacetStoreHandle<S> {
         &self.doc_id
     }
 
-    /// The drawer's content actor for this doc — the author of every write
-    /// this store makes. Resolved lazily (the doc may not be registered in
-    /// the drawer at load time); None until resolvable.
-    pub async fn local_writer_actor(&self) -> Option<ActorId> {
-        if let Some(actor) = self.inner.read().await.local_writer_actor.clone() {
-            return Some(actor);
-        }
-        let (drawer, branch) = {
-            let guard = self.inner.read().await;
-            (Arc::clone(&guard.drawer), guard.branch.clone())
-        };
-        let actor = drawer.resolve_content_actor(&self.doc_id, &branch).await;
-        if let Some(actor) = &actor {
-            self.inner.write().await.local_writer_actor = Some(actor.clone());
-        }
-        actor
+    /// Node author of writes made through this store, independent of its branch or role path.
+    pub async fn local_writer_author(&self) -> automerge::Author<'static> {
+        self.inner.read().await.drawer.local_author().clone()
     }
 
     /// The store's value at the given heads (None when the facet is absent
@@ -488,14 +469,14 @@ impl<S: FacetStore> FacetStoreHandle<S> {
             .get_facet_write_points(&self.doc_id, &branch, &facet_key, &from_heads, &to_heads)
             .await?;
         let mut versions = Vec::with_capacity(points.len());
-        for (heads, actor_id) in points {
+        for (heads, author) in points {
             let Some(value) = self.at(&heads).await? else {
                 continue;
             };
             versions.push(FacetStoreVersion {
                 heads,
                 value,
-                actor_id,
+                author,
             });
         }
         Ok(versions)

@@ -781,9 +781,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "automerge"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1b59cbd9e7685a1ac6bf6046ddcd8acb550fa5bf03c09f6c1056728a742b40d"
+checksum = "2fb849130973a7808a167887f56b1e8bdc36b9b541542602dcb337f34aecf47b"
 dependencies = [
  "cfg-if 1.0.4",
  "flate2",
@@ -805,8 +805,8 @@ dependencies = [
 
 [[package]]
 name = "autosurgeon"
-version = "0.13.0"
-source = "git+https://github.com/dman-os/autosurgeon?rev=6a1df66f667667f1d14bc2272c4d426815de66b8#6a1df66f667667f1d14bc2272c4d426815de66b8"
+version = "0.14.0"
+source = "git+https://github.com/dman-os/autosurgeon?rev=60cc24529981a4b70efd064a1a09be982d368d24#60cc24529981a4b70efd064a1a09be982d368d24"
 dependencies = [
  "automerge",
  "autosurgeon-derive",
@@ -818,8 +818,8 @@ dependencies = [
 
 [[package]]
 name = "autosurgeon-derive"
-version = "0.13.0"
-source = "git+https://github.com/dman-os/autosurgeon?rev=6a1df66f667667f1d14bc2272c4d426815de66b8#6a1df66f667667f1d14bc2272c4d426815de66b8"
+version = "0.14.0"
+source = "git+https://github.com/dman-os/autosurgeon?rev=60cc24529981a4b70efd064a1a09be982d368d24#60cc24529981a4b70efd064a1a09be982d368d24"
 dependencies = [
  "proc-macro2",
  "quote",

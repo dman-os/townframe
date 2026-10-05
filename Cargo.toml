@@ -156,9 +156,9 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 
 #
 # sync
-automerge = "0.11.0"
-autosurgeon = "0.13.0"
-automerge-test = "0.9"
+automerge = "0.12.0"
+autosurgeon = "0.14.0"
+automerge-test = "0.12.0"
 
 subduction_core = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
 subduction_iroh = { git = "https://github.com/dman-os/subduction", rev = "44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" }
@@ -232,8 +232,8 @@ irpc-iroh = "0.17.0"
 # xilem = { path = "../xilem/xilem/" }
 
 [patch.crates-io]
-autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
-autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
+autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "60cc24529981a4b70efd064a1a09be982d368d24" }
+autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "60cc24529981a4b70efd064a1a09be982d368d24" }
 # automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
 # leptos = { path = "../leptos/leptos/" }
 # leptos_meta = { path = "../leptos/meta/" }

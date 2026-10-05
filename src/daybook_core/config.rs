@@ -211,7 +211,7 @@ impl ConfigRepo {
         let store = crate::stores::AmStoreHandle::new(
             store_val,
             app_doc_handle.clone(),
-            local_actor_id.clone(),
+            automerge::Author::from(big_repo.local_peer_id().to_bytes32()?.to_vec()),
         );
 
         let cancel_token = CancellationToken::new();

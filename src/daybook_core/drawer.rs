@@ -43,14 +43,14 @@ pub(crate) fn facet_snapshot_metadata(
     doc: &automerge::Automerge,
     facet_key: &FacetKey,
     heads: &[automerge::ChangeHash],
-) -> Res<(ChangeHashSet, ActorId)> {
+) -> Res<(ChangeHashSet, Option<Vec<u8>>)> {
     let facet_heads = facet_recovery::recover_facet_heads_at(doc, facet_key, heads)?;
-    let actor_id = facet_recovery::facet_write_points(doc, facet_key, &[], heads)?
-        .into_iter()
-        .last()
-        .map(|(_, actor_id)| actor_id)
+    let (_, author) = facet_recovery::facet_write_author_at(doc, facet_key, heads)?
         .ok_or_else(|| ferr!("active facet has no dmeta write point"))?;
-    Ok((ChangeHashSet(Arc::from(facet_heads)), actor_id))
+    Ok((
+        ChangeHashSet(Arc::from(facet_heads)),
+        author.map(|author| author.as_bytes().to_vec()),
+    ))
 }
 
 /// Exact-head user-facet value hydration owned by the drawer.
@@ -68,7 +68,7 @@ pub(crate) struct ExactDmetaState {
     pub document_id: DocId,
     pub branch_id: daybook_types::doc::BranchId,
     pub branch_heads: ChangeHashSet,
-    pub facets: HashMap<FacetKey, (ChangeHashSet, ActorId)>,
+    pub facets: HashMap<FacetKey, (ChangeHashSet, Option<Vec<u8>>)>,
     pub all_facet_keys: Vec<FacetKey>,
 }
 
@@ -176,6 +176,8 @@ pub struct DrawerRepo {
     drawer_group: BigKeyhiveGroup,
     pending_documents_group: BigKeyhiveGroup,
     local_actor_id: ActorId,
+    // A node authors changes; Automerge owns the per-session actor IDs.
+    local_author: automerge::Author<'static>,
     local_peer_id: PeerKey,
     local_user_path: daybook_types::doc::UserPathBuf,
 
@@ -284,6 +286,7 @@ impl DrawerRepo {
         let local_user_path =
             daybook_types::doc::user_path::for_repo(local_user_path, "drawer-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
+        let local_author = automerge::Author::from(big_repo.local_peer_id().to_bytes32()?.to_vec());
         let drawer_am_handle = big_repo
             .get_doc(&drawer_doc_id)
             .await?
@@ -312,6 +315,7 @@ impl DrawerRepo {
             drawer_group: authority.default_drawer.clone(),
             pending_documents_group: authority.pending_documents_group(),
             local_actor_id,
+            local_author,
             local_user_path,
             entry_cache: surelock::mutex::Mutex::new(HashMap::new()),
             facet_cache: surelock::mutex::Mutex::new(FacetCacheState::new()),
@@ -512,7 +516,9 @@ impl DrawerRepo {
         Ok(local_reachable || public_reachable)
     }
 
-    pub(crate) fn content_actor_id(
+    // Legacy dmeta role-directory key, not an Automerge session or node author.
+    // Signed facet actors and delegations require the ADR015 document-format cutover.
+    pub(crate) fn dmeta_role_id(
         &self,
         user_path: Option<&daybook_types::doc::UserPath>,
         branch_doc_id: DocumentId,
@@ -523,16 +529,8 @@ impl DrawerRepo {
             .join(branch_doc_id.to_string());
         daybook_types::doc::user_path::to_actor_id(&scoped_user_path)
     }
-    /// The content actor a write to the given doc/branch (user_path None)
-    /// would use — the author of the store's own writes. None until the
-    /// doc's branch is registered.
-    pub(crate) async fn resolve_content_actor(
-        &self,
-        doc_id: &DocId,
-        branch_path: &daybook_types::doc::BranchPath,
-    ) -> Option<ActorId> {
-        let branch_ref = self.get_branch_ref(doc_id, branch_path).await.ok()??;
-        Some(self.content_actor_id(None, branch_ref.branch_doc_id))
+    pub(crate) fn local_author(&self) -> &automerge::Author<'static> {
+        &self.local_author
     }
 
     pub(crate) async fn get_branch_heads_by_doc_id(

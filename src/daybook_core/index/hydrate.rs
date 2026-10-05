@@ -95,7 +95,7 @@ pub(crate) async fn compute_doc_facet_diff(
     local_candidates.dedup();
     let local_changed_facet_keys = if let Some(current_heads) = current_heads {
         drawer
-            .facet_keys_touched_by_local_actor(
+            .facet_keys_touched_by_local_author(
                 doc_id,
                 branch_path,
                 current_heads,

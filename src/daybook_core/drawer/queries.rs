@@ -339,23 +339,26 @@ impl DrawerRepo {
             {
                 continue;
             }
-            let (facet_heads, actor_id) = handle
+            let (facet_heads, author) = handle
                 .with_document_read(|doc| {
                     crate::drawer::facet_snapshot_metadata(doc, &key, &branch_heads.0)
                 })
                 .await?;
-            facets.insert(key, (facet_heads, actor_id));
+            facets.insert(key, (facet_heads, author));
         }
-        let dmeta_actor_id = handle
+        let dmeta_author = handle
             .with_document_read(|doc| {
                 doc.get_changes(&[])
                     .last()
-                    .map(|change| change.actor_id().clone())
+                    .map(|change| {
+                        doc.get_author_for_actor(change.actor_id())
+                            .map(|author| author.as_bytes().to_vec())
+                    })
                     .ok_or_else(|| ferr!("dmeta facet has no write point"))
             })
             .await?;
         let dmeta_heads = branch_heads.clone();
-        facets.insert(dmeta_key, (dmeta_heads, dmeta_actor_id));
+        facets.insert(dmeta_key, (dmeta_heads, dmeta_author));
         Ok(Some(crate::drawer::ExactDmetaState {
             document_id: dmeta_id,
             branch_id: branch.branch_id,
@@ -929,7 +932,7 @@ impl DrawerRepo {
             .await
     }
 
-    pub async fn facet_keys_touched_by_local_actor(
+    pub async fn facet_keys_touched_by_local_author(
         &self,
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
@@ -948,52 +951,8 @@ impl DrawerRepo {
         else {
             return Ok(None);
         };
-        let branch_doc_id = handle.document_id();
-        let local_user_path = self.local_user_path.clone();
-        let mut local_actor_ids = HashSet::from([
-            self.local_actor_id.clone(),
-            self.content_actor_id(None, branch_doc_id.clone()),
-        ]);
-        if let Some(doc) = self
-            .get_doc_with_facets_at_branch_heads(
-                doc_id,
-                branch_path,
-                heads,
-                Some(vec![FacetKey::from(
-                    daybook_types::doc::WellKnownFacetTag::Dmeta,
-                )]),
-            )
-            .await?
-            && let Some(raw) = doc.facets.get(&FacetKey::from(
-                daybook_types::doc::WellKnownFacetTag::Dmeta,
-            ))
-            && let Ok(WellKnownFacet::Dmeta(dmeta)) =
-                serde_json::from_value::<WellKnownFacet>(raw.clone())
-        {
-            let local_segments: Vec<&str> = local_user_path
-                .as_str()
-                .trim_start_matches('/')
-                .split('/')
-                .collect();
-            for user_meta in dmeta.actors.values() {
-                let user_segments: Vec<&str> = user_meta
-                    .user_path
-                    .as_str()
-                    .trim_start_matches('/')
-                    .split('/')
-                    .collect();
-                if local_segments.first() == user_segments.first()
-                    && local_segments.get(1) == user_segments.get(1)
-                {
-                    local_actor_ids.insert(
-                        self.content_actor_id(Some(&user_meta.user_path), branch_doc_id.clone()),
-                    );
-                }
-            }
-        }
         let mut out = HashSet::new();
         for key in facet_keys {
-            let local_actor_ids = local_actor_ids.clone();
             let Some(facet_heads) = self
                 .get_facet_heads_at_branch_heads(doc_id, branch_path, heads, key)
                 .await?
@@ -1001,14 +960,15 @@ impl DrawerRepo {
                 // The handle resolved a moment ago, so the branch ref
                 // vanished mid-call (drawer doc updated between the two
                 // resolves). Defer instead of classifying with a stale
-                // actor set.
+                // author identity.
                 return Ok(None);
             };
             let is_local = handle
                 .with_document_read(|am_doc| {
                     for head in &facet_heads {
                         if let Some(change) = am_doc.get_change_by_hash(head)
-                            && local_actor_ids.contains(change.actor_id())
+                            && am_doc.get_author_for_actor(change.actor_id()).as_ref()
+                                == Some(&self.local_author)
                         {
                             return true;
                         }
@@ -1034,7 +994,7 @@ impl DrawerRepo {
         facet_key: &FacetKey,
         from: &[automerge::ChangeHash],
         to: &[automerge::ChangeHash],
-    ) -> Res<Vec<(ChangeHashSet, ActorId)>> {
+    ) -> Res<Vec<(ChangeHashSet, Option<automerge::Author<'static>>)>> {
         let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
             return Ok(vec![]);
         };

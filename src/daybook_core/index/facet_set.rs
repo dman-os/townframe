@@ -43,7 +43,7 @@ pub enum DocFacetMembership {
         facet_key: FacetKey,
         branch_heads: ChangeHashSet,
         facet_heads: ChangeHashSet,
-        actor_id: automerge::ActorId,
+        author: Option<Vec<u8>>,
     },
     Removed {
         document_id: DocId,
@@ -143,13 +143,13 @@ impl RevisionedStoreReader<u64, FacetDelta, eyre::Report> for FacetSetReader<'_>
                         Some(DocFacetMembership::Present {
                             branch_heads,
                             facet_heads,
-                            actor_id,
+                            author,
                             ..
                         }) => (
                             Some(FacetSnapshot {
                                 branch_heads: branch_heads.clone(),
                                 facet_heads,
-                                actor_id,
+                                author,
                             }),
                             Some(branch_heads),
                             false,
@@ -349,7 +349,7 @@ impl FacetSetRevisionStore {
             }
             if delta.branch_id.0 == state.document_id {
                 let touched_local = drawer
-                    .facet_keys_touched_by_local_actor(
+                    .facet_keys_touched_by_local_author(
                         &state.document_id,
                         daybook_types::doc::BranchPath::new("main"),
                         &state.branch_heads,
@@ -369,7 +369,7 @@ impl FacetSetRevisionStore {
                     ));
                 }
             }
-            for (facet_key, (facet_heads, actor_id)) in state.facets {
+            for (facet_key, (facet_heads, author)) in state.facets {
                 desired.insert(
                     FacetRouteKey {
                         document_id: state.document_id.clone(),
@@ -379,7 +379,7 @@ impl FacetSetRevisionStore {
                     FacetSnapshot {
                         branch_heads: state.branch_heads.clone(),
                         facet_heads,
-                        actor_id,
+                        author,
                     },
                 );
             }
@@ -450,7 +450,7 @@ impl FacetSetRevisionStore {
                     facet_key: key.facet_key.clone(),
                     branch_heads: snapshot.branch_heads.clone(),
                     facet_heads: snapshot.facet_heads.clone(),
-                    actor_id: snapshot.actor_id.clone(),
+                    author: snapshot.author.clone(),
                 }),
             ));
         }
@@ -547,7 +547,7 @@ async fn insert_routes(
         return Ok(());
     }
     let mut query = QueryBuilder::<Sqlite>::new(
-        "INSERT INTO facet_set_doc_facets(document_id, branch_id, facet_tag, facet_id, facet_heads_json, actor_id_json, branch_heads_json) VALUES ",
+        "INSERT INTO facet_set_doc_facets(document_id, branch_id, facet_tag, facet_id, facet_heads_json, author_json, branch_heads_json) VALUES ",
     );
     let mut first = true;
     for (key, snapshot) in desired {
@@ -567,7 +567,7 @@ async fn insert_routes(
             .push(", ")
             .push_bind(serde_json::to_string(&snapshot.facet_heads)?)
             .push(", ")
-            .push_bind(serde_json::to_string(&snapshot.actor_id)?)
+            .push_bind(serde_json::to_string(&snapshot.author)?)
             .push(", ")
             .push_bind(serde_json::to_string(&snapshot.branch_heads)?)
             .push(")");
@@ -1008,7 +1008,7 @@ impl DocFacetSetIndexRepo {
               , facet_tag TEXT NOT NULL
               , facet_id TEXT NOT NULL
               , facet_heads_json TEXT NOT NULL
-              , actor_id_json TEXT NOT NULL
+              , author_json TEXT NOT NULL
               , branch_heads_json TEXT NOT NULL
               , PRIMARY KEY(document_id, branch_id, facet_tag, facet_id)
             ) STRICT
@@ -1016,6 +1016,24 @@ impl DocFacetSetIndexRepo {
         )
         .execute(&sql.write_pool)
         .await?;
+        let legacy_column: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info('facet_set_doc_facets') WHERE name = 'actor_id_json'",
+        )
+        .fetch_one(&sql.write_pool)
+        .await?;
+        if legacy_column != 0 {
+            let mut tx = sql.write_pool.begin().await?;
+            sqlx::query(
+                "ALTER TABLE facet_set_doc_facets RENAME COLUMN actor_id_json TO author_json",
+            )
+            .execute(&mut *tx)
+            .await?;
+            // Session IDs cannot be relabelled as node authors. Preserve unknown provenance.
+            sqlx::query("UPDATE facet_set_doc_facets SET author_json = 'null'")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_facet_set_doc_facets_route ON facet_set_doc_facets(facet_tag, facet_id, document_id, branch_id)",
@@ -1093,6 +1111,54 @@ mod tests {
     use big_sync_core::revisioned_store::RevisionReadLimits;
     use daybook_types::doc::{AddDocArgs, BranchPathBuf, FacetKey, FacetRaw, WellKnownFacet};
     use std::collections::VecDeque;
+
+    #[tokio::test]
+    async fn legacy_actor_migration_preserves_routes_without_fabricating_authors() -> Res<()> {
+        let sql = SqlCtx::memory().await?;
+        sqlx::query(
+            r#"CREATE TABLE facet_set_doc_facets (
+                document_id TEXT NOT NULL
+              , branch_id TEXT NOT NULL
+              , facet_tag TEXT NOT NULL
+              , facet_id TEXT NOT NULL
+              , facet_heads_json TEXT NOT NULL
+              , actor_id_json TEXT NOT NULL
+              , branch_heads_json TEXT NOT NULL
+              , PRIMARY KEY(document_id, branch_id, facet_tag, facet_id)
+            ) STRICT"#,
+        )
+        .execute(&sql.write_pool)
+        .await?;
+        sqlx::query(r#"INSERT INTO facet_set_doc_facets VALUES ('doc', 'branch', 'note', 'main', '["facet"]', '"legacy-session"', '["branch"]')"#)
+            .execute(&sql.write_pool).await?;
+        DocFacetSetIndexRepo::init_schema(&sql).await?;
+        DocFacetSetIndexRepo::init_schema(&sql).await?;
+        let row: (String, String, String, String, String, String, String) = sqlx::query_as(
+            r#"SELECT document_id
+                    , branch_id
+                    , facet_tag
+                    , facet_id
+                    , facet_heads_json
+                    , author_json
+                    , branch_heads_json
+                 FROM facet_set_doc_facets"#,
+        )
+        .fetch_one(&sql.read_pool)
+        .await?;
+        assert_eq!(
+            row,
+            (
+                "doc".into(),
+                "branch".into(),
+                "note".into(),
+                "main".into(),
+                r#"["facet"]"#.into(),
+                "null".into(),
+                r#"["branch"]"#.into()
+            )
+        );
+        Ok(())
+    }
 
     struct ScriptedFrontierReader {
         reads: VecDeque<

@@ -2205,7 +2205,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     assert!(
         dmeta_after_add.actors.contains_key(
             &repo
-                .content_actor_id(Some(&user_path), main_branch_doc_id.clone())
+                .dmeta_role_id(Some(&user_path), main_branch_doc_id.clone())
                 .to_string()
         ),
         "user should be recorded on add dmeta"
@@ -2253,7 +2253,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     assert!(
         dmeta_after_update.actors.contains_key(
             &repo
-                .content_actor_id(Some(&user_path2), main_branch_doc_id)
+                .dmeta_role_id(Some(&user_path2), main_branch_doc_id)
                 .to_string()
         ),
         "updated user should be recorded on dmeta"
@@ -2374,9 +2374,9 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
     Ok(())
 }
 
-async fn latest_change_actor(handle: &big_repo::BigDocHandle) -> Res<automerge::ActorId> {
+async fn latest_change_author(handle: &big_repo::BigDocHandle) -> Res<automerge::Author<'static>> {
     handle
-        .with_document(|doc| {
+        .with_document_read(|doc| {
             let heads = doc.get_heads();
             let Some(latest_head) = heads.first() else {
                 eyre::bail!("doc has no heads");
@@ -2384,13 +2384,15 @@ async fn latest_change_actor(handle: &big_repo::BigDocHandle) -> Res<automerge::
             let change = doc
                 .get_change_by_hash(latest_head)
                 .ok_or_eyre("latest head change not found")?;
-            Ok(change.actor_id().clone())
+            doc.get_author_for_actor(change.actor_id())
+                .map(automerge::Author::into_owned)
+                .ok_or_eyre("latest change has no node author")
         })
-        .await?
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
+async fn test_update_at_heads_user_path_cannot_override_node_author() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
     let drawer_doc_id = {
@@ -2426,6 +2428,10 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         })
         .await?;
 
+    let base_heads = repo
+        .get_branch_heads_for_path(&doc_id, BranchPath::new("main"))
+        .await?
+        .ok_or_eyre("missing initial branch heads")?;
     let user_path = UserPathBuf::from("/duser-wip-testactor/ddev-wip-iroh-testactor/plug/routine");
     repo.update_at_heads(
         DocPatch {
@@ -2442,14 +2448,23 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         None,
     )
     .await?;
+    repo.update_at_heads(
+        DocPatch {
+            id: doc_id.clone(),
+            facets_set: [(
+                FacetKey::from(WellKnownFacetTag::TitleGeneric),
+                WellKnownFacet::TitleGeneric("concurrent".into()).into(),
+            )]
+            .into(),
+            facets_remove: vec![],
+            user_path: Some(user_path),
+        },
+        BranchPath::new("main"),
+        Some(base_heads),
+    )
+    .await?;
 
-    let expected_actor = repo.content_actor_id(
-        Some(&user_path),
-        repo.get_branch_state(&doc_id, BranchPath::new("main"))
-            .await?
-            .ok_or_eyre("missing main branch state")?
-            .branch_doc_id,
-    );
+    let expected_author = repo.local_author().clone();
     let branch_doc_id = repo
         .get_branch_state(&doc_id, BranchPath::new("main"))
         .await?
@@ -2459,8 +2474,25 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
         .get_doc(&branch_doc_id)
         .await?
         .into_ready(branch_doc_id)?;
-    let latest_actor = latest_change_actor(&handle).await?;
-    assert_eq!(latest_actor, expected_actor);
+    let latest_author = latest_change_author(&handle).await?;
+    assert_eq!(latest_author, expected_author);
+    handle
+        .with_document_read(|doc| -> Res<()> {
+            let restored = automerge::Automerge::load(&doc.save())?;
+            assert_eq!(
+                restored.get_heads().len(),
+                2,
+                "historical writes must remain concurrent"
+            );
+            for change in restored.get_changes(&[]) {
+                assert_eq!(
+                    restored.get_author_for_actor(change.actor_id()).as_ref(),
+                    Some(&expected_author)
+                );
+            }
+            Ok(())
+        })
+        .await?;
 
     stop_token.stop().await?;
     acx_stop().await?;
@@ -2468,7 +2500,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
+async fn test_merge_from_heads_user_path_cannot_override_node_author() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
     let drawer_doc_id = {
@@ -2555,13 +2587,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
     )
     .await?;
 
-    let expected_actor = repo.content_actor_id(
-        Some(&merge_user_path),
-        repo.get_branch_state(&doc_id, BranchPath::new("main"))
-            .await?
-            .ok_or_eyre("missing main branch state")?
-            .branch_doc_id,
-    );
+    let expected_author = repo.local_author().clone();
     let branch_doc_id = repo
         .get_branch_state(&doc_id, BranchPath::new("main"))
         .await?
@@ -2571,8 +2597,8 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
         .get_doc(&branch_doc_id)
         .await?
         .into_ready(branch_doc_id)?;
-    let latest_actor = latest_change_actor(&handle).await?;
-    assert_eq!(latest_actor, expected_actor);
+    let latest_author = latest_change_author(&handle).await?;
+    assert_eq!(latest_author, expected_author);
 
     stop_token.stop().await?;
     acx_stop().await?;
@@ -2580,7 +2606,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor() -> Res<()> {
+async fn test_facet_keys_touched_by_local_author_includes_custom_user_path() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
     let drawer_doc_id = {
@@ -2643,7 +2669,7 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
         .cloned()
         .ok_or_eyre("missing main branch")?;
     let touched = repo
-        .facet_keys_touched_by_local_actor(
+        .facet_keys_touched_by_local_author(
             &doc_id,
             BranchPath::new("main"),
             &main_heads,
