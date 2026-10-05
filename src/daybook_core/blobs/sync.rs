@@ -37,6 +37,7 @@ impl BlobSyncBackend {
             let (mut map, _key) = key.lock(&self.peer_addrs);
             map.insert(peer_id, addr);
         });
+        self.blobs_repo.notify_input_change();
     }
 
     pub fn active_peer_ids(&self) -> Vec<PeerKey> {
@@ -51,6 +52,7 @@ impl BlobSyncBackend {
             let (mut map, _key) = key.lock(&self.peer_addrs);
             map.remove(&peer_id);
         });
+        self.blobs_repo.notify_input_change();
     }
 
     pub async fn ensure_local_blob(&self, peer_id: PeerKey, blob_id: BlobId) -> Res<()> {

@@ -109,6 +109,7 @@ private val wellKnownFacetTagCanonicalStrings: Map<WellKnownFacetTag, String> = 
     WellKnownFacetTag.LABEL_GENERIC to "org.example.daybook.labelGeneric",
     WellKnownFacetTag.TITLE_GENERIC to "org.example.daybook.titleGeneric",
     WellKnownFacetTag.PATH_GENERIC to "org.example.daybook.pathGeneric",
+    WellKnownFacetTag.JWK to "org.example.daybook.jwk",
     WellKnownFacetTag.PENDING to "org.example.daybook.pending",
     WellKnownFacetTag.BODY to "org.example.daybook.body",
     WellKnownFacetTag.NOTE to "org.example.daybook.note",

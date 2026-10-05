@@ -875,7 +875,7 @@ mod tests {
                 current: Some(FacetSnapshot {
                     branch_heads: heads_1.clone(),
                     facet_heads: facet_heads_1,
-                    actor_id: actor_id_1,
+                    author: actor_id_1,
                 }),
                 current_branch_heads: Some(heads_1),
                 removed_local: false,
@@ -889,7 +889,7 @@ mod tests {
                 current: Some(FacetSnapshot {
                     branch_heads: heads_2.clone(),
                     facet_heads: facet_heads_2,
-                    actor_id: actor_id_2,
+                    author: actor_id_2,
                 }),
                 current_branch_heads: Some(heads_2.clone()),
                 removed_local: false,
