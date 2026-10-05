@@ -1,6 +1,6 @@
 # ADR 011: Daybook checkouts, staging, and publication
 
-- **Status:** Accepted (replaces the superseded revision; see superseded decisions in the drafts disposition ledger).
+- **Status:** Accepted (replaces the superseded revision; superseded decisions are listed inline below).
 - **Supersedes:** The original ADR 011's automatic ingestion on read commands, file-deletion-to-trash mapping, separate semantic bounce branches, and unconditional crash-safety claims.
 - **Depends on:** ADR 010 (generic bridge/vtree), FDRs 001–004, and ADR 007's distinct document/branch identities.
 - **Related:** ADR 012 owns lens recognition, preparation, output plans, and effective authority; ADR 013 owns blob retention and GC.

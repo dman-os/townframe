@@ -1,6 +1,6 @@
 # ADR 012: Lens recognition, selection, ingestion, and production
 
-- **Status:** Accepted (replaces the superseded revision; see superseded decisions in the drafts disposition ledger).
+- **Status:** Accepted (replaces the superseded revision; superseded decisions are listed inline below).
 - **Supersedes:** The original ADR 012's extension-first single-winner classification, ingest-without-render-base API, generic stubs, and render-failure-to-bounce contract.
 - **Depends on:** ADRs 010–011, FDRs 001–004, document/branch identity and plug registration designs.
 - **Related:** ADR 013 owns blob retention, chunk access, and byte transfer.

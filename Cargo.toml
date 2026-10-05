@@ -276,6 +276,8 @@ clippy.let_underscore_must_use = "warn"
 clippy.let_underscore_untyped = "deny"
 rust.let_underscore_drop = "deny"
 # clippy.used_underscore_binding = "warn"
+# Project convention: module files are named after their module (foo/ dir + foo.rs), never foo/mod.rs.
+clippy.mod_module_files = "deny"
 
 # Subduction is taken straight from the local checkout by the path dependencies above: its own
 # workspace members depend on each other by path, so nothing has to negotiate versions and the graph

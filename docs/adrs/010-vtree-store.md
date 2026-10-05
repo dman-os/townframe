@@ -1,6 +1,6 @@
 # ADR 010: Pauperfuse bridge and virtual tree store
 
-- **Status:** Accepted (replaces the superseded revision; see superseded decisions in the drafts disposition ledger).
+- **Status:** Accepted (replaces the superseded revision; superseded decisions are listed inline below).
 - **Supersedes:** ADR 010 rev. 2's N-way reconciliation and generic stubs. The older content-addressed `DirNode` DAG remains superseded.
 - **Depends on:** FDRs 001–004.
 - **Related:** ADR 011 defines durable Daybook checkouts; ADR 012 defines projection and ingestion through lenses; ADR 013 owns blob retention and transfer.
