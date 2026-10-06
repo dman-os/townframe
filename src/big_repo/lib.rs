@@ -1048,45 +1048,61 @@ impl BigRepo {
                         .await?;
                 }
                 AllocationRegistration::Unregistered(revertible) => {
-                    // Discard. First the advertising coparents the granted-not-
-                    // registered window may have left: a shared coparent grant
-                    // is replication authorization, so the revert runs BEFORE
-                    // the pending revocation and skips grants whose coparent
-                    // never landed (`group_document_ids` read), keeping the
-                    // discard idempotent across every finalize point. Then the
-                    // pending coparent revocation and the reservation deletion
-                    // in `complete_reserved_doc` — and nothing else: no keyhive
-                    // document, sedimentree, event or byte is deleted.
-                    for group in &revertible {
-                        if !self
-                            .keyhive()
-                            .group_document_ids(group)
-                            .await
-                            .contains(&doc_id)
-                        {
-                            continue;
-                        }
-                        self.keyhive()
-                            .revoke_group_from_doc(
-                                group,
-                                doc_id.clone(),
-                                self.drain_revocation_frontier(&doc_id).await?,
-                                &self.keyhive_protocol,
-                            )
-                            .await?;
-                    }
-                    self.keyhive()
-                        .complete_reserved_doc(
-                            &pending_group,
-                            doc_id.clone(),
-                            self.drain_revocation_frontier(&doc_id).await?,
-                            &self.keyhive_protocol,
-                            &self.keyhive_storage,
-                        )
+                    self.discard_reserved_doc(doc_id.clone(), pending_group.clone(), &revertible)
                         .await?;
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Discard one pending allocation outright: revert the advertising
+    /// coparents `revertible` names — a shared coparent grant IS replication
+    /// authorization (subduction-keyhive gates pulls on group membership), so
+    /// a grant standing on a doc nobody registered must be reverted — then
+    /// revoke the pending coparent and drop the reservation in
+    /// [`Self::complete_reserved_doc`]. Nothing else is touched: no keyhive
+    /// document, sedimentree, event or byte is deleted.
+    ///
+    /// The boot sweep's unregistered branch and the drawer's
+    /// `discard_temporary` both reach here, making a discard idempotent
+    /// across every finalize point: the revert skips grants whose coparent
+    /// never landed (`group_document_ids` read), and `complete_reserved_doc`
+    /// skips revocation on an already-revoked group and no-ops once the
+    /// reservation is gone.
+    pub async fn discard_reserved_doc(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        pending_group: BigKeyhiveGroup,
+        revertible: &[BigKeyhiveGroup],
+    ) -> Res<()> {
+        for group in revertible {
+            if !self
+                .keyhive()
+                .group_document_ids(group)
+                .await
+                .contains(&doc_id)
+            {
+                continue;
+            }
+            self.keyhive()
+                .revoke_group_from_doc(
+                    group,
+                    doc_id.clone(),
+                    self.drain_revocation_frontier(&doc_id).await?,
+                    &self.keyhive_protocol,
+                )
+                .await?;
+        }
+        self.keyhive()
+            .complete_reserved_doc(
+                &pending_group,
+                doc_id.clone(),
+                self.drain_revocation_frontier(&doc_id).await?,
+                &self.keyhive_protocol,
+                &self.keyhive_storage,
+            )
+            .await?;
         Ok(())
     }
 

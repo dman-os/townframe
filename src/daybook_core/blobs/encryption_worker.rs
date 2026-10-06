@@ -21,17 +21,22 @@
 //!
 //! 1. §11 pass over `P`: compute `C`, install the virtual entry, register the
 //!    pair (installed ⟹ servable ⟹ rooted, `CipherBlobProvider::install`)
-//! 2. write the JWK facet, in a document of its own
-//! 3. write the `cipherBlob` facet — `C` becomes nameable
-//! 4. (no step) the pin is derived from that facet, never written here
-//! 5. append the `?via=` resolution URL to the `Blob` facet — the commit point
+//! 2. stage the key document: the JWK facet goes into its initial content while
+//!    it is still the node-local staging doc — pending-only genesis, zero
+//!    members, nothing advertised (`DrawerRepo::add_temporary`)
+//! 3. write the `cipherBlob` facet — the claim: it names the staged key
+//!    document (keyRef + the staged heads)
+//! 4. commit the key document — grants, drawer registration, pending revoke:
+//!    the operation's only replicated act (`DrawerRepo::commit_temporary`)
+//! 5. (no step) the pin is derived from that facet, never written here
+//! 6. append the `?via=` resolution URL to the `Blob` facet
 
 use crate::blobs::pair_roots::PairRoots;
 use crate::interlude::*;
 
 use daybook_types::doc::{
-    AddDocArgs, Blob, BranchId, BranchPath, BranchPathBuf, ChangeHashSet, CipherBlob, DocId,
-    DocPatch, FacetKey, FacetRaw, FacetTag, Jwk, Representation, WellKnownFacet, WellKnownFacetTag,
+    AddDocArgs, Blob, BranchId, BranchPathBuf, ChangeHashSet, CipherBlob, DocId, DocPatch,
+    FacetKey, FacetRaw, FacetTag, Jwk, Representation, WellKnownFacet, WellKnownFacetTag,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -1596,15 +1601,17 @@ impl Ctx {
     /// carried over unchanged, so only the keying rotates.
     ///
     /// Order is §19's, adapted: the new representation is servable and rooted
-    /// before anything names it, the JWK lands in a fresh key document (§16's
-    /// migration: a new key-storage document per rotation; stopping grants on
-    /// the old one is the §16 stronger-isolation step, not this operation),
-    /// and the facet update is the commit point. The resolution URL names the
-    /// facet key — unchanged — and is ensured last anyway. The old
-    /// representation's release is nobody's direct write here: its pin leaves
-    /// the desired set with this facet delta, and the pin worker's release
-    /// leaf drops the old `ct:`/`pt:` tags (§19, "the release path is
-    /// deliberate").
+    /// before anything names it, the fresh key document is staged with its JWK
+    /// facet while it is still purely local (§16's migration: a new key-storage
+    /// document per rotation; stopping grants on the old one is the §16
+    /// stronger-isolation step, not this operation), the cipherBlob facet
+    /// update claims the staged key document and is the operation's commit
+    /// point, and the staged document's commit — the only replicated act —
+    /// follows it. The resolution URL names the facet key — unchanged — and is
+    /// ensured last anyway. The old representation's release is nobody's
+    /// direct write here: its pin leaves the desired set with this facet
+    /// delta, and the pin worker's release leaf drops the old `ct:`/`pt:`
+    /// tags (§19, "the release path is deliberate").
     async fn rotate_representation(
         &self,
         doc_id: &DocId,
@@ -1682,47 +1689,66 @@ impl Ctx {
             );
         }
 
-        // 2. The fresh key document, for §16's migration shape. Same facet key
-        // as any key document of this domain: the keyScope's one-key-per-doc
-        // rule is per (document, domain), and a rotation mints a new document.
-        let key_doc_id = self
+        // 2. The fresh key document, staged with its JWK facet in its initial
+        // content for §16's migration shape. Same facet key as any key
+        // document of this domain: the keyScope's one-key-per-doc rule is per
+        // (document, domain), and a rotation mints a new document.
+        // `add_temporary` keeps the staging doc purely local — pending-only
+        // genesis, zero members — until the commit after the claim below.
+        let jwk_key = self.jwk_facet_key();
+        let jwk = JwkOct::from_master_key(&new_key);
+        let staged_key = self
             .drawer_repo
-            .add(AddDocArgs {
+            .add_temporary(AddDocArgs {
                 branch_path: BranchPathBuf::from(MAIN_BRANCH),
-                facets: default(),
+                facets: [(
+                    jwk_key.clone(),
+                    FacetRaw::from(WellKnownFacet::Jwk(Jwk {
+                        kty: jwk.kty,
+                        members: serde_json::json!({ "k": jwk.k }),
+                    })),
+                )]
+                .into(),
                 user_path: None,
             })
             .await?;
-        let jwk_key = self.jwk_facet_key();
-        self.write_jwk_facet(&key_doc_id, &jwk_key, &new_key)
-            .await?;
-        let key_heads = self
-            .drawer_repo
-            .get_branch_heads_for_path(&key_doc_id, BranchPath::new(MAIN_BRANCH))
-            .await?
-            .ok_or_else(|| eyre::eyre!("key document {key_doc_id} has no {MAIN_BRANCH} branch"))?;
+        let key_doc_id = staged_key.doc_id.clone();
         let key_ref = format!("db+facet:///{key_doc_id}/{jwk_key}");
 
         // 3. The facet update, built at fresh heads (a change has to descend
-        // from the state it replaces) — the commit point.
+        // from the state it replaces) — the claim, and the operation's commit
+        // point: it names the still-staged key document (keyRef + the staged
+        // heads), so the next boot's sweep can replay the commit from it.
         let heads = self
             .drawer_repo
             .get_branch_heads_for_path(doc_id, branch)
             .await?
             .ok_or_else(|| eyre::eyre!("document {doc_id} has no {branch} branch"))?;
         self.write_cipher_facet(
-            doc_id, branch, &heads, cipher_key, c2_hash, c2_len, &key_ref, key_heads, encoding,
+            doc_id,
+            branch,
+            &heads,
+            cipher_key,
+            c2_hash,
+            c2_len,
+            &key_ref,
+            staged_key.branch_heads.clone(),
+            encoding,
         )
         .await?;
 
-        // 5. The resolution already names this facet key; ensure it anyway, in
+        // 4. The fresh key document's commit — the operation's only replicated
+        // act.
+        self.drawer_repo.commit_temporary(&staged_key).await?;
+
+        // 5-6. The resolution already names this facet key; ensure it anyway, in
         // case the representation's first commit never got this far.
         self.write_resolution_url(doc_id, branch, blob_key, cipher_key)
             .await?;
         Ok(())
     }
 
-    /// Steps 1-3 and 5 for a blob that has no representation yet.
+    /// Steps 1-6 for a blob that has no representation yet.
     async fn create_representation(
         &self,
         doc_id: &DocId,
@@ -1758,28 +1784,37 @@ impl Ctx {
             eyre::eyre!("representation {c_hash} is not complete immediately after install")
         })?;
 
-        // 2. The JWK facet, in a key document of its own: §19 keeps the key out
-        // of the document whose readers may only be entitled to serve.
-        let key_doc_id = self
+        // 2. The key document, staged with its JWK facet in its initial
+        // content — §19 keeps the key out of the document whose readers may
+        // only be entitled to serve, and `add_temporary` keeps the staging
+        // doc purely local: pending-only genesis, zero members, nothing
+        // advertised. A crash before the commit below leaves it to the next
+        // boot's sweep, which commits a claimed staging doc and discards an
+        // unclaimed one (ADR 003 §19).
+        let jwk_key = self.jwk_facet_key();
+        let jwk = JwkOct::from_master_key(&key);
+        let staged_key = self
             .drawer_repo
-            .add(AddDocArgs {
+            .add_temporary(AddDocArgs {
                 branch_path: BranchPathBuf::from(MAIN_BRANCH),
-                facets: default(),
+                facets: [(
+                    jwk_key.clone(),
+                    FacetRaw::from(WellKnownFacet::Jwk(Jwk {
+                        kty: jwk.kty,
+                        members: serde_json::json!({ "k": jwk.k }),
+                    })),
+                )]
+                .into(),
                 user_path: None,
             })
             .await?;
-        let jwk_key = self.jwk_facet_key();
-        self.write_jwk_facet(&key_doc_id, &jwk_key, &key).await?;
-        let key_heads = self
-            .drawer_repo
-            .get_branch_heads_for_path(&key_doc_id, BranchPath::new(MAIN_BRANCH))
-            .await?
-            .ok_or_else(|| eyre::eyre!("key document {key_doc_id} has no {MAIN_BRANCH} branch"))?;
+        let key_doc_id = staged_key.doc_id.clone();
         let key_ref = format!("db+facet:///{key_doc_id}/{jwk_key}");
 
-        // 3. The cipherBlob facet: from here C is nameable, so a reader that
-        // resolves through this document can reach a representation that is
-        // already servable.
+        // 3. The cipherBlob facet — the claim, and the operation's commit
+        // point: from here the staged key document is named (keyRef + the
+        // staged heads), so the next boot's sweep replays the commit from the
+        // claim.
         self.write_cipher_facet(
             doc_id,
             branch,
@@ -1788,13 +1823,16 @@ impl Ctx {
             c_hash,
             c_len,
             &key_ref,
-            key_heads,
+            staged_key.branch_heads.clone(),
             EncodingParams::DEFAULT,
         )
         .await?;
 
-        // 5. The commit point, last: everything above is recoverable state, and
-        // this is the write that makes the document resolve.
+        // 4. The key document's commit — the operation's only replicated act.
+        self.drawer_repo.commit_temporary(&staged_key).await?;
+
+        // 5-6. The commit point, last: everything above is recoverable state,
+        // and this is the write that makes the document resolve.
         self.write_resolution_url(doc_id, branch, blob_key, cipher_key)
             .await?;
         Ok(())
@@ -1877,37 +1915,6 @@ impl Ctx {
         self.write_resolution_url(doc_id, branch, blob_key, cipher_key)
             .await?;
 
-        Ok(())
-    }
-
-    async fn write_jwk_facet(
-        &self,
-        key_doc_id: &DocId,
-        jwk_key: &FacetKey,
-        key: &MasterKey,
-    ) -> Res<()> {
-        let jwk = JwkOct::from_master_key(key);
-        self.drawer_repo
-            .update_at_heads_with_scope(
-                DocPatch {
-                    id: key_doc_id.clone(),
-                    facets_set: [(
-                        jwk_key.clone(),
-                        FacetRaw::from(WellKnownFacet::Jwk(Jwk {
-                            kty: jwk.kty,
-                            members: serde_json::json!({ "k": jwk.k }),
-                        })),
-                    )]
-                    .into(),
-                    facets_remove: vec![],
-                    user_path: None,
-                },
-                BranchPath::new(MAIN_BRANCH),
-                None,
-                FacetWriteScope::System,
-            )
-            .await
-            .map_err(|err| eyre::eyre!("writing JWK facet {jwk_key} into {key_doc_id}: {err}"))?;
         Ok(())
     }
 

@@ -583,21 +583,26 @@ race an install or a delta for the same document. The trigger is an explicit
 request (`Rt::request_doc_representations_rotation`) carried to the worker's
 facet machine through a channel; the machine's budget gates it like every
 other task. `rotate_document` reconciles first, then rotates each existing
-representation: a fresh `MasterKey` and §16 migration (a fresh key-storage
-document per rotation), §11 install of the new ciphertext, then the cipherBlob
-facet updated **in place under its unchanged facet key** at fresh heads — that
-in-place update is the commit point. The old ciphertext's release is *not*
+representation: a fresh `MasterKey`, §16 migration — a fresh key-storage
+document per rotation, **staged via the node-local staging facility**
+(`add_temporary`, its JWK facet in its initial content) purely locally —,
+§11 install of the new ciphertext, then the cipherBlob facet updated **in
+place under its unchanged facet key** at fresh heads — that in-place update
+is the claim, and the claim plus the staged key document's
+`commit_temporary` (grants, drawer registration, pending revoke) are together
+the operation's commit point (§19). The old ciphertext's release is *not*
 written by the rotation: it rides the reactive pin diff (§19), so the "wait
 for required retention acknowledgement" and "eventually remove" of the safe
 relay rotation above are realized as the pin worker's release leaf observing
 the facet delta. The rotation task carries the branch's pending delta cursor
 through the scheduler and acknowledges it on durable success, so a rotated
 delta cannot gate the walker's durable prefix forever. Crash windows: a fault
-fault after §11 install leaves the new pair rooted-but-unreferenced — the
-declared window. The retry recovers to the correct end state only when it can
-find the key document; otherwise the pair is a permanent leak, because neither
-the diff-driven release nor the store GC can observe a pair whose only record is
-its own tags.
+after §11 install leaves the new pair rooted-but-unreferenced — the declared
+window — while a fault after the claim lands leaves a claimed-but-uncommitted
+staging doc that the next boot's sweep commits. The retry recovers to the
+correct end state only when it can find the key document; otherwise the pair
+is a permanent leak, because neither the diff-driven release nor the store GC
+can observe a pair whose only record is its own tags.
 Generate fresh keying material and a fresh encrypted representation:
 
 ```text
@@ -824,38 +829,57 @@ sequence is safe to be crashed in:
 
 ```text
 1. §11 pass over P: compute C, install the virtual entry, register the pair
-2. write the JWK facet
-3. write the cipherBlob facet              <- C becomes nameable
-4. derive and write the pin for C
-5. write Blob.urls resolution through the cipherBlob   <- commit point
+2. stage the key document: the JWK facet goes into its initial content while
+   the key document is still the node-local staging doc - pending-only
+   genesis, a zero-member pending group, nothing advertised
+3. write the cipherBlob facet - the claim: it names the staged key document
+   (keyRef + the staged document's heads)                <- commit point
+4. commit the key document: the advertising grants, the drawer registration,
+   the pending-group revocation - the operation's only replicated act
+5. derive and write the pin for C
+6. write Blob.urls resolution through the cipherBlob
 ```
 
-The representation is fully servable before anything points at it, and the
-resolution that lets a reader reach C is written last. A crash before step 5
-leaves the virtual entry and the pair tags unreferenced but inert: nothing
-There is deliberately no rescanning mechanism - no outbox, no boot-time orphan
-sweep. From the point the cipherBlob facet exists, recovery is by re-derivation:
-the §11 pass is deterministic, so the same document's next encryption attempt
-re-derives the identical digests, finds the registered pair and completes the
-facet write - the retry IS the collector.
+The representation is servable before anything points at it, and the staged
+key document stays purely local - the pending group has no members, so its
+events cannot leave the node - until the claim that names it is durable. The
+claim and the key document's commit are together the commit point: before it,
+a crash leaves a node-local staging document whose id reservation still names
+it; the next boot's registration sweep reads the drawer's surfaces and either
+**committed** it (the claim is present, so the registration write is replayed
+and the reservation granted, registered and completed) or **discarded** it
+(no claim, nothing advertised it, so the reservation is revoked and dropped).
+After it, recovery is by re-derivation: the §11 pass is deterministic, so the
+same document's next encryption attempt re-derives the identical digests,
+finds the registered pair and completes the facet write - the retry IS the
+collector. A pin is written only after the representation is servable, per
+§14 - the same ordering constraint expressed from the other side:
+servability is established at step 1, and step 5 is the first moment that
+fact may be published. The claim before step 4 names a key document a reader
+cannot yet resolve (it is unregistered, so nothing serves it); that window
+is transient and retries resolve cleanly once step 4's events propagate,
+because `keyRef` pins the staged heads the key document's commit will
+replicate and the key document's committed heads are exactly those heads.
 
-Before that point it is not, and the gap is a leak rather than dead storage. The
-pair tags are rooted by `install` while the key that makes `C` usable is written
-later, into a key document whose id is random and whose only durable pointer is
-the cipherBlob facet written after that. A crash in between leaves a pair that
-nothing can release: release is driven by the ciphertext inventory's pin rows, so
-a pair that was never pinned is invisible to that diff, and the store's GC cannot
-help either because its mark phase seeds the live set *from the named tags* - a
-pair whose only record is its own tags is by construction live to it. Since
-`pt:<C>` roots the plaintext, such a pair keeps the plaintext on disk even after
-its document is deleted. Closing this requires the key to be durable *and
-findable* before any tag is rooted (so a retry re-derives the same `C`), plus a
-record written before the root for the cases no retry reaches at all.
+There is deliberately no rescanning mechanism for the pair plane - no outbox
+sweep over `ct:`/`pt:` tags, no boot-time orphan hunt over the store: a
+transiently incomplete inventory view would make a live pair look
+unreferenced, and releasing it would unroot bytes a reader needs. The one
+sweep that does exist is over the *staging* plane (the pending-allocation
+registration sweep), which classifies id reservations by the drawer's own
+durable records and keeps anything it cannot read; it never touches pairs.
 
-A pin is written only after the representation is servable, per §14. That is
-the same ordering constraint expressed from the other side: servability is
-established at step 1, and step 4 is the first moment that fact may be
-published.
+The one gap the claim ordering cannot close is a crash after `install` but
+before the claim: the pair tags are rooted by `install`, the key document is
+staged but not yet named, and release is driven by the ciphertext inventory's
+pin rows, so a pair that was never pinned would be invisible to that diff -
+and the store's GC cannot help either because its mark phase seeds the live
+set *from the named tags*, so a pair whose only record is its own tags is by
+construction live to it. Since `pt:<C>` roots the plaintext, such a pair
+would keep the plaintext on disk even after its document is deleted. That is
+what the `PairRoots` ledger is for: a row written before the tags records
+which document's facets are expected to claim the pair, and the boot drain
+releases pairs nothing claims and keeps pairs a facet still names.
 
 #### The release path is deliberate
 

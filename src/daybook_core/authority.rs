@@ -193,17 +193,24 @@ pub(crate) async fn ensure(
 /// drain (the drawer staging facility for transactional doc creation).
 ///
 /// The drawer's durable registration surfaces (`docs.map` entries, branch
-/// refs, local-branch refs) settle each reservation:
+/// refs, local-branch refs) plus its cipherBlob claims settle each
+/// reservation:
 ///
-/// - **Registered** → mechanically replay the finalize sequence the
-///   registering caller owns: the advertising grants, then completion (revoke
-///   the pending coparent, drop the reservation). This is the
-///   registered-not-finalized crash window.
-/// - **Not registered** → discard: drop the reservation and revoke the
-///   pending coparent. Discard is purely local — allocations grant ONLY the
-///   pending group at genesis and it has no members, so the document's events
-///   can never have left the node and no peer can hold authorization; the
-///   events, sedimentree and bytes are never deleted.
+/// - **Registered** (including the claimed-but-uncommitted window: a durable
+///   `cipherBlob` facet names the reservation by `keyRef`, ADR 003 §19) →
+///   mechanically replay the registration: for claimed-but-unregistered ones
+///   the `docs.map` entry is written first, then the drain replays the
+///   finalize grants the registering caller owns, and completes (revoke the
+///   pending coparent, drop the reservation). This covers the
+///   registered-not-finalized crash window and the post-claim pre-commit one.
+/// - **Not registered and not claimed** → discard: drop the reservation and
+///   revoke the pending coparent. Discard is purely local — allocations grant
+///   ONLY the pending group at genesis and it has no members, so the
+///   document's events can never have left the node and no peer can hold
+///   authorization; the events, sedimentree and bytes are never deleted.
+///   A cipherBlob claim the scan could not fully enumerate keeps the
+///   reservation — an absent claim only decides a discard when every claim
+///   surface was readable.
 /// - Anything whose registration cannot be read, or that contradicts the
 ///   finalize ordering (registration implies staged content and the
 ///   finalize grants), is kept and warned, never released.
@@ -216,6 +223,7 @@ pub(crate) async fn recover_pending_documents(
     big_repo: &SharedBigRepo,
     authority: &RepoAuthority,
     sql: &SqlCtx,
+    local_user_path: &daybook_types::doc::UserPathBuf,
 ) -> Res<()> {
     let reserved = big_repo.reserved_doc_ids().await?;
     if reserved.is_empty() {
@@ -235,11 +243,41 @@ pub(crate) async fn recover_pending_documents(
         );
         return Ok(());
     };
-    let Some(shapes) =
-        crate::drawer::registered_allocation_shapes(sql, big_repo, &doc_id_drawer).await?
+    let Some(read) =
+        crate::drawer::registered_allocation_shapes(sql, big_repo, &doc_id_drawer, &reserved)
+            .await?
     else {
         return Ok(());
     };
+
+    // The claimed-but-uncommitted window (ADR 003 §19): the durable cipherBlob
+    // claim says the committing operation got past its commit point, so replay
+    // the registration write BEFORE the drain grants and completes — a crash
+    // from here on lands in the registered-not-finalized window these two
+    // steps already handle. Never register a claim the scan did not produce
+    // with every claim surface readable.
+    if !read.claims.is_empty() {
+        let claimed_unregistered: Vec<big_repo::DocumentId> = read
+            .claims
+            .iter()
+            .filter(|doc_id| !read.shapes.contains_key(*doc_id))
+            .cloned()
+            .collect();
+        if !claimed_unregistered.is_empty() && read.claims_complete {
+            // The registration entry's vtag actor is the drawer's own writer
+            // identity, derived exactly as `DrawerRepo::load` derives it.
+            let actor_id = daybook_types::doc::user_path::to_actor_id(
+                &daybook_types::doc::user_path::for_repo(local_user_path.clone(), "drawer-repo")?,
+            );
+            crate::drawer::register_claimed_allocations(
+                big_repo,
+                &doc_id_drawer,
+                &claimed_unregistered,
+                actor_id,
+            )
+            .await?;
+        }
+    }
     let registration = reserved
         .iter()
         .map(|doc_id| {
@@ -247,7 +285,7 @@ pub(crate) async fn recover_pending_documents(
             // drawer grants them between finalize and its registration write
             // (content docs and replicated branches advertise the drawer
             // group, local branches do not).
-            let registration = match shapes.get(doc_id) {
+            let registration = match read.shapes.get(doc_id) {
                 Some(
                     crate::drawer::RegisteredAllocationShape::ContentDoc
                     | crate::drawer::RegisteredAllocationShape::ReplicatedBranch,
@@ -262,6 +300,16 @@ pub(crate) async fn recover_pending_documents(
                         authority.encrypted_blob_docs.clone(),
                     ])
                 }
+                // The claimed-but-uncommitted window replays the commit too;
+                // a claim the scan could not fully enumerate keeps instead.
+                None if read.claims.contains(doc_id) => {
+                    big_repo::AllocationRegistration::Registered(vec![
+                        authority.content_docs.clone(),
+                        authority.encrypted_blob_docs.clone(),
+                        authority.default_drawer.clone(),
+                    ])
+                }
+                None if !read.claims_complete => big_repo::AllocationRegistration::Unknown,
                 None => big_repo::AllocationRegistration::Unregistered(vec![
                     authority.content_docs.clone(),
                     authority.encrypted_blob_docs.clone(),

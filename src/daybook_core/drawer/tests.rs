@@ -3810,3 +3810,420 @@ async fn the_drawer_commit_failure_pins_the_granted_not_registered_window() -> R
     node.stop().await?;
     Ok(())
 }
+
+// ── the transactional staging add (`add_temporary` / `commit_temporary` /
+//    `discard_temporary`, ADR 003 §19) ─────────────────────────────────────
+
+/// Write `key` as the worker's own JWK facet (the same shape
+/// `Ctx::create_representation` stages) so the facet the claim names exists.
+fn staging_jwk_facet(
+    key: &crate::blobs::encrypt::MasterKey,
+) -> (daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw) {
+    let jwk = crate::blobs::encrypt::JwkOct::from_master_key(key);
+    let key = daybook_types::doc::FacetKey {
+        tag: WellKnownFacetTag::Jwk.into(),
+        id: "grp:testdomain".into(),
+    };
+    (
+        key.clone(),
+        WellKnownFacet::Jwk(daybook_types::doc::Jwk {
+            kty: jwk.kty,
+            members: serde_json::json!({ "k": jwk.k }),
+        })
+        .into(),
+    )
+}
+
+/// The boot sweep's registration read requires the init state to name the
+/// drawer document; a DrawerNode harness never writes it, so this fakes the
+/// minimum shape (only `doc_id_drawer` is read).
+async fn arm_boot_sweep(node: &DrawerNode) -> Res<crate::authority::RepoAuthority> {
+    let sql = node.repo.meta_store_sql().clone();
+    let drawer_doc_id = node.repo.drawer_doc_id().clone();
+    crate::repo::globals::set_init_state(
+        &sql,
+        &crate::repo::globals::InitState::Created {
+            doc_id_app: drawer_doc_id.clone(),
+            doc_id_drawer: drawer_doc_id.clone(),
+            doc_id_config: Some(drawer_doc_id.clone()),
+            core_inventory_doc_id: None,
+            docs_inventory_doc_id: None,
+            encryption_inventory_doc_id: drawer_doc_id,
+        },
+    )
+    .await?;
+    crate::authority::ensure(&node.big_repo, &sql, None).await
+}
+
+async fn agent_reaches_doc(
+    node: &DrawerNode,
+    group: &big_repo::BigKeyhiveGroup,
+    doc_id: &big_repo::DocumentId,
+) -> Res<bool> {
+    let identity = big_repo::keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &doc_id
+                .to_bytes32()
+                .expect("generated doc identity is 32 bytes"),
+        )?,
+    );
+    Ok(node
+        .big_repo
+        .keyhive()
+        .agent_access_on(&group.id().into(), identity)
+        .await
+        .is_some())
+}
+
+/// The staging contract, pinned: a temporary add is purely local. Nothing is
+/// granted, nothing is registered, nothing is completed — the staged doc's
+/// only durable traces are the reservation and the pending-group authority
+/// that a zero-member group turns into "cannot leave the node".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_temporary_add_grants_nothing_and_registers_nothing() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+        })
+        .await?;
+
+    assert!(
+        node.big_repo
+            .reserved_doc_ids()
+            .await?
+            .contains(&staged.branch_doc_id),
+        "the staging reservation must be durable"
+    );
+    assert!(
+        node.big_repo
+            .documents_in_group(&node.repo.pending_documents_group)
+            .await
+            .contains(&staged.branch_doc_id),
+        "the pending coparent must be membered while staging"
+    );
+    for group in [
+        &node.repo.content_docs_group,
+        &node.repo.encrypted_blob_docs_group,
+        &node.repo.drawer_group,
+    ] {
+        assert!(
+            !agent_reaches_doc(&node, group, &staged.branch_doc_id).await?,
+            "no advertising group may reach a staged-but-uncommitted doc"
+        );
+    }
+    assert!(
+        node.repo.get_entry(&staged.doc_id).await?.is_none(),
+        "staging must not write the docs.map entry"
+    );
+
+    node.stop().await?;
+    Ok(())
+}
+
+/// A staged add committed through the receipt lands in exactly the state
+/// `batch_add` produces: grants, registration, completion.
+#[tokio::test(flavor = "multi_thread")]
+async fn committing_a_staged_add_matches_batch_add() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+        })
+        .await?;
+    node.repo.commit_temporary(&staged).await?;
+
+    assert!(
+        !node
+            .big_repo
+            .reserved_doc_ids()
+            .await?
+            .contains(&staged.branch_doc_id),
+        "the commit must drop the reservation"
+    );
+    assert!(
+        !node
+            .big_repo
+            .documents_in_group(&node.repo.pending_documents_group)
+            .await
+            .contains(&staged.branch_doc_id),
+        "the commit must revoke the pending coparent"
+    );
+    for group in [
+        &node.repo.content_docs_group,
+        &node.repo.encrypted_blob_docs_group,
+        &node.repo.drawer_group,
+    ] {
+        assert!(
+            agent_reaches_doc(&node, group, &staged.branch_doc_id).await?,
+            "the commit must grant the advertising group"
+        );
+    }
+    assert!(
+        node.repo.get_entry(&staged.doc_id).await?.is_some(),
+        "the commit must register the docs.map entry"
+    );
+
+    node.stop().await?;
+    Ok(())
+}
+
+/// Discard is idempotent: the second call revokes nothing (already revoked),
+/// no-ops the already-gone reservation and still reports success, and a
+/// discard of a committed receipt leaves the commit exactly intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn discarding_a_staged_add_is_idempotent_and_leaves_a_commit_intact() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+        })
+        .await?;
+    node.repo.discard_temporary(&staged).await?;
+    node.repo.discard_temporary(&staged).await?;
+
+    assert!(
+        !node
+            .big_repo
+            .reserved_doc_ids()
+            .await?
+            .contains(&staged.branch_doc_id),
+        "the discard must drop the reservation once and stay gone"
+    );
+    assert!(
+        !node
+            .big_repo
+            .documents_in_group(&node.repo.pending_documents_group)
+            .await
+            .contains(&staged.branch_doc_id),
+        "the discard must revoke the pending coparent once"
+    );
+    assert!(
+        node.repo.get_entry(&staged.doc_id).await?.is_none(),
+        "a discarded staging doc must never register"
+    );
+
+    // Discard of an already committed receipt: the caller picked commit, so
+    // the defensive grant revert must not undo a registered document.
+    let committed = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+        })
+        .await?;
+    node.repo.commit_temporary(&committed).await?;
+    node.repo.discard_temporary(&committed).await?;
+
+    assert!(
+        node.repo.get_entry(&committed.doc_id).await?.is_some(),
+        "discarding a committed receipt must not unregister it"
+    );
+    for group in [
+        &node.repo.content_docs_group,
+        &node.repo.encrypted_blob_docs_group,
+        &node.repo.drawer_group,
+    ] {
+        assert!(
+            agent_reaches_doc(&node, group, &committed.branch_doc_id).await?,
+            "discarding a committed receipt must not revert its grants"
+        );
+    }
+
+    node.stop().await?;
+    Ok(())
+}
+
+/// The claimed-but-uncommitted window (ADR 003 §19): the encryption flow's
+/// reorder writes the cipherBlob claim while the key document still stages, so
+/// a crash before `commit_temporary` leaves a claimed staging doc. The boot
+/// sweep replays the registration from the claim and lets the drain grant and
+/// complete it — the commit the crash interrupted, mechanically recovered.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_boot_sweep_commits_a_claimed_temporary_key_document() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let content_doc_id = node
+        .repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+        })
+        .await?;
+    let key = crate::blobs::encrypt::MasterKey::random();
+    let (jwk_key, jwk_raw) = staging_jwk_facet(&key);
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(jwk_key.clone(), jwk_raw)].into(),
+            user_path: None,
+        })
+        .await?;
+    // The claim: a durable cipherBlob facet naming the still-staged key doc.
+    let content_heads = node
+        .repo
+        .get_branch_heads_for_path(&content_doc_id, BranchPath::new("main"))
+        .await?
+        .ok_or_eyre("content doc has no main branch")?;
+    let cipher = daybook_types::doc::CipherBlob {
+        representation: daybook_types::doc::Representation {
+            digest: crate::blobs::blob_id_to_digest_str(crate::blobs::BlobId::new([9_u8; 32])),
+            length_octets: 4,
+        },
+        content_encoding: crate::blobs::encrypt::CONTENT_ENCODING_AES128GCM.to_string(),
+        key_ref: format!("db+facet:///{}/{jwk_key}", staged.doc_id).parse()?,
+        key_ref_heads: staged.branch_heads.clone(),
+        encoding_parameters: crate::blobs::encrypt::EncodingParams::DEFAULT
+            .to_encoding_parameters(),
+    };
+    node.repo
+        .update_at_heads_with_scope(
+            DocPatch {
+                id: content_doc_id.clone(),
+                facets_set: [(
+                    daybook_types::doc::FacetKey {
+                        tag: WellKnownFacetTag::CipherBlob.into(),
+                        id: "grp:testdomain/blob".into(),
+                    },
+                    WellKnownFacet::CipherBlob(cipher).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            BranchPath::new("main"),
+            Some(content_heads),
+            crate::drawer::FacetWriteScope::System,
+        )
+        .await?;
+
+    let authority = arm_boot_sweep(&node).await?;
+    crate::authority::recover_pending_documents(
+        &node.big_repo,
+        &authority,
+        node.repo.meta_store_sql(),
+        // The drawer writes its vtags with a path scoped like its own; the
+        // sweep's registration replay derives the same actor from the harness
+        // user path's repo scope.
+        &daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+    )
+    .await?;
+
+    assert!(
+        !node
+            .big_repo
+            .reserved_doc_ids()
+            .await?
+            .contains(&staged.branch_doc_id),
+        "the sweep must complete a claimed staging doc's reservation"
+    );
+    for group in [
+        &node.repo.content_docs_group,
+        &node.repo.encrypted_blob_docs_group,
+        &node.repo.drawer_group,
+    ] {
+        assert!(
+            agent_reaches_doc(&node, group, &staged.branch_doc_id).await?,
+            "the sweep must replay the commit's grants for a claimed doc"
+        );
+    }
+    let entry = node
+        .repo
+        .get_entry(&staged.doc_id)
+        .await?
+        .ok_or_eyre("the sweep must replay the claimed staging doc's registration")?;
+    assert_eq!(
+        entry
+            .branches
+            .get("main")
+            .map(|branch_ref| branch_ref.branch_doc_id.clone()),
+        Some(staged.branch_doc_id.clone()),
+        "the replayed registration must name the staged branch doc"
+    );
+    assert!(
+        node.repo
+            .get_doc_with_facets_at_branch(&staged.doc_id, BranchPath::new("main"), None)
+            .await?
+            .is_some_and(|doc| doc.facets.contains_key(&jwk_key)),
+        "the committed key document must serve the JWK facet the claim pinned"
+    );
+
+    node.stop().await?;
+    Ok(())
+}
+
+/// The other half of the claim window: the staged key doc survived but the
+/// crash was before the cipherBlob claim, so nothing names it and the sweep
+/// discards it — reservation gone, pending coparent revoked, no grants, and no
+/// registration.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_boot_sweep_discards_a_staged_key_doc_with_no_claim() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+        })
+        .await?;
+
+    let authority = arm_boot_sweep(&node).await?;
+    crate::authority::recover_pending_documents(
+        &node.big_repo,
+        &authority,
+        node.repo.meta_store_sql(),
+        &daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+    )
+    .await?;
+
+    assert!(
+        !node
+            .big_repo
+            .reserved_doc_ids()
+            .await?
+            .contains(&staged.branch_doc_id),
+        "an unclaimed staging doc's reservation must be dropped"
+    );
+    assert!(
+        !node
+            .big_repo
+            .documents_in_group(&node.repo.pending_documents_group)
+            .await
+            .contains(&staged.branch_doc_id),
+        "an unclaimed staging doc's pending coparent must be revoked"
+    );
+    for group in [
+        &node.repo.content_docs_group,
+        &node.repo.encrypted_blob_docs_group,
+        &node.repo.drawer_group,
+    ] {
+        assert!(
+            !agent_reaches_doc(&node, group, &staged.branch_doc_id).await?,
+            "an unclaimed staging doc must carry no grants"
+        );
+    }
+    assert!(
+        node.repo.get_entry(&staged.doc_id).await?.is_none(),
+        "an unclaimed staging doc must not register"
+    );
+
+    node.stop().await?;
+    Ok(())
+}

@@ -158,18 +158,88 @@ regression. `ensure()` also runs mid-session (plug imports), where the sweep can
 in-flight add (alloc→stage window): the raced add fails loudly rather than corrupting anything —
 the boot-time sweep is race-free because the drawer is not serving yet.
 
+### 3c. Landed — the external transactional add (two-phase staging + the cipherBlob claim)
+
+Landed 2026-10-25 by the staging worker lane (operator-approved design; the
+operator's contract, verbatim: "an `add` method that creates it only locally
+without adding it to the rest of the groups, swept at next boot, providing
+external systems transactional semantics by requiring them to come back and
+either discard their previous add or commit it"):
+
+- **`DrawerRepo::add_temporary(AddDocArgs) -> StagedAdd`** — pending-only
+  genesis (`prepare_add_doc`), no grants, no `docs.map` entry, no completion.
+  Validates its arguments at `FacetWriteScope::System` scope (the caller is
+  system machinery — ordinary `add`/`batch_add` keep their user-scope gate in
+  `batch_add_inner`). `batch_add_inner` now composes the same two halves:
+  prepare + `commit_staged_adds`, one code path, two spellings.
+- **`commit_temporary(&StagedAdd)`** — the finalize grants (content_docs +
+  encrypted_blob_docs + drawer), the `docs.map` registration (the
+  `fail_next_drawer_doc_commit` test seam lives in this commit path), then
+  `complete_allocated_doc`. Same sequence, mechanically, as `batch_add`.
+- **`discard_temporary(&StagedAdd)`** — idempotent; reverts any advertising
+  grants a crashed commit left (`big_repo::discard_reserved_doc`, the sweep's
+  discard primitive — the drain's `Unregistered` arm now calls it), revokes
+  the pending coparent, deletes the reservation. A discard of a committed
+  receipt is a logged no-op: the caller picked commit, and un-registering a
+  committed doc is a delete, not a discard.
+- **Encryption worker reorder** (`create_representation` +
+  `rotate_representation`): the key document is staged via `add_temporary`
+  **with the JWK facet in its staged initial content** (this is the "written
+  while still the node-local staging doc" requirement — the JWK goes into the
+  genesis, validated at system scope, so no staging-doc facet write interface
+  had to exist), the cipherBlob facet into the content doc is the claim and
+  the operation's commit point (keyRef + the staged heads),
+  `commit_temporary` is the operation's only replicated act, the resolution
+  URL is ensured last. `Ctx::write_jwk_facet` is gone.
+- **Sweep classification** (`registered_allocation_shapes` → new
+  `AllocationRegistrationRead`, `authority.rs:recover_pending_documents"): the
+  read now also collects **claims** — reservations named by a durable
+  `cipherBlob` facet's `keyRef`, found by the bounded tag enumeration +
+  facet-value read of the pin worker's drain, over the branch docs of every
+  registered content doc, paid only when reservations exist at boot. A
+  claimed-but-unregistered reservation is registered-in-spirit: the sweep
+  first replays the `docs.map` registration
+  (`register_claimed_allocations`; actor derived exactly as
+  `DrawerRepo::load`'s `drawer-repo`-scoped user path) and then lets the
+  drain replay the grants and complete it; the claim read's own unreadability
+  (a registered branch doc not materializable) downgrades the classification
+  to keep-and-warn. No claim (only when every claim surface was readable) →
+  discard; unreadable / contradictory → keep-and-warn unchanged.
+- **ADR 003**: §19's ordering block, its "no rescanning mechanism" paragraph
+  and §15's implemented-shape paragraph now record the staging-claim-commit
+  ordering and the transient pre-commit unresolvable `keyRef` window (retries
+  resolve once the commit's events propagate, because `keyRefHeads` pins the
+  staged heads the commit replicates). §16 does not state the ordering — not
+  amended.
+
+Tests (drawer/tests.rs): `a_temporary_add_grants_nothing_and_registers_nothing`,
+`committing_a_staged_add_matches_batch_add`,
+`discarding_a_staged_add_is_idempotent_and_leaves_a_commit_intact`,
+`the_boot_sweep_commits_a_claimed_temporary_key_document`,
+`the_boot_sweep_discards_a_staged_key_doc_with_no_claim`. Verified: clippy
+`-p big_repo -p daybook_core --all-targets --all-features` 0 errors / 0
+warnings; drawer tests 41/41 (33 prior untouched + 5 new + the commit-failure
+pin test); big_repo boot-sweep family 10/10; encryption-worker add/rotation
+tests 16/16. Note for the parent: a concurrently-running relay-retention lane
+briefly left `sync/tests.rs` uncompilable mid-run (its file — fixed by that
+lane, not touched here); the full `daybook_core` test-target compile is green
+on the final tree.
+
+Residual notes (flagged, not decided): committing the same receipt twice
+would panic on the no-op automerge commit (`tx.commit()` → `None` → "commit
+failed") — the contract is one commit-or-discard per receipt and the sweep
+owns crash windows, but if two-phase callers outside the repo's machinery are
+ever exposed (FFI) this deserves a guard or an explicit refusal. The sweep's
+claim scan reads replicated branch docs only (local `/tmp` branches never
+carry facet writes the worker authors). The `docs.map`-entry write in
+`register_claimed_allocations` is a fourth inline copy of the drawer-doc map
+write (alongside `batch_add`, `register_existing_doc`, `delete_branch`) — a
+shared helper could consolidate them later.
+
 ### 4. Not started, already decided
 
-- **Relay retention test (Tier 1)** — testable now, no production wiring. A node granted the *inventory* but not
-  the *key document* — ADR 003 §19's split: the `cipherBlob` facet rides with the `Blob` facet, the JWK lives in a
-  key document granted to the decryptor group. Assert it learns C, pulls C's bytes, has no P, cannot decrypt
-  (loudly), and re-serves C. Lever: the access-row grant/refusal already used by
-  `told_not_cloned_inventory_part_is_refused_until_the_inventory_document_is_granted` (`sync/tests.rs`).
-- **Tier 2 — PRODUCT DECISION.** The receive half has **no production caller**: `download_encrypted`,
-  `FsDownloadLedger`, `CipherReader` are exercised only by tests, and `CipherReader` implements no store trait, so
-  nothing dispatches to it. Yet ADR §12 mandates the resumable receive path and §20 the random-access reader. Either
-  wire it (a key-holder whose only source is a relay must materialize P) or declare that a relay is never the only
-  source. The Tier 2 test depends on this.
+- **Relay retention test (Tier 1) — LANDED** (`sync/tests::relay_granted_only_the_encrypted_inventory_cannot_decrypt_but_retains_and_re_serves_ciphertext`): a told node granted keyhive `Access::Relay` on the encryption inventory learns C, pulls C's bytes, holds no P; typed `DocLookup::Missing` proves it never received the key document; the origin stopped, it re-serves C to a third told node that was never connected to the origin. Design-fix (2026-10-26): the loud-decrypt-failure leg (`stage_relay_cipherblob` + `get_decrypted` through `DocKeySource`) was removed — it exercised the Tier-2 shape through a **fabricated** drawer state (a cipherBlob `FacetRaw` staged on the relay's own drawer that no relay plane can produce); §19's loud-decrypt-failure coverage belongs to a future Tier-2 receive-half test, not to a fabricated drawer fixture. Design reading settled (2026-10-26, operator): told/relay nodes boot WITHOUT the blob workers BY DESIGN — the drawer-dialect machines (pin worker authoring BlobPin facets into inventory docs, encryption worker) are the origin-side authoring path; a relay replays the part store derived from the config-told inventories (`IrohSyncRepo::peer_partition_ids`) with membership replayed from the serving side's permission-writer rows (fetch predicate `is_fetcher`, `>= Access::Relay`, so the Read grant the relay holds on the inventory documents — the sibling told test's provisioning route — retains exactly like a formerly asserted Relayed row). The pin worker's new boot ensurer (`ensure_configured_inventory_branch`) makes that configuration real: it refuses a spawn whose configured inventories are not local drawer branches, so the once-silent `resolve_doc_id_for_branch_doc_id` fallback can no longer boot a drawer-dialect reconcile against foreign config ids — the relay test asserts that refusal as an explicit policy leg, and the relay/ consumer/ told-sibling nodes all run workers-off accordingly (the sibling told test's earlier workers-on shape survived only because its empty desired sets never patched into the branchless foreign inventories). Deferred product decision (recorded, not blocked): eager cross-node retention ADVERTISING via the presence plane remains "a later, deliberate decision" per ADR 003 §13 — the relay's retention pull today is part-driven big_sync replay from peers it is connected to, which the test exercises directly (origin→relay, then relay→consumer with the origin stopped).
+- **Tier 2 — DECIDED (operator, 2026-10-26): the receive half stays unwired** (`download_encrypted`, `FsDownloadLedger`, `CipherReader` remain test-only primitives), acceptable as long as a proper replication test covers the encrypted-replication path — the Tier-1 relay test above is that coverage. When Tier 2 ever wires the receive half, the §19 loud-decrypt-failure coverage the staging used to stand in for belongs to that shape's own test.
 - **The 6 newest review findings** (2026-10-25 14:36–15:37Z) — dispositions in `docs/scratch/pr49-replies.md`
   (rounds 14–15). Fixes agreed: the codec serving-path allocation fix (§9 step 3), comment the facet-index reason,
   make `announce_held_blobs` conditional. No change for the `serve.rs:139` clone question. Out-param deferred.

@@ -456,7 +456,8 @@ impl RepoCtx {
         // until the next boot, so the per-construction `ensure` calls
         // (`rt.rs`, `sync.rs`, `drawer.rs`) must not re-run it mid-session
         // where it could race a live in-flight allocation.
-        crate::authority::recover_pending_documents(&big_repo, &authority, &sql).await?;
+        crate::authority::recover_pending_documents(&big_repo, &authority, &sql, &local_user_path)
+            .await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: BigRepo and authority booted");
 
         let (

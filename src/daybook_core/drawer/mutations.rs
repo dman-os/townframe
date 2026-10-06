@@ -18,12 +18,22 @@ use daybook_types::doc::{
     WellKnownFacetTag,
 };
 
-struct PreparedAddDoc {
-    doc_id: DocId,
-    handle: big_repo::BigDocHandle,
-    entry: DocEntry,
-    branch_heads: ChangeHashSet,
-    branch_doc_id: DocumentId,
+/// The receipt of [`DrawerRepo::add_temporary`]: a document staged purely
+/// locally. Nothing about the staging is replicated — the pending group has no
+/// members, so the staged events cannot leave the node — and nothing registers
+/// it yet: the caller either [`DrawerRepo::commit_temporary`]s it (the
+/// advertising grants, the `docs.map` registration, the pending revoke) or
+/// [`DrawerRepo::discard_temporary`]s it, and a crash leaves the reservation to
+/// the next boot's sweep (ADR 003 §19: the cipherBlob claim decides which).
+pub struct StagedAdd {
+    pub doc_id: DocId,
+    pub handle: big_repo::BigDocHandle,
+    /// The registration write the commit replays into the drawer document.
+    pub(crate) entry: DocEntry,
+    /// The staged content's branch heads — what a cipherBlob `keyRef` pins
+    /// while the document is still staging.
+    pub branch_heads: ChangeHashSet,
+    pub branch_doc_id: DocumentId,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,7 +44,11 @@ enum AddValidation {
 
 // mutations
 impl DrawerRepo {
-    async fn prepare_add_doc(&self, args: AddDocArgs) -> Result<PreparedAddDoc, DrawerError> {
+    /// Stage a new document's content in big_repo and return the receipt whose
+    /// commit registers it. Validation of the caller's own facets belongs to
+    /// the caller (batch validation validates first so a bad batch allocates
+    /// nothing); this only validates the system facets it authors.
+    async fn prepare_add_doc(&self, args: AddDocArgs) -> Result<StagedAdd, DrawerError> {
         if args.branch_path != "main" {
             Err(ferr!("new docs must be created on main"))?;
         }
@@ -44,7 +58,7 @@ impl DrawerRepo {
             // group, whose membership is empty (`authority.rs`), so nothing
             // between allocation and finalize advertises the document — its
             // events cannot leave the node. The advertising groups are granted
-            // at finalize, in the commit sequence below.
+            // by the registration half (`commit_staged_adds`), not here.
             .allocate_doc(vec![self.pending_documents_group.clone().into()])
             .await
             .map_err(|err| eyre::eyre!("{err}"))
@@ -140,7 +154,7 @@ impl DrawerRepo {
             previous_version_heads: None,
         };
 
-        Ok(PreparedAddDoc {
+        Ok(StagedAdd {
             doc_id,
             handle,
             entry,
@@ -194,34 +208,45 @@ impl DrawerRepo {
             }
         }
 
-        let mut prepared_docs = Vec::with_capacity(args_batch.len());
+        let mut staged_docs = Vec::with_capacity(args_batch.len());
         for args in args_batch {
-            prepared_docs.push(self.prepare_add_doc(args).await?);
+            staged_docs.push(self.prepare_add_doc(args).await?);
         }
+        self.commit_staged_adds(&staged_docs).await
+    }
 
+    /// The registration half of the drawer's add flow, shared by `batch_add`
+    /// (one commit for a batch) and `commit_temporary` (one receipt): the
+    /// finalize grants, the `docs.map` commit that registers the documents,
+    /// and the completion that revokes the pending coparent and drops the
+    /// reservation. One code path, two spellings.
+    async fn commit_staged_adds(
+        &self,
+        staged_docs: &[StagedAdd],
+    ) -> Result<Vec<DocId>, DrawerError> {
         // Finalize grants — the embedder's commit sequence: the advertising
         // groups become coparents here, before the docs.map commit that
         // registers the documents — the same shape `register_existing_doc`
         // grants at registration. From allocation until this point nothing
         // advertised the documents: the only membered coparent was the memberless
-        // pending group. `prepare_add_doc` grants the drawer group
-        // unconditionally; a completion (pending revocation) follows the
-        // registration below.
-        for prepared in &prepared_docs {
+        // pending group. The drawer-group grant below is unconditional for
+        // content docs (local branches skip it); a completion (pending revocation)
+        // follows the registration below.
+        for staged in staged_docs {
             self.big_repo
                 .add_admin_member_to_doc(
-                    prepared.branch_doc_id.clone(),
+                    staged.branch_doc_id.clone(),
                     self.content_docs_group.clone(),
                 )
                 .await?;
             self.big_repo
                 .add_admin_member_to_doc(
-                    prepared.branch_doc_id.clone(),
+                    staged.branch_doc_id.clone(),
                     self.encrypted_blob_docs_group.clone(),
                 )
                 .await?;
             self.big_repo
-                .add_admin_member_to_doc(prepared.branch_doc_id.clone(), self.drawer_group.clone())
+                .add_admin_member_to_doc(staged.branch_doc_id.clone(), self.drawer_group.clone())
                 .await?;
         }
 
@@ -247,12 +272,12 @@ impl DrawerRepo {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
                     _ => tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?,
                 };
-                for prepared in &prepared_docs {
+                for staged in staged_docs {
                     autosurgeon::reconcile_prop(
                         &mut tx,
                         &map_id,
-                        autosurgeon::Prop::Key((&prepared.doc_id[..]).into()),
-                        &prepared.entry,
+                        autosurgeon::Prop::Key((&staged.doc_id[..]).into()),
+                        &staged.entry,
                     )?;
                 }
                 let (heads, _) = tx.commit();
@@ -261,36 +286,36 @@ impl DrawerRepo {
             })
             .await??;
 
-        let mut doc_ids = Vec::with_capacity(prepared_docs.len());
+        let mut doc_ids = Vec::with_capacity(staged_docs.len());
 
         {
             surelock::key::lock_scope(|key| {
                 key.lock_with(
                     &(&self.entry_pool, &self.entry_cache),
                     |(mut pool, mut cache)| {
-                        for prepared in &prepared_docs {
-                            let pruned = pool.insert_key(&prepared.doc_id, 1);
+                        for staged in staged_docs {
+                            let pruned = pool.insert_key(&staged.doc_id, 1);
                             for pkey in pruned {
                                 cache.remove(&pkey);
                             }
-                            cache.insert(prepared.doc_id.clone(), prepared.entry.clone());
+                            cache.insert(staged.doc_id.clone(), staged.entry.clone());
                         }
                     },
                 );
             });
         }
 
-        for prepared in prepared_docs {
+        for staged in staged_docs {
             self.add_branch_to_partitions_if_needed(
                 BranchKind::Replicated,
-                prepared.branch_doc_id.clone(),
-                &prepared.branch_heads,
+                staged.branch_doc_id.clone(),
+                &staged.branch_heads,
             )
             .await?;
-            doc_ids.push(prepared.doc_id.clone());
+            doc_ids.push(staged.doc_id.clone());
             surelock::key::lock_scope(|key| {
                 let (mut handles, _key) = key.lock(&self.branch_handles);
-                handles.insert(prepared.branch_doc_id.clone(), prepared.handle);
+                handles.insert(staged.branch_doc_id.clone(), staged.handle.clone());
             });
             // The `docs.map` entry committed above is what registers the document, so only
             // now may the allocation's durable records go. Releasing them during finalize
@@ -300,9 +325,9 @@ impl DrawerRepo {
             // document its readers cannot yet authorize.
             self.big_repo
                 .complete_allocated_doc(
-                    prepared.branch_doc_id.clone(),
+                    staged.branch_doc_id.clone(),
                     self.pending_documents_group.clone(),
-                    prepared.branch_heads.iter().map(|head| head.0).collect(),
+                    staged.branch_heads.iter().map(|head| head.0).collect(),
                 )
                 .await
                 .map_err(|err| DrawerError::Other {
@@ -315,6 +340,84 @@ impl DrawerRepo {
         });
 
         Ok(doc_ids)
+    }
+
+    /// The purely local half of the transactional add an external system uses
+    /// (ADR 003 §19): stage a new document on `main` without granting any
+    /// advertising group, writing any `docs.map` entry or completing the
+    /// allocation. The staged group is the memberless pending marker group, so
+    /// the staged document's events cannot leave the node. The caller comes
+    /// back with the receipt and either [`DrawerRepo::commit_temporary`]s it or
+    /// [`DrawerRepo::discard_temporary`]s it; a crash leaves the reservation
+    /// for the next boot's sweep, which reads the durable claim (e.g. a
+    /// cipherBlob facet naming the staging doc) to replay the commit or
+    /// discard it.
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn add_temporary(&self, args: AddDocArgs) -> Result<StagedAdd, DrawerError> {
+        if self.cancel_token.is_cancelled() {
+            Err(ferr!("repo is stopped"))?;
+        }
+        // The staging caller is the repo's own machinery, so it validates at
+        // system scope: system-managed facets are exactly what it may author
+        // (the encryption worker's JWK). Ordinary `add`/`batch_add` callers
+        // keep their user-scope gate in `batch_add_inner`.
+        let resulting_keys: HashSet<FacetKey> = args.facets.keys().cloned().collect();
+        self.validate_facets(&args.facets, &[], &resulting_keys, FacetWriteScope::System)
+            .await?;
+        self.prepare_add_doc(args).await
+    }
+
+    /// Commit a [`StagedAdd`]: the finalize grants (content docs, encrypted
+    /// blob docs, drawer), the `docs.map` registration write and the completion
+    /// (revoke the pending coparent, drop the reservation) — the same sequence
+    /// `batch_add` runs, through the same code path.
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn commit_temporary(&self, staged: &StagedAdd) -> Result<(), DrawerError> {
+        if self.cancel_token.is_cancelled() {
+            Err(ferr!("repo is stopped"))?;
+        }
+        self.commit_staged_adds(std::slice::from_ref(staged))
+            .await?;
+        Ok(())
+    }
+
+    /// Discard a [`StagedAdd`] without ever registering it. Idempotent
+    /// (ADR 003 §19): the staging doc's advertising coparents — which only a
+    /// crashed commit could have granted — are reverted first, then the pending
+    /// coparent is revoked and the reservation dropped. A receipt that was
+    /// already committed is registered, so discard leaves it alone: the caller
+    /// picked commit, and undoing a registered doc is a delete, not a discard.
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn discard_temporary(&self, staged: &StagedAdd) -> Result<(), DrawerError> {
+        if self.cancel_token.is_cancelled() {
+            Err(ferr!("repo is stopped"))?;
+        }
+        if self
+            .get_branch_ref(&staged.doc_id, daybook_types::doc::BranchPath::new("main"))
+            .await?
+            .is_some()
+        {
+            tracing::debug!(
+                doc_id = %staged.doc_id,
+                "discard of an already committed temporary add is a no-op"
+            );
+            return Ok(());
+        }
+        self.big_repo
+            .discard_reserved_doc(
+                staged.branch_doc_id.clone(),
+                self.pending_documents_group.clone(),
+                &[
+                    self.content_docs_group.clone(),
+                    self.encrypted_blob_docs_group.clone(),
+                    self.drawer_group.clone(),
+                ],
+            )
+            .await
+            .map_err(|err| DrawerError::Other {
+                inner: eyre::eyre!(err),
+            })?;
+        Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all)]

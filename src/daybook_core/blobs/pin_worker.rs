@@ -75,15 +75,16 @@ pub(crate) async fn spawn_blob_pin_worker(args: BlobPinWorkerArgs) -> Res<RepoSt
     // resolve pairs an earlier run left rooted (ADR 003 §19).
     let pair_roots = PairRoots::boot(sql.clone()).await?;
 
-    let core_doc_id = drawer_repo
-        .resolve_doc_id_for_branch_doc_id(core_inventory_doc_id)
-        .await?;
-    let docs_doc_id = drawer_repo
-        .resolve_doc_id_for_branch_doc_id(docs_inventory_doc_id)
-        .await?;
-    let encryption_doc_id = drawer_repo
-        .resolve_doc_id_for_branch_doc_id(encryption_inventory_doc_id)
-        .await?;
+    let core_doc_id =
+        ensure_configured_inventory_branch(&drawer_repo, &core_inventory_doc_id, "core").await?;
+    let docs_doc_id =
+        ensure_configured_inventory_branch(&drawer_repo, &docs_inventory_doc_id, "docs").await?;
+    let encryption_doc_id = ensure_configured_inventory_branch(
+        &drawer_repo,
+        &encryption_inventory_doc_id,
+        "encryption",
+    )
+    .await?;
     let ctx = Arc::new(Ctx {
         drawer_repo,
         sql,
@@ -124,6 +125,38 @@ pub(crate) async fn spawn_blob_pin_worker(args: BlobPinWorkerArgs) -> Res<RepoSt
         cancel_token,
         worker_handle: Some(worker_handle),
     })
+}
+
+/// The pin worker's boot ensurer for the config-driven inventory specification
+/// (ADR 003 §13). The machines reconcile BlobPin facets into the configured
+/// inventory documents through drawer branch writes, so a configured inventory
+/// document id that no local drawer entry registers — the resolver's own
+/// fallback spelling is exactly that silent miss — is a broken config: the
+/// spawn fails here, at the boot edge, with the id named. This sits at the
+/// boot edge by design rather than mid-run: the violation is the config, and
+/// production provisioned its inventories into the drawer before their pin
+/// worker ever boots.
+async fn ensure_configured_inventory_branch(
+    drawer_repo: &DrawerRepo,
+    configured_branch_doc_id: &DocumentId,
+    what: &str,
+) -> Res<DocId> {
+    let doc_id = drawer_repo
+        .resolve_doc_id_for_branch_doc_id(configured_branch_doc_id.clone())
+        .await?;
+    let registered = drawer_repo.get_entry(&doc_id).await?.is_some_and(|entry| {
+        entry
+            .branches
+            .values()
+            .any(|branch| &branch.branch_doc_id == configured_branch_doc_id)
+    });
+    eyre::ensure!(
+        registered,
+        "configured {what} inventory document {configured_branch_doc_id} is not a local \
+         drawer branch: the inventory specification is config driven (ADR 003 §13), so a \
+         configured inventory the repo has not provisioned locally is a broken config",
+    );
+    Ok(doc_id)
 }
 
 /// Shared state of the blob-pin worker: the facet machine (docs inventory)
@@ -1588,6 +1621,70 @@ mod tests {
         )
         .await?;
         Ok(state.progress().await?.upstream_revision)
+    }
+
+    /// Positive control for the boot ensurer: every production-shaped repo's
+    /// configured inventories are its own init-minted, drawer-registered
+    /// branches, so the spawn succeeds (the lifecycle tests below are the
+    /// small proof this stays true against a real machine).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pin_worker_boot_ensurer_accepts_the_configured_inventory_branches() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let _pin_worker = spawn_pin_worker_for_test(&test_context).await?;
+        Ok(())
+    }
+
+    /// Negative control: a configured inventory document that no local drawer
+    /// entry registers is a broken config (inventory specification is config
+    /// driven, ADR 003 §13), so the spawn fails at the boot edge naming that
+    /// id, instead of the resolver's silent fallback spelling a foreign id
+    /// through to a mid-run "headless patch" crash on the first nonempty
+    /// inventory diff.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pin_worker_boot_ensurer_fails_a_spawn_whose_configured_inventory_has_no_drawer_branch()
+    -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        for (what, configured) in [
+            ("docs", DocumentId::random()),
+            ("encryption", DocumentId::random()),
+        ] {
+            let err = crate::blobs::spawn_blob_pin_worker(crate::blobs::BlobPinWorkerArgs {
+                drawer_repo: Arc::clone(&test_context.rt.drawer),
+                sql: test_context.rt.rcx.sql.clone(),
+                core_inventory_doc_id: test_context.rt.rcx.core_inventory_doc_id.clone(),
+                // Only the slot under test points at the branchless document;
+                // the other configured inventory stays the repo's own, so the
+                // failure is attributable to the slot the loop names.
+                docs_inventory_doc_id: if what == "docs" {
+                    configured.clone()
+                } else {
+                    test_context.rt.rcx.docs_inventory_doc_id.clone()
+                },
+                encryption_inventory_doc_id: if what == "encryption" {
+                    configured.clone()
+                } else {
+                    test_context.rt.rcx.encryption_inventory_doc_id.clone()
+                },
+                blobs_repo: Arc::clone(&test_context.rt.blobs_repo),
+                facet_set_store: test_context.rt.doc_facet_set_index_repo.revision_store(),
+                plugs_repo: Arc::clone(&test_context.rt.plugs_repo),
+                parent_cancel_token: tokio_util::sync::CancellationToken::new(),
+            })
+            .await;
+            let msg = match err {
+                Ok(_) => panic!(
+                    "the boot ensurer must refuse a configured {what} inventory \
+                     with no drawer branch",
+                ),
+                Err(err) => format!("{err:#}"),
+            };
+            assert!(
+                msg.contains("not a local drawer branch")
+                    && msg.contains(configured.to_string().as_str()),
+                "the failure must name the broken config ({what}): {msg}",
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]

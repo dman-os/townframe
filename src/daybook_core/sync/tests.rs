@@ -2178,6 +2178,7 @@ async fn wait_for_blob_bytes_retries_until_blob_arrives() -> Res<()> {
 async fn init_told_sync_node(
     repo_root: &std::path::Path,
     told: crate::config::AppBlobInventories,
+    blob_workers: bool,
 ) -> Res<SyncTestNode> {
     let device_name = "test-device".to_string();
     // 1. A fresh independent repo: own identity, own core docs, own keyhive.
@@ -2315,7 +2316,7 @@ async fn init_told_sync_node(
             rtx.core_inventory_doc_id, told.core_inventory_doc_id,
             "the told boot must resolve the core inventory from the config doc",
         );
-        open_sync_node_over_ctx(rtx).await
+        boot_sync_node(rtx, blob_workers).await
     }
     .await;
     result
@@ -2544,7 +2545,11 @@ async fn told_not_cloned_inventory_part_is_refused_until_the_inventory_document_
     );
 
     // The tell: node_b's independent repo names node_a's inventories through
-    // config and never clones anything.
+    // config and never clones anything. It boots WITHOUT the blob workers by
+    // design: a told config's inventories are the origin's document ids, which
+    // no local drawer entry registers here, so the drawer-dialect pin
+    // worker's boot ensurer refuses that spawn on a told node the same way it
+    // does on the relay test's nodes.
     let node_b = init_told_sync_node(
         &repo_b_path,
         crate::config::AppBlobInventories {
@@ -2552,6 +2557,7 @@ async fn told_not_cloned_inventory_part_is_refused_until_the_inventory_document_
             docs_inventory_doc_id: node_a.ctx.docs_inventory_doc_id.clone(),
             encryption_inventory_doc_id: node_a.ctx.encryption_inventory_doc_id.clone(),
         },
+        false,
     )
     .await?;
     assert_eq!(
@@ -2854,4 +2860,532 @@ async fn told_not_cloned_inventory_part_is_refused_until_the_inventory_document_
     node_b.stop().await?;
     node_a.stop().await?;
     Ok(())
+}
+
+/// The relay-retention leg of the cipherBlob design (ADR 003 §19, on the
+/// fetch plane ADR 013 §4 gave relays): a node told the inventories and
+/// granted Read access on the inventory documents ONLY — the digest-naming
+/// metadata documents, never a content document, never any group that grants
+/// the key document —
+///
+/// 1. replays the part store derived from the inventory documents (the part
+///    identities come from the config-told ids; the relay never projects
+///    anything of its own),
+/// 2. pulls the ciphertext bytes and stores them,
+/// 3. holds no plaintext and no key document,
+/// 4. its keyhive never received the key document at all (the typed
+///    `DocLookup::Missing` check below), and
+/// 5. still re-serves the bytes to a third node after the origin is stopped:
+///    retention is exactly "the bytes are useful without the keys".
+///
+/// The lever is the access-row grant shape of
+/// `told_not_cloned_inventory_part_is_refused_until_the_inventory_document_is_granted`
+/// applied to the relay: the permission writer copies the inventory document's
+/// closure verbatim (ADR 013 §4 keeps relays out of private documents) and the
+/// serving side's fetch predicate is `is_fetcher` (`>= Access::Relay`), so a
+/// Read-granted inventory row retains exactly like a Relay-granted one — Read
+/// is what enables the relay's validation/access on the metadata document; it
+/// never decrypts content and never derives pins.
+///
+/// The drawer-dialect machines (the pin worker authoring BlobPin facets into
+/// inventory documents, the encryption worker) are the ORIGIN-side authoring
+/// path, so the relay and the consumer boot WITHOUT the blob workers — that
+/// is the design, not a dodge: the pin worker's boot ensurer refuses a spawn
+/// whose configured inventories are not local drawer branches (asserted as
+/// the policy leg of this test), and the silent resolver fallback that once
+/// let such a spawn through to a mid-run "headless patch" crash is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_granted_only_the_encrypted_inventory_cannot_decrypt_but_retains_and_re_serves_ciphertext()
+-> Res<()> {
+    use big_repo::keyhive_core::access::Access;
+
+    utils_rs::testing::setup_tracing_once();
+    let temp_root = tempfile::tempdir()?;
+    let repo_a_path = temp_root.path().join("repo-a");
+    let repo_b_path = temp_root.path().join("repo-b-relay");
+    let repo_c_path = temp_root.path().join("repo-c-consumer");
+
+    tokio::fs::create_dir_all(&repo_a_path).await?;
+    let device_name = "test-device".to_string();
+    let rtx = RepoCtx::init(
+        &repo_a_path,
+        RepoOpenOptions::default(),
+        device_name.clone(),
+        device_name,
+    )
+    .await?;
+    rtx.shutdown().await?;
+
+    // The origin runs its blob workers: the inventory pins exist only because
+    // the production machines derived them.
+    let node_a = open_sync_node(&repo_a_path).await?;
+    let encryption_inventory_doc_id = node_a
+        .drawer
+        .resolve_doc_id_for_branch_doc_id(node_a.ctx.encryption_inventory_doc_id.clone())
+        .await?;
+
+    // One locally-stored plaintext with a `Blob` facet: the encryption worker
+    // installs the representation and derives the inventory pin for it.
+    let payload = b"relay-retention-ciphertext-000".to_vec();
+    let plaintext = node_a.blobs_repo.put(&payload).await?;
+    let doc_id = node_a
+        .drawer
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(
+                FacetKey::from(WellKnownFacetTag::Blob),
+                FacetRaw::from(WellKnownFacet::Blob(daybook_types::doc::Blob {
+                    mime: "application/octet-stream".to_string(),
+                    length_octets: payload.len() as u64,
+                    digest: crate::blobs::blob_id_to_digest_str(plaintext.clone()),
+                    inline: None,
+                    urls: Some(vec![format!("db+blob:///{plaintext}")]),
+                })),
+            )]
+            .into(),
+            user_path: Some(daybook_types::doc::UserPathBuf::from(
+                node_a.ctx.local_user_path.clone(),
+            )),
+        })
+        .await?;
+
+    let ciphertext_pins = wait_for_inventory_pin_ids(
+        &node_a,
+        &encryption_inventory_doc_id,
+        utils_rs::scale_timeout(Duration::from_secs(90)),
+    )
+    .await?;
+    let ciphertext: Vec<BlobId> = ciphertext_pins
+        .iter()
+        .map(|pin| {
+            crate::blobs::digest_str_to_blob_id_lenient(pin)
+                .ok_or_else(|| eyre::eyre!("inventory pin {pin} is not a blob digest"))
+        })
+        .collect::<Res<Vec<_>>>()?;
+    assert!(
+        !ciphertext.is_empty() && !ciphertext.contains(&plaintext),
+        "the inventory must name ciphertext, not the plaintext: {ciphertext:?}"
+    );
+
+    // A relay that reads the content document holds this exact facet state
+    // (ADR 003 §19: the cipherBlob rides with the Blob facet); the key
+    // document it names is where the relay's entitlements stop.
+    let origin_doc = node_a
+        .drawer
+        .get_doc_with_facets_at_branch(&doc_id, BranchPath::new("main"), None)
+        .await?
+        .ok_or_else(|| eyre::eyre!("the content doc with the Blob facet must exist"))?;
+    let cipher = match origin_doc
+        .facets
+        .iter()
+        .find(|(key, _)| key.tag == WellKnownFacetTag::CipherBlob.into())
+        .map(|(_, raw)| raw.clone())
+    {
+        Some(raw) => match WellKnownFacet::from_json(raw, WellKnownFacetTag::CipherBlob)? {
+            WellKnownFacet::CipherBlob(cipher) => cipher,
+            other => eyre::bail!("expected a cipherBlob facet, got {:?}", other.tag()),
+        },
+        None => eyre::bail!("the origin content doc must carry a cipherBlob facet"),
+    };
+    assert!(
+        !cipher.key_ref_heads.0.is_empty(),
+        "a cross-document keyRef must pin the key state it meant (ADR 003 §19)"
+    );
+    let key_ref = daybook_types::url::parse_facet_ref(&cipher.key_ref)?;
+    eyre::ensure!(
+        key_ref.doc_id != daybook_types::url::FACET_SELF_DOC_ID,
+        "the key must live in another document (ADR 003 §6, §19)"
+    );
+    // The key document is staged (`add_temporary`) and committed (`commit_temporary`,
+    // the docs.map registration) only after the cipherBlob facet that names it:
+    // the pin the inventory carries is derived from the facet, not from the
+    // commit, so the key doc's drawer registration can postdate the pins this
+    // wait already observed.
+    let key_branch_doc_id = {
+        let deadline =
+            tokio::time::Instant::now() + utils_rs::scale_timeout(Duration::from_secs(30));
+        loop {
+            let branch = node_a
+                .drawer
+                .get_branch_ref(&key_ref.doc_id, &BranchPathBuf::from("main"))
+                .await?
+                .map(|row| row.branch_doc_id);
+            if branch.is_some() {
+                break branch.expect("checked above");
+            }
+            if tokio::time::Instant::now() >= deadline {
+                eyre::bail!(
+                    "the origin key document ({}) never registered its main branch",
+                    key_ref.doc_id
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+
+    // The tell: the relay names node_a's inventories through config and never
+    // clones anything. The inventory documents themselves are granted to it
+    // with Read (the sibling told test's provisioning route: metadata access
+    // for validation — the relay replays the part store derived from them and
+    // never reads a private document); the key document is granted to nobody
+    // new in this test and is never a grant destination for the relay. The
+    // relay boots WITHOUT the blob workers by design: the drawer-dialect pin
+    // machines are the origin-side authoring path, and its told inventories
+    // have no local drawer branch, so the pin worker's boot ensurer refuses
+    // the spawn — asserted as the policy leg below.
+    let node_b = init_told_sync_node(
+        &repo_b_path,
+        crate::config::AppBlobInventories {
+            core_inventory_doc_id: node_a.ctx.core_inventory_doc_id.clone(),
+            docs_inventory_doc_id: node_a.ctx.docs_inventory_doc_id.clone(),
+            encryption_inventory_doc_id: node_a.ctx.encryption_inventory_doc_id.clone(),
+        },
+        false,
+    )
+    .await?;
+    assert_eq!(
+        &node_b.ctx.encryption_inventory_doc_id, &node_a.ctx.encryption_inventory_doc_id,
+        "the told config must name the origin's inventories without any clone"
+    );
+    assert_ne!(
+        node_b.ctx.repo_id, node_a.ctx.repo_id,
+        "the relay is an independent repo"
+    );
+
+    // The policy leg: the drawer-dialect pin worker is the origin-side
+    // authoring path, so it must not run on a told/relay config — its
+    // configured inventories are the origin's document ids and no local
+    // drawer entry registers them here. The boot ensurer turns that from the
+    // resolver's old silent fallback (a foreign id spelled straight through
+    // until the first nonempty inventory diff crashed mid-run on the headless
+    // patch) into a loud boot failure naming the broken config. Asserted on
+    // the relay's told config: every slot points at node_a's inventories, so
+    // the refused spawn names one of the ids the config cannot serve.
+    let pin_worker_spawn = crate::blobs::spawn_blob_pin_worker(crate::blobs::BlobPinWorkerArgs {
+        drawer_repo: Arc::clone(&node_b.drawer),
+        sql: node_b.ctx.sql.clone(),
+        core_inventory_doc_id: node_b.ctx.core_inventory_doc_id.clone(),
+        docs_inventory_doc_id: node_b.ctx.docs_inventory_doc_id.clone(),
+        encryption_inventory_doc_id: node_b.ctx.encryption_inventory_doc_id.clone(),
+        blobs_repo: Arc::clone(&node_b.blobs_repo),
+        facet_set_store: node_b.rt.doc_facet_set_index_repo.revision_store(),
+        plugs_repo: Arc::clone(&node_b.plugs_repo),
+        parent_cancel_token: tokio_util::sync::CancellationToken::new(),
+    })
+    .await;
+    let refusal = match pin_worker_spawn {
+        Ok(_) => panic!(
+            "the pin worker must not spawn on a relay-told config whose inventories \
+             have no local drawer branch",
+        ),
+        Err(err) => format!("{err:#}"),
+    };
+    assert!(
+        refusal.contains("not a local drawer branch")
+            && [
+                &node_a.ctx.core_inventory_doc_id,
+                &node_a.ctx.docs_inventory_doc_id,
+                &node_a.ctx.encryption_inventory_doc_id,
+            ]
+            .iter()
+            .any(|told_inventory| refusal.contains(told_inventory.to_string().as_str())),
+        "the boot ensurer must name the told config's unreachable inventory: {refusal}"
+    );
+
+    let encryption_part =
+        crate::blobs::blob_inventory_part_id(&node_b.ctx.encryption_inventory_doc_id);
+    assert!(
+        node_b.sync_repo.is_blob_part(&encryption_part),
+        "the told encryption inventory must classify as a blob part"
+    );
+    assert!(
+        node_b
+            .sync_repo
+            .peer_partition_ids("", true)
+            .contains_key(&encryption_part),
+        "the told encryption inventory must be advertised on connect"
+    );
+
+    let peer_a = PeerKey::new(*node_a.sync_repo.router.endpoint().id().as_bytes());
+    let peer_b = PeerKey::new(*node_b.sync_repo.router.endpoint().id().as_bytes());
+
+    let node_a_ticket = node_a.sync_repo.get_clone_ticket_url().await?;
+    let endpoint_addr = node_b.sync_repo.connect_url(&node_a_ticket).await?;
+    assert_eq!(
+        endpoint_addr.id,
+        node_a.sync_repo.router.endpoint().id(),
+        "the relay must have connected to node_a"
+    );
+    drive_keyhive_exchange(&node_a, peer_b.clone(), Duration::from_secs(30)).await?;
+    drive_keyhive_exchange(&node_b, peer_a.clone(), Duration::from_secs(30)).await?;
+
+    let agent_b = wait_for_peer_agent(&node_a, peer_b.clone(), Duration::from_secs(30)).await?;
+    node_a
+        .ctx
+        .big_repo
+        .grant_doc_access(
+            encryption_inventory_doc_id
+                .parse::<big_repo::DocumentId>()
+                .map_err(|_| eyre::eyre!("inventory doc id is not a document id"))?,
+            agent_b,
+            Access::Read,
+        )
+        .await?;
+    drive_keyhive_exchange(&node_b, peer_a.clone(), Duration::from_secs(30)).await?;
+    drive_keyhive_exchange(&node_a, peer_b.clone(), Duration::from_secs(30)).await?;
+    wait_for_part_row_including(
+        &node_a,
+        &encryption_part,
+        &peer_b,
+        "the relay must be admitted to the origin's inventory part row after the Read grant",
+        Duration::from_secs(30),
+    )
+    .await?;
+
+    node_b
+        .sync_repo
+        .wait_for_full_sync(
+            std::slice::from_ref(&peer_a),
+            std::slice::from_ref(&encryption_part),
+            None,
+        )
+        .await?;
+
+    // Membership convergence: the part's members — the ciphertext objects the
+    // pin worker pinned, and nothing else — arrive at the relay.
+    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(Duration::from_secs(30));
+    let origin_count = loop {
+        let origin_count = node_a
+            .ctx
+            .blob_part_store
+            .member_count(encryption_part.clone())
+            .await?;
+        let told_count = node_b
+            .ctx
+            .blob_part_store
+            .member_count(encryption_part.clone())
+            .await?;
+        if origin_count > 0 && told_count == origin_count {
+            break origin_count;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eyre::bail!(
+                "timed out waiting for the part's members to arrive at the relay: \
+                 origin={origin_count} relay={told_count}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(
+        origin_count,
+        ciphertext.len() as u64,
+        "the encryption part must carry exactly the ciphertext objects"
+    );
+    for c in &ciphertext {
+        assert!(
+            node_b
+                .ctx
+                .blob_part_store
+                .obj_exists(c.clone().into())
+                .await?,
+            "the part's membership must name ciphertext object {c}"
+        );
+    }
+    // No plaintext: the plaintext belongs to the ungranted parts, and the
+    // granted part carries only the ciphertext. The disk check is the
+    // end-user form of the claim; the part form is the structural one.
+    assert!(
+        !node_b
+            .ctx
+            .blob_part_store
+            .obj_exists(plaintext.clone().into())
+            .await?,
+        "the plaintext must not be a member of any part the relay holds"
+    );
+    assert!(
+        !node_b
+            .blobs_repo
+            .has_blob_on_disk(plaintext.clone())
+            .await?,
+        "the relay must hold no plaintext bytes"
+    );
+
+    // Presence, before any byte is read — the bytes must have landed by sync
+    // (an on-demand read would fetch from the active peers and prove nothing).
+    for c in &ciphertext {
+        wait_for_blob_replicated(
+            &node_b.blobs_repo,
+            c.clone(),
+            utils_rs::scale_timeout(Duration::from_secs(60)),
+        )
+        .await?;
+    }
+    for c in &ciphertext {
+        let got = node_b.blobs_repo.get_bytes(c.clone()).await?;
+        assert!(!got.is_empty(), "ciphertext {c} must have bytes");
+        assert_ne!(
+            got, payload,
+            "ciphertext {c} must be ciphertext, not the plaintext bytes"
+        );
+    }
+
+    // The typed leg of the keyless claim: the relay's keyhive never received
+    // the key document, so there is nothing to read it against (no grant, no
+    // clone, no group membership).
+    let key_doc_on_relay = node_b.ctx.big_repo.get_doc(&key_branch_doc_id).await?;
+    assert!(
+        matches!(key_doc_on_relay, big_repo::DocLookup::Missing),
+        "the relay must never have received the key document (ADR 003 §19)"
+    );
+
+    // Retention: a third node, told the same inventories, receives the
+    // ciphertext from the relay ALONE. The origin learns the third node's
+    // Keyhive agent in-process through its contact card (the way `big_repo`'s
+    // relay-topology tests propagate identity through a relay), but repo_c is
+    // never connected to node_a — and node_a is stopped before repo_c's pull,
+    // so no byte can reach it from anywhere but the relay's retained copy.
+    // Like the relay itself, repo_c boots without the blob workers by design:
+    // the drawer-dialect pin machines are the origin-side authoring path, and
+    // its told inventories have no local drawer branch, so the pin worker's
+    // boot ensurer refuses the spawn (the policy leg above asserts the relay
+    // side of this).
+    let node_c = init_told_sync_node(
+        &repo_c_path,
+        crate::config::AppBlobInventories {
+            core_inventory_doc_id: node_a.ctx.core_inventory_doc_id.clone(),
+            docs_inventory_doc_id: node_a.ctx.docs_inventory_doc_id.clone(),
+            encryption_inventory_doc_id: node_a.ctx.encryption_inventory_doc_id.clone(),
+        },
+        false,
+    )
+    .await?;
+    let peer_c = PeerKey::new(*node_c.sync_repo.router.endpoint().id().as_bytes());
+    let agent_c = node_a
+        .ctx
+        .big_repo
+        .receive_keyhive_contact_card(&node_c.ctx.big_repo.local_keyhive_contact_card())
+        .await?;
+    node_a
+        .ctx
+        .big_repo
+        .grant_doc_access(
+            encryption_inventory_doc_id
+                .parse::<big_repo::DocumentId>()
+                .map_err(|_| eyre::eyre!("inventory doc id is not a document id"))?,
+            agent_c,
+            Access::Read,
+        )
+        .await?;
+    // The grant delta reaches the relay before it is asked to serve: the
+    // permission writer mirrors the document's readers the relay can see.
+    drive_keyhive_exchange(&node_b, peer_a.clone(), Duration::from_secs(30)).await?;
+    drive_keyhive_exchange(&node_a, peer_b.clone(), Duration::from_secs(30)).await?;
+    wait_for_part_row_including(
+        &node_b,
+        &encryption_part,
+        &peer_c,
+        "the relay's part row must admit the third node — the grant is visible \
+         to the relay through the document",
+        Duration::from_secs(30),
+    )
+    .await?;
+
+    // The origin goes away; the retained bytes are all that is left.
+    node_a.stop().await?;
+
+    let node_b_ticket = node_b.sync_repo.get_clone_ticket_url().await?;
+    let consumer_addr = node_c.sync_repo.connect_url(&node_b_ticket).await?;
+    assert_eq!(
+        consumer_addr.id,
+        node_b.sync_repo.router.endpoint().id(),
+        "the consumer must have connected to the relay"
+    );
+    drive_keyhive_exchange(&node_c, peer_b.clone(), Duration::from_secs(30)).await?;
+    drive_keyhive_exchange(&node_b, peer_c.clone(), Duration::from_secs(30)).await?;
+
+    node_c
+        .sync_repo
+        .wait_for_full_sync(
+            std::slice::from_ref(&peer_b),
+            std::slice::from_ref(&encryption_part),
+            None,
+        )
+        .await?;
+    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(Duration::from_secs(30));
+    loop {
+        let relay_count = node_b
+            .ctx
+            .blob_part_store
+            .member_count(encryption_part.clone())
+            .await?;
+        let consumer_count = node_c
+            .ctx
+            .blob_part_store
+            .member_count(encryption_part.clone())
+            .await?;
+        if relay_count > 0 && consumer_count == relay_count {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eyre::bail!(
+                "timed out waiting for the part's members to arrive from the relay: \
+                 relay={relay_count} consumer={consumer_count}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    for c in &ciphertext {
+        wait_for_blob_replicated(
+            &node_c.blobs_repo,
+            c.clone(),
+            utils_rs::scale_timeout(Duration::from_secs(60)),
+        )
+        .await?;
+        let got = node_c.blobs_repo.get_bytes(c.clone()).await?;
+        assert!(
+            !got.is_empty(),
+            "the relay-served ciphertext {c} must have bytes"
+        );
+        assert_ne!(
+            got, payload,
+            "the relay-served ciphertext {c} must still be ciphertext, not the plaintext"
+        );
+    }
+    assert!(
+        !node_c
+            .blobs_repo
+            .has_blob_on_disk(plaintext.clone())
+            .await?,
+        "the consumer must hold no plaintext, either"
+    );
+
+    node_c.stop().await?;
+    node_b.stop().await?;
+    Ok(())
+}
+
+/// Wait until `part`'s rows on a node's own serving store admit `peer` — the
+/// same question the told-node test asks the origin after a grant, with the
+/// node parameterised so a serving relay's own rows can be polled too.
+async fn wait_for_part_row_including(
+    node: &SyncTestNode,
+    part: &PartKey,
+    peer: &PeerKey,
+    what: &str,
+    timeout: Duration,
+) -> Res<()> {
+    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(timeout);
+    loop {
+        let rows = inventory_part_rows(&node.ctx.big_repo.sql_ctx(), "daybook-blobs", part).await?;
+        if rows.iter().any(|principal| principal.0 == *peer) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eyre::bail!(
+                "timed out: {what}; rows = {:?}",
+                rows.iter().map(|(k, _)| k.to_string()).collect::<Vec<_>>()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
