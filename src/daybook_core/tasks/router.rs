@@ -48,7 +48,51 @@ pub struct RouterClaim {
     /// payload schemas are separate contracts and are not negotiated here.
     pub scheduling_protocol: SchedulingProtocolVersion,
     /// Causal observation of other candidates' generations at claim time.
+    #[serde(with = "observed_writers")]
     pub observed: BTreeMap<NodePubkey, u64>,
+}
+
+// JSON object keys cannot contain byte-array public keys. Human-readable codecs
+// stream ordered pairs; native binary RPC retains its map encoding.
+pub(crate) mod observed_writers {
+    use super::*;
+    pub fn serialize<S: serde::Serializer>(
+        value: &BTreeMap<NodePubkey, u64>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            serializer.collect_seq(value.iter())
+        } else {
+            value.serialize(serializer)
+        }
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<NodePubkey, u64>, D::Error> {
+        if !deserializer.is_human_readable() {
+            return BTreeMap::deserialize(deserializer);
+        }
+        struct Pairs;
+        impl<'de> serde::de::Visitor<'de> for Pairs {
+            type Value = BTreeMap<NodePubkey, u64>;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("ordered unique writer-generation pairs")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut entries: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut result = BTreeMap::new();
+                while let Some((writer, generation)) = entries.next_element()? {
+                    if result.insert(writer, generation).is_some() {
+                        return Err(serde::de::Error::custom("duplicate observed writer"));
+                    }
+                }
+                Ok(result)
+            }
+        }
+        deserializer.deserialize_seq(Pairs)
+    }
 }
 
 impl RouterClaim {
@@ -207,6 +251,9 @@ struct RegisteredSession {
 /// from the driver.
 #[derive(Debug)]
 pub enum RouterEvent {
+    /// Current Keyhive Edit audience. Empty means local admission is denied or
+    /// inconclusive; retained claims are evidence, never continuing grants.
+    AuthorityChanged { edit_agents: BTreeSet<NodePubkey> },
     ObsolescenceChecked {
         token: ObsolescenceToken,
         obsolete: bool,
@@ -344,6 +391,8 @@ pub struct RouterConfig {
     pub pool: TaskPoolId,
     pub node: NodePubkey,
     pub incarnation: NodeIncarnationId,
+    /// Initial audience checked by the driver before construction.
+    pub edit_agents: BTreeSet<NodePubkey>,
     /// Scheduling protocols this node can speak. A claim advertising a version
     /// outside this set is ineligible *for this node*, which is how an older
     /// participant waits instead of forming a competing cohort.
@@ -365,6 +414,7 @@ pub struct RouterMachine<IdSource> {
     /// that arrive in between must not grant leadership.
     own_claim_persisted: bool,
     routing: bool,
+    edit_agents: BTreeSet<NodePubkey>,
     sessions: BTreeMap<SessionKey, RegisteredSession>,
     allocations: BTreeMap<AllocationId, Allocation>,
     /// Pending tickets by task, awaiting a viable offer.
@@ -378,15 +428,17 @@ pub struct RouterMachine<IdSource> {
 
 impl<IdSource: CoordinationIds> RouterMachine<IdSource> {
     #[must_use]
-    pub fn new(config: RouterConfig, ids: IdSource) -> Self {
+    pub fn new(mut config: RouterConfig, ids: IdSource) -> Self {
+        let edit_agents = std::mem::take(&mut config.edit_agents);
         Self {
-            config,
+            edit_agents,
             ids,
             slot: RouterSlotState::default(),
             live_claims: BTreeSet::new(),
             own_claim: None,
             own_claim_persisted: false,
             routing: false,
+            config,
             sessions: BTreeMap::new(),
             allocations: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -400,6 +452,28 @@ impl<IdSource: CoordinationIds> RouterMachine<IdSource> {
     #[must_use]
     pub fn is_routing(&self) -> bool {
         self.routing
+    }
+
+    pub(crate) fn edit_agents(&self) -> &BTreeSet<NodePubkey> {
+        &self.edit_agents
+    }
+
+    pub(crate) fn start_pending(
+        &self,
+        session: SessionKey,
+        allocation_id: AllocationId,
+        task_id: PoolTaskId,
+    ) -> bool {
+        self.routing
+            && self
+                .allocations
+                .get(&allocation_id)
+                .is_some_and(|allocation| {
+                    allocation.session == session
+                        && allocation.task_id == task_id
+                        && matches!(allocation.phase, AllocationPhase::Accepted(_))
+                        && !allocation.cancel_requested
+                })
     }
 
     pub(crate) fn proof_pending(&self, token: &ObsolescenceToken) -> bool {
@@ -446,25 +520,28 @@ impl<IdSource: CoordinationIds> RouterMachine<IdSource> {
     /// a historical newer-version claim from permanently blocking takeover.
     #[must_use]
     pub fn projected_winner(&self) -> Option<&RouterClaim> {
-        let max_generation = self.slot.max_generation();
-        let claims: Vec<&RouterClaim> = self
+        let max_generation = self
             .slot
             .lanes()
             .values()
-            .filter(|claim| claim.generation == max_generation)
-            .collect();
-        if claims.is_empty() {
-            return None;
-        }
+            .filter(|claim| self.edit_agents.contains(&claim.candidate))
+            .map(|claim| claim.generation)
+            .max()
+            .unwrap_or(0);
+        let claims = self
+            .slot
+            .lanes()
+            .values()
+            .filter(|claim| self.edit_agents.contains(&claim.candidate))
+            .filter(|claim| claim.generation == max_generation);
 
         let newest_live_protocol = claims
-            .iter()
+            .clone()
             .filter(|claim| self.is_live(&claim.liveness_key()))
             .map(|claim| claim.scheduling_protocol)
             .max();
         match newest_live_protocol {
             Some(newest) => claims
-                .into_iter()
                 .filter(|claim| {
                     claim.scheduling_protocol >= newest && self.is_live(&claim.liveness_key())
                 })
@@ -472,7 +549,7 @@ impl<IdSource: CoordinationIds> RouterMachine<IdSource> {
             // No live claim at the greatest generation: every claim here is
             // dead, so rank alone reports the deterministic stale winner for
             // observation. Leadership still requires liveness.
-            None => claims.into_iter().min_by_key(|claim| claim.rank()),
+            None => claims.min_by_key(|claim| claim.rank()),
         }
     }
 
@@ -487,7 +564,32 @@ impl<IdSource: CoordinationIds> RouterMachine<IdSource> {
 
     /// Handle one event, pushing bounded actions into `out`.
     pub fn on_event(&mut self, event: RouterEvent, out: &mut Vec<RouterAction>) {
+        if let RouterEvent::AuthorityChanged { edit_agents } = event {
+            self.edit_agents = edit_agents;
+            self.live_claims
+                .retain(|claim| self.edit_agents.contains(&claim.candidate));
+            if !self.edit_agents.contains(&self.config.node) {
+                self.own_claim = None;
+                self.own_claim_persisted = false;
+                self.routing = false;
+                self.sessions.clear();
+                self.allocations.clear();
+                self.blocked_offers.clear();
+                for (task, (_, ticket)) in std::mem::take(&mut self.proofs) {
+                    self.pending.insert(task, ticket);
+                }
+            }
+            self.sessions
+                .retain(|session, _| self.edit_agents.contains(&session.node));
+            self.allocations
+                .retain(|_, allocation| self.sessions.contains_key(&allocation.session));
+            self.blocked_offers
+                .retain(|(session, _), _| self.sessions.contains_key(session));
+            self.reconsider_leadership();
+            return;
+        }
         match event {
+            RouterEvent::AuthorityChanged { .. } => unreachable!("authority handled at ingress"),
             RouterEvent::ObsolescenceChecked { token, obsolete } => {
                 let Some((expected, _)) = self.proofs.get(&token.task_id) else {
                     return;
@@ -517,6 +619,9 @@ impl<IdSource: CoordinationIds> RouterMachine<IdSource> {
                 self.reconsider_leadership();
             }
             RouterEvent::HeartbeatObserved { claim } => {
+                if !self.edit_agents.contains(&claim.candidate) {
+                    return;
+                }
                 self.live_claims.insert(claim);
                 // A newer live claim can defeat ours: stop routing promptly
                 // rather than continuing after the slot says otherwise.
@@ -537,8 +642,24 @@ impl<IdSource: CoordinationIds> RouterMachine<IdSource> {
                     claim.generation == generation && claim.claim_id == claim_id
                 });
                 if confirmed {
-                    self.own_claim_persisted = true;
-                    self.reconsider_leadership();
+                    let stored = self
+                        .slot
+                        .get(&self.config.node)
+                        .expect("own claim has a writer lane");
+                    let own = self.own_claim.as_mut().expect("confirmed own claim exists");
+                    // The register reserves sequences across all slots in the scope.
+                    // Task writes and interrupted publications leave gaps beyond this
+                    // election proposal; only the signed stored claim fixes its sequence.
+                    if own.pool == stored.pool
+                        && own.liveness_key() == stored.liveness_key()
+                        && own.incarnation == stored.incarnation
+                        && own.scheduling_protocol == stored.scheduling_protocol
+                        && own.observed == stored.observed
+                    {
+                        own.writer_seq = stored.writer_seq;
+                        self.own_claim_persisted = true;
+                        self.reconsider_leadership();
+                    }
                 }
             }
             RouterEvent::ClaimPersistenceFailed {
@@ -573,6 +694,15 @@ impl<IdSource: CoordinationIds> RouterMachine<IdSource> {
                 protocol,
                 active_attempts,
             } => {
+                if !self.edit_agents.contains(&self.config.node)
+                    || !self.edit_agents.contains(&session.node)
+                {
+                    out.push(RouterAction::RejectSession {
+                        session,
+                        reason: DeclineReason::Unavailable,
+                    });
+                    return;
+                }
                 if !self.config.supported_protocols.contains(&protocol) {
                     out.push(RouterAction::RejectSession {
                         session,
@@ -873,7 +1003,7 @@ impl<IdSource: CoordinationIds> RouterMachine<IdSource> {
     }
 
     fn consider_takeover(&mut self, out: &mut Vec<RouterAction>) {
-        if self.routing {
+        if self.routing || !self.edit_agents.contains(&self.config.node) {
             return;
         }
         // A claim may only be published after the currently projected claim's
@@ -955,7 +1085,8 @@ impl<IdSource: CoordinationIds> RouterMachine<IdSource> {
             self.routing = false;
             return;
         };
-        self.routing = self.own_claim_persisted
+        self.routing = self.edit_agents.contains(&self.config.node)
+            && self.own_claim_persisted
             && self.projected_winner().is_some_and(|winner| winner == &own);
     }
 

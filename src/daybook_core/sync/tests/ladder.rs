@@ -1281,8 +1281,10 @@ mod captured_recovery {
                 "test-device".into(),
             )
             .await?;
+
             ctx.shutdown().await?;
             let node = open_sync_node(&root).await?;
+
             let artifact = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../target/oci/@daybook/test");
             eyre::ensure!(
@@ -1300,6 +1302,7 @@ mod captured_recovery {
                 "db+facet:///{manifest_doc}/org.example.daybook.plugManifest/main?branch=main"
             )
             .parse()?;
+
             let activation = node.plugs_repo.enable_plug(&reference).await?;
             let status = node
                 .rt
@@ -1321,6 +1324,7 @@ mod captured_recovery {
                 manifest_doc,
                 manifest: (*manifest).clone(),
             };
+
             fixture.config_marker("early").await?;
             Ok(fixture)
         }
@@ -1957,15 +1961,30 @@ mod captured_recovery {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn native_only_executor_command_settles_captured_effects() -> Res<()> {
-        native_command_scenario(/*restart_executor*/ false).await
+        Box::pin(native_command_scenario(
+            /*restart_executor*/ false, /*authority_lifecycle*/ false,
+        ))
+        .await
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn native_command_survives_producer_disconnect_and_executor_restart() -> Res<()> {
-        native_command_scenario(/*restart_executor*/ true).await
+        Box::pin(native_command_scenario(
+            /*restart_executor*/ true, /*authority_lifecycle*/ false,
+        ))
+        .await
     }
 
-    async fn native_command_scenario(restart_executor: bool) -> Res<()> {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_router_withdraws_on_revocation_and_requires_explicit_reactivation() -> Res<()> {
+        Box::pin(native_command_scenario(
+            /*restart_executor*/ false, /*authority_lifecycle*/ true,
+        ))
+        .await
+    }
+
+    async fn native_command_scenario(restart_executor: bool, authority_lifecycle: bool) -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
         use crate::blobs::encrypt::{JwkOct, MasterKey};
         use crate::rt::task_adapter::{COMMAND_DOMAIN, CapturedRoutineAdapter};
         use crate::tasks::driver::SchedulingTiming;
@@ -1979,7 +1998,7 @@ mod captured_recovery {
         use big_sync_core::{ObjKey, PartKey};
 
         eprintln!("native command: opening producer; restart={restart_executor}");
-        let fixture = Fixture::open().await?;
+        let fixture = Box::pin(Fixture::open()).await?;
         let doc = fixture.document("native-distributed-command").await?;
         let a = &fixture.node;
         let b_root = fixture.temp.path().join("executor");
@@ -2004,7 +2023,7 @@ mod captured_recovery {
             .await?;
         a.ctx
             .big_repo
-            .add_member_to_group(b_agent, &group, Access::Edit)
+            .add_member_to_group(b_agent.clone(), &group, Access::Edit)
             .await?;
         let key = MasterKey::random();
         let key_facet = FacetKey::from(WellKnownFacetTag::Jwk);
@@ -2063,7 +2082,7 @@ mod captured_recovery {
             .await?;
         b.ctx
             .big_repo
-            .sync_doc_with_peer(metadata.document_id(), a_peer)
+            .sync_doc_with_peer(metadata.document_id(), a_peer.clone())
             .await?;
         b.ctx.big_repo.wait_for_quiescence(None).await?;
         let b_pools = PoolRepo::new(
@@ -2116,11 +2135,11 @@ mod captured_recovery {
                 timing,
             )
             .await?;
-        let _b_driver = b
+        let b_driver = b
             .sync_repo
             .attach_scheduling_pool(
                 b_snapshot.clone(),
-                b_adapter,
+                Arc::clone(&b_adapter) as Arc<dyn crate::tasks::driver::TaskExecutionAdapter>,
                 CapabilitySummary::default(),
                 Capacity::new(1),
                 timing,
@@ -2161,7 +2180,7 @@ mod captured_recovery {
             .await?
             .map_err(|error| ferr!("command observer: {error:?}"))?;
         eprintln!("native command: publishing captured declaration");
-        a_driver.submit(declaration, Vec::new()).await?;
+        a_driver.submit(declaration.clone(), Vec::new()).await?;
         eprintln!("native command: declaration published");
         let attempt = loop {
             let attempts = b.rt.dispatch_repo.task_attempts(&pool).await?;
@@ -2193,10 +2212,15 @@ mod captured_recovery {
         let producer = if restart_executor {
             eprintln!("native command: changing config, disconnecting and reopening");
             fixture.config_marker("late").await?;
+            eprintln!("native command: config changed; awaiting convergence");
             wait_for_sync_convergence(a, &b, endpoint.id).await?;
+            eprintln!("native command: converged; stopping producer");
             fixture.node.stop().await?;
+            eprintln!("native command: producer stopped; stopping executor");
             b.stop().await?;
+            eprintln!("native command: executor stopped; reopening");
             b = open_sync_node(&b_root).await?;
+            eprintln!("native command: executor reopened");
             let adapter = Arc::new(CapturedRoutineAdapter::new(
                 Arc::clone(&b.rt),
                 b_snapshot.clone(),
@@ -2205,7 +2229,7 @@ mod captured_recovery {
             let _driver = b
                 .sync_repo
                 .attach_scheduling_pool(
-                    b_snapshot,
+                    b_snapshot.clone(),
                     adapter,
                     CapabilitySummary::default(),
                     Capacity::new(1),
@@ -2258,6 +2282,193 @@ mod captured_recovery {
         assert_eq!(receipt.summary, terminal);
         assert_a_report(&report(&b, &doc).await?.unwrap());
         assert_eq!(admissions(&b, job).await?.len(), 1);
+        if authority_lifecycle {
+            let observed = crate::tasks::driver::TaskExecutionAdapter::cancel(
+                &*b_adapter,
+                attempt.request.key.clone(),
+                OpaqueReason::from_label("late authority withdrawal"),
+            )
+            .await?
+            .await?;
+            assert!(
+                matches!(observed, crate::tasks::driver::AttemptOutcome::Finished(TerminalFact::Succeeded { attempt_id, .. }) if attempt_id == attempt.request.key.attempt_id),
+                "late cancellation must observe the finalized success"
+            );
+            let producer = producer
+                .as_ref()
+                .expect("authority scenario retains producer");
+            let producer_tasks = producer.sync_repo.task_store(&pool).unwrap();
+            let mut producer_revisions = producer
+                .sync_repo
+                .task_backend()
+                .shared_store()
+                .open_revision_reader(SubPartsRequest {
+                    lower_bound: 0,
+                    targets: [SubscriptionTarget::Part {
+                        part_id: producer_tasks.register().part().clone(),
+                        cursor: 0,
+                    }]
+                    .into(),
+                })
+                .await?
+                .map_err(|error| ferr!("producer terminal observer: {error:?}"))?;
+            loop {
+                if producer_tasks
+                    .ticket(task_id)
+                    .await?
+                    .is_some_and(|ticket| ticket.terminal_summary() == Some(terminal.clone()))
+                {
+                    break;
+                }
+                producer_revisions
+                    .next(RevisionReadLimits::default())
+                    .await?;
+            }
+            a_driver.stop().await?;
+            let mut status = b_driver.status();
+            let old_claim = status
+                .wait_for(|state| state.routing)
+                .await?
+                .claim
+                .clone()
+                .unwrap();
+            eprintln!("authority lifecycle: sole executor router elected");
+
+            let mut queued = declaration.clone();
+            queued.task_id =
+                PoolTaskId::new(*blake3::hash(b"native-authority-queued-command").as_bytes());
+            queued.not_before_secs = Some(
+                i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_secs(),
+                )? + 3600,
+            );
+            let (entered, release) = b_driver.pause_checkpoint_admission();
+            b_driver.submit(queued.clone(), Vec::new()).await?;
+            eprintln!(
+                "authority lifecycle: queued obligation published; awaiting checkpoint admission"
+            );
+            entered.await?;
+            let before = status
+                .wait_for(|state| state.suspended && state.pending_checkpoint)
+                .await?
+                .checkpoint;
+            assert!(!status.borrow().routing);
+            assert_eq!(
+                tasks
+                    .register()
+                    .consumer_checkpoint(b"native-scheduling")
+                    .await?,
+                before
+            );
+            release.send(()).expect(ERROR_CHANNEL);
+            status
+                .wait_for(|state| {
+                    !state.suspended && !state.pending_checkpoint && state.checkpoint > before
+                })
+                .await?;
+            assert_eq!(
+                tasks.ticket(task_id).await?.unwrap().terminal_summary(),
+                Some(terminal.clone())
+            );
+            eprintln!(
+                "authority lifecycle: pending checkpoint retained and committed after admission"
+            );
+
+            producer
+                .ctx
+                .big_repo
+                .revoke_member_from_group_for_test(b_agent.clone(), &group)
+                .await?;
+            producer
+                .ctx
+                .big_repo
+                .sync_keyhive_with_peer(b_peer.clone())
+                .await?;
+            b.ctx
+                .big_repo
+                .sync_keyhive_with_peer(a_peer.clone())
+                .await?;
+            status
+                .wait_for(|state| state.suspended && !state.routing && state.claim.is_none())
+                .await?;
+            assert!(b_driver.submit(queued.clone(), Vec::new()).await.is_err());
+            assert_eq!(
+                producer
+                    .sync_repo
+                    .task_store(&pool)
+                    .unwrap()
+                    .ticket(task_id)
+                    .await?
+                    .unwrap()
+                    .terminal_summary(),
+                Some(terminal.clone())
+            );
+            eprintln!(
+                "authority lifecycle: revoked router withdrawn without deleting terminal obligation"
+            );
+
+            producer
+                .ctx
+                .big_repo
+                .add_member_to_group(b_agent, &group, Access::Edit)
+                .await?;
+            eprintln!("authority lifecycle: Edit regrant published");
+            producer.ctx.big_repo.sync_keyhive_with_peer(b_peer).await?;
+            eprintln!("authority lifecycle: producer regrant exchange complete");
+            b.ctx.big_repo.sync_keyhive_with_peer(a_peer).await?;
+            eprintln!(
+                "authority lifecycle: executor regrant exchange complete; state={:?}",
+                status.borrow()
+            );
+            let renewed = status
+                .wait_for(|state| state.routing)
+                .await?
+                .claim
+                .clone()
+                .unwrap();
+            assert!(renewed.generation > old_claim.generation);
+            assert_ne!(renewed.claim_id, old_claim.claim_id);
+            b_driver.stop().await?;
+            assert!(b_driver.submit(queued.clone(), Vec::new()).await.is_err());
+            let reattached = b
+                .sync_repo
+                .attach_scheduling_pool(
+                    b_snapshot,
+                    b_adapter,
+                    CapabilitySummary::default(),
+                    Capacity::new(1),
+                    timing,
+                )
+                .await?;
+            let mut status = reattached.status();
+            let new = status
+                .wait_for(|state| state.routing)
+                .await?
+                .claim
+                .clone()
+                .unwrap();
+            assert_ne!(new.incarnation, renewed.incarnation);
+            // A retained obsolete handle must not detach its replacement.
+            b_driver.stop().await?;
+            reattached.submit(queued.clone(), Vec::new()).await?;
+            assert!(
+                tasks
+                    .ticket(queued.task_id)
+                    .await?
+                    .unwrap()
+                    .terminal_summary()
+                    .is_none(),
+                "permission loss must not cancel the domain obligation"
+            );
+            assert_eq!(
+                tasks.ticket(task_id).await?.unwrap().terminal_summary(),
+                Some(terminal)
+            );
+            eprintln!("authority lifecycle: explicit reattachment elected a fresh router");
+            reattached.stop().await?;
+        }
         b.stop().await?;
         if let Some(producer) = producer {
             producer.stop().await?;
@@ -2266,12 +2477,12 @@ mod captured_recovery {
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn native_distributed_triage_incorporates_exact_capture_before_terminal() -> Res<()> {
-        native_triage_scenario(/*remote_executor*/ false).await
+        Box::pin(native_triage_scenario(/*remote_executor*/ false)).await
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn native_remote_triage_incorporates_exact_capture_before_terminal() -> Res<()> {
-        native_triage_scenario(/*remote_executor*/ true).await
+        Box::pin(native_triage_scenario(/*remote_executor*/ true)).await
     }
 
     async fn native_triage_scenario(remote_executor: bool) -> Res<()> {
@@ -2484,7 +2695,7 @@ mod captured_recovery {
                     Arc::clone(&node.rt),
                     processor.into(),
                     domain_ref.clone(),
-                    snapshot,
+                    snapshot.clone(),
                     CapabilitySummary::empty(),
                     Capacity::new(1),
                     SchedulingTiming {
@@ -2495,6 +2706,69 @@ mod captured_recovery {
                 )
                 .await?
         );
+        if !remote_executor {
+            let retired = node.rt.distributed_processors.read().await[processor]
+                .driver
+                .clone();
+            let mut retired_status = retired.status();
+            node.plugs_repo.disable_plug("@daybook/test").await?;
+            // Closure is the actor shutdown barrier, not a guessed delay after config mutation.
+            while retired_status.changed().await.is_ok() {}
+            node.sync_repo
+                .detach_distributed_processor(&node.rt, processor)
+                .await?;
+            assert!(
+                !node
+                    .rt
+                    .distributed_processors
+                    .read()
+                    .await
+                    .contains_key(processor)
+            );
+            let enabled = node.plugs_repo.enable_plug(&manifest_ref).await?;
+            assert!(matches!(
+                node.rt
+                    .triage_worker
+                    .wait_for_activation(&node.plugs_repo, enabled)
+                    .await?,
+                crate::rt::triage::ActivationStatus::Active(_)
+            ));
+            assert!(
+                !node
+                    .rt
+                    .distributed_processors
+                    .read()
+                    .await
+                    .contains_key(processor),
+                "enablement alone must not recreate a scheduling actor"
+            );
+            assert!(
+                node.sync_repo
+                    .attach_distributed_processor(
+                        Arc::clone(&node.rt),
+                        processor.into(),
+                        domain_ref.clone(),
+                        snapshot,
+                        CapabilitySummary::empty(),
+                        Capacity::new(1),
+                        SchedulingTiming {
+                            heartbeat_interval: Duration::from_millis(100),
+                            router_settle: Duration::from_millis(100),
+                            router_takeover_after: Duration::from_secs(1)
+                        }
+                    )
+                    .await?
+            );
+            retired.stop().await?;
+            assert!(
+                node.rt
+                    .distributed_processors
+                    .read()
+                    .await
+                    .contains_key(processor),
+                "an obsolete handle must not detach the replacement"
+            );
+        }
         if let Some(executor) = &executor {
             node.ctx.big_repo.wait_for_quiescence(None).await?;
             let peer = node.ctx.big_repo.local_peer_id();

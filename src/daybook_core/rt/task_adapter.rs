@@ -1152,9 +1152,16 @@ impl CapturedRoutineAdapter {
         if let Some(entry) = admitted {
             rt.record_job_admission(&attempt.dispatch_id, &current, entry)
                 .await?;
-            rt.dispatch_repo
+            if !rt
+                .dispatch_repo
                 .cancel(&attempt.dispatch_id, &current)
-                .await?;
+                .await?
+                && !current.cancellation_requested()
+            {
+                // Publication already owns the outcome; a later control message
+                // must not abort its job or replace its result.
+                return Ok(());
+            }
             let cancellation = rt
                 .wflow_ingress
                 .cancel_job(Arc::from(job), reason.to_owned())
@@ -1382,13 +1389,19 @@ impl TaskExecutionAdapter for CapturedRoutineAdapter {
         Box::pin(async move { adapter.start_inner(attempt).await })
     }
 
-    fn cancel(&self, key: AttemptKey, _reason: OpaqueReason) -> AdapterFuture<()> {
+    fn cancel(&self, key: AttemptKey, reason: OpaqueReason) -> AdapterFuture<AttemptSubscription> {
         let adapter = self.clone();
         Box::pin(async move {
-            if let Some(attempt) = adapter.rt.dispatch_repo.task_attempt(&key).await? {
-                Self::fail_local(&adapter.rt, &attempt, _reason.as_str()).await?;
-            }
-            Ok(())
+            let attempt = adapter
+                .rt
+                .dispatch_repo
+                .task_attempt(&key)
+                .await?
+                .ok_or_eyre("cancelled task attempt has no durable capture")?;
+            Self::fail_local(&adapter.rt, &attempt, reason.as_str()).await?;
+            // Finalization can have sealed publication before cancellation. Keep
+            // observing its actual outcome instead of fabricating a release.
+            Ok(adapter.subscription(attempt))
         })
     }
 

@@ -297,6 +297,32 @@ impl DocProcessorTriageListener {
                 }
             }
         }
+        // Configuration owns scheduling activation, independently of Keyhive
+        // permission and retained task/slot storage. Disablement must retire the
+        // attached actor before acknowledging the new activation snapshot.
+        let mut attached = self.rt.distributed_processors.write().await;
+        let disabled: Vec<_> = attached
+            .keys()
+            .filter(|id| {
+                !self.cached_processors.iter().any(|processor| {
+                    &processor.processor_full_id == *id
+                        && matches!(
+                            processor.processor_manifest.coordination,
+                            daybook_types::manifest::ProcessorCoordination::Distributed(_)
+                        )
+                })
+            })
+            .cloned()
+            .collect();
+        for id in disabled {
+            attached
+                .remove(&id)
+                .expect(ERROR_IMPOSSIBLE)
+                .driver
+                .stop()
+                .await?;
+        }
+        drop(attached);
         self.triage_read_tags = triage_read_tags;
         self.triage_read_keys = triage_read_keys;
         self.facet_reference_specs = Arc::new(facet_reference_specs);

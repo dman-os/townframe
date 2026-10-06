@@ -2188,3 +2188,100 @@ fn cancellation_of_prepared_start_fences_late_authorization_receipt() {
     );
     assert_eq!(machine.attempt_for_task(&task_id), None);
 }
+
+#[test]
+fn participation_revocation_fences_delayed_preparation_and_classification() {
+    let mut machine = worker_machine(1, &[1]);
+    let mut domain = FakeDomain::ready();
+    let initial = declaration("revoked-preparation");
+    let task = initial.task_id;
+    let mut actions = Vec::new();
+    drive_worker(
+        &mut machine,
+        WorkerEvent::OriginAttemptStart {
+            ticket: origin_ticket(initial),
+        },
+        &mut domain,
+        &mut actions,
+    );
+    let attempt = machine.attempt_for_task(&task).unwrap();
+    assert!(
+        actions
+            .iter()
+            .any(|action| matches!(action, WorkerAction::PersistAttempt { .. }))
+    );
+    actions.clear();
+    machine.on_event(
+        WorkerEvent::ParticipationChanged { allowed: false },
+        &mut actions,
+    );
+    machine.on_event(
+        WorkerEvent::AttemptPersisted {
+            task_id: task,
+            attempt_id: attempt,
+        },
+        &mut actions,
+    );
+    assert!(actions.iter().any(|action| matches!(action, WorkerAction::CancelAttempt { attempt_id: Some(id), .. } if *id == attempt)));
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, WorkerAction::StartDispatch { .. }))
+    );
+    machine.on_event(
+        WorkerEvent::AttemptFailed {
+            task_id: task,
+            attempt_id: attempt,
+        },
+        &mut actions,
+    );
+    assert!(machine.attempt_for_task(&task).is_none());
+
+    actions.clear();
+    machine.on_event(
+        WorkerEvent::OriginAttemptStart {
+            ticket: origin_ticket(declaration("denied-origin")),
+        },
+        &mut actions,
+    );
+    assert!(
+        actions.is_empty(),
+        "denied participation must not prepare new work"
+    );
+    machine.on_event(
+        WorkerEvent::ParticipationChanged { allowed: true },
+        &mut actions,
+    );
+    actions.clear();
+    machine.on_event(
+        WorkerEvent::OriginAttemptStart {
+            ticket: origin_ticket(declaration("revoked-classification")),
+        },
+        &mut actions,
+    );
+    let token = actions
+        .iter()
+        .find_map(|action| match action {
+            WorkerAction::ClassifyTask { token, .. } => Some(token.clone()),
+            _ => None,
+        })
+        .unwrap();
+    machine.on_event(
+        WorkerEvent::ParticipationChanged { allowed: false },
+        &mut Vec::new(),
+    );
+    actions.clear();
+    machine.on_event(
+        WorkerEvent::Classified {
+            token,
+            classification: TaskClassification::Runnable(crate::tasks::ResolvedInvocation {
+                args: vec![1],
+            }),
+        },
+        &mut actions,
+    );
+    assert!(
+        actions.is_empty(),
+        "a revoked classification receipt cannot create an attempt"
+    );
+}

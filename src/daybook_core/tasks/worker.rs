@@ -71,6 +71,9 @@ pub struct WorkerRegistration {
 /// Worker inputs.
 #[derive(Debug)]
 pub enum WorkerEvent {
+    /// Current local Keyhive participation. Losing permission cancels local
+    /// attempts without asserting global obsolescence or dropping produced outcomes.
+    ParticipationChanged { allowed: bool },
     Classified {
         token: ClassificationToken,
         classification: TaskClassification,
@@ -282,6 +285,7 @@ pub struct PoolWorkerMachine<IdSource> {
     ids: IdSource,
     /// The router session this worker currently serves, if any.
     current: Option<SessionKey>,
+    participating: bool,
     /// Attempts by allocation id (router-allocated) or task (origin fast path).
     attempts_by_allocation: BTreeMap<AllocationId, AttemptRecord>,
     origin_attempts: BTreeMap<PoolTaskId, AttemptRecord>,
@@ -306,6 +310,7 @@ impl<IdSource: CoordinationIds> PoolWorkerMachine<IdSource> {
             config,
             ids,
             current: None,
+            participating: true,
             attempts_by_allocation: BTreeMap::new(),
             origin_attempts: BTreeMap::new(),
             blocked_ready: BTreeMap::new(),
@@ -413,6 +418,17 @@ impl<IdSource: CoordinationIds> PoolWorkerMachine<IdSource> {
             .is_some_and(|(pending, _)| pending == token)
     }
 
+    pub(crate) fn dispatch_pending(&self, token: &DispatchToken) -> bool {
+        self.attempts_by_allocation
+            .values()
+            .chain(self.origin_attempts.values())
+            .any(|record| {
+                record.start_emitted.as_ref() == Some(token)
+                    && record.cancel_before_ack.is_none()
+                    && record.finishing.is_none()
+            })
+    }
+
     /// Attempts currently running locally.
     #[must_use]
     pub fn running_attempts(&self) -> usize {
@@ -511,6 +527,41 @@ impl<IdSource: CoordinationIds> PoolWorkerMachine<IdSource> {
 
     /// Handle one event, pushing bounded actions into `out`.
     pub fn on_event(&mut self, event: WorkerEvent, out: &mut Vec<WorkerAction>) {
+        if let WorkerEvent::ParticipationChanged { allowed } = event {
+            self.participating = allowed;
+            if allowed {
+                return;
+            }
+            self.classifications.clear();
+            self.current = None;
+            self.retire_allocations(out);
+            let tasks: Vec<_> = self
+                .origin_attempts
+                .values()
+                .filter(|record| record.finishing.is_none())
+                .map(|record| record.task_id)
+                .collect();
+            for task in tasks {
+                self.cancel_task(
+                    &task,
+                    OpaqueReason::from_label("pool participation revoked"),
+                    out,
+                );
+            }
+            return;
+        }
+        if !self.participating
+            && !matches!(
+                event,
+                WorkerEvent::AttemptPersisted { .. }
+                    | WorkerEvent::AttemptPersistFailed { .. }
+                    | WorkerEvent::AttemptFinished { .. }
+                    | WorkerEvent::AttemptFailed { .. }
+                    | WorkerEvent::TerminalFactAccepted { .. }
+            )
+        {
+            return;
+        }
         let event = match event {
             WorkerEvent::OriginAttemptStart { ticket } if ticket.is_terminal() => {
                 WorkerEvent::TicketObserved { ticket }
@@ -611,6 +662,9 @@ impl<IdSource: CoordinationIds> PoolWorkerMachine<IdSource> {
         out: &mut Vec<WorkerAction>,
     ) {
         match event {
+            WorkerEvent::ParticipationChanged { .. } => {
+                unreachable!("participation handled at ingress")
+            }
             WorkerEvent::Classified { .. } => {
                 unreachable!("classification results are consumed at ingress")
             }

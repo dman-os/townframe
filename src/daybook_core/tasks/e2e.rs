@@ -299,6 +299,7 @@ impl Driver {
                     pool: pool(),
                     node: node(9),
                     incarnation: incarnation(9),
+                    edit_agents: (0..=16).map(node).collect(),
                     supported_protocols: vec![SchedulingProtocolVersion(1)],
                 },
                 ids(),

@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::interlude::*;
-use std::{future::Future, pin::Pin};
+use std::{collections::VecDeque, future::Future, pin::Pin};
 
 pub type AdapterFuture<T> = Pin<Box<dyn Future<Output = Res<T>> + Send + 'static>>;
 
@@ -68,7 +68,9 @@ pub trait TaskExecutionAdapter: Send + Sync + 'static {
     fn classify(&self, ticket: TaskTicket) -> AdapterFuture<TaskClassification>;
     fn persist(&self, request: AttemptRequest) -> AdapterFuture<PreparedAttempt>;
     fn start(&self, attempt: PreparedAttempt) -> AdapterFuture<AttemptSubscription>;
-    fn cancel(&self, key: AttemptKey, reason: OpaqueReason) -> AdapterFuture<()>;
+    /// Request best-effort cancellation, then observe the actual durable winner.
+    /// A late cancellation cannot replace a completed success with local failure.
+    fn cancel(&self, key: AttemptKey, reason: OpaqueReason) -> AdapterFuture<AttemptSubscription>;
     fn incorporate(
         &self,
         declaration: TaskDeclaration,
@@ -128,6 +130,7 @@ struct ClaimPayload {
     generation: u64,
     claim_id: PoolClaimId,
     scheduling_protocol: SchedulingProtocolVersion,
+    #[serde(with = "super::router::observed_writers")]
     observed: BTreeMap<NodePubkey, u64>,
 }
 
@@ -201,7 +204,7 @@ async fn admit(
     repo: &BigRepo,
     snapshot: &PoolDescriptorSnapshot,
     peer: Option<NodePubkey>,
-) -> Res<()> {
+) -> Res<big_repo::CoordinationAuthority> {
     let sampled = repo
         .coordination_authority(
             snapshot.reference.document.clone(),
@@ -211,16 +214,60 @@ async fn admit(
     let checked = repo
         .admit_coordination_access(&sampled, Access::Edit)
         .await?;
-    if let Some(peer) = peer {
-        eyre::ensure!(
-            checked.edit_agents().contains(&peer.to_bytes32()),
-            "peer lacks current pool Edit"
-        );
+    if let Some(peer) = peer
+        && !checked.edit_agents().contains(&peer.to_bytes32())
+    {
+        return Err(big_repo::CoordinationError::Unauthorized.into());
     }
-    Ok(())
+    Ok(checked)
+}
+
+/// Network inputs fail closed on inconclusive or denied permission, but internal
+/// failures must reach the owning actor rather than masquerade as rejection.
+async fn permitted(
+    repo: &BigRepo,
+    snapshot: &PoolDescriptorSnapshot,
+    peer: Option<NodePubkey>,
+) -> Res<bool> {
+    match admit(repo, snapshot, peer).await {
+        Ok(_) => Ok(true),
+        Err(error)
+            if matches!(
+                error.downcast_ref::<big_repo::CoordinationError>(),
+                Some(
+                    big_repo::CoordinationError::Pending
+                        | big_repo::CoordinationError::Unauthorized
+                )
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PoolStatus {
+    pub(crate) routing: bool,
+    pub(crate) suspended: bool,
+    pub(crate) checkpoint: u64,
+    pub(crate) pending_checkpoint: bool,
+    pub(crate) claim: Option<RouterClaim>,
+}
+
+#[cfg(test)]
+struct CheckpointAdmissionGate {
+    entered: Option<oneshot::Sender<()>>,
+    release: oneshot::Receiver<()>,
 }
 
 struct PoolInner {
+    owner: std::sync::Weak<NativeTaskDriver>,
+    #[cfg(test)]
+    status: tokio::sync::watch::Receiver<PoolStatus>,
+    #[cfg(test)]
+    checkpoint_gate: Arc<std::sync::Mutex<Option<CheckpointAdmissionGate>>>,
     snapshot: PoolDescriptorSnapshot,
     adapter: Arc<dyn TaskExecutionAdapter>,
     capabilities: CapabilitySummary,
@@ -234,6 +281,30 @@ struct PoolInner {
 #[derive(Clone)]
 pub struct PoolDriverHandle(Arc<PoolInner>);
 impl PoolDriverHandle {
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> tokio::sync::watch::Receiver<PoolStatus> {
+        self.0.status.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_checkpoint_admission(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, observed) = oneshot::channel();
+        let (release, wait) = oneshot::channel();
+        assert!(
+            self.0
+                .checkpoint_gate
+                .lock()
+                .expect(ERROR_MUTEX)
+                .replace(CheckpointAdmissionGate {
+                    entered: Some(entered),
+                    release: wait
+                })
+                .is_none()
+        );
+        (observed, release)
+    }
     pub async fn submit(&self, declaration: TaskDeclaration, input_witness: Vec<u8>) -> Res<()> {
         let (reply, received) = oneshot::channel();
         self.0
@@ -247,7 +318,21 @@ impl PoolDriverHandle {
             .map_err(|_| eyre::eyre!("pool scheduling owner stopped"))?;
         received.await?
     }
+    /// Explicit domain detach. Retained transport data does not restart scheduling.
     pub async fn stop(&self) -> Res<()> {
+        let owner = self
+            .0
+            .owner
+            .upgrade()
+            .expect("pool owner outlives its handles");
+        let mut pools = owner.pools.lock().await;
+        if pools
+            .get(&self.0.snapshot.descriptor.pool_id)
+            .is_some_and(|current| Arc::ptr_eq(&current.0, &self.0))
+        {
+            pools.remove(&self.0.snapshot.descriptor.pool_id);
+        }
+        // Hold attachment ownership until old jobs and sessions have joined.
         self.0.cancel.cancel();
         let join = self.0.join.lock().expect(ERROR_MUTEX).take();
         if let Some(join) = join {
@@ -272,8 +357,16 @@ enum Command {
 
 enum Completion {
     Cancelled,
-    Worker(WorkerEvent),
+    Classified {
+        token: ClassificationToken,
+        ticket: Box<TaskTicket>,
+        result: Res<TaskClassification>,
+    },
     Router(RouterEvent),
+    Obsolescence {
+        token: super::router::ObsolescenceToken,
+        result: Res<bool>,
+    },
     OfferChecked {
         session: SessionKey,
         allocation_id: AllocationId,
@@ -415,7 +508,7 @@ impl NativeTaskDriver {
             snapshot.descriptor.router_slot.as_bytes().len() != 32,
             "router logical slot collides with the task-id slot domain"
         );
-        admit(&self.repo, &snapshot, None).await?;
+        let authority = admit(&self.repo, &snapshot, None).await?;
         let mut pools = self.pools.lock().await;
         if let Some(existing) = pools.get(&snapshot.descriptor.pool_id) {
             eyre::ensure!(
@@ -447,6 +540,12 @@ impl NativeTaskDriver {
                 pool: snapshot.descriptor.pool_id.clone(),
                 node,
                 incarnation,
+                edit_agents: authority
+                    .edit_agents()
+                    .iter()
+                    .copied()
+                    .map(NodePubkey::new)
+                    .collect(),
                 supported_protocols: vec![protocol],
             },
             NativeIds,
@@ -477,6 +576,10 @@ impl NativeTaskDriver {
             })
             .await?
             .map_err(|error| eyre::eyre!("task scheduling reader: {error:?}"))?;
+        let (authority_ticket, authority_rx) = self
+            .repo
+            .subscribe_domain_listener(big_repo::BigRepoDomainFilter)
+            .await?;
         let ephemeral = self
             .repo
             .ephemeral()
@@ -489,9 +592,24 @@ impl NativeTaskDriver {
             .register()
             .consumer_checkpoint(b"native-scheduling")
             .await?;
+        #[cfg(test)]
+        let (status_tx, status) = tokio::sync::watch::channel(PoolStatus {
+            routing: false,
+            suspended: false,
+            checkpoint,
+            pending_checkpoint: false,
+            claim: None,
+        });
+        #[cfg(test)]
+        let checkpoint_gate = Arc::new(std::sync::Mutex::new(None));
         let (tx, rx) = mpsc::channel(128);
         let cancel = CancellationToken::new();
         let handle = PoolDriverHandle(Arc::new(PoolInner {
+            owner: Arc::downgrade(self),
+            #[cfg(test)]
+            status,
+            #[cfg(test)]
+            checkpoint_gate: Arc::clone(&checkpoint_gate),
             snapshot: snapshot.clone(),
             adapter: Arc::clone(&adapter),
             capabilities,
@@ -513,6 +631,15 @@ impl NativeTaskDriver {
             worker,
             reader,
             ephemeral,
+            _authority_ticket: authority_ticket,
+            authority_rx,
+            pending_revision: None,
+            suspended: false,
+            #[cfg(test)]
+            status: status_tx,
+            #[cfg(test)]
+            checkpoint_gate,
+            replay_required: false,
             rx,
             cancel,
             jobs: JoinSet::new(),
@@ -544,6 +671,15 @@ impl NativeTaskDriver {
                 _ = cancel.cancelled() => Ok(()),
                 result = actor.run() => result,
             };
+            if cancel.is_cancelled() {
+                // Process shutdown preserves admitted durable jobs for recovery.
+                // Explicit domain detach still withdraws execution participation.
+                let detached = !actor.owner.cancel.is_cancelled();
+                actor
+                    .withdraw(detached)
+                    .await
+                    .expect("detaching pool participation failed");
+            }
             actor.abort_jobs().await;
             if let Err(error) = &result {
                 panic!("native pool scheduling failed: {error:?}");
@@ -605,6 +741,15 @@ struct PoolActor {
     worker: PoolWorkerMachine<NativeIds>,
     reader: Box<dyn big_sync::LocalPartRevisionReader>,
     ephemeral: big_repo::BigEphemeralSubscription,
+    _authority_ticket: big_repo::BigRepoDomainListenerRegistration,
+    authority_rx: mpsc::UnboundedReceiver<Vec<big_repo::BigRepoDomainNotification>>,
+    pending_revision: Option<(u64, VecDeque<PartEvent>)>,
+    suspended: bool,
+    #[cfg(test)]
+    status: tokio::sync::watch::Sender<PoolStatus>,
+    #[cfg(test)]
+    checkpoint_gate: Arc<std::sync::Mutex<Option<CheckpointAdmissionGate>>>,
+    replay_required: bool,
     rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
     jobs: JoinSet<Completion>,
@@ -628,6 +773,24 @@ struct PoolActor {
 }
 
 impl PoolActor {
+    #[cfg(test)]
+    fn publish_status(&self) {
+        let status = PoolStatus {
+            routing: self.router.is_routing(),
+            suspended: self.suspended,
+            checkpoint: self.checkpoint,
+            pending_checkpoint: self.pending_revision.is_some(),
+            claim: self.router.own_claim().cloned(),
+        };
+        self.status.send_if_modified(|current| {
+            if *current == status {
+                false
+            } else {
+                *current = status;
+                true
+            }
+        });
+    }
     // A job can own the SQLite writer while a handler awaits it. Independent
     // scheduling prevents actor self-deadlock; joining aborted jobs fences their
     // transaction release on shutdown and on failed recovery attachment.
@@ -688,9 +851,11 @@ impl PoolActor {
     fn start_attempt(
         &mut self,
         attempt: PreparedAttempt,
-        token: Option<super::worker::DispatchToken>,
+        mut token: Option<super::worker::DispatchToken>,
     ) {
         let adapter = Arc::clone(&self.adapter);
+        let repo = Arc::clone(&self.owner.repo);
+        let snapshot = self.snapshot.clone();
         let key = attempt.request.key.clone();
         let cancel = CancellationToken::new();
         assert!(
@@ -702,7 +867,27 @@ impl PoolActor {
         self.jobs.spawn(async move {
             tokio::select! {
                 _ = cancel.cancelled() => Completion::StartCancelled,
-                result = adapter.start(attempt) => Completion::Started { key, token, result },
+                completion = async move {
+                    let result = async {
+                        loop {
+                            match admit(&repo, &snapshot, None).await {
+                                Ok(_) => break,
+                                Err(error) => match error.downcast_ref::<big_repo::CoordinationError>() {
+                                    Some(big_repo::CoordinationError::Pending) => {
+                                        tokio::time::sleep(big_repo::CoordinationAuthority::PENDING_RECHECK_DELAY).await;
+                                    }
+                                    Some(big_repo::CoordinationError::Unauthorized) => {
+                                        token = None;
+                                        return adapter.cancel(key.clone(), OpaqueReason::from_label("pool participation revoked before start")).await;
+                                    }
+                                    _ => return Err(error),
+                                },
+                            }
+                        }
+                        adapter.start(attempt).await
+                    }.await;
+                    Completion::Started { key, token, result }
+                } => completion,
             }
         });
     }
@@ -793,12 +978,127 @@ impl PoolActor {
     }
 
     async fn run(&mut self) -> Res<()> {
+        loop {
+            match self.run_admitted().await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let revoked = match error.downcast_ref::<big_repo::CoordinationError>() {
+                        Some(big_repo::CoordinationError::Pending) => false,
+                        Some(big_repo::CoordinationError::Unauthorized) => true,
+                        _ => return Err(error),
+                    };
+                    self.withdraw(revoked).await?;
+                    #[cfg(test)]
+                    self.publish_status();
+                    // Retain the exact unread revision/checkpoint and pending effects.
+                    // Native membership notifications are incomplete, so unresolved
+                    // admission uses the same bounded recheck cadence as transport.
+                    tokio::select! {
+                        _ = self.cancel.cancelled() => return Ok(()),
+                        changes = self.authority_rx.recv() => {
+                            changes.ok_or_else(|| ferr!("pool authority listener closed"))?;
+                        }
+                        _ = tokio::time::sleep(big_repo::CoordinationAuthority::PENDING_RECHECK_DELAY) => {}
+                        command = self.rx.recv() => {
+                            match command {
+                                Some(Command::Submit { reply, .. }) => { drop(reply.send(Err(error))); }
+                                Some(Command::Rpc { request, .. }) => reject_request(request, "pool participation unavailable").await,
+                                None => return Ok(()),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn withdraw(&mut self, revoked: bool) -> Res<()> {
+        if !self.suspended {
+            self.suspended = true;
+            self.router_event(RouterEvent::AuthorityChanged {
+                edit_agents: BTreeSet::new(),
+            });
+            self.sessions.clear();
+            self.live.clear();
+            self.lose_route();
+        }
+        if revoked && !self.replay_required {
+            self.replay_required = true;
+            self.worker_event(WorkerEvent::ParticipationChanged { allowed: false });
+            let actions = std::mem::take(&mut self.worker_actions);
+            for action in actions {
+                if matches!(action, WorkerAction::CancelAttempt { .. }) {
+                    self.worker_action(action).await?;
+                } else {
+                    self.worker_actions.push(action);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_admitted(&mut self) -> Res<()> {
         let mut tick = tokio::time::interval(self.snapshot_timing().heartbeat_interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let takeover = tokio::time::Instant::now() + self.snapshot_timing().router_takeover_after;
         let mut next_takeover = takeover;
         loop {
+            let authority = admit(&self.owner.repo, &self.snapshot, None).await?;
+            if !self
+                .router
+                .edit_agents()
+                .iter()
+                .map(|node| node.to_bytes32())
+                .eq(authority.edit_agents().iter().copied())
+            {
+                let edit_agents = authority
+                    .edit_agents()
+                    .iter()
+                    .copied()
+                    .map(NodePubkey::new)
+                    .collect();
+                self.router_event(RouterEvent::AuthorityChanged { edit_agents });
+            }
+            self.sessions
+                .retain(|session, _| authority.edit_agents().contains(&session.node.to_bytes32()));
+            self.live.retain(|claim, _| {
+                authority
+                    .edit_agents()
+                    .contains(&claim.candidate.to_bytes32())
+            });
+            if self.route.is_some_and(|(claim, _)| {
+                !authority
+                    .edit_agents()
+                    .contains(&claim.candidate.to_bytes32())
+            }) {
+                self.lose_route();
+            }
+            if self.replay_required {
+                self.reader = self
+                    .owner
+                    .transport
+                    .shared_store()
+                    .open_revision_reader(SubPartsRequest {
+                        lower_bound: 0,
+                        targets: [SubscriptionTarget::Part {
+                            part_id: self.snapshot.descriptor.active_task_part.clone(),
+                            cursor: 0,
+                        }]
+                        .into(),
+                    })
+                    .await?
+                    .map_err(|error| ferr!("task scheduling reader: {error:?}"))?;
+                self.pending_revision = None;
+                self.replay_required = false;
+            }
+            if self.suspended {
+                self.worker_event(WorkerEvent::ParticipationChanged { allowed: true });
+            }
+            self.suspended = false;
             self.actions().await?;
+            self.incorporate_pending_revision().await?;
+            #[cfg(test)]
+            self.publish_status();
             tokio::select! {
                 _ = self.cancel.cancelled() => return Ok(()),
                 command = self.rx.recv() => {
@@ -820,16 +1120,12 @@ impl PoolActor {
                     match revision.wrap_err("reading native scheduling revision")? {
                         RevisionRead::ReplayComplete { .. } => {}
                         RevisionRead::Entries { revision, entries } => {
-                            for entry in entries { self.revision(entry).await.wrap_err("incorporating native scheduling revision")?; }
-                            self.actions().await?;
-                            if revision > self.checkpoint {
-                                self.tasks.register().begin_consumer_settlement(b"native-scheduling", revision)
-                                    .await.wrap_err("beginning native scheduling checkpoint")?
-                                    .commit().await.wrap_err("committing native scheduling checkpoint")?;
-                                self.checkpoint = revision;
-                            }
+                            self.pending_revision = Some((revision, entries.into()));
                         }
                     }
+                }
+                changes = self.authority_rx.recv() => {
+                    changes.ok_or_else(|| ferr!("pool authority listener closed"))?;
                 }
                 event = self.ephemeral.recv() => {
                     let Some(event) = event else { eyre::bail!("native heartbeat subscription closed"); };
@@ -846,7 +1142,7 @@ impl PoolActor {
                     self.router_event(RouterEvent::HeartbeatDue);
                     self.router_event(RouterEvent::RoutingTick);
                     if tokio::time::Instant::now() >= next_takeover {
-                        if admit(&self.owner.repo, &self.snapshot, None).await.is_ok() {
+                        if permitted(&self.owner.repo, &self.snapshot, None).await? {
                             self.router_event(RouterEvent::ConsiderTakeover);
                         }
                         next_takeover = tokio::time::Instant::now() + self.snapshot_timing().router_takeover_after;
@@ -856,6 +1152,57 @@ impl PoolActor {
             }
         }
     }
+    async fn incorporate_pending_revision(&mut self) -> Res<()> {
+        while let Some((_, entries)) = &self.pending_revision {
+            let Some(entry) = entries.front().cloned() else {
+                break;
+            };
+            self.revision(entry)
+                .await
+                .wrap_err("incorporating native scheduling revision")?;
+            self.pending_revision
+                .as_mut()
+                .expect(ERROR_IMPOSSIBLE)
+                .1
+                .pop_front();
+            self.actions().await?;
+        }
+        if let Some((revision, _)) = &self.pending_revision {
+            let revision = *revision;
+            if revision > self.checkpoint {
+                #[cfg(test)]
+                {
+                    let mut gate = self.checkpoint_gate.lock().expect(ERROR_MUTEX);
+                    if let Some(paused) = gate.as_mut() {
+                        if let Some(entered) = paused.entered.take() {
+                            entered.send(()).expect(ERROR_CHANNEL);
+                        }
+                        match paused.release.try_recv() {
+                            Ok(()) => *gate = None,
+                            Err(oneshot::error::TryRecvError::Empty) => {
+                                return Err(big_repo::CoordinationError::Pending.into());
+                            }
+                            Err(oneshot::error::TryRecvError::Closed) => {
+                                panic!("checkpoint admission gate closed")
+                            }
+                        }
+                    }
+                }
+                self.tasks
+                    .register()
+                    .begin_consumer_settlement(b"native-scheduling", revision)
+                    .await
+                    .wrap_err("beginning native scheduling checkpoint")?
+                    .commit()
+                    .await
+                    .wrap_err("committing native scheduling checkpoint")?;
+                self.checkpoint = revision;
+            }
+            self.pending_revision = None;
+        }
+        Ok(())
+    }
+
     fn snapshot_timing(&self) -> SchedulingTiming {
         // Actor configuration is retained by its handle; no mutable descriptor or
         // wall-clock conversion participates in the liveness decision.
@@ -927,7 +1274,7 @@ impl PoolActor {
             return Ok(());
         };
         let claim = heartbeat.claim;
-        if heartbeat.schema != 1
+        if heartbeat.schema != 2
             || claim.pool != self.snapshot.descriptor.pool_id
             || event.sender.as_bytes() != &claim.candidate.to_bytes32()
         {
@@ -938,9 +1285,7 @@ impl PoolActor {
         };
         if self.owner.identities.peer_for_endpoint(endpoint)
             != Some(PeerKey::new(claim.candidate.to_bytes32()))
-            || admit(&self.owner.repo, &self.snapshot, Some(claim.candidate))
-                .await
-                .is_err()
+            || !permitted(&self.owner.repo, &self.snapshot, Some(claim.candidate)).await?
         {
             return Ok(());
         }
@@ -998,9 +1343,7 @@ impl PoolActor {
             if self.sessions.get(&session).is_some_and(|stream| {
                 self.owner.identities.peer_for_endpoint(stream.endpoint)
                     != Some(PeerKey::new(session.node.to_bytes32()))
-            }) || admit(&self.owner.repo, &self.snapshot, Some(session.node))
-                .await
-                .is_err()
+            }) || !permitted(&self.owner.repo, &self.snapshot, Some(session.node)).await?
             {
                 self.sessions.remove(&session);
                 self.router_event(RouterEvent::SessionClosed { session });
@@ -1058,9 +1401,7 @@ impl PoolActor {
         }
         if self.owner.identities.peer_for_endpoint(endpoint)
             != Some(PeerKey::new(claim.candidate.to_bytes32()))
-            || admit(&self.owner.repo, &self.snapshot, Some(claim.candidate))
-                .await
-                .is_err()
+            || !permitted(&self.owner.repo, &self.snapshot, Some(claim.candidate)).await?
         {
             return Ok(());
         }
@@ -1102,9 +1443,7 @@ impl PoolActor {
         if !self.router.is_routing()
             || peer != PeerKey::new(session.node.to_bytes32())
             || self.owner.identities.peer_for_endpoint(endpoint) != Some(peer.clone())
-            || admit(&self.owner.repo, &self.snapshot, Some(session.node))
-                .await
-                .is_err()
+            || !permitted(&self.owner.repo, &self.snapshot, Some(session.node)).await?
         {
             reject_request(request, "router/session authority unavailable").await;
             return Ok(());
@@ -1169,9 +1508,9 @@ impl PoolActor {
                         };
                         if owner.identities.peer_for_endpoint(endpoint)
                             != Some(PeerKey::new(session.node.to_bytes32()))
-                            || admit(&owner.repo, &snapshot, Some(session.node))
+                            || !permitted(&owner.repo, &snapshot, Some(session.node))
                                 .await
-                                .is_err()
+                                .expect("native session admission failed")
                         {
                             break;
                         }
@@ -1296,9 +1635,7 @@ impl PoolActor {
         if let Some((key, endpoint)) = self.route
             && (self.owner.identities.peer_for_endpoint(endpoint)
                 != Some(PeerKey::new(key.candidate.to_bytes32()))
-                || admit(&self.owner.repo, &self.snapshot, Some(key.candidate))
-                    .await
-                    .is_err())
+                || !permitted(&self.owner.repo, &self.snapshot, Some(key.candidate)).await?)
         {
             self.lose_route();
             return Ok(());
@@ -1403,7 +1740,25 @@ impl PoolActor {
     async fn complete(&mut self, completion: Completion) -> Res<()> {
         match completion {
             Completion::Cancelled => {}
-            Completion::Worker(event) => self.worker_event(event),
+            Completion::Classified {
+                token,
+                ticket,
+                result,
+            } => {
+                if self.worker.classification_pending(&token) {
+                    match result {
+                        Ok(classification) => self.worker_event(WorkerEvent::Classified {
+                            token,
+                            classification,
+                        }),
+                        Err(error) => {
+                            self.worker_actions
+                                .push(WorkerAction::ClassifyTask { token, ticket });
+                            return Err(error);
+                        }
+                    }
+                }
+            }
             Completion::OfferChecked {
                 session,
                 allocation_id,
@@ -1423,10 +1778,7 @@ impl PoolActor {
                 }
                 if result? {
                     self.router_event(RouterEvent::TaskRemoved { task_id });
-                } else if admit(&self.owner.repo, &self.snapshot, Some(session.node))
-                    .await
-                    .is_err()
-                {
+                } else if !permitted(&self.owner.repo, &self.snapshot, Some(session.node)).await? {
                     self.router_event(RouterEvent::SessionClosed { session });
                 } else {
                     self.send_router(
@@ -1438,6 +1790,12 @@ impl PoolActor {
                         },
                     )
                     .await?;
+                }
+            }
+            Completion::Obsolescence { token, result } => {
+                if self.router.proof_pending(&token) {
+                    let obsolete = result?;
+                    self.router_event(RouterEvent::ObsolescenceChecked { token, obsolete });
                 }
             }
             Completion::Router(event) => {
@@ -1518,10 +1876,21 @@ impl PoolActor {
                         });
                     }
                 }
-                Err(_) => self.router_event(RouterEvent::ClaimPersistenceFailed {
-                    generation: claim.generation,
-                    claim_id: claim.claim_id,
-                }),
+                Err(error) => {
+                    if !matches!(
+                        error.downcast_ref::<big_repo::CoordinationError>(),
+                        Some(
+                            big_repo::CoordinationError::Pending
+                                | big_repo::CoordinationError::Unauthorized
+                        )
+                    ) {
+                        return Err(error);
+                    }
+                    self.router_event(RouterEvent::ClaimPersistenceFailed {
+                        generation: claim.generation,
+                        claim_id: claim.claim_id,
+                    });
+                }
             },
             Completion::SessionLost { session } => {
                 if self.worker.current_session() == Some(session) {
@@ -1572,17 +1941,21 @@ impl PoolActor {
 
     async fn actions(&mut self) -> Res<()> {
         while !self.worker_actions.is_empty() || !self.router_actions.is_empty() {
-            for action in std::mem::take(&mut self.worker_actions) {
+            let mut actions = std::mem::take(&mut self.worker_actions).into_iter();
+            while let Some(action) = actions.next() {
                 let action_kind = std::mem::discriminant(&action);
-                self.worker_action(action)
-                    .await
-                    .wrap_err_with(|| format!("worker action {action_kind:?}"))?;
+                if let Err(error) = self.worker_action(action).await {
+                    self.worker_actions.extend(actions);
+                    return Err(error).wrap_err_with(|| format!("worker action {action_kind:?}"));
+                }
             }
-            for action in std::mem::take(&mut self.router_actions) {
+            let mut actions = std::mem::take(&mut self.router_actions).into_iter();
+            while let Some(action) = actions.next() {
                 let action_kind = std::mem::discriminant(&action);
-                self.router_action(action)
-                    .await
-                    .wrap_err_with(|| format!("router action {action_kind:?}"))?;
+                if let Err(error) = self.router_action(action).await {
+                    self.router_actions.extend(actions);
+                    return Err(error).wrap_err_with(|| format!("router action {action_kind:?}"));
+                }
             }
         }
         Ok(())
@@ -1604,9 +1977,8 @@ impl PoolActor {
                 self.jobs.spawn(async move {
                     tokio::select! {
                         _ = cancel.cancelled() => Completion::Cancelled,
-                        result = adapter.classify(*ticket) => {
-                            let classification = result.expect("task domain classification failed");
-                            Completion::Worker(WorkerEvent::Classified { token, classification })
+                        result = adapter.classify(*ticket.clone()) => {
+                            Completion::Classified { token, ticket, result }
                         }
                     }
                 });
@@ -1646,6 +2018,9 @@ impl PoolActor {
                 invocation,
                 ..
             } => {
+                if !self.worker.dispatch_pending(&token) {
+                    return Ok(());
+                }
                 let attempt = self
                     .prepared
                     .get(&attempt_id)
@@ -1664,6 +2039,7 @@ impl PoolActor {
                 summary,
                 attempt_id,
             } => {
+                let result = async {
                 tracing::info!(target: "triage_terminal_lifetime", task = %declaration.task_id, ?attempt_id, "incorporating domain terminal");
                 let key = attempt_id.map(|attempt_id| self.key(declaration.task_id, attempt_id));
                 let receipt = self
@@ -1692,6 +2068,18 @@ impl PoolActor {
                     self.prepared.remove(&attempt_id);
                     self.finishing.remove(&attempt_id);
                 }
+                eyre::Ok(())
+                }.await;
+                if let Err(error) = result {
+                    // Incorporation is idempotent and its receipt is retained until
+                    // signed publication succeeds; permission races cannot lose it.
+                    self.worker_actions.push(WorkerAction::DomainTerminalFact {
+                        declaration,
+                        summary,
+                        attempt_id,
+                    });
+                    return Err(error);
+                }
             }
             WorkerAction::CancelAttempt {
                 task_id,
@@ -1711,15 +2099,15 @@ impl PoolActor {
                     if let Some(cancel) = self.start_cancels.remove(&key.attempt_id) {
                         cancel.cancel();
                     }
-                    self.adapter.cancel(key.clone(), reason.clone()).await?;
-                    // The adapter's cancellation receipt follows actual domain
-                    // settlement. It is a local release, not a global task fact.
-                    self.worker_event(WorkerEvent::AttemptFailed {
-                        task_id: key.task_id,
-                        attempt_id: key.attempt_id,
+                    let subscription = self.adapter.cancel(key.clone(), reason.clone()).await?;
+                    // Keep ownership until the actual cancellation/finalization
+                    // winner is durable. Revocation is not a global Cancelled fact.
+                    self.jobs.spawn(async move {
+                        Completion::Outcome {
+                            key,
+                            result: subscription.await,
+                        }
                     });
-                    self.prepared.remove(&key.attempt_id);
-                    self.finishing.remove(&key.attempt_id);
                 }
             }
             WorkerAction::WatchReadiness { task_id, watch } => {
@@ -1842,13 +2230,19 @@ impl PoolActor {
                     tokio::select! {
                         _ = cancel.cancelled() => Completion::Cancelled,
                         result = adapter.is_proven_obsolete(ticket.declaration.declaration) => {
-                            let obsolete = result.expect("domain obsolescence proof failed");
-                            Completion::Router(RouterEvent::ObsolescenceChecked { token, obsolete })
+                            Completion::Obsolescence { token, result }
                         }
                     }
                 });
             }
             RouterAction::PersistClaim { claim } => {
+                if self
+                    .router
+                    .own_claim()
+                    .is_none_or(|own| own.liveness_key() != claim.liveness_key())
+                {
+                    return Ok(());
+                }
                 let repo = Arc::clone(&self.owner.repo);
                 let tasks = Arc::clone(&self.tasks);
                 let snapshot = self.snapshot.clone();
@@ -1873,7 +2267,15 @@ impl PoolActor {
                 });
             }
             RouterAction::PublishHeartbeat { claim } => {
-                if admit(&self.owner.repo, &self.snapshot, None).await.is_err() {
+                if !self.router.is_routing()
+                    || self
+                        .router
+                        .own_claim()
+                        .is_none_or(|own| own.liveness_key() != claim.liveness_key())
+                {
+                    return Ok(());
+                }
+                if !permitted(&self.owner.repo, &self.snapshot, None).await? {
                     return Ok(());
                 }
                 let stored = claims(&self.tasks, &self.snapshot)
@@ -1886,7 +2288,7 @@ impl PoolActor {
                     return Ok(());
                 };
                 let heartbeat = Heartbeat {
-                    schema: 1,
+                    schema: 2,
                     claim: claim.clone(),
                     endpoint: *self.owner.endpoint.id().as_bytes(),
                 };
@@ -1931,9 +2333,8 @@ impl PoolActor {
                 allocation_id,
                 task_id,
             } => {
-                if admit(&self.owner.repo, &self.snapshot, Some(session.node))
-                    .await
-                    .is_ok()
+                if self.router.start_pending(session, allocation_id, task_id)
+                    && permitted(&self.owner.repo, &self.snapshot, Some(session.node)).await?
                 {
                     self.send_router(
                         session,

@@ -47,6 +47,7 @@ fn machine(node_seed: u8, supported: &[u16]) -> RouterMachine<SequentialIds> {
             pool: pool(),
             node: node(node_seed),
             incarnation: incarnation(node_seed),
+            edit_agents: (0..=16).map(node).collect(),
             supported_protocols: protocols(supported),
         },
         ids(),
@@ -1757,4 +1758,172 @@ fn superseded_and_removed_obsolescence_receipts_cannot_offer_stale_work() {
     assert!(actions.iter().any(|action| matches!(action,
         RouterAction::SendOffer { task_id, .. } if *task_id == derived_task("G1")
     )));
+}
+
+#[test]
+fn revoked_router_requires_fresh_election_and_fences_old_claim_receipts() {
+    let mut machine = leader(&[1]);
+    let old = machine.own_claim().unwrap().clone();
+    let mut out = Vec::new();
+    machine.on_event(
+        RouterEvent::AuthorityChanged {
+            edit_agents: [node(3)].into(),
+        },
+        &mut out,
+    );
+    assert!(!machine.is_routing());
+    assert!(machine.projected_winner().is_none());
+    machine.on_event(
+        RouterEvent::ClaimPersisted {
+            generation: old.generation,
+            claim_id: old.claim_id,
+        },
+        &mut out,
+    );
+    machine.on_event(RouterEvent::ConsiderTakeover, &mut out);
+    machine.on_event(RouterEvent::HeartbeatDue, &mut out);
+    assert!(
+        out.is_empty(),
+        "revoked participant must neither claim nor heartbeat"
+    );
+    machine.on_event(
+        RouterEvent::AuthorityChanged {
+            edit_agents: [node(9), node(3)].into(),
+        },
+        &mut out,
+    );
+    machine.on_event(
+        RouterEvent::ClaimPersisted {
+            generation: old.generation,
+            claim_id: old.claim_id,
+        },
+        &mut out,
+    );
+    assert!(
+        !machine.is_routing(),
+        "a regrant does not revive old leadership"
+    );
+    machine.on_event(RouterEvent::ConsiderTakeover, &mut out);
+    let new = machine.own_claim().unwrap().clone();
+    assert!(new.generation > old.generation);
+    assert!(new.writer_seq > old.writer_seq);
+    assert_ne!(new.claim_id, old.claim_id);
+    assert!(!machine.is_routing());
+    confirm_claims(&mut machine, &out, &NothingObsolete);
+    assert!(machine.is_routing());
+}
+
+#[test]
+fn revoked_live_candidate_does_not_block_takeover_or_authorize_stale_allocations() {
+    let mut machine = machine(9, &[1]);
+    let remote = claim(2, 100, 1, 200);
+    let mut out = Vec::new();
+    machine.on_event(
+        RouterEvent::SlotMerged {
+            claims: vec![remote.clone()],
+        },
+        &mut out,
+    );
+    machine.on_event(
+        RouterEvent::HeartbeatObserved {
+            claim: remote.liveness_key(),
+        },
+        &mut out,
+    );
+    machine.on_event(RouterEvent::ConsiderTakeover, &mut out);
+    assert!(out.is_empty());
+    machine.on_event(
+        RouterEvent::AuthorityChanged {
+            edit_agents: [node(9), node(3)].into(),
+        },
+        &mut out,
+    );
+    machine.on_event(RouterEvent::ConsiderTakeover, &mut out);
+    confirm_claims(&mut machine, &out, &NothingObsolete);
+    assert!(machine.is_routing());
+    register_session(&mut machine, session(3), 1, &["gpu"], 1, Vec::new());
+    let offers = feed(
+        &mut machine,
+        RouterEvent::TaskObserved {
+            ticket: Box::new(ticket("authority-transition")),
+        },
+        &NothingObsolete,
+    );
+    let allocation = offers
+        .iter()
+        .find_map(|action| match action {
+            RouterAction::SendOffer { allocation_id, .. } => Some(*allocation_id),
+            _ => None,
+        })
+        .expect("authorized executor receives an offer");
+    machine.on_event(
+        RouterEvent::AuthorityChanged {
+            edit_agents: [node(9)].into(),
+        },
+        &mut Vec::new(),
+    );
+    let stale = feed(
+        &mut machine,
+        RouterEvent::OfferAccepted {
+            session: session(3),
+            allocation_id: allocation,
+            attempt_id: PoolAttemptId::new(501),
+        },
+        &NothingObsolete,
+    );
+    assert!(stale.is_empty(), "revoked session cannot authorize a start");
+}
+
+#[test]
+fn causal_claim_observations_survive_json_and_reject_duplicate_writers() {
+    let mut original = claim(1, 8, 2, 101);
+    original.observed = [(node(2), 7), (node(3), 5)].into();
+    let encoded = serde_json::to_value(&original).unwrap();
+    assert_eq!(
+        serde_json::from_value::<RouterClaim>(encoded.clone()).unwrap(),
+        original
+    );
+    let mut duplicate = encoded;
+    duplicate["observed"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!([node(2), 9]));
+    assert!(serde_json::from_value::<RouterClaim>(duplicate).is_err());
+}
+
+#[test]
+fn confirmed_claim_uses_authenticated_sequence_after_other_slot_writes() {
+    let mut machine = machine(1, &[2]);
+    let mut actions = Vec::new();
+    machine.on_event(RouterEvent::ConsiderTakeover, &mut actions);
+    let proposed = machine.own_claim().unwrap().clone();
+    let mut persisted = proposed.clone();
+    persisted.writer_seq += 7;
+    machine.on_event(
+        RouterEvent::SlotMerged {
+            claims: vec![persisted.clone()],
+        },
+        &mut actions,
+    );
+    assert!(
+        !machine.is_routing(),
+        "merged evidence alone does not grant leadership"
+    );
+    machine.on_event(
+        RouterEvent::ClaimPersisted {
+            generation: proposed.generation,
+            claim_id: proposed.claim_id,
+        },
+        &mut actions,
+    );
+    assert!(
+        machine.is_routing(),
+        "register sequence gaps must not strand a confirmed election"
+    );
+    assert_eq!(machine.own_claim(), Some(&persisted));
+    actions.clear();
+    machine.on_event(RouterEvent::HeartbeatDue, &mut actions);
+    assert!(
+        matches!(&actions[..], [RouterAction::PublishHeartbeat { claim }] if claim == &persisted)
+    );
 }

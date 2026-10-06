@@ -21,7 +21,7 @@ pub const TASK_TICKET_PAYLOAD_SCHEMA: u16 = 2;
 
 /// Persisted schema of a router slot payload. Bumped independently of any live
 /// RPC/scheduling protocol version.
-pub const ROUTER_SLOT_PAYLOAD_SCHEMA: u16 = 1;
+pub const ROUTER_SLOT_PAYLOAD_SCHEMA: u16 = 2;
 
 fn update_len_prefixed(hasher: &mut Hasher, bytes: &[u8]) {
     hasher.update(&(bytes.len() as u64).to_be_bytes());

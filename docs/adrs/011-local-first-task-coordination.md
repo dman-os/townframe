@@ -14,6 +14,37 @@ writer as a publication job, so jobs cannot depend on that actor polling their
 futures. Shutdown aborts and joins all owned jobs before releasing actor resources;
 dropping detached handles is not a shutdown barrier.
 
+The domain explicitly attaches scheduling owners. Processor disablement retires
+its owner before activation acknowledgment; re-enabling configuration alone does
+not recreate it. `detach_distributed_processor` and `PoolDriverHandle::stop`
+remove only their exact owner incarnation and join its jobs before replacement.
+Retained pool ciphertext, router lanes, and task obligations do not grant activation.
+
+Attached actors subscribe to native authority changes and recheck current
+document/group Edit access at protected operations. Election projects only
+currently eligible candidates, preserving historical writer lanes as replay
+fences. Losing permission withdraws the local claim and sessions, fences delayed
+claim/start receipts, and requests best-effort local cancellation without
+publishing global cancellation or removing tasks. A renewed grant requires a
+fresh persisted election claim. Confirmation binds the claim to its signed
+register sequence: reservations span all slots in the scope, so task writes and
+interrupted publications can advance it beyond the machine's proposal.
+Cancellation observes the actual durable cancellation/finalization winner rather
+than inventing an outcome. Process shutdown withdraws routing and joins scheduling
+jobs without cancelling admitted durable execution; reopening explicitly attached
+pools recovers those attempts. Explicit domain detach and permission revocation
+also withdraw execution participation.
+
+Inconclusive authority (`Pending`) pauses admission, preserving the exact unread
+revision, unsettled checkpoint, and pending effects. Native notifications and
+the coordination bridge's existing pending recheck cadence resume those
+obligations; `Pending` alone does not revoke already-admitted execution.
+
+Router-slot JSON payload schema 2 and heartbeat schema 2 encode causal writer
+observations as unique public-key/generation pairs, not JSON object keys.
+The live binary RPC map encoding and scheduling protocol 2 remain unchanged;
+retained schema-1 router slots are not migrated or treated as schema 2.
+
 Classification and offer freshness fences use `TaskTicket::version_digest`,
 separate from the immutable declaration digest. It includes publisher evidence
 and ordered terminal lanes, so incorporation invalidates stale asynchronous
@@ -565,8 +596,8 @@ publication-key heads. The descriptor snapshot builds the register binding under
 fresh document/group Read admission; opening opaque Relay storage does not need
 payload-key materialization. JWK facets remain in the pool authority document:
 Drawer registration would add broader admin grants. Plaintext release rechecks
-current Read after asynchronous exact-head key resolution. This is provisioning
-and storage admission, not an integrated scheduler or historical writer proof.
+current Read after asynchronous exact-head key resolution. Storage admission
+alone does not attach a scheduler or establish historical writer permission.
 
 `PoolWorkerMachine::restore_running_attempt` accepts an existing authorized
 workflow attempt before routing registration. It preserves the attempt ID and

@@ -650,6 +650,22 @@ impl IrohSyncRepo {
         Ok(true)
     }
 
+    /// Domain-owned disablement. Retained ciphertext and task obligations do not
+    /// reattach the processor; a later enablement requires explicit attachment.
+    pub async fn detach_distributed_processor(
+        &self,
+        rt: &crate::rt::Rt,
+        processor_full_id: &str,
+    ) -> Res<()> {
+        let mut processors = rt.distributed_processors.write().await;
+        if let Some(processor) = processors.remove(processor_full_id) {
+            processor.driver.stop().await?;
+        }
+        drop(processors);
+        rt.triage_worker.wake_coordination();
+        Ok(())
+    }
+
     /// Start one real scheduling actor on an explicitly provisioned pool.
     /// Relay/Read storage attachment alone never grants scheduling authority.
     pub async fn attach_scheduling_pool(
