@@ -46,6 +46,129 @@ async fn new_meta_store_sql() -> Res<crate::app::SqlCtx> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn facet_delta_uses_settled_baseline_and_write_points() -> Res<()> {
+    let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        let mut tx = doc.transaction();
+        tx.put(automerge::ROOT, "version", "0")?;
+        tx.commit();
+        big_repo.create_doc(doc).await?.document_id()
+    };
+    let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        big_sync_host.store,
+        drawer_doc_id,
+        UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest"),
+        new_meta_store_sql().await?,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000))),
+        None,
+    )
+    .await?;
+    let first = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let second = FacetKey::from(WellKnownFacetTag::PathGeneric);
+    let deleted = FacetKey::from(WellKnownFacetTag::LabelGeneric);
+    let doc_id = repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [
+                (
+                    first.clone(),
+                    WellKnownFacet::TitleGeneric("same".into()).into(),
+                ),
+                (
+                    deleted.clone(),
+                    WellKnownFacet::LabelGeneric("delete".into()).into(),
+                ),
+            ]
+            .into(),
+            user_path: None,
+        })
+        .await?;
+    let branch = BranchPath::new("main");
+    let baseline = repo
+        .get_branch_heads_for_path(&doc_id, branch)
+        .await?
+        .unwrap();
+    // A same-value rewrite still changes the facet's write point.
+    repo.update_at_heads(
+        DocPatch {
+            id: doc_id.clone(),
+            facets_set: [(
+                first.clone(),
+                WellKnownFacet::TitleGeneric("same".into()).into(),
+            )]
+            .into(),
+            facets_remove: vec![],
+            user_path: None,
+        },
+        branch,
+        Some(baseline.clone()),
+    )
+    .await?;
+    repo.update_at_heads(
+        DocPatch {
+            id: doc_id.clone(),
+            facets_set: [(
+                second.clone(),
+                WellKnownFacet::PathGeneric("new".into()).into(),
+            )]
+            .into(),
+            facets_remove: vec![],
+            user_path: None,
+        },
+        branch,
+        None,
+    )
+    .await?;
+    repo.update_at_heads(
+        DocPatch {
+            id: doc_id.clone(),
+            facets_set: HashMap::new(),
+            facets_remove: vec![deleted.clone()],
+            user_path: None,
+        },
+        branch,
+        None,
+    )
+    .await?;
+    let target = repo
+        .get_branch_heads_for_path(&doc_id, branch)
+        .await?
+        .unwrap();
+    let changed = repo
+        .facet_keys_changed_between_branch_heads(&doc_id, branch, Some(&baseline), &target)
+        .await?
+        .unwrap();
+    assert!(changed.contains(&first));
+    assert!(changed.contains(&second));
+    assert!(changed.contains(&deleted));
+    assert!(!changed.contains(&FacetKey::from(WellKnownFacetTag::Branch)));
+    assert_eq!(
+        repo.facet_keys_changed_between_branch_heads(&doc_id, branch, Some(&target), &target)
+            .await?,
+        Some(HashSet::new())
+    );
+    assert_eq!(
+        repo.facet_keys_changed_between_branch_heads(&doc_id, branch, None, &target)
+            .await?,
+        repo.facet_keys_at_branch_heads(&doc_id, branch, &target)
+            .await?
+    );
+    let unavailable = ChangeHashSet(Arc::from([automerge::ChangeHash([0; 32])]));
+    assert_eq!(
+        repo.facet_keys_changed_between_branch_heads(&doc_id, branch, Some(&unavailable), &target)
+            .await?,
+        None
+    );
+    stop_token.stop().await?;
+    acx_stop().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn system_facet_validation_requires_privileged_scope() -> Res<()> {
     let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
     let drawer_doc_id = {

@@ -34,18 +34,18 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Instant
 import kotlin.uuid.Uuid
-import org.example.daybook.uniffi.big_sync.Byte32Id
-import org.example.daybook.uniffi.big_sync.FfiConverterTypeByte32Id
-import org.example.daybook.uniffi.big_sync.FfiConverterTypeObjId
-import org.example.daybook.uniffi.big_sync.ObjId
+import org.example.daybook.uniffi.big_sync.ByteKey
+import org.example.daybook.uniffi.big_sync.FfiConverterTypeByteKey
+import org.example.daybook.uniffi.big_sync.FfiConverterTypeObjKey
+import org.example.daybook.uniffi.big_sync.ObjKey
 import org.example.daybook.uniffi.types.Doc
 import org.example.daybook.uniffi.types.DocPatch
 import org.example.daybook.uniffi.types.FacetKey
 import org.example.daybook.uniffi.types.FfiConverterTypeDoc
 import org.example.daybook.uniffi.types.FfiConverterTypeDocPatch
 import org.example.daybook.uniffi.types.FfiConverterTypeFacetKey
-import org.example.daybook.uniffi.big_sync.RustBuffer as RustBufferByte32Id
-import org.example.daybook.uniffi.big_sync.RustBuffer as RustBufferObjId
+import org.example.daybook.uniffi.big_sync.RustBuffer as RustBufferByteKey
+import org.example.daybook.uniffi.big_sync.RustBuffer as RustBufferObjKey
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDoc
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferDocPatch
 import org.example.daybook.uniffi.types.RustBuffer as RustBufferFacetKey
@@ -1381,9 +1381,9 @@ public object FfiConverterTypeListenerRegistration: FfiConverter<ListenerRegistr
 
 
 data class AppBlobInventories (
-    var `coreInventoryDocId`: ObjId
+    var `coreInventoryDocId`: ObjKey
     , 
-    var `docsInventoryDocId`: ObjId
+    var `docsInventoryDocId`: ObjKey
     
 ){
     
@@ -1400,19 +1400,19 @@ data class AppBlobInventories (
 public object FfiConverterTypeAppBlobInventories: FfiConverterRustBuffer<AppBlobInventories> {
     override fun read(buf: ByteBuffer): AppBlobInventories {
         return AppBlobInventories(
-            FfiConverterTypeObjId.read(buf),
-            FfiConverterTypeObjId.read(buf),
+            FfiConverterTypeObjKey.read(buf),
+            FfiConverterTypeObjKey.read(buf),
         )
     }
 
     override fun allocationSize(value: AppBlobInventories) = (
-            FfiConverterTypeObjId.allocationSize(value.`coreInventoryDocId`) +
-            FfiConverterTypeObjId.allocationSize(value.`docsInventoryDocId`)
+            FfiConverterTypeObjKey.allocationSize(value.`coreInventoryDocId`) +
+            FfiConverterTypeObjKey.allocationSize(value.`docsInventoryDocId`)
     )
 
     override fun write(value: AppBlobInventories, buf: ByteBuffer) {
-            FfiConverterTypeObjId.write(value.`coreInventoryDocId`, buf)
-            FfiConverterTypeObjId.write(value.`docsInventoryDocId`, buf)
+            FfiConverterTypeObjKey.write(value.`coreInventoryDocId`, buf)
+            FfiConverterTypeObjKey.write(value.`docsInventoryDocId`, buf)
     }
 }
 
@@ -1421,7 +1421,7 @@ public object FfiConverterTypeAppBlobInventories: FfiConverterRustBuffer<AppBlob
 data class BranchDeleteTombstone (
     var `vtag`: VersionTag
     , 
-    var `branchDocId`: ObjId
+    var `branchDocId`: ObjKey
     , 
     var `branchHeads`: ChangeHashSet
     
@@ -1441,20 +1441,20 @@ public object FfiConverterTypeBranchDeleteTombstone: FfiConverterRustBuffer<Bran
     override fun read(buf: ByteBuffer): BranchDeleteTombstone {
         return BranchDeleteTombstone(
             FfiConverterTypeVersionTag.read(buf),
-            FfiConverterTypeObjId.read(buf),
+            FfiConverterTypeObjKey.read(buf),
             FfiConverterTypeChangeHashSet.read(buf),
         )
     }
 
     override fun allocationSize(value: BranchDeleteTombstone) = (
             FfiConverterTypeVersionTag.allocationSize(value.`vtag`) +
-            FfiConverterTypeObjId.allocationSize(value.`branchDocId`) +
+            FfiConverterTypeObjKey.allocationSize(value.`branchDocId`) +
             FfiConverterTypeChangeHashSet.allocationSize(value.`branchHeads`)
     )
 
     override fun write(value: BranchDeleteTombstone, buf: ByteBuffer) {
             FfiConverterTypeVersionTag.write(value.`vtag`, buf)
-            FfiConverterTypeObjId.write(value.`branchDocId`, buf)
+            FfiConverterTypeObjKey.write(value.`branchDocId`, buf)
             FfiConverterTypeChangeHashSet.write(value.`branchHeads`, buf)
     }
 }
@@ -1462,7 +1462,7 @@ public object FfiConverterTypeBranchDeleteTombstone: FfiConverterRustBuffer<Bran
 
 
 data class BranchSnapshot (
-    var `branchDocId`: ObjId
+    var `branchDocId`: ObjKey
     , 
     var `branchHeads`: ChangeHashSet
     
@@ -1481,18 +1481,18 @@ data class BranchSnapshot (
 public object FfiConverterTypeBranchSnapshot: FfiConverterRustBuffer<BranchSnapshot> {
     override fun read(buf: ByteBuffer): BranchSnapshot {
         return BranchSnapshot(
-            FfiConverterTypeObjId.read(buf),
+            FfiConverterTypeObjKey.read(buf),
             FfiConverterTypeChangeHashSet.read(buf),
         )
     }
 
     override fun allocationSize(value: BranchSnapshot) = (
-            FfiConverterTypeObjId.allocationSize(value.`branchDocId`) +
+            FfiConverterTypeObjKey.allocationSize(value.`branchDocId`) +
             FfiConverterTypeChangeHashSet.allocationSize(value.`branchHeads`)
     )
 
     override fun write(value: BranchSnapshot, buf: ByteBuffer) {
-            FfiConverterTypeObjId.write(value.`branchDocId`, buf)
+            FfiConverterTypeObjKey.write(value.`branchDocId`, buf)
             FfiConverterTypeChangeHashSet.write(value.`branchHeads`, buf)
     }
 }
@@ -2147,7 +2147,7 @@ public object FfiConverterTypeRepoConfig: FfiConverterRustBuffer<RepoConfig> {
 
 
 data class StoredBranchRef (
-    var `branchDocId`: ObjId
+    var `branchDocId`: ObjKey
     
 ){
     
@@ -2164,16 +2164,16 @@ data class StoredBranchRef (
 public object FfiConverterTypeStoredBranchRef: FfiConverterRustBuffer<StoredBranchRef> {
     override fun read(buf: ByteBuffer): StoredBranchRef {
         return StoredBranchRef(
-            FfiConverterTypeObjId.read(buf),
+            FfiConverterTypeObjKey.read(buf),
         )
     }
 
     override fun allocationSize(value: StoredBranchRef) = (
-            FfiConverterTypeObjId.allocationSize(value.`branchDocId`)
+            FfiConverterTypeObjKey.allocationSize(value.`branchDocId`)
     )
 
     override fun write(value: StoredBranchRef, buf: ByteBuffer) {
-            FfiConverterTypeObjId.write(value.`branchDocId`, buf)
+            FfiConverterTypeObjKey.write(value.`branchDocId`, buf)
     }
 }
 

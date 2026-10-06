@@ -137,9 +137,8 @@ fn exec_cases() {
         ));
 }
 
-/// This case imports the processor-bearing test plug and depends on triage.
+/// Import and enablement must expose the command after CLI repository reopen.
 #[test]
-#[ignore = "depends on currently broken document processor triage"]
 fn exec_processor_cases() {
     new_suite().case(concat!(
         env!("CARGO_MANIFEST_DIR"),

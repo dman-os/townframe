@@ -23,6 +23,7 @@ impl DrawerRepo {
         cancel_token: CancellationToken,
     ) -> Res<()> {
         let mut events = vec![];
+        let mut metadata_changes = vec![];
         loop {
             let notifs = tokio::select! {
                 biased;
@@ -39,6 +40,7 @@ impl DrawerRepo {
             };
 
             events.clear();
+            metadata_changes.clear();
 
             for notif in notifs {
                 let BigRepoChangeNotification::DocChanged {
@@ -63,7 +65,7 @@ impl DrawerRepo {
                     let (mut current_heads, _key) = key.lock(&self.current_heads);
                     *current_heads = new_heads;
                 });
-                if let Err(err) = self
+                match self
                     .events_for_patch(
                         &patch,
                         &heads,
@@ -73,23 +75,29 @@ impl DrawerRepo {
                     )
                     .await
                 {
-                    if cancel_token.is_cancelled() || self.cancel_token.is_cancelled() {
-                        return Ok(());
+                    Ok(Some(id)) => metadata_changes.push(id),
+                    Ok(None) => {}
+                    Err(err) => {
+                        if cancel_token.is_cancelled() || self.cancel_token.is_cancelled() {
+                            return Ok(());
+                        }
+                        return Err(err);
                     }
-                    return Err(err);
                 }
             }
 
+            metadata_changes.sort();
+            metadata_changes.dedup();
+            for id in &metadata_changes {
+                self.invalidate_entry_cache(id);
+                self.invalidate_facet_cache_doc(id);
+            }
+            if !metadata_changes.is_empty() {
+                // Publish only processed metadata, after invalidating both caches.
+                // Broadcast permits no current subscribers.
+                drop(self.metadata_events_tx.send(std::mem::take(&mut metadata_changes)));
+            }
             if !events.is_empty() {
-                // Invalidate caches for updated docs
-                for event in &events {
-                    match event {
-                        DrawerEvent::DocAdded { id, .. } | DrawerEvent::DocDeleted { id, .. } => {
-                            self.invalidate_entry_cache(id);
-                            self.invalidate_facet_cache_doc(id);
-                        }
-                    }
-                }
 
                 self.registry.notify(events.drain(..));
             }
@@ -184,11 +192,12 @@ impl DrawerRepo {
         out: &mut Vec<DrawerEvent>,
         live_origin: Option<&BigRepoChangeOrigin>,
         _exclude_peer_id: Option<&PeerKey>,
-    ) -> Res<()> {
+    ) -> Res<Option<DocId>> {
         // Prefix: docs.map
         if !big_repo::big_repo_path_prefix_matches(&["docs".into(), "map".into()], &patch.path) {
-            return Ok(());
+            return Ok(None);
         }
+        let mut affected = None;
 
         match &patch.action {
             automerge::PatchAction::PutMap {
@@ -221,9 +230,10 @@ impl DrawerRepo {
                 );
                 // docs.map.<doc_id>.version changed
                 let Some((_obj, automerge::Prop::Map(doc_id_str))) = patch.path.get(2) else {
-                    return Ok(());
+                    return Ok(None);
                 };
                 let doc_id = DocId::from(doc_id_str.clone());
+                affected = Some(doc_id.clone());
 
                 // Hydrate the entry at patch heads.
                 let path = vec![
@@ -283,6 +293,7 @@ impl DrawerRepo {
             automerge::PatchAction::DeleteMap { key, .. } if patch.path.len() == 2 => {
                 // docs.map.<doc_id> deleted
                 let doc_id = DocId::from(key.clone());
+                affected = Some(doc_id.clone());
                 let drawer_heads = ChangeHashSet(Arc::clone(patch_heads));
                 // Delete patches have no vtag; use docs.map_deleted actor evidence when replaying.
                 let tombstone = self
@@ -320,6 +331,6 @@ impl DrawerRepo {
             }
             _ => {}
         }
-        Ok(())
+        Ok(affected)
     }
 }

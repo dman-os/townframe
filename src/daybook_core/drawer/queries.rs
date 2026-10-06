@@ -717,6 +717,21 @@ impl DrawerRepo {
         self.current_doc_branches(doc_id).await
     }
 
+    /// Resolve the actual native document named by an exact historical branch
+    /// version. Current permissions must be checked on this identity, not on a
+    /// branch alias that may since have been replaced.
+    pub(crate) async fn native_document_at_branch_heads(
+        &self,
+        id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+        heads: &ChangeHashSet,
+    ) -> Res<Option<big_repo::DocumentId>> {
+        Ok(self
+            .resolve_handle_for_branch_heads(id, branch_path, heads)
+            .await?
+            .map(|handle| handle.document_id()))
+    }
+
     /// Get a doc at specific branch heads (exact version).
     #[tracing::instrument(level = "trace", skip_all, fields(%id, %branch_path))]
     pub async fn get_doc_with_facets_at_branch_heads(
@@ -828,6 +843,91 @@ impl DrawerRepo {
             .await
     }
 
+    /// Compare membership and write-point heads at exact versions without hydrating values.
+    /// An absent baseline is empty; unavailable materialization returns `None`.
+    pub(crate) async fn facet_keys_changed_between_branch_heads(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+        baseline: Option<&ChangeHashSet>,
+        target: &ChangeHashSet,
+    ) -> Res<Option<HashSet<FacetKey>>> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let Some(branch_ref) = self.get_branch_ref(doc_id, branch_path).await? else {
+            return Ok(None);
+        };
+        let Some(handle) = self
+            .get_handle_by_branch_doc_id(branch_ref.branch_doc_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        handle
+            .with_document_read(|doc| {
+                if target
+                    .iter()
+                    .chain(baseline.into_iter().flat_map(|heads| heads.iter()))
+                    .any(|head| doc.get_change_by_hash(head).is_none())
+                {
+                    return Ok(None);
+                }
+                let facets_at = |heads: &[automerge::ChangeHash]| -> Res<Option<automerge::ObjId>> {
+                    Ok(match doc.get_at(automerge::ROOT, "facets", heads)? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), object)) => {
+                            Some(object)
+                        }
+                        _ => None,
+                    })
+                };
+                let source_obj = baseline
+                    .map(|heads| facets_at(heads))
+                    .transpose()?
+                    .flatten();
+                let target_obj = facets_at(target)?;
+                let mut keys = HashSet::new();
+                for (object, heads) in source_obj
+                    .as_ref()
+                    .zip(baseline)
+                    .into_iter()
+                    .chain(target_obj.as_ref().map(|object| (object, target)))
+                {
+                    keys.extend(
+                        doc.map_range_at(object, .., heads)
+                            .map(|item| FacetKey::from(item.key)),
+                    );
+                }
+                let mut changed = HashSet::new();
+                for key in keys {
+                    let key_str = key.to_string();
+                    let source_present = match source_obj.as_ref().zip(baseline) {
+                        Some((object, heads)) => {
+                            doc.get_at(object, key_str.as_str(), heads)?.is_some()
+                        }
+                        None => false,
+                    };
+                    let target_present = match &target_obj {
+                        Some(object) => doc.get_at(object, key_str.as_str(), target)?.is_some(),
+                        None => false,
+                    };
+                    let writes_changed = if let Some(baseline) = baseline {
+                        source_present
+                            && target_present
+                            && facet_recovery::recover_facet_heads_at(doc, &key, baseline)?
+                                != facet_recovery::recover_facet_heads_at(doc, &key, target)?
+                    } else {
+                        false
+                    };
+                    if source_present != target_present || writes_changed {
+                        changed.insert(key);
+                    }
+                }
+                Ok(Some(changed))
+            })
+            .await
+    }
+
     /// Returns the set of facet keys present for the doc at branch heads, without hydrating facet values.
     pub async fn facet_keys_at_branch_heads(
         &self,
@@ -929,6 +1029,42 @@ impl DrawerRepo {
             return Ok(None);
         };
         self.get_facet_heads_at_branch_heads(doc_id, branch_path, &branch_heads, facet_key)
+            .await
+    }
+
+    /// Outer None means unavailable target; inner None means unlabelled provenance.
+    pub(crate) async fn facet_source_origin_at_heads(
+        &self,
+        doc_id: &DocId,
+        branch_path: &daybook_types::doc::BranchPath,
+        heads: &ChangeHashSet,
+        facet_keys: &[FacetKey],
+    ) -> Res<Option<Option<crate::tasks::NodePubkey>>> {
+        let Some(handle) = self
+            .resolve_handle_for_branch_heads(doc_id, branch_path, heads)
+            .await?
+        else {
+            return Ok(None);
+        };
+        handle
+            .with_document_read(|doc| {
+                let mut latest = None;
+                for key in facet_keys {
+                    if let Some(marker) =
+                        crate::drawer::facet_recovery::facet_write_author_at(doc, key, heads)?
+                        && latest
+                            .as_ref()
+                            .is_none_or(|(operation, _)| marker.0 > *operation)
+                    {
+                        latest = Some(marker);
+                    }
+                }
+                let origin = latest
+                    .and_then(|(_, author)| author)
+                    .and_then(|author| <[u8; 32]>::try_from(author.as_bytes()).ok())
+                    .map(crate::tasks::NodePubkey::new);
+                Ok(Some(origin))
+            })
             .await
     }
 

@@ -521,6 +521,9 @@ pub fn plug_manifest() -> PlugManifest {
                 "label-note".into(),
                 ProcessorManifest {
                     desc: "Auto label text notes with pseudo labels".into(),
+                    input: daybook_types::manifest::ProcessorInput::Snapshot,
+                    coordination: daybook_types::manifest::ProcessorCoordination::PerNode,
+                    effects: daybook_types::manifest::ProcessorEffects::SyncedDocumentWrites,
                     deets: ProcessorDeets::DocProcessor {
                         event_predicate: Default::default(),
                         routine_name: "label-note".into(),
@@ -545,6 +548,9 @@ pub fn plug_manifest() -> PlugManifest {
                 "label-image".into(),
                 ProcessorManifest {
                     desc: "Auto label image docs with pseudo labels".into(),
+                    input: daybook_types::manifest::ProcessorInput::Snapshot,
+                    coordination: daybook_types::manifest::ProcessorCoordination::PerNode,
+                    effects: daybook_types::manifest::ProcessorEffects::SyncedDocumentWrites,
                     deets: ProcessorDeets::DocProcessor {
                         event_predicate: Default::default(),
                         routine_name: "label-image".into(),

@@ -213,6 +213,22 @@ pub enum FacetManifestLookup {
     UnknownTag,
 }
 
+/// Exact per-plug installation identity. Global config heads are only a read witness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlugActivationTarget {
+    pub plug_id: String,
+    pub enabled_ref: url::Url,
+    pub enablement_entry_id: String,
+    pub config_doc_id: daybook_types::doc::DocId,
+    pub config_doc_heads: ChangeHashSet,
+}
+
+pub(crate) struct ProcessorActivationSnapshot {
+    pub targets: HashMap<String, PlugActivationTarget>,
+    pub manifests: HashMap<String, Arc<manifest::PlugManifest>>,
+    pub rejected: HashMap<String, String>,
+}
+
 pub struct PlugsRepo {
     big_repo: SharedBigRepo,
     blobs: Arc<crate::blobs::BlobsRepo>,

@@ -362,6 +362,9 @@ pub fn plug_manifest() -> PlugManifest {
             "parse-hledger".into(),
             Arc::new(ProcessorManifest {
                 desc: "Parse hledger journal notes into dayledger claims".into(),
+                input: daybook_types::manifest::ProcessorInput::Snapshot,
+                coordination: daybook_types::manifest::ProcessorCoordination::PerNode,
+                effects: daybook_types::manifest::ProcessorEffects::SyncedDocumentWrites,
                 deets: ProcessorDeets::DocProcessor {
                     event_predicate: ProcessorEventPredicate {
                         doc_change_predicate: DocChangePredicate::Any,

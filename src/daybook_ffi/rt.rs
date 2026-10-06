@@ -66,10 +66,7 @@ impl RtFfi {
         device_id: String,
         startup_progress_task_id: Option<String>,
     ) -> Result<Arc<Self>, FfiError> {
-        let rt_config = RtConfig {
-            device_id,
-            startup_progress_task_id,
-        };
+        let rt_config = RtConfig::new(device_id, startup_progress_task_id);
         let (rt, stop_token) = fcx
             .do_on_rt(Rt::boot(
                 rt_config,

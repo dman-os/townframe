@@ -138,7 +138,7 @@ impl PlugsRepo {
     }
 
     /// Enable the latest imported revision for a plug by id.
-    pub async fn enable_known_plug(&self, plug_id: &str) -> Res<ChangeHashSet> {
+    pub async fn enable_known_plug(&self, plug_id: &str) -> Res<PlugActivationTarget> {
         let ref_url = self
             .config_store()?
             .query_sync(|config| {
@@ -153,7 +153,7 @@ impl PlugsRepo {
     }
 
     /// readable `plugManifest/main` facet; the manifest id becomes the key.
-    pub async fn enable_plug(&self, ref_url: &url::Url) -> Res<ChangeHashSet> {
+    pub async fn enable_plug(&self, ref_url: &url::Url) -> Res<PlugActivationTarget> {
         if self.cancel_token.is_cancelled() {
             eyre::bail!("repo is stopped");
         }
@@ -208,7 +208,7 @@ impl PlugsRepo {
             None
         };
         let enabled_version = manifest.version.to_string();
-        let (_, new_heads) = self
+        let (_, _new_heads) = self
             .config_store()?
             .mutate_sync(|config| {
                 config.enabled.insert(plug_id.clone(), ref_url.clone());
@@ -249,7 +249,8 @@ impl PlugsRepo {
         if already_enabled.as_ref() != Some(&ref_url) {
             self.activate_from_ref(&plug_id, &ref_url).await?;
         }
-        Ok(new_heads)
+        self.processor_activation_snapshot_locked().await?.targets.remove(&plug_id)
+            .ok_or_eyre("enabled activation target missing")
     }
 
     /// ADR 007 §3: disable a plug by removing its config entry. `@daybook/core`

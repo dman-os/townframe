@@ -2264,4 +2264,512 @@ mod captured_recovery {
         }
         Ok(())
     }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_distributed_triage_incorporates_exact_capture_before_terminal() -> Res<()> {
+        native_triage_scenario(/*remote_executor*/ false).await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_remote_triage_incorporates_exact_capture_before_terminal() -> Res<()> {
+        native_triage_scenario(/*remote_executor*/ true).await
+    }
+
+    async fn native_triage_scenario(remote_executor: bool) -> Res<()> {
+        utils_rs::testing::setup_tracing_once();
+        use crate::blobs::encrypt::{JwkOct, MasterKey};
+        use crate::rt::triage::domain::*;
+        use crate::tasks::driver::SchedulingTiming;
+        use crate::tasks::storage::PinnedJwk;
+        use crate::tasks::*;
+        use automerge::transaction::Transactable;
+        use big_sync::HostPartStore as _;
+        use big_sync_core::revisioned_store::RevisionReadLimits;
+        use big_sync_core::rpc::{SubPartsRequest, SubscriptionTarget};
+        use big_sync_core::{ObjKey, PartKey};
+
+        eprintln!("native triage: opening real disk/runtime fixture");
+        let mut fixture = Fixture::open().await?;
+        let executor = if remote_executor {
+            let ticket = fixture.node.sync_repo.get_clone_ticket_url().await?;
+            let root = fixture.temp.path().join("triage-executor");
+            bootstrap_clone_repo_from_url_for_tests(&ticket, &root).await?;
+            let executor = open_sync_node(&root).await?;
+            let endpoint = executor.sync_repo.connect_url(&ticket).await?;
+            wait_for_sync_convergence(&fixture.node, &executor, endpoint.id).await?;
+            Some(executor)
+        } else {
+            None
+        };
+        fixture.manifest.version.major += 1;
+        eprintln!("native triage: replacing processor policy and awaiting activation");
+        fixture
+            .manifest
+            .processors
+            .retain(|name, _| name.as_str() == "test-label");
+        if !remote_executor {
+            // The guest fixture normally stops matching once it writes a label.
+            // This scenario must remain eligible after subsequent source edits.
+            let daybook_types::manifest::ProcessorDeets::DocProcessor { predicate, .. } =
+                &mut Arc::make_mut(fixture.manifest.processors.get_mut("test-label").unwrap())
+                    .deets;
+            *predicate =
+                daybook_types::manifest::DocPredicateClause::HasTag(WellKnownFacetTag::Note.into());
+            // LabelGeneric is an output, not a source dependency: reading it
+            // would intentionally trigger another run after every label write.
+            Arc::make_mut(fixture.manifest.routines.get_mut("test-label").unwrap()).doc_acls[0]
+                .facet_acl[0]
+                .read = false;
+        }
+        Arc::make_mut(fixture.manifest.processors.get_mut("test-label").unwrap()).coordination =
+            daybook_types::manifest::ProcessorCoordination::Distributed(
+                daybook_types::manifest::DistributedProcessorPolicy {
+                    placement: executor.as_ref().map_or(
+                        daybook_types::manifest::ProcessorPlacement::AnyNode,
+                        |executor| {
+                            daybook_types::manifest::ProcessorPlacement::Only(
+                                iroh::PublicKey::from_bytes(
+                                    &executor.ctx.big_repo.local_peer_id().to_bytes32().unwrap(),
+                                )
+                                .unwrap()
+                                .to_string(),
+                            )
+                        },
+                    ),
+                    duplicates: daybook_types::manifest::ProcessorDuplicatePolicy::Idempotent,
+                },
+            );
+        let node = &fixture.node;
+        node.drawer
+            .update_at_heads(
+                DocPatch {
+                    id: fixture.manifest_doc.clone(),
+                    facets_set: [(
+                        FacetKey::from(WellKnownFacetTag::PlugManifest),
+                        WellKnownFacet::PlugManifest(fixture.manifest.clone()).into(),
+                    )]
+                    .into(),
+                    facets_remove: vec![],
+                    user_path: None,
+                },
+                BranchPath::new("main"),
+                None,
+            )
+            .await?;
+        let manifest_ref = format!(
+            "db+facet:///{}/org.example.daybook.plugManifest/main?branch=main",
+            fixture.manifest_doc
+        )
+        .parse()?;
+        let activation = node.plugs_repo.enable_plug(&manifest_ref).await?;
+        assert!(matches!(
+            node.rt
+                .triage_worker
+                .wait_for_activation(&node.plugs_repo, activation)
+                .await?,
+            crate::rt::triage::ActivationStatus::Active(_)
+        ));
+
+        let group = node.ctx.big_repo.create_group_with_parents(vec![]).await?;
+        node.ctx
+            .big_repo
+            .add_admin_member_to_group(node.ctx.big_repo.local_keyhive_agent().await?, &group)
+            .await?;
+        if let Some(executor) = &executor {
+            let agent = node
+                .ctx
+                .big_repo
+                .receive_keyhive_contact_card(&executor.ctx.big_repo.local_keyhive_contact_card())
+                .await?;
+            node.ctx
+                .big_repo
+                .add_member_to_group(agent, &group, big_repo::keyhive_core::access::Access::Edit)
+                .await?;
+        }
+        let mut seed = automerge::Automerge::new();
+        let mut tx = seed.transaction();
+        let facets = tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
+        let key_facet = FacetKey::from(WellKnownFacetTag::Jwk);
+        autosurgeon::reconcile_prop(
+            &mut tx,
+            &facets,
+            autosurgeon::Prop::Key(key_facet.to_string().into()),
+            am_utils_rs::codecs::ThroughJson(serde_json::to_value(JwkOct::from_master_key(
+                &MasterKey::random(),
+            ))?),
+        )?;
+        tx.commit();
+        let pool_doc = node
+            .ctx
+            .big_repo
+            .create_doc_with_parents(seed.clone(), vec![group.clone().into()])
+            .await?;
+        let mut tx = seed.transaction();
+        autosurgeon::reconcile_prop(
+            &mut tx,
+            &facets,
+            autosurgeon::Prop::Key(key_facet.to_string().into()),
+            am_utils_rs::codecs::ThroughJson(serde_json::to_value(JwkOct::from_master_key(
+                &MasterKey::random(),
+            ))?),
+        )?;
+        tx.commit();
+        let domain_doc = node
+            .ctx
+            .big_repo
+            .create_doc_with_parents(seed, vec![group.clone().into()])
+            .await?;
+        let pinned = |document: String, heads| -> Res<PinnedJwk> {
+            Ok(PinnedJwk {
+                key_ref: daybook_types::url::build_facet_ref(&document, &key_facet)?,
+                heads,
+            })
+        };
+        let pool_key = pinned(
+            pool_doc.document_id().to_string(),
+            pool_doc
+                .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+                .await,
+        )?;
+        let pool_id = TaskPoolId::from_label("native-triage");
+        let descriptor = TaskPoolDescriptor {
+            pool_id: pool_id.clone(),
+            authority_group: group.id().to_bytes(),
+            active_task_part: PartKey::new(b"native-triage/tasks"),
+            register_scope: b"native-triage/register".to_vec(),
+            register_incarnation: [81; 32],
+            allowed_key_refs: [pool_key.key_ref.clone()].into(),
+            publication_key: pool_key,
+            archive_part: None,
+            router_slot: ObjKey::new(b"native-triage/router"),
+            router_heartbeat_topic: big_repo::BigEphemeralTopic::new([82; 32]),
+            allowed_rpc_transports: [RpcTransport::IrpcIroh].into(),
+            retention_class: RetentionClass::UntilAuthoritativeRemoval,
+            routing_defaults: RoutingDefaults::SharedElection,
+        };
+        let pools = PoolRepo::new(
+            Arc::clone(&node.ctx.big_repo),
+            node.ctx.doc_config.document_id(),
+            node.ctx.local_actor_id.clone(),
+        );
+        let pool_ref = pools
+            .register(pool_doc.document_id(), descriptor.clone())
+            .await?;
+        let domain_ref = ProcessorDomainReference {
+            document: domain_doc.document_id(),
+            authority_group: group.id().to_bytes(),
+        };
+        let domain_key = pinned(
+            domain_ref.document.to_string(),
+            domain_doc
+                .with_document_read(|doc| ChangeHashSet(doc.get_heads().into()))
+                .await,
+        )?;
+        let processor = "@daybook/test/test-label";
+        ProcessorDomainRepo::new(
+            Arc::clone(&node.ctx.big_repo),
+            node.ctx.local_actor_id.clone(),
+        )
+        .provision(&domain_ref, processor.into(), pool_ref.clone(), domain_key)
+        .await?;
+        let PoolDiscovery::Ready(snapshot) = pools
+            .load_descriptor(&pool_ref, &pool_id, group.id().to_bytes())
+            .await?
+        else {
+            eyre::bail!("native pool unavailable");
+        };
+        eprintln!("native triage: attaching native slot and task actors");
+        assert!(
+            node.sync_repo
+                .attach_distributed_processor(
+                    Arc::clone(&node.rt),
+                    processor.into(),
+                    domain_ref.clone(),
+                    snapshot,
+                    CapabilitySummary::empty(),
+                    Capacity::new(1),
+                    SchedulingTiming {
+                        heartbeat_interval: Duration::from_millis(100),
+                        router_settle: Duration::from_millis(100),
+                        router_takeover_after: Duration::from_secs(1)
+                    }
+                )
+                .await?
+        );
+        if let Some(executor) = &executor {
+            node.ctx.big_repo.wait_for_quiescence(None).await?;
+            let peer = node.ctx.big_repo.local_peer_id();
+            executor
+                .ctx
+                .big_repo
+                .sync_keyhive_with_peer(peer.clone())
+                .await?;
+            for document in [
+                node.ctx.doc_config.document_id(),
+                fixture.manifest_doc.parse()?,
+                pool_doc.document_id(),
+                domain_ref.document.clone(),
+            ] {
+                executor
+                    .ctx
+                    .big_repo
+                    .sync_doc_with_peer(document, peer.clone())
+                    .await?;
+            }
+            executor.ctx.big_repo.wait_for_quiescence(None).await?;
+            let pools = PoolRepo::new(
+                Arc::clone(&executor.ctx.big_repo),
+                executor.ctx.doc_config.document_id(),
+                executor.ctx.local_actor_id.clone(),
+            );
+            let PoolDiscovery::Ready(snapshot) = pools
+                .load_descriptor(&pool_ref, &pool_id, group.id().to_bytes())
+                .await?
+            else {
+                eyre::bail!("remote processor pool unavailable");
+            };
+            assert!(
+                executor
+                    .sync_repo
+                    .attach_distributed_processor(
+                        Arc::clone(&executor.rt),
+                        processor.into(),
+                        domain_ref.clone(),
+                        snapshot,
+                        CapabilitySummary::empty(),
+                        Capacity::new(1),
+                        SchedulingTiming {
+                            heartbeat_interval: Duration::from_millis(100),
+                            router_settle: Duration::from_millis(100),
+                            router_takeover_after: Duration::from_secs(1),
+                        },
+                    )
+                    .await?
+            );
+        }
+        let mut revisions = node
+            .sync_repo
+            .task_backend()
+            .shared_store()
+            .open_revision_reader(SubPartsRequest {
+                lower_bound: 0,
+                targets: [SubscriptionTarget::Part {
+                    part_id: descriptor.active_task_part,
+                    cursor: 0,
+                }]
+                .into(),
+            })
+            .await?
+            .map_err(|error| ferr!("triage observer: {error:?}"))?;
+        let doc = node
+            .drawer
+            .add(AddDocArgs {
+                branch_path: "main".into(),
+                facets: [(
+                    FacetKey::from(WellKnownFacetTag::Note),
+                    WellKnownFacet::Note(daybook_types::doc::Note {
+                        mime: "text/plain".into(),
+                        content: "distributed triage".into(),
+                    })
+                    .into(),
+                )]
+                .into(),
+                user_path: None,
+            })
+            .await?;
+        if let Some(executor) = &executor {
+            node.ctx.big_repo.wait_for_quiescence(None).await?;
+            executor
+                .ctx
+                .big_repo
+                .sync_keyhive_with_peer(node.ctx.big_repo.local_peer_id())
+                .await?;
+            executor
+                .ctx
+                .big_repo
+                .sync_doc_with_peer(doc.parse()?, node.ctx.big_repo.local_peer_id())
+                .await?;
+        }
+        let executing = executor.as_ref().unwrap_or(node);
+        let tasks = node.sync_repo.task_store(&pool_id).unwrap();
+        eprintln!("native triage: observing durable task preparation");
+        let dispatch_events = executing.rt.dispatch_repo.subscribe(SubscribeOpts::new(64));
+        let mut merged_target = None;
+        let mut preceding_generation = None;
+        let attempt = loop {
+            let attempt = loop {
+                let attempts = executing.rt.dispatch_repo.task_attempts(&pool_id).await?;
+                if let Some(attempt) = attempts.into_iter().find(|attempt| matches!(&serde_json::from_slice::<crate::rt::task_adapter::ResolvedRoutineInput>(&attempt.request.invocation.args).unwrap().input,
+                crate::rt::task_adapter::CapturedRoutineInput::V1 { processor: Some(captured), .. } if captured.slot.document_id == doc && captured.slot.branch_path.as_str() == "main" && merged_target.as_ref().is_none_or(|heads| &captured.capture.heads == heads))) { break attempt; }
+                tokio::select! {
+                    result = revisions.next(RevisionReadLimits::default()) => { result?; }
+                    result = dispatch_events.recv_async() => {
+                        match result {
+                            Ok(_) | Err(crate::repos::RecvError::Dropped { .. }) => {}
+                            Err(crate::repos::RecvError::Closed) => eyre::bail!("native triage dispatch observer closed"),
+                        }
+                    }
+                }
+            };
+            eprintln!("native triage: observing terminal after native effects");
+            let terminal = loop {
+                if let Some(ticket) = tasks.ticket(attempt.request.key.task_id).await?
+                    && let Some(summary) = ticket.terminal_summary()
+                {
+                    break summary;
+                }
+                let dispatch = executing
+                    .rt
+                    .dispatch_repo
+                    .get_any(&attempt.dispatch_id)
+                    .await
+                    .unwrap();
+                eyre::ensure!(
+                    dispatch.status != crate::rt::dispatch::DispatchStatus::Failed,
+                    "native processor attempt failed: {:?}",
+                    executing
+                        .rt
+                        .dispatch_repo
+                        .task_local_failure(&attempt.request.key)
+                        .await?
+                );
+                tokio::select! {
+                    result = revisions.next(RevisionReadLimits::default()) => { result?; }
+                    result = dispatch_events.recv_async() => {
+                        match result {
+                            Ok(_) | Err(crate::repos::RecvError::Dropped { .. }) => {}
+                            Err(crate::repos::RecvError::Closed) => eyre::bail!("native triage dispatch observer closed"),
+                        }
+                    }
+                }
+            };
+            assert!(matches!(terminal, TerminalSummary::Succeeded { .. }));
+            let crate::rt::task_adapter::CapturedRoutineInput::V1 {
+                processor: Some(captured),
+                ..
+            } = serde_json::from_slice::<crate::rt::task_adapter::ResolvedRoutineInput>(
+                &attempt.request.invocation.args,
+            )?
+            .input
+            else {
+                unreachable!()
+            };
+            if let Some(previous) = preceding_generation {
+                assert_ne!(captured.capture.generation, previous);
+            }
+            let store = node
+                .rt
+                .processor_slot_store(processor, Some(&domain_ref))
+                .await?
+                .unwrap();
+            let settled = store.slot(&captured.slot).await?;
+            assert!(settled.settled(&captured.capture.generation));
+            assert_eq!(
+                settled
+                    .settlements()
+                    .find(|settlement| settlement.capture.generation == captured.capture.generation)
+                    .unwrap()
+                    .capture,
+                captured.capture
+            );
+            let actual = node
+                .drawer
+                .get_doc_with_facets_at_branch_heads(
+                    &doc,
+                    BranchPath::new("main"),
+                    &node
+                        .drawer
+                        .get_branch_heads_for_path(&doc, BranchPath::new("main"))
+                        .await?
+                        .unwrap(),
+                    None,
+                )
+                .await?
+                .unwrap();
+            let expected: daybook_types::doc::FacetRaw =
+                WellKnownFacet::LabelGeneric("test_label".into()).into();
+            assert_eq!(
+                actual.facets[&FacetKey::from(WellKnownFacetTag::LabelGeneric)],
+                expected
+            );
+            if !remote_executor && merged_target.is_none() {
+                // Keep the branch-edit fixture out of the already large native
+                // runtime future so Tokio's test thread does not overflow its stack.
+                let heads = Box::pin(async {
+                    let main = BranchPath::new("main");
+                    let base = node
+                        .drawer
+                        .get_branch_heads_for_path(&doc, main)
+                        .await?
+                        .unwrap();
+                    let left = BranchPath::new("/tmp/triage-left");
+                    let right = BranchPath::new("/tmp/triage-right");
+                    for branch in [left, right] {
+                        node.drawer
+                            .create_branch_at_heads_from_branch(&doc, branch, main, &base, None)
+                            .await?;
+                    }
+                    for (branch, content) in
+                        [(left, "concurrent left"), (right, "concurrent right")]
+                    {
+                        node.drawer
+                            .update_at_heads(
+                                DocPatch {
+                                    id: doc.clone(),
+                                    facets_set: [(
+                                        FacetKey::from(WellKnownFacetTag::Note),
+                                        WellKnownFacet::Note(daybook_types::doc::Note {
+                                            mime: "text/plain".into(),
+                                            content: content.into(),
+                                        })
+                                        .into(),
+                                    )]
+                                    .into(),
+                                    facets_remove: vec![],
+                                    user_path: None,
+                                },
+                                branch,
+                                None,
+                            )
+                            .await?;
+                    }
+                    node.drawer
+                        .merge_from_branch(&doc, right, left, None)
+                        .await?;
+                    node.drawer
+                        .merge_from_branch(&doc, main, right, None)
+                        .await?;
+                    let heads = node
+                        .drawer
+                        .get_branch_heads_for_path(&doc, main)
+                        .await?
+                        .unwrap();
+                    eyre::Ok(heads)
+                })
+                .await?;
+                assert_ne!(heads, captured.capture.heads);
+                preceding_generation = Some(captured.capture.generation);
+                merged_target = Some(heads);
+                continue;
+            }
+            break attempt;
+        };
+        if let Some(executor) = executor {
+            assert!(
+                node.rt
+                    .dispatch_repo
+                    .task_attempts(&pool_id)
+                    .await?
+                    .is_empty()
+            );
+            assert_eq!(
+                admissions(&executor, attempt.job_id.as_deref().unwrap())
+                    .await?
+                    .len(),
+                1
+            );
+            executor.stop().await?;
+        }
+        fixture.node.stop().await?;
+        Ok(())
+    }
 }

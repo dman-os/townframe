@@ -203,7 +203,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
     );
 
     // Verify that no new dispatches were created for /tmp/ branch changes.
-    let final_dispatches = test_cx.dispatch_repo.list().await;
+    let final_dispatches = test_cx.dispatch_repo.list_unsettled().await;
     let staging_dispatches = final_dispatches
         .into_iter()
         .filter(|(_id, dispatch)| match &dispatch.args {

@@ -341,10 +341,7 @@ pub async fn daybook_rt() -> Res<Arc<daybook_core::rt::Rt>> {
             let init_repo = init_repo().await?;
             let local_state_sqlite_repo = sqlite_local_state_repo().await?;
             let (rt, stop) = daybook_core::rt::Rt::boot(
-                daybook_core::rt::RtConfig {
-                    device_id: "main_todo".into(),
-                    startup_progress_task_id: None,
-                },
+                daybook_core::rt::RtConfig::new("main_todo".into(), /*startup_progress_task_id*/ None),
                 Arc::clone(&ctx),
                 Arc::clone(&drawer),
                 Arc::clone(&plugs),
