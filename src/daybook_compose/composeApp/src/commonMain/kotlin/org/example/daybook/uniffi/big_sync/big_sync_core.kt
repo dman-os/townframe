@@ -925,8 +925,8 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
  * is needed because the UDL type name is used in function/method signatures.
  * It's also what we have an external type that references a custom type.
  */
-public typealias Byte32Id = kotlin.String
-public typealias FfiConverterTypeByte32Id = FfiConverterString
+public typealias ByteKey = kotlin.String
+public typealias FfiConverterTypeByteKey = FfiConverterString
 
 
 
@@ -935,8 +935,8 @@ public typealias FfiConverterTypeByte32Id = FfiConverterString
  * is needed because the UDL type name is used in function/method signatures.
  * It's also what we have an external type that references a custom type.
  */
-public typealias ObjId = Byte32Id
-public typealias FfiConverterTypeObjId = FfiConverterTypeByte32Id
+public typealias ObjKey = ByteKey
+public typealias FfiConverterTypeObjKey = FfiConverterTypeByteKey
 
 
 
@@ -945,8 +945,8 @@ public typealias FfiConverterTypeObjId = FfiConverterTypeByte32Id
  * is needed because the UDL type name is used in function/method signatures.
  * It's also what we have an external type that references a custom type.
  */
-public typealias PartId = Byte32Id
-public typealias FfiConverterTypePartId = FfiConverterTypeByte32Id
+public typealias PartKey = ByteKey
+public typealias FfiConverterTypePartKey = FfiConverterTypeByteKey
 
 
 
@@ -955,6 +955,6 @@ public typealias FfiConverterTypePartId = FfiConverterTypeByte32Id
  * is needed because the UDL type name is used in function/method signatures.
  * It's also what we have an external type that references a custom type.
  */
-public typealias PeerId = Byte32Id
-public typealias FfiConverterTypePeerId = FfiConverterTypeByte32Id
+public typealias PeerKey = ByteKey
+public typealias FfiConverterTypePeerKey = FfiConverterTypeByteKey
 

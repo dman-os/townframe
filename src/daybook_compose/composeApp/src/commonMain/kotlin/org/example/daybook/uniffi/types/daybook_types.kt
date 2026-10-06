@@ -1594,6 +1594,97 @@ public object FfiConverterTypeCardNodeV1: FfiConverterRustBuffer<CardNodeV1> {
 
 
 
+/**
+ * ADR 003 §3: one encrypted physical representation of a blob, with
+ * the scheme and the key needed to decrypt it.
+ *
+ * It deliberately carries no plaintext digest, MIME type, filename or
+ * application metadata. Those belong to the Blob facet and the layers
+ * above it, and a domain that stores or serves the ciphertext is not
+ * entitled to them (ADR 003 §13).
+ */
+data class CipherBlob (
+    /**
+     * The stored ciphertext blob.
+     */
+    var `representation`: Representation
+    , 
+    /**
+     * The algorithm pivot (ADR 003 §3): an HTTP content-coding token
+     * (`aes128gcm`) naming the scheme that defines the schema of
+     * `encoding_parameters`. A new scheme is a new token with its own
+     * parameters, so existing facets stay decryptable.
+     */
+    var `contentEncoding`: kotlin.String
+    , 
+    /**
+     * Facet reference to the JWK facet holding the encryption key.
+     * `self` names a facet in this document; otherwise the document id
+     * of the key document (docs/dict.md, "URLs").
+     */
+    var `keyRef`: Url
+    , 
+    /**
+     * The JWK facet state `key_ref` meant, per the change-hash-set
+     * convention: empty means "the same change hash as the facet
+     * holding this reference", which is only meaningful within one
+     * document. A cross-document reference has to pin its heads, or
+     * rotating the JWK in place would silently change the key an
+     * existing representation decrypts under (ADR 003 §15).
+     */
+    var `keyRefHeads`: ChangeHashSet
+    , 
+    /**
+     * Scheme inputs not derivable from anywhere else - for
+     * `aes128gcm`, `recordSize` and `padding`. Untyped on purpose:
+     * its schema is the one `content_encoding` selects, so a new
+     * scheme needs no change here. Consumers parse it and fail the
+     * facet if it does not fit (it is peer-supplied input).
+     */
+    var `encodingParameters`: Json
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCipherBlob: FfiConverterRustBuffer<CipherBlob> {
+    override fun read(buf: ByteBuffer): CipherBlob {
+        return CipherBlob(
+            FfiConverterTypeRepresentation.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeUrl.read(buf),
+            FfiConverterTypeChangeHashSet.read(buf),
+            FfiConverterTypeJson.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CipherBlob) = (
+            FfiConverterTypeRepresentation.allocationSize(value.`representation`) +
+            FfiConverterString.allocationSize(value.`contentEncoding`) +
+            FfiConverterTypeUrl.allocationSize(value.`keyRef`) +
+            FfiConverterTypeChangeHashSet.allocationSize(value.`keyRefHeads`) +
+            FfiConverterTypeJson.allocationSize(value.`encodingParameters`)
+    )
+
+    override fun write(value: CipherBlob, buf: ByteBuffer) {
+            FfiConverterTypeRepresentation.write(value.`representation`, buf)
+            FfiConverterString.write(value.`contentEncoding`, buf)
+            FfiConverterTypeUrl.write(value.`keyRef`, buf)
+            FfiConverterTypeChangeHashSet.write(value.`keyRefHeads`, buf)
+            FfiConverterTypeJson.write(value.`encodingParameters`, buf)
+    }
+}
+
+
+
 data class Dmeta (
     var `id`: kotlin.String
     , 
@@ -2115,6 +2206,64 @@ public object FfiConverterTypeImageMetadata: FfiConverterRustBuffer<ImageMetadat
 
 
 /**
+ * ADR 003 §5: generic key storage. The value is an RFC 7517 JWK and
+ * stays one rather than being wrapped in a Daybook-specific structure;
+ * `members` carries the key-type-specific members verbatim, so a key
+ * type Daybook never interprets still round-trips. A consumer reads the
+ * members its scheme needs - the cipherblob codec reads `k` for `oct`.
+ *
+ * `kty` is required rather than the whole value being untyped, because
+ * facets are also read through [`WellKnownFacet`]'s untagged
+ * deserialization: there a variant holding a bare `serde_json::Value`
+ * matches *any* payload, and would silently become the answer for
+ * facets it has nothing to do with.
+ */
+data class Jwk (
+    /**
+     * RFC 7517 key type, e.g. `oct`, `EC`, `RSA`.
+     */
+    var `kty`: kotlin.String
+    , 
+    /**
+     * The remaining RFC 7517 members, carried verbatim and re-emitted
+     * alongside `kty` so the facet value stays a plain JWK.
+     */
+    var `members`: Json
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeJwk: FfiConverterRustBuffer<Jwk> {
+    override fun read(buf: ByteBuffer): Jwk {
+        return Jwk(
+            FfiConverterString.read(buf),
+            FfiConverterTypeJson.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Jwk) = (
+            FfiConverterString.allocationSize(value.`kty`) +
+            FfiConverterTypeJson.allocationSize(value.`members`)
+    )
+
+    override fun write(value: Jwk, buf: ByteBuffer) {
+            FfiConverterString.write(value.`kty`, buf)
+            FfiConverterTypeJson.write(value.`members`, buf)
+    }
+}
+
+
+
+/**
  * ADR 007 §5: the per-plug track in the plugg config facet. We keep info
  * about the activated and latest manifests of plugs — not an index of all
  * version manifests. `latest` is the highest version seen (valid or
@@ -2600,6 +2749,51 @@ public object FfiConverterTypePoint: FfiConverterRustBuffer<Point> {
     override fun write(value: Point, buf: ByteBuffer) {
             FfiConverterFloat.write(value.`x`, buf)
             FfiConverterFloat.write(value.`y`, buf)
+    }
+}
+
+
+
+/**
+ * ADR 003 §3: the physical representation a cipherBlob facet describes,
+ * grouped so the facet JSON reads as `representation: { digest, lengthOctets }`.
+ *
+ * Declared outside [`WellKnownFacet`]'s item list on purpose: every item in
+ * that list becomes a facet tag of its own, and this is not a facet.
+ */
+data class Representation (
+    var `digest`: kotlin.String
+    , 
+    var `lengthOctets`: kotlin.ULong
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeRepresentation: FfiConverterRustBuffer<Representation> {
+    override fun read(buf: ByteBuffer): Representation {
+        return Representation(
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Representation) = (
+            FfiConverterString.allocationSize(value.`digest`) +
+            FfiConverterULong.allocationSize(value.`lengthOctets`)
+    )
+
+    override fun write(value: Representation, buf: ByteBuffer) {
+            FfiConverterString.write(value.`digest`, buf)
+            FfiConverterULong.write(value.`lengthOctets`, buf)
     }
 }
 
@@ -3794,6 +3988,8 @@ enum class WellKnownFacetTag {
     NOTE,
     BLOB,
     BLOB_PIN,
+    CIPHER_BLOB,
+    JWK,
     IMAGE_METADATA,
     OCR_RESULT,
     EMBEDDING,

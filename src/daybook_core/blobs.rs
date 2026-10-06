@@ -643,6 +643,31 @@ impl BlobsRepo {
         Arc::clone(&self.cipher_provider)
     }
 
+    /// Is this blob possessed by the store without stored bytes: a virtual
+    /// entry whose cipher pair is still rooted (`ct:`/`pt:` tags), so its
+    /// bytes are produced on demand by the registered provider and possession
+    /// needs no transfer (ADR 003 §14 "ready to be served, physically or
+    /// virtually").
+    ///
+    /// How the pieces compose: `blobs().has()` reports virtual entries as
+    /// complete because they are servable; only an entry with *stored* bytes
+    /// hands out a sync reader (the store's `sync_reader` returns `None` for
+    /// absent, partial *and* virtual), so "has but no reader" is exactly
+    /// "virtual". The pair tags are the servability half: an unrooted virtual
+    /// entry would serve as not-found, so there the honest state is "want",
+    /// not "possessed".
+    pub async fn blob_is_possessed_without_bytes(&self, blob_id: &BlobId) -> Res<bool> {
+        let iroh_hash = blob_id_to_iroh_hash(blob_id.clone());
+        let blobs = self.iroh_store.blobs();
+        if !blobs.has(iroh_hash).await? {
+            return Ok(false);
+        }
+        if blobs.sync_reader(iroh_hash).await?.is_some() {
+            return Ok(false);
+        }
+        crate::blobs::encrypt::has_pair_tags(&self.iroh_store, iroh_hash).await
+    }
+
     pub async fn shutdown(&self) -> Res<()> {
         self.iroh_store
             .shutdown()

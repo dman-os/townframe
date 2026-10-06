@@ -32,6 +32,8 @@ facets:
   org.example.daybook.note-editor-config
   org.example.daybook.blob
   org.example.daybook.blobPin
+  org.example.daybook.cipherBlob
+  org.example.daybook.jwk
   org.example.daybook.pending
   org.example.daybook.body
 dependencies: 

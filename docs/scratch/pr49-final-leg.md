@@ -311,8 +311,13 @@ shared helper could consolidate them later.
   is false for a virtual ciphertext entry even though the outboard exists.)
 - **Ciphertext is stored only where the key is absent** (relays/mirrors fetching the pinned part). Key-holders store P
   plus C's outboard. The pair tags are written only by key-holders (`register_pair` runs after the key is resolved).
-- `ensure_local_blob` has a `blobs().has(hash) → put_from_store` branch (`blobs/sync.rs:62`) that would copy a blob
-  into the daybook object store — worth a test if anything ever reads a C digest locally.
+- Fixed in this session: the `blobs().has(hash) → put_from_store` export shortcut is **reader-gated** (`sync_reader()` is
+  `Some` only for stored-complete entries) and the object task settles for a virtually possessed cipher representation
+  (`blob_is_possessed_without_bytes` = `has()` ∧ no reader ∧ pair tags rooted). Regression tests in `blobs/sync.rs`:
+  `blob_sync_obj_settles_for_a_virtually_possessed_cipher_representation` (RED-verified with the branch disabled) and
+  `blob_sync_materializes_ciphertext_for_a_node_without_a_pair` (relay downloads real C and lands stored bytes).
+  Seed `233875225706497` of the four-node stress passed in 102 s with **0** `cannot export a virtual entry` lines,
+  **0** rescheduling warns (was: 12,644 failures, 480 s timeout); told-test CI TMT passed solo (50 s).
 - `sync/tests.rs:794` carries a stale `TEMP-INSTRUMENTATION: localising why the blob scope does not replicate`
   despite its byte assertions passing — resolve or delete it.
 - A `cipherBlob` facet is **system-managed**: authoring one in a test needs
@@ -630,4 +635,24 @@ Categories: **RESOLVE** act now · **DISCUSS** needs the operator · **VERIFY** 
   unconditional FakeRpc cursor assert). Verification chain launched to `/tmp/pr49-parent-verify1.log`
   (encrypt module tests, the big_sync_core per-part pin, clippy on the three crates).
 - 2026-10-25 — workflow `bdf3de58` launched (3 forked lanes): crash-window strategy (read-only), revocation
+- 2026-10-06 — **blob-plane possession loop fixed (parent, directly)**. Root cause (pinned end-to-end): the object
+  task's possession leg (`ensure_local_blob`) took the `blobs().has(hash) → put_from_store` shortcut; the forked
+  iroh-blobs reports virtual entries (`EntryState::Virtual` — outboard + provider, no stored bytes) as
+  `BlobStatus::Complete` because they are servable, so a key-holder's own ciphertext representation (installed by the
+  §11 pass or the decrypt-receive path) short-circuited into `export`, which the store refuses (`fs.rs:1536`;
+  "cannot export a virtual entry to a path; it has no stored data") → task failed → rescheduled identically forever
+  (12,644 failures, ~800 per (peer, object)) → blob worker never rested → `natural settlement` fence timed out with
+  `differing or non-materialized docs: {}` (docs had all converged). Fix (townframe-only, no fork/pin edit):
+  export branch reader-gated; new `BlobsRepo::blob_is_possessed_without_bytes` (`has` ∧ no sync-reader ∧ `ct:`/`pt:`
+  pair rooted) makes the object task treat a rooted virtual entry as terminal possession (ADR 003 §14) — no export,
+  no `blob_now_held`, payload/membership still reconciled. Fork API (`BlobStatus::Virtual`) not needed: the store's
+  own `sync_reader` is the stored-bytes oracle and `has_pair_tags` the provider-rooted one. Gates: clippy
+  big_repo+daybook_core `--all-targets --all-features` 0/0; blob-sync family 7/7 + relay materialization 3/9-filter
+  family 9/9; stress seed `233875225706497` PASSED 102 s, 0 export errors / 0 reschedule warns; the CI-told
+  failure (`told_not_cloned_inventory_part_is_refused…`) passes solo (50 s — CI TMT was load slowness of its fence;
+  per operator, load failures are branch-owned, so one CI re-run will confirm).
+- 2026-10-06 — deliberately not solved: a virtual entry whose pair was released (drain) with pins still present falls
+  to the download branch — it either materializes real C from a serving peer or the task honestly retries as a
+  pending want; no special-casing written. The possession plane still has no distinct "servable" row kind
+  (`blob_now_held` is "held-bytes"), so a virtually possessed object emits no presence row.
   narrow-audience e2e (writer), blob test fidelity + helper fate (writer).
