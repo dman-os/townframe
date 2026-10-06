@@ -121,6 +121,12 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 references: default(),
             },
             FacetManifest {
+                key_tag: WellKnownFacetTag::Jwk.into(),
+                value_schema: schemars::schema_for!(daybook_types::doc::Jwk),
+                display_config: default(),
+                references: default(),
+            },
+            FacetManifest {
                 key_tag: WellKnownFacetTag::ImageMetadata.into(),
                 value_schema: schemars::schema_for!(ImageMetadata),
                 display_config: default(),

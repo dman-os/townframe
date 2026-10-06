@@ -197,6 +197,17 @@ crate::define_enum_and_tag!(
         LabelGeneric type (String),
         TitleGeneric type (String),
         PathGeneric type (String),
+        /// A generic RFC 7517 JWK. Key owners provision and rotate this facet;
+        /// it is not restricted to the blob encryption worker.
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+        #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+        #[serde(rename_all = "camelCase")]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        Jwk struct {
+            pub kty: String,
+            #[serde(flatten)]
+            pub members: serde_json::Value,
+        },
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
         #[serde(rename_all = "camelCase")]
@@ -1215,6 +1226,10 @@ mod ser_de {
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),
                 WellKnownFacetTag::Note => Self::Note(
+                    serde_json::from_value(value)
+                        .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
+                ),
+                WellKnownFacetTag::Jwk => Self::Jwk(
                     serde_json::from_value(value)
                         .wrap_err_with(|| format!("error parsing json as {tag} value"))?,
                 ),

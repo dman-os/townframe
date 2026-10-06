@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt;
 
 pub mod permission_writer;
 pub(crate) use permission_writer::spawn_blob_inventory_permission_writer;
+pub mod encrypt;
 pub mod pin_worker;
 pub mod pins_part_worker;
 pub mod sync;
@@ -40,6 +41,7 @@ pub struct BlobsRepo {
     // FIXME: use surelock
     hash_locks: Arc<std::sync::Mutex<HashMap<BlobId, Arc<tokio::sync::Mutex<()>>>>>,
     sync_backend: Arc<surelock::mutex::Mutex<Option<crate::blobs::sync::BlobSyncBackend>>>,
+    input_revision: tokio::sync::watch::Sender<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -267,6 +269,7 @@ impl BlobsRepo {
             iroh_store: fs_store.into(),
             hash_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             sync_backend: Arc::new(surelock::mutex::Mutex::new(default())),
+            input_revision: tokio::sync::watch::channel(0).0,
         }))
     }
 
@@ -274,6 +277,18 @@ impl BlobsRepo {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.sync_backend);
             *guard = Some(backend);
+        });
+    }
+
+    pub(crate) fn input_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.input_revision.subscribe()
+    }
+
+    pub(crate) fn notify_input_change(&self) {
+        self.input_revision.send_modify(|revision| {
+            *revision = revision
+                .checked_add(1)
+                .expect("blob input revision overflow");
         });
     }
 
@@ -334,6 +349,7 @@ impl BlobsRepo {
                 .await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
+            self.notify_input_change();
 
             Ok(hash)
         }
@@ -388,6 +404,7 @@ impl BlobsRepo {
                 .await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
+            self.notify_input_change();
             Ok(hash)
         }
         .await;
@@ -421,6 +438,7 @@ impl BlobsRepo {
             .await?;
         meta.iroh_ingested = true;
         self.write_meta(&object_paths.meta, &meta).await?;
+        self.notify_input_change();
 
         Ok(hash)
     }
@@ -495,6 +513,9 @@ impl BlobsRepo {
         self.iroh_store.clone()
     }
 
+    /// Shut down a store that has not been transferred to an Iroh router.
+    /// A registered `BlobsProtocol` owns this shutdown through the router;
+    /// after router shutdown the store must not receive another shutdown request.
     pub async fn shutdown(&self) -> Res<()> {
         self.iroh_store
             .shutdown()
@@ -602,6 +623,7 @@ impl BlobsRepo {
             true,
         );
         self.write_meta(&object_paths.meta, &meta).await?;
+        self.notify_input_change();
 
         Ok(blob_id)
     }

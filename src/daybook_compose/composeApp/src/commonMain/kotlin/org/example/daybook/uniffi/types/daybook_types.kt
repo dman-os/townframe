@@ -2115,6 +2115,48 @@ public object FfiConverterTypeImageMetadata: FfiConverterRustBuffer<ImageMetadat
 
 
 /**
+ * A generic RFC 7517 JWK. Key owners provision and rotate this facet;
+ * it is not restricted to the blob encryption worker.
+ */
+data class Jwk (
+    var `kty`: kotlin.String
+    , 
+    var `members`: Json
+    
+){
+    
+
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeJwk: FfiConverterRustBuffer<Jwk> {
+    override fun read(buf: ByteBuffer): Jwk {
+        return Jwk(
+            FfiConverterString.read(buf),
+            FfiConverterTypeJson.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: Jwk) = (
+            FfiConverterString.allocationSize(value.`kty`) +
+            FfiConverterTypeJson.allocationSize(value.`members`)
+    )
+
+    override fun write(value: Jwk, buf: ByteBuffer) {
+            FfiConverterString.write(value.`kty`, buf)
+            FfiConverterTypeJson.write(value.`members`, buf)
+    }
+}
+
+
+
+/**
  * ADR 007 §5: the per-plug track in the plugg config facet. We keep info
  * about the activated and latest manifests of plugs — not an index of all
  * version manifests. `latest` is the highest version seen (valid or
@@ -3789,6 +3831,7 @@ enum class WellKnownFacetTag {
     LABEL_GENERIC,
     TITLE_GENERIC,
     PATH_GENERIC,
+    JWK,
     PENDING,
     BODY,
     NOTE,
