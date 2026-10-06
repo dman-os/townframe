@@ -43,6 +43,8 @@ mod fingerprint;
 mod ids;
 pub mod keyed_frontier;
 pub mod live_revision_watch;
+/// Signed policy-neutral registers for custom reconciliation backends.
+pub mod encrypted_register;
 /// New-generation stream abstractions (see module docs). Additive only:
 /// existing machines migrate onto these in the upcoming swap, nothing is
 /// rewired yet.

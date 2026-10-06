@@ -28,6 +28,7 @@ structstruck.workspace = true
 #
 # encoding
 blake3.workspace = true
+ed25519-dalek.workspace = true
 bs58.workspace = true
 serde.workspace = true
 postcard.workspace = true
@@ -56,3 +57,4 @@ uniffi = { workspace = true, optional = true }
 
 [dev-dependencies]
 futures.workspace = true
+serde_json.workspace = true

@@ -410,6 +410,16 @@ impl SqliteBigRepoStore {
             // between sibling transitions would let acknowledging either
             // sibling permanently skip the others.
             let cursor = Self::next_cursor(&mut tx).await?;
+            // The document row may have been created earlier in this batch.
+            // Resolve it through this transaction, never another pooled reader
+            // that cannot see our uncommitted rows. Reuse it for all effects.
+            let obj_ref: i64 = sqlx::query_scalar(
+                "SELECT obj_ref FROM big_sync_objs WHERE scope_id = ? AND obj_id = ?",
+            )
+            .bind(self.scope().id())
+            .bind(doc.as_bytes())
+            .fetch_one(&mut *tx)
+            .await?;
             sqlx::query!(
                 "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
                      VALUES (?1, ?2, 0)
@@ -433,7 +443,7 @@ impl SqliteBigRepoStore {
                                    ELSE big_sync_members.added_at
                                END",
                         self.scope().id(),
-                        self.core.find_obj_ref(doc.clone()).await?.expect(ERROR_IMPOSSIBLE),
+                        obj_ref,
                         self.core.ensure_part_ref(&mut tx, part_id.clone()).await?,
                         EVENT_CHANGED,
                         i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
@@ -454,10 +464,7 @@ impl SqliteBigRepoStore {
                         "DELETE FROM big_sync_pending_members
                                          WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
                         self.scope().id(),
-                        self.core
-                            .find_obj_ref(doc.clone())
-                            .await?
-                            .expect(ERROR_IMPOSSIBLE),
+                        obj_ref,
                         self.core.ensure_part_ref(&mut tx, part_id.clone()).await?
                     )
                     .execute(&mut *tx)
@@ -479,7 +486,7 @@ impl SqliteBigRepoStore {
                              ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
                                event_type = excluded.event_type, txid = excluded.txid",
                         self.scope().id(),
-                        self.core.find_obj_ref(doc.clone()).await?.expect(ERROR_IMPOSSIBLE),
+                        obj_ref,
                         self.core.ensure_part_ref(&mut tx, part_id.clone()).await?,
                         EVENT_REMOVED,
                         i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)

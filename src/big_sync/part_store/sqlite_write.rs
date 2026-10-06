@@ -35,6 +35,7 @@ pub(crate) struct SqliteFrontierWrite<'a> {
     staged: BTreeMap<PartFrontierKey, Option<PartEvent>>,
     reserved_revision: Option<FrontierRevision>,
     notify: Notify,
+    write_payloads: bool,
 }
 
 impl<'a> SqliteFrontierWrite<'a> {
@@ -45,7 +46,12 @@ impl<'a> SqliteFrontierWrite<'a> {
             staged: BTreeMap::new(),
             reserved_revision: None,
             notify,
+            write_payloads: true,
         }
+    }
+
+    pub(crate) fn payloads_written_in_context(&mut self) {
+        self.write_payloads = false;
     }
 
     fn transaction_mut(&mut self) -> &mut Transaction<'a, Sqlite> {
@@ -232,7 +238,9 @@ impl<'a> SqliteFrontierWrite<'a> {
             (_, None) => (EVENT_REMOVED, None),
             _ => return Err(invalid_event("invalid keyed-frontier event for key")),
         };
-        if let Some(payload) = payload {
+        if self.write_payloads
+            && let Some(payload) = payload
+        {
             let payload_json = serde_json::to_string(&payload)
                 .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
             sqlx::query(
@@ -328,16 +336,19 @@ impl<'a> KeyedFrontierTransaction<PartFrontierKey, PartEvent> for SqliteFrontier
         } else {
             self.current_revision().await?
         };
+
         let staged = std::mem::take(&mut self.staged);
         for (key, mutation) in staged {
             self.apply(revision, key, mutation).await?;
         }
+
         self.transaction
             .take()
             .expect("sqlite frontier transaction present")
             .commit()
             .await
             .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
+
         if had_mutations || had_reserved_revision {
             (self.notify)(revision);
         }

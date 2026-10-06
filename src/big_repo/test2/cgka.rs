@@ -1711,3 +1711,93 @@ async fn tier6_prekey_janitor_survives_missed_add_window() -> crate::Res<()> {
     );
     Ok(())
 }
+
+async fn coordination_pool(repo: &std::sync::Arc<crate::BigRepo>)
+    -> crate::Res<(crate::BigKeyhiveGroup, crate::DocumentId)>
+{
+    let group = repo.create_group_with_parents(vec![]).await?;
+    repo.add_member_to_group(repo.local_keyhive_agent().await?, &group, Access::Admin).await?;
+    let mut initial = automerge::Automerge::new();
+    initial.transact(|tx| tx.put(automerge::ROOT, "kind", "pool"))
+        .map_err(|error| crate::ferr!("create coordination authority: {error:?}"))?;
+    let doc = repo.create_doc_with_parents(initial, vec![group.clone().into()]).await?;
+    Ok((group, doc.document_id()))
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn coordination_group_binding_and_direct_document_grants() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(183, 184, "CoordOwner", "CoordOutsider").await?;
+    let peer = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    let (group, document) = coordination_pool(&pair.left().repo).await?;
+    let group_id = group.id().to_bytes();
+    let wrong = pair.left().repo.create_group_with_parents(vec![]).await?;
+    assert!(matches!(pair.left().repo.coordination_authority(document.clone(), wrong.id().to_bytes()).await,
+        Err(crate::CoordinationError::Unauthorized)));
+    let missing = ed25519_dalek::SigningKey::from_bytes(&[231; 32]).verifying_key().to_bytes();
+    assert!(matches!(pair.left().repo.coordination_authority(document.clone(), missing).await,
+        Err(crate::CoordinationError::Pending)));
+    assert!(matches!(pair.left().repo.coordination_authority(crate::DocumentId::new(missing), group_id).await,
+        Err(crate::CoordinationError::Pending)));
+    fixtures::grant_and_propagate(&pair, document.clone(), &peer, Access::Edit).await?;
+    // Exact permission classification is observed after native work drains,
+    // not while an unrelated incoming event can invalidate the sampled view.
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+    let authority = pair.right().repo.coordination_authority(document.clone(), group_id).await?;
+    assert!(matches!(pair.right().repo.admit_coordination(&authority).await, Err(crate::CoordinationError::Unauthorized)));
+    let read_admission = pair.right().repo.admit_coordination_read(&authority).await;
+    assert!(matches!(read_admission, Err(crate::CoordinationError::Unauthorized)),
+        "direct-document-only Read admission result: {read_admission:?}");
+    pair.left().repo.add_member_to_group(peer.clone(), &group, Access::Relay).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+    let authority = pair.right().repo.coordination_authority(document.clone(), group_id).await?;
+    assert!(matches!(pair.right().repo.admit_coordination_read(&authority).await, Err(crate::CoordinationError::Unauthorized)));
+    let relay = pair.right().repo.admit_coordination_access(&authority, Access::Relay).await?;
+    assert_eq!(relay.local_access(), Some(Access::Relay));
+    assert!(matches!(pair.right().repo.with_coordination_signer(&relay, |_| Ok(())).await, Err(crate::CoordinationError::Unauthorized)));
+    pair.left().repo.add_member_to_group(peer, &group, Access::Read).await?;
+    pair.right_conn().sync_keyhive_with_peer().await?;
+    pair.left().repo.wait_for_quiescence(None).await?;
+    pair.right().repo.wait_for_quiescence(None).await?;
+    let authority = pair.right().repo.coordination_authority(document.clone(), group_id).await?;
+    assert!(matches!(pair.right().repo.admit_coordination(&authority).await, Err(crate::CoordinationError::Unauthorized)));
+    let readable = pair.right().repo.admit_coordination_read(&authority).await?;
+    assert_eq!(readable.local_access(), Some(Access::Read));
+    assert!(matches!(pair.right().repo.with_coordination_signer(&readable, |_| Ok(())).await, Err(crate::CoordinationError::Unauthorized)));
+    Ok(())
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn coordination_nested_revocation_invalidates_view_without_epoch_change() -> crate::Res<()> {
+    use keyhive_crypto::verifiable::Verifiable;
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(189, 190, "CoordOwner", "CoordNested").await?;
+    let peer = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    let peer_id = keyhive_core::principal::identifier::Identifier::from(peer.verifying_key());
+    let (group, document) = coordination_pool(&pair.left().repo).await?;
+    let nested = pair.left().repo.create_group_with_parents(vec![]).await?;
+    pair.left().repo.add_member_to_group(pair.left().repo.local_keyhive_agent().await?, &nested, Access::Admin).await?;
+    pair.left().repo.add_member_to_group(peer.clone(), &nested, Access::Edit).await?;
+    pair.left().repo.add_member_to_group(nested.clone(), &group, Access::Edit).await?;
+    // Keep document access through an independent route. Revoking the nested
+    // group permission changes pool eligibility, not the document's CGKA heads.
+    fixtures::grant_and_propagate(&pair, document.clone(), &peer, Access::Edit).await?;
+    let before = pair.left().repo.coordination_authority(document.clone(), group.id().to_bytes()).await?;
+    assert!(before.edit_agents().contains(&peer_id.to_bytes()));
+    pair.left().repo.admit_coordination(&before).await?;
+    let update = pair.left().repo.keyhive().clone_keyhive()
+        .revoke_member(peer_id, /*retain_all_other_members*/ true, nested.id()).await?;
+    assert!(update.cgka_ops().is_empty());
+    assert!(matches!(pair.left().repo.admit_coordination(&before).await, Err(crate::CoordinationError::Pending)));
+    assert!(matches!(pair.left().repo.admit_coordination_read(&before).await, Err(crate::CoordinationError::Pending)));
+    assert!(matches!(pair.left().repo.with_coordination_signer(&before, |_| Ok(())).await, Err(crate::CoordinationError::Pending)));
+    let after = pair.left().repo.coordination_authority(document, group.id().to_bytes()).await?;
+    assert!(!after.edit_agents().contains(&peer_id.to_bytes()));
+    pair.left().repo.admit_coordination(&after).await?;
+    Ok(())
+}

@@ -21,7 +21,9 @@ pub(crate) mod access_policy;
 mod backend;
 #[expect(unused)]
 mod changes;
+mod coordination;
 mod encrypted_blob;
+pub use coordination::{CoordinationAuthority, CoordinationError, CoordinationSigner};
 pub mod ephemeral;
 pub(crate) mod handler;
 mod keyhive;
@@ -1044,6 +1046,21 @@ impl BigRepo {
         }
         self.wait_for_keyhive_reconciliation().await?;
         Ok(())
+    }
+
+    /// Test fixture: perform and durably retain a real group revocation.
+    /// Native listeners emit the membership event; callers needing notification
+    /// delivery also use the existing runtime quiescence barrier.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn revoke_member_from_group_for_test(
+        &self,
+        member: impl Into<BigKeyhiveAuthority>,
+        group: &BigKeyhiveGroup,
+    ) -> Res<()> {
+        self.keyhive
+            .revoke_member_from_group_for_test(member, group, &self.keyhive_protocol)
+            .await?;
+        self.wait_for_keyhive_reconciliation().await
     }
 }
 

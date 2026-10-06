@@ -270,22 +270,20 @@ clippy.let_underscore_untyped = "deny"
 rust.let_underscore_drop = "deny"
 # clippy.used_underscore_binding = "warn"
 
-# Subduction is taken straight from the local checkout by the path dependencies above: its own
-# workspace members depend on each other by path, so nothing has to negotiate versions and the graph
-# holds exactly one copy of each crate. Keyhive stays declared by `rev` and is redirected by the
-# patch below, because subduction's own keyhive dependency is a git edge at the pushed rev — only a
-# patch on the shared URL unifies that edge with ours onto the one local checkout.
-# Remember to re-check resolution after editing either block: a partial block silently
-# duplicates a crate across the local path and the pinned git source.
+# Local fork development: patch each git source as a complete crate set so
+# Townframe and the forks share one copy of each dependency. Replace these
+# patches with published pins together when the fork work is ready to publish.
 [patch."https://github.com/dman-os/keyhive"]
-# keyhive_core = { path = "../keyhive/keyhive_core" }
-# keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
-# beekem = { path = "../keyhive/beekem" }
-# subduction_core = { path = "../subduction/subduction_core" }
-# subduction_iroh = { path = "../subduction/subduction_iroh" }
-# subduction_websocket = { path = "../subduction/subduction_websocket" }
-# subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
-# sedimentree_core = { path = "../subduction/sedimentree_core" }
-# subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
-# subduction_crypto = { path = "../subduction/subduction_crypto" }
-# subduction_keyhive = { path = "../subduction/subduction_keyhive" }
+keyhive_core = { path = "../keyhive/keyhive_core" }
+keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
+beekem = { path = "../keyhive/beekem" }
+
+[patch."https://github.com/dman-os/subduction"]
+subduction_core = { path = "../subduction/subduction_core" }
+subduction_iroh = { path = "../subduction/subduction_iroh" }
+subduction_websocket = { path = "../subduction/subduction_websocket" }
+subduction_ephemeral = { path = "../subduction/subduction_ephemeral" }
+sedimentree_core = { path = "../subduction/sedimentree_core" }
+subduction_redb_storage = { path = "../subduction/subduction_redb_storage" }
+subduction_crypto = { path = "../subduction/subduction_crypto" }
+subduction_keyhive = { path = "../subduction/subduction_keyhive" }
