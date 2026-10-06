@@ -57,6 +57,44 @@ fn bytes(register: &EncryptedRegister) -> Vec<u8> {
 }
 
 #[test]
+fn valid_signature_variants_preserve_poison_join_associativity() {
+    use ed25519_dalek::hazmat::{ExpandedSecretKey, raw_sign};
+    use sha2::{Digest, Sha512};
+
+    let signer = SigningKey::from_bytes(&[1; 32]);
+    let mut first = original(1, 1, b"same", vec![]);
+    let mut second = first.clone();
+    let mut expanded = ExpandedSecretKey::from_bytes(&Sha512::digest(signer.to_bytes()).into());
+    // Test-only nonce variation: strict verification does not enforce a signer’s
+    // deterministic nonce derivation. Both signatures authenticate the same header.
+    expanded.hash_prefix[0] ^= 1;
+    let alternate = raw_sign::<Sha512>(&expanded, &first.signing_bytes(), &signer.verifying_key());
+    let encoded = alternate.to_bytes();
+    second.signature = SignatureBytes {
+        r: encoded[..32].try_into().unwrap(),
+        s: encoded[32..].try_into().unwrap(),
+    };
+    first.verify().unwrap();
+    second.verify().unwrap();
+    assert_ne!(first.signature, second.signature);
+    if first.signature > second.signature {
+        std::mem::swap(&mut first, &mut second);
+    }
+    let smaller_signature = representation(first, 2);
+    let smaller_binding = representation(second, 1);
+    let conflict = representation(original(1, 1, b"conflict", vec![]), 1);
+    let mut left = EncryptedRegister::new(limits());
+    let mut right = EncryptedRegister::new(limits());
+    for value in [&smaller_signature, &smaller_binding, &conflict] {
+        left.merge(value.clone()).unwrap();
+    }
+    for value in [&smaller_signature, &conflict, &smaller_binding] {
+        right.merge(value.clone()).unwrap();
+    }
+    assert_eq!(bytes(&left), bytes(&right));
+}
+
+#[test]
 fn opaque_component_boundaries_and_malformed_frames() {
     for scope in [vec![], vec![0], vec![255, 0, b'/']] {
         for slot in [vec![], vec![0], vec![0, 255]] {

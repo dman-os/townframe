@@ -853,8 +853,22 @@ impl DrawerRepo {
 
             let schema_json = serde_json::to_value(&facet_manifest.value_schema)?;
             let schema_cache_key = (facet_tag.clone(), serde_json::to_string(&schema_json)?);
-            let validator = {
-                let compiled = jsonschema::validator_for(&schema_json).map_err(|err| {
+            let cached = surelock::key::lock_scope(|key| {
+                let (cache, _key) = key.lock(&self.facet_schema_validators);
+                cache.get(&schema_cache_key).cloned()
+            });
+            let validator = if let Some(cached) = cached {
+                cached
+            } else {
+                // Schema compilation is CPU-bound and recursively compiles the
+                // draft meta-schema on first use. Keep it off the async poll
+                // stack; a cached validator needs no compilation or worker hop.
+                let compiled = tokio::task::spawn_blocking(move || {
+                    jsonschema::validator_for(&schema_json)
+                })
+                .await
+                .unwrap()
+                .map_err(|err| {
                     eyre::eyre!(
                         "failed to compile facet schema validator for facet_manifest tag '{}': {err}",
                         facet_manifest.key_tag
@@ -863,12 +877,7 @@ impl DrawerRepo {
                 let compiled = Arc::new(compiled);
                 surelock::key::lock_scope(|key| {
                     let (mut cache, _key) = key.lock(&self.facet_schema_validators);
-                    if let Some(existing) = cache.get(&schema_cache_key) {
-                        Arc::clone(existing)
-                    } else {
-                        cache.insert(schema_cache_key, Arc::clone(&compiled));
-                        compiled
-                    }
+                    Arc::clone(cache.entry(schema_cache_key).or_insert(compiled))
                 })
             };
             if let Err(validation_error) = validator.validate(facet_value) {

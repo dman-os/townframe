@@ -1,5 +1,8 @@
 use crate::interlude::*;
 
+pub mod distributed_smoke;
+pub(crate) mod sync_node;
+
 use big_repo::{BigRepo, SharedBigRepo};
 
 use crate::drawer::DrawerRepo;
@@ -11,21 +14,24 @@ use crate::plugs::PlugsRepo;
 const HARNESS_SYNC_MODE: Option<big_sync::SyncMode> = Some(big_sync::SyncMode::CursorOnly);
 
 pub struct DaybookTestContext {
+    state: Option<DaybookTestState>,
+}
+
+pub struct DaybookTestState {
     pub _acx: SharedBigRepo,
-    pub big_sync_stop: big_sync::StopToken,
     pub drawer_repo: Arc<DrawerRepo>,
     pub dispatch_repo: Arc<crate::rt::dispatch::DispatchRepo>,
     pub _config_repo: Arc<crate::config::ConfigRepo>,
-    pub drawer_stop: crate::repos::RepoStopToken,
-    pub plugs_stop: crate::repos::RepoStopToken,
-    pub config_stop: crate::repos::RepoStopToken,
-    pub dispatch_stop: crate::repos::RepoStopToken,
-    pub progress_stop: crate::repos::RepoStopToken,
-    pub init_stop: crate::repos::RepoStopToken,
-    pub sqlite_local_state_stop: crate::repos::RepoStopToken,
-    pub rt_stop: crate::rt::RtStopToken,
     pub rt: Arc<crate::rt::Rt>,
     pub _temp_dir: tempfile::TempDir,
+    owners: sync_node::Owners,
+}
+
+impl std::ops::Deref for DaybookTestContext {
+    type Target = DaybookTestState;
+    fn deref(&self) -> &Self::Target {
+        self.state.as_ref().expect("stopped test context")
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -110,38 +116,40 @@ impl DaybookTestContext {
         }
     }
 
-    pub async fn stop(self) -> Res<()> {
+    pub async fn stop(mut self) -> Res<()> {
+        self.state
+            .take()
+            .expect("stopped test context")
+            .stop()
+            .await
+    }
+}
+impl DaybookTestState {
+    async fn stop(self) -> Res<()> {
         let Self {
-            _acx: _,
-            big_sync_stop,
-            drawer_repo: _,
-            dispatch_repo: _,
-            _config_repo: _,
-            drawer_stop,
-            plugs_stop,
-            config_stop,
-            dispatch_stop,
-            progress_stop,
-            init_stop,
-            sqlite_local_state_stop,
-            rt_stop,
+            _acx,
+            drawer_repo,
+            dispatch_repo,
+            _config_repo,
             rt,
-            _temp_dir: _,
+            _temp_dir,
+            mut owners,
         } = self;
-
-        rt_stop.stop().await?;
-        let rcx = Arc::clone(&rt.rcx);
-        drop(rt);
-        rcx.shutdown().await?;
-        drawer_stop.stop().await?;
-        progress_stop.stop().await?;
-        dispatch_stop.stop().await?;
-        config_stop.stop().await?;
-        plugs_stop.stop().await?;
-        init_stop.stop().await?;
-        sqlite_local_state_stop.stop().await?;
-        big_sync_stop.stop().await?;
+        drop((_acx, drawer_repo, dispatch_repo, _config_repo, rt));
+        owners.stop(/*runtime_first*/ false).await?;
+        // Temporary files outlive their stores and all consuming workers.
+        drop(_temp_dir);
         Ok(())
+    }
+}
+impl Drop for DaybookTestContext {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(state.stop())
+            })
+            .expect("test context teardown failed");
+        }
     }
 }
 
@@ -158,6 +166,7 @@ pub async fn test_cx_with_options(
         utils_rs::testing::setup_tracing_once();
     });
 
+    let temp_dir = tempfile::tempdir()?;
     // Generate unique IDs for this test to ensure complete isolation across parallel test runs
     let device_id = format!("test_{}", uuid::Uuid::new_v4().simple());
     let peer_id = crate::peer_id_from_label(&format!("test_{}", uuid::Uuid::new_v4().simple()));
@@ -173,6 +182,7 @@ pub async fn test_cx_with_options(
         group_part_group_scope: Default::default(),
     })
     .await?;
+    let mut owners = sync_node::Owners::before_context(acx_stop);
     let part_store = big_repo.shared_part_store();
     let (_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(&part_store),
@@ -182,6 +192,7 @@ pub async fn test_cx_with_options(
         HARNESS_SYNC_MODE,
         Arc::from("daybook-core-test"),
     )?;
+    owners.big_sync = Some(big_sync_stop);
 
     // Create a drawer document
     let drawer_doc_id = {
@@ -209,14 +220,16 @@ pub async fn test_cx_with_options(
     // Load config first to get local identity
     let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user");
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
-    let temp_dir = tempfile::tempdir()?;
 
     let blob_part_store = crate::repo::open_blob_part_store(big_repo.sql_ctx()).await?;
     let blobs =
         crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.clone())
             .await?;
+    owners.blobs = Some(Arc::clone(&blobs));
     let (sqlite_local_state_repo, sqlite_local_state_stop) =
         crate::local_state::SqliteLocalStateRepo::boot(temp_dir.path().join("local_state")).await?;
+    owners.local_state = Some(sqlite_local_state_stop);
+    let sql_ctx = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&big_repo),
@@ -226,44 +239,7 @@ pub async fn test_cx_with_options(
         Arc::clone(&sqlite_local_state_repo),
     )
     .await?;
-    let sql_ctx = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
-    let (config_repo, config_stop) = crate::config::ConfigRepo::load(
-        Arc::clone(&big_repo),
-        app_doc_id.clone(),
-        Arc::clone(&plugs_repo),
-        local_user_path.clone(),
-        sql_ctx.clone(),
-    )
-    .await?;
-
-    let config_user_path =
-        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "config-repo")?;
-    let config_actor_id = daybook_types::doc::user_path::to_actor_id(&config_user_path);
-    config_repo
-        .upsert_actor_user_path(config_actor_id, config_user_path)
-        .await?;
-
-    let plugs_user_path =
-        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "plugs-repo")?;
-    let plugs_actor_id = daybook_types::doc::user_path::to_actor_id(&plugs_user_path);
-    config_repo
-        .upsert_actor_user_path(plugs_actor_id, plugs_user_path)
-        .await?;
-    let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
-        Arc::clone(&big_repo),
-        app_doc_id.clone(),
-        local_user_path.clone(),
-        sql_ctx.clone(),
-    )
-    .await?;
-    let dispatch_user_path =
-        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "dispatch-repo")?;
-    let dispatch_actor_id = daybook_types::doc::user_path::to_actor_id(&dispatch_user_path);
-    config_repo
-        .upsert_actor_user_path(dispatch_actor_id, dispatch_user_path)
-        .await?;
-    let (progress_repo, progress_stop) =
-        crate::progress::ProgressRepo::boot(sql_ctx.clone()).await?;
+    owners.plugs = Some(plugs_stop);
     let (drawer_repo, drawer_stop) = DrawerRepo::load(
         Arc::clone(&big_repo),
         Arc::clone(&part_store),
@@ -283,12 +259,53 @@ pub async fn test_cx_with_options(
         Some(Arc::clone(&plugs_repo)),
     )
     .await?;
+    owners.drawer = Some(drawer_stop);
+    let (config_repo, config_stop) = crate::config::ConfigRepo::load(
+        Arc::clone(&big_repo),
+        app_doc_id.clone(),
+        Arc::clone(&plugs_repo),
+        local_user_path.clone(),
+        sql_ctx.clone(),
+    )
+    .await?;
+    owners.config = Some(config_stop);
+
+    let config_user_path =
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "config-repo")?;
+    let config_actor_id = daybook_types::doc::user_path::to_actor_id(&config_user_path);
+    config_repo
+        .upsert_actor_user_path(config_actor_id, config_user_path)
+        .await?;
+
+    let plugs_user_path =
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "plugs-repo")?;
+    let plugs_actor_id = daybook_types::doc::user_path::to_actor_id(&plugs_user_path);
+    config_repo
+        .upsert_actor_user_path(plugs_actor_id, plugs_user_path)
+        .await?;
     let drawer_user_path =
         daybook_types::doc::user_path::for_repo(local_user_path.clone(), "drawer-repo")?;
     let drawer_actor_id = daybook_types::doc::user_path::to_actor_id(&drawer_user_path);
     config_repo
         .upsert_actor_user_path(drawer_actor_id, drawer_user_path)
         .await?;
+    let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
+        Arc::clone(&big_repo),
+        app_doc_id.clone(),
+        local_user_path.clone(),
+        sql_ctx.clone(),
+    )
+    .await?;
+    owners.dispatch = Some(dispatch_stop);
+    let dispatch_user_path =
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "dispatch-repo")?;
+    let dispatch_actor_id = daybook_types::doc::user_path::to_actor_id(&dispatch_user_path);
+    config_repo
+        .upsert_actor_user_path(dispatch_actor_id, dispatch_user_path)
+        .await?;
+    let (progress_repo, progress_stop) =
+        crate::progress::ProgressRepo::boot(sql_ctx.clone()).await?;
+    owners.progress = Some(progress_stop);
 
     if options.provision_mltools_models {
         let mltools_config = mltools::models::mobile_default(mltools::models::test_cache_dir())
@@ -395,6 +412,18 @@ pub async fn test_cx_with_options(
         &docs_inventory_doc_id,
     )
     .await?;
+    let app_doc = big_repo
+        .get_doc(&app_doc_id)
+        .await?
+        .into_ready(app_doc_id.clone())?;
+    let drawer_doc = big_repo
+        .get_doc(&drawer_doc_id)
+        .await?
+        .into_ready(drawer_doc_id)?;
+    let config_doc = big_repo
+        .get_doc(&config_doc_id)
+        .await?
+        .into_ready(config_doc_id)?;
     let rcx = crate::repo::RepoCtx::from_parts(
         crate::repo::RepoCtxParts {
             layout,
@@ -402,13 +431,13 @@ pub async fn test_cx_with_options(
             options: crate::repo::RepoOpenOptions::default(),
             sql: sql_ctx.clone(),
             sqlite_local_state_repo: Arc::clone(&sqlite_local_state_repo),
-            sqlite_local_state_stop: std::sync::Mutex::new(None),
+            sqlite_local_state_stop: std::sync::Mutex::new(owners.local_state.take()),
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
             frontier_part_store: big_repo.frontier_part_store(),
             derived_part_store: big_repo.derived_part_store(),
             big_repo: Arc::clone(&big_repo),
-            big_repo_stop: std::sync::Mutex::new(Some(acx_stop)),
+            big_repo_stop: std::sync::Mutex::new(owners.big_repo.take()),
             local_peer_key,
             local_actor_id: local_actor_id.clone(),
             local_user_path: local_user_path.clone(),
@@ -420,21 +449,13 @@ pub async fn test_cx_with_options(
             iroh_secret_key,
             secret_store,
         },
-        big_repo
-            .get_doc(&app_doc_id)
-            .await?
-            .into_ready(app_doc_id.clone())?,
-        big_repo
-            .get_doc(&drawer_doc_id)
-            .await?
-            .into_ready(drawer_doc_id)?,
-        big_repo
-            .get_doc(&config_doc_id)
-            .await?
-            .into_ready(config_doc_id)?,
+        app_doc,
+        drawer_doc,
+        config_doc,
         core_inventory_doc_id,
         docs_inventory_doc_id,
     );
+    owners.ctx = Some(Arc::clone(&rcx));
 
     let (init_repo, init_stop) = crate::rt::init::InitRepo::load(
         Arc::clone(&big_repo),
@@ -445,6 +466,7 @@ pub async fn test_cx_with_options(
         None,
     )
     .await?;
+    owners.init = Some(init_stop);
     let init_user_path =
         daybook_types::doc::user_path::for_repo(local_user_path.clone(), "init-repo")?;
     let init_actor_id = daybook_types::doc::user_path::to_actor_id(&init_user_path);
@@ -465,23 +487,18 @@ pub async fn test_cx_with_options(
         sqlite_local_state_repo,
     )
     .await?;
+    owners.rt = Some(rt_stop);
 
     Ok(DaybookTestContext {
-        _acx: big_repo,
-        big_sync_stop,
-        drawer_repo,
-        rt,
-        dispatch_repo,
-        _config_repo: config_repo,
-        drawer_stop,
-        plugs_stop,
-        config_stop,
-        dispatch_stop,
-        progress_stop,
-        init_stop,
-        sqlite_local_state_stop,
-        rt_stop,
-        _temp_dir: temp_dir,
+        state: Some(DaybookTestState {
+            _acx: big_repo,
+            drawer_repo,
+            rt,
+            dispatch_repo,
+            _config_repo: config_repo,
+            _temp_dir: temp_dir,
+            owners,
+        }),
     })
 }
 
@@ -515,8 +532,15 @@ pub async fn import_and_enable_test_plug(test_cx: &DaybookTestContext) -> Res<()
         format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
             .parse()?;
     let target = test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
-    let status = test_cx.rt.triage_worker.wait_for_activation(&test_cx.rt.plugs_repo, target).await?;
-    eyre::ensure!(matches!(status, crate::rt::triage::ActivationStatus::Active(_)), "test plug activation failed: {status:?}");
+    let status = test_cx
+        .rt
+        .triage_worker
+        .wait_for_activation(&test_cx.rt.plugs_repo, target)
+        .await?;
+    eyre::ensure!(
+        matches!(status, crate::rt::triage::ActivationStatus::Active(_)),
+        "test plug activation failed: {status:?}"
+    );
     Ok(())
 }
 pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::StopToken)> {
@@ -575,9 +599,8 @@ pub async fn boot_repo() -> Res<(
         big_sync_host,
         Box::new(move || {
             async move {
-                stop.stop().await?;
                 big_sync_stop.stop().await?;
-                eyre::Ok(())
+                stop.stop().await
             }
             .boxed()
         }),
@@ -604,6 +627,7 @@ pub async fn boot_disk_repo(
         group_part_group_scope: Default::default(),
     })
     .await?;
+    let mut owners = sync_node::Owners::before_context(stop);
     let part_store = repo.shared_part_store();
     let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
         Arc::clone(&part_store),
@@ -613,6 +637,7 @@ pub async fn boot_disk_repo(
         HARNESS_SYNC_MODE,
         Arc::from("daybook-core-test"),
     )?;
+    owners.big_sync = Some(big_sync_stop);
     let big_sync_host = big_sync::Ctx {
         store: part_store,
         worker,
@@ -622,11 +647,88 @@ pub async fn boot_disk_repo(
         big_sync_host,
         Box::new(move || {
             async move {
-                stop.stop().await?;
-                big_sync_stop.stop().await?;
-                eyre::Ok(())
+                owners.stop(/*runtime_first*/ false).await
             }
             .boxed()
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn disk_bootstrap_early_error_preserves_document_for_reopen() -> Res<()> {
+        use automerge::{ReadDoc, transaction::Transactable};
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().join("repo");
+        let mut witness = None;
+        let failed: Res<()> = async {
+            let (repo, _sync, _stop) = boot_disk_repo(root.clone()).await?;
+            let mut seed = automerge::Automerge::new();
+            let mut transaction = seed.transaction();
+            transaction.put(automerge::ROOT, "note", "retained after refusal")?;
+            transaction.commit();
+            let document = repo.create_doc(seed).await?.document_id();
+            repo.wait_for_quiescence(None).await?;
+            witness = Some((repo, document));
+            eyre::bail!("scenario refused after durable native publication");
+        }
+        .await;
+        let failure = failed.expect_err("exercise dropped teardown closure");
+        let (stopped, document) = witness.ok_or(failure)?;
+        assert!(stopped.get_doc(&document).await.is_err());
+        drop(stopped);
+        let (reopened, _sync, stop) = boot_disk_repo(root).await?;
+        let big_repo::DocLookup::Ready(handle) = reopened.get_doc(&document).await? else {
+            panic!("early-error teardown lost the durable document");
+        };
+        let retained = handle
+            .with_document_read(|doc| {
+                doc.get(automerge::ROOT, "note")
+                    .unwrap()
+                    .unwrap()
+                    .0
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .await;
+        assert_eq!(retained, "retained after refusal");
+        drop(handle);
+        stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_context_early_error_drains_native_actor_before_removing_files() -> Res<()> {
+        let mut witness = None;
+        let failed: Res<()> = async {
+            let context = test_cx(utils_rs::function_full!()).await?;
+            let document = context.rt.rcx.doc_config.document_id();
+            assert!(matches!(
+                context._acx.get_doc(&document).await?,
+                big_repo::DocLookup::Ready(_)
+            ));
+            witness = Some((
+                Arc::clone(&context._acx),
+                document,
+                context._temp_dir.path().to_owned(),
+            ));
+            eyre::bail!("scenario refused after native bootstrap");
+        }
+        .await;
+        let failure = failed.expect_err("exercise early-error teardown");
+        let (repo, document, directory) = witness.ok_or(failure)?;
+        assert!(
+            repo.get_doc(&document).await.is_err(),
+            "the native actor must not serve after its context leaves scope"
+        );
+        assert!(
+            !directory.exists(),
+            "temporary files remain until teardown completes"
+        );
+        Ok(())
+    }
 }

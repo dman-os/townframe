@@ -20,16 +20,16 @@
 use crate::interlude::*;
 
 use aes_gcm::{
-    aead::{AeadInPlace, KeyInit},
     Aes128Gcm, Nonce,
+    aead::{AeadInPlace, KeyInit},
 };
 use hkdf::Hkdf;
 use iroh_blobs::Hash;
 use sha2::Sha256;
 
-use super::keys::MasterKey;
-use super::params::{validate_record_size, EncodingParams, Padding, DEFAULT_PADDING, RECORD_SIZE};
 use super::Res;
+use super::keys::MasterKey;
+use super::params::{DEFAULT_PADDING, EncodingParams, Padding, RECORD_SIZE, validate_record_size};
 pub(crate) const SALT_LEN: usize = 16;
 /// GCM tag (16) + record delimiter byte (1).
 pub(crate) const RECORD_OVERHEAD: usize = 17;

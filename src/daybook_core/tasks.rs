@@ -33,6 +33,7 @@
 //! data, and an unknown persisted version is unsupported data, not evidence of
 //! cancellation.
 
+pub(crate) mod control;
 pub mod driver;
 #[cfg(test)]
 mod e2e;
@@ -43,10 +44,11 @@ pub mod rpc;
 pub mod storage;
 pub mod store;
 #[cfg(test)]
-mod test_util;
+pub(crate) mod test_util;
 pub mod transport;
 pub mod worker;
 
+pub use control::RegisterSourceControl;
 pub use model::{
     ActiveAttemptSummary, AllocationId, AttemptState, CapabilitySummary, Capacity,
     CollisionRejected, CoordinationIds, CoordinationSlotKey, DeclarationViolation, DeclineReason,

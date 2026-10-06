@@ -44,10 +44,49 @@ pub enum AttemptOutcome {
 
 pub type AttemptSubscription = AdapterFuture<AttemptOutcome>;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DomainReceipt {
+/// Durable acknowledgement of this exact request, not canonical result selection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DomainIncorporationAck {
     pub task_id: PoolTaskId,
-    pub summary: TerminalSummary,
+    pub declaration_digest: [u8; 32],
+    pub incorporated: TerminalSummary,
+}
+
+#[derive(Clone, Debug)]
+pub enum DomainIncorporationRequest {
+    LocalOutcome {
+        attempt: AttemptKey,
+        fact: TerminalFact,
+    },
+    ObservedTerminal {
+        summary: TerminalSummary,
+        affected_attempt: Option<AttemptKey>,
+    },
+}
+
+impl DomainIncorporationRequest {
+    pub fn summary(&self) -> TerminalSummary {
+        match self {
+            Self::LocalOutcome {
+                fact:
+                    TerminalFact::Succeeded {
+                        attempt_id,
+                        result_ref,
+                    },
+                ..
+            } => TerminalSummary::Succeeded {
+                attempt_id: *attempt_id,
+                result_ref: result_ref.clone(),
+            },
+            Self::LocalOutcome {
+                fact: TerminalFact::Cancelled { reason },
+                ..
+            } => TerminalSummary::Cancelled {
+                reason: reason.clone(),
+            },
+            Self::ObservedTerminal { summary, .. } => summary.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -74,9 +113,8 @@ pub trait TaskExecutionAdapter: Send + Sync + 'static {
     fn incorporate(
         &self,
         declaration: TaskDeclaration,
-        summary: TerminalSummary,
-        attempt: Option<AttemptKey>,
-    ) -> AdapterFuture<DomainReceipt>;
+        request: DomainIncorporationRequest,
+    ) -> AdapterFuture<DomainIncorporationAck>;
     fn watch(&self, watch: ReadinessWatch) -> AdapterFuture<AdapterFuture<()>>;
     fn recover(&self, pool: TaskPoolId) -> AdapterFuture<Vec<RecoveredAttempt>>;
     fn is_proven_obsolete(&self, declaration: TaskDeclaration) -> AdapterFuture<bool>;
@@ -99,7 +137,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 /// Explicit local tuning, never a distributed lease or exactly-once guarantee.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct SchedulingTiming {
     pub heartbeat_interval: std::time::Duration,
     pub router_settle: std::time::Duration,
@@ -258,6 +296,8 @@ pub(crate) struct PoolStatus {
 
 #[cfg(test)]
 struct CheckpointAdmissionGate {
+    task: PoolTaskId,
+    observed: bool,
     entered: Option<oneshot::Sender<()>>,
     release: oneshot::Receiver<()>,
 }
@@ -275,6 +315,7 @@ struct PoolInner {
     timing: SchedulingTiming,
     tx: mpsc::Sender<Command>,
     cancel: CancellationToken,
+    shutdown: CancellationToken,
     join: std::sync::Mutex<Option<tokio::task::JoinHandle<Res<()>>>>,
 }
 
@@ -289,6 +330,7 @@ impl PoolDriverHandle {
     #[cfg(test)]
     pub(crate) fn pause_checkpoint_admission(
         &self,
+        task: PoolTaskId,
     ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
         let (entered, observed) = oneshot::channel();
         let (release, wait) = oneshot::channel();
@@ -298,6 +340,8 @@ impl PoolDriverHandle {
                 .lock()
                 .expect(ERROR_MUTEX)
                 .replace(CheckpointAdmissionGate {
+                    task,
+                    observed: false,
                     entered: Some(entered),
                     release: wait
                 })
@@ -318,13 +362,21 @@ impl PoolDriverHandle {
             .map_err(|_| eyre::eyre!("pool scheduling owner stopped"))?;
         received.await?
     }
+    /// Quiesce for runtime shutdown without withdrawing durable admitted work.
+    pub(crate) async fn shutdown(&self) -> Res<()> {
+        self.0.shutdown.cancel();
+        self.stop().await
+    }
+
     /// Explicit domain detach. Retained transport data does not restart scheduling.
     pub async fn stop(&self) -> Res<()> {
-        let owner = self
-            .0
-            .owner
-            .upgrade()
-            .expect("pool owner outlives its handles");
+        let Some(owner) = self.0.owner.upgrade() else {
+            // Transport may have joined every actor before the runtime releases
+            // its retained handles. A missing live owner is still an invariant.
+            assert!(self.0.cancel.is_cancelled());
+            assert!(self.0.join.lock().expect(ERROR_MUTEX).is_none());
+            return Ok(());
+        };
         let mut pools = owner.pools.lock().await;
         if pools
             .get(&self.0.snapshot.descriptor.pool_id)
@@ -420,6 +472,8 @@ pub(crate) struct NativeTaskDriver {
     endpoint: iroh::Endpoint,
     identities: big_repo::rpc::BigRepoRpcHandle,
     pools: tokio::sync::Mutex<HashMap<TaskPoolId, PoolDriverHandle>>,
+    #[cfg(test)]
+    pub(crate) revision_read_delay: std::sync::Mutex<std::time::Duration>,
     cancel: CancellationToken,
     join: std::sync::Mutex<Option<tokio::task::JoinHandle<Res<()>>>>,
 }
@@ -438,51 +492,146 @@ impl NativeTaskDriver {
             endpoint,
             identities,
             pools: Default::default(),
+            #[cfg(test)]
+            revision_read_delay: Default::default(),
             cancel: CancellationToken::new(),
             join: Default::default(),
         });
         let weak = Arc::downgrade(&owner);
         let cancel = owner.cancel.clone();
         let join = tokio::spawn(async move {
-            loop {
-                let incoming = tokio::select! {
-                    _ = cancel.cancelled() => return Ok(()),
-                    incoming = rx.recv() => incoming,
-                };
-                let Some(AuthenticatedTaskRequest {
-                    peer,
-                    endpoint,
-                    request,
-                }) = incoming
-                else {
-                    return Ok(());
-                };
-                let Some(owner) = weak.upgrade() else {
-                    return Ok(());
-                };
-                let pool = match &request {
-                    TaskCoordinationRpcMessage::RegisterExecutor(message) => &message.inner.pool,
-                    TaskCoordinationRpcMessage::Report(message) => &message.inner.pool,
-                };
-                let handle = owner.pools.lock().await.get(pool).cloned();
-                if let Some(handle) = handle {
-                    if handle
-                        .0
-                        .tx
-                        .send(Command::Rpc {
-                            peer,
-                            endpoint,
-                            request,
-                        })
-                        .await
-                        .is_err()
-                        && !handle.0.cancel.is_cancelled()
-                    {
-                        panic!("live pool RPC consumer closed");
+            let run = async {
+                loop {
+                    let incoming = rx.recv().await;
+                    let Some(AuthenticatedTaskRequest {
+                        peer,
+                        endpoint,
+                        request,
+                    }) = incoming
+                    else {
+                        return Ok(());
+                    };
+                    let Some(owner) = weak.upgrade() else {
+                        return Ok(());
+                    };
+                    let request = match request {
+                        TaskCoordinationRpcMessage::CurrentPoolControl(message) => {
+                            use super::rpc::ControlRejection;
+                            let result = if owner.identities.peer_for_endpoint(endpoint)
+                                != Some(peer.clone())
+                            {
+                                Err(big_repo::CoordinationError::Unauthorized)
+                            } else {
+                                async {
+                                    if let Some(control) = &message.inner.offered {
+                                        owner
+                                            .transport
+                                            .accept_current_control(
+                                                &message.inner.pool,
+                                                &peer,
+                                                control,
+                                            )
+                                            .await?;
+                                    }
+                                    owner
+                                        .transport
+                                        .current_control(&message.inner.pool, &peer)
+                                        .await
+                                }
+                                .await
+                            };
+                            let reply = result.map_err(ControlRejection::from);
+                            // The requester may disconnect before its response.
+                            drop(message.tx.send(reply).await);
+                            continue;
+                        }
+                        TaskCoordinationRpcMessage::CurrentProcessorControl(message) => {
+                            let result = if owner.identities.peer_for_endpoint(endpoint)
+                                != Some(peer.clone())
+                            {
+                                Err(big_repo::CoordinationError::Unauthorized)
+                            } else {
+                                async {
+                                    if let Some(control) = &message.inner.offered {
+                                        owner
+                                            .transport
+                                            .accept_processor_control(
+                                                &message.inner.processor,
+                                                &peer,
+                                                control,
+                                            )
+                                            .await?;
+                                    }
+                                    owner
+                                        .transport
+                                        .current_processor_control(&message.inner.processor, &peer)
+                                        .await
+                                }
+                                .await
+                            };
+                            drop(
+                                message
+                                    .tx
+                                    .send(result.map_err(super::rpc::ControlRejection::from))
+                                    .await,
+                            );
+                            continue;
+                        }
+                        TaskCoordinationRpcMessage::RegisterSourceControl(message) => {
+                            let result = if owner.identities.peer_for_endpoint(endpoint)
+                                != Some(peer.clone())
+                            {
+                                Err(big_repo::CoordinationError::Unauthorized)
+                            } else {
+                                owner.transport.source_control(&peer, &message.inner).await
+                            };
+                            drop(
+                                message
+                                    .tx
+                                    .send(result.map_err(super::rpc::ControlRejection::from))
+                                    .await,
+                            );
+                            continue;
+                        }
+                        request => request,
+                    };
+                    let pool = match &request {
+                        TaskCoordinationRpcMessage::RegisterExecutor(message) => {
+                            &message.inner.pool
+                        }
+                        TaskCoordinationRpcMessage::Report(message) => &message.inner.pool,
+                        TaskCoordinationRpcMessage::CurrentPoolControl(_)
+                        | TaskCoordinationRpcMessage::CurrentProcessorControl(_)
+                        | TaskCoordinationRpcMessage::RegisterSourceControl(_) => {
+                            unreachable!("control handled before scheduling ingress")
+                        }
+                    };
+                    let handle = owner.pools.lock().await.get(pool).cloned();
+                    if let Some(handle) = handle {
+                        if handle
+                            .0
+                            .tx
+                            .send(Command::Rpc {
+                                peer,
+                                endpoint,
+                                request,
+                            })
+                            .await
+                            .is_err()
+                            && !handle.0.cancel.is_cancelled()
+                        {
+                            panic!("live pool RPC consumer closed");
+                        }
+                    } else {
+                        reject_request(request, "pool has no scheduling owner").await;
                     }
-                } else {
-                    reject_request(request, "pool has no scheduling owner").await;
                 }
+            };
+            // Shutdown cancels in-flight admission as well as the next receive.
+            // Selection/certificates committed before cancellation are resumable.
+            tokio::select! {
+                _ = cancel.cancelled() => Ok(()),
+                result = run => result,
             }
         });
         *owner.join.lock().expect(ERROR_MUTEX) = Some(join);
@@ -516,8 +665,10 @@ impl NativeTaskDriver {
                 "stopped scheduling pool cannot be reattached to a live owner"
             );
             eyre::ensure!(
-                existing.0.snapshot.reference == snapshot.reference
-                    && existing.0.snapshot.descriptor == snapshot.descriptor
+                self.transport
+                    .selected_pool(&snapshot.descriptor.pool_id)
+                    .is_some_and(|(selected, _)| selected.reference == snapshot.reference
+                        && selected.descriptor == snapshot.descriptor)
                     && Arc::ptr_eq(&existing.0.adapter, &adapter)
                     && existing.0.capabilities == capabilities
                     && existing.0.capacity == capacity
@@ -604,6 +755,7 @@ impl NativeTaskDriver {
         let checkpoint_gate = Arc::new(std::sync::Mutex::new(None));
         let (tx, rx) = mpsc::channel(128);
         let cancel = CancellationToken::new();
+        let shutdown = CancellationToken::new();
         let handle = PoolDriverHandle(Arc::new(PoolInner {
             owner: Arc::downgrade(self),
             #[cfg(test)]
@@ -617,6 +769,7 @@ impl NativeTaskDriver {
             timing,
             tx,
             cancel: cancel.clone(),
+            shutdown: shutdown.clone(),
             join: Default::default(),
         }));
         let mut actor = PoolActor {
@@ -629,7 +782,8 @@ impl NativeTaskDriver {
             timing,
             router,
             worker,
-            reader,
+            reader: Some(reader),
+            reader_next: None,
             ephemeral,
             _authority_ticket: authority_ticket,
             authority_rx,
@@ -641,7 +795,10 @@ impl NativeTaskDriver {
             checkpoint_gate,
             replay_required: false,
             rx,
+            selection_rx: self.transport.selection_changes(),
+            selection_dirty: true,
             cancel,
+            shutdown,
             jobs: JoinSet::new(),
             prepared: BTreeMap::new(),
             finishing: BTreeMap::new(),
@@ -671,10 +828,11 @@ impl NativeTaskDriver {
                 _ = cancel.cancelled() => Ok(()),
                 result = actor.run() => result,
             };
+            tracing::debug!(node = %actor.node, cancelled = cancel.is_cancelled(), owner_stopped = actor.owner.cancel.is_cancelled(), runtime_stopped = actor.shutdown.is_cancelled(), "native scheduling actor finished");
             if cancel.is_cancelled() {
                 // Process shutdown preserves admitted durable jobs for recovery.
                 // Explicit domain detach still withdraws execution participation.
-                let detached = !actor.owner.cancel.is_cancelled();
+                let detached = !actor.owner.cancel.is_cancelled() && !actor.shutdown.is_cancelled();
                 actor
                     .withdraw(detached)
                     .await
@@ -726,6 +884,30 @@ async fn reject_request(request: TaskCoordinationRpcMessage, reason: &str) {
         TaskCoordinationRpcMessage::Report(message) => {
             drop(message.tx.send(Err(reason.to_owned())).await);
         }
+        TaskCoordinationRpcMessage::CurrentPoolControl(message) => {
+            drop(
+                message
+                    .tx
+                    .send(Err(super::rpc::ControlRejection::Invalid(reason.into())))
+                    .await,
+            );
+        }
+        TaskCoordinationRpcMessage::CurrentProcessorControl(message) => {
+            drop(
+                message
+                    .tx
+                    .send(Err(super::rpc::ControlRejection::Invalid(reason.into())))
+                    .await,
+            );
+        }
+        TaskCoordinationRpcMessage::RegisterSourceControl(message) => {
+            drop(
+                message
+                    .tx
+                    .send(Err(super::rpc::ControlRejection::Invalid(reason.into())))
+                    .await,
+            );
+        }
     }
 }
 
@@ -739,10 +921,25 @@ struct PoolActor {
     timing: SchedulingTiming,
     router: RouterMachine<NativeIds>,
     worker: PoolWorkerMachine<NativeIds>,
-    reader: Box<dyn big_sync::LocalPartRevisionReader>,
+    reader: Option<Box<dyn big_sync::LocalPartRevisionReader>>,
+    #[expect(clippy::type_complexity)]
+    reader_next: Option<
+        Pin<
+            Box<
+                dyn Future<
+                        Output = (
+                            Box<dyn big_sync::LocalPartRevisionReader>,
+                            Res<RevisionRead<u64, PartEvent>>,
+                        ),
+                    > + Send,
+            >,
+        >,
+    >,
     ephemeral: big_repo::BigEphemeralSubscription,
     _authority_ticket: big_repo::BigRepoDomainListenerRegistration,
     authority_rx: mpsc::UnboundedReceiver<Vec<big_repo::BigRepoDomainNotification>>,
+    selection_rx: tokio::sync::watch::Receiver<()>,
+    selection_dirty: bool,
     pending_revision: Option<(u64, VecDeque<PartEvent>)>,
     suspended: bool,
     #[cfg(test)]
@@ -752,6 +949,7 @@ struct PoolActor {
     replay_required: bool,
     rx: mpsc::Receiver<Command>,
     cancel: CancellationToken,
+    shutdown: CancellationToken,
     jobs: JoinSet<Completion>,
     prepared: BTreeMap<PoolAttemptId, PreparedAttempt>,
     start_cancels: BTreeMap<PoolAttemptId, CancellationToken>,
@@ -786,6 +984,12 @@ impl PoolActor {
             if *current == status {
                 false
             } else {
+                tracing::debug!(
+                    pool = %self.snapshot.descriptor.pool_id,
+                    node = %self.owner.repo.local_peer_id(),
+                    ?status,
+                    "native scheduling owner state changed"
+                );
                 *current = status;
                 true
             }
@@ -977,6 +1181,59 @@ impl PoolActor {
         Ok(())
     }
 
+    async fn refresh_transport(&mut self) -> Res<()> {
+        if !self.selection_dirty {
+            return Ok(());
+        }
+        let (snapshot, tasks) = self
+            .owner
+            .transport
+            .selected_pool(&self.snapshot.descriptor.pool_id)
+            .expect("live scheduling retains its transport owner");
+        if snapshot.reference == self.snapshot.reference {
+            self.selection_dirty = false;
+            return Ok(());
+        }
+        admit(&self.owner.repo, &snapshot, None).await?;
+        eyre::ensure!(
+            snapshot.descriptor.register_scope == self.snapshot.descriptor.register_scope
+                && snapshot.descriptor.register_incarnation
+                    == self.snapshot.descriptor.register_incarnation
+                && snapshot.descriptor.router_slot == self.snapshot.descriptor.router_slot
+                && snapshot.descriptor.router_heartbeat_topic
+                    == self.snapshot.descriptor.router_heartbeat_topic,
+            "transport rotation changes live scheduling identity"
+        );
+        let reader = self
+            .owner
+            .transport
+            .shared_store()
+            .open_revision_reader(SubPartsRequest {
+                lower_bound: 0,
+                targets: [SubscriptionTarget::Part {
+                    part_id: snapshot.descriptor.active_task_part.clone(),
+                    cursor: 0,
+                }]
+                .into(),
+            })
+            .await?
+            .map_err(|error| ferr!("rotated scheduling reader: {error:?}"))?;
+        let checkpoint = tasks
+            .register()
+            .consumer_checkpoint(b"native-scheduling")
+            .await?;
+        // Drop the predecessor read, but retain the admitted attempts, pending
+        // effects and exact unread revision. Replay reconstructs the new part;
+        // its selector checkpoint comes from the durable successor binding.
+        self.reader_next = None;
+        self.reader = Some(reader);
+        self.snapshot = snapshot;
+        self.tasks = tasks;
+        self.checkpoint = checkpoint;
+        self.selection_dirty = false;
+        Ok(())
+    }
+
     async fn run(&mut self) -> Res<()> {
         loop {
             match self.run_admitted().await {
@@ -984,7 +1241,26 @@ impl PoolActor {
                 Err(error) => {
                     let revoked = match error.downcast_ref::<big_repo::CoordinationError>() {
                         Some(big_repo::CoordinationError::Pending) => false,
-                        Some(big_repo::CoordinationError::Unauthorized) => true,
+                        Some(big_repo::CoordinationError::Unauthorized) => {
+                            // A retired SQL binding rejects publication with the same
+                            // typed error as native revocation. Only current native
+                            // denial may cancel already admitted durable execution.
+                            let (selected, _) = self
+                                .owner
+                                .transport
+                                .selected_pool(&self.snapshot.descriptor.pool_id)
+                                .expect("live scheduling retains its transport owner");
+                            match admit(&self.owner.repo, &selected, None).await {
+                                Ok(_) => false,
+                                Err(admission) => {
+                                    match admission.downcast_ref::<big_repo::CoordinationError>() {
+                                        Some(big_repo::CoordinationError::Pending) => false,
+                                        Some(big_repo::CoordinationError::Unauthorized) => true,
+                                        _ => return Err(admission),
+                                    }
+                                }
+                            }
+                        }
                         _ => return Err(error),
                     };
                     self.withdraw(revoked).await?;
@@ -995,6 +1271,10 @@ impl PoolActor {
                     // admission uses the same bounded recheck cadence as transport.
                     tokio::select! {
                         _ = self.cancel.cancelled() => return Ok(()),
+                        changed = self.selection_rx.changed() => {
+                            changed.expect("retained transport selection channel closed");
+                            self.selection_dirty = true;
+                        }
                         changes = self.authority_rx.recv() => {
                             changes.ok_or_else(|| ferr!("pool authority listener closed"))?;
                         }
@@ -1043,7 +1323,10 @@ impl PoolActor {
         let takeover = tokio::time::Instant::now() + self.snapshot_timing().router_takeover_after;
         let mut next_takeover = takeover;
         loop {
+            self.refresh_transport().await?;
+            tracing::debug!(node = %self.owner.repo.local_peer_id(), phase = "admission", "native scheduling await beginning");
             let authority = admit(&self.owner.repo, &self.snapshot, None).await?;
+            tracing::debug!(node = %self.owner.repo.local_peer_id(), phase = "admission", "native scheduling await completed");
             if !self
                 .router
                 .edit_agents()
@@ -1074,20 +1357,22 @@ impl PoolActor {
                 self.lose_route();
             }
             if self.replay_required {
-                self.reader = self
-                    .owner
-                    .transport
-                    .shared_store()
-                    .open_revision_reader(SubPartsRequest {
-                        lower_bound: 0,
-                        targets: [SubscriptionTarget::Part {
-                            part_id: self.snapshot.descriptor.active_task_part.clone(),
-                            cursor: 0,
-                        }]
-                        .into(),
-                    })
-                    .await?
-                    .map_err(|error| ferr!("task scheduling reader: {error:?}"))?;
+                self.reader_next = None;
+                self.reader = Some(
+                    self.owner
+                        .transport
+                        .shared_store()
+                        .open_revision_reader(SubPartsRequest {
+                            lower_bound: 0,
+                            targets: [SubscriptionTarget::Part {
+                                part_id: self.snapshot.descriptor.active_task_part.clone(),
+                                cursor: 0,
+                            }]
+                            .into(),
+                        })
+                        .await?
+                        .map_err(|error| ferr!("task scheduling reader: {error:?}"))?,
+                );
                 self.pending_revision = None;
                 self.replay_required = false;
             }
@@ -1095,12 +1380,35 @@ impl PoolActor {
                 self.worker_event(WorkerEvent::ParticipationChanged { allowed: true });
             }
             self.suspended = false;
+            tracing::debug!(node = %self.owner.repo.local_peer_id(), phase = "actions", "native scheduling await beginning");
             self.actions().await?;
+            tracing::debug!(node = %self.owner.repo.local_peer_id(), phase = "actions", "native scheduling await completed");
+            tracing::debug!(node = %self.owner.repo.local_peer_id(), phase = "revision", "native scheduling await beginning");
             self.incorporate_pending_revision().await?;
+            // Keep the multi-query read alive when heartbeats or RPC win select.
+            // Recreating it on every wake can starve delivery under disk load.
+            if self.reader_next.is_none() {
+                let mut reader = self.reader.take().expect("revision reader has one owner");
+                #[cfg(test)]
+                let delay = *self.owner.revision_read_delay.lock().expect(ERROR_MUTEX);
+                self.reader_next = Some(Box::pin(async move {
+                    #[cfg(test)]
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    let result = reader.next(RevisionReadLimits::default()).await;
+                    (reader, result)
+                }));
+            }
+            tracing::debug!(node = %self.owner.repo.local_peer_id(), phase = "revision", "native scheduling await completed");
             #[cfg(test)]
             self.publish_status();
             tokio::select! {
                 _ = self.cancel.cancelled() => return Ok(()),
+                changed = self.selection_rx.changed() => {
+                    changed.expect("retained transport selection channel closed");
+                    self.selection_dirty = true;
+                }
                 command = self.rx.recv() => {
                     let Some(command) = command else { return Ok(()); };
                     match command {
@@ -1113,10 +1421,16 @@ impl PoolActor {
                             // A cancelled submit future may drop its reply receiver.
                             drop(reply.send(result));
                         }
-                        Command::Rpc { peer, endpoint, request } => self.rpc(peer, endpoint, request).await.wrap_err("handling native scheduling RPC")?,
+                        Command::Rpc { peer, endpoint, request } => {
+                            tracing::debug!(node = %self.node, phase = "rpc", "native scheduling selected await beginning");
+                            self.rpc(peer, endpoint, request).await.wrap_err("handling native scheduling RPC")?;
+                            tracing::debug!(node = %self.node, phase = "rpc", "native scheduling selected await completed");
+                        },
                     }
                 }
-                revision = self.reader.next(RevisionReadLimits::default()) => {
+                (reader, revision) = self.reader_next.as_mut().expect("owned revision read") => {
+                    self.reader_next = None;
+                    self.reader = Some(reader);
                     match revision.wrap_err("reading native scheduling revision")? {
                         RevisionRead::ReplayComplete { .. } => {}
                         RevisionRead::Entries { revision, entries } => {
@@ -1129,15 +1443,20 @@ impl PoolActor {
                 }
                 event = self.ephemeral.recv() => {
                     let Some(event) = event else { eyre::bail!("native heartbeat subscription closed"); };
+                    tracing::debug!(node = %self.node, phase = "heartbeat", "native scheduling selected await beginning");
                     self.heartbeat(event).await.wrap_err("incorporating native scheduling heartbeat")?;
+                    tracing::debug!(node = %self.node, phase = "heartbeat", "native scheduling selected await completed");
                 }
                 completion = self.jobs.join_next(), if !self.jobs.is_empty() => {
                     let completion = completion.expect(ERROR_IMPOSSIBLE).expect("native pool job panicked");
                     let completion_kind = std::mem::discriminant(&completion);
+                    tracing::debug!(node = %self.node, ?completion_kind, phase = "completion", "native scheduling selected await beginning");
                     self.complete(completion).await
                         .wrap_err_with(|| format!("completing native scheduling job {completion_kind:?}"))?;
+                    tracing::debug!(node = %self.node, ?completion_kind, phase = "completion", "native scheduling selected await completed");
                 }
                 _ = tick.tick() => {
+                    tracing::debug!(node = %self.owner.repo.local_peer_id(), phase = "tick", "native scheduling await beginning");
                     self.expire().await?;
                     self.router_event(RouterEvent::HeartbeatDue);
                     self.router_event(RouterEvent::RoutingTick);
@@ -1148,6 +1467,7 @@ impl PoolActor {
                         next_takeover = tokio::time::Instant::now() + self.snapshot_timing().router_takeover_after;
                     }
                     self.reconnect().await?;
+                    tracing::debug!(node = %self.owner.repo.local_peer_id(), phase = "tick", "native scheduling await completed");
                 }
             }
         }
@@ -1173,7 +1493,7 @@ impl PoolActor {
                 #[cfg(test)]
                 {
                     let mut gate = self.checkpoint_gate.lock().expect(ERROR_MUTEX);
-                    if let Some(paused) = gate.as_mut() {
+                    if let Some(paused) = gate.as_mut().filter(|paused| paused.observed) {
                         if let Some(entered) = paused.entered.take() {
                             entered.send(()).expect(ERROR_CHANNEL);
                         }
@@ -1231,9 +1551,21 @@ impl PoolActor {
             .try_into()
             .map_err(|_| eyre::eyre!("unknown register logical slot in task scheduling part"))?;
         let task_id = PoolTaskId::new(digest);
+        #[cfg(test)]
+        {
+            // Pause the target task checkpoint, not prior router/terminal traffic:
+            // suspending earlier would reject the very submission under observation.
+            if let Some(gate) = self.checkpoint_gate.lock().expect(ERROR_MUTEX).as_mut()
+                && gate.task == task_id
+            {
+                gate.observed = true;
+            }
+        }
+        tracing::debug!(node = %self.node, task = %task_id, removed, session = ?self.worker.current_session(), "native scheduling task revision observed");
         if removed {
             self.router_event(RouterEvent::TaskRemoved { task_id });
         } else if let Some(ticket) = self.tasks.ticket(task_id).await? {
+            tracing::debug!(node = %self.node, task = %task_id, producer = ?ticket.declaration.declaration.producer, terminal = ticket.terminal_summary().is_some(), "native scheduling task ticket decoded");
             // Durable remote incorporation precedes checkpoint acknowledgement.
             // The worker also propagates monotonic summary transitions through
             // its own exact finishing acknowledgement path.
@@ -1242,12 +1574,17 @@ impl PoolActor {
                     .adapter
                     .incorporate(
                         ticket.declaration.declaration.clone(),
-                        summary.clone(),
-                        None,
+                        DomainIncorporationRequest::ObservedTerminal {
+                            summary: summary.clone(),
+                            affected_attempt: None,
+                        },
                     )
                     .await?;
                 eyre::ensure!(
-                    receipt.task_id == task_id && receipt.summary == summary,
+                    receipt.task_id == task_id
+                        && receipt.declaration_digest
+                            == ticket.declaration.declaration.canonical_digest()
+                        && receipt.incorporated == summary,
                     "domain returned another terminal receipt"
                 );
             }
@@ -1439,6 +1776,11 @@ impl PoolActor {
         let session = match &request {
             TaskCoordinationRpcMessage::RegisterExecutor(message) => message.inner.session,
             TaskCoordinationRpcMessage::Report(message) => message.inner.session,
+            TaskCoordinationRpcMessage::CurrentPoolControl(_)
+            | TaskCoordinationRpcMessage::CurrentProcessorControl(_)
+            | TaskCoordinationRpcMessage::RegisterSourceControl(_) => {
+                unreachable!("control cannot enter a scheduling actor")
+            }
         };
         if !self.router.is_routing()
             || peer != PeerKey::new(session.node.to_bytes32())
@@ -1556,6 +1898,11 @@ impl PoolActor {
                 }
                 self.report_event(session, message.inner.report);
                 drop(message.tx.send(Ok(())).await);
+            }
+            TaskCoordinationRpcMessage::CurrentPoolControl(_)
+            | TaskCoordinationRpcMessage::CurrentProcessorControl(_)
+            | TaskCoordinationRpcMessage::RegisterSourceControl(_) => {
+                unreachable!("control cannot enter a scheduling actor")
             }
         }
         Ok(())
@@ -1745,6 +2092,20 @@ impl PoolActor {
                 ticket,
                 result,
             } => {
+                tracing::debug!(
+                    task = %ticket.declaration.declaration.task_id,
+                    node = %self.owner.repo.local_peer_id(),
+                    classification = match &result {
+                        Ok(TaskClassification::Runnable(_)) => "runnable",
+                        Ok(TaskClassification::NotReady(_)) => "not-ready",
+                        Ok(TaskClassification::Obsolete) => "obsolete",
+                        Ok(TaskClassification::CoordinationIncomplete) => "coordination-incomplete",
+                        Ok(TaskClassification::Invalid) => "invalid",
+                        Err(_) => "error",
+                    },
+                    pending = self.worker.classification_pending(&token),
+                    "native executor classification completed"
+                );
                 if self.worker.classification_pending(&token) {
                     match result {
                         Ok(classification) => self.worker_event(WorkerEvent::Classified {
@@ -1928,6 +2289,13 @@ impl PoolActor {
                 generation,
                 result,
             } => {
+                tracing::debug!(
+                    task = %task,
+                    node = %self.owner.repo.local_peer_id(),
+                    generation,
+                    error = ?result.as_ref().err(),
+                    "native executor readiness watch completed"
+                );
                 result?;
                 if self.watch_generations.get(&task) == Some(&generation) {
                     self.watch_generations.remove(&task);
@@ -2041,14 +2409,22 @@ impl PoolActor {
             } => {
                 let result = async {
                 tracing::info!(target: "triage_terminal_lifetime", task = %declaration.task_id, ?attempt_id, "incorporating domain terminal");
-                let key = attempt_id.map(|attempt_id| self.key(declaration.task_id, attempt_id));
+                let request = if let Some(attempt_id) = attempt_id {
+                    DomainIncorporationRequest::LocalOutcome {
+                        attempt: self.key(declaration.task_id, attempt_id),
+                        fact: self.finishing.get(&attempt_id).expect("local acknowledgement requires actual outcome").clone(),
+                    }
+                } else {
+                    DomainIncorporationRequest::ObservedTerminal { summary: summary.clone(), affected_attempt: None }
+                };
+                eyre::ensure!(request.summary() == summary, "incorporation changes original finishing fact");
                 let receipt = self
                     .adapter
-                    .incorporate(*declaration.clone(), summary.clone(), key)
+                    .incorporate(*declaration.clone(), request)
                     .await?;
                 tracing::info!(target: "triage_terminal_lifetime", task = %declaration.task_id, "domain terminal incorporated");
                 eyre::ensure!(
-                    receipt.task_id == declaration.task_id && receipt.summary == summary,
+                    receipt.task_id == declaration.task_id && receipt.declaration_digest == declaration.canonical_digest() && receipt.incorporated == summary,
                     "domain returned another settlement receipt"
                 );
                 if let Some(attempt_id) = attempt_id {
@@ -2307,6 +2683,7 @@ impl PoolActor {
                 task_id,
                 declaration,
             } => {
+                tracing::debug!(task = %task_id, ?session, node = %self.owner.repo.local_peer_id(), "native router preparing offer");
                 let Some(ticket_version) = self.router.offer_evidence(
                     session,
                     allocation_id,

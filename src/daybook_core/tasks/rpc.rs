@@ -12,7 +12,7 @@ use irpc::{channel, rpc_requests};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-pub const TASK_COORDINATION_ALPN: &[u8] = b"townframe/task-coordination/2";
+pub const TASK_COORDINATION_ALPN: &[u8] = b"townframe/task-coordination/6";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterExecutorRequest {
@@ -72,6 +72,46 @@ pub enum ExecutorReport {
     Closed,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CurrentPoolControlRequest {
+    pub pool: TaskPoolId,
+    /// Optional authenticated advertisement; never creates an unsolicited pool.
+    pub offered: Option<super::pool::PoolRotationControl>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CurrentProcessorControlRequest {
+    pub processor: String,
+    pub offered: Option<crate::rt::triage::domain::ProcessorRotationControl>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterSourceControlRequest {
+    pub register_scope: Vec<u8>,
+    pub authority_document: big_repo::DocumentId,
+    pub key_ref: url::Url,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ControlRejection {
+    Pending,
+    Unauthorized,
+    Invalid(String),
+}
+
+impl From<big_repo::CoordinationError> for ControlRejection {
+    fn from(error: big_repo::CoordinationError) -> Self {
+        match error {
+            big_repo::CoordinationError::Pending => Self::Pending,
+            big_repo::CoordinationError::Unauthorized => Self::Unauthorized,
+            big_repo::CoordinationError::Invalid(reason) => Self::Invalid(reason.into()),
+            big_repo::CoordinationError::Other(error) => {
+                panic!("native current control failed: {error:?}")
+            }
+        }
+    }
+}
+
 #[rpc_requests(message = TaskCoordinationRpcMessage)]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum TaskCoordinationRpc {
@@ -79,6 +119,12 @@ pub enum TaskCoordinationRpc {
     RegisterExecutor(RegisterExecutorRequest),
     #[rpc(tx = channel::oneshot::Sender<Result<(), String>>)]
     Report(ExecutorReportRequest),
+    #[rpc(tx = channel::oneshot::Sender<Result<super::pool::PoolRotationControl, ControlRejection>>)]
+    CurrentPoolControl(CurrentPoolControlRequest),
+    #[rpc(tx = channel::oneshot::Sender<Result<crate::rt::triage::domain::ProcessorRotationControl, ControlRejection>>)]
+    CurrentProcessorControl(CurrentProcessorControlRequest),
+    #[rpc(tx = channel::oneshot::Sender<Result<super::RegisterSourceControl, ControlRejection>>)]
+    RegisterSourceControl(RegisterSourceControlRequest),
 }
 
 pub struct AuthenticatedTaskRequest {
@@ -134,10 +180,19 @@ impl ProtocolHandler for TaskCoordinationProtocolHandler {
                 return Ok(());
             };
             let session = match &request {
-                TaskCoordinationRpcMessage::RegisterExecutor(message) => message.inner.session,
-                TaskCoordinationRpcMessage::Report(message) => message.inner.session,
+                TaskCoordinationRpcMessage::RegisterExecutor(message) => {
+                    Some(message.inner.session)
+                }
+                TaskCoordinationRpcMessage::Report(message) => Some(message.inner.session),
+                // A passive relay has no executor session. Its native peer and
+                // current pool sponsorship are checked independently.
+                TaskCoordinationRpcMessage::CurrentPoolControl(_)
+                | TaskCoordinationRpcMessage::CurrentProcessorControl(_)
+                | TaskCoordinationRpcMessage::RegisterSourceControl(_) => None,
             };
-            if session.node.to_bytes32().as_slice() != peer.as_bytes() {
+            if let Some(session) = session
+                && session.node.to_bytes32().as_slice() != peer.as_bytes()
+            {
                 connection.close(0u32.into(), b"task session identity mismatch");
                 return Ok(());
             }

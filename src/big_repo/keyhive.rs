@@ -198,7 +198,6 @@ impl BigKeyhiveHandle {
         &self.signer
     }
 
-
     pub(crate) async fn new(seed: [u8; 32], listener: BigRepoKeyhiveListener) -> Res<Self> {
         let signer = MemorySigner::from(ed25519_dalek::SigningKey::from_bytes(&seed));
         let (keyhive, keyhive_peer_id, contact_card) =
@@ -1211,14 +1210,15 @@ impl BigKeyhiveHandle {
         group: &BigKeyhiveGroup,
         protocol: &BigRepoKeyhiveProtocol,
     ) -> Res<()> {
-        let update = self.keyhive
+        let update = self
+            .keyhive
             .revoke_member(
                 member.into().into_identifier(),
                 /*retain_all_other_members*/ true,
                 group.id(),
             )
             .await
-            .map_err(|error| ferr!("group test revocation failed: {error}"))?;
+            .map_err(|error| ferr!("group test revocation failed: {error:?}"))?;
         persist_cgka_update_ops(protocol, update.cgka_ops().to_vec()).await?;
         for revocation in update.revocations() {
             persist_revocation(protocol, Arc::clone(revocation)).await?;

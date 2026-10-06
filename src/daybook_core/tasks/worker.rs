@@ -588,6 +588,20 @@ impl<IdSource: CoordinationIds> PoolWorkerMachine<IdSource> {
             }
             event => event,
         };
+        // Synchronization may deliver the ticket while its offer is being
+        // classified. Keep the allocation-owning classification: replacing it
+        // with passive observation would decline the offer as Unavailable.
+        if let WorkerEvent::TicketObserved { ticket } = &event
+            && !ticket.is_terminal()
+            && self
+                .classifications
+                .get(&ticket.task_id)
+                .is_some_and(|(token, _)| {
+                    token.allocation.is_some() && token.ticket_version == ticket.version_digest()
+                })
+        {
+            return;
+        }
         let request = match &event {
             WorkerEvent::OfferReceived {
                 session,

@@ -13,6 +13,11 @@ workspace = true
 name = "daybook_core"
 path = "lib.rs"
 
+[[example]]
+name = "distributed_smoke"
+path = "examples/distributed_smoke.rs"
+required-features = ["test-support"]
+
 [features]
 default = ["uniffi"]
 uniffi = ["dep:uniffi"]

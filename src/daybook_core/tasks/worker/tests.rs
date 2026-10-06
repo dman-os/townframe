@@ -2029,6 +2029,51 @@ fn cancelled_offer_rejects_late_async_readiness_without_reserving_capacity() {
 }
 
 #[test]
+fn synchronized_ticket_preserves_in_flight_offer_classification() {
+    let mut machine = worker_machine(1, &[1]);
+    let mut adapter = FakeDomain::ready();
+    connect(&mut machine, &mut adapter);
+    let ticket = origin_ticket(declaration("G1"));
+    let mut actions = Vec::new();
+    machine.on_event(
+        WorkerEvent::OfferReceived {
+            session: session(),
+            allocation_id: AllocationId::new(41),
+            task_id: ticket.task_id,
+            declaration: Box::new(ticket.declaration.declaration.clone()),
+            ticket: Some(ticket.clone()),
+        },
+        &mut actions,
+    );
+    let token = actions
+        .into_iter()
+        .find_map(|action| match action {
+            WorkerAction::ClassifyTask { token, .. } => Some(token),
+            _ => None,
+        })
+        .expect("offer classification");
+    let mut actions = Vec::new();
+    machine.on_event(WorkerEvent::TicketObserved { ticket }, &mut actions);
+    assert!(
+        !actions
+            .iter()
+            .any(|action| matches!(action, WorkerAction::DeclineOffer { .. }))
+    );
+    machine.on_event(
+        WorkerEvent::Classified {
+            token,
+            classification: TaskClassification::Runnable(ResolvedInvocation {
+                args: declaration("G1").input.clone(),
+            }),
+        },
+        &mut actions,
+    );
+    assert!(actions.iter().any(|action| matches!(action,
+        WorkerAction::AcceptOffer { allocation_id, .. } if *allocation_id == AllocationId::new(41)
+    )));
+}
+
+#[test]
 fn superseded_async_classification_cannot_accept_a_new_allocation() {
     let mut machine = worker_machine(1, &[1]);
     let mut adapter = FakeDomain::ready();

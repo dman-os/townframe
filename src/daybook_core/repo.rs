@@ -107,17 +107,17 @@ pub struct RepoCtx {
     /// Local-only store backing consumer-derived objects that are not documents.
     pub derived_part_store: SharedPartStore,
     coordination_parts: tokio::sync::OnceCell<Arc<big_sync::SqlitePartStore>>,
+    pub(crate) processor_activation_tokens:
+        tokio::sync::Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
+    // Boot order is independent; weak owners do not prolong stopped runtimes.
+    pub(crate) processor_runtime_owners: tokio::sync::Mutex<(
+        std::sync::Weak<crate::rt::Rt>,
+        std::sync::Weak<crate::sync::IrohSyncRepo>,
+    )>,
     // Headless relay attachment and later runtime activation retain the same
     // per-domain publication lock and native register owner.
-    pub(crate) processor_slot_stores: tokio::sync::Mutex<
-        HashMap<
-            String,
-            (
-                crate::rt::triage::domain::ProcessorDomainReference,
-                Arc<crate::rt::triage::slots::ProcessorSlotStore>,
-            ),
-        >,
-    >,
+    pub(crate) processor_slot_stores:
+        tokio::sync::Mutex<HashMap<String, crate::rt::triage::ProcessorSlotOwner>>,
 
     pub big_repo: SharedBigRepo,
     big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
@@ -231,6 +231,8 @@ impl RepoCtx {
             frontier_part_store: parts.frontier_part_store,
             derived_part_store: parts.derived_part_store,
             coordination_parts: tokio::sync::OnceCell::new(),
+            processor_runtime_owners: Default::default(),
+            processor_activation_tokens: Default::default(),
             processor_slot_stores: Default::default(),
             big_repo: parts.big_repo,
             big_repo_stop: parts.big_repo_stop,

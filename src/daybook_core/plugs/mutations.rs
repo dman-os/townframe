@@ -249,7 +249,10 @@ impl PlugsRepo {
         if already_enabled.as_ref() != Some(&ref_url) {
             self.activate_from_ref(&plug_id, &ref_url).await?;
         }
-        self.processor_activation_snapshot_locked().await?.targets.remove(&plug_id)
+        self.processor_activation_snapshot_locked()
+            .await?
+            .targets
+            .remove(&plug_id)
             .ok_or_eyre("enabled activation target missing")
     }
 

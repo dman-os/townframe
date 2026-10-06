@@ -1,20 +1,23 @@
 use super::*;
 use crate::repos::{Repo as _, SubscribeOpts};
 use crate::tasks::driver::{
-    AdapterFuture, AttemptKey, AttemptOutcome, AttemptRequest, AttemptSubscription, DomainReceipt,
-    PreparedAttempt, RecoveredAttempt, TaskExecutionAdapter,
+    AdapterFuture, AttemptKey, AttemptOutcome, AttemptRequest, AttemptSubscription,
+    DomainIncorporationAck, DomainIncorporationRequest, PreparedAttempt, RecoveredAttempt,
+    TaskExecutionAdapter,
 };
 use crate::tasks::{
     DomainCoordinationRef, EffectPolicy, OpaqueReason, OpaqueResultRef, Preference, ReadinessWatch,
     ResolvedInvocation, TaskClassification, TaskDeclaration, TaskPoolId, TaskTicket, TerminalFact,
     TerminalSummary,
 };
+pub use triage::origins::TaskAuthorization;
 
 pub const COMMAND_DOMAIN: &str = "daybook.command.v1";
 pub const PROCESSOR_DOMAIN: &str = "daybook.processor.v1";
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CapturedPoolBinding {
+    rotation_generation: u64,
     document: String,
     authority_group: [u8; 32],
     pool: TaskPoolId,
@@ -23,6 +26,7 @@ impl CapturedPoolBinding {
     pub(crate) fn from_snapshot(snapshot: &crate::tasks::PoolDescriptorSnapshot) -> Self {
         Self {
             document: snapshot.reference.document.to_string(),
+            rotation_generation: snapshot.reference.rotation_generation,
             authority_group: snapshot.reference.authority_group,
             pool: snapshot.descriptor.pool_id.clone(),
         }
@@ -35,6 +39,7 @@ impl CapturedPoolBinding {
 pub struct CapturedProcessorInput {
     pub slot: triage::slots::ProcessorSlotKey,
     pub capture: triage::slots::ProcessorCapture,
+    pub authorization: TaskAuthorization,
     pub domain: triage::domain::ProcessorDomainReference,
     pub configuration: std::collections::BTreeMap<String, ChangeHashSet>,
 }
@@ -61,13 +66,14 @@ pub enum CapturedRoutineInput {
 struct ProcessorTaskInput<'a> {
     slot: Cow<'a, triage::slots::ProcessorSlotKey>,
     capture: Cow<'a, triage::slots::ProcessorCapture>,
-    domain: Cow<'a, triage::domain::ProcessorDomainReference>,
+    authorization: Cow<'a, TaskAuthorization>,
+    // Native domain/key locations remain in the signed publisher witness.
     plug_id: Cow<'a, str>,
     routine_name: Cow<'a, str>,
     bundle_name: Cow<'a, str>,
     manifest_document: Cow<'a, str>,
     configuration_document: Cow<'a, str>,
-    pool: Cow<'a, CapturedPoolBinding>,
+    pool: Cow<'a, TaskPoolId>,
     changed_facet_keys: Cow<'a, [String]>,
     wflow_args_json: Option<Cow<'a, str>>,
 }
@@ -98,13 +104,14 @@ impl CapturedRoutineInput {
         Ok(serde_json::to_vec(&ProcessorTaskInput {
             slot: Cow::Borrowed(&processor.slot),
             capture: Cow::Borrowed(&processor.capture),
-            domain: Cow::Borrowed(&processor.domain),
+            authorization: Cow::Borrowed(&processor.authorization),
+
             plug_id: Cow::Borrowed(plug_id),
             routine_name: Cow::Borrowed(routine_name),
             bundle_name: Cow::Borrowed(bundle_name),
             manifest_document: Cow::Borrowed(manifest_doc_id),
             configuration_document: Cow::Borrowed(configuration_document),
-            pool: Cow::Borrowed(pool_binding.as_ref().expect(ERROR_IMPOSSIBLE)),
+            pool: Cow::Borrowed(&pool_binding.as_ref().expect(ERROR_IMPOSSIBLE).pool),
             changed_facet_keys: Cow::Borrowed(&invocation.changed_facet_keys),
             wflow_args_json: args.wflow_args_json.as_deref().map(Cow::Borrowed),
         })?)
@@ -142,6 +149,7 @@ impl CapturedRoutineAdapter {
             tasks: Some(tasks),
             pool: CapturedPoolBinding {
                 document: snapshot.reference.document.to_string(),
+                rotation_generation: snapshot.reference.rotation_generation,
                 authority_group: snapshot.reference.authority_group,
                 pool: snapshot.descriptor.pool_id,
             },
@@ -171,7 +179,7 @@ impl CapturedRoutineAdapter {
     ) -> Res<CapturedRoutineInput> {
         let mut input = self
             .rt
-            .prepare_routine(plug_id, routine_name, args, None)
+            .prepare_routine(plug_id, routine_name, args, None, None)
             .await?
             .input;
         let CapturedRoutineInput::V1 { pool_binding, .. } = &mut input;
@@ -194,7 +202,7 @@ impl CapturedRoutineAdapter {
                 Ok(input) => input,
                 Err(_) => return Ok(TaskClassification::Invalid),
             };
-            if input.slot.processor_full_id != *identity || *input.domain != *domain {
+            if input.slot.processor_full_id != *identity || *input.pool != self.pool.pool {
                 return Ok(TaskClassification::Invalid);
             }
             if let Some(store) = self.rt.processor_slot_store(identity, Some(domain)).await?
@@ -265,10 +273,7 @@ impl CapturedRoutineAdapter {
             return Ok(TaskClassification::Invalid);
         }
         let now = jiff::Timestamp::now().as_second();
-        if declaration
-            .not_after_secs
-            .is_some_and(|deadline| now > deadline)
-        {
+        if declaration.expired_at(now) {
             return Ok(TaskClassification::Invalid);
         }
         if declaration.not_before_secs.is_some_and(|start| now < start) {
@@ -336,14 +341,41 @@ impl CapturedRoutineAdapter {
             ..
         } = execution;
         let ActiveDispatchArgs::FacetRoutine(args) = args;
-        if !encoded_eq(pool_binding, &Some(self.pool.clone()))? {
+        let Some(captured_pool) = pool_binding else {
             return Ok(TaskClassification::Invalid);
+        };
+        if captured_pool.pool != self.pool.pool
+            || captured_pool.authority_group != self.pool.authority_group
+            || captured_pool.rotation_generation > self.pool.rotation_generation
+        {
+            return Ok(TaskClassification::Invalid);
+        }
+        if captured_pool.document != self.pool.document {
+            let Ok(document) = captured_pool.document.parse() else {
+                return Ok(TaskClassification::Invalid);
+            };
+            if !self.tasks.as_ref().is_some_and(|tasks| {
+                tasks
+                    .register()
+                    .recognizes_authority(&document, &captured_pool.authority_group)
+            }) {
+                return Ok(TaskClassification::Invalid);
+            }
         }
         if manifest_branch != "main"
             || manifest_heads.is_empty()
             || args.heads.is_empty()
             || configuration_heads.is_empty()
-            || configuration_document != self.rt.plugs_repo.configuration_document_id()
+            || match processor {
+                Some(processor) => {
+                    configuration_document
+                        .parse::<big_repo::DocumentId>()
+                        .ok()
+                        .as_ref()
+                        != Some(&processor.domain.document)
+                }
+                None => configuration_document != self.rt.plugs_repo.configuration_document_id(),
+            }
             || args.primary_doc.doc_id != args.doc_id
             || args.primary_doc.branch_path != args.branch_path
             || args.primary_doc.heads != args.heads
@@ -384,7 +416,14 @@ impl CapturedRoutineAdapter {
                 dispatch::RoutineInvocation::Processor(invocation),
             ) => {
                 if processor.slot.processor_full_id != *identity
-                    || processor.domain != *domain
+                    || (processor.domain != *domain
+                        && !self.tasks.as_ref().is_some_and(|tasks| {
+                            tasks.register().recognizes_authority(
+                                &processor.domain.document,
+                                &processor.domain.authority_group,
+                            )
+                        }))
+                    || processor.domain.authority_group != domain.authority_group
                     || processor.slot.document_id != args.doc_id
                     || processor.slot.branch_path != args.branch_path
                     || processor.capture.heads != args.heads
@@ -476,11 +515,19 @@ impl CapturedRoutineAdapter {
                 if expected != processor.capture {
                     return Ok(TaskClassification::Invalid);
                 }
-                let mut hash = blake3::Hasher::new();
-                hash.update(b"daybook/processor-task/v1\0");
-                hash.update(&processor.slot.id());
-                hash.update(&expected.generation);
-                if crate::tasks::PoolTaskId::new(*hash.finalize().as_bytes()) != declaration.task_id
+                // Authorization is part of the origin-signed canonical input.
+                // Recompute from the independently proven capture rather than
+                // trusting an origin's local SQLite row or accepting arbitrary IDs.
+                // The original creation time is also the earliest execution
+                // time: a future-dated origin may wait, but cannot run early.
+                if processor
+                    .authorization
+                    .expected_task_id(processor.slot.id(), expected.generation)
+                    != declaration.task_id
+                    || processor.authorization.task_id != declaration.task_id
+                    || processor.authorization.not_after_secs != declaration.not_after_secs
+                    || declaration.not_before_secs
+                        != Some(processor.authorization.originated_at_secs)
                 {
                     return Ok(TaskClassification::Invalid);
                 }
@@ -546,16 +593,57 @@ impl CapturedRoutineAdapter {
         {
             return Ok(TaskClassification::Invalid);
         }
-        let Some(bindings) = self
-            .rt
-            .plugs_repo
-            .config_bindings_at(configuration_document, configuration_heads)
-            .await?
-        else {
-            return Ok(TaskClassification::NotReady(Self::watch_for(
-                declaration,
-                Some((input_bytes, publisher)),
-            )));
+        let bindings = if let Some(processor) = processor {
+            let domains = triage::domain::ProcessorDomainRepo::new(
+                Arc::clone(&self.rt.rcx.big_repo),
+                self.rt.rcx.local_actor_id.clone(),
+            );
+            let Some(shared) = domains
+                .configuration_at(
+                    &processor.domain,
+                    &processor.slot.processor_full_id,
+                    configuration_heads,
+                )
+                .await?
+            else {
+                return Ok(TaskClassification::NotReady(Self::watch_for(
+                    declaration,
+                    Some((input_bytes, publisher)),
+                )));
+            };
+            // Historical native configuration proves the allowed lifetime.
+            // Widen subtraction because origin time is unvalidated external input.
+            if i128::from(processor.authorization.not_after_secs)
+                - i128::from(processor.authorization.originated_at_secs)
+                != i128::from(shared.task_lifetime_secs.get())
+            {
+                return Ok(TaskClassification::Invalid);
+            }
+            let reference = crate::plugs::PlugsRepo::parse_enabled_ref(&shared.manifest)?;
+            let pinned = reference
+                .at
+                .as_ref()
+                .map(|at| am_utils_rs::parse_commit_heads(at))
+                .transpose()?;
+            if &reference.doc_id != manifest_doc_id
+                || pinned.is_some_and(|heads| heads != manifest_heads.0)
+            {
+                return Ok(TaskClassification::Invalid);
+            }
+            shared.config_documents
+        } else {
+            let Some(bindings) = self
+                .rt
+                .plugs_repo
+                .config_bindings_at(configuration_document, configuration_heads)
+                .await?
+            else {
+                return Ok(TaskClassification::NotReady(Self::watch_for(
+                    declaration,
+                    Some((input_bytes, publisher)),
+                )));
+            };
+            bindings
         };
         if let Some(processor) = processor {
             let Some(owner) = bindings.get(plug_id) else {
@@ -661,6 +749,7 @@ impl CapturedRoutineAdapter {
         }
         let reference = crate::tasks::PoolReference {
             document: self.pool.document.parse()?,
+            rotation_generation: self.pool.rotation_generation,
             authority_group: self.pool.authority_group,
         };
         let pools = crate::tasks::PoolRepo::new(
@@ -926,6 +1015,15 @@ impl CapturedRoutineAdapter {
             .job_id
             .as_deref()
             .expect("native prepared attempt has a job");
+        let deadline = self
+            .rt
+            .dispatch_repo
+            .execution_deadline(&attempt.dispatch_id)
+            .await?
+            .expect("prepared task retains a finite execution authorization");
+        self.rt
+            .execution_gate
+            .authorize_until(Arc::from(job), deadline);
         let admitted = self
             .rt
             .wflow_part_state
@@ -960,6 +1058,16 @@ impl CapturedRoutineAdapter {
             .get_any(&attempt.dispatch_id)
             .await
             .ok_or_eyre("retained task mapping has no dispatch")?;
+        // Terminal status is durable before its integration hooks. Do not
+        // publish an outcome receipt while crash-replay delivery remains pending.
+        if dispatch.status.is_terminal()
+            && !self
+                .rt
+                .deliver_dispatch_completion(&attempt.dispatch_id)
+                .await?
+        {
+            return Ok(None);
+        }
         if dispatch.status.is_terminal()
             && dispatch.status != dispatch::DispatchStatus::Succeeded
             && let Some(reason) = self
@@ -993,13 +1101,11 @@ impl CapturedRoutineAdapter {
         if let Some(AttemptOutcome::Finished(fact)) = &outcome {
             self.rt
                 .dispatch_repo
-                .incorporate_task_receipt(
-                    DomainReceipt {
-                        task_id: attempt.request.key.task_id,
-                        summary: summary(fact),
-                    },
-                    attempt.request.declaration_digest,
-                )
+                .incorporate_domain_ack(DomainIncorporationAck {
+                    task_id: attempt.request.key.task_id,
+                    incorporated: summary(fact),
+                    declaration_digest: attempt.request.declaration_digest,
+                })
                 .await?;
         }
         Ok(outcome)
@@ -1108,7 +1214,7 @@ impl CapturedRoutineAdapter {
         Ok(())
     }
 
-    async fn fail_local(rt: &Rt, attempt: &PreparedAttempt, reason: &str) -> Res<()> {
+    pub(crate) async fn fail_local(rt: &Rt, attempt: &PreparedAttempt, reason: &str) -> Res<()> {
         let _admission = rt.task_admission.lock().await;
         let current = rt
             .dispatch_repo
@@ -1179,6 +1285,7 @@ impl CapturedRoutineAdapter {
                     attempt.dispatch_id.clone(),
                     dispatch::DispatchStatus::Failed,
                     &current,
+                    None,
                 )
                 .await?;
             rt.execution_gate.release(job);
@@ -1319,8 +1426,7 @@ impl CapturedRoutineAdapter {
             if attempt
                 .request
                 .declaration
-                .not_after_secs
-                .is_some_and(|deadline| jiff::Timestamp::now().as_second() > deadline)
+                .expired_at(jiff::Timestamp::now().as_second())
                 || self
                     .pool_rights(&attempt.request.declaration, resolved.publisher)
                     .await?
@@ -1364,12 +1470,11 @@ impl TaskExecutionAdapter for CapturedRoutineAdapter {
             if adapter
                 .rt
                 .dispatch_repo
-                .task_receipt(
+                .domain_obligation_settled(
                     &ticket.task_id,
                     ticket.declaration.declaration.canonical_digest(),
                 )
                 .await?
-                .is_some()
             {
                 return Ok(TaskClassification::Obsolete);
             }
@@ -1408,11 +1513,17 @@ impl TaskExecutionAdapter for CapturedRoutineAdapter {
     fn incorporate(
         &self,
         declaration: TaskDeclaration,
-        summary: TerminalSummary,
-        attempt: Option<AttemptKey>,
-    ) -> AdapterFuture<DomainReceipt> {
+        request: DomainIncorporationRequest,
+    ) -> AdapterFuture<DomainIncorporationAck> {
         let adapter = self.clone();
         Box::pin(async move {
+            let summary = request.summary();
+            let attempt = match &request {
+                DomainIncorporationRequest::LocalOutcome { attempt, .. } => Some(attempt.clone()),
+                DomainIncorporationRequest::ObservedTerminal {
+                    affected_attempt, ..
+                } => affected_attempt.clone(),
+            };
             if let Some(key) = attempt {
                 eyre::ensure!(
                     key.task_id == declaration.task_id && key.pool == declaration.pool,
@@ -1428,16 +1539,25 @@ impl TaskExecutionAdapter for CapturedRoutineAdapter {
                     local.request.declaration_digest == declaration.canonical_digest(),
                     "terminal incorporation changes the retained declaration"
                 );
-                let own_success = matches!(summary, TerminalSummary::Succeeded { attempt_id, .. } if attempt_id == key.attempt_id);
-                if own_success {
+                let outcome = adapter.outcome(&local).await?;
+                if let DomainIncorporationRequest::LocalOutcome { fact, .. } = &request {
                     eyre::ensure!(
-                        matches!(
-                            adapter.outcome(&local).await?,
-                            Some(AttemptOutcome::Finished(TerminalFact::Succeeded { .. }))
-                        ),
-                        "task success precedes actual native settlement"
+                        matches!(&outcome, Some(AttemptOutcome::Finished(actual)) if actual == fact),
+                        "local incorporation differs from actual durable outcome"
                     );
-                } else if adapter.outcome(&local).await?.is_none() {
+                    if let TerminalFact::Succeeded { attempt_id, .. } = fact {
+                        eyre::ensure!(
+                            *attempt_id == key.attempt_id,
+                            "local success names another attempt"
+                        );
+                    }
+                } else if matches!(summary, TerminalSummary::Succeeded { attempt_id, .. } if attempt_id == key.attempt_id)
+                {
+                    eyre::ensure!(
+                        matches!(&outcome, Some(AttemptOutcome::Finished(actual)) if self::summary(actual) == summary),
+                        "observed own success differs from actual durable outcome"
+                    );
+                } else if outcome.is_none() {
                     Self::fail_local(
                         &adapter.rt,
                         &local,
@@ -1447,7 +1567,7 @@ impl TaskExecutionAdapter for CapturedRoutineAdapter {
                 }
             }
             if matches!(summary, TerminalSummary::Succeeded { .. })
-                && adapter.processor_domain.is_some()
+                && let Some((_, current_domain)) = &adapter.processor_domain
             {
                 let processor: ProcessorTaskInput<'_> = serde_json::from_slice(&declaration.input)?;
                 // Task and slot parts may arrive in either order. A remote
@@ -1459,7 +1579,7 @@ impl TaskExecutionAdapter for CapturedRoutineAdapter {
                         .rt
                         .processor_slot_store(
                             &processor.slot.processor_full_id,
-                            Some(&processor.domain),
+                            Some(current_domain),
                         )
                         .await?
                     else {
@@ -1506,13 +1626,11 @@ impl TaskExecutionAdapter for CapturedRoutineAdapter {
             adapter
                 .rt
                 .dispatch_repo
-                .incorporate_task_receipt(
-                    DomainReceipt {
-                        task_id: declaration.task_id,
-                        summary,
-                    },
-                    declaration.canonical_digest(),
-                )
+                .incorporate_domain_ack(DomainIncorporationAck {
+                    task_id: declaration.task_id,
+                    incorporated: summary,
+                    declaration_digest: declaration.canonical_digest(),
+                })
                 .await
         })
     }
@@ -1594,9 +1712,7 @@ impl TaskExecutionAdapter for CapturedRoutineAdapter {
                 let now = jiff::Timestamp::now().as_second();
                 let wake_at = [
                     declaration.not_before_secs,
-                    declaration
-                        .not_after_secs
-                        .map(|deadline| deadline.saturating_add(1)),
+                    Some(declaration.not_after_secs.saturating_add(1)),
                 ]
                 .into_iter()
                 .flatten()
@@ -1761,9 +1877,8 @@ impl TaskExecutionAdapter for CapturedRoutineAdapter {
             if adapter
                 .rt
                 .dispatch_repo
-                .task_receipt(&declaration.task_id, declaration.canonical_digest())
+                .domain_obligation_settled(&declaration.task_id, declaration.canonical_digest())
                 .await?
-                .is_some()
             {
                 return Ok(true);
             }

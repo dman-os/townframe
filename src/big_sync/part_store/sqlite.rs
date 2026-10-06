@@ -510,6 +510,69 @@ impl SqlitePartStore {
 }
 
 impl SqlitePartStore {
+    /// Discard cached serving grants before an embedder resamples authority at boot.
+    pub async fn clear_part_members(&self) -> Res<()> {
+        let mut tx = self
+            .core
+            .sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
+        SqliteCore::next_cursor(&mut tx).await?;
+        sqlx::query("DELETE FROM big_sync_syncable WHERE scope_id = ? AND part_ref IS NOT NULL")
+            .bind(self.core.scope_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Replace the serving audience for a current part and its retained sources atomically.
+    pub async fn set_parts_members(
+        &self,
+        parts: &[PartKey],
+        agents: &HashMap<PeerKey, keyhive_core::access::Access>,
+    ) -> Res<()> {
+        let mut tx = self
+            .core
+            .sql
+            .write_pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await?;
+        let changed_at =
+            i64::try_from(SqliteCore::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
+        for part in parts {
+            let part_ref = self.core.ensure_part_ref(&mut tx, part.clone()).await?;
+            sqlx::query!(
+                "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2",
+                self.core.scope_id,
+                part_ref
+            )
+            .execute(&mut *tx)
+            .await?;
+            for (principal, access) in agents {
+                sqlx::query!(
+                    "INSERT INTO big_sync_syncable(
+                         scope_id
+                       , part_ref
+                       , principal_id
+                       , access_level
+                       , changed_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    self.core.scope_id,
+                    part_ref,
+                    Self::peer_blob(principal.clone()),
+                    encode_access(access),
+                    changed_at
+                )
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn replay_candidates(
         &self,
         parts: &HashSet<PartKey>,
@@ -1564,37 +1627,8 @@ impl HostPartStore for SqlitePartStore {
         part: PartKey,
         agents: HashMap<PeerKey, keyhive_core::access::Access>,
     ) -> Res<()> {
-        let mut tx = self
-            .core
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        let part_ref = self.core.ensure_part_ref(&mut tx, part).await?;
-        let changed_at =
-            i64::try_from(SqliteCore::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
-        sqlx::query!(
-            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2",
-            self.core.scope_id,
-            part_ref
-        )
-        .execute(&mut *tx)
-        .await?;
-        for (principal, access) in &agents {
-            sqlx::query!(
-                "INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                self.core.scope_id,
-                part_ref,
-                Self::peer_blob(principal.clone()),
-                encode_access(access),
-                changed_at
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(())
+        self.set_parts_members(std::slice::from_ref(&part), &agents)
+            .await
     }
 
     async fn add_part_member(

@@ -558,14 +558,18 @@ impl ShutdownGuard {
         Self { nodes }
     }
 
+    // Own each completed node before the next fallible await, so partial boot
+    // failure or cancellation drains earlier nodes through the same Drop path.
     /// Boot N disconnected nodes managed under this RAII shutdown guard.
     #[expect(unused)]
     pub(crate) async fn boot(specs: &[(u8, &'static str)]) -> crate::Res<Self> {
-        let mut nodes = Vec::with_capacity(specs.len());
+        let mut guard = Self {
+            nodes: Vec::with_capacity(specs.len()),
+        };
         for &(seed, label) in specs {
-            nodes.push(Node::boot(seed, label).await?);
+            guard.nodes.push(Node::boot(seed, label).await?);
         }
-        Ok(Self { nodes })
+        Ok(guard)
     }
 
     /// Boot N nodes with per-node control over the keyhive change-notification
@@ -573,15 +577,17 @@ impl ShutdownGuard {
     /// through explicit `sync_keyhive_with_peer` rounds, so their membership
     /// view is stale by construction until a test explicitly syncs.
     pub(crate) async fn boot_mixed(specs: &[(u8, &'static str, bool)]) -> crate::Res<Self> {
-        let mut nodes = Vec::with_capacity(specs.len());
+        let mut guard = Self {
+            nodes: Vec::with_capacity(specs.len()),
+        };
         for &(seed, label, keyhive_change_notifs) in specs {
-            nodes.push(if keyhive_change_notifs {
+            guard.nodes.push(if keyhive_change_notifs {
                 Node::boot(seed, label).await?
             } else {
                 Node::boot_without_keyhive_notifs(seed, label).await?
             });
         }
-        Ok(Self { nodes })
+        Ok(guard)
     }
 
     /// Return a reference to a node by index.

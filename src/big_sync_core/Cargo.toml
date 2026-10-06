@@ -14,6 +14,8 @@ default = ["uniffi", "test-support", "automerge"]
 uniffi = ["dep:uniffi"]
 automerge = ["dep:autosurgeon"]
 test-support = []
+# Message correlation only; disabled builds retain the original channel layout.
+channel-trace = []
 
 [dependencies]
 utils_rs = { workspace = true, features = ["hash"] }
@@ -56,5 +58,7 @@ tracing.workspace = true
 uniffi = { workspace = true, optional = true }
 
 [dev-dependencies]
+ed25519-dalek = { workspace = true, features = ["hazmat"] }
+sha2 = "0.10"
 futures.workspace = true
 serde_json.workspace = true

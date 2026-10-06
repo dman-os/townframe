@@ -23,9 +23,9 @@ use rand::RngCore;
 
 use iroh_blobs::Hash;
 
+use super::Res;
 use super::codec::{MASTER_KEY_LEN, SALT_LEN};
 use super::params::EncodingParams;
-use super::Res;
 
 /// Master key for one cipherblob family: the 32-octet input-keying material
 /// the record cipher is derived from. The caller owns persistence (the facet

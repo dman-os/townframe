@@ -19,8 +19,8 @@
 
 use crate::interlude::*;
 
-use super::codec::RECORD_OVERHEAD;
 use super::Res;
+use super::codec::RECORD_OVERHEAD;
 
 /// Maximum admitted RFC 8188 record size. Both metadata and header parsing
 /// enforce this bound before record-size arithmetic or record decryption.

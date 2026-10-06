@@ -98,6 +98,10 @@ and completion depends on both sides' state (RIBLT in particular completes when
 `a₀ ⊕ b₀` decodes, regardless of which side sent symbols). Nothing about that fits
 a driver/responder split, and neither will the next algorithm we add.
 
+A strategy batch containing an unavailable part must not starve its readable parts. When a summary explicitly reports unknown/refused targets, the decision task makes one bounded summary request for the remaining targets. The omitted targets still receive the existing unanswered decision and retry independently; they are not declared synced, removed, or treated as empty parts. If the remaining request also fails, ordinary task failure/backoff applies. This preserves unknown/refused indistinguishability without requiring offline peers to have already allocated a newer transport generation.
+
+The long-poll wake reader must poll its live phase after the one-shot replay-complete boundary. A filtered empty replay revision followed by that boundary is not two empty live probes: conflating them waits out the entire page hold despite a later commit notification. Replay completion therefore does not consume the empty-probe guard. Native transport acceptance waits for exact publisher witness evidence, not an unversioned same-object completion that may describe an earlier pull.
+
 **4. Event delivery is an unbounded push stream.** `PeerReplayTask` calls
 `sub_parts` and then forwards every event into the machine's ingress channel for
 as long as the stream lives. There is no paging and no protocol-level window: the

@@ -332,11 +332,15 @@ impl Representation {
     }
 
     fn canonical_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.binding
-            .cmp(&other.binding)
+        // Poison witnesses rank signature variants before envelope metadata.
+        // Retain the same variant here so later equivocation cannot expose
+        // a signature discarded by a different arrival order.
+        self.original
+            .signature
+            .cmp(&other.original.signature)
+            .then_with(|| self.binding.cmp(&other.binding))
             .then_with(|| self.publisher.cmp(&other.publisher))
             .then_with(|| self.ciphertext.cmp(&other.ciphertext))
-            .then_with(|| self.original.signature.cmp(&other.original.signature))
             .then_with(|| self.signature.cmp(&other.signature))
     }
 }

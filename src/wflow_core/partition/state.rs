@@ -1,6 +1,6 @@
 use crate::interlude::*;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::r#gen::metastore::WflowMeta;
 use crate::partition::RetryPolicy;
@@ -26,6 +26,9 @@ pub struct JobState {
     pub runs: Vec<JobRunEvent>,
     pub steps: Vec<JobStepState>,
     pub pending_messages: VecDeque<JobInboxMessage>,
+    /// Message identities remain after consumption so durable sender replay
+    /// cannot deliver the same reply to a later receive step.
+    pub received_message_ids: HashSet<Arc<str>>,
     pub active_wait: Option<JobWaitState>,
 }
 

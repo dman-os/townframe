@@ -311,6 +311,7 @@ impl InitRepo {
         &self,
         run_mode: &daybook_types::manifest::InitRunMode,
         init_id: &str,
+        dispatch_id: &str,
     ) -> Res<()> {
         match run_mode {
             daybook_types::manifest::InitRunMode::PerInstall => {
@@ -347,7 +348,13 @@ impl InitRepo {
                 .await?;
             }
             daybook_types::manifest::InitRunMode::PerBoot => {
-                self.per_boot_done.write().await.insert(init_id.to_string());
+                // A replayed terminal callback from an earlier boot must not
+                // satisfy this boot's obligation. Hold selection through marking
+                // so a replacement dispatch cannot race this ownership check.
+                let running = self.running_dispatches.read().await;
+                if running.get(init_id).map(String::as_str) == Some(dispatch_id) {
+                    self.per_boot_done.write().await.insert(init_id.to_string());
+                }
             }
         }
         Ok(())

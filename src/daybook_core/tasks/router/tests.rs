@@ -814,6 +814,126 @@ fn acceptance_starts_the_offered_allocation() {
             task_id: derived_task("G1"),
         }]
     );
+    // Companion to Quint guardWrongAcceptedAttemptTest and
+    // guardStaleAttemptOutcomeTest: compare the real reducer's emitted actions
+    // using its generated allocation identity, not a model-minted numeric ID.
+    assert!(
+        feed(
+            &mut machine,
+            RouterEvent::OfferAccepted {
+                session: session(3),
+                allocation_id,
+                attempt_id: PoolAttemptId::new(2),
+            },
+            &adapter
+        )
+        .is_empty()
+    );
+    assert!(
+        feed(
+            &mut machine,
+            RouterEvent::AttemptChanged {
+                session: session(3),
+                task_id: derived_task("G1"),
+                attempt_id: PoolAttemptId::new(2),
+                state: AttemptState::Succeeded,
+            },
+            &adapter
+        )
+        .is_empty()
+    );
+    let actions = feed(
+        &mut machine,
+        RouterEvent::AttemptChanged {
+            session: session(3),
+            task_id: derived_task("G1"),
+            attempt_id: PoolAttemptId::new(1),
+            state: AttemptState::Succeeded,
+        },
+        &adapter,
+    );
+    let [
+        RouterAction::SendOffer {
+            session: offered,
+            allocation_id: next,
+            declaration,
+            task_id,
+        },
+    ] = actions.as_slice()
+    else {
+        panic!("only the actual accepted attempt releases capacity: {actions:?}");
+    };
+    assert_eq!(*offered, session(3));
+    assert_ne!(*next, allocation_id);
+    assert_eq!(declaration.task_id, derived_task("G1"));
+    assert_eq!(*task_id, derived_task("G1"));
+}
+
+#[test]
+fn ordered_duplicate_registration_retains_only_the_last_attempt_and_allocation() {
+    // Rust companion to Quint guardOrderedDuplicateRegistrationTest.
+    for reverse in [false, true] {
+        let mut machine = leader(&[1]);
+        let mut attempts = vec![
+            ActiveAttemptSummary {
+                task_id: derived_task("G1"),
+                attempt_id: PoolAttemptId::new(1),
+                allocation: Some(AllocationId::new(10)),
+            },
+            ActiveAttemptSummary {
+                task_id: derived_task("G1"),
+                attempt_id: PoolAttemptId::new(2),
+                allocation: Some(AllocationId::new(20)),
+            },
+        ];
+        if reverse {
+            attempts.reverse();
+        }
+        let expected = attempts.last().unwrap().clone();
+        register_session(&mut machine, session(3), 1, &["gpu"], 2, attempts);
+        let retained = &machine.sessions[&session(3)].active_attempts;
+        assert_eq!(
+            retained,
+            &HashMap::from([(
+                derived_task("G1"),
+                ActiveAttemptRef {
+                    attempt_id: expected.attempt_id,
+                    allocation: expected.allocation,
+                }
+            )])
+        );
+        let stale = if reverse { 2 } else { 1 };
+        assert!(
+            feed(
+                &mut machine,
+                RouterEvent::AttemptChanged {
+                    session: session(3),
+                    task_id: derived_task("G1"),
+                    attempt_id: PoolAttemptId::new(stale),
+                    state: AttemptState::Running,
+                },
+                &NothingObsolete
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            machine.sessions[&session(3)].active_attempts[&derived_task("G1")],
+            ActiveAttemptRef {
+                attempt_id: expected.attempt_id,
+                allocation: expected.allocation,
+            }
+        );
+        let offers = feed(
+            &mut machine,
+            RouterEvent::TaskObserved {
+                ticket: Box::new(ticket("G2")),
+            },
+            &NothingObsolete,
+        );
+        assert!(
+            matches!(offers.as_slice(), [RouterAction::SendOffer { task_id, .. }] if *task_id == derived_task("G2"))
+        );
+    }
 }
 
 /// A router that has lost the election does not authorize starts: a late

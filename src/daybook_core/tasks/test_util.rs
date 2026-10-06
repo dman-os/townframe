@@ -129,7 +129,9 @@ pub fn declaration(generation: &str) -> TaskDeclaration {
         placement: Preference::PreferOrigin(node(1)),
         effect_policy: EffectPolicy::Idempotent,
         not_before_secs: None,
-        not_after_secs: None,
+        // Fixed finite fixture deadline (2100-01-01), so independently constructed
+        // declarations retain identical meaning without wall-clock sampling.
+        not_after_secs: 4_102_444_800,
         result_retention: ResultRetention::ExternalSettlement(DomainCoordinationRef::from_label(
             "photo-7",
         )),
@@ -238,12 +240,51 @@ impl iroh::protocol::ProtocolHandler for TaskTestAccept {
 }
 
 pub(crate) struct TaskTestNode {
+    // Fields drop in declaration order: facade copies go before the owner guard.
     pub(crate) repo: SharedBigRepo,
     pub(crate) endpoint: iroh::Endpoint,
-    _router: iroh::protocol::Router,
+    owners: TaskTestOwners,
+}
+
+struct TaskTestOwners {
+    root: crate::test_support::sync_node::Owners,
+    router: Option<iroh::protocol::Router>,
+    endpoint: Option<iroh::Endpoint>,
+    rpc: Option<big_repo::rpc::BigRepoRpcStopToken>,
     connections: Arc<tokio::sync::Mutex<Vec<big_repo::BigRepoConnection>>>,
-    rpc_stop: big_repo::rpc::BigRepoRpcStopToken,
-    repo_stop: big_repo::BigRepoStopToken,
+    stopped: bool,
+}
+
+impl TaskTestOwners {
+    async fn stop(&mut self) -> Res<()> {
+        // Stop accept producers before draining the connections they install.
+        if let Some(router) = self.router.take() {
+            router.shutdown().await?;
+            drop(self.endpoint.take());
+        } else if let Some(endpoint) = self.endpoint.take() {
+            endpoint.close().await;
+        }
+        for connection in self.connections.lock().await.drain(..) {
+            if !connection.is_closed() {
+                connection.stop().await?;
+            }
+        }
+        if let Some(rpc) = self.rpc.take() {
+            rpc.stop().await?;
+        }
+        self.root.stop(/*runtime_first*/ false).await?;
+        self.stopped = true;
+        Ok(())
+    }
+}
+
+impl Drop for TaskTestOwners {
+    fn drop(&mut self) {
+        if !self.stopped {
+            tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(self.stop()))
+                .expect("native task fixture teardown failed");
+        }
+    }
 }
 
 impl TaskTestNode {
@@ -258,6 +299,14 @@ impl TaskTestNode {
             group_part_group_scope: Default::default(),
         })
         .await?;
+        let mut owners = TaskTestOwners {
+            root: crate::test_support::sync_node::Owners::before_context(repo_stop),
+            router: None,
+            endpoint: None,
+            rpc: None,
+            connections: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            stopped: false,
+        };
         let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
             .clear_ip_transports()
             .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
@@ -265,8 +314,10 @@ impl TaskTestNode {
             .relay_mode(iroh::RelayMode::Disabled)
             .bind()
             .await?;
-        let connections = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        owners.endpoint = Some(endpoint.clone());
+        let connections = Arc::clone(&owners.connections);
         let (rpc, rpc_stop) = big_repo::rpc::spawn_repo_rpc(Arc::clone(&repo)).await?;
+        owners.rpc = Some(rpc_stop);
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(
                 crate::sync::SUBDUCTION_ALPN,
@@ -278,26 +329,48 @@ impl TaskTestNode {
             )
             .accept(big_repo::rpc::REPO_SYNC_ALPN, rpc.protocol_handler())
             .spawn();
+        owners.router = Some(router);
         Ok(Self {
             repo,
             endpoint,
-            _router: router,
-            connections,
-            rpc_stop,
-            repo_stop,
+            owners,
         })
     }
 
     pub(crate) async fn stop(self) -> Res<()> {
-        for connection in self.connections.lock().await.drain(..) {
-            if !connection.is_closed() {
-                connection.stop().await?;
-            }
-        }
-        // Router shutdown drains its accept producers and closes the endpoint
-        // before their RPC and repository dependencies are stopped.
-        self._router.shutdown().await?;
-        self.rpc_stop.stop().await?;
-        self.repo_stop.stop().await
+        let Self {
+            repo,
+            endpoint,
+            mut owners,
+        } = self;
+        drop((repo, endpoint));
+        owners.stop().await
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_task_fixture_error_scope_closes_repository() -> Res<()> {
+    use automerge::transaction::Transactable;
+    let mut witness = None;
+    let failed: Res<()> = async {
+        let node = TaskTestNode::boot(199).await?;
+        let mut seed = automerge::Automerge::new();
+        let mut transaction = seed.transaction();
+        transaction.put(automerge::ROOT, "version", 1)?;
+        transaction.commit();
+        let handle = node.repo.create_doc(seed).await?;
+        let document = handle.document_id();
+        assert!(matches!(
+            node.repo.get_doc(&document).await?,
+            big_repo::DocLookup::Ready(_)
+        ));
+        drop(handle);
+        witness = Some((Arc::clone(&node.repo), document));
+        eyre::bail!("scenario refused with live native accept and RPC producers");
+    }
+    .await;
+    let failure = failed.expect_err("exercise native fixture error scope");
+    let (repo, document) = witness.ok_or(failure)?;
+    assert!(repo.get_doc(&document).await.is_err());
+    Ok(())
 }

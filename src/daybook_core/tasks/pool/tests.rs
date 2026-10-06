@@ -7,7 +7,10 @@ fn descriptor(group: [u8; 32]) -> TaskPoolDescriptor {
     )
     .unwrap();
     TaskPoolDescriptor {
+        predecessor_parts: Default::default(),
+        historical_key_authorities: Default::default(),
         pool_id: TaskPoolId::for_processor("example/plug", "processor"),
+        rotation_generation: 0,
         authority_group: group,
         active_task_part: PartKey::new(b"task-part/first"),
         register_scope: b"pool/processor".to_vec(),
@@ -48,6 +51,40 @@ fn seed() -> automerge::Automerge {
 }
 
 #[test]
+fn rotated_descriptor_rejects_noncanonical_transport_parts() {
+    let mut initial = descriptor([1; 32]);
+    initial.archive_part = Some(PartKey::new(b"initial/archive"));
+    let successor = initial.successor(initial.publication_key.clone()).unwrap();
+    let encoded = successor.encode().unwrap();
+    for (field, value) in [
+        (
+            "active_task_part",
+            serde_json::to_value(&initial.active_task_part).unwrap(),
+        ),
+        (
+            "archive_part",
+            serde_json::to_value(&successor.active_task_part).unwrap(),
+        ),
+        (
+            "rotation_generation",
+            serde_json::json!(successor.rotation_generation + 1),
+        ),
+        ("pool_id", serde_json::json!("another-pool")),
+        ("authority_group", serde_json::to_value([2; 32]).unwrap()),
+    ] {
+        let mut wire: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        wire[field] = value;
+        assert!(
+            matches!(
+                TaskPoolDescriptor::decode(&serde_json::to_string(&wire).unwrap()),
+                Err(PoolMetadataRejection::Malformed(_))
+            ),
+            "accepted noncanonical {field}"
+        );
+    }
+}
+
+#[test]
 fn processor_mapping_separates_tuple_boundaries() {
     assert_ne!(
         TaskPoolId::for_processor("a/b", "c"),
@@ -67,10 +104,12 @@ fn concurrent_directory_root_and_pool_maps_preserve_independent_references() {
         }
         let pool = descriptor([1; 32]).pool_id;
         let left_reference = PoolReference {
+            rotation_generation: 0,
             document: DocumentId::new([3; 32]),
             authority_group: [1; 32],
         };
         let right_reference = PoolReference {
+            rotation_generation: 0,
             document: DocumentId::new([4; 32]),
             authority_group: [1; 32],
         };
@@ -294,6 +333,27 @@ async fn register_watch_reload_and_change_physical_part_without_changing_logical
     rotated.active_task_part = PartKey::new(b"task-part/rotated");
     repo.register(reference.document.clone(), rotated.clone())
         .await?;
+    // Directory Edit is not authority to advance the pool: both an inflated
+    // reference to real metadata and an unavailable higher hint must remain inert.
+    for hint in [
+        PoolReference {
+            rotation_generation: u64::MAX,
+            document: reference.document.clone(),
+            authority_group: group_id,
+        },
+        PoolReference {
+            rotation_generation: u64::MAX - 1,
+            document: DocumentId::new([247; 32]),
+            authority_group: group_id,
+        },
+    ] {
+        let key = hint.key()?;
+        directory
+            .with_document(|doc| {
+                write_reference(doc, &actor("directory-editor"), &first.pool_id, &key)
+            })
+            .await??;
+    }
     let reloaded = PoolRepo::new(
         Arc::clone(&big_repo),
         directory.document_id(),
@@ -336,12 +396,13 @@ async fn register_watch_reload_and_change_physical_part_without_changing_logical
 }
 
 #[tokio::test]
-async fn known_missing_reference_is_pending_and_duplicate_hints_are_conflict() -> Res<()> {
+async fn missing_selected_reference_stays_pending_without_fallback() -> Res<()> {
     let (big_repo, _sync, stop) = crate::test_support::boot_repo().await?;
     let directory = big_repo.create_doc(seed()).await?;
     let repo = PoolRepo::new(big_repo, directory.document_id(), actor("pool"));
     let pool = descriptor([1; 32]).pool_id;
     let missing = PoolReference {
+        rotation_generation: 0,
         document: DocumentId::new([8; 32]),
         authority_group: [1; 32],
     };
@@ -353,7 +414,8 @@ async fn known_missing_reference_is_pending_and_duplicate_hints_are_conflict() -
     assert_eq!(
         repo.discover(&pool, [1; 32]).await?,
         PoolDiscovery::Pending {
-            documents: BTreeSet::from([missing.document.clone()])
+            documents: BTreeSet::from([missing.document.clone()]),
+            authority_pending: false
         }
     );
     assert_eq!(
@@ -361,6 +423,7 @@ async fn known_missing_reference_is_pending_and_duplicate_hints_are_conflict() -
         PoolDiscovery::Rejected(PoolMetadataRejection::WrongAuthority)
     );
     let duplicate = PoolReference {
+        rotation_generation: 0,
         document: DocumentId::new([9; 32]),
         authority_group: [1; 32],
     };
@@ -371,8 +434,9 @@ async fn known_missing_reference_is_pending_and_duplicate_hints_are_conflict() -
         .await??;
     assert_eq!(
         repo.discover(&pool, [1; 32]).await?,
-        PoolDiscovery::Conflict {
-            references: BTreeSet::from([missing, duplicate])
+        PoolDiscovery::Pending {
+            documents: BTreeSet::from([missing.document.clone()]),
+            authority_pending: false
         }
     );
     stop().await
@@ -390,6 +454,7 @@ async fn lookup_binding_is_neutral_and_conflicts_across_authority_groups() -> Re
     let pool = TaskPoolId::for_processor("explicit/plug", "managed-processor");
     assert_eq!(repo.lookup_binding(&pool).await?, PoolBindingLookup::Absent);
     let first = PoolReference {
+        rotation_generation: 0,
         document: DocumentId::new([21; 32]),
         authority_group: [1; 32],
     };
@@ -405,10 +470,12 @@ async fn lookup_binding_is_neutral_and_conflicts_across_authority_groups() -> Re
         repo.load_descriptor(&first, &pool, first.authority_group)
             .await?,
         PoolDiscovery::Pending {
-            documents: BTreeSet::from([first.document.clone()])
+            documents: BTreeSet::from([first.document.clone()]),
+            authority_pending: false
         }
     );
     let other_group = PoolReference {
+        rotation_generation: 0,
         document: first.document.clone(),
         authority_group: [2; 32],
     };

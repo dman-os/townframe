@@ -808,11 +808,12 @@ pub trait HostPartStore: Send + Sync {
                         tracing::debug!(?request_id, "replay page long poll woke for new event");
                         break true;
                     }
-                    // No rows (an empty page) or the reader's boundary: neither is a wake. A
-                    // reader that answers with no rows every time must not turn this wait into a
-                    // spin, so after one probe the pacing is the hold, which the caller re-issues
-                    // from. This is also the arm that parks a blocking reader's live phase.
-                    _ => {
+                    // The one-shot replay boundary is not an empty live probe.
+                    // Filtering can emit an empty revision before that boundary;
+                    // counting both would park a blocking reader until hold expiry
+                    // instead of polling its notification-driven live phase.
+                    RevisionRead::ReplayComplete { .. } => {}
+                    RevisionRead::Entries { .. } => {
                         if probed {
                             tokio::select! {
                                 () = &mut hold => {

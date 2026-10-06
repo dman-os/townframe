@@ -95,10 +95,12 @@ impl DrawerRepo {
             if !metadata_changes.is_empty() {
                 // Publish only processed metadata, after invalidating both caches.
                 // Broadcast permits no current subscribers.
-                drop(self.metadata_events_tx.send(std::mem::take(&mut metadata_changes)));
+                drop(
+                    self.metadata_events_tx
+                        .send(std::mem::take(&mut metadata_changes)),
+                );
             }
             if !events.is_empty() {
-
                 self.registry.notify(events.drain(..));
             }
         }

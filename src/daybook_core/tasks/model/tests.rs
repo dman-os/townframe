@@ -410,7 +410,7 @@ fn canonical_digest_covers_only_execution_meaning() {
 fn local_declaration_validation_catches_producer_invariants() {
     let mut inverted = declaration("G1");
     inverted.not_before_secs = Some(100);
-    inverted.not_after_secs = Some(50);
+    inverted.not_after_secs = 50;
     assert_eq!(
         inverted.validate_local(),
         DeclarationViolation::WindowInverted {
@@ -419,20 +419,11 @@ fn local_declaration_validation_catches_producer_invariants() {
         }
     );
 
-    let mut horizon_without_deadline = declaration("G1");
-    horizon_without_deadline.result_retention = ResultRetention::TicketAuthoritative {
-        retain_until: Some(100),
-    };
-    assert_eq!(
-        horizon_without_deadline.validate_local(),
-        DeclarationViolation::MissingExecutionDeadline
-    );
-
     let mut valid = declaration("G1");
     valid.result_retention = ResultRetention::TicketAuthoritative {
         retain_until: Some(100),
     };
-    valid.not_after_secs = Some(100);
+    valid.not_after_secs = 100;
     assert!(valid.validate_local().is_valid());
 }
 
@@ -443,7 +434,7 @@ fn local_declaration_validation_catches_producer_invariants() {
 fn local_producer_violation_fails_loudly() {
     let mut invalid = declaration("G1");
     invalid.not_before_secs = Some(10);
-    invalid.not_after_secs = Some(5);
+    invalid.not_after_secs = 5;
     let _ticket = TaskTicket::declare_local(invalid, evidence(node(1), 1));
 }
 
@@ -629,23 +620,18 @@ fn canonical_input_collision_rejects_all_remote_evidence() {
 }
 
 #[test]
-fn indefinite_and_finite_retention_have_distinct_deadline_contracts() {
+fn result_retention_never_removes_the_execution_deadline() {
     let mut indefinite = declaration("G1");
+    indefinite.not_after_secs = 100;
     indefinite.result_retention = ResultRetention::TicketAuthoritative { retain_until: None };
     assert_eq!(indefinite.validate_local(), DeclarationViolation::Valid);
     let mut finite = indefinite.clone();
     finite.result_retention = ResultRetention::TicketAuthoritative {
         retain_until: Some(100),
     };
-    assert_eq!(
-        finite.validate_local(),
-        DeclarationViolation::MissingExecutionDeadline
-    );
-    finite.not_after_secs = Some(100);
-    assert!(finite.validate_local().is_valid());
-    indefinite.not_after_secs = Some(100);
+    assert_eq!(finite.validate_local(), DeclarationViolation::Valid);
     assert_ne!(finite.canonical_digest(), indefinite.canonical_digest());
-    finite.not_after_secs = Some(101);
+    finite.not_after_secs = 101;
     assert_eq!(
         finite.validate_local(),
         DeclarationViolation::RetentionPrecedesDeadline {
@@ -653,6 +639,58 @@ fn indefinite_and_finite_retention_have_distinct_deadline_contracts() {
             retain_until: 100,
         }
     );
+}
+
+#[test]
+fn missing_or_null_deadlines_cannot_decode_as_task_declarations() {
+    for retention in [
+        ResultRetention::ExternalSettlement(DomainCoordinationRef::from_label("slot")),
+        ResultRetention::TicketAuthoritative { retain_until: None },
+        ResultRetention::TicketAuthoritative {
+            retain_until: Some(100),
+        },
+    ] {
+        let mut task = declaration("G1");
+        task.not_after_secs = 100;
+        task.result_retention = retention;
+        let mut encoded = serde_json::to_value(&task).unwrap();
+        encoded["not_after_secs"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<TaskDeclaration>(encoded.clone()).is_err());
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("not_after_secs")
+            .unwrap();
+        assert!(serde_json::from_value::<TaskDeclaration>(encoded).is_err());
+    }
+}
+
+#[test]
+fn execution_deadline_is_part_of_the_immutable_task_identity() {
+    let original = declaration("G1");
+    let mut renewed = original.clone();
+    renewed.not_after_secs += 1;
+    assert_ne!(original.canonical_digest(), renewed.canonical_digest());
+    let mut retained = TaskTicket::declare_local(original, evidence(node(1), 1));
+    let before = retained.clone();
+    let incoming = TaskTicket::declare_local(renewed, evidence(node(2), 1));
+    assert!(retained.merge(&incoming).is_err());
+    assert_eq!(retained, before);
+}
+
+#[test]
+fn execution_expiry_and_collection_account_for_admission_clock_lag() {
+    let mut task = declaration("G1");
+    task.not_after_secs = 100;
+    assert!(!task.expired_at(100));
+    assert!(task.expired_at(101));
+    assert!(!task.expiry_is_certain_at(110, 10));
+    assert!(task.expiry_is_certain_at(111, 10));
+    assert_eq!(task.expiry_is_certain_at(101, 0), task.expired_at(101));
+    task.not_after_secs = i64::MIN;
+    assert!(!task.expiry_is_certain_at(i64::MIN, 1));
+    assert!(task.expiry_is_certain_at(i64::MAX, 0));
+    assert!(!task.expiry_is_certain_at(i64::MAX, u64::MAX));
 }
 
 #[test]
@@ -664,7 +702,7 @@ fn malformed_remote_declarations_are_rejected_before_any_mutation() {
     invalid_retention.result_retention = ResultRetention::TicketAuthoritative {
         retain_until: Some(100),
     };
-    invalid_retention.not_after_secs = Some(101);
+    invalid_retention.not_after_secs = 101;
     for (declaration, violation) in [
         (
             invalid_placement,

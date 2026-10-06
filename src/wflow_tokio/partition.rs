@@ -37,6 +37,7 @@ pub struct ExecutionGate {
 pub(crate) struct ExecutionAdmission {
     active: bool,
     held_jobs: std::collections::HashSet<Arc<str>>,
+    deadlines: HashMap<Arc<str>, i64>,
 }
 
 impl ExecutionGate {
@@ -50,6 +51,31 @@ impl ExecutionGate {
         self.state.send_modify(|state| {
             state.held_jobs.insert(job_id);
         });
+    }
+
+    /// Bind an immutable host authorization before the job can execute. Retry,
+    /// timer/message wake and snapshot recovery all retain the same boundary.
+    pub fn authorize_until(&self, job_id: Arc<str>, not_after_secs: i64) {
+        self.state.send_modify(|state| {
+            state
+                .deadlines
+                .entry(job_id)
+                .and_modify(|previous| {
+                    assert_eq!(
+                        *previous, not_after_secs,
+                        "workflow authorization cannot be renewed"
+                    )
+                })
+                .or_insert(not_after_secs);
+        });
+    }
+
+    pub(crate) fn execution_expired(&self, job_id: &str) -> bool {
+        self.state
+            .borrow()
+            .deadlines
+            .get(job_id)
+            .is_some_and(|deadline| Timestamp::now().as_second() > *deadline)
     }
 
     pub fn release(&self, job_id: &str) {

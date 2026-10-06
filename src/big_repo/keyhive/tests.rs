@@ -164,6 +164,7 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
 
 #[tokio::test]
 async fn authority_change_archive_immediately_restores_private_document_key() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
     let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
     let (evt_tx, _evt_rx) = async_channel::unbounded();
     let listener = BigRepoKeyhiveListener {
@@ -245,6 +246,13 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         .clone_keyhive()
         .receive_contact_card(clone.contact_card())
         .await?;
+    // This fixture has no runtime event consumer: persist the contact-card
+    // dependency before granting its agent membership, as native ingress does.
+    let contact_event = match clone.contact_card().op() {
+        KeyOp::Add(op) => StaticEvent::PrekeysExpanded(Box::new(op.as_ref().clone())),
+        KeyOp::Rotate(op) => StaticEvent::PrekeyRotated(Box::new(op.as_ref().clone())),
+    };
+    protocol.persist_local_events(vec![contact_event]).await?;
     let clone_agent = owner
         .get_agent_by_peer_id(&clone.keyhive_peer_id())
         .await?
@@ -287,15 +295,23 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
         vec![Some(local_secret)],
     )
     .await?;
-    let restored = BigKeyhiveHandle::restore_from_storage_archive(owner_seed, &storage, listener)
-        .await?
-        .ok_or_eyre("owner archive is missing")?;
+    let restored =
+        BigKeyhiveHandle::restore_from_storage_archive(owner_seed, &storage, listener.clone())
+            .await?
+            .ok_or_eyre("owner archive is missing")?;
     restored.import_prekey_state(&storage).await?;
     subduction_keyhive::ingest_from_storage(restored.clone_keyhive().as_ref(), &storage).await?;
     let restored_keyhive = restored.clone_keyhive();
     assert!(
         restored_keyhive.get_document(kh_doc_id).await.is_some(),
         "restored document is missing"
+    );
+    assert_eq!(
+        restored_keyhive
+            .try_decrypt_content(kh_doc_id, checkpoint.encrypted_content())
+            .await?,
+        b"authority-checkpoint",
+        "restored private material must decrypt the exact pre-restart ciphertext",
     );
     restored_keyhive
         .try_encrypt_content(
@@ -320,6 +336,18 @@ async fn authority_change_archive_immediately_restores_private_document_key() ->
     assert!(
         remaining.is_empty(),
         "archive compaction must remove incorporated private deltas"
+    );
+
+    let compacted = BigKeyhiveHandle::restore_from_storage_archive(owner_seed, &storage, listener)
+        .await?
+        .ok_or_eyre("compacted owner archive is missing")?;
+    assert_eq!(
+        compacted
+            .clone_keyhive()
+            .try_decrypt_content(kh_doc_id, checkpoint.encrypted_content())
+            .await?,
+        b"authority-checkpoint",
+        "compaction must retain the key for the exact pre-restart ciphertext",
     );
 
     Ok(())

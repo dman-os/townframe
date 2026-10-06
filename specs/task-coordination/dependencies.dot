@@ -1,0 +1,24 @@
+digraph dependencies {
+  n4909[label="q::step"];
+  n4909 -> n4793;
+  n4403[label="handle"];
+  n4403 -> n3622;
+  n1887[label="classifyResult"];
+  n1887 -> n4860;
+  n4793[label="step"];
+  n4793 -> n4403;
+  n4461[label="connected"];
+  n4461 -> n4403;
+  n4901[label="dispatching"];
+  n4901 -> n4403;
+  n4901 -> n4860;
+  n4905[label="q::init"];
+  n4905 -> n4670;
+  n4670[label="init"];
+  n4670 -> n4461;
+  n4860[label="accepted"];
+  n4860 -> n4403;
+  n4860 -> n4461;
+  n3622[label="apply"];
+  n3622 -> n1887;
+}

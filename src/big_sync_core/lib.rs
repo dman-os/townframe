@@ -39,12 +39,12 @@ use cursor::*;
 pub mod concurrent_delta_walker;
 pub mod delta_walker_sparse_state;
 pub mod delta_walker_state;
+/// Signed policy-neutral registers for custom reconciliation backends.
+pub mod encrypted_register;
 mod fingerprint;
 mod ids;
 pub mod keyed_frontier;
 pub mod live_revision_watch;
-/// Signed policy-neutral registers for custom reconciliation backends.
-pub mod encrypted_register;
 /// New-generation stream abstractions (see module docs). Additive only:
 /// existing machines migrate onto these in the upcoming swap, nothing is
 /// rewired yet.

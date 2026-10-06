@@ -1,4 +1,5 @@
 pub mod domain;
+pub(crate) mod origins;
 pub mod slots;
 
 use crate::interlude::*;
@@ -77,6 +78,12 @@ impl TriageWorker {
         self.coordination_ready.notify_one();
     }
 
+    pub(crate) fn activation_updates(
+        &self,
+    ) -> tokio::sync::watch::Receiver<HashMap<String, ActivationAck>> {
+        self.state.subscribe()
+    }
+
     pub async fn query_activation(
         &self,
         plugs: &PlugsRepo,
@@ -92,6 +99,9 @@ impl TriageWorker {
         };
         if current != target {
             return Ok(ActivationStatus::Superseded(current.clone()));
+        }
+        if !desired.manifests.contains_key(&target.plug_id) {
+            return Ok(ActivationStatus::Pending);
         }
         Ok(match self.state.borrow().get(&target.plug_id) {
             Some(ack) if &ack.target == target => ActivationStatus::Active(ack.clone()),
@@ -137,7 +147,9 @@ struct SourceTestGate {
 }
 
 pub(crate) struct DistributedProcessor {
+    pub plug_id: String,
     pub domain: domain::ProcessorDomainReference,
+    pub installed_domain_heads: std::sync::Mutex<Vec<automerge::ChangeHash>>,
     pub driver: crate::tasks::driver::PoolDriverHandle,
     pub pool: crate::tasks::PoolDescriptorSnapshot,
 }
@@ -157,38 +169,122 @@ impl Rt {
         );
         let snapshot = match repo.load(reference, processor).await? {
             domain::ProcessorDomainLoad::Ready(snapshot) => snapshot,
+            domain::ProcessorDomainLoad::Pending {
+                authority_pending: true,
+                ..
+            } => {
+                return Err(big_repo::CoordinationError::Pending.into());
+            }
             domain::ProcessorDomainLoad::Pending { .. } => return Ok(None),
             domain::ProcessorDomainLoad::Rejected(error) => return Err(error.into()),
         };
-        Ok(Some(self.rcx.attach_processor_slot_store(&snapshot).await?))
+        // The captured document remains the authorization witness. Settlement
+        // belongs to the selected logical owner, never a retired physical part.
+        let selected = repo
+            .selected_candidate(&self.rcx.doc_config.document_id(), processor)
+            .await?;
+        let owner = match selected {
+            Some(candidate) if candidate.reference != *reference => {
+                let owner = match repo.load(&candidate.reference, processor).await? {
+                    domain::ProcessorDomainLoad::Ready(owner) => owner,
+                    domain::ProcessorDomainLoad::Pending {
+                        authority_pending: true,
+                        ..
+                    } => {
+                        return Err(big_repo::CoordinationError::Pending.into());
+                    }
+                    domain::ProcessorDomainLoad::Pending { .. } => return Ok(None),
+                    domain::ProcessorDomainLoad::Rejected(error) => return Err(error.into()),
+                };
+                let store = self
+                    .rcx
+                    .attach_processor_slot_store(&owner.transport(&self.rcx.big_repo).await?, None)
+                    .await?;
+                eyre::ensure!(
+                    store
+                        .register()
+                        .recognizes_authority(&reference.document, &reference.authority_group),
+                    "selected processor does not authenticate captured settlement source"
+                );
+                return Ok(Some(store));
+            }
+            _ => snapshot,
+        };
+        Ok(Some(
+            self.rcx
+                .attach_processor_slot_store(&owner.transport(&self.rcx.big_repo).await?, None)
+                .await?,
+        ))
     }
+}
+
+pub(crate) struct ProcessorSlotOwner {
+    pub snapshot: Arc<domain::control::ProcessorTransportSnapshot>,
+    pub store: Arc<slots::ProcessorSlotStore>,
 }
 
 impl crate::repo::RepoCtx {
     pub(crate) async fn attach_processor_slot_store(
         &self,
-        snapshot: &domain::ProcessorDomainSnapshot,
+        snapshot: &Arc<domain::control::ProcessorTransportSnapshot>,
+        control: Option<String>,
     ) -> Res<Arc<slots::ProcessorSlotStore>> {
         let mut stores = self.processor_slot_stores.lock().await;
-        let binding = snapshot.register_binding(&self.big_repo).await?;
-        if let Some((bound, store)) = stores.get(&snapshot.processor_full_id) {
+        let mut binding = snapshot.register_binding.clone();
+        let sampled = self
+            .big_repo
+            .coordination_authority(
+                snapshot.reference.document.clone(),
+                snapshot.reference.authority_group,
+            )
+            .await?;
+        binding.authority = self
+            .big_repo
+            .admit_coordination_access(&sampled, big_repo::keyhive_core::access::Access::Relay)
+            .await?;
+        if let Some(ProcessorSlotOwner {
+            snapshot: bound,
+            store,
+        }) = stores.get_mut(&snapshot.processor_full_id)
+        {
+            if bound.reference == snapshot.reference && store.register().part() == &binding.part {
+                store.register().refresh_publication_key(&binding).await?;
+                if let Some(control) = control {
+                    store.register().remember_current_control(control).await?;
+                }
+                *bound = Arc::clone(snapshot);
+                return Ok(Arc::clone(store));
+            }
+            if binding.generation < store.register().generation()
+                || (binding.generation == store.register().generation()
+                    && snapshot.reference.document > bound.reference.document)
+            {
+                store.register().adopt_source(&binding).await?;
+                return Ok(Arc::clone(store));
+            }
             eyre::ensure!(
-                bound == &snapshot.reference,
-                "processor authority binding changed; explicit migration is required"
+                bound.reference.authority_group == snapshot.reference.authority_group
+                    && binding.scope.as_slice() == store.register().scope()
+                    && (control.is_some()
+                        || binding.predecessor_parts.contains(store.register().part())
+                        || binding.part == *store.register().part()),
+                "processor successor omits retained native binding"
             );
-            store.register().refresh_publication_key(&binding).await?;
-            return Ok(Arc::clone(store));
         }
-        let register = crate::tasks::storage::RegisterStore::open(
+        let register = crate::tasks::storage::RegisterStore::open_current(
             self.coordination_part_store().await?,
             Arc::clone(&self.big_repo),
             binding,
+            control,
         )
         .await?;
         let store = Arc::new(slots::ProcessorSlotStore::distributed(register));
         stores.insert(
             snapshot.processor_full_id.clone(),
-            (snapshot.reference.clone(), Arc::clone(&store)),
+            ProcessorSlotOwner {
+                snapshot: Arc::clone(snapshot),
+                store: Arc::clone(&store),
+            },
         );
         Ok(store)
     }
@@ -200,6 +296,7 @@ struct PreparedProcessor {
     routine_name: KeyGeneric,
     processor_manifest: Arc<ProcessorManifest>,
     plug_manifest: Arc<daybook_types::manifest::PlugManifest>,
+    facet_reference_specs: Arc<HashMap<String, Vec<FacetReferenceManifest>>>,
     event_predicate: ProcessorEventPredicate,
     /// Tag-level: any facet with this tag counts as read.
     read_tags: HashSet<String>,
@@ -211,9 +308,9 @@ struct PreparedProcessor {
 struct DocProcessorTriageListener {
     rt: Arc<Rt>,
     cached_processors: Vec<PreparedProcessor>,
+    pending_activation: bool,
     triage_read_tags: HashSet<String>,
     triage_read_keys: HashSet<FacetKey>,
-    facet_reference_specs: Arc<HashMap<String, Vec<FacetReferenceManifest>>>,
     predicate_requirements: HashSet<DocPredicateEvalRequirement>,
     predicate_resolved: HashMap<DocPredicateEvalRequirement, DocPredicateEvalResolved>,
 }
@@ -227,6 +324,7 @@ struct ProcessorDispatchPlan {
     dispatch_id: String,
     input: crate::rt::task_adapter::CapturedRoutineInput,
     distributed_policy: Option<daybook_types::manifest::DistributedProcessorPolicy>,
+    task_authorization: Option<origins::TaskAuthorization>,
     #[serde(default)]
     source_origin: Option<crate::tasks::NodePubkey>,
 }
@@ -237,31 +335,83 @@ impl DocProcessorTriageListener {
         &mut self,
         plugs: Vec<Arc<daybook_types::manifest::PlugManifest>>,
         boundaries: &HashMap<String, ActivationAck>,
-    ) -> Res<()> {
+        pending_plugs: &HashSet<String>,
+    ) -> Res<HashSet<String>> {
         self.cached_processors.clear();
+        let mut shared_documents = HashSet::new();
+        let mut pending_shared = HashSet::new();
         let mut triage_read_tags = HashSet::new();
         let mut triage_read_keys = HashSet::new();
-        let mut facet_reference_specs: HashMap<String, Vec<FacetReferenceManifest>> =
-            HashMap::new();
-        for plug in plugs {
+        for plug in &plugs {
             let plug_id = plug.id();
-            for facet in &plug.facets {
-                if facet.references.is_empty() {
+            let attached: HashMap<_, _> = self
+                .rt
+                .distributed_processors
+                .read()
+                .await
+                .iter()
+                .filter_map(|(id, owner)| {
+                    let (owner_plug, name) = id.rsplit_once('/')?;
+                    (owner_plug == plug_id).then(|| (name.to_owned(), Arc::clone(owner)))
+                })
+                .collect();
+            let names: BTreeSet<_> = plug
+                .processors
+                .keys()
+                .map(|name| name.0.clone())
+                .chain(attached.keys().cloned())
+                .collect();
+            for processor_name in names {
+                let definition = if let Some(owner) = attached.get(&processor_name) {
+                    shared_documents.insert(owner.domain.document.to_string());
+                    let id = format!("{plug_id}/{processor_name}");
+                    let domains = domain::ProcessorDomainRepo::new(
+                        Arc::clone(&self.rt.rcx.big_repo),
+                        self.rt.rcx.local_actor_id.clone(),
+                    );
+                    let snapshot = match domains.load(&owner.domain, &id).await? {
+                        domain::ProcessorDomainLoad::Ready(snapshot) => snapshot,
+                        domain::ProcessorDomainLoad::Pending { .. } => {
+                            pending_shared.insert(id);
+                            self.pending_activation = true;
+                            continue;
+                        }
+                        domain::ProcessorDomainLoad::Rejected(
+                            domain::ProcessorDomainRejection::Unauthorized,
+                        ) => continue,
+                        domain::ProcessorDomainLoad::Rejected(error) => return Err(error.into()),
+                    };
+                    shared_documents.insert(snapshot.reference.document.to_string());
+                    shared_documents
+                        .extend(snapshot.configuration.config_documents.values().cloned());
+                    let manifest = crate::plugs::PlugsRepo::parse_enabled_ref(
+                        &snapshot.configuration.manifest,
+                    )?;
+                    shared_documents.insert(manifest.doc_id.clone());
+                    let Some((_, definition)) = self
+                        .rt
+                        .plugs_repo
+                        .read_manifest_at_ref(&snapshot.configuration.manifest)
+                        .await?
+                    else {
+                        pending_shared.insert(id);
+                        self.pending_activation = true;
+                        continue;
+                    };
+                    definition
+                } else {
+                    Arc::clone(plug)
+                };
+                let Some(processor) = definition.processors.get(processor_name.as_str()) else {
                     continue;
-                }
-                facet_reference_specs
-                    .entry(facet.key_tag.to_string())
-                    .or_default()
-                    .extend(facet.references.iter().cloned());
-            }
-            for (processor_name, processor) in &plug.processors {
+                };
                 match &processor.deets {
                     ProcessorDeets::DocProcessor {
                         event_predicate,
                         predicate,
                         routine_name,
                     } => {
-                        let routine = plug.routines.get(routine_name).ok_or_else(|| {
+                        let routine = definition.routines.get(routine_name).ok_or_else(|| {
                             ferr!(
                                 "routine {} not found in plug {} manifest",
                                 routine_name,
@@ -282,12 +432,35 @@ impl DocProcessorTriageListener {
                         read_keys.extend(acl_keys);
                         triage_read_tags.extend(read_tags.iter().cloned());
                         triage_read_keys.extend(read_keys.iter().cloned());
+                        let mut requirements = HashSet::new();
+                        predicate.append_requirements(&mut requirements);
+                        let mut references: HashMap<String, Vec<FacetReferenceManifest>> =
+                            HashMap::new();
+                        if requirements.contains(&DocPredicateEvalRequirement::FacetManifest) {
+                            // The active plug is only an activation gate. Its reference
+                            // schema must not override the shared processor definition.
+                            for manifest in plugs
+                                .iter()
+                                .filter(|other| other.id() != plug_id)
+                                .chain(std::iter::once(&definition))
+                            {
+                                for facet in &manifest.facets {
+                                    if !facet.references.is_empty() {
+                                        references
+                                            .entry(facet.key_tag.to_string())
+                                            .or_default()
+                                            .extend(facet.references.iter().cloned());
+                                    }
+                                }
+                            }
+                        }
                         self.cached_processors.push(PreparedProcessor {
                             processor_full_id: format!("{plug_id}/{processor_name}"),
                             plug_id: plug_id.clone(),
                             routine_name: routine_name.clone(),
                             processor_manifest: Arc::clone(processor),
-                            plug_manifest: Arc::clone(&plug),
+                            plug_manifest: Arc::clone(&definition),
+                            facet_reference_specs: Arc::new(references),
                             event_predicate: event_predicate.clone(),
                             read_tags,
                             read_keys,
@@ -300,21 +473,28 @@ impl DocProcessorTriageListener {
         // Configuration owns scheduling activation, independently of Keyhive
         // permission and retained task/slot storage. Disablement must retire the
         // attached actor before acknowledging the new activation snapshot.
+        // An enabled target whose manifest is unavailable is not negative
+        // authority. Keep its actor attached so transport and readiness can
+        // recover; an empty inventory must not turn Pending into disablement.
         let mut attached = self.rt.distributed_processors.write().await;
         let disabled: Vec<_> = attached
-            .keys()
-            .filter(|id| {
-                !self.cached_processors.iter().any(|processor| {
-                    &processor.processor_full_id == *id
-                        && matches!(
-                            processor.processor_manifest.coordination,
-                            daybook_types::manifest::ProcessorCoordination::Distributed(_)
-                        )
-                })
+            .iter()
+            .filter(|(id, owner)| {
+                !pending_plugs.contains(&owner.plug_id)
+                    && !pending_shared.contains(*id)
+                    && !self.cached_processors.iter().any(|processor| {
+                        &processor.processor_full_id == *id
+                            && matches!(
+                                processor.processor_manifest.coordination,
+                                daybook_types::manifest::ProcessorCoordination::Distributed(_)
+                            )
+                    })
             })
-            .cloned()
+            .map(|(id, _)| id.clone())
             .collect();
         for id in disabled {
+            tracing::debug!(node = %self.rt.rcx.big_repo.local_peer_id(), processor = %id, "native processor activation withdrawing attached actor");
+            self.rt.rcx.clear_processor_activation(&id).await?;
             attached
                 .remove(&id)
                 .expect(ERROR_IMPOSSIBLE)
@@ -325,8 +505,8 @@ impl DocProcessorTriageListener {
         drop(attached);
         self.triage_read_tags = triage_read_tags;
         self.triage_read_keys = triage_read_keys;
-        self.facet_reference_specs = Arc::new(facet_reference_specs);
-        Ok(())
+
+        Ok(shared_documents)
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -344,6 +524,13 @@ impl DocProcessorTriageListener {
         local_changed_facet_keys: Option<&HashSet<FacetKey>>,
         source_revision: u64,
     ) -> Res<Option<Vec<ProcessorDispatchPlan>>> {
+        if self.pending_activation {
+            tracing::debug!(
+                source_revision,
+                "processor source retained pending established activation"
+            );
+            return Ok(None);
+        }
         let rt = &self.rt;
         debug!(
             processor_count = self.cached_processors.len(),
@@ -353,6 +540,12 @@ impl DocProcessorTriageListener {
         let mut full_doc_for_reference_predicates: Option<Option<Arc<Doc>>> = None;
         for processor in &self.cached_processors {
             if source_revision <= processor.source_boundary {
+                tracing::debug!(
+                    processor = %processor.processor_full_id,
+                    source_revision,
+                    source_boundary = processor.source_boundary,
+                    "processor source precedes activation boundary"
+                );
                 continue;
             }
             let is_local_for_processor = local_changed_facet_keys
@@ -390,6 +583,11 @@ impl DocProcessorTriageListener {
                         .get(&processor.processor_full_id)
                         .cloned()
                     else {
+                        tracing::debug!(
+                            processor = %processor.processor_full_id,
+                            source_revision,
+                            "processor source retained pending scheduling owner"
+                        );
                         return Ok(None);
                     };
                     Some(managed)
@@ -496,7 +694,7 @@ impl DocProcessorTriageListener {
                         self.predicate_resolved.insert(
                             requirement.clone(),
                             DocPredicateEvalResolved::FacetManifest(Arc::clone(
-                                &self.facet_reference_specs,
+                                &processor.facet_reference_specs,
                             )),
                         );
                     }
@@ -571,8 +769,34 @@ impl DocProcessorTriageListener {
                 changed_facet_keys,
                 wflow_args_json: None,
             };
+            let shared_configuration = if let Some(managed) = &distributed {
+                let domains = domain::ProcessorDomainRepo::new(
+                    Arc::clone(&rt.rcx.big_repo),
+                    rt.rcx.local_actor_id.clone(),
+                );
+                match domains
+                    .load(&managed.domain, &processor.processor_full_id)
+                    .await?
+                {
+                    domain::ProcessorDomainLoad::Ready(snapshot) => Some(snapshot),
+                    domain::ProcessorDomainLoad::Pending {
+                        authority_pending: true,
+                        ..
+                    } => return Err(big_repo::CoordinationError::Pending.into()),
+                    domain::ProcessorDomainLoad::Pending { .. } => return Ok(None),
+                    domain::ProcessorDomainLoad::Rejected(error) => return Err(error.into()),
+                }
+            } else {
+                None
+            };
             let mut prepared = rt
-                .prepare_routine(&processor.plug_id, &processor.routine_name.0, args, None)
+                .prepare_routine(
+                    &processor.plug_id,
+                    &processor.routine_name.0,
+                    args,
+                    None,
+                    shared_configuration.as_ref(),
+                )
                 .await?;
             let crate::rt::task_adapter::CapturedRoutineInput::V1 {
                 args,
@@ -624,12 +848,17 @@ impl DocProcessorTriageListener {
                 };
                 config_values.insert(config.doc_id.clone(), doc.facets.clone());
             }
-            let Some(bindings) = rt
-                .plugs_repo
-                .config_bindings_at(configuration_document, configuration_heads)
-                .await?
-            else {
-                return Ok(None);
+            let bindings = if let Some(shared) = &shared_configuration {
+                std::borrow::Cow::Borrowed(&shared.configuration.config_documents)
+            } else {
+                let Some(bindings) = rt
+                    .plugs_repo
+                    .config_bindings_at(configuration_document, configuration_heads)
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                std::borrow::Cow::Owned(bindings)
             };
             let own_config = bindings
                 .get(&processor.plug_id)
@@ -689,12 +918,31 @@ impl DocProcessorTriageListener {
             if !predicate_match || slot.settled(&capture.generation) {
                 continue;
             }
+            let task_authorization = if let Some(shared) = &shared_configuration {
+                Some(
+                    rt.processor_task_origins
+                        .originate(
+                            slot_key.id(),
+                            capture.generation,
+                            &shared.configuration,
+                            jiff::Timestamp::now().as_second(),
+                        )
+                        .await?,
+                )
+            } else {
+                None
+            };
             let mut hash = blake3::Hasher::new();
             hash.update(b"daybook/processor-task/v1\0");
             hash.update(&slot_key.id());
             hash.update(&capture.generation);
-            let dispatch_id =
-                utils_rs::hash::blake3_hash_bytes_multibase(hash.finalize().as_bytes());
+            let dispatch_id = utils_rs::hash::blake3_hash_bytes_multibase(
+                match &task_authorization {
+                    Some(authorization) => authorization.task_id.to_bytes32(),
+                    None => *hash.finalize().as_bytes(),
+                }
+                .as_slice(),
+            );
             if let Some(distributed) = &distributed {
                 let crate::rt::task_adapter::CapturedRoutineInput::V1 {
                     processor: input,
@@ -705,6 +953,10 @@ impl DocProcessorTriageListener {
                 *input = Some(crate::rt::task_adapter::CapturedProcessorInput {
                     slot: slot_key.clone(),
                     capture: capture.clone(),
+                    authorization: task_authorization
+                        .as_ref()
+                        .expect("distributed processor retains its authorization")
+                        .clone(),
                     domain: distributed.domain.clone(),
                     configuration,
                 });
@@ -717,8 +969,13 @@ impl DocProcessorTriageListener {
                 else {
                     unreachable!("prepared processor invocation")
                 };
-                invocation.task_id =
-                    Some(crate::tasks::PoolTaskId::new(*hash.finalize().as_bytes()).to_string());
+                invocation.task_id = Some(
+                    task_authorization
+                        .as_ref()
+                        .expect("distributed processor has a shared task lifetime")
+                        .task_id
+                        .to_string(),
+                );
             }
             plans.push(ProcessorDispatchPlan {
                 slot: slot_key,
@@ -728,6 +985,7 @@ impl DocProcessorTriageListener {
                 plug_id: processor.plug_id.clone(),
                 routine_name: processor.routine_name.0.clone(),
                 source_origin,
+                task_authorization,
                 distributed_policy: match &processor.processor_manifest.coordination {
                     daybook_types::manifest::ProcessorCoordination::PerNode => None,
                     daybook_types::manifest::ProcessorCoordination::Distributed(policy) => {
@@ -807,17 +1065,19 @@ async fn enqueue_processor_plan(rt: &Rt, plan: &ProcessorDispatchPlan) -> Res<()
             .ok_or_eyre("captured distributed processor is no longer attached")?;
         let origin = plan.source_origin;
         let (placement, effect_policy) = crate::rt::task_adapter::processor_policy(policy, origin)?;
-        let mut hash = blake3::Hasher::new();
-        hash.update(b"daybook/processor-task/v1\0");
-        hash.update(&plan.slot.id());
-        hash.update(&plan.capture.generation);
+        let authorization = plan
+            .task_authorization
+            .as_ref()
+            .expect("distributed processor plan retains its origin authorization");
         let coordination =
             crate::tasks::DomainCoordinationRef::from_label(plan.dispatch_id.clone());
+        let task_id = authorization.task_id;
+        tracing::debug!(task = %task_id, processor = %plan.slot.processor_full_id, "publishing captured processor obligation");
         managed
             .driver
             .submit(
                 crate::tasks::TaskDeclaration {
-                    task_id: crate::tasks::PoolTaskId::new(*hash.finalize().as_bytes()),
+                    task_id,
                     pool: managed.pool.descriptor.pool_id.clone(),
                     domain: crate::tasks::DomainId::from_label(
                         crate::rt::task_adapter::PROCESSOR_DOMAIN,
@@ -831,8 +1091,8 @@ async fn enqueue_processor_plan(rt: &Rt, plan: &ProcessorDispatchPlan) -> Res<()
                     coordination_ref: Some(coordination.clone()),
                     placement,
                     effect_policy,
-                    not_before_secs: None,
-                    not_after_secs: None,
+                    not_before_secs: Some(authorization.originated_at_secs),
+                    not_after_secs: authorization.not_after_secs,
                     result_retention: crate::tasks::ResultRetention::ExternalSettlement(
                         coordination,
                     ),
@@ -840,6 +1100,7 @@ async fn enqueue_processor_plan(rt: &Rt, plan: &ProcessorDispatchPlan) -> Res<()
                 serde_json::to_vec(&plan.input)?,
             )
             .await?;
+        tracing::debug!(task = %task_id, processor = %plan.slot.processor_full_id, "captured processor obligation published");
         return Ok(());
     }
     if rt.dispatch_repo.get_any(&plan.dispatch_id).await.is_some() {
@@ -1051,6 +1312,13 @@ async fn apply_processor_revision(
     let mut groups = BTreeMap::<(DocId, String), ProcessorFacetGroup>::new();
     for delta in entries {
         if delta.key.branch_id.0 != delta.key.document_id {
+            tracing::debug!(
+                source_revision,
+                document = %delta.key.document_id,
+                branch = %delta.key.branch_id.0,
+                facet = ?delta.key.facet_key,
+                "processor source excluded non-main physical branch"
+            );
             continue;
         }
         groups
@@ -1095,6 +1363,12 @@ async fn apply_processor_revision(
     let mut plans = Vec::new();
     let mut state_updates = Vec::new();
     for group in groups.into_values() {
+        tracing::debug!(
+            source_revision,
+            document = %group.document_id,
+            branch = %group.branch_id.0,
+            "planning processor source group"
+        );
         let doc_key = processor_doc_state_key(&group.document_id, &group.branch_id.0);
         let Some((group_plans, group_updates)) = plan_processor_group(
             triage,
@@ -1140,9 +1414,10 @@ fn new_doc_processor_listener(rt: Arc<Rt>) -> DocProcessorTriageListener {
     DocProcessorTriageListener {
         rt,
         cached_processors: Vec::new(),
+        pending_activation: false,
         triage_read_tags: HashSet::new(),
         triage_read_keys: HashSet::new(),
-        facet_reference_specs: Arc::new(HashMap::new()),
+
         predicate_requirements: HashSet::new(),
         predicate_resolved: HashMap::new(),
     }
@@ -1198,6 +1473,7 @@ async fn install_activation_snapshot(
             .cached_processor_activation_snapshot(&cached_heads)
             .await?
     };
+    tracing::debug!(targets = ?desired.targets, manifests = ?desired.manifests.keys(), rejected = ?desired.rejected, "installing processor activation snapshot");
     *config_documents = desired
         .targets
         .values()
@@ -1225,6 +1501,17 @@ async fn install_activation_snapshot(
     }
     let boundary = source.latest_revision().await?;
     let mut installed = HashMap::new();
+    for (plug_id, previous) in acknowledgements.iter() {
+        if desired.targets.get(plug_id) == Some(&previous.target)
+            && !desired.manifests.contains_key(plug_id)
+            && !desired.rejected.contains_key(plug_id)
+        {
+            // Temporary unavailability is not disablement or a new activation.
+            // Preserve the established boundary and leave source deltas unsettled.
+            installed.insert(plug_id.clone(), previous.clone());
+        }
+    }
+    triage.pending_activation = !installed.is_empty();
     for (plug_id, manifest) in &desired.manifests {
         let target = &desired.targets[plug_id];
         let previous = acknowledgements.get(plug_id);
@@ -1255,9 +1542,21 @@ async fn install_activation_snapshot(
         };
         installed.insert(plug_id.clone(), ack);
     }
-    triage
-        .refresh_processors(desired.manifests.into_values().collect(), &installed)
-        .await?;
+    let pending_plugs = desired
+        .targets
+        .keys()
+        .filter(|id| !desired.manifests.contains_key(*id) && !desired.rejected.contains_key(*id))
+        .cloned()
+        .collect();
+    config_documents.extend(
+        triage
+            .refresh_processors(
+                desired.manifests.into_values().collect(),
+                &installed,
+                &pending_plugs,
+            )
+            .await?,
+    );
     triage.predicate_requirements.clear();
     triage.predicate_resolved.clear();
     if &installed != acknowledgements {
@@ -1457,6 +1756,7 @@ async fn run_doc_processor_driver(
     .await?;
     let mut deferred: Option<(u64, Vec<FacetDelta>)> = None;
     let mut parked = false;
+    let mut authority_pending = false;
     loop {
         if cancel_token.is_cancelled() {
             return Ok(());
@@ -1465,6 +1765,14 @@ async fn run_doc_processor_driver(
         let read = tokio::select! {
             _ = cancel_token.cancelled() => return Ok(()),
             _ = rt.triage_worker.coordination_ready.notified() => {
+                changes.config_changed = true;
+                changes.source_ready = true;
+                None
+            }
+            _ = tokio::time::sleep(big_repo::CoordinationAuthority::PENDING_RECHECK_DELAY),
+                if parked && authority_pending => {
+                // Materialization wakes do not cover native generation races.
+                // Keep the source revision unacknowledged until fresh admission.
                 changes.source_ready = true;
                 None
             }
@@ -1561,7 +1869,11 @@ async fn run_doc_processor_driver(
                 }
             }
         }
-        if changes.config_changed || !changes.documents.is_empty() {
+        if changes.config_changed
+            || !changes.documents.is_empty()
+            || (triage.pending_activation && changes.source_ready)
+        {
+            let was_pending = triage.pending_activation;
             install_activation_snapshot(
                 &mut triage,
                 &facet_set_store,
@@ -1570,6 +1882,9 @@ async fn run_doc_processor_driver(
                 &changes.documents,
             )
             .await?;
+            if was_pending && !triage.pending_activation {
+                parked = false;
+            }
         }
         if changes.source_ready {
             parked = false;
@@ -1582,15 +1897,38 @@ async fn run_doc_processor_driver(
                 let defer = source_gate.as_ref().is_some_and(|gate| gate.defer_once);
                 #[cfg(not(test))]
                 let defer = false;
-                let settled = !defer
-                    && apply_processor_revision(
+                let settled = if defer {
+                    false
+                } else {
+                    match apply_processor_revision(
                         &mut triage,
                         &facet_state,
                         &mut facet_walker,
                         revision,
                         entries.clone(),
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(settled) => {
+                            authority_pending = false;
+                            settled
+                        }
+                        Err(error)
+                            if matches!(
+                                error.downcast_ref::<big_repo::CoordinationError>(),
+                                Some(big_repo::CoordinationError::Pending)
+                            ) =>
+                        {
+                            tracing::debug!(
+                                revision,
+                                "processor source retained pending native authority"
+                            );
+                            authority_pending = true;
+                            false
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
                 #[cfg(test)]
                 if let Some(mut gate) = source_gate {
                     gate.settled
@@ -1698,6 +2036,7 @@ mod tests {
             routine_name: "process".into(),
             processor_manifest,
             plug_manifest: manifest,
+            facet_reference_specs: Arc::new(HashMap::new()),
             event_predicate: default(),
             read_tags: default(),
             read_keys: default(),

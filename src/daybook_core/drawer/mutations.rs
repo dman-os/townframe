@@ -5,8 +5,8 @@ use super::{BranchKind, DrawerRepo, FacetRaw, FacetWriteScope};
 use crate::drawer::{
     dmeta,
     types::{
-        BranchDeleteTombstone, DocDeleteTombstone, DocEntry, DrawerError, StoredBranchRef,
-        UpdateDocArgsV2, UpdateDocBatchErrV2,
+        BranchDeleteTombstone, DocDeleteTombstone, DocEntry, DrawerError, MergeError,
+        StoredBranchRef, UpdateDocArgsV2, UpdateDocBatchErrV2,
     },
 };
 
@@ -937,11 +937,13 @@ impl DrawerRepo {
         from_branch: &daybook_types::doc::BranchPath,
         from_heads: &ChangeHashSet,
         user_path: Option<&daybook_types::doc::UserPath>,
-    ) -> Result<(), DrawerError> {
+        not_after_secs: Option<i64>,
+    ) -> Result<(), MergeError> {
         if self.cancel_token.is_cancelled() {
             return Err(DrawerError::Other {
                 inner: ferr!("repo is stopped"),
-            });
+            }
+            .into());
         }
         let to_branch_ref = self.get_branch_ref(id, to_branch).await?.ok_or_else(|| {
             DrawerError::BranchNotFound {
@@ -964,14 +966,14 @@ impl DrawerRepo {
         {
             return Err(DrawerError::BranchNotFound {
                 name: to_branch.to_string(),
-            });
+            }
+            .into());
         }
         let handle = self
             .get_handle_by_branch_doc_id(to_branch_ref.branch_doc_id.clone())
             .await?
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
-        let mutation_actor_id =
-            self.dmeta_role_id(user_path, to_branch_ref.branch_doc_id.clone());
+        let mutation_actor_id = self.dmeta_role_id(user_path, to_branch_ref.branch_doc_id.clone());
         let from_branch_ref = self.get_branch_ref(id, from_branch).await?.ok_or_else(|| {
             DrawerError::BranchNotFound {
                 name: from_branch.to_string(),
@@ -986,7 +988,8 @@ impl DrawerRepo {
         {
             return Err(DrawerError::BranchNotFound {
                 name: from_branch.to_string(),
-            });
+            }
+            .into());
         }
         let from_handle = self
             .get_handle_by_branch_doc_id(from_branch_ref.branch_doc_id.clone())
@@ -1064,6 +1067,20 @@ impl DrawerRepo {
             .await?;
         let (_new_heads, _modified_facets, invalidated_uuids) = handle
             .with_document(move |am_doc| {
+                if let Some(deadline) = not_after_secs
+                    && Timestamp::now().as_second() > deadline
+                {
+                    return Err(eyre::Report::new(MergeError::ExecutionExpired {
+                        not_after_secs: deadline,
+                    }));
+                }
+                // Stage bounded execution effects privately. The deadline is
+                // checked again under the document lock immediately before the
+                // replacement becomes visible; waiting for handles or computing
+                // the merge cannot extend execution authorization.
+                let original_doc = am_doc;
+                let mut bounded_copy = not_after_secs.map(|_| original_doc.clone());
+                let am_doc = bounded_copy.as_mut().unwrap_or(&mut *original_doc);
                 am_doc.set_author(Some(self.local_author.clone()));
                 // A branch merge imports the source history, but branch identity belongs
                 // to the physical destination document. Snapshot it before the CRDT merge
@@ -1156,9 +1173,22 @@ impl DrawerRepo {
                     invalidated
                 };
 
+                if let Some(copy) = bounded_copy {
+                    let deadline = not_after_secs.expect("bounded merge has an execution deadline");
+                    if Timestamp::now().as_second() > deadline {
+                        return Err(eyre::Report::new(MergeError::ExecutionExpired {
+                            not_after_secs: deadline,
+                        }));
+                    }
+                    *original_doc = copy;
+                }
                 eyre::Ok((new_heads, modified_facets, invalidated_uuids))
             })
-            .await??;
+            .await?
+            .map_err(|error| match error.downcast::<MergeError>() {
+                Ok(error) => error,
+                Err(error) => MergeError::from(error),
+            })?;
 
         let drawer_heads = self.get_drawer_heads();
 
@@ -1345,11 +1375,13 @@ impl DrawerRepo {
         to_branch: &daybook_types::doc::BranchPath,
         from_branch: &daybook_types::doc::BranchPath,
         user_path: Option<&daybook_types::doc::UserPath>,
-    ) -> Result<(), DrawerError> {
+        not_after_secs: Option<i64>,
+    ) -> Result<(), MergeError> {
         if self.cancel_token.is_cancelled() {
             return Err(DrawerError::Other {
                 inner: ferr!("repo is stopped"),
-            });
+            }
+            .into());
         }
         let from_branch_state = self
             .get_branch_heads_for_path(id, from_branch)
@@ -1358,8 +1390,15 @@ impl DrawerRepo {
                 name: from_branch.to_string(),
             })?;
 
-        self.merge_from_heads(id, to_branch, from_branch, &from_branch_state, user_path)
-            .await
+        self.merge_from_heads(
+            id,
+            to_branch,
+            from_branch,
+            &from_branch_state,
+            user_path,
+            not_after_secs,
+        )
+        .await
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(%id, %branch_path))]

@@ -108,12 +108,33 @@ impl DecidePeerStrategyTask {
                 .await;
             asker_part_cursors.insert(part_id.clone(), cursor);
         }
-        let summary = peer_rpc
-            .peer_summary(PeerSummaryRequest {
-                parts: self.parts.clone(),
-                asker_part_cursors: asker_part_cursors.clone(),
-            })
-            .await??;
+        let request = PeerSummaryRequest {
+            parts: self.parts.clone(),
+            asker_part_cursors: asker_part_cursors.clone(),
+        };
+        let summary = match peer_rpc.peer_summary(request).await? {
+            Ok(summary) => summary,
+            Err(ListPartsError::UnkownParts { unkown_parts }) => {
+                // A newer local generation need not exist at an offline peer.
+                // Keep those parts unanswered without starving its readable
+                // predecessor evidence in the same strategy batch.
+                let mut known = self.parts.clone();
+                for part in &unkown_parts {
+                    known.remove(part);
+                }
+                if known.is_empty() || known.len() == self.parts.len() {
+                    return Err(DecidePeerStrategyErrorDeets::ListError(
+                        ListPartsError::UnkownParts { unkown_parts },
+                    ));
+                }
+                peer_rpc
+                    .peer_summary(PeerSummaryRequest {
+                        parts: known,
+                        asker_part_cursors: asker_part_cursors.clone(),
+                    })
+                    .await??
+            }
+        };
         tracing::debug!(
             peer_id = %self.peer_id,
             part_count = summary.parts.len(),

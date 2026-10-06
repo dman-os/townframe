@@ -43,10 +43,16 @@ async fn import_plug_oci(
         format!("db+facet:///{doc_id}/org.example.daybook.plugManifest/main?branch=main")
             .parse()?;
     let target = test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
-    let status = test_cx.rt.triage_worker
-        .wait_for_activation(&test_cx.rt.plugs_repo, target).await?;
+    let status = test_cx
+        .rt
+        .triage_worker
+        .wait_for_activation(&test_cx.rt.plugs_repo, target)
+        .await?;
     eyre::ensure!(
-        matches!(status, daybook_core::rt::triage::ActivationStatus::Active(_)),
+        matches!(
+            status,
+            daybook_core::rt::triage::ActivationStatus::Active(_)
+        ),
         "plug activation failed: {status:?}",
     );
     Ok(())

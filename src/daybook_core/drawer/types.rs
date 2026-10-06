@@ -30,6 +30,26 @@ pub enum DrawerError {
     },
 }
 
+/// Merge-specific refusal; ordinary document mutations do not have an execution deadline.
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum MergeError {
+    /// execution authorization expired at {not_after_secs}
+    ExecutionExpired { not_after_secs: i64 },
+    /// {inner}
+    Drawer {
+        #[from]
+        inner: DrawerError,
+    },
+}
+
+impl From<eyre::Report> for MergeError {
+    fn from(inner: eyre::Report) -> Self {
+        Self::Drawer {
+            inner: DrawerError::Other { inner },
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 /// error applying some patches at given indices: {map:?}
 pub struct UpdateDocBatchErrV2 {

@@ -1,0 +1,19 @@
+{
+  "name": "townframe-task-coordination-specs",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Scoped finite-state Quint specifications; no root dependencies",
+  "scripts": {
+    "prepare:verification": "mkdir -p .verification/json-limit-classes && javac --release 21 -d .verification/json-limit-classes tooling/QuintJsonLimit.java && jar --create --file .verification/quint-json-limit.jar --manifest tooling/json-limit.mf -C .verification/json-limit-classes .",
+    "check:register": "node runner.mjs check",
+    "simulate:register": "node runner.mjs simulate",
+    "verify:register": "node runner.mjs verify",
+    "negative:register": "node runner.mjs negative"
+  },
+  "devDependencies": {
+    "@informalsystems/quint": "0.33.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

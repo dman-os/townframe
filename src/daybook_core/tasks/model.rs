@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 /// Persisted schema of a [`TaskTicket`] payload. Bumped independently of any
 /// live RPC/scheduling protocol version.
-pub const TASK_TICKET_PAYLOAD_SCHEMA: u16 = 2;
+pub const TASK_TICKET_PAYLOAD_SCHEMA: u16 = 3;
 
 /// Persisted schema of a router slot payload. Bumped independently of any live
 /// RPC/scheduling protocol version.
@@ -476,11 +476,28 @@ pub struct TaskDeclaration {
     pub placement: Preference,
     pub effect_policy: EffectPolicy,
     pub not_before_secs: Option<i64>,
-    pub not_after_secs: Option<i64>,
+    /// Immutable origin-bound execution deadline; replay, retries and transport
+    /// rotation never renew it. Successors require a new task identity.
+    pub not_after_secs: i64,
     pub result_retention: ResultRetention,
 }
 
 impl TaskDeclaration {
+    /// `not_after_secs` is the last authorized second. Caller-supplied time keeps
+    /// the decision deterministic in reducers and permits exact boundary tests.
+    pub fn expired_at(&self, now_secs: i64) -> bool {
+        now_secs > self.not_after_secs
+    }
+
+    /// Whether even the slowest conforming admission clock must reject this
+    /// task. The supplied bound covers its lag relative to the collector, not
+    /// merely the collector's own clock error. This proves execution expiry,
+    /// not acknowledgement, archival retention, or physical allocation fencing.
+    pub fn expiry_is_certain_at(&self, now_secs: i64, max_admission_clock_lag_secs: u64) -> bool {
+        i128::from(now_secs) - i128::from(max_admission_clock_lag_secs)
+            > i128::from(self.not_after_secs)
+    }
+
     /// Domain-separated digest of the canonical execution meaning.
     ///
     /// Covers exactly the fields of [`Self`] and nothing else: publisher
@@ -490,7 +507,7 @@ impl TaskDeclaration {
     #[must_use]
     pub fn canonical_digest(&self) -> [u8; 32] {
         let mut hasher = Hasher::new();
-        hasher.update(b"daybook/task-declaration/v2");
+        hasher.update(b"daybook/task-declaration/v3");
         hasher.update(&self.task_id.to_bytes32());
         update_len_prefixed(&mut hasher, self.pool.as_str().as_bytes());
         update_len_prefixed(&mut hasher, self.domain.as_str().as_bytes());
@@ -526,15 +543,8 @@ impl TaskDeclaration {
                 hasher.update(b"no-not-before");
             }
         }
-        match self.not_after_secs {
-            Some(secs) => {
-                hasher.update(b"not-after");
-                hasher.update(&secs.to_be_bytes());
-            }
-            None => {
-                hasher.update(b"no-not-after");
-            }
-        }
+        hasher.update(b"not-after");
+        hasher.update(&self.not_after_secs.to_be_bytes());
         self.result_retention.update_digest(&mut hasher);
         *hasher.finalize().as_bytes()
     }
@@ -544,12 +554,12 @@ impl TaskDeclaration {
     /// and the caller fails loudly, unlike a rejected remote payload.
     #[must_use]
     pub fn validate_local(&self) -> DeclarationViolation {
-        if let (Some(not_before), Some(not_after)) = (self.not_before_secs, self.not_after_secs)
-            && not_after < not_before
+        if let Some(not_before) = self.not_before_secs
+            && self.not_after_secs < not_before
         {
             return DeclarationViolation::WindowInverted {
                 not_before_secs: not_before,
-                not_after_secs: not_after,
+                not_after_secs: self.not_after_secs,
             };
         }
 
@@ -557,9 +567,7 @@ impl TaskDeclaration {
             retain_until: Some(retain_until),
         } = self.result_retention
         {
-            let Some(not_after_secs) = self.not_after_secs else {
-                return DeclarationViolation::MissingExecutionDeadline;
-            };
+            let not_after_secs = self.not_after_secs;
             if not_after_secs > retain_until {
                 return DeclarationViolation::RetentionPrecedesDeadline {
                     not_after_secs,
@@ -586,7 +594,6 @@ pub enum DeclarationViolation {
         not_before_secs: i64,
         not_after_secs: i64,
     },
-    MissingExecutionDeadline,
     RetentionPrecedesDeadline {
         not_after_secs: i64,
         retain_until: i64,
@@ -612,8 +619,6 @@ impl std::fmt::Display for DeclarationViolation {
                 formatter,
                 "task window is inverted: not_before {not_before_secs} > not_after {not_after_secs}"
             ),
-            Self::MissingExecutionDeadline => formatter
-                .write_str("finite ticket-authoritative retention requires an execution deadline"),
             Self::RetentionPrecedesDeadline {
                 not_after_secs,
                 retain_until,

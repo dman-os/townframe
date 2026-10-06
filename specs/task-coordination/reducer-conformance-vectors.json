@@ -1,0 +1,91 @@
+{
+  "format": "manual-semantic-vectors-v1",
+  "identityContract": "Map node/task/session/attempt labels injectively to Rust IDs; claim rank must be computed in Rust, not copied from integer rank. Compare named semantic action fields, not numeric Quint action tags or debug formatting.",
+  "vectors": [
+    {
+      "name": "guardWrongAcceptedAttemptTest",
+      "setup": "AuthorityChanged Edit={N1,N2}; ConsiderTakeover; ClaimPersisted matching generated generation/claim; RegisterExecutor S1 capacity1 protocol1; TaskObserved T1; ObsolescenceChecked exact emitted token false",
+      "events": [
+        "OfferAccepted S1 emitted allocation A1 attempt P1",
+        "OfferAccepted S1 A1 attempt P2"
+      ],
+      "expected": [
+        "StartAttempt S1 A1 T1",
+        "no actions; allocation remains accepted P1"
+      ]
+    },
+    {
+      "name": "guardCancelledAcceptanceTest",
+      "setup": "Same offered T1/A1/S1 setup",
+      "events": [
+        "TaskRemoved T1",
+        "OfferAccepted S1 A1 P1"
+      ],
+      "expected": [
+        "CancelAttempt S1 T1; retain offered allocation",
+        "CancelAttempt S1 T1, never StartAttempt; retain accepted P1"
+      ]
+    },
+    {
+      "name": "guardStaleAttemptOutcomeTest",
+      "setup": "Same offered setup then OfferAccepted S1 A1 P1",
+      "events": [
+        "AttemptChanged S1 T1 P2 Finished",
+        "AttemptChanged S1 T1 P1 Finished"
+      ],
+      "expected": [
+        "no actions; retain accepted P1",
+        "SendOffer S1 fresh allocation A2 T1"
+      ]
+    },
+    {
+      "name": "guardClaimFailureIdentityTest",
+      "setup": "AuthorityChanged Edit={N1,N2}; ConsiderTakeover emits claim C1",
+      "events": [
+        "ClaimPersistenceFailed different generation, same claim ID",
+        "ClaimPersistenceFailed exact generation/claim ID"
+      ],
+      "expected": [
+        "no state change or actions",
+        "clear own claim and routing, retain slot lane; no actions"
+      ]
+    },
+    {
+      "name": "guardSameWriterSuccessSequenceTest",
+      "setup": "TaskTicket T1 valid identical declaration, writer W1 success P2/result R2 seq2",
+      "events": [
+        "merge W1 success P1/R1 seq1",
+        "merge W1 cancelled seq3"
+      ],
+      "expected": [
+        "Unchanged, original success retained",
+        "Unchanged, original success retained"
+      ]
+    },
+    {
+      "name": "guardInvalidBatchPrecedesMutationTest",
+      "setup": "Fresh valid ticket T1 with publisher E1",
+      "events": [
+        "merge same-schema/task remote ticket with before3 after2, new publisher E2 and W1 success seq2"
+      ],
+      "expected": [
+        "InvalidDeclaration; whole original ticket unchanged, no E2 or terminal lane retained"
+      ]
+    },
+    {
+      "name": "guardOrderedDuplicateRegistrationTest",
+      "setup": "Persisted eligible router leader; exact authorized session S1; capacity1 protocol1",
+      "events": [
+        "RegisterExecutor S1 active_attempts=[(T1,P1,Some(A1)),(T1,P2,None)]",
+        "AttemptChanged S1 T1 P1 Running",
+        "RegisterExecutor S1 active_attempts=[(T1,P2,None),(T1,P1,Some(A1))]"
+      ],
+      "expected": [
+        "retain only T1/P2/None; owed=1; no actions",
+        "ignore conflicting Running report; retain P2",
+        "retain only T1/P1/Some(A1); owed=1; no actions"
+      ]
+    }
+  ],
+  "status": "Executable Quint witnesses exist under corresponding names; Rust bridge not run or implemented. Digest bytes, rank bytes, signature admission and effect IO remain bridge-owned."
+}

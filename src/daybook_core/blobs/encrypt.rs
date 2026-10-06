@@ -8,5 +8,5 @@ mod params;
 pub use codec::{decrypt_bytes, encrypt_bytes, encrypt_with_rs};
 pub use keys::{JwkOct, MasterKey};
 pub use params::{
-    EncodingParams, Padding, CONTENT_ENCODING_AES128GCM, DEFAULT_PADDING, RECORD_SIZE,
+    CONTENT_ENCODING_AES128GCM, DEFAULT_PADDING, EncodingParams, Padding, RECORD_SIZE,
 };

@@ -98,11 +98,12 @@ impl BigRepo {
         let group_id = identifier(&group)?;
         let keyhive = self.keyhive.clone_keyhive();
         let generation = keyhive.state_generation();
-        let doc = keyhive
-            .get_document(subject.into())
-            .await
-            .ok_or(CoordinationError::Pending)?;
+        let Some(doc) = keyhive.get_document(subject.into()).await else {
+            tracing::warn!(%document, ?group, generation, reason = "document absent", "coordination authority pending");
+            return Err(CoordinationError::Pending);
+        };
         if keyhive.get_group(group_id.into()).await.is_none() {
+            tracing::warn!(%document, ?group, generation, reason = "group absent", "coordination authority pending");
             return Err(CoordinationError::Pending);
         }
         let members = self.keyhive.agents_for_membered(subject).await;
@@ -110,7 +111,9 @@ impl BigRepo {
         let _guard = doc.lock().await;
         // Membership stores increment under the mutated node's lock before rebuilt
         // members become visible. A walk racing that mutation cannot retain its generation.
-        if keyhive.state_generation() != generation {
+        let current_generation = keyhive.state_generation();
+        if current_generation != generation {
+            tracing::warn!(%document, ?group, generation, current_generation, reason = "membership changed during sample", "coordination authority pending");
             return Err(CoordinationError::Pending);
         }
         // Group binding and membership do not depend on document payload keys.

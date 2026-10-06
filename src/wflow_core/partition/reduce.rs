@@ -27,6 +27,7 @@ pub fn reduce_job_init_event(
             runs: default(),
             steps: default(),
             pending_messages: default(),
+            received_message_ids: default(),
             active_wait: None,
         },
     );
@@ -87,6 +88,12 @@ pub fn reduce_job_message_event(
         info!("message for unknown or archived job, skipping");
         return;
     };
+    if !job_state
+        .received_message_ids
+        .insert(Arc::clone(&event.message_id))
+    {
+        return;
+    }
     job_state
         .pending_messages
         .push_back(state::JobInboxMessage {
@@ -393,4 +400,60 @@ fn complete_wait_step_success_for_wait_state(
         end_at,
         deets: job_events::JobEffectResultDeets::Success { value_json },
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replayed_message_is_not_redelivered_after_consumption_and_snapshot() {
+        let mut state = state::PartitionJobsState::default();
+        let mut effects = Vec::new();
+        let job_id: Arc<str> = Arc::from("reply-parent");
+        reduce_job_init_event(
+            &mut state,
+            &mut effects,
+            1,
+            job_events::JobInitEvent {
+                job_id: Arc::clone(&job_id),
+                timestamp: Timestamp::now(),
+                args_json: Arc::from("null"),
+                override_wflow_retry_policy: None,
+                wflow: crate::r#gen::metastore::WflowMeta {
+                    key: "reply-test".into(),
+                    service: crate::r#gen::metastore::WflowServiceMeta::LocalNative,
+                },
+            },
+        );
+        effects.clear();
+        let event = job_events::JobMessageEvent {
+            job_id: Arc::clone(&job_id),
+            message_id: Arc::from("request-1"),
+            timestamp: Timestamp::now(),
+            payload_json: Arc::from("{\"status\":\"succeeded\"}"),
+        };
+        reduce_job_message_event(&mut state, &mut effects, event.clone());
+        reduce_job_message_event(&mut state, &mut effects, event.clone());
+        assert_eq!(state.active[&job_id].pending_messages.len(), 1);
+        state
+            .active
+            .get_mut(&job_id)
+            .unwrap()
+            .pending_messages
+            .pop_front()
+            .unwrap();
+        let encoded = serde_json::to_string(&state).unwrap();
+        let mut state = serde_json::from_str(&encoded).unwrap();
+        reduce_job_message_event(&mut state, &mut effects, event.clone());
+        assert!(state.active[&job_id].pending_messages.is_empty());
+        assert!(effects.is_empty());
+        let next = job_events::JobMessageEvent {
+            message_id: Arc::from("request-2"),
+            ..event
+        };
+        reduce_job_message_event(&mut state, &mut effects, next);
+        assert_eq!(state.active[&job_id].pending_messages.len(), 1);
+        assert_eq!(state.active[&job_id].received_message_ids.len(), 2);
+    }
 }

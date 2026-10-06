@@ -2,6 +2,13 @@
 slow-timeout = { period = "60s", terminate-after = 2 }
 # flaky-result = "fail"
 
+# Native graph fixtures are internally multithreaded; reserve their CPU footprint
+# instead of starting one whole service graph per available runner thread.
+# This changes resource accounting, not deadlines, retries, or scenario assertions.
+[[profile.default.overrides]]
+filter = 'package(daybook_core) & (test(sync::tests::) | test(tasks::transport::tests::) | test(test_support::sync_node::tests::))'
+threads-required = "num-cpus"
+
 [[profile.default.overrides]]
 filter = 'test(/long_test/)'
 slow-timeout = { period = "60s", terminate-after = 4 }

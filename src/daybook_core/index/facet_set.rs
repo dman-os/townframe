@@ -738,6 +738,9 @@ impl DocFacetSetIndexRepo {
         part_store: big_repo::SharedPartStore,
         cancel_token: CancellationToken,
     ) -> Res<()> {
+        // Main-branch projection also depends on the Drawer entry mapping. Its
+        // arrival need not change the already-materialized branch's AFW heads.
+        let mut metadata_wake = drawer.subscribe_metadata_events();
         let source = DocDeltaRevisionStore::new(AutomergeFrontierRevisionStore::new(part_store));
         // The walker cursor and the site memory share one state repo: the
         // progress table keys are disjoint from the per-branch memory keys.
@@ -772,6 +775,34 @@ impl DocFacetSetIndexRepo {
             tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => return Ok(()),
+                changed = metadata_wake.recv() => {
+                    let keys = match changed {
+                        Ok(documents) => documents.into_iter()
+                            .map(|document| doc_delta_key(&BranchId(document)))
+                            .collect::<Vec<_>>(),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            pending.keys().copied().collect()
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            eyre::bail!("facet-set Drawer metadata listener closed");
+                        }
+                    };
+                    for key in keys {
+                        if let Some(task) = pending.get(&key).cloned() {
+                            let future = run_facet_set_delta_task(
+                                task,
+                                Arc::clone(&drawer),
+                                Arc::clone(&self.revision_store),
+                                state.clone(),
+                            );
+                            if !tasks.wake(key, future)? {
+                                pending_wakes.insert(key);
+                            }
+                        } else {
+                            pending_wakes.insert(key);
+                        }
+                    }
+                }
                 change = materialization_wake.next() => {
                     let change = change?;
                     let key = doc_delta_key(&BranchId(change.doc_id.to_string()));

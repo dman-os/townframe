@@ -147,6 +147,60 @@ mod replay_tests {
     use super::*;
 
     #[tokio::test]
+    async fn expired_run_admission_aborts_before_service_for_new_and_restored_jobs() -> Res<()> {
+        use futures::StreamExt;
+        use wflow_core::partition::{
+            job_events::{JobInitEvent, JobRunResult},
+            log::PartitionLogEntry,
+        };
+        for restored in [false, true] {
+            let cx = Ctx::init(None).await?;
+            let plugin = Arc::new(wash_plugin_wflow::WflowPlugin::new(Arc::clone(
+                &cx.metastore,
+            )));
+            let gate = wflow_tokio::partition::ExecutionGate::paused();
+            let job: Arc<str> = Arc::from("expired-continuation");
+            gate.authorize_until(Arc::clone(&job), 0);
+            gate.hold(Arc::clone(&job));
+            let mut log = wflow_tokio::partition::PartitionLogRef::new(Arc::clone(&cx.logstore));
+            let init = PartitionLogEntry::JobInit(JobInitEvent {
+                job_id: Arc::clone(&job),
+                timestamp: Timestamp::now(),
+                args_json: Arc::from("null"),
+                override_wflow_retry_policy: None,
+                // No such service exists: Aborted rather than WflowNotFound
+                // demonstrates that the real worker never invokes the service.
+                wflow: wflow_core::metastore::WflowMeta {
+                    key: "must-not-run".into(),
+                    service: wflow_core::metastore::WflowServiceMeta::LocalNative,
+                },
+            });
+            if restored {
+                log.append(&init).await?;
+            }
+            let (worker, _) = start_partition_worker(&cx, plugin, 0, Arc::clone(&gate)).await?;
+            if !restored {
+                log.append(&init).await?;
+            }
+            gate.activate();
+            // Readiness release cannot renew the retained immutable deadline.
+            gate.release(&job);
+            let mut tail = log.tail(0);
+            loop {
+                let (_, entry) = tail.next().await.expect("partition tail closed")?;
+                if let Some(PartitionLogEntry::JobEffectResult(event)) = entry {
+                    assert_eq!(event.job_id, job);
+                    assert!(matches!(event.result, JobRunResult::Aborted));
+                    break;
+                }
+            }
+            drop(tail);
+            worker.stop().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn disk_worker_replay_ready_incorporates_final_reserved_hole() -> Res<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("journal.db");

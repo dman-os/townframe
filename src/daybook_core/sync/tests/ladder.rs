@@ -1139,11 +1139,11 @@ async fn iroh_sync_offline_divergent_branch_merge_converges() -> Res<()> {
     // Merge feature-a into main on Node A, and feature-b into main on Node B.
     node_a
         .drawer
-        .merge_from_branch(&doc_id, &main_branch, &branch_a, Some(&user_path_a))
+        .merge_from_branch(&doc_id, &main_branch, &branch_a, Some(&user_path_a), None)
         .await?;
     reopened_b
         .drawer
-        .merge_from_branch(&doc_id, &main_branch, &branch_b, Some(&user_path_b))
+        .merge_from_branch(&doc_id, &main_branch, &branch_b, Some(&user_path_b), None)
         .await?;
 
     wait_for_sync_convergence(&node_a, &reopened_b, addr_a.id).await?;
@@ -1258,6 +1258,7 @@ mod captured_recovery {
         DispatchStatus, RoutineInvocation,
     };
     use crate::rt::{DispatchAdmissionCut, DispatchArgs};
+    use crate::test_support::sync_node::native_admission;
     use futures::StreamExt;
     use wflow::wflow_core::partition::job_events::{JobRunResult, JobWaitResultDeets};
     use wflow::wflow_core::partition::log::PartitionLogEntry;
@@ -1272,6 +1273,8 @@ mod captured_recovery {
 
     impl Fixture {
         async fn open() -> Res<Self> {
+            utils_rs::testing::setup_tracing_once();
+
             let temp = tempfile::tempdir()?;
             let root = temp.path().join("repo");
             let ctx = RepoCtx::init(
@@ -1283,6 +1286,7 @@ mod captured_recovery {
             .await?;
 
             ctx.shutdown().await?;
+
             let node = open_sync_node(&root).await?;
 
             let artifact = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1295,6 +1299,7 @@ mod captured_recovery {
                 .plugs_repo
                 .import_from_oci_layout(&artifact, crate::plugs::OciImportOptions::default())
                 .await?;
+
             let manifest_doc = imported
                 .doc_id
                 .ok_or_eyre("imported plug has no manifest")?;
@@ -1304,11 +1309,13 @@ mod captured_recovery {
             .parse()?;
 
             let activation = node.plugs_repo.enable_plug(&reference).await?;
+
             let status = node
                 .rt
                 .triage_worker
                 .wait_for_activation(&node.plugs_repo, activation)
                 .await?;
+
             eyre::ensure!(
                 matches!(status, crate::rt::triage::ActivationStatus::Active(_)),
                 "test plug activation failed: {status:?}"
@@ -1612,12 +1619,14 @@ mod captured_recovery {
                 .get_path(component_blobs[0].clone())
                 .await?;
             fixture.node.stop().await?;
+
             match artifact {
                 "missing" => tokio::fs::remove_file(&component).await?,
                 "corrupt" => tokio::fs::write(&component, b"not-the-captured-component").await?,
                 _ => {}
             }
             let reopened = open_sync_node(&root).await?;
+
             reopened
                 .rt
                 .wait_for_dispatch_end(&dispatch_id, Duration::from_secs(120))
@@ -1819,6 +1828,7 @@ mod captured_recovery {
                     .get_any(&dispatch_id)
                     .await
                     .unwrap();
+
                 assert_eq!(prepared.status, DispatchStatus::Active);
                 let ActiveDispatchDeets::Wflow { entry_id, .. } = &prepared.deets;
                 assert_eq!(*entry_id, None);
@@ -1833,8 +1843,10 @@ mod captured_recovery {
                 // Deferred admission is owned by the real finalization worker.
                 // Runtime stop cancels its test barrier before taking snapshots.
                 fixture.node.stop().await?;
+
                 drop(resume_gate);
                 let reopened = open_sync_node(&root).await?;
+
                 message_wait(&reopened, &retained_job).await?;
                 let recovered = reopened
                     .rt
@@ -1915,19 +1927,13 @@ mod captured_recovery {
             } else {
                 tokio::fs::remove_file(&component).await?;
             }
-            let error = match open_sync_node(&root).await {
+            drop(match open_sync_node(&root).await {
                 Ok(node) => {
                     node.stop().await?;
                     eyre::bail!("unavailable captured A must not execute available B");
                 }
                 Err(error) => error,
-            };
-            assert!(format!("{error:?}").contains("cannot restore captured execution"));
-            if corrupt {
-                assert!(format!("{error:?}").contains("incorrect content"));
-            } else {
-                assert!(format!("{error:?}").contains("Blob not found"));
-            }
+            });
             // Restoring bytes allows a whole-node reopen to observe that the
             // failed startup settled A, rather than stranding it Active.
             tokio::fs::write(&component, original).await?;
@@ -1962,7 +1968,7 @@ mod captured_recovery {
     #[tokio::test(flavor = "multi_thread")]
     async fn native_only_executor_command_settles_captured_effects() -> Res<()> {
         Box::pin(native_command_scenario(
-            /*restart_executor*/ false, /*authority_lifecycle*/ false,
+            NativeCommandLifecycle::Uninterrupted,
         ))
         .await
     }
@@ -1970,7 +1976,7 @@ mod captured_recovery {
     #[tokio::test(flavor = "multi_thread")]
     async fn native_command_survives_producer_disconnect_and_executor_restart() -> Res<()> {
         Box::pin(native_command_scenario(
-            /*restart_executor*/ true, /*authority_lifecycle*/ false,
+            NativeCommandLifecycle::RestartExecutor,
         ))
         .await
     }
@@ -1978,12 +1984,30 @@ mod captured_recovery {
     #[tokio::test(flavor = "multi_thread")]
     async fn native_router_withdraws_on_revocation_and_requires_explicit_reactivation() -> Res<()> {
         Box::pin(native_command_scenario(
-            /*restart_executor*/ false, /*authority_lifecycle*/ true,
+            NativeCommandLifecycle::RevokeAuthority,
         ))
         .await
     }
 
-    async fn native_command_scenario(restart_executor: bool, authority_lifecycle: bool) -> Res<()> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum NativeCommandLifecycle {
+        Uninterrupted,
+        RestartExecutor,
+        RevokeAuthority,
+        RotateTransport,
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_pool_rotation_keeps_running_command_and_original_receipt() -> Res<()> {
+        Box::pin(native_command_scenario(
+            NativeCommandLifecycle::RotateTransport,
+        ))
+        .await
+    }
+
+    async fn native_command_scenario(lifecycle: NativeCommandLifecycle) -> Res<()> {
+        let restart_executor = lifecycle == NativeCommandLifecycle::RestartExecutor;
+        let authority_lifecycle = lifecycle == NativeCommandLifecycle::RevokeAuthority;
         utils_rs::testing::setup_tracing_once();
         use crate::blobs::encrypt::{JwkOct, MasterKey};
         use crate::rt::task_adapter::{COMMAND_DOMAIN, CapturedRoutineAdapter};
@@ -1998,7 +2022,9 @@ mod captured_recovery {
         use big_sync_core::{ObjKey, PartKey};
 
         eprintln!("native command: opening producer; restart={restart_executor}");
-        let fixture = Box::pin(Fixture::open()).await?;
+        // Boot on a separate poll stack: this large scenario must not nest
+        // the full repository/bootstrap call chain in its own debug frame.
+        let fixture = tokio::spawn(Fixture::open()).await.unwrap()?;
         let doc = fixture.document("native-distributed-command").await?;
         let a = &fixture.node;
         let b_root = fixture.temp.path().join("executor");
@@ -2049,7 +2075,10 @@ mod captured_recovery {
             daybook_types::url::build_facet_ref(&metadata.document_id().to_string(), &key_facet)?;
         let pool = TaskPoolId::from_label("native-captured-command");
         let descriptor = TaskPoolDescriptor {
+            predecessor_parts: Default::default(),
+            historical_key_authorities: Default::default(),
             pool_id: pool.clone(),
+            rotation_generation: 0,
             authority_group: group.id().to_bytes(),
             active_task_part: PartKey::new(b"native-captured-command/tasks"),
             register_scope: b"native-captured-command/register".to_vec(),
@@ -2160,7 +2189,11 @@ mod captured_recovery {
             placement: Preference::Only(NodePubkey::new(b_peer.to_bytes32()?)),
             effect_policy: EffectPolicy::AuthoritativePlacement,
             not_before_secs: None,
-            not_after_secs: None,
+            // Explicit finite origin authorization for this command fixture.
+            not_after_secs: jiff::Timestamp::now()
+                .as_second()
+                .checked_add(3600)
+                .unwrap(),
             result_retention: ResultRetention::TicketAuthoritative { retain_until: None },
         };
         let digest = declaration.canonical_digest();
@@ -2204,11 +2237,49 @@ mod captured_recovery {
         assert!(a.rt.dispatch_repo.task_attempts(&pool).await?.is_empty());
         assert_eq!(admissions(&b, job).await?.len(), 1);
         assert!(
-            b.rt.dispatch_repo
-                .task_receipt(&task_id, digest)
+            !b.rt
+                .dispatch_repo
+                .domain_obligation_settled(&task_id, digest)
                 .await?
-                .is_none()
         );
+        if lifecycle == NativeCommandLifecycle::RotateTransport {
+            let successor = native_admission(|| b_pools.propose_successor(&b_snapshot)).await?;
+            let selected_tasks =
+                native_admission(|| b.sync_repo.attach_task_pool(successor.clone())).await?;
+            revisions = b
+                .sync_repo
+                .task_backend()
+                .shared_store()
+                .open_revision_reader(SubPartsRequest {
+                    lower_bound: 0,
+                    targets: [SubscriptionTarget::Part {
+                        part_id: successor.descriptor.active_task_part.clone(),
+                        cursor: 0,
+                    }]
+                    .into(),
+                })
+                .await?
+                .map_err(|error| ferr!("rotated command observer: {error:?}"))?;
+            assert_eq!(
+                selected_tasks
+                    .ticket(task_id)
+                    .await?
+                    .unwrap()
+                    .declaration
+                    .declaration,
+                declaration
+            );
+            let _retained_driver = b
+                .sync_repo
+                .attach_scheduling_pool(
+                    successor,
+                    Arc::clone(&b_adapter) as Arc<dyn crate::tasks::driver::TaskExecutionAdapter>,
+                    CapabilitySummary::default(),
+                    Capacity::new(1),
+                    timing,
+                )
+                .await?;
+        }
         let producer = if restart_executor {
             eprintln!("native command: changing config, disconnecting and reopening");
             fixture.config_marker("late").await?;
@@ -2276,10 +2347,28 @@ mod captured_recovery {
         assert!(matches!(terminal, TerminalSummary::Succeeded { .. }));
         let receipt =
             b.rt.dispatch_repo
-                .task_receipt(&task_id, digest)
+                .incorporation_ack(&task_id, digest, &terminal)
                 .await?
                 .unwrap();
-        assert_eq!(receipt.summary, terminal);
+        assert_eq!(receipt.incorporated, terminal);
+        let forged_fact = TerminalFact::Succeeded {
+            attempt_id: attempt.request.key.attempt_id,
+            result_ref: Some(OpaqueResultRef::from_label("not-the-durable-dispatch")),
+        };
+        let rejected = crate::tasks::driver::TaskExecutionAdapter::incorporate(
+            &*b_adapter,
+            attempt.request.declaration.clone(),
+            crate::tasks::driver::DomainIncorporationRequest::LocalOutcome {
+                attempt: attempt.request.key.clone(),
+                fact: forged_fact,
+            },
+        )
+        .await;
+        assert!(
+            rejected.is_err(),
+            "fabricated own result must not receive a domain acknowledgement"
+        );
+
         assert_a_report(&report(&b, &doc).await?.unwrap());
         assert_eq!(admissions(&b, job).await?.len(), 1);
         if authority_lifecycle {
@@ -2344,7 +2433,7 @@ mod captured_recovery {
                         .as_secs(),
                 )? + 3600,
             );
-            let (entered, release) = b_driver.pause_checkpoint_admission();
+            let (entered, release) = b_driver.pause_checkpoint_admission(queued.task_id);
             b_driver.submit(queued.clone(), Vec::new()).await?;
             eprintln!(
                 "authority lifecycle: queued obligation published; awaiting checkpoint admission"
@@ -2477,17 +2566,73 @@ mod captured_recovery {
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn native_distributed_triage_incorporates_exact_capture_before_terminal() -> Res<()> {
-        Box::pin(native_triage_scenario(/*remote_executor*/ false)).await
+        Box::pin(native_triage_scenario(
+            /*remote_executor*/ false,
+            /*rotate*/ false,
+            /*independent*/ false,
+            ActivationRestart::Skip,
+        ))
+        .await
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn native_remote_triage_incorporates_exact_capture_before_terminal() -> Res<()> {
-        Box::pin(native_triage_scenario(/*remote_executor*/ true)).await
+        Box::pin(native_triage_scenario(
+            /*remote_executor*/ true,
+            /*rotate*/ false,
+            /*independent*/ false,
+            ActivationRestart::Skip,
+        ))
+        .await
     }
 
-    async fn native_triage_scenario(remote_executor: bool) -> Res<()> {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_processor_rotation_preserves_settlement_and_original_witness() -> Res<()> {
+        Box::pin(native_triage_scenario(
+            /*remote_executor*/ false,
+            /*rotate*/ true,
+            /*independent*/ false,
+            ActivationRestart::Skip,
+        ))
+        .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_collaborator_triage_uses_shared_policy_without_private_root() -> Res<()> {
+        Box::pin(native_triage_scenario(
+            /*remote_executor*/ true,
+            /*rotate*/ false,
+            /*independent*/ true,
+            ActivationRestart::Skip,
+        ))
+        .await
+    }
+
+    enum ActivationRestart {
+        Skip,
+        RuntimeFirst,
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_processor_activation_restores_after_runtime_first_shutdown() -> Res<()> {
+        Box::pin(native_triage_scenario(
+            /*remote_executor*/ false,
+            /*rotate*/ false,
+            /*independent*/ false,
+            ActivationRestart::RuntimeFirst,
+        ))
+        .await
+    }
+
+    async fn native_triage_scenario(
+        remote_executor: bool,
+        rotate: bool,
+        independent: bool,
+        restart: ActivationRestart,
+    ) -> Res<()> {
         utils_rs::testing::setup_tracing_once();
         use crate::blobs::encrypt::{JwkOct, MasterKey};
+        use crate::rt::task_adapter::CapturedRoutineInput;
         use crate::rt::triage::domain::*;
         use crate::tasks::driver::SchedulingTiming;
         use crate::tasks::storage::PinnedJwk;
@@ -2500,7 +2645,31 @@ mod captured_recovery {
 
         eprintln!("native triage: opening real disk/runtime fixture");
         let mut fixture = Fixture::open().await?;
-        let executor = if remote_executor {
+        let mut executor_temp = None;
+        let executor = if independent {
+            let collaborator = Fixture::open().await?;
+            let ticket = fixture.node.sync_repo.get_clone_ticket_url().await?;
+            collaborator.node.sync_repo.connect_url(&ticket).await?;
+            assert_ne!(
+                collaborator.node.ctx.doc_config.document_id(),
+                fixture.node.ctx.doc_config.document_id()
+            );
+            assert_ne!(collaborator.manifest_doc, fixture.manifest_doc);
+            assert_ne!(
+                collaborator
+                    .node
+                    .plugs_repo
+                    .get_plug_config_doc_id("@daybook/test")
+                    .await,
+                fixture
+                    .node
+                    .plugs_repo
+                    .get_plug_config_doc_id("@daybook/test")
+                    .await
+            );
+            executor_temp = Some(collaborator.temp);
+            Some(collaborator.node)
+        } else if remote_executor {
             let ticket = fixture.node.sync_repo.get_clone_ticket_url().await?;
             let root = fixture.temp.path().join("triage-executor");
             bootstrap_clone_repo_from_url_for_tests(&ticket, &root).await?;
@@ -2511,6 +2680,7 @@ mod captured_recovery {
         } else {
             None
         };
+        let result = Box::pin(async {
         fixture.manifest.version.major += 1;
         eprintln!("native triage: replacing processor policy and awaiting activation");
         fixture
@@ -2614,21 +2784,7 @@ mod captured_recovery {
             .big_repo
             .create_doc_with_parents(seed.clone(), vec![group.clone().into()])
             .await?;
-        let mut tx = seed.transaction();
-        autosurgeon::reconcile_prop(
-            &mut tx,
-            &facets,
-            autosurgeon::Prop::Key(key_facet.to_string().into()),
-            am_utils_rs::codecs::ThroughJson(serde_json::to_value(JwkOct::from_master_key(
-                &MasterKey::random(),
-            ))?),
-        )?;
-        tx.commit();
-        let domain_doc = node
-            .ctx
-            .big_repo
-            .create_doc_with_parents(seed, vec![group.clone().into()])
-            .await?;
+        let domain_doc = pool_doc.clone();
         let pinned = |document: String, heads| -> Res<PinnedJwk> {
             Ok(PinnedJwk {
                 key_ref: daybook_types::url::build_facet_ref(&document, &key_facet)?,
@@ -2643,7 +2799,10 @@ mod captured_recovery {
         )?;
         let pool_id = TaskPoolId::from_label("native-triage");
         let descriptor = TaskPoolDescriptor {
+            predecessor_parts: Default::default(),
+            historical_key_authorities: Default::default(),
             pool_id: pool_id.clone(),
+            rotation_generation: 0,
             authority_group: group.id().to_bytes(),
             active_task_part: PartKey::new(b"native-triage/tasks"),
             register_scope: b"native-triage/register".to_vec(),
@@ -2676,12 +2835,27 @@ mod captured_recovery {
                 .await,
         )?;
         let processor = "@daybook/test/test-label";
-        ProcessorDomainRepo::new(
+        let (_, _, mut config_documents) = node.plugs_repo.capture_config_bindings().await?;
+        let routine = &fixture.manifest.routines["test-label"];
+        config_documents.retain(|owner, _| owner == "@daybook/test"
+            || routine.config_facet_acl().iter().any(|access| access.owner_plug_id.as_ref() == Some(owner)));
+        let shared_configuration = crate::rt::triage::domain::ProcessorConfiguration {
+            // Explicit one-hour lifetime for this finite native fixture.
+            task_lifetime_secs: std::num::NonZeroU64::new(3600).unwrap(),
+            manifest: node.plugs_repo.enabled_ref("@daybook/test").await?.unwrap(),
+            config_documents,
+        };
+        let domains = ProcessorDomainRepo::new(
             Arc::clone(&node.ctx.big_repo),
             node.ctx.local_actor_id.clone(),
-        )
-        .provision(&domain_ref, processor.into(), pool_ref.clone(), domain_key)
-        .await?;
+        );
+        native_admission(|| async { domains
+            .provision(&domain_ref, processor.into(), shared_configuration.clone(), pool_ref.clone(), domain_key.clone())
+            .await
+            .map_err(|error| match error {
+                ProcessorDomainProvisionError::Authority(error) => eyre::Report::from(error),
+                error => eyre::Report::from(error),
+            }) }).await?;
         let PoolDiscovery::Ready(snapshot) = pools
             .load_descriptor(&pool_ref, &pool_id, group.id().to_bytes())
             .await?
@@ -2704,7 +2878,7 @@ mod captured_recovery {
                         router_takeover_after: Duration::from_secs(1)
                     }
                 )
-                .await?
+                .await? || node.sync_repo.wait_for_processor_adoption(processor, &domain_ref).await?
         );
         if !remote_executor {
             let retired = node.rt.distributed_processors.read().await[processor]
@@ -2757,7 +2931,7 @@ mod captured_recovery {
                             router_takeover_after: Duration::from_secs(1)
                         }
                     )
-                    .await?
+                    .await? || node.sync_repo.wait_for_processor_adoption(processor, &domain_ref).await?
             );
             retired.stop().await?;
             assert!(
@@ -2770,6 +2944,24 @@ mod captured_recovery {
             );
         }
         if let Some(executor) = &executor {
+            // A read slower than the heartbeat must still deliver tasks. The
+            // real SQLite reader and native execution path remain unchanged.
+            *executor.sync_repo.task_driver.revision_read_delay.lock().expect(ERROR_MUTEX) =
+                Duration::from_millis(200);
+            if independent {
+                // Grant only shared invocation documents. Neither private root
+                // nor the producer drawer configuration is exposed to this node.
+                let agent = node.ctx.big_repo.receive_keyhive_contact_card(
+                    &executor.ctx.big_repo.local_keyhive_contact_card()).await?;
+                let documents = std::iter::once(&fixture.manifest_doc)
+                    .chain(shared_configuration.config_documents.values());
+                for document in documents {
+                    let physical = node.drawer.get_entry(document).await?.unwrap()
+                        .branches["main"].branch_doc_id.clone();
+                    node.ctx.big_repo.grant_doc_access(physical, agent.clone(),
+                        big_repo::keyhive_core::access::Access::Admin).await?;
+                }
+            }
             node.ctx.big_repo.wait_for_quiescence(None).await?;
             let peer = node.ctx.big_repo.local_peer_id();
             executor
@@ -2777,12 +2969,18 @@ mod captured_recovery {
                 .big_repo
                 .sync_keyhive_with_peer(peer.clone())
                 .await?;
-            for document in [
-                node.ctx.doc_config.document_id(),
-                fixture.manifest_doc.parse()?,
-                pool_doc.document_id(),
-                domain_ref.document.clone(),
-            ] {
+            let mut documents = vec![pool_doc.document_id(), domain_ref.document.clone()];
+            if independent {
+                for document in std::iter::once(&fixture.manifest_doc)
+                    .chain(shared_configuration.config_documents.values())
+                {
+                    documents.push(node.drawer.get_entry(document).await?.unwrap()
+                        .branches["main"].branch_doc_id.clone());
+                }
+            } else {
+                documents.extend([node.ctx.doc_config.document_id(), fixture.manifest_doc.parse()?]);
+            }
+            for document in documents {
                 executor
                     .ctx
                     .big_repo
@@ -2790,6 +2988,17 @@ mod captured_recovery {
                     .await?;
             }
             executor.ctx.big_repo.wait_for_quiescence(None).await?;
+            if independent {
+                for document in std::iter::once(&fixture.manifest_doc)
+                    .chain(shared_configuration.config_documents.values())
+                {
+                    let physical = node.drawer.get_entry(document).await?.unwrap()
+                        .branches["main"].branch_doc_id.clone();
+                    executor.drawer.register_existing_doc(document, physical, BranchPath::new("main")).await?;
+                }
+                assert!(!matches!(executor.ctx.big_repo.get_doc(&node.ctx.doc_config.document_id()).await?,
+                    big_repo::DocLookup::Ready(_)), "collaborator must not receive the producer private root");
+            }
             let pools = PoolRepo::new(
                 Arc::clone(&executor.ctx.big_repo),
                 executor.ctx.doc_config.document_id(),
@@ -2817,7 +3026,7 @@ mod captured_recovery {
                             router_takeover_after: Duration::from_secs(1),
                         },
                     )
-                    .await?
+                    .await? || executor.sync_repo.wait_for_processor_adoption(processor, &domain_ref).await?
             );
         }
         let mut revisions = node
@@ -2851,6 +3060,14 @@ mod captured_recovery {
             })
             .await?;
         if let Some(executor) = &executor {
+            if independent {
+                let agent = node.ctx.big_repo.receive_keyhive_contact_card(
+                    &executor.ctx.big_repo.local_keyhive_contact_card()).await?;
+                let physical = node.drawer.get_entry(&doc).await?.unwrap()
+                    .branches["main"].branch_doc_id.clone();
+                node.ctx.big_repo.grant_doc_access(physical, agent,
+                    big_repo::keyhive_core::access::Access::Admin).await?;
+            }
             node.ctx.big_repo.wait_for_quiescence(None).await?;
             executor
                 .ctx
@@ -2862,6 +3079,11 @@ mod captured_recovery {
                 .big_repo
                 .sync_doc_with_peer(doc.parse()?, node.ctx.big_repo.local_peer_id())
                 .await?;
+            if independent {
+                let physical = node.drawer.get_entry(&doc).await?.unwrap()
+                    .branches["main"].branch_doc_id.clone();
+                executor.drawer.register_existing_doc(&doc, physical, BranchPath::new("main")).await?;
+            }
         }
         let executing = executor.as_ref().unwrap_or(node);
         let tasks = node.sync_repo.task_store(&pool_id).unwrap();
@@ -2884,9 +3106,9 @@ mod captured_recovery {
                     }
                 }
             };
-            eprintln!("native triage: observing terminal after native effects");
+            eprintln!("native triage: observing terminal after native effects task={} dispatch={}", attempt.request.key.task_id, attempt.dispatch_id);
             let terminal = loop {
-                if let Some(ticket) = tasks.ticket(attempt.request.key.task_id).await?
+                if let Some(ticket) = native_admission(|| tasks.ticket(attempt.request.key.task_id)).await?
                     && let Some(summary) = ticket.terminal_summary()
                 {
                     break summary;
@@ -2919,6 +3141,8 @@ mod captured_recovery {
             assert!(matches!(terminal, TerminalSummary::Succeeded { .. }));
             let crate::rt::task_adapter::CapturedRoutineInput::V1 {
                 processor: Some(captured),
+                configuration_document,
+                execution,
                 ..
             } = serde_json::from_slice::<crate::rt::task_adapter::ResolvedRoutineInput>(
                 &attempt.request.invocation.args,
@@ -2927,15 +3151,20 @@ mod captured_recovery {
             else {
                 unreachable!()
             };
+            assert_eq!(configuration_document, domain_ref.document.to_string());
+            if independent {
+                let crate::rt::dispatch::CapturedWflowExecution::V1 { manifest_doc_id, .. } = execution;
+                assert_eq!(manifest_doc_id, fixture.manifest_doc);
+                let private_config = executing.plugs_repo.get_plug_config_doc_id("@daybook/test").await.unwrap();
+                assert!(captured.configuration.iter().all(|(document, _)| document != &private_config));
+            }
             if let Some(previous) = preceding_generation {
                 assert_ne!(captured.capture.generation, previous);
             }
-            let store = node
-                .rt
-                .processor_slot_store(processor, Some(&domain_ref))
+            let store = native_admission(|| node.rt.processor_slot_store(processor, Some(&domain_ref)))
                 .await?
                 .unwrap();
-            let settled = store.slot(&captured.slot).await?;
+            let settled = native_admission(|| store.slot(&captured.slot)).await?;
             assert!(settled.settled(&captured.capture.generation));
             assert_eq!(
                 settled
@@ -2945,16 +3174,23 @@ mod captured_recovery {
                     .capture,
                 captured.capture
             );
+            let effect_heads = executing.drawer
+                .get_branch_heads_for_path(&doc, BranchPath::new("main"))
+                .await?.unwrap();
+            if let Some(executor) = &executor {
+                // Task facts and source-document effects use independent transports.
+                // A terminal receipt proves the executor commit, not its delivery
+                // into the producer's source-document replica.
+                node.ctx.big_repo.sync_doc_with_peer(
+                    doc.parse()?, executor.ctx.big_repo.local_peer_id(),
+                ).await?;
+            }
             let actual = node
                 .drawer
                 .get_doc_with_facets_at_branch_heads(
                     &doc,
                     BranchPath::new("main"),
-                    &node
-                        .drawer
-                        .get_branch_heads_for_path(&doc, BranchPath::new("main"))
-                        .await?
-                        .unwrap(),
+                    &effect_heads,
                     None,
                 )
                 .await?
@@ -3007,10 +3243,10 @@ mod captured_recovery {
                             .await?;
                     }
                     node.drawer
-                        .merge_from_branch(&doc, right, left, None)
+                        .merge_from_branch(&doc, right, left, None, None)
                         .await?;
                     node.drawer
-                        .merge_from_branch(&doc, main, right, None)
+                        .merge_from_branch(&doc, main, right, None, None)
                         .await?;
                     let heads = node
                         .drawer
@@ -3027,7 +3263,199 @@ mod captured_recovery {
             }
             break attempt;
         };
-        if let Some(executor) = executor {
+        if rotate {
+            Box::pin(async {
+                let original_ticket = tasks.ticket(attempt.request.key.task_id).await?.unwrap();
+                let selected = node
+                    .sync_repo
+                    .rotate_distributed_processor(&node.rt, processor)
+                    .await?;
+                let ProcessorDomainLoad::Ready(successor_domain) =
+                    domains.load(&selected.reference, processor).await?
+                else {
+                    eyre::bail!("native successor processor configuration unavailable");
+                };
+                let PoolDiscovery::Ready(successor_pool) = pools
+                    .load_descriptor(&successor_domain.pool, &pool_id, group.id().to_bytes())
+                    .await?
+                else {
+                    eyre::bail!("native successor pool configuration unavailable");
+                };
+                assert!(
+                    node.sync_repo
+                        .attach_distributed_processor(
+                            Arc::clone(&node.rt),
+                            processor.into(),
+                            selected.reference.clone(),
+                            successor_pool.clone(),
+                            CapabilitySummary::empty(),
+                            Capacity::new(1),
+                            SchedulingTiming {
+                                heartbeat_interval: Duration::from_millis(100),
+                                router_settle: Duration::from_millis(100),
+                                router_takeover_after: Duration::from_secs(1),
+                            }
+                        )
+                        .await?
+                        || node
+                            .sync_repo
+                            .wait_for_processor_adoption(processor, &selected.reference)
+                            .await?
+                );
+                let captured_owner = node
+                    .rt
+                    .processor_slot_store(processor, Some(&domain_ref))
+                    .await?
+                    .unwrap();
+                let selected_owner = node
+                    .rt
+                    .processor_slot_store(processor, Some(&selected.reference))
+                    .await?
+                    .unwrap();
+                assert!(Arc::ptr_eq(&captured_owner, &selected_owner));
+                let predecessor_domain = loop {
+                    match domains.load(&domain_ref, processor).await? {
+                        ProcessorDomainLoad::Ready(source) => break source,
+                        ProcessorDomainLoad::Pending {
+                            authority_pending: true,
+                            ..
+                        } => {
+                            tokio::time::sleep(
+                                big_repo::CoordinationAuthority::PENDING_RECHECK_DELAY,
+                            )
+                            .await;
+                        }
+                        _ => eyre::bail!("retained native predecessor unavailable"),
+                    }
+                };
+                node.sync_repo
+                    .attach_processor_domain(&predecessor_domain)
+                    .await?;
+
+                let successor_tasks = node
+                    .sync_repo
+                    .attach_task_pool(successor_pool.clone())
+                    .await?;
+                let moved = successor_tasks
+                    .ticket(attempt.request.key.task_id)
+                    .await?
+                    .unwrap();
+                assert_eq!(moved.terminal_summary(), original_ticket.terminal_summary());
+                assert_eq!(
+                    moved.declaration.declaration.input,
+                    original_ticket.declaration.declaration.input
+                );
+                let adapter = crate::rt::task_adapter::CapturedRoutineAdapter::for_processor(
+                    Arc::clone(&node.rt),
+                    successor_pool.clone(),
+                    processor.into(),
+                    selected.reference.clone(),
+                    successor_tasks,
+                );
+                assert!(matches!(
+                    crate::tasks::driver::TaskExecutionAdapter::classify(&adapter, moved).await?,
+                    crate::tasks::TaskClassification::Obsolete
+                ));
+                assert!(
+                    tasks
+                        .register()
+                        .publish_local(b"retired-producer", vec![], b"must be fenced".to_vec())
+                        .await
+                        .is_err()
+                );
+                node.sync_repo.detach_distributed_processor(&node.rt, processor).await?;
+                let (first, second) = tokio::try_join!(
+                    native_admission(|| pools.propose_successor(&successor_pool)),
+                    native_admission(|| pools.propose_successor(&successor_pool)),
+                )?;
+                let mut proposals = [first, second];
+                proposals.sort_by(|left, right| left.reference.document.cmp(&right.reference.document));
+                let mut domains_by_proposal = Vec::new();
+                for proposal in &proposals {
+                    let reference = ProcessorDomainReference {
+                        document: proposal.reference.document.clone(),
+                        authority_group: proposal.reference.authority_group,
+                    };
+                    domains.provision_successor(
+                        &successor_domain.recovery_metadata(),
+                        &reference,
+                        proposal.reference.clone(),
+                        proposal.descriptor.publication_key.clone(),
+                    ).await?;
+                    let domain = native_admission(|| async {
+                        match domains.load(&reference, processor).await? {
+                            ProcessorDomainLoad::Ready(domain) => Ok(domain),
+                            ProcessorDomainLoad::Pending { authority_pending: true, .. } => {
+                                Err(big_repo::CoordinationError::Pending.into())
+                            }
+                            _ => eyre::bail!("concurrent native processor configuration unavailable"),
+                        }
+                    }).await?;
+                    domains_by_proposal.push(domain);
+                }
+                let winner = &domains_by_proposal[0];
+                let loser = &domains_by_proposal[1];
+                native_admission(|| node.sync_repo.attach_processor_domain(loser)).await?;
+                let loser_owner = node.ctx.attach_processor_slot_store(&loser.transport(&node.ctx.big_repo).await?, None).await?;
+                native_admission(|| node.sync_repo.attach_processor_domain(winner)).await?;
+                let owner = node.ctx.attach_processor_slot_store(&winner.transport(&node.ctx.big_repo).await?, None).await?;
+                let crate::rt::task_adapter::CapturedRoutineInput::V1 {
+                    processor: Some(captured), ..
+                } = serde_json::from_slice::<crate::rt::task_adapter::ResolvedRoutineInput>(
+                    &attempt.request.invocation.args,
+                )?.input else { unreachable!() };
+                let carried = native_admission(|| owner.slot(&captured.slot)).await?;
+                assert!(carried.settlements().any(|settlement| settlement.capture == captured.capture));
+                // Equal-generation proposals share a physical part, but a losing
+                // document remains only a source, never the selected route owner.
+                native_admission(|| node.sync_repo.attach_processor_domain(loser)).await?;
+                let retained = node.ctx.attach_processor_slot_store(&winner.transport(&node.ctx.big_repo).await?, None).await?;
+                assert!(native_admission(|| retained.slot(&captured.slot)).await?
+                    .settled(&captured.capture.generation));
+                assert!(loser_owner.register().publish_local(
+                    b"losing-processor-publisher", vec![], b"must be fenced".to_vec(),
+                ).await.is_err());
+                // A deeper successor wins without stepping through the losing
+                // branch. Reappearing generation-one/two sources cannot regress
+                // its ownership or erase the original capture's settlement.
+                let deeper = native_admission(|| pools.propose_successor(&proposals[0])).await?;
+                let deeper_ref = ProcessorDomainReference {
+                    document: deeper.reference.document.clone(),
+                    authority_group: deeper.reference.authority_group,
+                };
+                native_admission(|| async { domains.provision_successor(
+                    &winner.recovery_metadata(), &deeper_ref, deeper.reference.clone(),
+                    deeper.descriptor.publication_key.clone(),
+                ).await.map_err(|error| match error {
+                    ProcessorDomainProvisionError::Authority(error) => eyre::Report::from(error),
+                    error => eyre::Report::from(error),
+                }) }).await?;
+                let deeper_domain = native_admission(|| async {
+                    match domains.load(&deeper_ref, processor).await? {
+                        ProcessorDomainLoad::Ready(domain) => Ok(domain),
+                        ProcessorDomainLoad::Pending { authority_pending: true, .. } =>
+                            Err(big_repo::CoordinationError::Pending.into()),
+                        _ => eyre::bail!("deeper processor configuration unavailable"),
+                    }
+                }).await?;
+                native_admission(|| node.sync_repo.attach_processor_domain(&deeper_domain)).await?;
+                let deeper_owner = node.ctx.attach_processor_slot_store(&deeper_domain.transport(&node.ctx.big_repo).await?, None).await?;
+                assert!(native_admission(|| deeper_owner.slot(&captured.slot)).await?
+                    .settled(&captured.capture.generation));
+                for source in [&predecessor_domain, &successor_domain, loser] {
+                    native_admission(|| node.sync_repo.attach_processor_domain(source)).await?;
+                    let current = node.ctx.attach_processor_slot_store(&source.transport(&node.ctx.big_repo).await?, None).await?;
+                    assert!(Arc::ptr_eq(&current, &deeper_owner));
+                    assert_eq!(current.register().generation(), 3);
+                }
+                assert!(owner.register().publish_local(
+                    b"shallower-processor-publisher", vec![], b"must be fenced".to_vec(),
+                ).await.is_err());
+                eyre::Ok(())
+            })
+            .await?;
+        }
+        if let Some(executor) = &executor {
             assert!(
                 node.rt
                     .dispatch_repo
@@ -3036,14 +3464,102 @@ mod captured_recovery {
                     .is_empty()
             );
             assert_eq!(
-                admissions(&executor, attempt.job_id.as_deref().unwrap())
+                admissions(executor, attempt.job_id.as_deref().unwrap())
                     .await?
                     .len(),
                 1
             );
+        }
+        eyre::Ok((pool_id.clone(), attempt.clone()))
+        }).await;
+        // Stop owned adoption tasks before dropping their native hub, including
+        // error exits. Otherwise a teardown panic can hide the original failure.
+        if let Some(executor) = executor {
             executor.stop().await?;
         }
-        fixture.node.stop().await?;
-        Ok(())
+        if matches!(restart, ActivationRestart::RuntimeFirst) {
+            assert!(!remote_executor && !rotate);
+            let retained = if let Ok((pool, attempt)) = &result {
+                let domains = ProcessorDomainRepo::new(
+                    Arc::clone(&fixture.node.ctx.big_repo),
+                    fixture.node.ctx.local_actor_id.clone(),
+                );
+                let selected = domains
+                    .selected_candidate(
+                        &fixture.node.ctx.doc_config.document_id(),
+                        "@daybook/test/test-label",
+                    )
+                    .await?
+                    .unwrap();
+                let tasks = fixture.node.sync_repo.task_store(pool).unwrap();
+                let ticket = native_admission(|| tasks.ticket(attempt.request.key.task_id)).await?;
+                let entries = admissions(&fixture.node, attempt.job_id.as_deref().unwrap()).await?;
+                Some((selected, ticket, entries))
+            } else {
+                None
+            };
+            let root = fixture.temp.path().join("repo");
+            fixture.node.stop_runtime_first().await?;
+            if let (Ok((pool, attempt)), Some((selected, ticket, entries))) = (&result, retained) {
+                let reopened = open_sync_node(&root).await?;
+                let proof = Box::pin(async {
+                    assert!(
+                        reopened
+                            .sync_repo
+                            .wait_for_processor_adoption(
+                                "@daybook/test/test-label",
+                                &selected.reference
+                            )
+                            .await?
+                    );
+                    let tasks = reopened.sync_repo.task_store(pool).unwrap();
+                    assert_eq!(
+                        native_admission(|| tasks.ticket(attempt.request.key.task_id)).await?,
+                        ticket
+                    );
+                    let restored = reopened.rt.dispatch_repo.task_attempts(pool).await?;
+                    let exact = restored
+                        .iter()
+                        .find(|candidate| candidate.request.key == attempt.request.key)
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::to_vec(&exact.request)?,
+                        serde_json::to_vec(&attempt.request)?
+                    );
+                    assert_eq!(
+                        admissions(&reopened, attempt.job_id.as_deref().unwrap()).await?,
+                        entries
+                    );
+                    let CapturedRoutineInput::V1 {
+                        processor: Some(captured),
+                        ..
+                    } = serde_json::from_slice::<crate::rt::task_adapter::ResolvedRoutineInput>(
+                        &attempt.request.invocation.args,
+                    )?
+                    .input
+                    else {
+                        unreachable!()
+                    };
+                    let slots = reopened
+                        .rt
+                        .processor_slot_store("@daybook/test/test-label", Some(&selected.reference))
+                        .await?
+                        .unwrap();
+                    assert!(
+                        native_admission(|| slots.slot(&captured.slot))
+                            .await?
+                            .settled(&captured.capture.generation)
+                    );
+                    eyre::Ok(())
+                })
+                .await;
+                reopened.stop().await?;
+                proof?;
+            }
+        } else {
+            fixture.node.stop().await?;
+        }
+        drop(executor_temp);
+        result.map(|_| ())
     }
 }

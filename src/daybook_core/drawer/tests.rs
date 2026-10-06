@@ -791,6 +791,7 @@ async fn a_branch_whose_branch_doc_access_is_revoked_leaves_the_listing_and_is_r
         &branch,
         &stress_heads,
         None,
+        None,
     )
     .await?;
     let main_heads_after_merge = repo
@@ -894,11 +895,12 @@ async fn a_branch_whose_branch_doc_access_is_revoked_leaves_the_listing_and_is_r
             &branch,
             &stress_heads,
             None,
+            None,
         )
         .await
         .expect_err("a merge whose source branch doc is unreachable must be refused");
     assert!(
-        matches!(&err, DrawerError::BranchNotFound { name } if name.as_str() == "/stress/1"),
+        matches!(&err, MergeError::Drawer { inner: DrawerError::BranchNotFound { name } } if name.as_str() == "/stress/1"),
         "expected BranchNotFound for /stress/1, got {err:?}"
     );
     assert!(
@@ -915,11 +917,12 @@ async fn a_branch_whose_branch_doc_access_is_revoked_leaves_the_listing_and_is_r
             BranchPath::new("main"),
             &main_heads_after_merge,
             None,
+            None,
         )
         .await
         .expect_err("a merge whose target branch doc is unreachable must be refused");
     assert!(
-        matches!(&err, DrawerError::BranchNotFound { name } if name.as_str() == "/stress/1"),
+        matches!(&err, MergeError::Drawer { inner: DrawerError::BranchNotFound { name } } if name.as_str() == "/stress/1"),
         "expected BranchNotFound for /stress/1, got {err:?}"
     );
     assert!(
@@ -1614,12 +1617,38 @@ async fn test_v2_merge() -> Res<()> {
         .get(&*local_branch("branch-a").to_string())
         .unwrap()
         .clone();
+    let main_before_expired_merge = repo
+        .get_branch_heads_for_path(&doc_id, BranchPath::new("main"))
+        .await?
+        .unwrap();
+    let expired = repo
+        .merge_from_heads(
+            &doc_id,
+            BranchPath::new("main"),
+            &local_branch("branch-a"),
+            &a_heads,
+            None,
+            Some(0),
+        )
+        .await
+        .expect_err("expired task effects must not become visible");
+    assert!(matches!(
+        expired,
+        MergeError::ExecutionExpired { not_after_secs: 0 }
+    ));
+    assert_eq!(
+        repo.get_branch_heads_for_path(&doc_id, BranchPath::new("main"))
+            .await?
+            .unwrap(),
+        main_before_expired_merge,
+    );
     repo.merge_from_heads(
         &doc_id,
         BranchPath::new("main"),
         &local_branch("branch-a"),
         &a_heads,
         None,
+        Some(Timestamp::now().as_second().checked_add(3600).unwrap()),
     )
     .await?;
 
@@ -1635,6 +1664,7 @@ async fn test_v2_merge() -> Res<()> {
         BranchPath::new("main"),
         &local_branch("branch-b"),
         &b_heads,
+        None,
         None,
     )
     .await?;
@@ -1838,8 +1868,15 @@ async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() 
             .get(&branch_a.to_string())
             .ok_or_eyre("missing branch-a state after update")?
             .clone();
-        repo.merge_from_heads(&doc_id, BranchPath::new("main"), &branch_a, &a_heads, None)
-            .await?;
+        repo.merge_from_heads(
+            &doc_id,
+            BranchPath::new("main"),
+            &branch_a,
+            &a_heads,
+            None,
+            None,
+        )
+        .await?;
         let heads_after_a = repo
             .get_doc_branches(&doc_id)
             .await?
@@ -1881,8 +1918,15 @@ async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() 
             .get(&branch_b.to_string())
             .ok_or_eyre("missing branch-b state after update")?
             .clone();
-        repo.merge_from_heads(&doc_id, BranchPath::new("main"), &branch_b, &b_heads, None)
-            .await?;
+        repo.merge_from_heads(
+            &doc_id,
+            BranchPath::new("main"),
+            &branch_b,
+            &b_heads,
+            None,
+            None,
+        )
+        .await?;
 
         // Recreate the stale-heads path: materialize a new branch from an older main head set
         // after main has already advanced through an intervening merge.
@@ -1923,6 +1967,7 @@ async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() 
             BranchPath::new("main"),
             &stale_branch,
             &stale_heads,
+            None,
             None,
         )
         .await?;
@@ -2229,6 +2274,7 @@ async fn test_v2_additional_apis() -> Res<()> {
         BranchPath::new("main"),
         &local_branch("branch-a"),
         None,
+        None,
     )
     .await?;
     let doc_merged = repo
@@ -2483,6 +2529,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
         &local_branch("branch-a"),
         &a_heads,
         Some(&user_path),
+        None,
     )
     .await?;
 
@@ -2707,6 +2754,7 @@ async fn test_merge_from_heads_user_path_cannot_override_node_author() -> Res<()
         &local_branch("branch-a"),
         &branch_heads,
         Some(&merge_user_path),
+        None,
     )
     .await?;
 
@@ -3047,6 +3095,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
         &local_branch("branch-a"),
         &a_heads,
         None,
+        None,
     )
     .await?;
     repo.merge_from_heads(
@@ -3054,6 +3103,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
         BranchPath::new("main"),
         &local_branch("branch-b"),
         &b_heads,
+        None,
         None,
     )
     .await?;
@@ -3233,6 +3283,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
         &local_branch("branch-a"),
         &a_heads,
         None,
+        None,
     )
     .await?;
     let entry_merged_a = repo.get_doc_branches(&doc_id).await?.unwrap();
@@ -3250,6 +3301,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
         BranchPath::new("main"),
         &local_branch("branch-b"),
         &b_heads,
+        None,
         None,
     )
     .await?;

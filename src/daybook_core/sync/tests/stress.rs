@@ -696,7 +696,8 @@ async fn wait_network_rest(
         node.as_ref().map(|node| async move {
             let parts = node
                 .sync_repo
-                .peer_partition_ids("", true)
+                .peer_partition_ids(&node.ctx.big_repo.local_peer_id(), true)
+                .await?
                 .into_keys()
                 .collect::<Vec<_>>();
             let peers = peers_set[index].iter().cloned().collect::<Vec<_>>();

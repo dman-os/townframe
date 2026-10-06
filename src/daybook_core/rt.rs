@@ -113,10 +113,12 @@ pub struct Rt {
     #[cfg(test)]
     admission_gate: tokio::sync::Mutex<Option<(DispatchAdmissionCut, DispatchTestGate)>>,
     task_admission: tokio::sync::Mutex<()>,
+    completion_delivery: tokio::sync::Mutex<()>,
     execution_gate: Arc<wflow::wflow_tokio::partition::ExecutionGate>,
     pub plugs_repo: Arc<PlugsRepo>,
     pub triage_worker: triage::TriageWorker,
     pub(crate) processor_slots: Arc<triage::slots::ProcessorSlotStore>,
+    pub(crate) processor_task_origins: triage::origins::ProcessorTaskOrigins,
     pub(crate) distributed_processors:
         tokio::sync::RwLock<HashMap<String, Arc<triage::DistributedProcessor>>>,
     pub drawer: Arc<DrawerRepo>,
@@ -143,6 +145,8 @@ pub struct RtStopToken {
     wflow_part_handle: TokioPartitionWorkerHandle,
     rt: Arc<Rt>,
     partition_watcher: tokio::task::JoinHandle<()>,
+    expiry_watcher: tokio::task::JoinHandle<()>,
+    completion_watcher: tokio::task::JoinHandle<()>,
     doc_processor_stop: crate::rt::triage::DocProcessorStopToken,
     blob_pin_worker_stop: crate::repos::RepoStopToken,
     blob_pins_part_worker_stop: crate::repos::RepoStopToken,
@@ -154,11 +158,23 @@ pub struct RtStopToken {
 
 impl RtStopToken {
     pub async fn stop(self) -> Res<()> {
+        // Triage produces dispatches: drain its in-flight plan before closing
+        // runtime admission. Cancelling the runtime first makes that child fail
+        // with "rt is shutting down" while it still owns an admitted source.
+        self.doc_processor_stop.stop().await?;
         self.rt.cancel_token.cancel();
+        self.expiry_watcher.await?;
+        self.completion_watcher.await?;
 
         utils_rs::wait_on_handle_with_timeout(self.partition_watcher, Duration::from_secs(10))
             .await?;
-        self.doc_processor_stop.stop().await?;
+        // Runtime and transport boot/shutdown orders are independent. Quiesce
+        // task actors before tearing down the effect host, preserving admissions.
+        let mut processors = self.rt.distributed_processors.write().await;
+        for (_, processor) in processors.drain() {
+            processor.driver.shutdown().await?;
+        }
+        drop(processors);
 
         self.plugs_manifest_consumer_stop.stop().await?;
         self.plugs_config_consumer_stop.stop().await?;
@@ -360,8 +376,10 @@ impl Rt {
         let mut boot_plugs_manifest = None;
         let mut boot_partition = None;
         let mut boot_processor = None;
+        let mut boot_expiry_watcher = None;
+        let mut boot_completion_watcher = None;
         let execution_gate = wflow::wflow_tokio::partition::ExecutionGate::paused();
-        let result = async {
+        let result: Res<(Arc<Self>, RtStopToken)> = async {
             Self::emit_startup_progress_status(
                 &progress_repo,
                 startup_progress_task_id.as_deref(),
@@ -372,14 +390,24 @@ impl Rt {
             let mut loaded_workloads = HashSet::new();
             let mut restore_errors = Vec::new();
             for (dispatch_id, dispatch) in dispatch_repo.list_unsettled().await {
-                if let Some(attempt) = dispatch_repo
-                    .task_attempt_for_dispatch(&dispatch_id)
-                    .await?
-                    && let Some(job) = attempt.job_id
-                {
-                    execution_gate.hold(Arc::from(job));
+                let deadline = dispatch_repo.execution_deadline(&dispatch_id).await?;
+                let expired =
+                    deadline.is_some_and(|deadline| Timestamp::now().as_second() > deadline);
+                if let Some(deadline) = deadline {
+                    let ActiveDispatchDeets::Wflow { wflow_job_id, .. } = &dispatch.deets;
+                    if let Some(job) = wflow_job_id {
+                        execution_gate.authorize_until(Arc::from(job.as_str()), deadline);
+                        if dispatch_repo
+                            .task_attempt_for_dispatch(&dispatch_id)
+                            .await?
+                            .is_some()
+                        {
+                            execution_gate.hold(Arc::from(job.as_str()));
+                        }
+                    }
                 }
                 if dispatch.status.is_terminal()
+                    || expired
                     || loaded_workloads.contains(dispatch.execution.workload_id())
                 {
                     continue;
@@ -504,6 +532,8 @@ impl Rt {
             let wflow_ingress = Arc::new(wflow::ingress::PartitionLogIngress::new(part_log));
             let local_wflow_part_id = format!("{}/{part_idx}", config.device_id);
 
+            let processor_task_origins =
+                triage::origins::ProcessorTaskOrigins::open(rcx.sql.clone()).await?;
             let rt = Arc::new(Self {
                 config,
                 local_wflow_part_id,
@@ -515,6 +545,7 @@ impl Rt {
                 #[cfg(test)]
                 admission_gate: tokio::sync::Mutex::new(None),
                 task_admission: tokio::sync::Mutex::new(()),
+                completion_delivery: tokio::sync::Mutex::new(()),
                 execution_gate,
                 plugs_repo,
                 triage_worker: triage::TriageWorker::new(),
@@ -522,6 +553,7 @@ impl Rt {
                     Arc::clone(&rcx.derived_part_store),
                     rcx.iroh_secret_key.public().as_bytes().to_owned(),
                 )),
+                processor_task_origins,
                 distributed_processors: tokio::sync::RwLock::new(HashMap::new()),
                 drawer,
                 rcx,
@@ -543,6 +575,14 @@ impl Rt {
                 wflow_part_state,
             });
             rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
+            boot_expiry_watcher = Some(tokio::spawn({
+                let rt = Arc::clone(&rt);
+                async move { rt.watch_task_expiry().await.unwrap() }
+            }));
+            boot_completion_watcher = Some(tokio::spawn({
+                let rt = Arc::clone(&rt);
+                async move { rt.watch_dispatch_completions().await.unwrap() }
+            }));
             let reconciliation = async {
                 // Terminal journal outcomes outrank artifact availability: archived
                 // jobs need settlement, not another component execution.
@@ -566,6 +606,7 @@ impl Rt {
                                 dispatch_id.clone(),
                                 dispatch::DispatchStatus::Failed,
                                 &current,
+                                None,
                             )
                             .await?;
                         if restore_error.is_none() {
@@ -657,6 +698,8 @@ impl Rt {
                 RtStopToken {
                     rt,
                     partition_watcher,
+                    expiry_watcher: boot_expiry_watcher.take().expect(ERROR_IMPOSSIBLE),
+                    completion_watcher: boot_completion_watcher.take().expect(ERROR_IMPOSSIBLE),
                     doc_processor_stop: boot_processor.take().expect(ERROR_IMPOSSIBLE),
                     plugs_manifest_consumer_stop: boot_plugs_manifest
                         .take()
@@ -674,6 +717,16 @@ impl Rt {
         if result.is_err() {
             boot_cancel.cancel();
             let mut cleanup_error = None;
+            if let Some(watcher) = boot_completion_watcher
+                && let Err(error) = watcher.await
+            {
+                cleanup_error = Some(eyre::Report::new(error));
+            }
+            if let Some(watcher) = boot_expiry_watcher
+                && let Err(error) = watcher.await
+            {
+                cleanup_error = Some(eyre::Report::new(error));
+            }
             if let Some(worker) = boot_processor
                 && let Err(error) = worker.stop().await
             {
@@ -711,7 +764,14 @@ impl Rt {
                 return result.wrap_err(format!("runtime startup teardown also failed: {error:#}"));
             }
         }
-        result
+        let (rt, stop) = result?;
+        if let Err(error) = rt.rcx.register_processor_runtime(&rt).await {
+            stop.stop()
+                .await
+                .wrap_err("tearing down failed processor activation restore")?;
+            return Err(error);
+        }
+        Ok((rt, stop))
     }
 
     pub async fn render_facet_view(
@@ -1014,6 +1074,68 @@ impl Rt {
             plug_manifest,
             view_manifest,
         })
+    }
+
+    async fn watch_task_expiry(&self) -> Res<()> {
+        use crate::repos::{RecvError, Repo as _, SubscribeOpts};
+        // Subscribe before reading durable ownership: notifications are hints,
+        // and a lost/coalesced hint is repaired by rereading the expiry index.
+        let events = self.dispatch_repo.subscribe(SubscribeOpts::new(64));
+        let mut next = self.dispatch_repo.next_task_expiry().await?;
+        loop {
+            if self.cancel_token.is_cancelled() {
+                return Ok(());
+            }
+            if next.is_some_and(|deadline| Timestamp::now().as_second() > deadline) {
+                let attempts = self
+                    .dispatch_repo
+                    .expired_task_attempts(Timestamp::now().as_second(), 64)
+                    .await?;
+                for attempt in attempts {
+                    if self.cancel_token.is_cancelled() {
+                        return Ok(());
+                    }
+                    task_adapter::CapturedRoutineAdapter::fail_local(
+                        self,
+                        &attempt,
+                        "task execution authorization expired",
+                    )
+                    .await?;
+                    self.dispatch_repo
+                        .mark_task_expiry_cancellation(&attempt.dispatch_id)
+                        .await?;
+                }
+                for id in self
+                    .dispatch_repo
+                    .expired_descendants(Timestamp::now().as_second(), 64)
+                    .await?
+                {
+                    if self.cancel_token.is_cancelled() {
+                        return Ok(());
+                    }
+                    self.cancel_dispatch(&id).await?;
+                    self.dispatch_repo
+                        .mark_descendant_expiry_cancellation(&id)
+                        .await?;
+                }
+                next = self.dispatch_repo.next_task_expiry().await?;
+                continue;
+            }
+            tokio::select! {
+                _ = self.cancel_token.cancelled() => return Ok(()),
+                event = events.recv_async() => {
+                    match event {
+                        Ok(_) | Err(RecvError::Dropped { .. }) => {}
+                        Err(RecvError::Closed) => eyre::bail!("task expiry dispatch subscription closed"),
+                    }
+                    next = self.dispatch_repo.next_task_expiry().await?;
+                }
+                // Sample wall-clock changes only while an authorization exists;
+                // this does no periodic database IO. The publication guards use
+                // the exact deadline, not a one-second execution grace period.
+                _ = tokio::time::sleep(Duration::from_secs(1)), if next.is_some() => {}
+            }
+        }
     }
 
     #[tracing::instrument(
@@ -1448,6 +1570,7 @@ impl Rt {
                 );
                 return Ok(());
             }
+            let execution_deadline = self.dispatch_repo.execution_deadline(dispatch_id).await?;
             let Some(finalization) = self
                 .dispatch_repo
                 .claim_finalization(dispatch_id, &dispatch)
@@ -1473,8 +1596,11 @@ impl Rt {
 
             // Cancellation owns this outcome only after its durable mark commits.
             // A publication claim seals out later cancellation without waiting.
-            let cancelled_win = finalization.cancelled;
-            let merged_successfully =
+            // Expiry is not sealed out by an earlier finalization claim.
+            let mut cancelled_win = finalization.cancelled
+                || execution_deadline
+                    .is_some_and(|deadline| Timestamp::now().as_second() > deadline);
+            let mut merged_successfully =
                 !cancelled_win && matches!(result, JobRunResult::Success { .. });
 
             if merged_successfully {
@@ -1489,11 +1615,23 @@ impl Rt {
                 );
                 match self
                     .drawer
-                    .merge_from_branch(doc_id, target_branch_path, staging_branch_path, None)
+                    .merge_from_branch(
+                        doc_id,
+                        target_branch_path,
+                        staging_branch_path,
+                        None,
+                        execution_deadline,
+                    )
                     .await
                 {
                     Ok(()) => {}
-                    Err(crate::drawer::types::DrawerError::BranchNotFound { name }) => {
+                    Err(crate::drawer::types::MergeError::ExecutionExpired { .. }) => {
+                        cancelled_win = true;
+                        merged_successfully = false;
+                    }
+                    Err(crate::drawer::types::MergeError::Drawer {
+                        inner: crate::drawer::types::DrawerError::BranchNotFound { name },
+                    }) => {
                         debug!(
                             %dispatch_id,
                             %entry_id,
@@ -1546,6 +1684,10 @@ impl Rt {
                         .wrap_err("error deleting staging branch after merge")?;
                 }
             }
+            if execution_deadline.is_some_and(|deadline| Timestamp::now().as_second() > deadline) {
+                cancelled_win = true;
+                merged_successfully = false;
+            }
             if !merged_successfully {
                 // Delete staging branch on failure if it exists.
                 info!(
@@ -1563,112 +1705,6 @@ impl Rt {
                         other => Err(other),
                     })
                     .wrap_err("error deleting staging branch")?;
-                for hook in &dispatch.on_success_hooks {
-                    match hook {
-                        DispatchOnSuccessHook::InitMarkDone { init_id, .. } => {
-                            self.init_repo
-                                .clear_running_dispatch(init_id, dispatch_id)
-                                .await?;
-                        }
-                        DispatchOnSuccessHook::ProcessorSettlement { .. } => {}
-                        DispatchOnSuccessHook::CommandInvokeReply {
-                            parent_wflow_job_id,
-                            request_id,
-                        } => {
-                            let reply = {
-                                let (status, value_json, error_json) =
-                                    command_invoke_reply_from_result(
-                                        result,
-                                        dispatch_id,
-                                        cancelled_win,
-                                        merged_successfully,
-                                    );
-                                daybook_pdk::InvokeCommandReply {
-                                    request_id: request_id.clone(),
-                                    status,
-                                    value_json,
-                                    error_json,
-                                }
-                            };
-                            self.wflow_ingress
-                                .send_message(
-                                    Arc::from(parent_wflow_job_id.as_str()),
-                                    Arc::from(request_id.as_str()),
-                                    serde_json::to_string(&reply).expect(ERROR_JSON),
-                                )
-                                .await
-                                .wrap_err_with(|| {
-                                    format!(
-                                        "error sending command invoke reply to parent job {parent_wflow_job_id}"
-                                    )
-                                })?;
-                        }
-                    }
-                }
-            } else {
-                for hook in &dispatch.on_success_hooks {
-                    match hook {
-                        DispatchOnSuccessHook::InitMarkDone { init_id, run_mode } => {
-                            self.init_repo.mark_done(run_mode, init_id).await?;
-                            self.init_repo
-                                .clear_running_dispatch(init_id, dispatch_id)
-                                .await?;
-                        }
-                        DispatchOnSuccessHook::ProcessorSettlement {
-                            slot,
-                            capture,
-                            domain,
-                        } => {
-                            let store = self
-                                .processor_slot_store(&slot.processor_full_id, domain.as_ref())
-                                .await?
-                                .ok_or_eyre(
-                                    "captured processor settlement domain is not materialized",
-                                )?;
-                            store
-                                .settle(
-                                    slot,
-                                    triage::slots::ProcessorSettlement {
-                                        capture: capture.clone(),
-                                        attempt_id: dispatch_id.to_string(),
-                                    },
-                                )
-                                .await?;
-                        }
-                        DispatchOnSuccessHook::CommandInvokeReply {
-                            parent_wflow_job_id,
-                            request_id,
-                        } => {
-                            let reply = {
-                                let (status, value_json, error_json) =
-                                    command_invoke_reply_from_result(
-                                        result,
-                                        dispatch_id,
-                                        cancelled_win,
-                                        merged_successfully,
-                                    );
-                                daybook_pdk::InvokeCommandReply {
-                                    request_id: request_id.clone(),
-                                    status,
-                                    value_json,
-                                    error_json,
-                                }
-                            };
-                            self.wflow_ingress
-                                .send_message(
-                                    Arc::from(parent_wflow_job_id.as_str()),
-                                    Arc::from(request_id.as_str()),
-                                    serde_json::to_string(&reply).expect(ERROR_JSON),
-                                )
-                                .await
-                                .wrap_err_with(|| {
-                                    format!(
-                                        "error sending command invoke reply to parent job {parent_wflow_job_id}"
-                                    )
-                                })?;
-                        }
-                    }
-                }
             }
 
             let final_status = if merged_successfully {
@@ -1678,36 +1714,283 @@ impl Rt {
             } else {
                 dispatch::DispatchStatus::Failed
             };
-            self.progress_repo
-                .add_update(
-                    dispatch_id,
-                    crate::progress::ProgressUpdate {
-                        at: jiff::Timestamp::now(),
-                        title: None,
-                        deets: crate::progress::ProgressUpdateDeets::Completed {
-                            state: if matches!(final_status, dispatch::DispatchStatus::Succeeded) {
-                                crate::progress::ProgressFinalState::Succeeded
-                            } else if matches!(final_status, dispatch::DispatchStatus::Cancelled) {
-                                crate::progress::ProgressFinalState::Cancelled
-                            } else {
-                                crate::progress::ProgressFinalState::Failed
-                            },
-                            message: None,
-                        },
-                    },
+            let completed = self
+                .dispatch_repo
+                .complete(
+                    dispatch_id.into(),
+                    final_status.clone(),
+                    &dispatch,
+                    Some(result),
                 )
                 .await?;
-            self.dispatch_repo
-                .complete(dispatch_id.into(), final_status.clone(), &dispatch)
-                .await?;
             finalization.finish();
-            self.release_waiting_dispatches(
-                dispatch_id,
-                matches!(final_status, dispatch::DispatchStatus::Succeeded),
-            )
-            .await?;
+            let Some(_) = completed else {
+                return Ok(());
+            };
+            self.deliver_dispatch_completion(dispatch_id).await?;
         }
         Ok(())
+    }
+
+    async fn watch_dispatch_completions(&self) -> Res<()> {
+        use crate::repos::{RecvError, Repo as _, SubscribeOpts};
+        let events = self.dispatch_repo.subscribe(SubscribeOpts::new(64));
+        let mut wakes = None;
+        loop {
+            if self.cancel_token.is_cancelled() {
+                return Ok(());
+            }
+            if self
+                .dispatch_repo
+                .next_dispatch_completion()
+                .await?
+                .is_some()
+            {
+                if wakes.is_none() {
+                    // Install materialization/authority/document wakes before
+                    // rereading delivery state. Pending is an outstanding durable
+                    // obligation, not a fatal callback or a timed polling loop.
+                    let local = self
+                        .rcx
+                        .big_repo
+                        .subscribe_local_listener(big_repo::BigRepoLocalFilter { doc_id: None })
+                        .await?;
+                    let domain = self
+                        .rcx
+                        .big_repo
+                        .subscribe_domain_listener(big_repo::BigRepoDomainFilter)
+                        .await?;
+                    let changes = self
+                        .rcx
+                        .big_repo
+                        .subscribe_change_listener(big_repo::BigRepoChangeFilter {
+                            doc_id: None,
+                            origin: None,
+                            path: vec![],
+                        })
+                        .await?;
+                    wakes = Some((local, domain, changes));
+                }
+                let mut after = None;
+                loop {
+                    let page = self
+                        .dispatch_repo
+                        .dispatch_completion_page(after.as_deref())
+                        .await?;
+                    if page.is_empty() {
+                        break;
+                    }
+                    for id in &page {
+                        if self.cancel_token.is_cancelled() {
+                            return Ok(());
+                        }
+                        self.deliver_dispatch_completion(id).await?;
+                    }
+                    // A Pending head must not block unrelated completions.
+                    after = page.last().cloned();
+                }
+            }
+            if self
+                .dispatch_repo
+                .next_dispatch_completion()
+                .await?
+                .is_none()
+            {
+                wakes = None;
+            }
+            if let Some(((_, local), (_, domain), (_, changes))) = &mut wakes {
+                tokio::select! {
+                    _ = self.cancel_token.cancelled() => return Ok(()),
+                    event = events.recv_async() => match event {
+                        Ok(_) | Err(RecvError::Dropped { .. }) => {}
+                        Err(RecvError::Closed) => eyre::bail!("completion dispatch subscription closed"),
+                    },
+                    event = local.recv() => { event.expect("completion materialization subscription closed"); },
+                    event = domain.recv() => { event.expect("completion authority subscription closed"); },
+                    event = changes.recv() => { event.expect("completion document subscription closed"); },
+                }
+            } else {
+                tokio::select! {
+                    _ = self.cancel_token.cancelled() => return Ok(()),
+                    event = events.recv_async() => match event {
+                        Ok(_) | Err(RecvError::Dropped { .. }) => {}
+                        Err(RecvError::Closed) => eyre::bail!("completion dispatch subscription closed"),
+                    }
+                }
+            }
+        }
+    }
+
+    async fn deliver_dispatch_completion(&self, dispatch_id: &str) -> Res<bool> {
+        let _delivery = self.completion_delivery.lock().await;
+        let Some(completion) = self
+            .dispatch_repo
+            .pending_dispatch_completion(dispatch_id)
+            .await?
+        else {
+            return Ok(true);
+        };
+        let dispatch = completion.dispatch;
+        let fallback = JobRunResult::Aborted;
+        let result = completion.result.as_ref().unwrap_or(&fallback);
+        let final_status = dispatch.status.clone();
+        let cancelled_win = final_status == dispatch::DispatchStatus::Cancelled;
+        let merged_successfully = final_status == dispatch::DispatchStatus::Succeeded;
+        if !merged_successfully {
+            for hook in &dispatch.on_success_hooks {
+                match hook {
+                    DispatchOnSuccessHook::InitMarkDone { init_id, .. } => {
+                        self.init_repo
+                            .clear_running_dispatch(init_id, dispatch_id)
+                            .await?;
+                    }
+                    DispatchOnSuccessHook::ProcessorSettlement { .. } => {}
+                    DispatchOnSuccessHook::CommandInvokeReply {
+                        parent_wflow_job_id,
+                        request_id,
+                    } => {
+                        let reply = {
+                            let (status, value_json, error_json) = command_invoke_reply_from_result(
+                                result,
+                                dispatch_id,
+                                cancelled_win,
+                                merged_successfully,
+                            );
+                            daybook_pdk::InvokeCommandReply {
+                                request_id: request_id.clone(),
+                                status,
+                                value_json,
+                                error_json,
+                            }
+                        };
+                        self.wflow_ingress
+                                .send_message(
+                                    Arc::from(parent_wflow_job_id.as_str()),
+                                    Arc::from(request_id.as_str()),
+                                    serde_json::to_string(&reply).expect(ERROR_JSON),
+                                )
+                                .await
+                                .wrap_err_with(|| {
+                                    format!(
+                                        "error sending command invoke reply to parent job {parent_wflow_job_id}"
+                                    )
+                                })?;
+                    }
+                }
+            }
+        } else {
+            for hook in &dispatch.on_success_hooks {
+                match hook {
+                    DispatchOnSuccessHook::InitMarkDone { init_id, run_mode } => {
+                        self.init_repo
+                            .mark_done(run_mode, init_id, dispatch_id)
+                            .await?;
+                        self.init_repo
+                            .clear_running_dispatch(init_id, dispatch_id)
+                            .await?;
+                    }
+                    DispatchOnSuccessHook::ProcessorSettlement {
+                        slot,
+                        capture,
+                        domain,
+                    } => {
+                        let store = match self
+                            .processor_slot_store(&slot.processor_full_id, domain.as_ref())
+                            .await
+                        {
+                            Ok(Some(store)) => store,
+                            Ok(None) => return Ok(false),
+                            Err(error)
+                                if matches!(
+                                    error.downcast_ref::<big_repo::CoordinationError>(),
+                                    Some(big_repo::CoordinationError::Pending)
+                                ) =>
+                            {
+                                return Ok(false);
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        let settlement = store
+                            .settle(
+                                slot,
+                                triage::slots::ProcessorSettlement {
+                                    capture: capture.clone(),
+                                    attempt_id: dispatch_id.to_string(),
+                                },
+                            )
+                            .await;
+                        if let Err(error) = settlement {
+                            if matches!(
+                                error.downcast_ref::<big_repo::CoordinationError>(),
+                                Some(big_repo::CoordinationError::Pending)
+                            ) {
+                                return Ok(false);
+                            }
+                            return Err(error);
+                        }
+                    }
+                    DispatchOnSuccessHook::CommandInvokeReply {
+                        parent_wflow_job_id,
+                        request_id,
+                    } => {
+                        let reply = {
+                            let (status, value_json, error_json) = command_invoke_reply_from_result(
+                                result,
+                                dispatch_id,
+                                cancelled_win,
+                                merged_successfully,
+                            );
+                            daybook_pdk::InvokeCommandReply {
+                                request_id: request_id.clone(),
+                                status,
+                                value_json,
+                                error_json,
+                            }
+                        };
+                        self.wflow_ingress
+                                .send_message(
+                                    Arc::from(parent_wflow_job_id.as_str()),
+                                    Arc::from(request_id.as_str()),
+                                    serde_json::to_string(&reply).expect(ERROR_JSON),
+                                )
+                                .await
+                                .wrap_err_with(|| {
+                                    format!(
+                                        "error sending command invoke reply to parent job {parent_wflow_job_id}"
+                                    )
+                                })?;
+                    }
+                }
+            }
+        }
+        self.progress_repo
+            .add_update(
+                dispatch_id,
+                crate::progress::ProgressUpdate {
+                    at: jiff::Timestamp::now(),
+                    title: None,
+                    deets: crate::progress::ProgressUpdateDeets::Completed {
+                        state: if matches!(final_status, dispatch::DispatchStatus::Succeeded) {
+                            crate::progress::ProgressFinalState::Succeeded
+                        } else if matches!(final_status, dispatch::DispatchStatus::Cancelled) {
+                            crate::progress::ProgressFinalState::Cancelled
+                        } else {
+                            crate::progress::ProgressFinalState::Failed
+                        },
+                        message: None,
+                    },
+                },
+            )
+            .await?;
+        self.release_waiting_dispatches(
+            dispatch_id,
+            matches!(final_status, dispatch::DispatchStatus::Succeeded),
+        )
+        .await?;
+        self.dispatch_repo
+            .finish_dispatch_completion(dispatch_id)
+            .await?;
+        Ok(true)
     }
 
     async fn release_waiting_dispatches(
@@ -1944,6 +2227,26 @@ impl Rt {
         dispatch_id: &str,
         dispatch: &DispatchAttempt,
     ) -> Res<()> {
+        let deadline = self.dispatch_repo.execution_deadline(dispatch_id).await?;
+        if let Some(deadline) = deadline {
+            let ActiveDispatchDeets::Wflow { wflow_job_id, .. } = &dispatch.deets;
+            let job = wflow_job_id
+                .as_deref()
+                .expect("active dispatch has a workflow identity");
+            self.execution_gate
+                .authorize_until(Arc::from(job), deadline);
+        }
+        if deadline.is_some_and(|deadline| Timestamp::now().as_second() > deadline) {
+            self.dispatch_repo
+                .complete(
+                    dispatch_id.to_owned(),
+                    dispatch::DispatchStatus::Cancelled,
+                    dispatch,
+                    None,
+                )
+                .await?;
+            return Ok(());
+        }
         #[cfg(test)]
         if !self
             .admission_barrier(DispatchAdmissionCut::BeforeJobInit)
@@ -2001,6 +2304,7 @@ impl Rt {
                         dispatch_id.into(),
                         dispatch::DispatchStatus::Failed,
                         dispatch,
+                        None,
                     )
                     .await
                     .wrap_err_with(|| {
@@ -2296,22 +2600,34 @@ impl Rt {
         routine_name: &str,
         args: DispatchArgs,
         fixed_dispatch_id: Option<String>,
+        processor_configuration: Option<&triage::domain::ProcessorDomainSnapshot>,
     ) -> Res<task_adapter::PreparedRoutine> {
         self.ensure_rt_live()?;
 
-        // Select enablement once, then derive every execution field from the same
-        // exact manifest revision. Delayed execution never revisits enablement.
+        // Local enablement gates participation. Processor captures use the shared
+        // policy reference; commands use the enabled reference. Every execution
+        // field comes from one exact manifest revision, never delayed enablement.
         let enabled_ref = self
             .plugs_repo
             .enabled_ref(plug_id)
             .await?
             .ok_or_else(|| ferr!("plug not enabled: {plug_id}/{routine_name}"))?;
-        let manifest_ref = PlugsRepo::parse_enabled_ref(&enabled_ref)?;
-        let (manifest_heads, plug_man) = self
-            .plugs_repo
-            .materialize_active(plug_id, &enabled_ref)
-            .await?
-            .ok_or_else(|| ferr!("enabled manifest not readable: {plug_id}/{routine_name}"))?;
+        let policy_ref =
+            processor_configuration.map_or(&enabled_ref, |domain| &domain.configuration.manifest);
+        let manifest_ref = PlugsRepo::parse_enabled_ref(policy_ref)?;
+        let manifest = if processor_configuration.is_some() {
+            self.plugs_repo.read_manifest_at_ref(policy_ref).await?
+        } else {
+            self.plugs_repo
+                .materialize_active(plug_id, policy_ref)
+                .await?
+        };
+        let (manifest_heads, plug_man) =
+            manifest.ok_or_else(|| ferr!("manifest not readable: {plug_id}/{routine_name}"))?;
+        eyre::ensure!(
+            plug_man.id() == plug_id,
+            "shared definition names another plug"
+        );
         let routine_man = plug_man
             .routines
             .get(routine_name)
@@ -2501,7 +2817,16 @@ impl Rt {
         // Configuration is invocation input: persist its exact document and heads
         // before enqueueing, so a delayed or recovered job cannot read a newer revision.
         let (configuration_document, configuration_heads, config_bindings) =
-            self.plugs_repo.capture_config_bindings().await?;
+            if let Some(domain) = processor_configuration {
+                (
+                    domain.reference.document.to_string(),
+                    ChangeHashSet(domain.heads.clone().into()),
+                    std::borrow::Cow::Borrowed(&domain.configuration.config_documents),
+                )
+            } else {
+                let (document, heads, bindings) = self.plugs_repo.capture_config_bindings().await?;
+                (document, heads, std::borrow::Cow::Owned(bindings))
+            };
         let ActiveDispatchArgs::FacetRoutine(facet_args) = &mut args;
         for config_doc in &mut facet_args.config_docs {
             let owner = config_doc.facet_acl[0]
@@ -2564,7 +2889,7 @@ impl Rt {
         reuse_terminal_on_match: bool,
     ) -> Res<String> {
         let prepared = self
-            .prepare_routine(plug_id, routine_name, args, fixed_dispatch_id)
+            .prepare_routine(plug_id, routine_name, args, fixed_dispatch_id, None)
             .await?;
         self.dispatch_prepared_no_gate(
             plug_id,
@@ -2761,6 +3086,7 @@ impl Rt {
                     dispatch_id.into(),
                     dispatch::DispatchStatus::Cancelled,
                     &dispatch,
+                    None,
                 )
                 .await?;
             self.release_waiting_dispatches(dispatch_id, false).await?;
@@ -3638,7 +3964,10 @@ mod tests {
             daybook_types::doc::WellKnownFacet::TitleGeneric(value.to_string()).into()
         }
 
-        async fn setup(waiting_on_dispatch_ids: Vec<String>) -> Res<Self> {
+        async fn setup(
+            waiting_on_dispatch_ids: Vec<String>,
+            task_deadline: Option<i64>,
+        ) -> Res<Self> {
             let cx = crate::test_support::test_cx(utils_rs::function_full!()).await?;
             // The per-node settlement hook writes derived-scope state; the
             // in-crate test harness builds the RepoCtx directly, so ensure the
@@ -3701,51 +4030,86 @@ mod tests {
             };
             let capture =
                 triage::slots::ProcessorCapture::new(main_heads.clone(), None, [1; 32], [2; 32]);
-            cx.dispatch_repo
-                .add(
-                    dispatch_id.clone(),
-                    Arc::new(DispatchAttempt::new(ActiveDispatch {
-                        execution: dispatch::CapturedWflowExecution::fixture(),
-                        deets: ActiveDispatchDeets::Wflow {
-                            wflow_partition_id: Some("part".into()),
-                            entry_id: Some(1),
-                            plug_id: "@test/plug".into(),
-                            routine_name: "routine".into(),
-                            bundle_name: "bundle".into(),
-                            wflow_job_id: Some(job_id.clone()),
+            let dispatch = Arc::new(DispatchAttempt::new(ActiveDispatch {
+                execution: dispatch::CapturedWflowExecution::fixture(),
+                deets: ActiveDispatchDeets::Wflow {
+                    wflow_partition_id: Some(if task_deadline.is_some() {
+                        cx.rt.local_wflow_part_id.clone()
+                    } else {
+                        "part".into()
+                    }),
+                    entry_id: task_deadline.is_none().then_some(1),
+                    plug_id: "@test/plug".into(),
+                    routine_name: "routine".into(),
+                    bundle_name: "bundle".into(),
+                    wflow_job_id: Some(job_id.clone()),
+                },
+                args: ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
+                    doc_id: doc_id.clone(),
+                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                    staging_branch_path: staging.clone(),
+                    heads: main_heads.clone(),
+                    invocation: dispatch::RoutineInvocation::Command,
+                    primary_doc: dispatch::DocFacetTokens {
+                        doc_id: doc_id.clone(),
+                        branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+                        staging_branch_path: staging.clone(),
+                        heads: main_heads.clone(),
+                        facet_acl: vec![],
+                    },
+                    config_docs: vec![],
+                    local_state_acl: vec![],
+                    command_invoke_acl_snapshot: vec![],
+                    wflow_args_json: None,
+                }),
+                status: if waiting_on_dispatch_ids.is_empty() {
+                    dispatch::DispatchStatus::Active
+                } else {
+                    dispatch::DispatchStatus::Waiting
+                },
+                waiting_on_dispatch_ids,
+                on_success_hooks: vec![DispatchOnSuccessHook::ProcessorSettlement {
+                    slot: slot_key.clone(),
+                    capture: capture.clone(),
+                    domain: None,
+                }],
+            }));
+            if let Some(deadline) = task_deadline {
+                use crate::tasks::driver::{AttemptKey, AttemptRequest, PreparedAttempt};
+                let mut declaration = crate::tasks::test_util::declaration("unobserved-expiry");
+                declaration.not_after_secs = deadline;
+                let request = AttemptRequest {
+                    key: AttemptKey {
+                        pool: declaration.pool.clone(),
+                        task_id: declaration.task_id,
+                        attempt_id: crate::tasks::PoolAttemptId::new(1),
+                    },
+                    allocation: None,
+                    declaration_digest: declaration.canonical_digest(),
+                    declaration,
+                    invocation: crate::tasks::ResolvedInvocation {
+                        args: serde_json::to_vec(&dispatch.args)?,
+                    },
+                };
+                cx.dispatch_repo
+                    .persist_task_attempt(
+                        PreparedAttempt {
+                            request,
+                            capture_digest: *blake3::hash(&serde_json::to_vec(
+                                &dispatch.execution,
+                            )?)
+                            .as_bytes(),
+                            dispatch_id: dispatch_id.clone(),
+                            workflow_partition: cx.rt.local_wflow_part_id.clone(),
+                            job_id: Some(job_id.clone()),
+                            staging_id: Some(staging.to_string()),
                         },
-                        args: ActiveDispatchArgs::FacetRoutine(FacetRoutineArgs {
-                            doc_id: doc_id.clone(),
-                            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-                            staging_branch_path: staging.clone(),
-                            heads: main_heads.clone(),
-                            invocation: dispatch::RoutineInvocation::Command,
-                            primary_doc: dispatch::DocFacetTokens {
-                                doc_id: doc_id.clone(),
-                                branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-                                staging_branch_path: staging.clone(),
-                                heads: main_heads.clone(),
-                                facet_acl: vec![],
-                            },
-                            config_docs: vec![],
-                            local_state_acl: vec![],
-                            command_invoke_acl_snapshot: vec![],
-                            wflow_args_json: None,
-                        }),
-                        status: if waiting_on_dispatch_ids.is_empty() {
-                            dispatch::DispatchStatus::Active
-                        } else {
-                            dispatch::DispatchStatus::Waiting
-                        },
-                        waiting_on_dispatch_ids,
-                        on_success_hooks: vec![DispatchOnSuccessHook::ProcessorSettlement {
-                            slot: slot_key.clone(),
-                            capture: capture.clone(),
-                            domain: None,
-                        }],
-                    })),
-                )
-                .await?;
+                        dispatch,
+                    )
+                    .await?;
+            } else {
+                cx.dispatch_repo.add(dispatch_id.clone(), dispatch).await?;
+            }
 
             Ok(Self {
                 cx,
@@ -3814,9 +4178,68 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn init_completion_replay_cannot_satisfy_a_different_boot_dispatch() -> Res<()> {
+        use daybook_types::manifest::InitRunMode;
+        let fixture = CancelRaceFixture::setup(vec![], None).await?;
+        let repo = &fixture.cx.rt.init_repo;
+        let init = "replayed-boot-init";
+        repo.mark_done(&InitRunMode::PerBoot, init, "prior-boot")
+            .await?;
+        assert!(!repo.is_done(&InitRunMode::PerBoot, init).await?);
+        repo.set_running_dispatch(init, "current-boot").await?;
+        repo.mark_done(&InitRunMode::PerBoot, init, "prior-boot")
+            .await?;
+        repo.clear_running_dispatch(init, "prior-boot").await?;
+        assert!(!repo.is_done(&InitRunMode::PerBoot, init).await?);
+        assert_eq!(
+            repo.get_running_dispatch(init).await.as_deref(),
+            Some("current-boot")
+        );
+        repo.mark_done(&InitRunMode::PerBoot, init, "current-boot")
+            .await?;
+        repo.clear_running_dispatch(init, "current-boot").await?;
+        assert!(repo.is_done(&InitRunMode::PerBoot, init).await?);
+        // Durable node completion is intentionally independent of boot ownership.
+        repo.mark_done(&InitRunMode::PerNode, "replayed-node-init", "prior-boot")
+            .await?;
+        assert!(
+            repo.is_done(&InitRunMode::PerNode, "replayed-node-init")
+                .await?
+        );
+        fixture.cx.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_expiry_without_pool_observation_rejects_late_success_effects() -> Res<()> {
+        use crate::repos::{RecvError, Repo as _, SubscribeOpts};
+        let fixture = CancelRaceFixture::setup(vec![], Some(0)).await?;
+        let original_title = fixture.target_title().await?;
+        let events = fixture.cx.dispatch_repo.subscribe(SubscribeOpts::new(64));
+        // There is no pool driver or adapter outcome subscription in this
+        // fixture. Expiry ownership belongs to the runtime, not its observers.
+        loop {
+            if fixture.status().await?.is_terminal() {
+                break;
+            }
+            match events.recv_async().await {
+                Ok(_) | Err(RecvError::Dropped { .. }) => {}
+                Err(RecvError::Closed) => eyre::bail!("expiry observer closed"),
+            }
+        }
+        assert_ne!(fixture.status().await?, dispatch::DispatchStatus::Succeeded);
+        fixture.deliver_success().await?;
+        assert_eq!(fixture.target_title().await?, original_title);
+        assert!(fixture.settlement().await?.is_none());
+        assert_eq!(fixture.cx.dispatch_repo.next_task_expiry().await?, None);
+        fixture.cx.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn terminal_effect_failure_settles_without_publication() -> Res<()> {
         use wflow::wflow_core::partition::job_events::{JobEffectResult, JobEffectResultDeets};
-        let fixture = CancelRaceFixture::setup(vec![]).await?;
+        let fixture = CancelRaceFixture::setup(vec![], None).await?;
         let PartitionLogEntry::JobEffectResult(mut event) = success_effect_result(&fixture.job_id)
         else {
             unreachable!();
@@ -3850,7 +4273,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelled_dispatch_refuses_late_success_publication() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let fixture = CancelRaceFixture::setup(vec![]).await?;
+        let fixture = CancelRaceFixture::setup(vec![], None).await?;
 
         // Cancellation durably accepted before the success result arrives.
         fixture.cancel().await?;
@@ -3885,7 +4308,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn success_finalization_refuses_late_cancellation_rollback() -> Res<()> {
         utils_rs::testing::setup_tracing_once();
-        let fixture = CancelRaceFixture::setup(vec![]).await?;
+        let fixture = CancelRaceFixture::setup(vec![], None).await?;
 
         // The successful result is finalized before the cancellation arrives.
         fixture.deliver_success().await?;
@@ -3927,7 +4350,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_during_claimed_publication_returns_without_waiting() -> Res<()> {
-        let fixture = CancelRaceFixture::setup(vec![]).await?;
+        let fixture = CancelRaceFixture::setup(vec![], None).await?;
         let (claimed, claimed_rx) = tokio::sync::oneshot::channel();
         let (resume, resume_rx) = tokio::sync::oneshot::channel();
         *fixture.cx.rt.finalization_gate.lock().await = Some(DispatchTestGate {
@@ -3957,8 +4380,117 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn pending_settlement_keeps_delivery_owned_without_blocking_other_completions() -> Res<()>
+    {
+        use crate::repos::{Repo as _, SubscribeOpts};
+        let fixture = CancelRaceFixture::setup(vec![], None).await?;
+        let original = fixture
+            .cx
+            .dispatch_repo
+            .get_any(&fixture.dispatch_id)
+            .await
+            .unwrap();
+        let mut pending = (**original).clone();
+        let ActiveDispatchDeets::Wflow { wflow_job_id, .. } = &mut pending.deets;
+        *wflow_job_id = Some("pending-domain-job".into());
+        let [DispatchOnSuccessHook::ProcessorSettlement { slot, capture, .. }] =
+            pending.on_success_hooks.as_slice()
+        else {
+            panic!("fixture must carry exact processor settlement hook");
+        };
+        pending.on_success_hooks = vec![DispatchOnSuccessHook::ProcessorSettlement {
+            slot: slot.clone(),
+            capture: capture.clone(),
+            domain: Some(triage::domain::ProcessorDomainReference {
+                document: big_repo::DocumentId::new([91; 32]),
+                authority_group: [92; 32],
+            }),
+        }];
+        let pending = Arc::new(DispatchAttempt::new(pending));
+        fixture
+            .cx
+            .dispatch_repo
+            .add("a-pending-domain".into(), Arc::clone(&pending))
+            .await?;
+        fixture
+            .cx
+            .dispatch_repo
+            .complete(
+                "a-pending-domain".into(),
+                dispatch::DispatchStatus::Succeeded,
+                &pending,
+                Some(&JobRunResult::Success {
+                    value_json: Arc::from("null"),
+                }),
+            )
+            .await?;
+        assert!(
+            !fixture
+                .cx
+                .rt
+                .deliver_dispatch_completion("a-pending-domain")
+                .await?
+        );
+        assert!(
+            fixture
+                .cx
+                .dispatch_repo
+                .pending_dispatch_completion("a-pending-domain")
+                .await?
+                .is_some()
+        );
+        let mut other = (**original).clone();
+        let ActiveDispatchDeets::Wflow { wflow_job_id, .. } = &mut other.deets;
+        *wflow_job_id = Some("unrelated-completion-job".into());
+        other.on_success_hooks.clear();
+        let other = Arc::new(DispatchAttempt::new(other));
+        fixture
+            .cx
+            .dispatch_repo
+            .add("z-unrelated-completion".into(), Arc::clone(&other))
+            .await?;
+        let events = fixture.cx.dispatch_repo.subscribe(SubscribeOpts::new(64));
+        fixture
+            .cx
+            .dispatch_repo
+            .complete(
+                "z-unrelated-completion".into(),
+                dispatch::DispatchStatus::Failed,
+                &other,
+                None,
+            )
+            .await?;
+        loop {
+            if let dispatch::DispatchEvent::DispatchCompletionDelivered { id } =
+                events.recv_async().await.unwrap().as_ref()
+                && id == "z-unrelated-completion"
+            {
+                break;
+            }
+        }
+        assert!(
+            fixture
+                .cx
+                .dispatch_repo
+                .pending_dispatch_completion("z-unrelated-completion")
+                .await?
+                .is_none()
+        );
+        assert!(
+            fixture
+                .cx
+                .dispatch_repo
+                .pending_dispatch_completion("a-pending-domain")
+                .await?
+                .is_some()
+        );
+        fixture.cx.stop().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn stale_success_cannot_publish_or_settle_replacement_attempt() -> Res<()> {
-        let fixture = CancelRaceFixture::setup(vec![]).await?;
+        let fixture = CancelRaceFixture::setup(vec![], None).await?;
         let old = fixture
             .cx
             .dispatch_repo
@@ -3999,7 +4531,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelled_ready_dispatch_refuses_waiting_activation() -> Res<()> {
-        let fixture = CancelRaceFixture::setup(vec!["dependency".into()]).await?;
+        let fixture = CancelRaceFixture::setup(vec!["dependency".into()], None).await?;
         let (ready, ready_rx) = tokio::sync::oneshot::channel();
         let (resume, resume_rx) = tokio::sync::oneshot::channel();
         *fixture.cx.rt.waiting_activation_gate.lock().await = Some(DispatchTestGate {

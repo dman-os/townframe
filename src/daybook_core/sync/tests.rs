@@ -1,12 +1,10 @@
 use super::*;
 mod ladder;
 mod stress;
+use crate::test_support::sync_node::SyncTestNode;
 
 use crate::blobs::{BlobId, BlobsRepo};
 use crate::drawer::{DrawerRepo, types::DrawerError};
-use crate::local_state::SqliteLocalStateRepo;
-use crate::plugs::PlugsRepo;
-use crate::progress::ProgressRepo;
 use crate::repo::{RepoCtx, RepoOpenOptions};
 use crate::repos::{Repo, SubscribeOpts};
 use daybook_types::doc::{
@@ -31,119 +29,6 @@ async fn facet_set_hash_rows(
     .bind(facet_tag)
     .fetch_all(sql)
     .await?)
-}
-
-struct SyncTestNode {
-    ctx: Arc<RepoCtx>,
-    rt: Arc<crate::rt::Rt>,
-    drawer: Arc<DrawerRepo>,
-    blobs_repo: Arc<BlobsRepo>,
-    progress_repo: Arc<ProgressRepo>,
-    plugs_repo: Arc<PlugsRepo>,
-    sync_repo: Arc<IrohSyncRepo>,
-    sync_stop: IrohSyncRepoStopToken,
-    rt_stop: crate::rt::RtStopToken,
-    drawer_stop: crate::repos::RepoStopToken,
-    plugs_stop: crate::repos::RepoStopToken,
-    config_stop: crate::repos::RepoStopToken,
-    dispatch_stop: crate::repos::RepoStopToken,
-    init_stop: crate::repos::RepoStopToken,
-    progress_stop: crate::repos::RepoStopToken,
-    sqlite_local_state_stop: crate::repos::RepoStopToken,
-}
-
-impl SyncTestNode {
-    async fn stop(self) -> Res<()> {
-        let SyncTestNode {
-            ctx,
-            rt: _rt,
-            blobs_repo: _blobs_repo,
-            drawer: _drawer,
-            progress_repo: _progress_repo,
-            plugs_repo: _plugs_repo,
-            sync_repo,
-            sync_stop,
-            rt_stop,
-            progress_stop,
-            drawer_stop,
-            plugs_stop,
-            config_stop,
-            dispatch_stop,
-            init_stop,
-            sqlite_local_state_stop,
-        } = self;
-        drop(sync_repo);
-        sync_stop.cancel_token.cancel();
-        tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(60)),
-            sync_stop.stop(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting sync stop"))??;
-        // Router shutdown awaits BlobsProtocol's FsStore shutdown and releases
-        // its disk lock. Do not send a second shutdown through BlobsRepo.
-        tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(60)),
-            rt_stop.stop(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting rt stop"))??;
-        tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(10)),
-            progress_stop.stop(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting progress stop"))??;
-        dispatch_stop.cancel_token.cancel();
-        tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(10)),
-            dispatch_stop.stop(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting dispatch stop"))??;
-        init_stop.cancel_token.cancel();
-        tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(10)),
-            init_stop.stop(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting init stop"))??;
-        sqlite_local_state_stop.cancel_token.cancel();
-        tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(10)),
-            sqlite_local_state_stop.stop(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting sqlite local state stop"))??;
-        config_stop.cancel_token.cancel();
-        tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(10)),
-            config_stop.stop(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting config stop"))??;
-        drawer_stop.cancel_token.cancel();
-        tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(10)),
-            drawer_stop.stop(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting drawer stop"))??;
-        plugs_stop.cancel_token.cancel();
-        tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(10)),
-            plugs_stop.stop(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting plugs stop"))??;
-        tokio::time::timeout(
-            utils_rs::scale_timeout(Duration::from_secs(10)),
-            ctx.shutdown(),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("timeout waiting ctx shutdown"))??;
-        Ok(())
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -173,7 +58,19 @@ async fn iroh_sync_between_copied_repos() -> Res<()> {
     }
 
     let sync_url = node_a.sync_repo.get_clone_ticket_url().await?;
-    let endpoint_addr = node_b.sync_repo.connect_url(&sync_url).await?;
+    let (endpoint_addr, _) = tokio::try_join!(node_b.sync_repo.connect_url(&sync_url), async {
+        let endpoint = node_b.sync_repo.connect_url(&sync_url).await?;
+        let peers = node_b.sync_repo.active_peers.read().await;
+        assert!(
+            matches!(
+                peers.get(&PeerKey::new(*endpoint.id.as_bytes())),
+                Some(ActivePeerState::Connected { closed, .. })
+                    if !closed.load(std::sync::atomic::Ordering::Acquire)
+            ),
+            "concurrent connect acknowledged an unfinished or closed registration"
+        );
+        eyre::Ok(endpoint)
+    })?;
     wait_for_sync_convergence(&node_a, &node_b, endpoint_addr.id).await?;
     for doc_id in &created_doc_ids {
         wait_for_doc_presence_with_activity(&node_b, doc_id, Duration::from_secs(60)).await?;
@@ -218,22 +115,43 @@ async fn shutdown_stops_the_inventory_writer_after_the_workers_that_serve_from_i
     let node = open_sync_node(&repo_path).await?;
     // The record is read through a handle taken before the stop, which consumes
     // the token.
-    let shutdown_order = node.sync_stop.shutdown_order();
+    let shutdown_order = node.shutdown_order();
     node.stop().await?;
 
-    assert_eq!(
-        shutdown_order.recorded(),
-        vec![
-            "task_driver_stop",
-            "big_sync_worker_stop",
-            "big_sync_rpc_stop",
-            "blob_sync_worker_stop",
-            "big_repo_rpc_stop_token",
-            "blob_inventory_permission_stop",
-        ],
-        "the inventory writer serves the store the blob worker and the RPC server serve \
-         from, so it must stop after both"
-    );
+    let recorded = shutdown_order.recorded();
+    let stopped_at = |child| {
+        recorded
+            .iter()
+            .position(|stopped| *stopped == child)
+            .expect("child was not stopped")
+    };
+    for consumer in [
+        "blob_sync_worker_stop",
+        "big_sync_rpc_stop",
+        "big_repo_rpc_stop_token",
+    ] {
+        assert!(
+            stopped_at(consumer) < stopped_at("blob_inventory_permission_stop"),
+            "the inventory writer must outlive every worker/RPC serving its store"
+        );
+    }
+    for dependency in ["task_driver_stop", "big_repo_rpc_stop_token"] {
+        assert!(
+            stopped_at("task_control_stop") < stopped_at(dependency),
+            "current-control exchange must release its native RPC dependencies before they stop"
+        );
+    }
+    for consumer in [
+        "task_control_stop",
+        "task_driver_stop",
+        "task_sync_worker_stop",
+        "big_sync_rpc_stop",
+    ] {
+        assert!(
+            stopped_at(consumer) < stopped_at("task_permission_stop"),
+            "task authority must remain maintained until scheduling and transport stop"
+        );
+    }
     Ok(())
 }
 
@@ -950,135 +868,14 @@ async fn bootstrap_clone_repo_from_url_for_tests(
 }
 
 async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
-    info!(repo_root = %repo_root.display(), "opening sync test node");
-    let rtx = RepoCtx::open(
+    SyncTestNode::open(
         repo_root,
         RepoOpenOptions {
             sync_max_task_backoff: Some(Duration::from_millis(500)),
         },
-        "test-device".into(),
+        "test-device",
     )
-    .await?;
-    let blobs_repo =
-        BlobsRepo::new(rtx.layout.blobs_root.clone(), rtx.local_user_path.clone()).await?;
-    let (plugs_repo, plugs_stop) = PlugsRepo::load(
-        Arc::clone(&rtx.big_repo),
-        Arc::clone(&blobs_repo),
-        rtx.doc_config.document_id(),
-        daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
-        Arc::clone(&rtx.sqlite_local_state_repo),
-    )
-    .await?;
-    let (drawer_repo, drawer_stop) = DrawerRepo::load(
-        Arc::clone(&rtx.big_repo),
-        Arc::clone(&rtx.part_store),
-        rtx.doc_drawer.document_id(),
-        daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
-        rtx.sql.clone(),
-        rtx.layout.repo_root.join("local_state"),
-        Arc::new(surelock::mutex::Mutex::new(
-            utils_rs::lru::KeyedLruPool::new(1000),
-        )),
-        Arc::new(surelock::mutex::Mutex::new(
-            utils_rs::lru::KeyedLruPool::new(1000),
-        )),
-        Some(Arc::clone(&plugs_repo)),
-    )
-    .await?;
-    let (config_repo, config_stop) = crate::config::ConfigRepo::load(
-        Arc::clone(&rtx.big_repo),
-        rtx.doc_app.document_id(),
-        Arc::clone(&plugs_repo),
-        daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
-        rtx.sql.clone(),
-    )
-    .await?;
-    let (dispatch_repo, dispatch_stop) = crate::rt::dispatch::DispatchRepo::load(
-        Arc::clone(&rtx.big_repo),
-        rtx.doc_app.document_id(),
-        daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
-        rtx.sql.clone(),
-    )
-    .await?;
-    let (progress_repo, progress_stop) = ProgressRepo::boot(rtx.sql.clone()).await?;
-    let (init_repo, init_stop) = crate::rt::init::InitRepo::load(
-        Arc::clone(&rtx.big_repo),
-        rtx.doc_app.document_id(),
-        daybook_types::doc::UserPathBuf::from(rtx.local_user_path.clone()),
-        rtx.sql.clone(),
-        Arc::clone(&progress_repo),
-        None,
-    )
-    .await?;
-    let (sqlite_local_state_repo, sqlite_local_state_stop) =
-        SqliteLocalStateRepo::boot(rtx.layout.repo_root.join("local_state")).await?;
-
-    let runtime = crate::rt::Rt::boot(
-        crate::rt::RtConfig::new(
-            "test-device".to_string(),
-            /*startup_progress_task_id*/ None,
-        ),
-        Arc::clone(&rtx),
-        Arc::clone(&drawer_repo),
-        Arc::clone(&plugs_repo),
-        Arc::clone(&dispatch_repo),
-        Arc::clone(&progress_repo),
-        Arc::clone(&blobs_repo),
-        Arc::clone(&config_repo),
-        Arc::clone(&init_repo),
-        Arc::clone(&sqlite_local_state_repo),
-    )
-    .await;
-    let (rt, rt_stop) = match runtime {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            // A captured-artifact startup refusal still releases every owner
-            // opened by this helper, including the asynchronous FsStore lock.
-            dispatch_stop.cancel_token.cancel();
-            dispatch_stop.stop().await?;
-            init_stop.cancel_token.cancel();
-            init_stop.stop().await?;
-            progress_stop.stop().await?;
-            sqlite_local_state_stop.cancel_token.cancel();
-            sqlite_local_state_stop.stop().await?;
-            config_stop.cancel_token.cancel();
-            config_stop.stop().await?;
-            drawer_stop.cancel_token.cancel();
-            drawer_stop.stop().await?;
-            plugs_stop.cancel_token.cancel();
-            plugs_stop.stop().await?;
-            blobs_repo.shutdown().await?;
-            rtx.shutdown().await?;
-            return Err(error);
-        }
-    };
-
-    let (sync_repo, sync_stop) = IrohSyncRepo::boot(
-        Arc::clone(&rtx),
-        Arc::clone(&config_repo),
-        Arc::clone(&blobs_repo),
-        Some(Arc::clone(&progress_repo)),
-    )
-    .await?;
-
-    Ok(SyncTestNode {
-        ctx: rtx,
-        drawer: Arc::clone(&rt.drawer),
-        blobs_repo: Arc::clone(&rt.blobs_repo),
-        progress_repo: Arc::clone(&rt.progress_repo),
-        plugs_repo: Arc::clone(&rt.plugs_repo),
-        rt,
-        rt_stop,
-        sync_repo,
-        sync_stop,
-        drawer_stop,
-        plugs_stop,
-        config_stop,
-        dispatch_stop,
-        init_stop,
-        progress_stop,
-        sqlite_local_state_stop,
-    })
+    .await
 }
 
 async fn list_doc_ids(drawer: &DrawerRepo) -> Res<HashSet<String>> {
@@ -1212,7 +1009,8 @@ async fn wait_for_sync_convergence(
 ) -> Res<()> {
     let required_partitions = source
         .sync_repo
-        .peer_partition_ids("", true)
+        .peer_partition_ids(&source.ctx.big_repo.local_peer_id(), true)
+        .await?
         .into_keys()
         .collect::<Vec<_>>();
     let peer_id = PeerKey::new(*endpoint_id.as_bytes());
@@ -1284,7 +1082,8 @@ async fn wait_for_full_sync_succeeds_after_event_was_already_emitted() -> Res<()
 
     let required_partitions = node_b
         .sync_repo
-        .peer_partition_ids("", true)
+        .peer_partition_ids(&node_b.ctx.big_repo.local_peer_id(), true)
+        .await?
         .into_keys()
         .collect::<Vec<_>>();
     let peer_id = PeerKey::new(*endpoint_addr_ba.id.as_bytes());

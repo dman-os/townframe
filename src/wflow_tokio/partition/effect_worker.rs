@@ -403,6 +403,15 @@ impl TokioEffectWorker {
             self.drop_cached_session(session);
         }
 
+        // Recheck at service invocation, after effect/state/context awaits.
+        // Cancellation incorporation may lag expiry; it is not authorization
+        // for a timer, retry, message wake or restored continuation to execute.
+        if self.pcx.execution_gate.execution_expired(&job_id) {
+            if let Some(session) = cached.take() {
+                self.drop_cached_session(session);
+            }
+            return job_events::JobRunResult::Aborted;
+        }
         let (host_kind, reply) = match &job_state_snapshot.wflow.service {
             wflow_core::r#gen::metastore::WflowServiceMeta::Wasmcloud(meta) => {
                 if let Some(session) = cached.as_ref()
