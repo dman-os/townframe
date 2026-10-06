@@ -80,6 +80,8 @@ impl SyncTestNode {
         )
         .await
         .map_err(|_| eyre::eyre!("timeout waiting sync stop"))??;
+        // Router shutdown awaits BlobsProtocol's FsStore shutdown and releases
+        // its disk lock. Do not send a second shutdown through BlobsRepo.
         tokio::time::timeout(
             utils_rs::scale_timeout(Duration::from_secs(60)),
             rt_stop.stop(),
@@ -222,6 +224,7 @@ async fn shutdown_stops_the_inventory_writer_after_the_workers_that_serve_from_i
     assert_eq!(
         shutdown_order.recorded(),
         vec![
+            "task_driver_stop",
             "big_sync_worker_stop",
             "big_sync_rpc_stop",
             "blob_sync_worker_stop",
@@ -1010,11 +1013,11 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
     let (sqlite_local_state_repo, sqlite_local_state_stop) =
         SqliteLocalStateRepo::boot(rtx.layout.repo_root.join("local_state")).await?;
 
-    let (rt, rt_stop) = crate::rt::Rt::boot(
-        crate::rt::RtConfig {
-            device_id: "test-device".to_string(),
-            startup_progress_task_id: None,
-        },
+    let runtime = crate::rt::Rt::boot(
+        crate::rt::RtConfig::new(
+            "test-device".to_string(),
+            /*startup_progress_task_id*/ None,
+        ),
         Arc::clone(&rtx),
         Arc::clone(&drawer_repo),
         Arc::clone(&plugs_repo),
@@ -1025,7 +1028,30 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
         Arc::clone(&init_repo),
         Arc::clone(&sqlite_local_state_repo),
     )
-    .await?;
+    .await;
+    let (rt, rt_stop) = match runtime {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            // A captured-artifact startup refusal still releases every owner
+            // opened by this helper, including the asynchronous FsStore lock.
+            dispatch_stop.cancel_token.cancel();
+            dispatch_stop.stop().await?;
+            init_stop.cancel_token.cancel();
+            init_stop.stop().await?;
+            progress_stop.stop().await?;
+            sqlite_local_state_stop.cancel_token.cancel();
+            sqlite_local_state_stop.stop().await?;
+            config_stop.cancel_token.cancel();
+            config_stop.stop().await?;
+            drawer_stop.cancel_token.cancel();
+            drawer_stop.stop().await?;
+            plugs_stop.cancel_token.cancel();
+            plugs_stop.stop().await?;
+            blobs_repo.shutdown().await?;
+            rtx.shutdown().await?;
+            return Err(error);
+        }
+    };
 
     let (sync_repo, sync_stop) = IrohSyncRepo::boot(
         Arc::clone(&rtx),

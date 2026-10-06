@@ -106,6 +106,7 @@ pub struct RepoCtx {
     pub frontier_part_store: SharedPartStore,
     /// Local-only store backing consumer-derived objects that are not documents.
     pub derived_part_store: SharedPartStore,
+    coordination_parts: tokio::sync::OnceCell<Arc<big_sync::SqlitePartStore>>,
 
     pub big_repo: SharedBigRepo,
     big_repo_stop: std::sync::Mutex<Option<big_repo::BigRepoStopToken>>,
@@ -177,6 +178,25 @@ pub(crate) async fn open_blob_part_store(sql: SqlCtx) -> Res<SharedPartStore> {
 }
 
 impl RepoCtx {
+    /// Runtime recovery and native replication share one publication wake owner.
+    /// Reopening the same SQL scope through independent stores would split the
+    /// in-process notifications despite reading the same durable rows.
+    pub(crate) async fn coordination_part_store(&self) -> Res<Arc<big_sync::SqlitePartStore>> {
+        self.coordination_parts
+            .get_or_try_init(|| async {
+                Ok::<_, eyre::Report>(Arc::new(
+                    big_sync::SqlitePartStore::new(
+                        self.big_repo.sql_ctx(),
+                        crate::tasks::transport::TASK_SCOPE_KEY,
+                        big_sync_core::BuckId::MAX_LEVEL,
+                    )
+                    .await?,
+                ))
+            })
+            .await
+            .cloned()
+    }
+
     pub(crate) fn from_parts(
         parts: RepoCtxParts,
         doc_app: BigDocHandle,
@@ -199,6 +219,7 @@ impl RepoCtx {
             blob_part_store: parts.blob_part_store,
             frontier_part_store: parts.frontier_part_store,
             derived_part_store: parts.derived_part_store,
+            coordination_parts: tokio::sync::OnceCell::new(),
             big_repo: parts.big_repo,
             big_repo_stop: parts.big_repo_stop,
             doc_app,

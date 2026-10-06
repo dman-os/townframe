@@ -137,6 +137,8 @@ pub enum ActiveDispatchArgs {
 pub struct ProcessorInvocation {
     pub trigger_doc_id: daybook_types::doc::DocId,
     pub changed_facet_keys: Vec<String>,
+    /// Stable distributed obligation identity; use as the external idempotency key.
+    pub task_id: Option<String>,
 }
 
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
@@ -622,32 +624,60 @@ impl DispatchRepo {
     pub async fn get_any_by_wflow_key(
         &self,
         wflow_key: &str,
-    ) -> Option<(String, Arc<ActiveDispatch>)> {
+    ) -> Option<(String, Arc<DispatchAttempt>)> {
         let state = self.state.lock().await;
 
-        if let Some((dispatch_id, dispatch)) =
-            state.active_dispatches.iter().find(|(_, dispatch)| {
-                matches!(
-                    &dispatch.deets,
-                    ActiveDispatchDeets::Wflow { wflow_key: key, .. } if key == wflow_key
-                )
-            })
+        if let Some((dispatch_id, dispatch)) = state
+            .active_dispatches
+            .iter()
+            .find(|(_, dispatch)| dispatch.execution.wflow().key == wflow_key)
         {
             return Some((dispatch_id.clone(), Arc::clone(dispatch)));
         }
 
         state.dispatches.iter().find_map(|(dispatch_id, dispatch)| {
-            matches!(
-                &dispatch.deets,
-                ActiveDispatchDeets::Wflow { wflow_key: key, .. } if key == wflow_key
-            )
-            .then(|| (dispatch_id.clone(), Arc::clone(dispatch)))
+            (dispatch.execution.wflow().key == wflow_key)
+                .then(|| (dispatch_id.clone(), Arc::clone(dispatch)))
         })
     }
 
-    pub async fn add(&self, id: String, dispatch: Arc<ActiveDispatch>) -> Res<()> {
+    pub async fn add(&self, id: String, dispatch: Arc<DispatchAttempt>) -> Res<()> {
+        self.add_with_task_attempt(id, dispatch, None).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn persist_task_attempt(
+        &self,
+        attempt: crate::tasks::driver::PreparedAttempt,
+        dispatch: Arc<DispatchAttempt>,
+    ) -> Res<crate::tasks::driver::PreparedAttempt> {
+        self.add_with_task_attempt(attempt.dispatch_id.clone(), dispatch, Some(attempt))
+            .await?
+            .ok_or_eyre("prepared task admission did not retain its mapping")
+    }
+
+    async fn add_with_task_attempt(
+        &self,
+        id: String,
+        dispatch: Arc<DispatchAttempt>,
+        attempt: Option<crate::tasks::driver::PreparedAttempt>,
+    ) -> Res<Option<crate::tasks::driver::PreparedAttempt>> {
         debug!(?id, "adding dispatch to repo");
         let _transition_guard = self.transition_mutex.lock().await;
+        if let Some(candidate) = &attempt
+            && let Some(existing) = self.task_attempt(&candidate.request.key).await?
+        {
+            eyre::ensure!(
+                existing.capture_digest == candidate.capture_digest
+                    && serde_json::to_vec(&existing.request)?
+                        == serde_json::to_vec(&candidate.request)?,
+                "pool attempt identity reused with different captured execution"
+            );
+            return Ok(Some(existing));
+        }
+        if self.state.lock().await.dispatches.contains_key(&id) {
+            eyre::bail!("dispatch already exists: {id}");
+        }
         let ActiveDispatchArgs::FacetRoutine(_args) = &dispatch.args;
 
         let mut tx = self
@@ -657,6 +687,18 @@ impl DispatchRepo {
             .await?;
         persist_dispatch_tx(&mut tx, &id, &dispatch).await?;
         clear_cancelled_mark_tx(&mut tx, &id).await?;
+        if let Some(attempt) = &attempt {
+            sqlx::query(
+                "INSERT INTO dispatch_task_attempts (key_json, pool_json, dispatch_id, payload_json)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(serde_json::to_string(&attempt.request.key)?)
+            .bind(serde_json::to_string(&attempt.request.key.pool)?)
+            .bind(&id)
+            .bind(serde_json::to_string(attempt)?)
+            .execute(&mut *tx)
+            .await?;
+        }
         tx.commit().await?;
 
         let mut state = self.state.lock().await;
@@ -702,14 +744,137 @@ impl DispatchRepo {
             heads,
             origin: self.local_origin(),
         }]);
+        Ok(attempt)
+    }
+
+    pub(crate) async fn task_attempt(
+        &self,
+        key: &crate::tasks::driver::AttemptKey,
+    ) -> Res<Option<crate::tasks::driver::PreparedAttempt>> {
+        let payload: Option<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM dispatch_task_attempts WHERE key_json = ?",
+        )
+        .bind(serde_json::to_string(key)?)
+        .fetch_optional(&self.repo_sql.read_pool)
+        .await?;
+        payload
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
+
+    pub(crate) async fn task_attempts(
+        &self,
+        pool: &crate::tasks::TaskPoolId,
+    ) -> Res<Vec<crate::tasks::driver::PreparedAttempt>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM dispatch_task_attempts WHERE pool_json = ? ORDER BY key_json",
+        )
+        .bind(serde_json::to_string(pool)?)
+        .fetch_all(&self.repo_sql.read_pool)
+        .await?;
+        rows.into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .collect()
+    }
+
+    pub(crate) async fn task_attempt_for_dispatch(
+        &self,
+        dispatch_id: &str,
+    ) -> Res<Option<crate::tasks::driver::PreparedAttempt>> {
+        let payload: Option<String> = sqlx::query_scalar(
+            "SELECT payload_json FROM dispatch_task_attempts WHERE dispatch_id = ?",
+        )
+        .bind(dispatch_id)
+        .fetch_optional(&self.repo_sql.read_pool)
+        .await?;
+        payload
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
+
+    pub(crate) async fn task_local_failure(
+        &self,
+        key: &crate::tasks::driver::AttemptKey,
+    ) -> Res<Option<String>> {
+        let row: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT local_failure FROM dispatch_task_attempts WHERE key_json = ?",
+        )
+        .bind(serde_json::to_string(key)?)
+        .fetch_optional(&self.repo_sql.read_pool)
+        .await?;
+        Ok(row.flatten())
+    }
+
+    pub(crate) async fn fail_task_locally(
+        &self,
+        key: &crate::tasks::driver::AttemptKey,
+        reason: &str,
+    ) -> Res<()> {
+        let changed = sqlx::query(
+            "UPDATE dispatch_task_attempts SET local_failure = COALESCE(local_failure, ?) WHERE key_json = ?",
+        ).bind(reason).bind(serde_json::to_string(key)?).execute(&self.repo_sql.write_pool).await?;
+        eyre::ensure!(
+            changed.rows_affected() == 1,
+            "local failure names no durable task attempt"
+        );
         Ok(())
+    }
+
+    pub(crate) async fn task_receipt(
+        &self,
+        task_id: &crate::tasks::PoolTaskId,
+        declaration_digest: [u8; 32],
+    ) -> Res<Option<crate::tasks::driver::DomainReceipt>> {
+        let row: Option<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT payload_json, declaration_digest FROM dispatch_task_receipts WHERE task_json = ?",
+        )
+        .bind(serde_json::to_string(task_id)?)
+        .fetch_optional(&self.repo_sql.read_pool)
+        .await?;
+        row.map(|(payload, digest)| {
+            eyre::ensure!(
+                digest == declaration_digest,
+                "task settlement belongs to a different declaration"
+            );
+            serde_json::from_str(&payload).map_err(Into::into)
+        })
+        .transpose()
+    }
+
+    pub(crate) async fn incorporate_task_receipt(
+        &self,
+        receipt: crate::tasks::driver::DomainReceipt,
+        declaration_digest: [u8; 32],
+    ) -> Res<crate::tasks::driver::DomainReceipt> {
+        let _transition = self.transition_mutex.lock().await;
+        if let Some(existing) = self
+            .task_receipt(&receipt.task_id, declaration_digest)
+            .await?
+            && (matches!(
+                existing.summary,
+                crate::tasks::TerminalSummary::Succeeded { .. }
+            ) || existing.summary == receipt.summary)
+        {
+            return Ok(existing);
+        }
+        sqlx::query(
+            "INSERT INTO dispatch_task_receipts (task_json, payload_json, declaration_digest) VALUES (?, ?, ?)
+             ON CONFLICT(task_json) DO UPDATE SET payload_json = excluded.payload_json",
+        )
+            .bind(serde_json::to_string(&receipt.task_id)?)
+            .bind(serde_json::to_string(&receipt)?)
+            .bind(declaration_digest.as_slice())
+            .execute(&self.repo_sql.write_pool)
+            .await?;
+        Ok(receipt)
     }
 
     pub async fn complete(
         &self,
         id: String,
         status: DispatchStatus,
-    ) -> Res<Option<Arc<ActiveDispatch>>> {
+        expected: &DispatchAttempt,
+    ) -> Res<Option<Arc<DispatchAttempt>>> {
         assert!(matches!(
             status,
             DispatchStatus::Succeeded | DispatchStatus::Failed | DispatchStatus::Cancelled
@@ -1185,6 +1350,33 @@ async fn init_schema(repo_sql: &SqlCtx) -> Res<()> {
     .execute(&repo_sql.write_pool)
     .await?;
 
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dispatch_task_attempts (
+             key_json TEXT PRIMARY KEY NOT NULL
+           , pool_json TEXT NOT NULL
+           , dispatch_id TEXT NOT NULL UNIQUE REFERENCES dispatches(id)
+           , payload_json TEXT NOT NULL
+           , local_failure TEXT
+         ) STRICT",
+    )
+    .execute(&repo_sql.write_pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_dispatch_task_attempts_pool
+         ON dispatch_task_attempts(pool_json, key_json)",
+    )
+    .execute(&repo_sql.write_pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dispatch_task_receipts (
+             task_json TEXT PRIMARY KEY NOT NULL
+           , payload_json TEXT NOT NULL
+           , declaration_digest BLOB NOT NULL
+         ) STRICT",
+    )
+    .execute(&repo_sql.write_pool)
+    .await?;
+
     Ok(())
 }
 
@@ -1227,6 +1419,16 @@ async fn load_state(repo_sql: &SqlCtx) -> Res<DispatchState> {
             .fetch_all(&repo_sql.write_pool)
             .await?;
     state.cancelled_dispatches = cancelled_ids.into_iter().collect();
+    for id in &state.cancelled_dispatches {
+        if let Some(dispatch) = state.dispatches.get(id)
+            && !dispatch.status.is_terminal()
+        {
+            dispatch.arbitration.store(
+                ATTEMPT_CANCEL_REQUESTED,
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+    }
 
     let frontier_rows: Vec<(String, i64)> =
         sqlx::query_as("SELECT wflow_partition_id, frontier FROM wflow_partition_frontier")
