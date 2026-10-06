@@ -45,6 +45,34 @@ fn recover_facet_heads_inner(
     Ok(recovered)
 }
 
+/// Latest visible marker operation in Automerge's Lamport order, with actor
+/// bytes breaking concurrent ties. Timestamp values and arrival order are irrelevant.
+pub(super) fn facet_write_author_at<'a>(
+    doc: &'a Automerge,
+    facet_key: &FacetKey,
+    heads: &[ChangeHash],
+) -> Res<Option<(automerge::ObjId, Option<automerge::Author<'a>>)>> {
+    let mut latest = None;
+    for marker in ["updatedAt", "deletedAt"] {
+        let Some(list) = facet_marker_list(doc, facet_key, Some(heads), marker)? else {
+            continue;
+        };
+        for index in 0..doc.length_at(&list, heads) {
+            for (_, operation) in doc.get_all_at(&list, index, heads)? {
+                if latest.as_ref().is_none_or(|prior| &operation > prior) {
+                    latest = Some(operation);
+                }
+            }
+        }
+    }
+    Ok(latest.map(|operation| {
+        let hash = doc.hash_for_opid(&operation).expect(ERROR_IMPOSSIBLE);
+        let change = doc.get_change_meta_by_hash(&hash).expect(ERROR_IMPOSSIBLE);
+        let author = doc.get_author_for_actor(&change.actor);
+        (operation, author)
+    }))
+}
+
 /// The facet's dmeta `updatedAt` list object at the given heads (None when
 /// the dmeta walk yields no list). The list object id is stable across
 /// writes — it is created once at facet-meta creation and reused.
@@ -52,6 +80,15 @@ pub fn facet_updated_at_list(
     doc: &Automerge,
     facet_key: &FacetKey,
     read_heads: Option<&[ChangeHash]>,
+) -> Res<Option<automerge::ObjId>> {
+    facet_marker_list(doc, facet_key, read_heads, "updatedAt")
+}
+
+fn facet_marker_list(
+    doc: &Automerge,
+    facet_key: &FacetKey,
+    read_heads: Option<&[ChangeHash]>,
+    marker: &str,
 ) -> Res<Option<automerge::ObjId>> {
     // Path: facets -> org.example.daybook.dmeta/main -> facets -> <facet_key> -> updatedAt
     let facets_obj = match get(doc, automerge::ROOT, "facets", read_heads)? {
@@ -89,11 +126,11 @@ pub fn facet_updated_at_list(
         }
     };
 
-    match get(doc, &facet_meta_obj, "updatedAt", read_heads)? {
+    match get(doc, &facet_meta_obj, marker, read_heads)? {
         Some((Value::Object(ObjType::List), id)) => Ok(Some(id)),
         None => Ok(None),
         Some((other, _)) => {
-            eyre::bail!("unexpected value for updatedAt property: expected List, got {other:?}");
+            eyre::bail!("unexpected value for {marker} property: expected List, got {other:?}");
         }
     }
 }
@@ -108,7 +145,7 @@ pub fn facet_write_points(
     facet_key: &FacetKey,
     from: &[ChangeHash],
     to: &[ChangeHash],
-) -> Res<Vec<(ChangeHashSet, ActorId)>> {
+) -> Res<Vec<(ChangeHashSet, Option<automerge::Author<'static>>)>> {
     let Some(updated_at_list) = facet_updated_at_list(doc, facet_key, Some(to))? else {
         return Ok(Vec::new());
     };
@@ -135,7 +172,10 @@ pub fn facet_write_points(
         if write_hashes.contains(&change.hash()) {
             let mut heads: Vec<ChangeHash> = change.deps().to_vec();
             heads.push(change.hash());
-            points.push((ChangeHashSet(heads.into()), change.actor_id().clone()));
+            let author = doc
+                .get_author_for_actor(change.actor_id())
+                .map(automerge::Author::into_owned);
+            points.push((ChangeHashSet(heads.into()), author));
         }
     }
     Ok(points)
@@ -281,6 +321,92 @@ mod tests {
         assert!(
             result.is_err(),
             "expected error on scalar updatedAt property"
+        );
+        Ok(())
+    }
+    #[test]
+    fn marker_origin_is_head_scoped_and_merge_order_independent() -> Res<()> {
+        // Own the assertion snapshots so the source documents remain writable.
+        fn facet_write_author_at(
+            doc: &Automerge,
+            key: &FacetKey,
+            heads: &[ChangeHash],
+        ) -> Res<Option<(automerge::ObjId, Option<Vec<u8>>)>> {
+            Ok(
+                super::facet_write_author_at(doc, key, heads)?.map(|(operation, author)| {
+                    (operation, author.map(|author| author.as_bytes().to_vec()))
+                }),
+            )
+        }
+        let mut base = Automerge::new();
+        let key = FacetKey::from(WellKnownFacetTag::Note);
+        let mut tx = base.transaction();
+        let facets = tx.put_object(automerge::ROOT, "facets", ObjType::Map)?;
+        let dmeta = tx.put_object(
+            &facets,
+            format!("{}/main", WellKnownFacetTag::Dmeta.as_str()),
+            ObjType::Map,
+        )?;
+        let metas = tx.put_object(&dmeta, "facets", ObjType::Map)?;
+        let meta = tx.put_object(&metas, key.to_string(), ObjType::Map)?;
+        let updates = tx.put_object(&meta, "updatedAt", ObjType::List)?;
+        let deletions = tx.put_object(&meta, "deletedAt", ObjType::List)?;
+        tx.insert(&updates, 0, 1000i64)?;
+        tx.commit();
+        let old_heads = base.get_heads();
+        assert_eq!(
+            facet_write_author_at(&base, &key, &old_heads)?.unwrap().1,
+            None
+        );
+        let mut left = base.fork();
+        let mut right = base.fork();
+        left.set_author(Some(automerge::Author::from(vec![1; 32])));
+        right.set_author(Some(automerge::Author::from(vec![2; 32])));
+        let mut tx = left.transaction();
+        tx.insert(&updates, 1, i64::MAX)?;
+        tx.commit();
+        let left_heads = left.get_heads();
+        let mut tx = right.transaction();
+        tx.insert(&updates, 1, i64::MIN)?;
+        tx.commit();
+        let left_origin = facet_write_author_at(&left, &key, &left_heads)?.unwrap();
+        let right_origin = facet_write_author_at(&right, &key, &right.get_heads())?.unwrap();
+        let expected = if left_origin.0 > right_origin.0 {
+            left_origin.1
+        } else {
+            right_origin.1
+        };
+        let mut merged_left = left.clone();
+        let mut merged_right = right.clone();
+        merged_left.merge(&mut right)?;
+        merged_right.merge(&mut left)?;
+        assert_eq!(
+            facet_write_author_at(&merged_left, &key, &merged_left.get_heads())?
+                .unwrap()
+                .1,
+            expected
+        );
+        assert_eq!(
+            facet_write_author_at(&merged_right, &key, &merged_right.get_heads())?
+                .unwrap()
+                .1,
+            expected
+        );
+        assert_eq!(
+            facet_write_author_at(&merged_left, &key, &left_heads)?
+                .unwrap()
+                .1,
+            Some(vec![1; 32])
+        );
+        merged_left.set_author(Some(automerge::Author::from(vec![3; 32])));
+        let mut tx = merged_left.transaction();
+        tx.insert(&deletions, 0, 0i64)?;
+        tx.commit();
+        assert_eq!(
+            facet_write_author_at(&merged_left, &key, &merged_left.get_heads())?
+                .unwrap()
+                .1,
+            Some(vec![3; 32])
         );
         Ok(())
     }

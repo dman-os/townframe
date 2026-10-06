@@ -33,6 +33,14 @@ prek -a
 cargo x build-plug-oci --plug-root ./src/plug_test/
 ```
 
+Automerge 0.12 and Autosurgeon 0.14 are upgraded together. Both Autosurgeon
+crates are pinned to the published `dman-os/autosurgeon` fork, rebased onto
+upstream 0.14 with tuple/historical-read/hydration fixes retained; no sibling
+checkout is required. Drawer and native store writes set node authors, never
+path-derived session actor IDs.
+Keep fixed-width `VersionTag` IDs and legacy dmeta role IDs separate from node
+authors; do not derive an author from an old unlabelled change's actor ID.
+
 ## Repo guide
 
 - `./src/utils_rs/`: General purpose utilities.

@@ -1461,12 +1461,12 @@ impl BigDocHandle {
         Ok(out)
     }
 
-    pub async fn reconcile_prop_with_actor<'a, T, P>(
+    pub async fn reconcile_prop_with_author<'a, T, P>(
         &self,
         obj_id: automerge::ObjId,
         prop_name: P,
         update: &T,
-        actor_id: Option<automerge::ActorId>,
+        author: Option<automerge::Author<'static>>,
     ) -> Res<Option<ChangeHash>>
     where
         T: Hydrate + Reconcile + Send + Sync + 'static,
@@ -1474,9 +1474,7 @@ impl BigDocHandle {
     {
         let res = self
             .with_document(|doc| {
-                if let Some(actor) = &actor_id {
-                    doc.set_actor(actor.clone());
-                }
+                doc.set_author(author);
                 doc.transact(|tx| {
                     autosurgeon::reconcile_prop(tx, obj_id, prop_name, update)
                         .wrap_err("error reconciling")?;

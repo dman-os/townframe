@@ -51,7 +51,7 @@ impl DrawerRepo {
         let doc_id = DocId::from(branch_doc_id.to_string());
         let branch_id = BranchId::from(branch_doc_id.to_string());
         let mutation_actor_id =
-            self.content_actor_id(args.user_path.as_deref(), branch_doc_id.clone());
+            self.dmeta_role_id(args.user_path.as_deref(), branch_doc_id.clone());
         let now = Timestamp::now();
 
         let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
@@ -90,7 +90,7 @@ impl DrawerRepo {
         let mut doc_am = automerge::Automerge::new();
 
         let heads = (|| -> Result<ChangeHashSet, eyre::Report> {
-            doc_am.set_actor(mutation_actor_id.clone());
+            doc_am.set_author(Some(self.local_author.clone()));
             let mut tx = doc_am.transaction();
             tx.put(automerge::ROOT, "version", "0")?;
             tx.put(automerge::ROOT, "$schema", "daybook.doc")?;
@@ -205,7 +205,7 @@ impl DrawerRepo {
         let drawer_heads = self
             .drawer_doc_handle
             .with_document(|doc| {
-                doc.set_actor(self.local_actor_id.clone());
+                doc.set_author(Some(self.local_author.clone()));
                 let mut tx = doc.transaction();
                 let docs_obj = match tx.get(automerge::ROOT, "docs")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
@@ -316,7 +316,7 @@ impl DrawerRepo {
         let drawer_heads = self
             .drawer_doc_handle
             .with_document(|doc| {
-                doc.set_actor(self.local_actor_id.clone());
+                doc.set_author(Some(self.local_author.clone()));
                 let mut tx = doc.transaction();
                 let docs_obj = match tx.get(automerge::ROOT, "docs")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
@@ -360,7 +360,7 @@ impl DrawerRepo {
                 return Err(ferr!("adopted doc branch missing: {doc_id}").into());
             }
         };
-        let mutation_actor_id = self.content_actor_id(None, branch_doc_id.clone());
+        let mutation_actor_id = self.dmeta_role_id(None, branch_doc_id.clone());
         let now = Timestamp::now();
         let branch_key = FacetKey::from(WellKnownFacetTag::Branch);
         let branches_key = FacetKey::from(WellKnownFacetTag::Branches);
@@ -379,7 +379,7 @@ impl DrawerRepo {
         branch_handle
             .with_document(|am_doc| {
                 let has_dmeta = dmeta::facet_meta_obj(am_doc, &dmeta_key)?.is_some();
-                am_doc.set_actor(mutation_actor_id.clone());
+                am_doc.set_author(Some(self.local_author.clone()));
                 let mut tx = am_doc.transaction();
                 if tx.get(automerge::ROOT, "id")?.is_none() {
                     tx.put(automerge::ROOT, "id", doc_id)?;
@@ -493,7 +493,7 @@ impl DrawerRepo {
             });
         };
         let mutation_actor_id =
-            self.content_actor_id(patch.user_path.as_deref(), branch_doc_id.clone());
+            self.dmeta_role_id(patch.user_path.as_deref(), branch_doc_id.clone());
         let existing_facet_keys = handle
             .with_document_read(|am_doc| {
                 let facets_obj =
@@ -526,7 +526,7 @@ impl DrawerRepo {
         // 1. Update content doc
         let (new_heads, invalidated_uuids) = handle
             .with_document(|am_doc| {
-                am_doc.set_actor(mutation_actor_id.clone());
+                am_doc.set_author(Some(self.local_author.clone()));
                 let mut tx = am_doc
                     .transaction_at(automerge::PatchLog::null(), &heads)
                     .expect(ERROR_IMPOSSIBLE);
@@ -639,9 +639,10 @@ impl DrawerRepo {
                         from_branch = %from_branch,
                         current_heads = ?current_heads_serialized,
                         from_heads = ?from_heads_serialized,
-                        "create_branch_at_heads_from_branch: fast-path clone"
+                        "create_branch_at_heads_from_branch: fast-path fork"
                     );
-                    Ok(am_doc.clone())
+                    // Independent branches share a node author, never a sequential write session.
+                    Ok(am_doc.fork())
                 } else {
                     debug!(
                         ?id,
@@ -751,9 +752,9 @@ impl DrawerRepo {
             FacetWriteScope::System,
         )
         .await?;
-        let mutation_actor_id = self.content_actor_id(user_path, branch_doc_id.clone());
+        let mutation_actor_id = self.dmeta_role_id(user_path, branch_doc_id.clone());
         let heads = (|| -> Result<ChangeHashSet, eyre::Report> {
-            branch_doc.set_actor(mutation_actor_id.clone());
+            branch_doc.set_author(Some(self.local_author.clone()));
             let mut tx = branch_doc.transaction();
             let facets_obj = match tx.get(automerge::ROOT, "facets")? {
                 Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
@@ -970,7 +971,7 @@ impl DrawerRepo {
             .await?
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
         let mutation_actor_id =
-            self.content_actor_id(user_path, to_branch_ref.branch_doc_id.clone());
+            self.dmeta_role_id(user_path, to_branch_ref.branch_doc_id.clone());
         let from_branch_ref = self.get_branch_ref(id, from_branch).await?.ok_or_else(|| {
             DrawerError::BranchNotFound {
                 name: from_branch.to_string(),
@@ -1063,7 +1064,7 @@ impl DrawerRepo {
             .await?;
         let (_new_heads, _modified_facets, invalidated_uuids) = handle
             .with_document(move |am_doc| {
-                am_doc.set_actor(mutation_actor_id.clone());
+                am_doc.set_author(Some(self.local_author.clone()));
                 // A branch merge imports the source history, but branch identity belongs
                 // to the physical destination document. Snapshot it before the CRDT merge
                 // so a concurrent source `Branch` facet cannot win Automerge's conflict
