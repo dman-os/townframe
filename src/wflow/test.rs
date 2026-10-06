@@ -127,7 +127,6 @@ impl WflowTestContextBuilder {
         let partition_log = wflow_tokio::partition::PartitionLogRef::new(Arc::clone(&logstore));
         let ingress = Arc::new(crate::ingress::PartitionLogIngress::new(
             partition_log.clone(),
-            Arc::clone(&metastore),
         ));
 
         let snapstore = match self.snap_store {
@@ -241,8 +240,15 @@ impl WflowTestContext {
 
         self.host = Some(host);
 
-        let (worker_handle, working_state) =
-            crate::start_partition_worker(&wcx, Arc::clone(&self.wflow_plugin), 0).await?;
+        let execution_gate = wflow_tokio::partition::ExecutionGate::paused();
+        let (worker_handle, working_state) = crate::start_partition_worker(
+            &wcx,
+            Arc::clone(&self.wflow_plugin),
+            0,
+            Arc::clone(&execution_gate),
+        )
+        .await?;
+        execution_gate.activate();
 
         self.worker_handle = Some(worker_handle);
         self.working_state = Some(working_state);
@@ -297,9 +303,12 @@ impl WflowTestContext {
         args_json: String,
     ) -> Res<u64> {
         use crate::WflowIngress;
-        self.ingress
-            .add_job(job_id, wflow_key, args_json, None)
-            .await
+        let wflow = self
+            .metastore
+            .get_wflow(wflow_key)
+            .await?
+            .ok_or_else(|| eyre::eyre!("workflow not found: {wflow_key}"))?;
+        self.ingress.add_job(job_id, wflow, args_json, None).await
     }
 
     /// Request cancellation of a job

@@ -63,7 +63,7 @@ impl DispatchRepoFfi {
             .fcx
             .do_on_rt(async move {
                 this.repo
-                    .list()
+                    .list_unsettled()
                     .await
                     .into_iter()
                     .map(|(id, _)| id)

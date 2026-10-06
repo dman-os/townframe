@@ -33,6 +33,24 @@ prek -a
 cargo x build-plug-oci --plug-root ./src/plug_test/
 ```
 
+The OCI builder honors `CARGO_TARGET_DIR` for its child WASM compilation as well
+as the host Cargo command. OCI output remains `./target/oci` unless `--out-root`
+is supplied; artifact output is separate from the compilation cache.
+Before child WASM compilation, the OCI builder runs the canonical
+`x/wit-fetch.ts --plug-root <directory>` refresh for that plug. Guest bindings
+consume generated `wit/deps`; without this refresh a changed host interface can
+leave a successfully compiled guest on an incompatible ABI. The refresh also
+preserves generated doc-comment sanitization. Use `./x/wit-fetch.ts` without
+`--plug-root` to regenerate dependency bindings across all consumers.
+
+`daybook_core` tests enable the `test-support` features of `big_repo`, `big_sync`,
+and `secrets_rs` through dev-dependencies. Repository identity and key material
+use the process-local in-memory keyring during tests, not a desktop secret
+service or kernel keyring. A standalone runtime smoke that needs the same
+isolation should explicitly enable `daybook_core/test-support`; ordinary
+production builds retain the platform keyring. The in-memory keyring is not
+cross-process persistence, so identity-reopen checks must run in one process.
+
 Automerge 0.12 and Autosurgeon 0.14 are upgraded together. Both Autosurgeon
 crates are pinned to the published `dman-os/autosurgeon` fork, rebased onto
 upstream 0.14 with tuple/historical-read/hydration fixes retained; no sibling

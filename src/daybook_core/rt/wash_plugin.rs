@@ -40,6 +40,9 @@ mod binds_guest {
                 wit_doc::WellKnownFacet::TitleGeneric(val)
             }
             root_doc::WellKnownFacet::PathGeneric(val) => wit_doc::WellKnownFacet::PathGeneric(val),
+            root_doc::WellKnownFacet::Jwk(val) => wit_doc::WellKnownFacet::Jwk(
+                serde_json::to_string(&val).expect("JWK serialization cannot fail"),
+            ),
             root_doc::WellKnownFacet::ImageMetadata(val) => {
                 wit_doc::WellKnownFacet::ImageMetadata(wit_doc::ImageMetadata {
                     facet_ref: val.facet_ref.to_string(),
@@ -196,6 +199,9 @@ mod binds_guest {
                 root_doc::WellKnownFacet::TitleGeneric(val)
             }
             wit_doc::WellKnownFacet::PathGeneric(val) => root_doc::WellKnownFacet::PathGeneric(val),
+            wit_doc::WellKnownFacet::Jwk(val) => {
+                root_doc::WellKnownFacet::Jwk(serde_json::from_str(&val)?)
+            }
             wit_doc::WellKnownFacet::ImageMetadata(val) => {
                 root_doc::WellKnownFacet::ImageMetadata(root_doc::ImageMetadata {
                     facet_ref: val.facet_ref.parse()?,
@@ -412,7 +418,6 @@ pub struct DaybookPlugin {
     blobs_repo: Arc<crate::blobs::BlobsRepo>,
     sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     config_repo: Arc<crate::config::ConfigRepo>,
-    plugs_repo: Arc<crate::plugs::PlugsRepo>,
     rt: RwLock<Option<std::sync::Weak<crate::rt::Rt>>>,
 }
 
@@ -423,7 +428,6 @@ impl DaybookPlugin {
         blobs_repo: Arc<crate::blobs::BlobsRepo>,
         sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
         config_repo: Arc<crate::config::ConfigRepo>,
-        plugs_repo: Arc<crate::plugs::PlugsRepo>,
     ) -> Self {
         Self {
             drawer_repo,
@@ -431,7 +435,6 @@ impl DaybookPlugin {
             blobs_repo,
             sqlite_local_state_repo,
             config_repo,
-            plugs_repo,
             rt: default(),
         }
     }
@@ -846,59 +849,11 @@ impl facet_routine::Host for SharedWashCtx {
             command_invoke_acl_snapshot,
             wflow_args_json: _,
         }) = &dispatch.args;
-        let ActiveDispatchDeets::Wflow { plug_id, .. } = &dispatch.deets;
-
         let primary_doc_tokens = build_doc_facet_tokens(self, &dayook_plugin, primary_doc).await?;
 
-        let mut config_doc_tokens: Vec<facet_routine::DocFacetTokens> = Vec::new();
-        if !config_docs.is_empty() {
-            let mut owner_config_docs: HashMap<String, (String, ChangeHashSet)> = HashMap::new();
-            for config_doc_meta in config_docs {
-                let owner_plug_id =
-                    config_doc_owner_plug_id(&config_doc_meta.facet_acl, plug_id.as_str())?;
-                let (config_doc_id, config_heads) =
-                    if let Some(found) = owner_config_docs.get(&owner_plug_id) {
-                        found.clone()
-                    } else {
-                        let config_doc_id = dayook_plugin
-                        .plugs_repo
-                        .get_plug_config_doc_id(&owner_plug_id)
-                        .await
-                        .ok_or_else(|| {
-                            wasmtime_err(format!(
-                                "plug {owner_plug_id} has no config doc; expected one at enablement"
-                            ))
-                        })?;
-                        let config_heads = dayook_plugin
-                            .drawer_repo
-                            .get_doc_branches(&config_doc_id)
-                            .await
-                            .map_err(|err| {
-                                wasmtime_err(format!("error getting config doc branches: {err}"))
-                            })?
-                            .and_then(|doc| doc.branches.get("main").cloned())
-                            .ok_or_else(|| {
-                                wasmtime_err(format!(
-                                    "config doc missing main branch for plug {owner_plug_id}"
-                                ))
-                            })?;
-                        owner_config_docs.insert(
-                            owner_plug_id.clone(),
-                            (config_doc_id.clone(), config_heads.clone()),
-                        );
-                        (config_doc_id, config_heads)
-                    };
-                let config_doc_tokens_meta = dispatch::DocFacetTokens {
-                    doc_id: config_doc_id,
-                    branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-                    staging_branch_path: daybook_types::doc::BranchPathBuf::from("main"),
-                    heads: config_heads,
-                    facet_acl: config_doc_meta.facet_acl.clone(),
-                };
-                let tokens =
-                    build_doc_facet_tokens(self, &dayook_plugin, &config_doc_tokens_meta).await?;
-                config_doc_tokens.push(tokens);
-            }
+        let mut config_doc_tokens = Vec::with_capacity(config_docs.len());
+        for config_doc in config_docs {
+            config_doc_tokens.push(build_doc_facet_tokens(self, &dayook_plugin, config_doc).await?);
         }
 
         let mut sqlite_connections: Vec<(
@@ -964,6 +919,7 @@ impl facet_routine::Host for SharedWashCtx {
                 facet_routine::RoutineInvocation::Processor(facet_routine::ProcessorInvocation {
                     trigger_doc_id: proc.trigger_doc_id.clone(),
                     changed_facet_keys: proc.changed_facet_keys.clone(),
+                    task_id: proc.task_id.clone(),
                 })
             }
             dispatch::RoutineInvocation::Command => facet_routine::RoutineInvocation::Command,
@@ -979,28 +935,4 @@ impl facet_routine::Host for SharedWashCtx {
             sqlite_connections,
         })
     }
-}
-
-fn config_doc_owner_plug_id(
-    facet_acl: &[daybook_types::manifest::RoutineFacetAccess],
-    default_owner_plug_id: &str,
-) -> wasmtime::Result<String> {
-    let mut owner_plug_id: Option<String> = None;
-    for access in facet_acl {
-        let access_owner = access
-            .owner_plug_id
-            .as_deref()
-            .unwrap_or(default_owner_plug_id);
-        match owner_plug_id.as_deref() {
-            None => owner_plug_id = Some(access_owner.to_string()),
-            Some(existing) if existing == access_owner => {}
-            Some(existing) => {
-                return Err(wasmtime_err(format!(
-                    "config doc facet ACL mixes owner_plug_id values: expected {existing}, found {access_owner}"
-                )));
-            }
-        }
-    }
-
-    Ok(owner_plug_id.unwrap_or_else(|| default_owner_plug_id.to_string()))
 }

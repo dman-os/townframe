@@ -495,8 +495,6 @@ pub struct WflowPlugin {
 
     // workload_id -> workload
     active_workloads: RwLock<HashMap<Arc<str>, Arc<WflowWorkload>>>,
-    // wflow key -> workload_id
-    active_keys: DHashMap<Arc<str>, Arc<str>>,
     // job id ->
     active_jobs: RwLock<HashMap<Arc<str>, Arc<ActiveJobCtx>>>,
     // ctx id -> job id
@@ -509,7 +507,6 @@ impl WflowPlugin {
         Self {
             active_workloads: default(),
             pending_workloads: default(),
-            active_keys: default(),
             active_jobs: default(),
             active_contexts: default(),
             metastore,
@@ -777,25 +774,6 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         if wflow_keys.is_empty() {
             anyhow::bail!("wflow_keys is empty: \"{wflow_keys_raw}\"");
         }
-        for key in &wflow_keys {
-            if let Some(occupied) = self.metastore.get_wflow(key).await.to_anyhow()? {
-                if let WflowServiceMeta::Wasmcloud(WasmcloudWflowServiceMeta { workload_id }) =
-                    &occupied.service
-                {
-                    if workload_id != workload.id() {
-                        anyhow::bail!(
-                            "wflow under key '{key}' in metatstore '{occupied:?}' doesn't match workload id '{}'",
-                            workload.id()
-                        );
-                    }
-                } else {
-                    anyhow::bail!(
-                        "wflow under key '{key}' in metatstore '{occupied:?}' doesn't match workload type for workload '{}'",
-                        workload.id()
-                    );
-                }
-            }
-        }
         let workload_id: Arc<str> = workload.id().into();
         self.pending_workloads.insert(workload_id, wflow_keys);
         Ok(())
@@ -840,31 +818,6 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         let instance_pre = binds_service::ServicePre::new(instance_pre)
             .map_err(|err| anyhow::anyhow!("error pre instantiating service component: {err}"))?;
 
-        // Handle workload restarts/re-resolves deterministically by clearing any
-        // prior registration for this workload ID before inserting fresh keys.
-        if let Some(previous_workload) = self
-            .active_workloads
-            .write()
-            .expect(ERROR_MUTEX)
-            .remove(&workload_id)
-        {
-            for key in &previous_workload.wflow_keys {
-                self.active_keys.remove(key);
-            }
-        }
-
-        for key in &wflow_keys {
-            let old = self
-                .active_keys
-                .insert(Arc::clone(key), Arc::clone(&workload_id));
-            if let Some(old_workload_id) = old
-                && old_workload_id != workload_id
-            {
-                anyhow::bail!(
-                    "wflow key '{key}' already mapped to workload '{old_workload_id}', cannot remap to '{workload_id}'"
-                );
-            }
-        }
         let wflow = WflowWorkload {
             wflow_keys,
             instance_pre,
@@ -884,17 +837,10 @@ impl wash_runtime::plugin::HostPlugin for WflowPlugin {
         workload_id: &str,
         _interfaces: WitInterfaces<'_>,
     ) -> anyhow::Result<()> {
-        if let Some(wflow) = self
-            .active_workloads
+        self.active_workloads
             .write()
             .expect(ERROR_MUTEX)
-            .remove(workload_id)
-        {
-            for key in &wflow.wflow_keys {
-                self.active_keys.remove(key);
-            }
-        }
-        // FIXME: cleaanup from meta store
+            .remove(workload_id);
         Ok(())
     }
 
@@ -929,6 +875,14 @@ impl service::WflowServiceHost for WflowPlugin {
                 session: None,
             };
         };
+        if !workload.wflow_keys.contains(journal.wflow.key.as_str()) {
+            return service::RunJobReply {
+                result: Err(job_events::JobRunResult::WorkerErr(
+                    job_events::JobRunWorkerError::WflowNotFound,
+                )),
+                session: None,
+            };
+        }
         let start_session = |journal| async {
             self.start_session(&workload, Arc::clone(&job_id), journal)
                 .await

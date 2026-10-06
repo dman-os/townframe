@@ -7,6 +7,7 @@ use crate::partition::{effects, job_events, state};
 pub fn reduce_job_init_event(
     state: &mut state::PartitionJobsState,
     effects: &mut Vec<PartitionEffect>,
+    entry_id: u64,
     event: job_events::JobInitEvent,
 ) {
     if state.active.contains_key(&event.job_id) || state.archive.contains_key(&event.job_id) {
@@ -17,6 +18,8 @@ pub fn reduce_job_init_event(
     state.active.insert(
         Arc::clone(&event.job_id),
         state::JobState {
+            init_entry_id: entry_id,
+            last_event_entry_id: entry_id,
             init_args_json: Arc::clone(&event.args_json),
             override_wflow_retry_policy: event.override_wflow_retry_policy,
             wflow: event.wflow,
@@ -61,6 +64,7 @@ pub fn reduce_job_cancel_event(
             });
         }
         job_state.active_wait = None;
+        job_state.cancelling = true;
         archive_job(state, &event.job_id);
         return;
     }

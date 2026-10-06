@@ -10,6 +10,9 @@ pub struct TailLogEntry {
 }
 
 #[async_trait]
+/// Entries are one-based. Zero denotes an empty prefix, not an entry.
+/// `tail(0)` starts at entry one; other offsets are inclusive. Historical
+/// reserved holes are returned explicitly and count toward the journal prefix.
 pub trait LogStore: Send + Sync {
     async fn append(&self, entry: &[u8]) -> Res<u64>;
     fn tail(&'_ self, offset: u64) -> BoxStream<'_, Res<TailLogEntry>>;

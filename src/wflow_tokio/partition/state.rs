@@ -23,6 +23,7 @@ pub struct PartitionWorkingState {
     // Change notification channel - sends JobCounts whenever counts change
     change_tx: tokio::sync::watch::Sender<JobCounts>,
     change_rx: tokio::sync::watch::Receiver<JobCounts>,
+    incorporated_entry: tokio::sync::watch::Sender<u64>,
 }
 
 impl PartitionWorkingState {
@@ -37,13 +38,31 @@ impl PartitionWorkingState {
             archive: initial_jobs.archive.len(),
         };
         let (change_tx, change_rx) = tokio::sync::watch::channel(initial_counts);
+        let (incorporated_entry, _) = tokio::sync::watch::channel(initial_entry_id);
         Self {
             last_applied_entry_id: AtomicU64::new(initial_entry_id),
             jobs: RwLock::new(initial_jobs),
             effects: RwLock::new(initial_effects),
             change_tx,
             change_rx,
+            incorporated_entry,
         }
+    }
+
+    pub fn mark_entry_incorporated(&self, entry_id: u64) {
+        self.last_applied_entry_id
+            .store(entry_id, std::sync::atomic::Ordering::SeqCst);
+        self.incorporated_entry.send_replace(entry_id);
+    }
+
+    /// Subscribe before sampling the retained prefix. A live reserved hole is
+    /// not incorporated merely because a later append finished.
+    pub async fn wait_for_prefix(&self, entry_id: u64) -> Res<()> {
+        let mut changes = self.incorporated_entry.subscribe();
+        while *changes.borrow_and_update() < entry_id {
+            changes.changed().await?;
+        }
+        Ok(())
     }
 
     /// Get a read lock on jobs state

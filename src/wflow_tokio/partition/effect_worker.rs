@@ -54,6 +54,7 @@ pub fn start_tokio_effect_worker(
     let fut = {
         let cancel_token = cancel_token.clone();
         async move {
+            let mut admission_changes = pcx.execution_gate.changes();
             let mut worker = TokioEffectWorker {
                 state,
                 effect_cancel_tokens,
@@ -61,6 +62,7 @@ pub fn start_tokio_effect_worker(
                 worker_id: Arc::clone(&worker_name),
                 sessions: default(),
                 pending_timers: default(),
+                deferred_effects: Vec::new(),
                 log: pcx.log_ref(),
                 pcx,
             };
@@ -78,13 +80,17 @@ pub fn start_tokio_effect_worker(
                         let Ok(effect_id) = effect_id else {
                             break;
                         };
-                        worker.handle_partition_effects(effect_id).await?;
+                        worker.admit_or_defer(effect_id).await?;
                     }
                     effect_id = effect_rx.recv() => {
                         let Ok(effect_id) = effect_id else {
                             break;
                         };
-                        worker.handle_partition_effects(effect_id).await?;
+                        worker.admit_or_defer(effect_id).await?;
+                    }
+                    change = admission_changes.changed() => {
+                        change?;
+                        worker.run_deferred_effects().await?;
                     }
                     _ = timer_tick.tick() => {
                         worker.fire_due_timers().await?;
@@ -114,6 +120,7 @@ struct TokioEffectWorker {
     worker_id: WorkerId,
     sessions: HashMap<Arc<str>, CachedRunSession>,
     pending_timers: HashMap<effects::EffectId, PendingTimer>,
+    deferred_effects: Vec<effects::EffectId>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +144,45 @@ struct CachedRunSession {
 }
 
 impl TokioEffectWorker {
+    async fn effect_permitted(
+        state: &PartitionWorkingState,
+        gate: &crate::partition::ExecutionGate,
+        effect_id: &effects::EffectId,
+    ) -> bool {
+        let effects = state.read_effects().await;
+        effects
+            .get(effect_id)
+            .is_none_or(|effect| gate.permits(effect))
+    }
+
+    async fn admit_or_defer(&mut self, effect_id: effects::EffectId) -> Res<()> {
+        if Self::effect_permitted(&self.state, &self.pcx.execution_gate, &effect_id).await {
+            self.handle_partition_effects(effect_id).await
+        } else {
+            self.deferred_effects.push(effect_id);
+            Ok(())
+        }
+    }
+
+    async fn run_deferred_effects(&mut self) -> Res<()> {
+        let mut index = 0;
+        while index < self.deferred_effects.len() {
+            if Self::effect_permitted(
+                &self.state,
+                &self.pcx.execution_gate,
+                &self.deferred_effects[index],
+            )
+            .await
+            {
+                let effect_id = self.deferred_effects.swap_remove(index);
+                self.handle_partition_effects(effect_id).await?;
+            } else {
+                index += 1;
+            }
+        }
+        Ok(())
+    }
+
     fn should_keep_session(result: &job_events::JobRunResult) -> bool {
         matches!(
             result,
@@ -236,9 +282,11 @@ impl TokioEffectWorker {
     async fn handle_partition_effects(&mut self, effect_id: effects::EffectId) -> Res<()> {
         let (job_id, deets) = {
             let effects_map = self.state.read_effects().await;
-            let effects::PartitionEffect { job_id, deets } = effects_map
-                .get(&effect_id)
-                .expect("scheduled effect not found");
+            let Some(effects::PartitionEffect { job_id, deets }) = effects_map.get(&effect_id)
+            else {
+                // A held effect can be durably invalidated while it waits.
+                return Ok(());
+            };
             (Arc::clone(job_id), deets.clone())
         };
 
@@ -334,6 +382,14 @@ impl TokioEffectWorker {
             };
             state.clone()
         };
+        if job_state_snapshot.cancelling {
+            // The durable cancellation won before this held run was activated.
+            // Produce the actual aborted run outcome without invoking the SDK.
+            if let Some(session) = self.take_session(&job_id) {
+                self.drop_cached_session(session);
+            }
+            return job_events::JobRunResult::Aborted;
+        }
         let run_ctx = crate::partition::service::RunJobCtx {
             effect_id: effect_id.clone(),
             run_id,

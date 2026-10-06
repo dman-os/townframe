@@ -5,6 +5,9 @@ a wasm routine that writes a `LabelGeneric` facet with the value `test_label`
 into the given document. We create a doc with `touch`, capture its id, run
 the command, then assert the label landed via `cat`.
 
+`cat` emits JSON only. A downstream reader such as `grep -q` may close its pipe
+after matching; that normal consumer completion must not panic or prevent shutdown.
+
 ```console
 $ daybook_cli init
 $ sh -c 'cp -r "$PLUG_OCI" ./plug-oci'
