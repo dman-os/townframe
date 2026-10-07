@@ -18,6 +18,11 @@ pub trait BigSyncRpcClient<K: FutureForm> {
     /// [`PeerSummaryError::TooManyParts`]. An empty answer map would be
     /// indistinguishable from an idle peer, and the asker would mark every part
     /// unknown and re-ask - the same starvation, only silent.
+    ///
+    /// The asker reports that refusal once, as
+    /// [`crate::SyncStatEvent::PeerPartSetTooLarge`]: the ceiling is a property of the
+    /// part set the asker built, not of any one part, so the machine keeps re-asking
+    /// while the embedder — who owns the part→peer plan — is the one who can narrow it.
     fn peer_summary<'a>(
         &'a self,
         req: PeerSummaryRequest,

@@ -254,8 +254,13 @@ pub(crate) async fn recover_pending_documents(
     // claim says the committing operation got past its commit point, so replay
     // the registration write BEFORE the drain grants and completes — a crash
     // from here on lands in the registered-not-finalized window these two
-    // steps already handle. Never register a claim the scan did not produce
-    // with every claim surface readable.
+    // steps already handle. A claim the scan *did* find is registered regardless of
+    // whether the other claim surfaces were readable: incompleteness can only make the
+    // claim *set* incomplete, and the classification below already maps a found claim to
+    // `Registered` — so skipping the replay here would let the drain complete the
+    // allocation with no `docs.map` entry, leaving the key document outside the drawer
+    // while the claim still names it. Incompleteness vetoes only the discard direction:
+    // the arm below that maps a claimless, shapeless reservation to `Unknown`.
     if !read.claims.is_empty() {
         let claimed_unregistered: Vec<big_repo::DocumentId> = read
             .claims
@@ -263,7 +268,7 @@ pub(crate) async fn recover_pending_documents(
             .filter(|doc_id| !read.shapes.contains_key(*doc_id))
             .cloned()
             .collect();
-        if !claimed_unregistered.is_empty() && read.claims_complete {
+        if !claimed_unregistered.is_empty() {
             // The registration entry's vtag actor is the drawer's own writer
             // identity, derived exactly as `DrawerRepo::load` derives it.
             let actor_id = daybook_types::doc::user_path::to_actor_id(

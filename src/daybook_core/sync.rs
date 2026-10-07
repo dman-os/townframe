@@ -1019,6 +1019,24 @@ impl IrohSyncRepo {
                     "BigSync peer partition unanswered"
                 );
             }
+            big_sync_core::SyncStatEvent::PeerPartSetTooLarge {
+                peer_id,
+                requested,
+                cap,
+            } => {
+                // Report-only, once per transition: the ceiling is a property of the part
+                // set this node asked with, so narrowing that set is the embedder's call
+                // and the machine keeps re-asking until it is made. Warned rather than
+                // logged at info because no part in the refused request can sync at all
+                // until the request shrinks.
+                warn!(
+                    local_peer_id = %self.router.endpoint().id(),
+                    %peer_id,
+                    requested,
+                    cap,
+                    "BigSync peer refused a summary request above the part ceiling"
+                );
+            }
             big_sync_core::SyncStatEvent::PeerPartStale { .. } => {}
             big_sync_core::SyncStatEvent::PartFullySynced { .. } => {}
             big_sync_core::SyncStatEvent::PartStale { .. } => {}

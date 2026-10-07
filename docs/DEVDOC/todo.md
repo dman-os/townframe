@@ -114,8 +114,16 @@
       - [ ] How to avoid missing triage work?
     - [ ] Abort/cancel on StopToken Drop
     - [ ] Drop warning on stop tokens
+- [ ] big_blobs
+  - [ ] Object parts
+  - [ ] Orphan key documents
+  - [ ] announce_held_blobs
+  - [ ] store gc
+  - [ ] Remove blobs from facet_set
+  - [ ] download to tmp dir
 
 - [ ] Cleanup and show it to people
+
  
 - [ ] DEK rotation
 - [ ] Get started on iOS

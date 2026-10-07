@@ -449,13 +449,6 @@ pub(crate) async fn registered_allocation_shapes(
     let mut shapes = HashMap::new();
     let mut claims = HashSet::new();
     let mut claims_complete = true;
-    // A `cipherBlob` facet's key id is `{domain}/{facet}`, so the claimed doc
-    // id lives in the facet value: match candidates by the `keyRef`'s doc id
-    // after the value read.
-    let candidates_by_string: HashMap<String, big_repo::DocumentId> = claim_candidates
-        .iter()
-        .map(|id| (id.to_string(), id.clone()))
-        .collect();
     // The branch docs of every registered content doc: what the claim scan
     // reads when there are reservations to classify.
     let mut content_branch_docs = Vec::new();
@@ -511,6 +504,22 @@ pub(crate) async fn registered_allocation_shapes(
 
     // The claim scan is per boot-sweep and only paid when reservations exist:
     // the candidates are the sweep's reservations.
+    // A `cipherBlob` facet's key id is `{domain}/{facet}`, so the claimed doc id
+    // lives in the facet value: match candidates by the `keyRef`'s doc id after the
+    // value read.
+    //
+    // Only reservations with no registration shape are candidates. A registered
+    // reservation needs no claim replay — the classification below reads it off
+    // `shapes` alone — so scanning for it would open every registered content branch
+    // doc (a cost that scales with the drawer) to answer a question whose answer is
+    // already known. A reservation whose scan came back incomplete stays a candidate
+    // on purpose: it is unclassified *because* the surfaces could not all be read, so
+    // dropping it here would turn a kept reservation into a discarded one.
+    let candidates_by_string: HashMap<String, big_repo::DocumentId> = claim_candidates
+        .iter()
+        .filter(|id| !shapes.contains_key(*id))
+        .map(|id| (id.to_string(), id.clone()))
+        .collect();
     if !candidates_by_string.is_empty() {
         for branch_doc_id in &content_branch_docs {
             if !claims_in_branch_doc(big_repo, branch_doc_id, &candidates_by_string, &mut claims)

@@ -801,10 +801,24 @@ impl HostPartStore for MemoryPartStore {
         surelock::key::lock_scope(|key| {
             let (mut guard, _key) = key.lock(&self.inner);
             let guard = &mut *guard;
-            guard.tombstoned_objs.remove(&obj_id);
+            let tombstone_lifted = guard.tombstoned_objs.remove(&obj_id).is_some();
             let obj_state = guard.objs.entry(obj_id.clone()).or_default();
             let old_payload = obj_state.payload.replace(payload.clone());
             let desired_parts = obj_state.parts.clone();
+            // Re-writing the payload the object already holds, with its membership live and
+            // no tombstone lifted, is not a change: taking a cursor for it restamps every
+            // part's `changed_at`/`latest_cursor` and queues a `Changed` no peer caused. The
+            // presence plane's boot announce replays every blob this node holds, so a repeat
+            // here would revise the whole blob plane on every restart. `add_obj_to_parts`
+            // already refuses a repeat for a present membership; the payload write has to
+            // make the same refusal. The parts-less case keeps its emit: an object with no
+            // live membership may still be one the object route has yet to hear about.
+            if !tombstone_lifted
+                && old_payload.as_ref() == Some(&payload)
+                && !desired_parts.is_empty()
+            {
+                return Ok(());
+            }
             if desired_parts.is_empty() {
                 let cursor = guard.global_cursor.next();
                 guard

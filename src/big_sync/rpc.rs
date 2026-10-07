@@ -1343,6 +1343,15 @@ impl BigSyncRpcWorker {
                     // own; a summary request names a peer's newly pending parts (the
                     // number of told inventories), not an unbounded set.
                     let mut summaries = HashMap::new();
+                    // The store is local and owned by this process, so these three reads
+                    // fail only when the substrate itself is broken — a store error, not
+                    // a per-part condition. There is no conservative partial answer to
+                    // fall back on: a part omitted here reads to the asker as "not
+                    // readable", which is a wrong verdict that silently starves that
+                    // part's sync, where the unknown-part answer is already folded into
+                    // the map by `summarize_parts` (handled below) instead of erroring.
+                    // So a failure here names a system-level error and panics rather than
+                    // degrading the answer.
                     for part_id in parts {
                         if store
                             .read_denied(ReadTarget::Part(part_id.clone()), asker.clone())

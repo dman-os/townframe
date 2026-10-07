@@ -4167,6 +4167,127 @@ async fn the_boot_sweep_commits_a_claimed_temporary_key_document() -> Res<()> {
     Ok(())
 }
 
+/// The same claim window with one claim surface unreadable: a `docs.map` entry
+/// naming a content branch doc this node does not hold makes the scan
+/// incomplete. A claim the scan *did* find is still positive evidence — the
+/// incompleteness is about the claims it could not enumerate, not about the one
+/// it read — so the sweep must replay that registration all the same. Gating the
+/// replay on a complete scan instead lets the drain complete the allocation with
+/// no `docs.map` entry, and the next boot has no reservation left to register
+/// from: the key document ends up outside the drawer while the claim's `keyRef`
+/// still names it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_boot_sweep_registers_a_found_claim_even_when_the_claim_scan_is_incomplete() -> Res<()>
+{
+    let node = boot_drawer_node().await?;
+
+    let content_doc_id = node
+        .repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+        })
+        .await?;
+    let key = crate::blobs::encrypt::MasterKey::random();
+    let (jwk_key, jwk_raw) = staging_jwk_facet(&key);
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(jwk_key.clone(), jwk_raw)].into(),
+            user_path: None,
+        })
+        .await?;
+    let content_heads = node
+        .repo
+        .get_branch_heads_for_path(&content_doc_id, BranchPath::new("main"))
+        .await?
+        .ok_or_eyre("content doc has no main branch")?;
+    let cipher = daybook_types::doc::CipherBlob {
+        representation: daybook_types::doc::Representation {
+            digest: crate::blobs::blob_id_to_digest_str(crate::blobs::BlobId::new([9_u8; 32])),
+            length_octets: 4,
+        },
+        content_encoding: crate::blobs::encrypt::CONTENT_ENCODING_AES128GCM.to_string(),
+        key_ref: format!("db+facet:///{}/{jwk_key}", staged.doc_id).parse()?,
+        key_ref_heads: staged.branch_heads.clone(),
+        encoding_parameters: crate::blobs::encrypt::EncodingParams::DEFAULT
+            .to_encoding_parameters(),
+    };
+    node.repo
+        .update_at_heads_with_scope(
+            DocPatch {
+                id: content_doc_id.clone(),
+                facets_set: [(
+                    daybook_types::doc::FacetKey {
+                        tag: WellKnownFacetTag::CipherBlob.into(),
+                        id: "grp:testdomain/blob".into(),
+                    },
+                    WellKnownFacet::CipherBlob(cipher).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            BranchPath::new("main"),
+            Some(content_heads),
+            crate::drawer::FacetWriteScope::System,
+        )
+        .await?;
+
+    // The unreadable surface. Registering a `docs.map` entry whose branch doc no
+    // node holds is exactly the shape the sweep meets after a partial clone: the
+    // entry is durable and its branch cannot be read, so the claim scan reports
+    // the claim surfaces incomplete while the claim above stays readable.
+    let local_user_path =
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest");
+    crate::drawer::register_claimed_allocations(
+        &node.big_repo,
+        node.repo.drawer_doc_id(),
+        &[big_repo::DocumentId::new([0xAB; 32])],
+        daybook_types::doc::user_path::to_actor_id(&daybook_types::doc::user_path::for_repo(
+            local_user_path.clone(),
+            "drawer-repo",
+        )?),
+    )
+    .await?;
+
+    let authority = arm_boot_sweep(&node).await?;
+    crate::authority::recover_pending_documents(
+        &node.big_repo,
+        &authority,
+        node.repo.meta_store_sql(),
+        &local_user_path,
+    )
+    .await?;
+
+    assert!(
+        !node
+            .big_repo
+            .reserved_doc_ids()
+            .await?
+            .contains(&staged.branch_doc_id),
+        "a found claim must complete its staging doc's reservation even when the scan \
+         could not read every claim surface"
+    );
+    let entry = node.repo.get_entry(&staged.doc_id).await?.ok_or_eyre(
+        "the sweep must replay a found claim's registration even when the scan could \
+             not read every claim surface",
+    )?;
+    assert_eq!(
+        entry
+            .branches
+            .get("main")
+            .map(|branch_ref| branch_ref.branch_doc_id.clone()),
+        Some(staged.branch_doc_id.clone()),
+        "the replayed registration must name the staged branch doc"
+    );
+
+    node.stop().await?;
+    Ok(())
+}
+
 /// The other half of the claim window: the staged key doc survived but the
 /// crash was before the cipherBlob claim, so nothing names it and the sweep
 /// discards it — reservation gone, pending coparent revoked, no grants, and no

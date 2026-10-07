@@ -2474,7 +2474,7 @@ async fn drive_keyhive_exchange(
 /// active peers and would prove nothing. The one byte read below happens only
 /// after presence was already established, and is sanity, not proof.
 #[tokio::test(flavor = "multi_thread")]
-async fn told_not_cloned_inventory_part_is_refused_until_the_inventory_document_is_granted()
+async fn long_test_told_not_cloned_inventory_part_is_refused_until_the_inventory_document_is_granted()
 -> Res<()> {
     use big_repo::keyhive_core::access::Access;
 
@@ -2879,7 +2879,7 @@ async fn told_not_cloned_inventory_part_is_refused_until_the_inventory_document_
 ///    retention is exactly "the bytes are useful without the keys".
 ///
 /// The lever is the access-row grant shape of
-/// `told_not_cloned_inventory_part_is_refused_until_the_inventory_document_is_granted`
+/// `long_test_told_not_cloned_inventory_part_is_refused_until_the_inventory_document_is_granted`
 /// applied to the relay: the permission writer copies the inventory document's
 /// closure verbatim (ADR 013 §4 keeps relays out of private documents) and the
 /// serving side's fetch predicate is `is_fetcher` (`>= Access::Relay`), so a

@@ -224,6 +224,21 @@ structstruck::strike! {
             peer_id: PeerKey,
             part_id: PartKey,
         },
+        /// The peer refused a summary request because it named more parts than the
+        /// responder serves. The ceiling bounds what a responder will read, not what
+        /// an asker may ask, so the fact is about the request the asker built — this
+        /// peer's part set — and only the embedder, who owns the part→peer plan, can
+        /// narrow it.
+        ///
+        /// The parts keep their in-flight strategy and the machine keeps re-asking on
+        /// its retry timer, so the state heals on its own once the plan changes.
+        /// Emitted once per transition into the refused state: the fact, not the
+        /// attempt, is what a subscriber acts on.
+        PeerPartSetTooLarge {
+            peer_id: PeerKey,
+            requested: usize,
+            cap: usize,
+        },
         PartFullySynced {
             part_id: PartKey,
         },
@@ -382,6 +397,11 @@ structstruck::strike! {
         peers: Map<PeerKey, struct PeerSyncState {
             replay_phase_done: bool,
             emitted_full_synced: bool,
+            /// The peer's last summary request was refused for naming more parts than
+            /// the responder serves. A property of the request rather than of any one
+            /// part, so it latches per peer: an answered summary is how the machine
+            /// learns the request in flight is no longer the refused one.
+            part_set_too_large: bool,
             parts: Map<PartKey, struct PeerPartStatState {
                 emitted_full_synced: bool,
                 cursor_active: bool,
@@ -637,6 +657,34 @@ impl SyncStatMachine {
         peer_part_state.unanswered = true;
         self.stat_evts
             .push(SyncStatEvent::PeerPartUnanswered { peer_id, part_id });
+    }
+
+    /// Record the peer's refusal of a summary request whose part set was above the
+    /// responder's ceiling.
+    ///
+    /// Reports the fact once per transition and deliberately does not resolve it: the
+    /// ceiling is a property of the request the asker built, so the machine cannot
+    /// decide its way out of it — only a narrower part set can, and the embedder owns
+    /// that plan. The retry keeps re-asking, so the state heals once that call is made.
+    fn mark_peer_part_set_too_large(&mut self, peer_id: PeerKey, requested: usize, cap: usize) {
+        let peer_state = self.peers.entry(peer_id.clone()).or_default();
+        if peer_state.part_set_too_large {
+            return;
+        }
+        peer_state.part_set_too_large = true;
+        self.stat_evts.push(SyncStatEvent::PeerPartSetTooLarge {
+            peer_id,
+            requested,
+            cap,
+        });
+    }
+
+    /// An answered summary clears the refusal latch, so a refusal of an over-ceiling
+    /// part set after it reports as a new fact.
+    fn clear_peer_part_set_too_large(&mut self, peer_id: &PeerKey) {
+        if let Some(peer_state) = self.peers.get_mut(peer_id) {
+            peer_state.part_set_too_large = false;
+        }
     }
 
     fn __check_peer_part_synced(&mut self, peer_id: PeerKey, part_id: PartKey) {
@@ -1332,6 +1380,9 @@ impl BigSyncMachine {
             );
             return;
         }
+        // This answer consumed the request the refusal was about, so the latch is cleared:
+        // a refusal of the next request is a new fact.
+        self.stat_machine.clear_peer_part_set_too_large(&peer_id);
         let mut parts_retry = Set::new();
 
         for (part_id, decision) in part_strats {
@@ -1464,7 +1515,24 @@ impl BigSyncMachine {
         retry: Retry,
         DecidePeerStrategyTaskError { peer_id, deets }: DecidePeerStrategyTaskError,
     ) {
-        tracing::warn!(peer_id = %peer_id, task_id, ?deets, "decide peer strategy failed");
+        match &deets {
+            DecidePeerStrategyErrorDeets::PeerSummary(PeerSummaryError::TooManyParts {
+                ..
+            }) => {
+                // A refusal that is a property of the request repeats identically on every
+                // retry, so it is reported once as a fact on the stat channel instead of
+                // warned once per attempt.
+                tracing::debug!(
+                    peer_id = %peer_id,
+                    task_id,
+                    ?deets,
+                    "peer refused the summary request"
+                );
+            }
+            _ => {
+                tracing::warn!(peer_id = %peer_id, task_id, ?deets, "decide peer strategy failed");
+            }
+        }
         let Some(peer_state) = self.peers.get_mut(&peer_id) else {
             assert!(self.all_seen_peer.contains(&peer_id), "fishy");
             return;
@@ -1491,11 +1559,19 @@ impl BigSyncMachine {
             DecidePeerStrategyErrorDeets::Rpc(_) => {
                 // noop, retry with backoff
             }
-            DecidePeerStrategyErrorDeets::PeerSummary(_) => {
-                // noop, retry with backoff. Unlike an unknown part, the ceiling is a
-                // property of the request the asker itself built - its part set for
-                // this peer - so no retry clears it until the asker chunks that set.
-                // The warning above this match carries the count and the ceiling.
+            DecidePeerStrategyErrorDeets::PeerSummary(PeerSummaryError::TooManyParts {
+                requested,
+                cap,
+            }) => {
+                // Reported once, as a fact on the stat channel, rather than per attempt:
+                // the ceiling is a property of the part set the asker itself built, so no
+                // retry clears it — only the embedder narrowing that set does — and the
+                // retry path below keeps re-asking until then, so the state heals by
+                // itself once the plan changes. There is deliberately no catch-all arm: a
+                // new refusal shape has to be classified here rather than silently
+                // inheriting this one's verdict.
+                self.stat_machine
+                    .mark_peer_part_set_too_large(peer_id.clone(), requested, cap);
             }
         }
         let mut parts_retry = Set::new();
@@ -3647,6 +3723,90 @@ mod tests {
             machine.drain_stat_evts().count(),
             1,
             "a later refusal of the same part is reported again"
+        );
+    }
+
+    /// A summary request the peer refuses for naming more parts than it serves is a fact
+    /// about the request, not about any one part: it is reported once, the parts keep
+    /// their retry, and an answered summary clears the latch so a later refusal reports
+    /// again. The machine never resolves the refusal by itself — narrowing the part set
+    /// is the embedder's call — but it keeps re-asking so the state heals once that call
+    /// is made.
+    #[test]
+    fn a_refused_part_set_is_reported_once_and_an_answered_summary_clears_it() {
+        let mut machine = BigSyncMachine::default();
+        let peer = PeerKey::random();
+        let part = PartKey::random();
+        machine.handle_evt(BigSyncEvent::SetPeer(SetPeerEvent {
+            peer_id: peer.clone(),
+            parts: [part.clone()].into(),
+            objects: Set::new(),
+        }));
+        machine.drain_stat_evts().for_each(drop);
+
+        let refusal = || DecidePeerStrategyTaskError {
+            peer_id: peer.clone(),
+            deets: DecidePeerStrategyErrorDeets::PeerSummary(PeerSummaryError::TooManyParts {
+                requested: 65,
+                cap: 64,
+            }),
+        };
+        let retry = || crate::scheduler::Retry {
+            attempt_no: 0,
+            backoff: Duration::ZERO,
+            queued_at: std::time::Instant::now(),
+        };
+        let pending_task_id =
+            |machine: &BigSyncMachine| match &machine.peers[&peer].parts[&part].strat {
+                PeerPartStrategy::Pending(task_id) => *task_id,
+                _ => panic!("the part must be pending a decision"),
+            };
+
+        machine.handle_decide_peer_strat_err(1, retry(), refusal());
+        let reported: Vec<_> = machine.drain_stat_evts().collect();
+        assert_eq!(reported.len(), 1, "the refusal is a fact, reported once");
+        assert!(
+            matches!(
+                reported[0],
+                SyncStatEvent::PeerPartSetTooLarge {
+                    requested: 65,
+                    cap: 64,
+                    ..
+                }
+            ),
+            "the report carries the count and the ceiling the responder named"
+        );
+
+        machine.handle_decide_peer_strat_err(pending_task_id(&machine), retry(), refusal());
+        assert!(
+            machine.drain_stat_evts().next().is_none(),
+            "re-asking the same question is not a new fact"
+        );
+
+        // An answered summary means the request in flight is no longer the refused one.
+        machine.handle_set_peer_strat(
+            pending_task_id(&machine),
+            retry(),
+            SetPeerStrategy {
+                peer_id: peer.clone(),
+                part_strats: [(
+                    part.clone(),
+                    PeerPartStratDecision::Cursor(CursorStrat {
+                        latest_cursor: 0,
+                        last_cursor: 0,
+                    }),
+                )]
+                .into(),
+            },
+        );
+        machine.drain_stat_evts().for_each(drop);
+
+        // ...so a refusal after it is new, even though it names the same ceiling.
+        machine.handle_decide_peer_strat_err(1, retry(), refusal());
+        assert_eq!(
+            machine.drain_stat_evts().count(),
+            1,
+            "a refusal after an answered summary is a new fact"
         );
     }
 
