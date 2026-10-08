@@ -8,7 +8,6 @@ const CONTENT_DOCS_GROUP_KEY: &str = "global.authority.content_docs_group";
 const ENCRYPTED_BLOB_DOCS_GROUP_KEY: &str = "global.authority.encrypted_blob_docs_group";
 const DRAWER_GROUP_KEY: &str = "global.authority.default_drawer_group";
 const BLOB_INVENTORIES_GROUP_KEY: &str = "global.authority.blob_inventories_group";
-const PENDING_DOCUMENTS_GROUP_KEY: &str = "local.authority.pending_documents_group";
 
 /// Stable identifiers for the initial repository authority groups.
 ///
@@ -42,7 +41,6 @@ pub(crate) struct RepoAuthority {
     pub encrypted_blob_docs: BigKeyhiveGroup,
     pub default_drawer: BigKeyhiveGroup,
     pub blob_inventories: BigKeyhiveGroup,
-    pending_documents: BigKeyhiveGroup,
 }
 
 impl RepoAuthority {
@@ -79,10 +77,6 @@ impl RepoAuthority {
     }
     pub(crate) fn blob_inventories_part_id(&self) -> PartKey {
         big_repo::group_part_id(self.blob_inventories.id().to_bytes())
-    }
-
-    pub(crate) fn pending_documents_group(&self) -> BigKeyhiveGroup {
-        self.pending_documents.clone()
     }
 }
 
@@ -133,9 +127,6 @@ pub(crate) async fn ensure(
         supplied_ids.map(|ids| ids.blob_inventories),
     )
     .await?;
-    let (pending_documents, _) =
-        ensure_group(big_repo, sql, PENDING_DOCUMENTS_GROUP_KEY, None).await?;
-
     if repo_agents_created
         || core_docs_created
         || content_docs_created
@@ -183,151 +174,9 @@ pub(crate) async fn ensure(
         encrypted_blob_docs,
         default_drawer,
         blob_inventories,
-        pending_documents,
     };
 
     Ok(auth)
-}
-
-/// Boot sweep over every durable doc reservation — the pending-allocation
-/// drain (the drawer staging facility for transactional doc creation).
-///
-/// The drawer's durable registration surfaces (`docs.map` entries, branch
-/// refs, local-branch refs) plus its cipherBlob claims settle each
-/// reservation:
-///
-/// - **Registered** (including the claimed-but-uncommitted window: a durable
-///   `cipherBlob` facet names the reservation by `keyRef`, ADR 003 §19) →
-///   mechanically replay the registration: for claimed-but-unregistered ones
-///   the `docs.map` entry is written first, then the drain replays the
-///   finalize grants the registering caller owns, and completes (revoke the
-///   pending coparent, drop the reservation). This covers the
-///   registered-not-finalized crash window and the post-claim pre-commit one.
-/// - **Not registered and not claimed** → discard: drop the reservation and
-///   revoke the pending coparent. Discard is purely local — allocations grant
-///   ONLY the pending group at genesis and it has no members, so the
-///   document's events can never have left the node and no peer can hold
-///   authorization; the events, sedimentree and bytes are never deleted.
-///   A cipherBlob claim the scan could not fully enumerate keeps the
-///   reservation — an absent claim only decides a discard when every claim
-///   surface was readable.
-/// - Anything whose registration cannot be read, or that contradicts the
-///   finalize ordering (registration implies staged content and the
-///   finalize grants), is kept and warned, never released.
-///
-/// Runs ONLY at the repo's boot site (`repo.rs:open_inner`), never on the
-/// per-construction `ensure` calls: an external temporary allocation is valid
-/// until the next boot by contract, so a mid-session sweep must not be able
-/// to race a live in-flight allocation.
-pub(crate) async fn recover_pending_documents(
-    big_repo: &SharedBigRepo,
-    authority: &RepoAuthority,
-    sql: &SqlCtx,
-    local_user_path: &daybook_types::doc::UserPathBuf,
-) -> Res<()> {
-    let reserved = big_repo.reserved_doc_ids().await?;
-    if reserved.is_empty() {
-        return Ok(());
-    }
-    // The registration read goes through the drawer document, whose id the
-    // repo records in its init state once initialization (or clone) produced
-    // the core docs. Reservations without it — a fresh repo mid-init-dance, or
-    // a test harness — cannot be classified; keep them.
-    let crate::repo::globals::InitState::Created { doc_id_drawer, .. } =
-        crate::repo::globals::get_init_state(sql).await?
-    else {
-        tracing::warn!(
-            reservations = reserved.len(),
-            "pending doc reservations keep their boot sweep: the drawer document id is not \
-             registered yet, so registration cannot be read"
-        );
-        return Ok(());
-    };
-    let Some(read) =
-        crate::drawer::registered_allocation_shapes(sql, big_repo, &doc_id_drawer, &reserved)
-            .await?
-    else {
-        return Ok(());
-    };
-
-    // The claimed-but-uncommitted window (ADR 003 §19): the durable cipherBlob
-    // claim says the committing operation got past its commit point, so replay
-    // the registration write BEFORE the drain grants and completes — a crash
-    // from here on lands in the registered-not-finalized window these two
-    // steps already handle. A claim the scan *did* find is registered regardless of
-    // whether the other claim surfaces were readable: incompleteness can only make the
-    // claim *set* incomplete, and the classification below already maps a found claim to
-    // `Registered` — so skipping the replay here would let the drain complete the
-    // allocation with no `docs.map` entry, leaving the key document outside the drawer
-    // while the claim still names it. Incompleteness vetoes only the discard direction:
-    // the arm below that maps a claimless, shapeless reservation to `Unknown`.
-    if !read.claims.is_empty() {
-        let claimed_unregistered: Vec<big_repo::DocumentId> = read
-            .claims
-            .iter()
-            .filter(|doc_id| !read.shapes.contains_key(*doc_id))
-            .cloned()
-            .collect();
-        if !claimed_unregistered.is_empty() {
-            // The registration entry's vtag actor is the drawer's own writer
-            // identity, derived exactly as `DrawerRepo::load` derives it.
-            let actor_id = daybook_types::doc::user_path::to_actor_id(
-                &daybook_types::doc::user_path::for_repo(local_user_path.clone(), "drawer-repo")?,
-            );
-            crate::drawer::register_claimed_allocations(
-                big_repo,
-                &doc_id_drawer,
-                &claimed_unregistered,
-                actor_id,
-            )
-            .await?;
-        }
-    }
-    let registration = reserved
-        .iter()
-        .map(|doc_id| {
-            // The finalize grants of the registering path, exactly as the
-            // drawer grants them between finalize and its registration write
-            // (content docs and replicated branches advertise the drawer
-            // group, local branches do not).
-            let registration = match read.shapes.get(doc_id) {
-                Some(
-                    crate::drawer::RegisteredAllocationShape::ContentDoc
-                    | crate::drawer::RegisteredAllocationShape::ReplicatedBranch,
-                ) => big_repo::AllocationRegistration::Registered(vec![
-                    authority.content_docs.clone(),
-                    authority.encrypted_blob_docs.clone(),
-                    authority.default_drawer.clone(),
-                ]),
-                Some(crate::drawer::RegisteredAllocationShape::LocalBranch) => {
-                    big_repo::AllocationRegistration::Registered(vec![
-                        authority.content_docs.clone(),
-                        authority.encrypted_blob_docs.clone(),
-                    ])
-                }
-                // The claimed-but-uncommitted window replays the commit too;
-                // a claim the scan could not fully enumerate keeps instead.
-                None if read.claims.contains(doc_id) => {
-                    big_repo::AllocationRegistration::Registered(vec![
-                        authority.content_docs.clone(),
-                        authority.encrypted_blob_docs.clone(),
-                        authority.default_drawer.clone(),
-                    ])
-                }
-                None if !read.claims_complete => big_repo::AllocationRegistration::Unknown,
-                None => big_repo::AllocationRegistration::Unregistered(vec![
-                    authority.content_docs.clone(),
-                    authority.encrypted_blob_docs.clone(),
-                    authority.default_drawer.clone(),
-                ]),
-            };
-            (doc_id.clone(), registration)
-        })
-        .collect();
-    big_repo
-        .drain_pending_allocations(authority.pending_documents_group(), &registration)
-        .await?;
-    Ok(())
 }
 
 async fn ensure_group(

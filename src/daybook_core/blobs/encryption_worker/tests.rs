@@ -61,6 +61,8 @@ async fn stage_document_with_blob(
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-0".to_string(),
         })
         .await?;
     Ok((doc_id, blob_key))
@@ -1122,6 +1124,8 @@ async fn delta_with_nothing_to_represent_does_not_stall_the_machine() -> Res<()>
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-1".to_string(),
         })
         .await?;
 

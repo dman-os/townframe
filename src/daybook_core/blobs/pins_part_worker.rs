@@ -833,6 +833,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pins_part_worker.rs-0".to_string(),
             })
             .await?;
         let branch_id = BranchId::from(doc_id.to_string());
@@ -968,6 +970,8 @@ mod tests {
                 ]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pins_part_worker.rs-1".to_string(),
             })
             .await?;
 
@@ -1152,6 +1156,8 @@ mod tests {
                 ]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pins_part_worker.rs-2".to_string(),
             })
             .await?;
 
@@ -1225,6 +1231,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pins_part_worker.rs-3".to_string(),
             })
             .await?;
         // The cipherBlob's keyRef is cross-document, so it pins the key doc's

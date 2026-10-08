@@ -1325,6 +1325,8 @@ async fn apply_event(
                     user_path: Some(daybook_types::doc::UserPathBuf::from(
                         node.ctx.local_user_path.clone(),
                     )),
+
+                    idempotency_key: "test-key-stress.rs-0".to_string(),
                 })
                 .await?;
             Ok(StressEventOutcome::Applied(format!("created doc {id}")))

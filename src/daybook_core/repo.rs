@@ -451,13 +451,6 @@ impl RepoCtx {
         let frontier_part_store = big_repo.frontier_part_store();
         let derived_part_store = big_repo.derived_part_store();
         let authority = crate::authority::ensure(&big_repo, &sql, None).await?;
-        // The pending-allocation boot sweep lives here, at the one site that
-        // births the `BigRepo`: an external temporary allocation is valid only
-        // until the next boot, so the per-construction `ensure` calls
-        // (`rt.rs`, `sync.rs`, `drawer.rs`) must not re-run it mid-session
-        // where it could race a live in-flight allocation.
-        crate::authority::recover_pending_documents(&big_repo, &authority, &sql, &local_user_path)
-            .await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: BigRepo and authority booted");
 
         let (
@@ -753,6 +746,8 @@ impl RepoCtx {
                     branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                     facets: default(),
                     user_path: None,
+
+                    idempotency_key: "init:core-inventory".to_string(),
                 })
                 .await?;
             let docs_inventory_daybook_id = _drawer_repo
@@ -760,6 +755,8 @@ impl RepoCtx {
                     branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                     facets: default(),
                     user_path: None,
+
+                    idempotency_key: "init:docs-inventory".to_string(),
                 })
                 .await?;
             let encryption_inventory_daybook_id = _drawer_repo
@@ -767,6 +764,8 @@ impl RepoCtx {
                     branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                     facets: default(),
                     user_path: None,
+
+                    idempotency_key: "init:encryption-inventory".to_string(),
                 })
                 .await?;
 

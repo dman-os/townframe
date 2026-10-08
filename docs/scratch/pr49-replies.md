@@ -5,6 +5,49 @@ entry first. The parent agent appends here; subagent lanes must not edit it.
 Chat messages only carry the short action summary.
 
 ---
+## 2026-10-25 — round 17: the allocation lifecycle is rebuilt around three verbs and a write-ahead outbox
+
+The two lanes this round ran only after a full read-through of PR #49's allocation half — including the keyhive fork's genesis API and this repo's delete path — established that the PR's shape protected nothing:
+
+**Findings (the reasons, pinned).**
+
+1. **finalization ≠ completion, but the split protected nothing.** `complete_allocated_doc` (revoke pending-group coparent + delete reservation) ran after the drawer's registration write because releasing pending state before registration was judged unsafe. But the pending state was provably inert: the pending group is memberless (zero peers hold authorization; the fork pins the local agent as every document's head parent, so genesis advertises nothing even with *no* group coparent; verified in `keyhive_core` `generate_doc_with_reserved_signer`), and the reservation row's real job — recovering a crash mid-commit — is absorbed by deterministic re-derivation. The order constraint "release after registration" was the root cause of every piece of machinery this round removed: the `AllocationRegistration` classification, the drain's grant replay, `discard_reserved_doc`'s grant surgery, the five synchronized advertising-group sites.
+2. **Reverting advertising grants on discard was wrong anyway.** Deletion's own steady state (`DrawerRepo::del`) tombstones and de-partitions without ever revoking standing delegations — dead-but-advertised is the system's accepted shape (ADR 012: "access stays purely additive"; revocation is part-lane membership). The boot sweep issuing forward revocation + re-key events on a speculative classification inverted the PR's own "never release blind" rule (the PairRoots ledger's).
+3. **Coparents-at-allocation was vestigial plumbing.** The reservation row memoized genesis parenting from the pre-PR design where grants *were* genesis coparents. The id derives from the signer alone; parenting belongs to the commit that produces genesis events, and the crash-replay args belong to the embedder's durable record — not to big_repo's row.
+
+**Lane 1 — big_repo's surface is now three verbs:**
+
+```
+allocate_id() -> DocumentId                          // row {signing_key}; touches nothing else
+commit_id(id, content, keys, coparents) -> BigDocHandle
+    // idempotent: stage record (AlreadyExists-on-mismatch guard) -> genesis from the RESERVED
+    // signer with the passed coparents (empty = memberless staging doc) -> events + sedimentree
+    // -> handle -> DELETE the reservation row as the last step. Crash mid-way leaves the row;
+    // a re-run reproduces byte-identical events (tested incl. across restart).
+abandon_allocation(id)                               // delete the row; NO keyhive ops at all
+reserved_doc_ids()                                   // kept: the cheap leak-sweep query
+```
+
+Deleted: `finalize_allocated_doc*`, `complete_allocated_doc`, `recover_allocated_doc` (resurrected with an honest name as `commit_reserved` — the mid-commit rescue verb), `discard_reserved_doc`, `drain_pending_allocations`, `AllocationRegistration`, the reservation's `parents` field, and the **`pending_documents` group everywhere** (authority field/persistence, drawer field, all threading). `doc delete` (the other half of the grant story) is unchanged this round — see the open items.
+
+**Lane 2 — the drawer's SQLite add-outbox with caller idempotency keys:**
+
+- `AddDocArgs` gains a required `idempotency_key` (FFI/Kotlin bindings regenerated; two compose callers + smoke test updated). Retry contract: same key + `done` row ⇒ **same doc_id**, no re-execution; in-flight key ⇒ refused (never resumed concurrently); late retry *after* the TTL purge ⇒ fresh add (documented).
+- `drawer_add_outbox` table (`drawer/outbox.rs`): write-ahead row durable **before** `commit_id`, then `pending-add → committed-staged → done`, with `done` written only when the `docs.map` entry is durable — never when the in-memory flow returns. TTL purge is strictly `state='done' AND done_at < cutoff` (7 days); **pending rows are never aged out**.
+- `drawer/reconciliation.rs`: the boot pass that replaced the interim sweep and re-entered the claim machinery (dead-code markers removed). Arms: reservation without outbox row ⇒ abandon (pre-write-ahead crash: no content ever existed); no keyhive doc ⇒ abandon row + reservation (caller retry is a fresh deterministic add); interrupted commit with a live doc ⇒ `commit_reserved` finishes it from the staged record; claimed-but-unregistered temporary ⇒ claim replay (`register_claimed_allocations`), then the drawer's own registration sequence; ordinary rows ⇒ the same shared sequence; unreadable registration ⇒ warn + keep. **Unclaimed temporary rows are dropped with the staging doc left unregistered** (nothing claims it; the retry re-derives).
+- The encryption worker's staging adds (create/rotate) now key per-*invocation* — both sites mint fresh keying material pre-staging, so a (doc, domain)-derived key would misdedupe a second representation onto the first's JWK (undecryptable); rotation's recovery is the durable claim, not the key.
+
+**Review fixes caught parent-side** (things the lanes themselves got wrong): the outbox schema is now ensured *before* the plugs `attach_drawer` (its first manifest write runs the drawer's add path and raced the schema creation — `no such table: drawer_add_outbox` on a plain boot); and the two misdedupe/unclaimed-temp fixes above.
+
+**Verified:** clippy `--all-targets --all-features` clean on `big_repo` and `daybook_core` (plus `daybook_cli`, `daybook_ffi`, `daybook_pdk`, plug crates; only the pre-redis future-incompat note remains); 53 targeted nextest tests green across the verb lifecycle, outbox crash windows, retry contract, claim replay and rotation recovery; `./x/check-dayb.ts` EXIT=0 (bindings + Kotlin `hotReloadDesktopMain`).
+
+**Open for the operator (not blocking push):**
+1. Outbox rows store entry + heads as **plaintext SQL** (encoding isolated in one helper pair for a one-site flip). Recommend following the `DocReservation` encrypted-blob precedent — entry metadata replicas what the drawer doc replicates, but the row format lives next to the secret store.
+2. `doc delete` still leaves standing delegations (stale ACL enumerations accumulate forever). Real fix: a drawer-owned idempotent "revoke this doc's drawer-managed delegations at tombstone heads" pass, driven by the durable tombstone — evidence-based, unlike the speculative sweeps this round killed.
+3. The rotation temp instrumentation (`TEMP-INSTRUMENTATION(prekey-dive)` in `keyhive.rs`) is still live for the round-16 prekey race; it should be its own squashed commit before the prekey diagnosis closes.
+4. Detekt baseline keeps a now-stale `AddDocArgs` suppression (harmless).
+
+---
 
 ## 2026-10-25 — round 16: the pair-root leak ledger is landed
 

@@ -924,6 +924,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-facet_ref.rs-0".to_string(),
             })
             .await?;
 
@@ -948,6 +950,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-facet_ref.rs-1".to_string(),
             })
             .await?;
 

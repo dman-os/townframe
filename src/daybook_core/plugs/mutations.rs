@@ -74,6 +74,8 @@ impl PlugsRepo {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "init:core-plug-manifest".to_string(),
             })
             .await?;
         let core_doc_id = daybook_types::doc::DocId::from(core_doc_id);
@@ -201,6 +203,8 @@ impl PlugsRepo {
                         branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                         facets: HashMap::new(),
                         user_path: None,
+
+                        idempotency_key: format!("plug-enable:{plug_id}"),
                     })
                     .await?,
             )
@@ -589,6 +593,8 @@ impl PlugsRepo {
                 branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets,
                 user_path: None,
+
+                idempotency_key: { "plug-add-manifest-doc".to_string() },
             })
             .await?;
 

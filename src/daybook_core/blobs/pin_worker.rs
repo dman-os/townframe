@@ -1734,6 +1734,8 @@ mod tests {
                 ]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pin_worker.rs-0".to_string(),
             })
             .await?;
 
@@ -1984,6 +1986,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pin_worker.rs-1".to_string(),
             })
             .await?;
 
@@ -2326,6 +2330,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pin_worker.rs-2".to_string(),
             })
             .await?;
         roots
@@ -2412,6 +2418,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pin_worker.rs-3".to_string(),
             })
             .await?;
         drawer
@@ -2602,6 +2610,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pin_worker.rs-4".to_string(),
             })
             .await?;
 

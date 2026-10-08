@@ -812,6 +812,11 @@ pub struct AddDocArgs {
     pub branch_path: BranchPathBuf,
     pub facets: HashMap<FacetKey, FacetRaw>,
     pub user_path: Option<UserPathBuf>,
+    /// Caller-chosen idempotency key for the drawer's write-ahead add outbox:
+    /// a retry with the same key returns the same doc instead of adding a
+    /// second one. Required and non-empty; see `drawer/outbox.rs` for the
+    /// exact retry contract.
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

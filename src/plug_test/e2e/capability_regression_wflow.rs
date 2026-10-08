@@ -128,6 +128,8 @@ async fn setup_doc(test_cx: &daybook_core::test_support::DaybookTestContext) -> 
             ]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-capability_regression_wflow.rs-0".to_string(),
         })
         .await?;
     Ok(doc_id)

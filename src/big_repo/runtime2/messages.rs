@@ -47,7 +47,6 @@ type SignedRevocation = Arc<
 #[educe(Debug)]
 pub enum Runtime2Cmd {
     AllocateDoc {
-        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::DocumentId>>,
     },
     /// Create a document. The handle sends this; the hub asynchronously calls
@@ -78,6 +77,10 @@ pub enum Runtime2Cmd {
     },
     FinalizeAllocatedDoc {
         doc_id: DocumentId,
+        /// Coparents the genesis is created under (the reservation stores
+        /// none). Empty is a valid genesis: the local active agent is always
+        /// the head parent.
+        coparents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         #[educe(Debug(ignore))]
         initial_content: Box<automerge::Automerge>,
         #[educe(Debug(ignore))]
@@ -85,22 +88,6 @@ pub enum Runtime2Cmd {
         #[educe(Debug(ignore))]
         resp:
             futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::types::LiveDocHandle>>,
-    },
-    /// Release an allocation's durable records: its pending-group authority and its id
-    /// reservation. Deliberately separate from [`Self::FinalizeAllocatedDoc`]: those two
-    /// records are the only things that name an allocation, so they have to outlive every
-    /// step that can still fail, including the caller's own registration write. The caller
-    /// that registers the document (the drawer's `docs.map` entry) sends this once that
-    /// write is durable, so a crash in between leaves a pending allocation that boot
-    /// recovery still finds through its reservation.
-    CompleteAllocatedDoc {
-        doc_id: DocumentId,
-        pending_group: crate::keyhive::BigKeyhiveGroup,
-        /// Content heads the registration made durable; the pending-group revocation is
-        /// ordered after them.
-        content_heads: Vec<[u8; 32]>,
-        #[educe(Debug(ignore))]
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     },
     GetDocHandle {
         doc_id: DocumentId,

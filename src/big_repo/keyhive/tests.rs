@@ -75,7 +75,7 @@ async fn prekey_rotation_secret_is_durable_before_public_event_and_survives_comp
 }
 
 #[tokio::test]
-async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
+async fn reserved_doc_finalization_creates_the_document_with_the_callers_coparents() -> Res<()> {
     let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::memory();
     let (evt_tx, _evt_rx) = async_channel::unbounded();
     let owner = BigKeyhiveHandle::new(
@@ -92,72 +92,47 @@ async fn pending_doc_finalization_removes_only_pending_group() -> Res<()> {
         owner.keyhive_peer_id(),
         owner.contact_card().clone(),
     ));
-    let (pending_group, _) = owner
+    let (coparent_group, _) = owner
         .create_group_with_parents(Vec::new(), &protocol)
         .await?;
-    let (intended_group, _) = owner
+    let (other_group, _) = owner
         .create_group_with_parents(Vec::new(), &protocol)
         .await?;
-    let doc_id = owner
-        .reserve_doc_id(
-            vec![pending_group.clone().into(), intended_group.clone().into()],
-            &storage,
-        )
-        .await?;
+    let doc_id = owner.reserve_doc_id(&storage).await?;
     // A reservation is not yet a Keyhive authority: no document exists and
     // no group contains it.
-    assert!(!owner.document_has_content(doc_id.clone()).await?);
+    assert!(!owner.keyhive_document_exists(doc_id.clone()).await?);
     assert!(
         !owner
-            .group_document_ids(&pending_group)
-            .await
-            .contains(&doc_id)
-    );
-    assert!(
-        !owner
-            .group_document_ids(&intended_group)
+            .group_document_ids(&coparent_group)
             .await
             .contains(&doc_id)
     );
 
-    // Finalization creates the document under the reserved identity with the
-    // real content heads and the reserved parents.
+    // Finalization creates the document under the reserved identity and the
+    // real content heads, membered in exactly the caller-passed coparents.
     owner
         .finalize_reserved_doc(
             doc_id.clone(),
+            vec![coparent_group.clone().into()],
             nonempty::nonempty!([7u8; 32]),
             &protocol,
             &storage,
         )
         .await?;
-    assert!(owner.document_has_content(doc_id.clone()).await?);
+    assert!(owner.keyhive_document_exists(doc_id.clone()).await?);
     assert!(
         owner
-            .group_document_ids(&pending_group)
+            .group_document_ids(&coparent_group)
             .await
             .contains(&doc_id)
     );
-    assert!(
-        owner
-            .group_document_ids(&intended_group)
-            .await
-            .contains(&doc_id)
-    );
-
-    owner
-        .revoke_group_from_doc(&pending_group, doc_id.clone(), vec![vec![7; 32]], &protocol)
-        .await?;
     assert!(
         !owner
-            .group_document_ids(&pending_group)
+            .group_document_ids(&other_group)
             .await
-            .contains(&doc_id)
-    );
-    assert!(
-        owner
-            .group_document_ids(&intended_group)
-            .await
-            .contains(&doc_id)
+            .contains(&doc_id),
+        "finalization must grant only the caller-passed coparents"
     );
     Ok(())
 }
@@ -441,35 +416,44 @@ async fn document_creation_succeeds_once_the_coparent_material_is_present() -> R
         .create_doc(vec![peer_authority], nonempty![[7u8; 32]], &protocol)
         .await?;
     assert!(
-        owner.document_has_content(doc_id).await?,
+        owner.keyhive_document_exists(doc_id).await?,
         "the created document must be materialized"
     );
     Ok(())
 }
 
+/// A coparent the caller passes that this hive has never materialized is fine
+/// for the reserved-signer path: unlike `generate_doc` (which resolves ids and
+/// refuses unknown ones), `generate_doc_with_reserved_signer` registers the
+/// passed peer's material as a side effect. The material-presence fixtures
+/// cover both absence (auto-registration here) and explicit registration.
 #[tokio::test]
-async fn reserved_document_finalization_refuses_a_parent_the_hive_has_not_materialized() -> Res<()>
-{
+async fn reserved_doc_finalization_registers_a_coparent_absent_from_the_hive() -> Res<()> {
     let (owner, storage, protocol, peer_individual, peer_authority) =
         local_hive_and_unmaterialized_peer(65, 66).await?;
     let peer_identifier: Identifier = peer_individual.lock().await.id().into();
 
-    // A reservation stores parent ids without resolving them, so reserving
-    // succeeds here and the refusal has to come from finalization.
-    let doc_id = owner.reserve_doc_id(vec![peer_authority], &storage).await?;
-    let err = owner
-        .finalize_reserved_doc(doc_id, nonempty![[7u8; 32]], &protocol, &storage)
-        .await
-        .err()
-        .ok_or_eyre("finalization must not proceed without the parent's material")?;
+    let doc_id = owner.reserve_doc_id(&storage).await?;
+    owner
+        .finalize_reserved_doc(
+            doc_id.clone(),
+            vec![peer_authority],
+            nonempty::nonempty!([7u8; 32]),
+            &protocol,
+            &storage,
+        )
+        .await?;
     assert!(
-        err.to_string()
-            .contains("cannot resolve reserved parent authority"),
-        "finalization refuses an unresolvable parent before selecting prekeys: {err}"
+        owner.keyhive_document_exists(doc_id).await?,
+        "the finalized document must be materialized"
     );
     assert!(
-        err.to_string().contains(&format!("{peer_identifier:?}")),
-        "the refusal must name the parent it could not resolve: {err}"
+        owner
+            .clone_keyhive()
+            .get_agent(peer_identifier)
+            .await
+            .is_some(),
+        "finalization must have registered the absent coparent's material"
     );
     Ok(())
 }
@@ -486,12 +470,18 @@ async fn reserved_document_finalization_succeeds_once_the_parent_material_is_pre
         "the fixture must start without the peer registered"
     );
 
-    let doc_id = owner.reserve_doc_id(vec![peer_authority], &storage).await?;
+    let doc_id = owner.reserve_doc_id(&storage).await?;
     owner
-        .finalize_reserved_doc(doc_id.clone(), nonempty![[7u8; 32]], &protocol, &storage)
+        .finalize_reserved_doc(
+            doc_id.clone(),
+            vec![peer_authority],
+            nonempty::nonempty!([7u8; 32]),
+            &protocol,
+            &storage,
+        )
         .await?;
     assert!(
-        owner.document_has_content(doc_id).await?,
+        owner.keyhive_document_exists(doc_id).await?,
         "the finalized document must be materialized"
     );
     Ok(())

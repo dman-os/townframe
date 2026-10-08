@@ -1413,6 +1413,8 @@ mod tests {
                 ]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-facet_set.rs-0".to_string(),
             })
             .await?;
 
@@ -1429,6 +1431,8 @@ mod tests {
                 branch_path: BranchPathBuf::from("main"),
                 facets: Default::default(),
                 user_path: None,
+
+                idempotency_key: "test-key-facet_set.rs-1".to_string(),
             })
             .await?;
         wait_for_doc_tag(&repo, &empty_doc_id, WellKnownFacetTag::Dmeta.as_str()).await?;
@@ -1527,6 +1531,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-facet_set.rs-2".to_string(),
             })
             .await?;
 

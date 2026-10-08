@@ -315,6 +315,8 @@ mod tests {
                 branch_path: BranchPathBuf::from("main"),
                 facets: default(),
                 user_path: None,
+
+                idempotency_key: "test-key-key_source.rs-0".to_string(),
             })
             .await?;
         Ok(doc_id)

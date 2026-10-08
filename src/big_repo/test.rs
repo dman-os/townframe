@@ -571,30 +571,26 @@ async fn bucket_band_reconciles_after_offline_reopen() -> Res<()> {
 }
 
 #[tokio::test]
-async fn allocate_and_finalize_pending_document_lifecycle() -> Res<()> {
+async fn allocate_commit_abandon_id_lifecycle() -> Res<()> {
     let temp_root = tempdir()?;
     let owner = SyncRepoNode::boot(temp_root.path().join("owner"), 191, true).await?;
-    let pending = owner.repo.create_group_with_parents(vec![]).await?;
     let intended = owner.repo.create_group_with_parents(vec![]).await?;
-    let doc_id = owner
-        .repo
-        .allocate_doc(vec![pending.clone().into(), intended.clone().into()])
-        .await?;
+    let doc_id = owner.repo.allocate_id().await?;
 
     assert!(!owner.repo.contains_sedimentree_id(doc_id.clone()).await?);
     assert!(
         !owner
             .repo
             .keyhive()
-            .document_has_content(doc_id.clone())
+            .keyhive_document_exists(doc_id.clone())
             .await?
     );
+    assert!(owner.repo.reserved_doc_ids().await?.contains(&doc_id));
     // A reservation is not yet a Keyhive authority: no group contains it.
     assert!(
         !owner
             .repo
-            .keyhive()
-            .group_document_ids(&pending)
+            .documents_in_group(&intended)
             .await
             .contains(&doc_id)
     );
@@ -603,422 +599,197 @@ async fn allocate_and_finalize_pending_document_lifecycle() -> Res<()> {
     initial
         .transact(|tx| tx.put(automerge::ROOT, "id", doc_id.to_string()))
         .expect("failed creating initial document commit");
-    let content_heads: Vec<[u8; 32]> = initial.get_heads().into_iter().map(|head| head.0).collect();
     let retry_initial = initial.clone();
-    owner
+    let handle = owner
         .repo
-        .finalize_allocated_doc(doc_id.clone(), initial)
+        .commit_id(
+            doc_id.clone(),
+            initial,
+            Vec::new(),
+            &[intended.clone().into()],
+        )
         .await?;
-    // Re-finalizing the same allocation is idempotent: it must neither re-stage nor
-    // double-apply the authority creation.
-    owner
-        .repo
-        .finalize_allocated_doc(doc_id.clone(), retry_initial)
-        .await?;
-
     assert!(owner.repo.contains_sedimentree_id(doc_id.clone()).await?);
     assert!(
         owner
             .repo
             .keyhive()
-            .document_has_content(doc_id.clone())
+            .keyhive_document_exists(doc_id.clone())
             .await?
     );
-    // Finalize deliberately leaves the allocation's durable records in place. The
-    // reservation and the pending-group authority are the only things that name a
-    // document nobody has registered yet, so they must outlive finalize; the caller that
-    // registers the document (the drawer, in its `docs.map` entry) drops them.
-    assert!(owner.repo.reserved_doc_ids().await?.contains(&doc_id));
     assert!(
         owner
             .repo
-            .keyhive()
-            .group_document_ids(&pending)
+            .documents_in_group(&intended)
             .await
-            .contains(&doc_id)
+            .contains(&doc_id),
+        "the commit must member the document in the caller-passed coparents"
     );
+    // commit_id deletes the reservation row as its final step, so a committed
+    // id is no longer a recovery candidate.
     assert!(
-        owner
-            .repo
-            .keyhive()
-            .group_document_ids(&intended)
-            .await
-            .contains(&doc_id)
+        !owner.repo.reserved_doc_ids().await?.contains(&doc_id),
+        "commit_id must drop the reservation"
     );
+    let expected_export = handle.export().await;
 
+    // Re-committing the same allocation is idempotent: it must neither re-stage
+    // nor double-apply the authority creation, and the content is untouched.
+    let recommitted = owner
+        .repo
+        .commit_id(
+            doc_id.clone(),
+            retry_initial,
+            Vec::new(),
+            &[intended.clone().into()],
+        )
+        .await?;
+    assert_eq!(
+        recommitted.export().await,
+        expected_export,
+        "the re-commit must reproduce the identical document"
+    );
     let mut mismatch = automerge::Automerge::new();
     mismatch
         .transact(|tx| tx.put(automerge::ROOT, "different", true))
         .expect("failed creating mismatched document content");
     let mismatch_error = owner
         .repo
-        .finalize_allocated_doc(doc_id.clone(), mismatch)
+        .commit_id(doc_id.clone(), mismatch, Vec::new(), &[])
         .await
         .expect_err("different persisted content must be rejected");
     assert!(
-        mismatch_error
-            .to_string()
-            .contains("initial content mismatch")
-    );
-
-    // Completion is the only step that drops the records: it revokes the pending-group
-    // authority and drops the id reservation, while the intended group's authority stays.
-    owner
-        .repo
-        .complete_allocated_doc(doc_id.clone(), pending.clone(), content_heads)
-        .await?;
-    assert!(
-        !owner.repo.reserved_doc_ids().await?.contains(&doc_id),
-        "completion must drop the id reservation"
-    );
-    assert!(
-        !owner
-            .repo
-            .keyhive()
-            .group_document_ids(&pending)
-            .await
-            .contains(&doc_id),
-        "completion must revoke the pending-group authority"
+        mismatch_error.to_string().contains("mismatch"),
+        "unexpected error: {mismatch_error}"
     );
     assert!(
         owner
             .repo
-            .keyhive()
-            .group_document_ids(&intended)
+            .documents_in_group(&intended)
             .await
-            .contains(&doc_id)
+            .contains(&doc_id),
+        "the re-commit must not re-do any authority surgery"
+    );
+
+    // Abandon on an already-committed id is a no-op on the absent row: the
+    // committed document stays exactly as it is.
+    owner.repo.abandon_allocation(doc_id.clone()).await?;
+    assert!(
+        owner
+            .repo
+            .keyhive()
+            .keyhive_document_exists(doc_id.clone())
+            .await?
     );
 
     owner.shutdown().await?;
     Ok(())
 }
 
+/// Abandon is pure local bookkeeping: the reservation row goes (once, then
+/// again without error), and no keyhive operation happens — the id becomes
+/// uncommittable, and an id that was never allocated abandons silently too.
+/// `commit_reserved` is the rescue verb for a commit crashed inside
+/// `commit_id` after the keyhive authority was created but before the
+/// Sedimentree persisted: the reservation still holds the staged record (and
+/// the row), so the finish reproduces the identical document and deletes the
+/// row like any successful commit.
 #[tokio::test]
-async fn staged_document_reservation_recovers_after_repository_reopen() -> Res<()> {
+async fn commit_reserved_finishes_an_interrupted_commit() -> Res<()> {
     let temp_root = tempdir()?;
-    let repo_path = temp_root.path().join("reserved-document-restart");
+    let repo_path = temp_root
+        .path()
+        .join("reserved-document-interrupted-commit");
     let (repo, _part_store, stop) = _boot_disk_repo(repo_path.clone()).await?;
-    let pending = repo.create_group_with_parents(vec![]).await?;
-    let intended = repo.create_group_with_parents(vec![]).await?;
-    let pending_id = pending.id().to_bytes();
-    let intended_id = intended.id().to_bytes();
-    let doc_id = repo
-        .allocate_doc(vec![pending.clone().into(), intended.clone().into()])
-        .await?;
+    let doc_id = repo.allocate_id().await?;
     let mut initial = automerge::Automerge::new();
     initial
         .transact(|tx| tx.put(automerge::ROOT, "id", doc_id.to_string()))
         .expect("failed creating staged initial document");
-    let content_heads: Vec<[u8; 32]> = initial.get_heads().into_iter().map(|head| head.0).collect();
+    let expected_bytes = initial.save();
+    // Simulate the crash window precisely: stage the record, create the
+    // keyhive authority from the reserved signer (events persisted), and stop
+    // before any Sedimentree persistence. The interrupted `commit_id` leaves
+    // the reservation row behind with everything else.
     repo.keyhive
         .stage_reserved_doc(
             doc_id.clone(),
-            initial.save(),
+            expected_bytes.clone(),
             Vec::new(),
             &repo.keyhive_storage,
         )
         .await?;
+    let heads = initial
+        .get_heads()
+        .into_iter()
+        .map(|head| head.0)
+        .collect::<Vec<_>>();
+    repo.keyhive
+        .finalize_reserved_doc(
+            doc_id.clone(),
+            Vec::new(),
+            nonempty::NonEmpty::from_vec(heads).expect("initial document has heads"),
+            &repo.keyhive_protocol,
+            &repo.keyhive_storage,
+        )
+        .await?;
+    assert!(repo.keyhive.keyhive_document_exists(doc_id.clone()).await?);
+    assert!(!repo.contains_sedimentree_id(doc_id.clone()).await?);
     stop().await?;
     drop(repo);
 
     let (reopened, _part_store, reopened_stop) = _boot_disk_repo(repo_path).await?;
-    let reopened_pending = reopened
-        .get_group_by_id(pending_id)
-        .await
-        .expect("pending group must survive restart");
-    let reopened_intended = reopened
-        .get_group_by_id(intended_id)
-        .await
-        .expect("intended group must survive restart");
-    assert!(reopened.recover_allocated_doc(doc_id.clone()).await?);
+    assert!(
+        reopened.reserved_doc_ids().await?.contains(&doc_id),
+        "the interrupted commit's reservation survives the restart"
+    );
+    let handle = reopened.commit_reserved(doc_id.clone(), &[]).await?;
+    assert_eq!(
+        handle.export().await,
+        expected_bytes,
+        "the finished commit must reproduce the staged bytes"
+    );
     assert!(reopened.contains_sedimentree_id(doc_id.clone()).await?);
     assert!(
-        reopened
-            .keyhive()
-            .document_has_content(doc_id.clone())
-            .await?
-    );
-    // Recovery recreates the authority and stops there. It has no caller that registered
-    // the document, so completing here would erase the only records that can still name
-    // the allocation; both survive instead, and the next boot recovers it again.
-    assert!(reopened.reserved_doc_ids().await?.contains(&doc_id));
-    assert!(
-        reopened
-            .keyhive()
-            .group_document_ids(&reopened_pending)
-            .await
-            .contains(&doc_id)
-    );
-    assert!(
-        reopened
-            .keyhive()
-            .group_document_ids(&reopened_intended)
-            .await
-            .contains(&doc_id)
-    );
-
-    // The drawer's registration is what completes the allocation.
-    reopened
-        .complete_allocated_doc(doc_id.clone(), reopened_pending.clone(), content_heads)
-        .await?;
-    assert!(!reopened.reserved_doc_ids().await?.contains(&doc_id));
-    assert!(
-        !reopened
-            .keyhive()
-            .group_document_ids(&reopened_pending)
-            .await
-            .contains(&doc_id)
-    );
-    assert!(
-        reopened
-            .keyhive()
-            .group_document_ids(&reopened_intended)
-            .await
-            .contains(&doc_id)
+        !reopened.reserved_doc_ids().await?.contains(&doc_id),
+        "the finished commit deletes the reservation row"
     );
     reopened_stop().await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn reserved_document_crash_windows_are_recoverable() -> Res<()> {
+async fn abandon_allocation_deletes_the_reservation_and_touches_nothing_else() -> Res<()> {
     let temp_root = tempdir()?;
     let owner = SyncRepoNode::boot(temp_root.path().join("owner"), 192, true).await?;
-    let pending = owner.repo.create_group_with_parents(vec![]).await?;
-    let intended = owner.repo.create_group_with_parents(vec![]).await?;
 
-    // Crash window 1: reservation durable, no sedimentree, no Keyhive doc. Nothing but
-    // the reservation names the allocation, and it is the boot sweep's input.
-    let doc_id = owner
-        .repo
-        .allocate_doc(vec![pending.clone().into(), intended.clone().into()])
-        .await?;
+    let doc_id = owner.repo.allocate_id().await?;
+    assert!(owner.repo.reserved_doc_ids().await?.contains(&doc_id));
+    owner.repo.abandon_allocation(doc_id.clone()).await?;
     assert!(
-        owner.repo.reserved_doc_ids().await?.contains(&doc_id),
-        "reservation must be durable immediately after allocation"
+        !owner.repo.reserved_doc_ids().await?.contains(&doc_id),
+        "the abandon must drop the reservation"
     );
-    assert!(!owner.repo.contains_sedimentree_id(doc_id.clone()).await?);
-    assert!(
-        !owner
-            .repo
-            .keyhive()
-            .document_has_content(doc_id.clone())
-            .await?
-    );
+    // Idempotent: the second abandon finds no row and still succeeds.
+    owner.repo.abandon_allocation(doc_id.clone()).await?;
 
-    // Finalizing an id that was never allocated must fail: no reservation and
-    // no matching document.
+    // An id that was never allocated abandons silently too.
     let never_allocated = DocumentId::new([0xEE; 32]);
+    owner
+        .repo
+        .abandon_allocation(never_allocated.clone())
+        .await?;
+
+    // The abandoned id is finalizable by nobody: no reservation, no document.
     let mut phantom = automerge::Automerge::new();
     phantom
         .transact(|tx| tx.put(automerge::ROOT, "id", never_allocated.to_string()))
         .expect("failed creating phantom document");
-    let phantom_error = owner
-        .repo
-        .finalize_allocated_doc(never_allocated, phantom)
-        .await
-        .expect_err("finalizing an unallocated id must fail");
-    assert!(
-        phantom_error.to_string().contains("no reservation"),
-        "unexpected error: {phantom_error}"
-    );
-
-    // Crash window 2: authority and sedimentree durable, allocation still pending. Nothing
-    // has registered the document, so both records must still be there and re-finalizing
-    // must stay idempotent.
-    let mut initial = automerge::Automerge::new();
-    initial
-        .transact(|tx| tx.put(automerge::ROOT, "id", doc_id.to_string()))
-        .expect("failed creating initial document commit");
-    let content_heads: Vec<[u8; 32]> = initial.get_heads().into_iter().map(|head| head.0).collect();
-    let retry_initial = initial.clone();
-    owner
-        .repo
-        .finalize_allocated_doc(doc_id.clone(), initial)
-        .await?;
-    owner
-        .repo
-        .finalize_allocated_doc(doc_id.clone(), retry_initial)
-        .await?;
-
-    assert!(owner.repo.contains_sedimentree_id(doc_id.clone()).await?);
-    assert!(
-        owner
-            .repo
-            .keyhive()
-            .document_has_content(doc_id.clone())
-            .await?
-    );
-    assert!(
-        owner.repo.reserved_doc_ids().await?.contains(&doc_id),
-        "only completion may drop the reservation, and nothing has registered the document"
-    );
-    assert!(
-        owner
-            .repo
-            .keyhive()
-            .group_document_ids(&pending)
-            .await
-            .contains(&doc_id)
-    );
-
-    // Crash window 3: the registration landed, so completion drops both records while the
-    // intended group's authority stays.
-    owner
-        .repo
-        .complete_allocated_doc(doc_id.clone(), pending.clone(), content_heads)
-        .await?;
-    assert!(!owner.repo.reserved_doc_ids().await?.contains(&doc_id));
-    assert!(
-        !owner
-            .repo
-            .keyhive()
-            .group_document_ids(&pending)
-            .await
-            .contains(&doc_id)
-    );
-    assert!(
-        owner
-            .repo
-            .keyhive()
-            .group_document_ids(&intended)
-            .await
-            .contains(&doc_id)
-    );
-
-    owner.shutdown().await?;
-    Ok(())
-}
-#[tokio::test]
-async fn the_boot_sweep_discards_an_unregistered_staged_allocation() -> Res<()> {
-    // Crash window (b): the authority, the finalize grants and the sedimentree
-    // are durable but nothing registered the document. The sweep discards: the
-    // advertising coparents the granted-not-registered window left standing are
-    // reverted FIRST (a shared coparent grant is replication authorization),
-    // then the pending coparent is revoked and the reservation dropped, while
-    // the sedimentree and content bytes stay — a discard never deletes them.
-    let temp_root = tempdir()?;
-    let owner = SyncRepoNode::boot(temp_root.path().join("owner"), 192, true).await?;
-    let pending = owner.repo.create_group_with_parents(vec![]).await?;
-    let mut advertising_groups = Vec::new();
-    for _ in 0..3 {
-        advertising_groups.push(owner.repo.create_group_with_parents(vec![]).await?);
-    }
-
-    let doc_id = owner
-        .repo
-        .allocate_doc(vec![pending.clone().into()])
-        .await?;
-    let mut initial = automerge::Automerge::new();
-    initial
-        .transact(|tx| tx.put(automerge::ROOT, "id", doc_id.to_string()))
-        .expect("failed creating initial document commit");
-    owner
-        .repo
-        .finalize_allocated_doc(doc_id.clone(), initial)
-        .await?;
-    assert!(owner.repo.contains_sedimentree_id(doc_id.clone()).await?);
-
-    let mut registration = HashMap::new();
-    // The granted-not-registered window: the finalize grants landed, then the
-    // caller died before the registration write.
-    for group in &advertising_groups {
-        owner
-            .repo
-            .add_admin_member_to_doc(doc_id.clone(), group.clone())
-            .await?;
-    }
-    registration.insert(
-        doc_id.clone(),
-        AllocationRegistration::Unregistered(advertising_groups.clone()),
-    );
-    owner
-        .repo
-        .drain_pending_allocations(pending.clone(), &registration)
-        .await?;
-
-    assert!(
-        !owner.repo.reserved_doc_ids().await?.contains(&doc_id),
-        "the sweep must drop the reservation of an unregistered allocation"
-    );
-    assert!(
-        !owner
-            .repo
-            .keyhive()
-            .group_document_ids(&pending)
-            .await
-            .contains(&doc_id),
-        "the sweep must revoke the pending coparent of an unregistered allocation"
-    );
-    for group in &advertising_groups {
-        assert!(
-            !owner
-                .repo
-                .keyhive()
-                .group_document_ids(group)
-                .await
-                .contains(&doc_id),
-            "the sweep must revert the advertising coparent of an unregistered allocation"
-        );
-    }
-    assert!(
-        owner.repo.contains_sedimentree_id(doc_id.clone()).await?,
-        "a discard never deletes the sedimentree"
-    );
-    assert!(
-        owner
-            .repo
-            .keyhive()
-            .document_has_content(doc_id.clone())
-            .await?,
-        "a discard never deletes the document bytes"
-    );
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn the_boot_sweep_discards_a_reservation_that_was_never_staged() -> Res<()> {
-    // Crash window (a): reservation durable and nothing else — the leak. The
-    // ordering proof (staging precedes any possible registration) makes the
-    // discard purely local, and the id becomes finalizable by nobody again.
-    let temp_root = tempdir()?;
-    let owner = SyncRepoNode::boot(temp_root.path().join("owner"), 192, true).await?;
-    let pending = owner.repo.create_group_with_parents(vec![]).await?;
-
-    let doc_id = owner
-        .repo
-        .allocate_doc(vec![pending.clone().into()])
-        .await?;
-    assert!(owner.repo.reserved_doc_ids().await?.contains(&doc_id));
-
-    let mut registration = HashMap::new();
-    registration.insert(
-        doc_id.clone(),
-        AllocationRegistration::Unregistered(vec![
-            owner.repo.create_group_with_parents(vec![]).await?,
-        ]),
-    );
-    owner
-        .repo
-        .drain_pending_allocations(pending.clone(), &registration)
-        .await?;
-
-    assert!(
-        !owner.repo.reserved_doc_ids().await?.contains(&doc_id),
-        "the sweep must drop the reservation"
-    );
-    assert!(!owner.repo.contains_sedimentree_id(doc_id.clone()).await?);
-
-    let mut phantom = automerge::Automerge::new();
-    phantom
-        .transact(|tx| tx.put(automerge::ROOT, "id", doc_id.to_string()))
-        .expect("failed creating phantom document");
     let error = owner
         .repo
-        .finalize_allocated_doc(doc_id.clone(), phantom)
+        .commit_id(never_allocated, phantom, Vec::new(), &[])
         .await
-        .expect_err("a discarded reservation is gone; finalizing the id must fail");
+        .expect_err("committing an abandoned (unallocated) id must fail");
     assert!(
         error.to_string().contains("no reservation"),
         "unexpected error: {error}"
@@ -1027,119 +798,57 @@ async fn the_boot_sweep_discards_a_reservation_that_was_never_staged() -> Res<()
     Ok(())
 }
 
+/// A crash between staging and committing is exactly what the reservation row
+/// exists for: after a reopen, the re-run of `commit_id` with the staged
+/// content reproduces the identical document, deletes the row and finishes.
 #[tokio::test]
-async fn the_boot_sweep_completes_a_registered_allocation_by_replaying_its_grants() -> Res<()> {
-    // Crash window (c) — registered-not-finalized: the registration is durable
-    // but the allocating caller died before completion, and a finalize grant
-    // may not have landed either. The sweep mechanically replays the finalize
-    // grants and completes, leaving the registered groups authorized and the
-    // pending coparent revoked.
+async fn commit_rerun_after_restart_reproduces_byte_identical_events() -> Res<()> {
     let temp_root = tempdir()?;
-    let owner = SyncRepoNode::boot(temp_root.path().join("owner"), 192, true).await?;
-    let pending = owner.repo.create_group_with_parents(vec![]).await?;
-    let intended = owner.repo.create_group_with_parents(vec![]).await?;
-
-    let doc_id = owner
-        .repo
-        .allocate_doc(vec![pending.clone().into()])
-        .await?;
+    let repo_path = temp_root.path().join("reserved-document-restart");
+    let (repo, _part_store, stop) = _boot_disk_repo(repo_path.clone()).await?;
+    let doc_id = repo.allocate_id().await?;
     let mut initial = automerge::Automerge::new();
     initial
         .transact(|tx| tx.put(automerge::ROOT, "id", doc_id.to_string()))
-        .expect("failed creating initial document commit");
-    owner
-        .repo
-        .finalize_allocated_doc(doc_id.clone(), initial)
+        .expect("failed creating staged initial document");
+    let expected_bytes = initial.save();
+    // Crash window: only the staged record exists (no keyhive document, no
+    // sedimentree); the reservation row carries it.
+    repo.keyhive
+        .stage_reserved_doc(
+            doc_id.clone(),
+            expected_bytes.clone(),
+            Vec::new(),
+            &repo.keyhive_storage,
+        )
         .await?;
-    assert!(
-        !owner
-            .repo
-            .keyhive()
-            .group_document_ids(&intended)
-            .await
-            .contains(&doc_id),
-        "positive control: the replayed grant has not run yet"
-    );
+    assert!(repo.reserved_doc_ids().await?.contains(&doc_id));
+    assert!(!repo.contains_sedimentree_id(doc_id.clone()).await?);
+    stop().await?;
+    drop(repo);
 
-    let mut registration = HashMap::new();
-    registration.insert(
-        doc_id.clone(),
-        AllocationRegistration::Registered(vec![intended.clone()]),
-    );
-    owner
-        .repo
-        .drain_pending_allocations(pending.clone(), &registration)
+    let (reopened, _part_store, reopened_stop) = _boot_disk_repo(repo_path).await?;
+    let content = automerge::Automerge::load(&expected_bytes)?;
+    let handle = reopened
+        .commit_id(doc_id.clone(), content, Vec::new(), &[])
         .await?;
-
+    assert!(reopened.contains_sedimentree_id(doc_id.clone()).await?);
     assert!(
-        !owner.repo.reserved_doc_ids().await?.contains(&doc_id),
-        "the sweep must complete the registered allocation"
+        handle.export().await == expected_bytes,
+        "the post-restart commit must reproduce the staged bytes exactly"
     );
-    assert!(
-        !owner
-            .repo
-            .keyhive()
-            .group_document_ids(&pending)
-            .await
-            .contains(&doc_id),
-        "completion must revoke the pending coparent"
-    );
-    assert!(
-        owner
-            .repo
-            .keyhive()
-            .group_document_ids(&intended)
-            .await
-            .contains(&doc_id),
-        "the sweep must replay the finalize grant"
-    );
-    assert!(
-        owner.repo.contains_sedimentree_id(doc_id.clone()).await?,
-        "completion never deletes the sedimentree"
-    );
-    owner.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn the_boot_sweep_keeps_reservations_it_cannot_safely_release() -> Res<()> {
-    // Both keep-and-warn directions: a reservation the registration read could
-    // not classify (absent from the map), and one whose registration
-    // contradicts the finalize ordering (registered but never staged).
-    let temp_root = tempdir()?;
-    let owner = SyncRepoNode::boot(temp_root.path().join("owner"), 192, true).await?;
-    let pending = owner.repo.create_group_with_parents(vec![]).await?;
-    let intended = owner.repo.create_group_with_parents(vec![]).await?;
-
-    let kept_unreadable = owner
-        .repo
-        .allocate_doc(vec![pending.clone().into()])
+    // A re-run over the now-committed id is the same idempotent no-op.
+    let content = automerge::Automerge::load(&expected_bytes)?;
+    let rerun = reopened
+        .commit_id(doc_id.clone(), content, Vec::new(), &[])
         .await?;
-    let kept_contradiction = owner
-        .repo
-        .allocate_doc(vec![pending.clone().into()])
-        .await?;
-
-    let mut registration = HashMap::new();
-    registration.insert(
-        kept_contradiction.clone(),
-        AllocationRegistration::Registered(vec![intended.clone()]),
+    assert_eq!(
+        rerun.export().await,
+        handle.export().await,
+        "the re-run must not change anything"
     );
-    owner
-        .repo
-        .drain_pending_allocations(pending.clone(), &registration)
-        .await?;
-
-    let reservations = owner.repo.reserved_doc_ids().await?;
-    assert!(
-        reservations.contains(&kept_unreadable),
-        "an unreadable registration keeps the reservation"
-    );
-    assert!(
-        reservations.contains(&kept_contradiction),
-        "registered-but-never-staged contradicts the finalize ordering and keeps the reservation"
-    );
-    owner.shutdown().await?;
+    assert!(!reopened.reserved_doc_ids().await?.contains(&doc_id));
+    reopened_stop().await?;
     Ok(())
 }
 

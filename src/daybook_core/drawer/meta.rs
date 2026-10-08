@@ -49,7 +49,7 @@ use daybook_types::url::parse_facet_ref;
 use std::collections::{HashMap, HashSet};
 
 /// Create the local-branch SQL tables if the db predates them. Idempotent;
-/// also called by the boot sweep's registration read, which can run before
+/// also called by the boot reconciliation's registration read, which can run before
 /// a drawer boot ever created the schema.
 pub(crate) async fn ensure_local_branch_schema(sql: &SqlCtx) -> Res<()> {
     sqlx::query(
@@ -395,8 +395,9 @@ impl DrawerRepo {
     }
 }
 
-/// The registration side of the pending allocations, as the boot sweep's
-/// caller reads it off the drawer's durable surfaces. The surface is the
+/// The registration side of the drawer's add outbox, as the boot
+/// reconciliation's registration read (reconciliation.rs) sees it on the
+/// drawer's durable surfaces. The surface is the
 /// kind: content docs are `docs.map` keys, replicated branches ride an
 /// entry's branch refs, and a local branch ref never travels on the drawer
 /// document at all (it lives in the `drawer_local_branches` SQL table).
@@ -404,12 +405,13 @@ impl DrawerRepo {
 /// `claims` are the claimed-but-uncommitted staging allocations (ADR 003 §19):
 /// a durable `cipherBlob` facet names the reservation by `keyRef`, so the
 /// operation got past its commit point and the commit is replayed, not
-/// discarded. `claims_complete` is false when a registered content doc's
-/// branch could not be read, in which case an absent claim means nothing.
+/// discarded. An incomplete scan (`claims_in_branch_doc` returning `false`) is
+/// reported per branch via the warn path: the reconciliation replays
+/// discovered commits regardless of completeness, since it never discards on
+/// a claim read.
 pub(crate) struct AllocationRegistrationRead {
     pub shapes: HashMap<big_repo::DocumentId, RegisteredAllocationShape>,
     pub claims: HashSet<big_repo::DocumentId>,
-    pub claims_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,8 +432,8 @@ pub(crate) enum RegisteredAllocationShape {
 ///
 /// Returns `Ok(None)` when the drawer document is not readable at this boot
 /// stage (missing, or still pending materialization on a fresh clone): the
-/// boot sweep then keeps every reservation instead of classifying, since a
-/// registered-but-unreadable allocation must never be discarded.
+/// reconciliation then keeps every surviving row instead of replaying, since a
+/// registered-but-unreadable entry must never be re-committed blind.
 pub(crate) async fn registered_allocation_shapes(
     sql: &SqlCtx,
     big_repo: &big_repo::SharedBigRepo,
@@ -441,14 +443,13 @@ pub(crate) async fn registered_allocation_shapes(
     let big_repo::DocLookup::Ready(drawer_handle) = big_repo.get_doc(drawer_doc_id).await? else {
         tracing::warn!(
             %drawer_doc_id,
-            "pending allocations keep their boot sweep: the drawer document is not readable here"
+            "outbox rows keep their replay: the drawer document is not readable here"
         );
         return Ok(None);
     };
 
     let mut shapes = HashMap::new();
     let mut claims = HashSet::new();
-    let mut claims_complete = true;
     // The branch docs of every registered content doc: what the claim scan
     // reads when there are reservations to classify.
     let mut content_branch_docs = Vec::new();
@@ -527,19 +528,14 @@ pub(crate) async fn registered_allocation_shapes(
             {
                 tracing::warn!(
                     %branch_doc_id,
-                    "pending allocations keep their boot sweep: a registered content doc's \
+                    "outbox rows keep their replay check: a registered content doc's \
                      branch could not be read, so its cipherBlob claims cannot be enumerated"
                 );
-                claims_complete = false;
             }
         }
     }
 
-    Ok(Some(AllocationRegistrationRead {
-        shapes,
-        claims,
-        claims_complete,
-    }))
+    Ok(Some(AllocationRegistrationRead { shapes, claims }))
 }
 
 /// Read one registered branch doc's durable `cipherBlob` facets at its current
@@ -574,7 +570,7 @@ async fn claims_in_branch_doc(
             am_utils_rs::codecs::ThroughJson<HashMap<FacetKey, daybook_types::doc::FacetRaw>>,
         >(&heads, automerge::ROOT, vec!["facets".into()])
         .await
-        .wrap_err("hydrate facets for the pending-allocation claim scan")?
+        .wrap_err("hydrate facets for the add-outbox claim scan")?
         .map(|value| value.0)
         .unwrap_or_default();
     for (key, raw) in facets {
@@ -597,8 +593,8 @@ async fn claims_in_branch_doc(
 /// Replay the registration write for the claimed-but-uncommitted staging
 /// allocations (ADR 003 §19): the durable cipherBlob claim says the operation
 /// got past its commit point, so the commit is replayed, starting with the
-/// `docs.map` entry — written here, before the boot drain grants and
-/// completes the allocation, in the drawer's own registration shape. A crash
+/// `docs.map` entry — written here, before the boot reconciliation replays the
+/// grants and registration, in the drawer's own registration shape. A crash
 /// anywhere in the replay lands in the registered-not-finalized window the
 /// sweep already handles, because the reservation is only released after that
 /// completes.

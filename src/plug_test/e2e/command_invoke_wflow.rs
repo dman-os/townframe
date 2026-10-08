@@ -16,6 +16,8 @@ async fn test_command_invoke_success_reply() -> Res<()> {
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-command_invoke_wflow.rs-0".to_string(),
         })
         .await?;
     let (_doc, success_heads) = test_cx

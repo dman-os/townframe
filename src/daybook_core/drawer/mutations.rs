@@ -1,5 +1,6 @@
 use crate::interlude::*;
 
+use super::outbox::{self, OutboxState};
 use super::{BranchKind, DrawerRepo, FacetRaw, FacetWriteScope};
 
 use crate::drawer::{
@@ -19,12 +20,13 @@ use daybook_types::doc::{
 };
 
 /// The receipt of [`DrawerRepo::add_temporary`]: a document staged purely
-/// locally. Nothing about the staging is replicated — the pending group has no
-/// members, so the staged events cannot leave the node — and nothing registers
-/// it yet: the caller either [`DrawerRepo::commit_temporary`]s it (the
-/// advertising grants, the `docs.map` registration, the pending revoke) or
-/// [`DrawerRepo::discard_temporary`]s it, and a crash leaves the reservation to
-/// the next boot's sweep (ADR 003 §19: the cipherBlob claim decides which).
+/// locally. Nothing about the staging is replicated — no coparent grants at
+/// genesis mean no group reaches the staged doc, so its events cannot leave
+/// the node — and nothing registers it yet: the caller either
+/// [`DrawerRepo::commit_temporary`]s it (the advertising grants plus the
+/// `docs.map` registration) or [`DrawerRepo::discard_temporary`]s it, and a
+/// crash leaves the reservation to the next boot's sweep (ADR 003 §19: the
+/// cipherBlob claim decides which).
 pub struct StagedAdd {
     pub doc_id: DocId,
     pub handle: big_repo::BigDocHandle,
@@ -34,6 +36,9 @@ pub struct StagedAdd {
     /// while the document is still staging.
     pub branch_heads: ChangeHashSet,
     pub branch_doc_id: DocumentId,
+    /// The idempotency key the outbox row rides on (from the caller's
+    /// `AddDocArgs`); a commit or discard updates that row.
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -48,18 +53,66 @@ impl DrawerRepo {
     /// commit registers it. Validation of the caller's own facets belongs to
     /// the caller (batch validation validates first so a bad batch allocates
     /// nothing); this only validates the system facets it authors.
-    async fn prepare_add_doc(&self, args: AddDocArgs) -> Result<StagedAdd, DrawerError> {
+    /// `temporary` marks an `add_temporary` staging receipt: its outbox row is
+    /// write-ahead bookkeeping too, but its registration is NOT owed by the
+    /// row — the durable `cipherBlob` claim decides it (ADR 003 §19,
+    /// `drawer/reconciliation.rs`). Ordinary adds' rows are the intent to
+    /// register.
+    async fn prepare_add_doc(
+        &self,
+        args: AddDocArgs,
+        temporary: bool,
+    ) -> Result<StagedAdd, DrawerError> {
         if args.branch_path != "main" {
             Err(ferr!("new docs must be created on main"))?;
         }
+        if args.idempotency_key.is_empty() {
+            Err(ferr!("add requires a non-empty idempotency key"))?;
+        }
+        // Retry contract (drawer_add_outbox): the same key with a `done` row
+        // returns the same doc, no re-execution; an in-flight key is refused.
+        // After the TTL purge a late retry re-executes as a fresh add.
+        if let Some(row) = outbox::get_row(&self.meta_store_sql, &args.idempotency_key).await? {
+            match row.state {
+                OutboxState::Done => {
+                    let doc_id = DocId::from(row.branch_doc_id.to_string());
+                    let handle = self
+                        .big_repo
+                        .get_doc(&row.branch_doc_id)
+                        .await?
+                        .into_ready(row.branch_doc_id.clone())
+                        .wrap_err_with(|| {
+                            eyre::eyre!(
+                                "deduped add for key '{}' cannot materialize its doc",
+                                args.idempotency_key
+                            )
+                        })?;
+                    return Ok(StagedAdd {
+                        doc_id,
+                        handle,
+                        entry: row.entry,
+                        branch_heads: row.staged_branch_heads,
+                        branch_doc_id: row.branch_doc_id,
+                        idempotency_key: args.idempotency_key,
+                    });
+                }
+                OutboxState::PendingAdd | OutboxState::CommittedStaged => {
+                    Err(ferr!(
+                        "idempotency key '{}' is already in flight; \
+                         retry after the boot pass resolves it",
+                        args.idempotency_key
+                    ))?;
+                }
+            }
+        }
+        // The staging facility: allocation and commit touch no group — a
+        // genesis with no coparents leaves the document visible to the local
+        // agent only, so nothing between allocation and registration
+        // advertises the document. The advertising groups are granted by the
+        // registration half (`commit_staged_adds`), not here.
         let branch_doc_id = self
             .big_repo
-            // The staging facility: allocation grants ONLY the pending marker
-            // group, whose membership is empty (`authority.rs`), so nothing
-            // between allocation and finalize advertises the document — its
-            // events cannot leave the node. The advertising groups are granted
-            // by the registration half (`commit_staged_adds`), not here.
-            .allocate_doc(vec![self.pending_documents_group.clone().into()])
+            .allocate_id()
             .await
             .map_err(|err| eyre::eyre!("{err}"))
             .wrap_err("error allocating doc in big repo")?;
@@ -134,13 +187,6 @@ impl DrawerRepo {
             let (heads, _) = tx.commit();
             Ok(ChangeHashSet(Arc::from([heads.expect("commit failed")])))
         })()?;
-        let handle = self
-            .big_repo
-            .finalize_allocated_doc(branch_doc_id.clone(), doc_am)
-            .await
-            .map_err(|err| eyre::eyre!("{err}"))
-            .wrap_err("error finalizing allocated doc in big repo")?;
-
         let entry = DocEntry {
             branches: [(
                 args.branch_path.to_string(),
@@ -153,6 +199,25 @@ impl DrawerRepo {
             vtag: VersionTag::mint(self.local_actor_id.clone()),
             previous_version_heads: None,
         };
+        // Write-ahead (ADR 003 §19): the outbox row is durable BEFORE
+        // `commit_id` runs, so any crash mid-commit is replayable by the next
+        // boot's pass or resolved on caller retry.
+        outbox::insert_pending(
+            &self.meta_store_sql,
+            &args.idempotency_key,
+            &branch_doc_id,
+            &entry,
+            &heads,
+            temporary,
+        )
+        .await?;
+        let handle = self
+            .big_repo
+            .commit_id(branch_doc_id.clone(), doc_am, Vec::new(), &[])
+            .await
+            .map_err(|err| eyre::eyre!("{err}"))
+            .wrap_err("error committing allocated doc in big repo")?;
+        outbox::mark_committed_staged(&self.meta_store_sql, &args.idempotency_key).await?;
 
         Ok(StagedAdd {
             doc_id,
@@ -160,6 +225,7 @@ impl DrawerRepo {
             entry,
             branch_heads: heads,
             branch_doc_id,
+            idempotency_key: args.idempotency_key,
         })
     }
 
@@ -210,28 +276,26 @@ impl DrawerRepo {
 
         let mut staged_docs = Vec::with_capacity(args_batch.len());
         for args in args_batch {
-            staged_docs.push(self.prepare_add_doc(args).await?);
+            staged_docs.push(self.prepare_add_doc(args, false).await?);
         }
         self.commit_staged_adds(&staged_docs).await
     }
 
     /// The registration half of the drawer's add flow, shared by `batch_add`
     /// (one commit for a batch) and `commit_temporary` (one receipt): the
-    /// finalize grants, the `docs.map` commit that registers the documents,
-    /// and the completion that revokes the pending coparent and drops the
-    /// reservation. One code path, two spellings.
-    async fn commit_staged_adds(
+    /// finalize grants and the `docs.map` commit that registers the
+    /// documents. One code path, two spellings.
+    pub(crate) async fn commit_staged_adds(
         &self,
         staged_docs: &[StagedAdd],
     ) -> Result<Vec<DocId>, DrawerError> {
-        // Finalize grants — the embedder's commit sequence: the advertising
-        // groups become coparents here, before the docs.map commit that
-        // registers the documents — the same shape `register_existing_doc`
-        // grants at registration. From allocation until this point nothing
-        // advertised the documents: the only membered coparent was the memberless
-        // pending group. The drawer-group grant below is unconditional for
-        // content docs (local branches skip it); a completion (pending revocation)
-        // follows the registration below.
+        // Finalize grants — the registration sequence: the advertising groups
+        // become members before the docs.map commit that registers the
+        // documents — the same shape `register_existing_doc` grants at
+        // registration. From commit_id until this point nothing advertised
+        // the documents: a genesis with no coparents leaves them visible to
+        // the local agent only. The drawer-group grant below is unconditional
+        // for content docs (local branches skip it).
         for staged in staged_docs {
             self.big_repo
                 .add_admin_member_to_doc(
@@ -254,10 +318,11 @@ impl DrawerRepo {
             .drawer_doc_handle
             .with_document(|doc| {
                 // Test-only: refuse before the commit. Every allocation in this batch has
-                // already created its Keyhive authority and received its finalize
-                // grants, so failing here pins the node in the window between the
-                // grants and the registration write, where the id reservation and the
-                // pending-group authority must still exist.
+                // already committed (keyhive authority created; the reservation row is
+                // gone) and received its finalize grants, so failing here pins the node
+                // in the window between the grants and the registration write, where the
+                // grants are the only thing that names the documents still nothing has
+                // registered.
                 #[cfg(test)]
                 if self.take_fail_next_drawer_doc_commit() {
                     eyre::bail!("injected drawer-doc commit failure (test only)");
@@ -281,8 +346,14 @@ impl DrawerRepo {
                     )?;
                 }
                 let (heads, _) = tx.commit();
-                let heads = heads.expect("commit failed");
-                eyre::Ok(ChangeHashSet(Arc::from([heads])))
+                // A replay over an already-durable identical entry (the boot
+                // loop re-derives residuals) writes nothing: commit() answers
+                // None and the drawer doc stays at its current heads.
+                let heads = heads.map_or_else(
+                    || ChangeHashSet(Arc::from(doc.get_heads())),
+                    |head| ChangeHashSet(Arc::from([head])),
+                );
+                eyre::Ok(heads)
             })
             .await??;
 
@@ -317,22 +388,10 @@ impl DrawerRepo {
                 let (mut handles, _key) = key.lock(&self.branch_handles);
                 handles.insert(staged.branch_doc_id.clone(), staged.handle.clone());
             });
-            // The `docs.map` entry committed above is what registers the document, so only
-            // now may the allocation's durable records go. Releasing them during finalize
-            // instead would drop them before the entry exists: a crash in between leaves a
-            // document with a Keyhive authority that nothing enumerates. The finalize
-            // grants landed before this commit precisely so the entry never names a
-            // document its readers cannot yet authorize.
-            self.big_repo
-                .complete_allocated_doc(
-                    staged.branch_doc_id.clone(),
-                    self.pending_documents_group.clone(),
-                    staged.branch_heads.iter().map(|head| head.0).collect(),
-                )
-                .await
-                .map_err(|err| DrawerError::Other {
-                    inner: eyre::eyre!("{err}"),
-                })?;
+            // The `docs.map` entry committed above is what registers the
+            // document and the partitions are re-derived, so the row goes
+            // `done`: aged out by TTL and never replayed by the boot loop.
+            outbox::mark_done(&self.meta_store_sql, &staged.idempotency_key).await?;
         }
         surelock::key::lock_scope(|key| {
             let (mut heads, _key) = key.lock(&self.current_heads);
@@ -344,14 +403,15 @@ impl DrawerRepo {
 
     /// The purely local half of the transactional add an external system uses
     /// (ADR 003 §19): stage a new document on `main` without granting any
-    /// advertising group, writing any `docs.map` entry or completing the
-    /// allocation. The staged group is the memberless pending marker group, so
-    /// the staged document's events cannot leave the node. The caller comes
-    /// back with the receipt and either [`DrawerRepo::commit_temporary`]s it or
-    /// [`DrawerRepo::discard_temporary`]s it; a crash leaves the reservation
-    /// for the next boot's sweep, which reads the durable claim (e.g. a
-    /// cipherBlob facet naming the staging doc) to replay the commit or
-    /// discard it.
+    /// advertising group or writing any `docs.map` entry. A coparentless
+    /// genesis means the staged document's events cannot leave the node; the
+    /// reservation row is consumed by `commit_id` itself, so a crash before
+    /// the caller's registration leaves the doc committed-but-unregistered
+    /// (enumerated at boot by the drawer outbox pass, which reads the durable
+    /// claim — e.g. a cipherBlob facet naming the staging doc — and replays
+    /// the commit). The caller comes back with the receipt and either
+    /// [`DrawerRepo::commit_temporary`]s it or [`DrawerRepo::discard_temporary`]s
+    /// it.
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn add_temporary(&self, args: AddDocArgs) -> Result<StagedAdd, DrawerError> {
         if self.cancel_token.is_cancelled() {
@@ -364,13 +424,12 @@ impl DrawerRepo {
         let resulting_keys: HashSet<FacetKey> = args.facets.keys().cloned().collect();
         self.validate_facets(&args.facets, &[], &resulting_keys, FacetWriteScope::System)
             .await?;
-        self.prepare_add_doc(args).await
+        self.prepare_add_doc(args, true).await
     }
 
     /// Commit a [`StagedAdd`]: the finalize grants (content docs, encrypted
-    /// blob docs, drawer), the `docs.map` registration write and the completion
-    /// (revoke the pending coparent, drop the reservation) — the same sequence
-    /// `batch_add` runs, through the same code path.
+    /// blob docs, drawer) and the `docs.map` registration write — the same
+    /// sequence `batch_add` runs, through the same code path.
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn commit_temporary(&self, staged: &StagedAdd) -> Result<(), DrawerError> {
         if self.cancel_token.is_cancelled() {
@@ -382,11 +441,12 @@ impl DrawerRepo {
     }
 
     /// Discard a [`StagedAdd`] without ever registering it. Idempotent
-    /// (ADR 003 §19): the staging doc's advertising coparents — which only a
-    /// crashed commit could have granted — are reverted first, then the pending
-    /// coparent is revoked and the reservation dropped. A receipt that was
-    /// already committed is registered, so discard leaves it alone: the caller
-    /// picked commit, and undoing a registered doc is a delete, not a discard.
+    /// (ADR 003 §19): the reservation row goes; nothing else happens — the
+    /// staging doc never received a coparent grant (a crashed commit happens
+    /// after the registration write began, and a registered doc is a delete,
+    /// not a discard), so there is no grant to revert and no pending coparent
+    /// to revoke. The doc's events, sedimentree and bytes are never deleted;
+    /// the id becomes uncommittable.
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn discard_temporary(&self, staged: &StagedAdd) -> Result<(), DrawerError> {
         if self.cancel_token.is_cancelled() {
@@ -403,16 +463,13 @@ impl DrawerRepo {
             );
             return Ok(());
         }
+        // Terminal: the row goes out of the outbox with the reservation, so a
+        // claimed staging doc cannot be replayed after its caller picked
+        // discard. The staging doc itself is untouched — no revoke, no event
+        // or byte delete (an invisible memberless orphan at most).
+        outbox::delete_row(&self.meta_store_sql, &staged.idempotency_key).await?;
         self.big_repo
-            .discard_reserved_doc(
-                staged.branch_doc_id.clone(),
-                self.pending_documents_group.clone(),
-                &[
-                    self.content_docs_group.clone(),
-                    self.encrypted_blob_docs_group.clone(),
-                    self.drawer_group.clone(),
-                ],
-            )
+            .abandon_allocation(staged.branch_doc_id.clone())
             .await
             .map_err(|err| DrawerError::Other {
                 inner: eyre::eyre!(err),
@@ -857,14 +914,14 @@ impl DrawerRepo {
                 }
             })
             .await?;
-        // The staging facility: allocation grants ONLY the pending marker group,
-        // whose membership is empty (`authority.rs`), so nothing between
-        // allocation and finalize advertises the branch document — its events
-        // cannot leave the node. The advertising groups are granted at finalize,
-        // in the commit sequence below.
+        // The staging facility: allocation and commit touch no group — a
+        // genesis with no coparents leaves the branch document visible to the
+        // local agent only, so nothing between allocation and the registration
+        // writes below advertises the branch document. The advertising groups
+        // are granted at registration, in the sequence below.
         let branch_doc_id = self
             .big_repo
-            .allocate_doc(vec![self.pending_documents_group.clone().into()])
+            .allocate_id()
             .await
             .map_err(|err| eyre::eyre!("{err}"))
             .wrap_err("error allocating branch doc in big repo")?;
@@ -942,20 +999,26 @@ impl DrawerRepo {
             let (heads, _) = tx.commit();
             Ok(ChangeHashSet(Arc::from([heads.expect("commit failed")])))
         })()?;
+        // The branch forks `from_handle`'s encrypted causal history, so the
+        // initial content is encrypted against keys this node already holds for
+        // the source document; they seed the branch's sedimentree.
         let handle = self
             .big_repo
-            .finalize_allocated_doc_from_parent(branch_doc_id.clone(), branch_doc, &from_handle)
+            .commit_id(
+                branch_doc_id.clone(),
+                branch_doc,
+                from_handle.content_keys().await?,
+                &[],
+            )
             .await
             .map_err(|err| eyre::eyre!("{err}"))
-            .wrap_err("error finalizing allocated branch doc in big repo")?;
-        // Finalize grants — the embedder's commit sequence: the advertising
-        // groups become coparents here, before any write that names the branch
+            .wrap_err("error committing allocated branch doc in big repo")?;
+        // Finalize grants — the registration sequence: the advertising groups
+        // become members here, before any write that names the branch
         // (the Branches facet below, the partition, the branch-ref registration) —
         // the same shape `register_existing_doc` grants at registration. From
-        // allocation until this point nothing advertised the branch document: the
-        // only membered coparent was the memberless pending group. A replicated
-        // branch grants the drawer group; a local branch does not. The
-        // pending-group revocation follows the registration below.
+        // commit_id until this point nothing advertised the branch document. A
+        // replicated branch grants the drawer group; a local branch does not.
         self.big_repo
             .add_admin_member_to_doc(branch_doc_id.clone(), self.content_docs_group.clone())
             .await?;
@@ -1082,22 +1145,12 @@ impl DrawerRepo {
             });
             drawer_heads
         };
-        // The branch ref is durable in the drawer document by now — `upsert_local_branch_ref`
-        // for a local branch, the entry update for a replicated one — so the allocation's
-        // durable records may go. Never earlier: a crash before this point has to leave a
-        // pending allocation that recovery can still find. The finalize grants landed
-        // before every write naming the branch, so nothing ever points at a branch its
-        // readers cannot yet authorize.
-        self.big_repo
-            .complete_allocated_doc(
-                branch_doc_id.clone(),
-                self.pending_documents_group.clone(),
-                heads.iter().map(|head| head.0).collect(),
-            )
-            .await
-            .map_err(|err| DrawerError::Other {
-                inner: eyre::eyre!("{err}"),
-            })?;
+        // The branch-ref write above is what registers the branch (durable in
+        // the drawer document or the local-branch table), and the finalize
+        // grants landed before everything that names the branch, so nothing
+        // ever points at a branch its readers cannot yet authorize. There are
+        // no allocation records left to release here: commit_id already deleted
+        // the reservation row.
         surelock::key::lock_scope(|key| {
             let (mut handles, _key) = key.lock(&self.branch_handles);
             handles.insert(branch_doc_id, handle);

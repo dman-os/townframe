@@ -23,7 +23,7 @@
 //!    pair (installed ⟹ servable ⟹ rooted, `CipherBlobProvider::install`)
 //! 2. stage the key document: the JWK facet goes into its initial content while
 //!    it is still the node-local staging doc — pending-only genesis, zero
-//!    members, nothing advertised (`DrawerRepo::add_temporary`)
+//!    members, nothing advertised — coparentless genesis (`DrawerRepo::add_temporary`)
 //! 3. write the `cipherBlob` facet — the claim: it names the staged key
 //!    document (keyRef + the staged heads)
 //! 4. commit the key document — grants, drawer registration, pending revoke:
@@ -1693,7 +1693,7 @@ impl Ctx {
         // content for §16's migration shape. Same facet key as any key
         // document of this domain: the keyScope's one-key-per-doc rule is per
         // (document, domain), and a rotation mints a new document.
-        // `add_temporary` keeps the staging doc purely local — pending-only
+        // `add_temporary` keeps the staging doc purely local — coparentless
         // genesis, zero members — until the commit after the claim below.
         let jwk_key = self.jwk_facet_key();
         let jwk = JwkOct::from_master_key(&new_key);
@@ -1710,6 +1710,18 @@ impl Ctx {
                 )]
                 .into(),
                 user_path: None,
+
+                // Per-invocation (like the rotate site below): the staging add
+                // mints fresh keying material that no prior row names, so the
+                // key cannot derive from (doc, domain) — deduping on it would
+                // re-point a second representation's keyRef at the first
+                // representation's JWK. Replay of an interrupted attempt runs
+                // through the durable claim and the boot pass, not this key.
+                idempotency_key: format!(
+                    "key-doc:{doc_id}/{}/{}",
+                    jwk_key.id,
+                    uuid::Uuid::new_v4()
+                ),
             })
             .await?;
         let key_doc_id = staged_key.doc_id.clone();
@@ -1787,10 +1799,10 @@ impl Ctx {
         // 2. The key document, staged with its JWK facet in its initial
         // content — §19 keeps the key out of the document whose readers may
         // only be entitled to serve, and `add_temporary` keeps the staging
-        // doc purely local: pending-only genesis, zero members, nothing
-        // advertised. A crash before the commit below leaves it to the next
-        // boot's sweep, which commits a claimed staging doc and discards an
-        // unclaimed one (ADR 003 §19).
+        // doc purely local: coparentless genesis, zero members, nothing
+        // advertised. A crash before the commit below leaves the doc committed
+        // but unregistered — enumerated at boot by the drawer outbox pass that
+        // replays the durable claim (ADR 003 §19).
         let jwk_key = self.jwk_facet_key();
         let jwk = JwkOct::from_master_key(&key);
         let staged_key = self
@@ -1806,6 +1818,18 @@ impl Ctx {
                 )]
                 .into(),
                 user_path: None,
+
+                // Per-invocation: a rotation mints a fresh key document, and its
+                // "operation" includes fresh keying material that no prior row
+                // names. Retry recovery of an interrupted rotation goes through
+                // the durable cipherBlob claim (boot reconciliation), never
+                // through this key; a leftover unclaimed staging doc is
+                // abandoned by the boot pass.
+                idempotency_key: format!(
+                    "key-doc-rotate:{doc_id}/{}/{}",
+                    jwk_key.id,
+                    uuid::Uuid::new_v4()
+                ),
             })
             .await?;
         let key_doc_id = staged_key.doc_id.clone();

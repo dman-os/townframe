@@ -280,7 +280,6 @@ impl QuiescenceProbe {
 pub(crate) trait HubCommandFuture<F: FutureForm> {
     fn allocate_doc(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::DocumentId>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 
@@ -288,19 +287,12 @@ pub(crate) trait HubCommandFuture<F: FutureForm> {
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         doc_id: crate::DocumentId,
+        coparents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         initial_content: Box<automerge::Automerge>,
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         resp: futures::channel::oneshot::Sender<
             eyre::Result<crate::runtime2::types::LiveDocHandle>,
         >,
-    ) -> F::Future<'static, eyre::Result<()>>;
-
-    fn complete_allocated_doc(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        doc_id: crate::DocumentId,
-        pending_group: crate::keyhive::BigKeyhiveGroup,
-        content_heads: Vec<[u8; 32]>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
     ) -> F::Future<'static, eyre::Result<()>>;
 
     fn create_doc(
@@ -341,12 +333,11 @@ const QUIESCENCE_STALL_REPORT_INTERVAL: std::time::Duration = std::time::Duratio
 impl<F: FutureForm> HubCommandFuture<F> for F {
     fn allocate_doc(
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::DocumentId>>,
     ) -> F::Future<'static, eyre::Result<()>> {
         let span = tracing::debug_span!("allocate_doc");
         let fut = async move {
-            let result = runtime_io.allocate_document(parents).await;
+            let result = runtime_io.allocate_document().await;
             resp.send(result).map_err(|_| ferr!(ERROR_CHANNEL))?;
             Ok(())
         };
@@ -357,6 +348,7 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
         runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         doc_id: crate::DocumentId,
+        coparents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         initial_content: Box<automerge::Automerge>,
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         resp: futures::channel::oneshot::Sender<
@@ -376,7 +368,9 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 .ok_or_else(|| ferr!("automerge document has no content heads"))?;
                 let sed_id = sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32()?);
                 // Stage the plaintext before creating the Keyhive authority.
-                // This is the recovery record for a crash in any later step.
+                // This is the recovery record for a crash in any later step; the
+                // re-run reproduces byte-identical events through the stage
+                // guard's AlreadyExists-on-mismatch refusal.
                 let already_persisted = runtime_io.contains_sedimentree(sed_id).await?;
                 runtime_io
                     .stage_allocated_document(
@@ -389,7 +383,11 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                 // The initial content is encrypted against the Keyhive document,
                 // so authority creation precedes Sedimentree persistence.
                 runtime_io
-                    .finalize_document_authority(doc_id.clone(), content_heads.clone())
+                    .finalize_document_authority(
+                        doc_id.clone(),
+                        coparents.clone(),
+                        content_heads.clone(),
+                    )
                     .await?;
                 let handle = if runtime_io.contains_sedimentree(sed_id).await? {
                     let (handle_resp, handle_rx) = futures::channel::oneshot::channel();
@@ -450,36 +448,15 @@ impl<F: FutureForm> HubCommandFuture<F> for F {
                         .map_err(|_| ferr!(ERROR_ACTOR))?;
                     put_rx.await.map_err(|_| ferr!(ERROR_CHANNEL))??
                 };
+                // The commit has fully landed: keyhive document, events,
+                // sedimentree and a verified handle all exist and the stage
+                // record can no longer reproduce anything new, so the
+                // reservation row goes as the sequence's last step. A crash
+                // before it leaves the row and a re-run still reproduces
+                // byte-identical events; only `abandon_allocation` deletes the
+                // row otherwise.
+                runtime_io.delete_doc_reservation(doc_id.clone()).await?;
                 eyre::Ok(handle)
-            }
-            .await;
-            resp.send(result).map_err(|_| ferr!(ERROR_CHANNEL))?;
-            Ok(())
-        };
-        F::from_future(fut.instrument(span.or_current()))
-    }
-
-    fn complete_allocated_doc(
-        runtime_io: Arc<dyn crate::runtime2::RuntimeIo<F>>,
-        doc_id: crate::DocumentId,
-        pending_group: crate::keyhive::BigKeyhiveGroup,
-        content_heads: Vec<[u8; 32]>,
-        resp: futures::channel::oneshot::Sender<eyre::Result<()>>,
-    ) -> F::Future<'static, eyre::Result<()>> {
-        let span = tracing::debug_span!("complete_allocated_doc", doc_id = %doc_id);
-        let fut = async move {
-            // The registration that released this allocation is durable on the caller's
-            // side already (the drawer's `docs.map` commit). This handler is the only step
-            // that drops the allocation's durable records, so it must run after every step
-            // that can still fail: a crash before it leaves the reservation and the
-            // pending-group authority in place, and boot recovery finds the allocation
-            // again instead of losing a document nothing can enumerate.
-            let result = async {
-                let content_heads = nonempty::NonEmpty::from_vec(content_heads)
-                    .ok_or_else(|| ferr!("completed document has no content heads: {doc_id}"))?;
-                runtime_io
-                    .complete_document_authority(doc_id, pending_group, content_heads)
-                    .await
             }
             .await;
             resp.send(result).map_err(|_| ferr!(ERROR_CHANNEL))?;
@@ -777,10 +754,10 @@ where
             self.note_activity();
         }
         match cmd {
-            Runtime2Cmd::AllocateDoc { parents, resp } => {
+            Runtime2Cmd::AllocateDoc { resp } => {
                 self.spawn_tracked(
                     crate::runtime2::TrackedWorkKind::CreateDoc,
-                    F::allocate_doc(Arc::clone(&self.runtime_io), parents, resp),
+                    F::allocate_doc(Arc::clone(&self.runtime_io), resp),
                 )?;
             }
             Runtime2Cmd::CreateDoc {
@@ -819,6 +796,7 @@ where
             }
             Runtime2Cmd::FinalizeAllocatedDoc {
                 doc_id,
+                coparents,
                 initial_content,
                 initial_keys,
                 resp,
@@ -829,25 +807,9 @@ where
                         Arc::clone(&self.runtime_io),
                         self.cmd_tx.clone(),
                         doc_id,
+                        coparents,
                         initial_content,
                         initial_keys,
-                        resp,
-                    ),
-                )?;
-            }
-            Runtime2Cmd::CompleteAllocatedDoc {
-                doc_id,
-                pending_group,
-                content_heads,
-                resp,
-            } => {
-                self.spawn_tracked(
-                    crate::runtime2::TrackedWorkKind::CreateDoc,
-                    F::complete_allocated_doc(
-                        Arc::clone(&self.runtime_io),
-                        doc_id,
-                        pending_group,
-                        content_heads,
                         resp,
                     ),
                 )?;

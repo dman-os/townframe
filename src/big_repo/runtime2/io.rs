@@ -285,10 +285,7 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
         content_heads: nonempty::NonEmpty<[u8; 32]>,
     ) -> F::Future<'_, eyre::Result<crate::DocumentId>>;
 
-    fn allocate_document(
-        &self,
-        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
-    ) -> F::Future<'_, eyre::Result<crate::DocumentId>>;
+    fn allocate_document(&self) -> F::Future<'_, eyre::Result<crate::DocumentId>>;
 
     fn stage_allocated_document(
         &self,
@@ -301,15 +298,15 @@ pub trait RuntimeIo<F: FutureForm>: Send + Sync {
     fn finalize_document_authority(
         &self,
         doc_id: crate::DocumentId,
+        coparents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: nonempty::NonEmpty<[u8; 32]>,
     ) -> F::Future<'_, eyre::Result<()>>;
 
-    fn complete_document_authority(
-        &self,
-        doc_id: crate::DocumentId,
-        pending_group: crate::keyhive::BigKeyhiveGroup,
-        content_heads: nonempty::NonEmpty<[u8; 32]>,
-    ) -> F::Future<'_, eyre::Result<()>>;
+    /// Delete a document's reservation row. The commit sequence's last step —
+    /// it must run only after the sedimentree persisted and the handle was
+    /// materialized, so a crash mid-commit keeps re-running the sequence from
+    /// the reservation (and abandons it only via `abandon_allocation`).
+    fn delete_doc_reservation(&self, doc_id: crate::DocumentId) -> F::Future<'_, eyre::Result<()>>;
 
     /// Persist a durable prekey-state snapshot (published membership ops +
     /// secret halves) to incremental storage. Called after every prekey state
