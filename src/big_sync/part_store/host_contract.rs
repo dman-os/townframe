@@ -595,6 +595,7 @@ where
     assert_local_revision_reader_contract(harness).await?;
     assert_local_revision_reader_all_contract(harness).await?;
     assert_latest_revision_is_a_read_contract(harness).await?;
+    assert_repeated_payload_write_is_not_a_change_contract(harness).await?;
     assert_page_outcome_contract(harness).await?;
     assert_object_route_resumes_from_its_cursor(harness).await?;
     assert_zero_page_limit_carries_no_events(harness).await?;
@@ -621,6 +622,80 @@ where
     assert_eq!(
         first, second,
         "reading the latest revision must not allocate a revision"
+    );
+    Ok(())
+}
+
+/// Re-writing the payload an object already holds, with its membership already live and no
+/// membership transition riding along, is not a change: no revision is allocated and no part
+/// cursor moves.
+///
+/// This is the presence plane's steady state, not an edge case. Its write edge re-announces
+/// every blob the node holds on boot, so a store that reserved a revision per repeat put every
+/// held blob object back on the wire on every restart. `add_obj_to_parts` already refuses the
+/// same repeat for a present membership; the payload write has to match it.
+pub async fn assert_repeated_payload_write_is_not_a_change_contract<H>(harness: &H) -> Res<()>
+where
+    H: HostPartStoreContractHarness + Sync,
+{
+    let store = harness.store();
+    let part = test_part(249);
+    let obj = test_obj(250);
+    let held = payload("repeat-is-not-a-change", 1);
+
+    store.ensure_part(part.clone()).await?;
+    seed_live_obj(
+        store,
+        obj.clone(),
+        held.clone(),
+        std::slice::from_ref(&part),
+    )
+    .await?;
+
+    let revision_before = store.latest_revision().await?;
+    let cursor_before = store
+        .summarize_parts(HashSet::from([part.clone()]))
+        .await??
+        .get(&part)
+        .expect(ERROR_IMPOSSIBLE)
+        .latest_cursor;
+
+    store.set_obj_payload(obj.clone(), held.clone()).await?;
+
+    assert_eq!(
+        store.latest_revision().await?,
+        revision_before,
+        "repeating an object's payload must not allocate a revision"
+    );
+    assert_eq!(
+        store
+            .summarize_parts(HashSet::from([part.clone()]))
+            .await??
+            .get(&part)
+            .expect(ERROR_IMPOSSIBLE)
+            .latest_cursor,
+        cursor_before,
+        "repeating an object's payload must not move a part cursor"
+    );
+    assert_eq!(
+        store.obj_payload(obj.clone()).await?,
+        Some(held.clone()),
+        "the repeat must leave the payload in place"
+    );
+    assert_eq!(
+        store.obj_parts(obj.clone()).await?,
+        vec![part.clone()],
+        "the repeat must leave membership in place"
+    );
+
+    // Control: a payload the object does not hold is a change and must allocate a revision.
+    // Without this leg, the assertions above would also pass for a store that never allocates.
+    store
+        .set_obj_payload(obj.clone(), payload("repeat-is-not-a-change", 2))
+        .await?;
+    assert!(
+        store.latest_revision().await? > revision_before,
+        "a changed payload must allocate a revision"
     );
     Ok(())
 }

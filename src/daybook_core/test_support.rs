@@ -149,6 +149,72 @@ pub async fn test_cx(test_name: &'static str) -> Res<DaybookTestContext> {
     test_cx_with_options(test_name, DaybookTestCxOptions::default()).await
 }
 
+/// Stage the ADR 003 §19 key-material shape: a key document holding `key` as a
+/// JWK facet, returned with that branch's heads.
+///
+/// Needed wherever a test writes a `cipherBlob` facet, because its `keyRef` is
+/// cross-document - the key doc is readable by decryptors, the content doc by
+/// whoever may serve the ciphertext - and the drawer reads an *empty*-heads
+/// reference as "self, in this document", demanding the target facet exist in
+/// the same document (`validate_facet_reference`). Pinning the key doc's real
+/// heads is the same thing the encryption worker does in production.
+pub async fn stage_key_doc(
+    drawer: &DrawerRepo,
+    key: &crate::blobs::encrypt::MasterKey,
+) -> Res<(daybook_types::doc::DocId, daybook_types::doc::ChangeHashSet)> {
+    let key_doc_id = drawer
+        .add(daybook_types::doc::AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+
+            idempotency_key: "test-key-test_support.rs-0".to_string(),
+        })
+        .await?;
+    let heads = write_jwk_facet(drawer, &key_doc_id, key).await?;
+    Ok((key_doc_id, heads))
+}
+
+/// Write `key` into the JWK facet of `doc_id` - what a rotation does in place
+/// (ADR 003 §15) - and return the heads of that write.
+pub async fn write_jwk_facet(
+    drawer: &DrawerRepo,
+    doc_id: &daybook_types::doc::DocId,
+    key: &crate::blobs::encrypt::MasterKey,
+) -> Res<daybook_types::doc::ChangeHashSet> {
+    // The JWK facet is system-managed like the cipherBlob that references it.
+    let jwk = crate::blobs::encrypt::JwkOct::from_master_key(key);
+    drawer
+        .update_at_heads_with_scope(
+            daybook_types::doc::DocPatch {
+                id: doc_id.clone(),
+                facets_set: [(
+                    daybook_types::doc::FacetKey {
+                        tag: daybook_types::doc::WellKnownFacetTag::Jwk.into(),
+                        id: "relay".into(),
+                    },
+                    daybook_types::doc::FacetRaw::from(daybook_types::doc::WellKnownFacet::Jwk(
+                        daybook_types::doc::Jwk {
+                            kty: jwk.kty,
+                            members: serde_json::json!({ "k": jwk.k }),
+                        },
+                    )),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            daybook_types::doc::BranchPath::new("main"),
+            None,
+            crate::drawer::FacetWriteScope::System,
+        )
+        .await?;
+    drawer
+        .get_branch_heads_for_path(doc_id, daybook_types::doc::BranchPath::new("main"))
+        .await?
+        .ok_or_eyre("key document has no main branch")
+}
+
 pub async fn test_cx_with_options(
     _test_name: &'static str,
     options: DaybookTestCxOptions,
@@ -321,6 +387,8 @@ pub async fn test_cx_with_options(
             branch_path: daybook_types::doc::BranchPathBuf::from("main"),
             facets: default(),
             user_path: None,
+
+            idempotency_key: "test-key-test_support.rs-1".to_string(),
         })
         .await?;
     let docs_inventory_daybook_id = drawer_repo
@@ -328,6 +396,17 @@ pub async fn test_cx_with_options(
             branch_path: daybook_types::doc::BranchPathBuf::from("main"),
             facets: default(),
             user_path: None,
+
+            idempotency_key: "test-key-test_support.rs-2".to_string(),
+        })
+        .await?;
+    let encryption_inventory_daybook_id = drawer_repo
+        .add(daybook_types::doc::AddDocArgs {
+            branch_path: daybook_types::doc::BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+
+            idempotency_key: "test-key-test_support.rs-3".to_string(),
         })
         .await?;
     let core_entry = drawer_repo
@@ -338,6 +417,10 @@ pub async fn test_cx_with_options(
         .get_entry(&docs_inventory_daybook_id)
         .await?
         .ok_or_eyre("missing docs inventory doc entry")?;
+    let encryption_entry = drawer_repo
+        .get_entry(&encryption_inventory_daybook_id)
+        .await?
+        .ok_or_eyre("missing encryption inventory doc entry")?;
     let core_inventory_doc_id = core_entry
         .branches
         .get("main")
@@ -350,6 +433,12 @@ pub async fn test_cx_with_options(
         .ok_or_eyre("missing main branch for docs inventory doc")?
         .branch_doc_id
         .clone();
+    let encryption_inventory_doc_id = encryption_entry
+        .branches
+        .get("main")
+        .ok_or_eyre("missing main branch for encryption inventory doc")?
+        .branch_doc_id
+        .clone();
 
     big_repo
         .add_admin_member_to_doc(
@@ -363,11 +452,18 @@ pub async fn test_cx_with_options(
             authority.blob_inventories.clone(),
         )
         .await?;
+    big_repo
+        .add_admin_member_to_doc(
+            encryption_inventory_doc_id.clone(),
+            authority.blob_inventories.clone(),
+        )
+        .await?;
 
     config_repo
         .set_blob_inventories(crate::config::AppBlobInventories {
             core_inventory_doc_id: core_inventory_doc_id.clone(),
             docs_inventory_doc_id: docs_inventory_doc_id.clone(),
+            encryption_inventory_doc_id: encryption_inventory_doc_id.clone(),
         })
         .await?;
 
@@ -379,7 +475,14 @@ pub async fn test_cx_with_options(
             drawer_doc_id.clone(),
             core_inventory_doc_id.clone(),
             docs_inventory_doc_id.clone(),
+            encryption_inventory_doc_id.clone(),
         ],
+    )
+    .await?;
+    crate::authority::grant_docs_admin(
+        &big_repo,
+        &authority.encrypted_blob_docs,
+        [app_doc_id.clone(), drawer_doc_id.clone()],
     )
     .await?;
     crate::repo::ensure_authority_partitions(
@@ -393,6 +496,7 @@ pub async fn test_cx_with_options(
         &blob_part_store,
         &core_inventory_doc_id,
         &docs_inventory_doc_id,
+        &encryption_inventory_doc_id,
     )
     .await?;
     let rcx = crate::repo::RepoCtx::from_parts(
@@ -405,6 +509,8 @@ pub async fn test_cx_with_options(
             sqlite_local_state_stop: std::sync::Mutex::new(None),
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
+            blob_presence_store: crate::repo::open_blob_presence_part_store(sql_ctx.clone())
+                .await?,
             frontier_part_store: big_repo.frontier_part_store(),
             derived_part_store: big_repo.derived_part_store(),
             big_repo: Arc::clone(&big_repo),
@@ -434,6 +540,7 @@ pub async fn test_cx_with_options(
             .into_ready(config_doc_id)?,
         core_inventory_doc_id,
         docs_inventory_doc_id,
+        encryption_inventory_doc_id,
     );
 
     let (init_repo, init_stop) = crate::rt::init::InitRepo::load(
@@ -456,6 +563,10 @@ pub async fn test_cx_with_options(
         crate::rt::RtConfig {
             device_id: device_id.clone(),
             startup_progress_task_id: None,
+            // Tests drive the worker they assert on. An ambient worker would
+            // also be eligible for the same documents and domains, so its
+            // writes would be indistinguishable from the code under test.
+            spawn_blob_workers: false,
         },
         rcx,
         Arc::clone(&drawer_repo),

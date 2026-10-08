@@ -92,6 +92,12 @@ pub struct CloneProvisionResponse {
     pub repo_agents_group: [u8; 32],
     pub core_docs_group: [u8; 32],
     pub content_docs_group: [u8; 32],
+    /// ADR 003 §19: the encryption-eligibility group, whose id is the domain
+    /// cipherblob facets name. Serde-default so a seeder that predates the
+    /// group still deserializes; a clone from such a seeder then creates its
+    /// own group, i.e. the two devices name different encryption domains.
+    #[serde(default)]
+    pub encrypted_blob_docs_group: Option<[u8; 32]>,
     pub default_drawer_group: [u8; 32],
     pub blob_inventories_group: [u8; 32],
 }
@@ -152,6 +158,7 @@ impl CloneProvisionResponse {
                 repo_agents: self.repo_agents_group,
                 core_docs: self.core_docs_group,
                 content_docs: self.content_docs_group,
+                encrypted_blob_docs: self.encrypted_blob_docs_group,
                 default_drawer: self.default_drawer_group,
                 blob_inventories: self.blob_inventories_group,
             },
@@ -317,6 +324,13 @@ async fn pull_required_partitions_via_big_sync_worker(
     let core_docs_partition_id = big_repo::group_part_id(bootstrap.authority_ids.core_docs);
     let content_docs_partition_id = big_repo::group_part_id(bootstrap.authority_ids.content_docs);
     let drawer_partition_id = big_repo::group_part_id(bootstrap.authority_ids.default_drawer);
+    // The encryption-eligibility group is a document-bearing group like the
+    // three above, so its state has to reach the clone or the clone cannot
+    // evaluate eligibility. Absent on a seeder that predates the group.
+    let encrypted_blob_docs_partition_id = bootstrap
+        .authority_ids
+        .encrypted_blob_docs
+        .map(big_repo::group_part_id);
     let blob_sync_backend = Arc::new(crate::blobs::sync::BlobSyncBackend::new(
         Arc::clone(blobs_repo),
         Arc::clone(blob_part_store),
@@ -423,6 +437,12 @@ async fn pull_required_partitions_via_big_sync_worker(
         // barrier.
     ]
     .into_iter()
+    .chain(
+        encrypted_blob_docs_partition_id
+            .clone()
+            .into_iter()
+            .map(|part_id| (part_id, Arc::clone(&repo_backend_id))),
+    )
     .collect();
 
     big_sync_worker
@@ -456,7 +476,10 @@ async fn pull_required_partitions_via_big_sync_worker(
             core_docs_partition_id,
             content_docs_partition_id,
             drawer_partition_id,
-        ];
+        ]
+        .into_iter()
+        .chain(encrypted_blob_docs_partition_id)
+        .collect::<Vec<_>>();
         big_sync_worker
             .wait_for_full_sync(vec![peer_id.clone()], required_partitions)
             .await?;
@@ -625,6 +648,8 @@ pub async fn clone_repo_init_from_url(
 
         let part_store = big_repo.shared_part_store();
         let blob_part_store = crate::repo::open_blob_part_store(big_repo.sql_ctx()).await?;
+        let blob_presence_store =
+            crate::repo::open_blob_presence_part_store(big_repo.sql_ctx()).await?;
         let blobs_repo =
             crate::blobs::BlobsRepo::new(staging.join("blobs"), "clone-bootstrap".into()).await?;
 
@@ -643,6 +668,16 @@ pub async fn clone_repo_init_from_url(
 
         blobs_repo.shutdown().await?;
 
+        // The source's app doc has been pulled above; its config facet names
+        // the encrypted-representation inventory. Resolved here, ahead of the
+        // init state: a clone/carrier comes with the source's inventories by
+        // definition, so there is no inventory-less state to placehold.
+        let inventories =
+            crate::repo::blob_inventories_from_app_doc(&big_repo, &bootstrap.app_doc_id)
+                .await?
+                .ok_or_else(|| {
+                    eyre::eyre!("clone bootstrap: source app doc carries no blob inventories")
+                })?;
         crate::repo::globals::set_init_state(
             &sql,
             &crate::repo::globals::InitState::Created {
@@ -651,6 +686,7 @@ pub async fn clone_repo_init_from_url(
                 doc_id_config: bootstrap.config_doc_id.clone(),
                 core_inventory_doc_id: None,
                 docs_inventory_doc_id: None,
+                encryption_inventory_doc_id: inventories.encryption_inventory_doc_id,
             },
         )
         .await?;
@@ -664,6 +700,7 @@ pub async fn clone_repo_init_from_url(
             sqlite_local_state_stop: std::sync::Mutex::new(Some(sqlite_local_state_stop)),
             part_store: Arc::clone(&part_store),
             blob_part_store: Arc::clone(&blob_part_store),
+            blob_presence_store: Arc::clone(&blob_presence_store),
             frontier_part_store: big_repo.frontier_part_store(),
             derived_part_store: big_repo.derived_part_store(),
             big_repo: Arc::clone(&big_repo),
@@ -728,7 +765,14 @@ async fn ensure_bootstrap_local_partitions(
         big_repo::group_part_id(bootstrap.authority_ids.core_docs),
         big_repo::group_part_id(bootstrap.authority_ids.content_docs),
         big_repo::group_part_id(bootstrap.authority_ids.default_drawer),
-    ];
+    ]
+    .into_iter()
+    .chain(
+        bootstrap
+            .authority_ids
+            .encrypted_blob_docs
+            .map(big_repo::group_part_id),
+    );
     for part_id in part_ids {
         partition_store.ensure_part(part_id).await?;
     }

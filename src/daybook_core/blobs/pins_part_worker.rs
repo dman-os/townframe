@@ -39,9 +39,7 @@ pub(crate) async fn spawn_blob_pins_part_worker(
     let sql = sqlite_local_state_repo
         .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
         .await?;
-    Ctx::init_schema(&sql).await?;
-
-    let ctx = Arc::new(Ctx { part_store, sql });
+    let ctx = Arc::new(Ctx::new(part_store, sql).await?);
     let cancel_token = parent_cancel_token.child_token();
     let worker_cancel_token = cancel_token.clone();
     let mut worker = Worker::new(Arc::clone(&ctx));
@@ -85,6 +83,16 @@ impl std::ops::Deref for Worker {
 }
 
 impl Ctx {
+    /// Build the worker's shared state, ensuring its schema exists.
+    ///
+    /// The schema belongs to the state it describes: the spawn path and a test
+    /// that drives the machine directly must both be unable to observe a
+    /// missing table.
+    async fn new(part_store: SharedPartStore, sql: SqlCtx) -> Res<Self> {
+        Self::init_schema(&sql).await?;
+        Ok(Self { part_store, sql })
+    }
+
     async fn init_schema(sql: &SqlCtx) -> Res<()> {
         sqlx::query(
             r#"
@@ -297,13 +305,7 @@ impl Ctx {
                 // that decodes to a blob digest names a blob this node can pin.
                 // Drop the route rather than failing the task: a task error is
                 // fatal to the machine.
-                if delta
-                    .key
-                    .facet_key
-                    .id
-                    .parse::<crate::blobs::BlobId>()
-                    .is_err()
-                {
+                if crate::blobs::digest_str_to_blob_id_lenient(&delta.key.facet_key.id).is_none() {
                     tracing::warn!(
                         facet_id = %delta.key.facet_key.id,
                         "ignoring BlobPin facet whose key is not a blob id"
@@ -781,6 +783,25 @@ mod tests {
         }
     }
 
+    /// Boot the part worker for the duration of a test.
+    ///
+    /// The harness no longer spawns blob workers, and these lifecycle tests
+    /// observe the machine's projection instead of driving it: the part-worker
+    /// pipeline *is* the subject. Booting it here keeps the writer and the
+    /// assertions in the same test.
+    async fn spawn_part_worker_for_test(
+        test_context: &crate::test_support::DaybookTestContext,
+    ) -> Res<crate::repos::RepoStopToken> {
+        crate::blobs::spawn_blob_pins_part_worker(
+            Arc::clone(&test_context.rt.rcx.blob_part_store),
+            Arc::clone(&test_context.rt.sqlite_local_state_repo),
+            Arc::clone(&test_context.rt.drawer),
+            test_context.rt.doc_facet_set_index_repo.revision_store(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn prepare_facet_deltas_accepts_merged_revisions_with_newest_heads() -> Res<()> {
         let test_context = test_cx(utils_rs::function_full!()).await?;
@@ -789,10 +810,7 @@ mod tests {
             .sqlite_local_state_repo
             .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
             .await?;
-        let ctx = Ctx {
-            part_store: Arc::clone(&test_context.rt.rcx.blob_part_store),
-            sql,
-        };
+        let ctx = Ctx::new(Arc::clone(&test_context.rt.rcx.blob_part_store), sql).await?;
         let blob_id_1 = crate::blobs::BlobId::random();
         let blob_id_2 = crate::blobs::BlobId::random();
         let hash_1 = blob_id_1.to_string();
@@ -815,6 +833,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pins_part_worker.rs-0".to_string(),
             })
             .await?;
         let branch_id = BranchId::from(doc_id.to_string());
@@ -917,6 +937,7 @@ mod tests {
             .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
             .await?;
         let blob_part_store = &test_context.rt.rcx.blob_part_store;
+        let _part_worker = spawn_part_worker_for_test(&test_context).await?;
 
         let blob_id_1 = crate::blobs::BlobId::random();
         let blob_id_2 = crate::blobs::BlobId::random();
@@ -949,6 +970,8 @@ mod tests {
                 ]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pins_part_worker.rs-1".to_string(),
             })
             .await?;
 
@@ -1103,6 +1126,10 @@ mod tests {
             .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
             .await?;
         let blob_part_store = &test_context.rt.rcx.blob_part_store;
+        // The reconcile the observation loop below reads lives in the part
+        // worker; the fork-regime harness does not boot it ambiently, so the
+        // test spawns the worker it asserts on.
+        let _part_worker = spawn_part_worker_for_test(&test_context).await?;
 
         let control_hash = crate::blobs::BlobId::random().to_string();
         let reserved_hash = "/etc/daybook-escape".to_string();
@@ -1129,6 +1156,8 @@ mod tests {
                 ]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-pins_part_worker.rs-2".to_string(),
             })
             .await?;
 
@@ -1148,9 +1177,116 @@ mod tests {
             Vec::<PartKey>::new(),
             "a facet key that names no blob became a part store object"
         );
+        // The part store and the pin rows are written by two different workers of
+        // this machine, so the control object landing above says nothing about the
+        // row list below: wait on the record this asserts. A key that is not a blob
+        // digest can never add a row, so waiting on the count is the whole of it.
+        wait_for_pin_row_count(&sql, &doc_id, 1).await?;
         assert_eq!(
             list_hashes_for_doc(&sql, &doc_id).await?,
             vec![control_hash]
+        );
+
+        test_context.stop().await?;
+        Ok(())
+    }
+
+    /// The parts this worker maintains follow `BlobPin` facets only, so they
+    /// stay plaintext.
+    ///
+    /// A document's part syncs alongside the document, so a ciphertext digest
+    /// in one would advertise ciphertext to every reader of the document - the
+    /// wrong audience, and exactly what ADR 003 §13 keeps in the separate
+    /// encrypted-representation inventory. A `cipherBlob` facet carries an
+    /// encrypted representation but is not a `BlobPin`, so it must leave these
+    /// parts untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cipher_blob_facets_do_not_reach_the_doc_part() -> Res<()> {
+        let test_context = test_cx(utils_rs::function_full!()).await?;
+        let sql = test_context
+            .rt
+            .sqlite_local_state_repo
+            .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
+            .await?;
+        let blob_part_store = &test_context.rt.rcx.blob_part_store;
+        let _part_worker = spawn_part_worker_for_test(&test_context).await?;
+
+        let plaintext_id = crate::blobs::BlobId::random();
+        let cipher_id = crate::blobs::BlobId::random();
+        let plaintext_hash = plaintext_id.to_string();
+        let cipher_hash = cipher_id.to_string();
+
+        // The plaintext pin is the anchor: once its row lands, the machine has
+        // processed both facet writes.
+        let doc_id = test_context
+            .drawer_repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [(
+                    FacetKey {
+                        tag: WellKnownFacetTag::BlobPin.into(),
+                        id: plaintext_hash.clone(),
+                    },
+                    FacetRaw::from(WellKnownFacet::BlobPin(BlobPin { length_octets: 150 })),
+                )]
+                .into(),
+                user_path: None,
+
+                idempotency_key: "test-key-pins_part_worker.rs-3".to_string(),
+            })
+            .await?;
+        // The cipherBlob's keyRef is cross-document, so it pins the key doc's
+        // heads (an empty-heads reference means "self, in this document").
+        let (key_doc_id, key_heads) = crate::test_support::stage_key_doc(
+            &test_context.drawer_repo,
+            &crate::blobs::encrypt::MasterKey::random(),
+        )
+        .await?;
+        let key_ref = format!("db+facet:///{key_doc_id}/org.example.daybook.jwk/relay");
+        test_context
+            .drawer_repo
+            .update_at_heads_with_scope(
+                DocPatch {
+                    id: doc_id.clone(),
+                    facets_set: [(
+                        FacetKey::from(WellKnownFacetTag::CipherBlob),
+                        FacetRaw::from(WellKnownFacet::CipherBlob(
+                            daybook_types::doc::CipherBlob {
+                                representation: daybook_types::doc::Representation {
+                                    digest: cipher_hash.clone(),
+                                    length_octets: 4096,
+                                },
+                                content_encoding: "aes128gcm".to_string(),
+                                key_ref: key_ref.parse()?,
+                                key_ref_heads: key_heads,
+                                encoding_parameters: serde_json::json!({
+                                    "recordSize": 65_536,
+                                    "padding": "record",
+                                }),
+                            },
+                        )),
+                    )]
+                    .into(),
+                    facets_remove: vec![],
+                    user_path: None,
+                },
+                BranchPath::new("main"),
+                None,
+                crate::drawer::FacetWriteScope::System,
+            )
+            .await?;
+
+        wait_for_pin_row_count(&sql, &doc_id, 1).await?;
+        assert_eq!(
+            list_hashes_for_doc(&sql, &doc_id).await?,
+            vec![plaintext_hash.clone()]
+        );
+        assert_eq!(
+            blob_part_store
+                .obj_parts(ObjKey::from(crate::blobs::blob_id_from_hash(&cipher_hash)?))
+                .await?,
+            Vec::<PartKey>::new(),
+            "a ciphertext digest must not enter the document's part"
         );
 
         test_context.stop().await?;

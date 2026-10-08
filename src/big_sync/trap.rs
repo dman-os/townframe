@@ -5,9 +5,9 @@ use big_sync_core::{
     part_store::{CursorIndex, ObjPayload, PartDirtyCount, PartStoreReadOnly},
     rpc::{
         BigSyncRpcClient, BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest,
-        LeafBucketResult, LeafBucketsError, LeafBucketsRequest, ListPartsError, PeerSummaryRequest,
-        PeerSummaryResult, ReplayPage, ReplayPageRequest, ReplaySubscriptionRequest,
-        ReplaySubscriptionResponse,
+        LeafBucketResult, LeafBucketsError, LeafBucketsRequest, ListPartsError, PeerSummaryError,
+        PeerSummaryRequest, PeerSummaryResult, ReplayPage, ReplayPageRequest,
+        ReplaySubscriptionRequest, ReplaySubscriptionResponse,
     },
 };
 use future_form::{FutureForm, Sendable};
@@ -153,7 +153,7 @@ impl BigSyncRpcClient<Sendable> for TrappedRpcClient {
     fn peer_summary<'a>(
         &'a self,
         req: PeerSummaryRequest,
-    ) -> BoxFuture<'a, BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
+    ) -> BoxFuture<'a, BigSyncRpcResult<Result<PeerSummaryResult, PeerSummaryError>>> {
         let fut = self.inner.peer_summary(req);
         Sendable::from_future(self.trap.run_or_trap(fut))
     }

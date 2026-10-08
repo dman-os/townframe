@@ -47,7 +47,6 @@ type SignedRevocation = Arc<
 #[educe(Debug)]
 pub enum Runtime2Cmd {
     AllocateDoc {
-        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         resp: futures::channel::oneshot::Sender<eyre::Result<crate::DocumentId>>,
     },
     /// Create a document. The handle sends this; the hub asynchronously calls
@@ -78,11 +77,14 @@ pub enum Runtime2Cmd {
     },
     FinalizeAllocatedDoc {
         doc_id: DocumentId,
+        /// Coparents the genesis is created under (the reservation stores
+        /// none). Empty is a valid genesis: the local active agent is always
+        /// the head parent.
+        coparents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         #[educe(Debug(ignore))]
         initial_content: Box<automerge::Automerge>,
         #[educe(Debug(ignore))]
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
-        pending_group: crate::keyhive::BigKeyhiveGroup,
         #[educe(Debug(ignore))]
         resp:
             futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::types::LiveDocHandle>>,

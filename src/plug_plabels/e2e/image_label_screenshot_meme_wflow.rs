@@ -32,6 +32,8 @@ async fn long_af_test_image_label_fallback_multi_label_screenshot_meme() -> Res<
         )]
         .into(),
         user_path: None,
+
+        idempotency_key: "test-key-image_label_screenshot_meme_wflow.rs-0".to_string(),
     };
 
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;

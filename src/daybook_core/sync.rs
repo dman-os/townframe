@@ -310,6 +310,7 @@ impl IrohSyncRepo {
             vec![
                 rcx.core_inventory_doc_id.clone(),
                 rcx.docs_inventory_doc_id.clone(),
+                rcx.encryption_inventory_doc_id.clone(),
             ],
             cancel_token.clone(),
         )
@@ -472,11 +473,21 @@ impl IrohSyncRepo {
 }
 
 impl IrohSyncRepo {
+    /// Is `part_id` one of this repo's blob scopes? There is one per inventory
+    /// document (ADR 003 §13).
+    ///
+    /// A repo whose config predates the encrypted-representation inventory has
+    /// no such document, so it has no part for it: nothing to classify, and a
+    /// sentinel id would name a scope that cannot exist.
+    // FIXME: this ought to be retied and wait_for_full_sync should take (scope,part) instead
     #[inline]
     pub fn is_blob_part(&self, part_id: &PartKey) -> bool {
         let core_blob = crate::blobs::blob_inventory_part_id(&self.rcx.core_inventory_doc_id);
         let docs_blob = crate::blobs::blob_inventory_part_id(&self.rcx.docs_inventory_doc_id);
-        part_id == &core_blob || part_id == &docs_blob
+        part_id == &core_blob
+            || part_id == &docs_blob
+            || part_id
+                == &crate::blobs::blob_inventory_part_id(&self.rcx.encryption_inventory_doc_id)
     }
 
     fn peer_partition_ids(
@@ -511,6 +522,13 @@ impl IrohSyncRepo {
             );
             parts.insert(
                 crate::blobs::blob_inventory_part_id(&self.rcx.docs_inventory_doc_id),
+                Arc::clone(&blob_backend_id),
+            );
+            // The encrypted-representation inventory is a blob scope too. Left
+            // out, no peer ever asks for it, so a relay never learns the
+            // ciphertext digests it is meant to retain (ADR 003 §13).
+            parts.insert(
+                crate::blobs::blob_inventory_part_id(&self.rcx.encryption_inventory_doc_id),
                 blob_backend_id,
             );
         }
@@ -939,6 +957,7 @@ impl IrohSyncRepo {
             repo_agents_group: self.authority.ids().repo_agents,
             core_docs_group: self.authority.ids().core_docs,
             content_docs_group: self.authority.ids().content_docs,
+            encrypted_blob_docs_group: self.authority.ids().encrypted_blob_docs,
             default_drawer_group: self.authority.ids().default_drawer,
             blob_inventories_group: self.authority.ids().blob_inventories,
         })
@@ -998,6 +1017,24 @@ impl IrohSyncRepo {
                     %peer_id,
                     %part_id,
                     "BigSync peer partition unanswered"
+                );
+            }
+            big_sync_core::SyncStatEvent::PeerPartSetTooLarge {
+                peer_id,
+                requested,
+                cap,
+            } => {
+                // Report-only, once per transition: the ceiling is a property of the part
+                // set this node asked with, so narrowing that set is the embedder's call
+                // and the machine keeps re-asking until it is made. Warned rather than
+                // logged at info because no part in the refused request can sync at all
+                // until the request shrinks.
+                warn!(
+                    local_peer_id = %self.router.endpoint().id(),
+                    %peer_id,
+                    requested,
+                    cap,
+                    "BigSync peer refused a summary request above the part ceiling"
                 );
             }
             big_sync_core::SyncStatEvent::PeerPartStale { .. } => {}
@@ -1127,31 +1164,6 @@ impl IrohSyncRepo {
         let endpoint_addr = bootstrap::parse_clone_endpoint_addr(source_url)?;
         self.connect_endpoint_addr(endpoint_addr.clone()).await?;
         Ok(endpoint_addr)
-    }
-
-    pub async fn ensure_local_blob_from_active_peers(
-        &self,
-        blob_id: crate::blobs::BlobId,
-    ) -> Res<()> {
-        let peers = self
-            .active_peers
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
-        for peer_id in peers {
-            if let Err(err) = self
-                .blobs_sync_backend
-                .ensure_local_blob(peer_id.clone(), blob_id.clone())
-                .await
-            {
-                tracing::warn!(%peer_id, %blob_id, ?err, "failed to download missing blob from active peer");
-            } else {
-                return Ok(());
-            }
-        }
-        eyre::bail!("unable to download missing blob {blob_id} from any active peer");
     }
 
     pub async fn connect_known_devices_once(&self) -> Res<()> {

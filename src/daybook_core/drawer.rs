@@ -12,7 +12,9 @@ mod events;
 mod facet_recovery;
 mod meta;
 mod mutations;
+mod outbox;
 mod queries;
+mod reconciliation;
 #[cfg(test)]
 mod tests;
 pub mod types;
@@ -20,6 +22,7 @@ pub mod types;
 pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
 pub use meta::doc_version_updates;
 pub use meta::version_updates;
+pub use mutations::StagedAdd;
 
 use big_repo::{
     BigKeyhiveGroup, BigRepoLocalListenerRegistration, BigRepoLocalNotification, SharedBigRepo,
@@ -173,8 +176,8 @@ pub struct DrawerRepo {
     partition_store: SharedPartStore,
     drawer_doc_id: DocumentId,
     content_docs_group: BigKeyhiveGroup,
+    encrypted_blob_docs_group: BigKeyhiveGroup,
     drawer_group: BigKeyhiveGroup,
-    pending_documents_group: BigKeyhiveGroup,
     local_actor_id: ActorId,
     local_peer_id: PeerKey,
     local_user_path: daybook_types::doc::UserPathBuf,
@@ -309,8 +312,8 @@ impl DrawerRepo {
             partition_store,
             drawer_doc_id,
             content_docs_group: authority.content_docs.clone(),
+            encrypted_blob_docs_group: authority.encrypted_blob_docs.clone(),
             drawer_group: authority.default_drawer.clone(),
-            pending_documents_group: authority.pending_documents_group(),
             local_actor_id,
             local_user_path,
             entry_cache: surelock::mutex::Mutex::new(HashMap::new()),
@@ -334,8 +337,15 @@ impl DrawerRepo {
         });
         // The local branch schema must exist before the plugs repo's
         // attach_drawer (which registers the config doc and warms the derived
-        // cache) runs; register/get call paths read drawer_local_branches.
+        // The local branch schema and the add-outbox schema must exist before
+        // the plugs repo's attach_drawer (which registers the config doc and
+        // warms the derived cache) runs: the plugs boot's first manifest write
+        // goes through the drawer's add path, whose dedupe reads
+        // drawer_add_outbox. Both writes are bookkeeping-only here; the
+        // outbox's row *replay* runs after attach, below, so that
+        // possibly-half-registered entries never boot other machinery.
         repo.ensure_local_branch_schema().await?;
+        outbox::ensure_outbox_schema(&repo.meta_store_sql).await?;
         // ADR 007 §2: the plugs repo is loaded before the drawer (the drawer
         // needs it for facet validation); attach the drawer back so the plugs
         // repo can read manifest docs and write the plugg config facet through
@@ -343,6 +353,11 @@ impl DrawerRepo {
         if let Some(plugs_repo) = &repo.plugs_repo {
             plugs_repo.attach_drawer(Arc::clone(&repo)).await?;
         }
+        // The add-outbox boot pass (ADR 003 §19): replay surviving write-ahead
+        // rows through the registration sequence and abandon reservations that
+        // outlived their outbox row, before any other repo machinery boots on
+        // possibly-half-registered entries.
+        repo.reconcile_add_outbox_at_boot().await?;
         repo.migrate_content_doc_authority().await?;
         repo.ensure_replicated_branch_partitions().await?;
         let worker_handle = tokio::spawn({
@@ -364,6 +379,8 @@ impl DrawerRepo {
         ))
     }
 
+    /// One-shot backfill of the authority groups every document branch must
+    /// belong to (see `drawer`'s own groups; keyed so the walk runs once).
     async fn migrate_content_doc_authority(&self) -> Res<()> {
         const MIGRATION_KEY: &str = "global.authority.content_docs_and_drawer_migrated";
         if crate::repo::globals::get_string_global(&self.meta_store_sql, MIGRATION_KEY)
@@ -470,14 +487,25 @@ impl DrawerRepo {
                 .revoke_doc_access(branch_doc_id.clone(), self.drawer_group.clone())
                 .await?;
             self.big_repo
-                .revoke_doc_access(branch_doc_id, self.content_docs_group.clone())
+                .revoke_doc_access(branch_doc_id.clone(), self.content_docs_group.clone())
+                .await?;
+            // The encryption-eligibility membership is the third grant a branch
+            // doc carries (commit_staged_adds grants the content-docs and
+            // drawer groups at registration; the encrypted_blob_docs migration
+            // backfills older repos). Leaving it on
+            // lets every repo agent - via repo_agents' admin membership of the
+            // group - still reach a tombstoned branch doc, so `branch_doc_reachable`
+            // stays true and the doc-channel/keyhive two-channel contract breaks.
+            self.big_repo
+                .revoke_doc_access(branch_doc_id, self.encrypted_blob_docs_group.clone())
                 .await?;
         }
         Ok(())
     }
 
     /// Whether this node can reach the branch's document at all. Deleting a
-    /// replicated branch revokes this repo's drawer and content groups' access to
+    /// replicated branch revokes this repo's drawer, content and
+    /// encryption-eligibility groups' access to
     /// that branch doc on the keyhive channel, while the tombstone that drops the
     /// branch from the listing travels on the doc channel; the channels are
     /// independent, so a peer can hold the revocation while still listing the

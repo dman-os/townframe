@@ -41,54 +41,65 @@ use super::{BranchKind, BranchRefRow, DrawerRepo};
 use crate::drawer::types::{DocEntry, DocNBranches, StoredBranchRef};
 use crate::stores::VersionTag;
 use automerge::ReadDoc;
-use daybook_types::doc::{ChangeHashSet, DocId};
+use automerge::transaction::Transactable;
+use daybook_types::doc::{
+    ChangeHashSet, DocId, FacetKey, FacetTag, WellKnownFacet, WellKnownFacetTag,
+};
+use daybook_types::url::parse_facet_ref;
+use std::collections::{HashMap, HashSet};
+
+/// Create the local-branch SQL tables if the db predates them. Idempotent;
+/// also called by the boot reconciliation's registration read, which can run before
+/// a drawer boot ever created the schema.
+pub(crate) async fn ensure_local_branch_schema(sql: &SqlCtx) -> Res<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS drawer_local_branches (
+            doc_id TEXT NOT NULL,
+            branch_path TEXT NOT NULL,
+            branch_doc_id BLOB NOT NULL,
+            vtag_version TEXT NOT NULL,
+            vtag_actor_id TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (doc_id, branch_path)
+        ) STRICT
+        "#,
+    )
+    .execute(&sql.write_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS drawer_local_branches_deleted (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id TEXT NOT NULL,
+            branch_path TEXT NOT NULL,
+            branch_doc_id BLOB NOT NULL,
+            branch_heads_json TEXT NOT NULL,
+            vtag_version TEXT NOT NULL,
+            vtag_actor_id TEXT NOT NULL,
+            deleted_at INTEGER NOT NULL
+        ) STRICT
+        "#,
+    )
+    .execute(&sql.write_pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_doc_id ON drawer_local_branches(doc_id)",
+    )
+    .execute(&sql.write_pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_deleted_doc_path ON drawer_local_branches_deleted(doc_id, branch_path, deleted_at DESC)",
+    )
+    .execute(&sql.write_pool)
+    .await?;
+    Ok(())
+}
 
 impl DrawerRepo {
     pub(super) async fn ensure_local_branch_schema(&self) -> Res<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS drawer_local_branches (
-                doc_id TEXT NOT NULL,
-                branch_path TEXT NOT NULL,
-                branch_doc_id BLOB NOT NULL,
-                vtag_version TEXT NOT NULL,
-                vtag_actor_id TEXT NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY (doc_id, branch_path)
-            ) STRICT
-            "#,
-        )
-        .execute(&self.meta_store_sql.write_pool)
-        .await?;
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS drawer_local_branches_deleted (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                doc_id TEXT NOT NULL,
-                branch_path TEXT NOT NULL,
-                branch_doc_id BLOB NOT NULL,
-                branch_heads_json TEXT NOT NULL,
-                vtag_version TEXT NOT NULL,
-                vtag_actor_id TEXT NOT NULL,
-                deleted_at INTEGER NOT NULL
-            ) STRICT
-            "#,
-        )
-        .execute(&self.meta_store_sql.write_pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_doc_id ON drawer_local_branches(doc_id)",
-        )
-        .execute(&self.meta_store_sql.write_pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_deleted_doc_path ON drawer_local_branches_deleted(doc_id, branch_path, deleted_at DESC)",
-        )
-        .execute(&self.meta_store_sql.write_pool)
-        .await?;
-        Ok(())
+        ensure_local_branch_schema(&self.meta_store_sql).await
     }
-
     pub(super) async fn upsert_local_branch_ref(
         &self,
         doc_id: &DocId,
@@ -382,4 +393,267 @@ impl DrawerRepo {
             .await?;
         Ok(entry)
     }
+}
+
+/// The registration side of the drawer's add outbox, as the boot
+/// reconciliation's registration read (reconciliation.rs) sees it on the
+/// drawer's durable surfaces. The surface is the
+/// kind: content docs are `docs.map` keys, replicated branches ride an
+/// entry's branch refs, and a local branch ref never travels on the drawer
+/// document at all (it lives in the `drawer_local_branches` SQL table).
+///
+/// `claims` are the claimed-but-uncommitted staging allocations (ADR 003 §19):
+/// a durable `cipherBlob` facet names the reservation by `keyRef`, so the
+/// operation got past its commit point and the commit is replayed, not
+/// discarded. An incomplete scan (`claims_in_branch_doc` returning `false`) is
+/// reported per branch via the warn path: the reconciliation replays
+/// discovered commits regardless of completeness, since it never discards on
+/// a claim read.
+pub(crate) struct AllocationRegistrationRead {
+    pub shapes: HashMap<big_repo::DocumentId, RegisteredAllocationShape>,
+    pub claims: HashSet<big_repo::DocumentId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegisteredAllocationShape {
+    ContentDoc,
+    ReplicatedBranch,
+    LocalBranch,
+}
+
+/// Read every pending allocation's registration off the drawer's durable
+/// surfaces in one pass: one read of the drawer document's `docs.map` plus one
+/// query over the local-branch SQL (whose schema may not exist yet — the sweep
+/// can run before a drawer boot created it). When `claim_candidates` is
+/// non-empty, the registered content docs' branch facets are also read for
+/// `cipherBlob` claims over those reservations — the claimed-but-uncommitted
+/// window (ADR 003 §19). The claim scan is paid only for the boots that have
+/// reservations to classify.
+///
+/// Returns `Ok(None)` when the drawer document is not readable at this boot
+/// stage (missing, or still pending materialization on a fresh clone): the
+/// reconciliation then keeps every surviving row instead of replaying, since a
+/// registered-but-unreadable entry must never be re-committed blind.
+pub(crate) async fn registered_allocation_shapes(
+    sql: &SqlCtx,
+    big_repo: &big_repo::SharedBigRepo,
+    drawer_doc_id: &big_repo::DocumentId,
+    claim_candidates: &[big_repo::DocumentId],
+) -> Res<Option<AllocationRegistrationRead>> {
+    let big_repo::DocLookup::Ready(drawer_handle) = big_repo.get_doc(drawer_doc_id).await? else {
+        tracing::warn!(
+            %drawer_doc_id,
+            "outbox rows keep their replay: the drawer document is not readable here"
+        );
+        return Ok(None);
+    };
+
+    let mut shapes = HashMap::new();
+    let mut claims = HashSet::new();
+    // The branch docs of every registered content doc: what the claim scan
+    // reads when there are reservations to classify.
+    let mut content_branch_docs = Vec::new();
+    drawer_handle
+        .with_document_read(|doc| {
+            let map_id = match doc.get(automerge::ROOT, "docs")? {
+                Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => {
+                    match doc.get(&docs_id, "map")? {
+                        Some((automerge::Value::Object(automerge::ObjType::Map), map_id)) => map_id,
+                        _ => eyre::bail!("invalid drawer shape"),
+                    }
+                }
+                None => return eyre::Ok(()),
+                _ => eyre::bail!("invalid drawer shape"),
+            };
+            for item in doc.map_range(&map_id, ..) {
+                let doc_id = DocId::from(item.key.clone());
+                let entry: Option<DocEntry> = autosurgeon::hydrate_prop(doc, &map_id, item.key)?;
+                let Some(entry) = entry else {
+                    continue;
+                };
+                let doc_id = doc_id
+                    .to_string()
+                    .parse::<big_repo::DocumentId>()
+                    .map_err(|err| ferr!("drawer docs.map key is not a document id: {err}"))?;
+                for branch_ref in entry.branches.values() {
+                    shapes.insert(
+                        branch_ref.branch_doc_id.clone(),
+                        RegisteredAllocationShape::ReplicatedBranch,
+                    );
+                    content_branch_docs.push(branch_ref.branch_doc_id.clone());
+                }
+                shapes.insert(doc_id, RegisteredAllocationShape::ContentDoc);
+            }
+            eyre::Ok(())
+        })
+        .await?;
+
+    ensure_local_branch_schema(sql).await?;
+    let local_rows: Vec<(Vec<u8>,)> =
+        sqlx::query_as("SELECT branch_doc_id FROM drawer_local_branches")
+            .fetch_all(&sql.write_pool)
+            .await?;
+    for (branch_doc_id,) in local_rows {
+        let branch_doc_id: [u8; 32] = branch_doc_id
+            .try_into()
+            .map_err(|err| ferr!("drawer local branch doc id is not 32 bytes: {err:?}"))?;
+        shapes.insert(
+            big_repo::DocumentId::new(branch_doc_id),
+            RegisteredAllocationShape::LocalBranch,
+        );
+    }
+
+    // The claim scan is per boot-sweep and only paid when reservations exist:
+    // the candidates are the sweep's reservations.
+    // A `cipherBlob` facet's key id is `{domain}/{facet}`, so the claimed doc id
+    // lives in the facet value: match candidates by the `keyRef`'s doc id after the
+    // value read.
+    //
+    // Only reservations with no registration shape are candidates. A registered
+    // reservation needs no claim replay — the classification below reads it off
+    // `shapes` alone — so scanning for it would open every registered content branch
+    // doc (a cost that scales with the drawer) to answer a question whose answer is
+    // already known. A reservation whose scan came back incomplete stays a candidate
+    // on purpose: it is unclassified *because* the surfaces could not all be read, so
+    // dropping it here would turn a kept reservation into a discarded one.
+    let candidates_by_string: HashMap<String, big_repo::DocumentId> = claim_candidates
+        .iter()
+        .filter(|id| !shapes.contains_key(*id))
+        .map(|id| (id.to_string(), id.clone()))
+        .collect();
+    if !candidates_by_string.is_empty() {
+        for branch_doc_id in &content_branch_docs {
+            if !claims_in_branch_doc(big_repo, branch_doc_id, &candidates_by_string, &mut claims)
+                .await?
+            {
+                tracing::warn!(
+                    %branch_doc_id,
+                    "outbox rows keep their replay check: a registered content doc's \
+                     branch could not be read, so its cipherBlob claims cannot be enumerated"
+                );
+            }
+        }
+    }
+
+    Ok(Some(AllocationRegistrationRead { shapes, claims }))
+}
+
+/// Read one registered branch doc's durable `cipherBlob` facets at its current
+/// heads and collect every claim candidate its values name by `keyRef`.
+///
+/// The tag enumeration is what bounds it (only `cipherBlob`-tagged keys are
+/// hydrated), and the doc id comes from the facet value — the same
+/// facet-value read the pin worker's pair drain uses, for the same reason:
+/// a `cipherBlob` facet's key id is `{domain}/{facet}`, so no tag+id index can
+/// answer this. `Ok(false)` when the branch doc is unreadable — the caller
+/// must then treat an absent claim as unknown rather than as no claim. Local
+/// branches (`/tmp`) are skipped: local branch docs never enter a replicated
+/// partition, so the encryption worker never writes their facets and a claim
+/// can never ride one.
+async fn claims_in_branch_doc(
+    big_repo: &big_repo::SharedBigRepo,
+    branch_doc_id: &big_repo::DocumentId,
+    candidates_by_string: &HashMap<String, big_repo::DocumentId>,
+    claims: &mut HashSet<big_repo::DocumentId>,
+) -> Res<bool> {
+    let handle = match big_repo.get_doc(branch_doc_id).await? {
+        big_repo::DocLookup::Ready(handle) => handle,
+        big_repo::DocLookup::Missing | big_repo::DocLookup::PendingMaterialization => {
+            return Ok(false);
+        }
+    };
+    let heads = handle
+        .with_document_read(|doc| Arc::from(doc.get_heads()))
+        .await;
+    let facets = handle
+        .hydrate_path_at_heads::<
+            am_utils_rs::codecs::ThroughJson<HashMap<FacetKey, daybook_types::doc::FacetRaw>>,
+        >(&heads, automerge::ROOT, vec!["facets".into()])
+        .await
+        .wrap_err("hydrate facets for the add-outbox claim scan")?
+        .map(|value| value.0)
+        .unwrap_or_default();
+    for (key, raw) in facets {
+        if key.tag != FacetTag::WellKnown(WellKnownFacetTag::CipherBlob) {
+            continue;
+        }
+        let WellKnownFacet::CipherBlob(cipher) =
+            WellKnownFacet::from_json(raw, WellKnownFacetTag::CipherBlob)?
+        else {
+            unreachable!("cipherBlob facet decoded to another well-known variant");
+        };
+        let reference = parse_facet_ref(&cipher.key_ref)?;
+        if let Some(candidate) = candidates_by_string.get(&reference.doc_id.to_string()) {
+            claims.insert(candidate.clone());
+        }
+    }
+    Ok(true)
+}
+
+/// Replay the registration write for the claimed-but-uncommitted staging
+/// allocations (ADR 003 §19): the durable cipherBlob claim says the operation
+/// got past its commit point, so the commit is replayed, starting with the
+/// `docs.map` entry — written here, before the boot reconciliation replays the
+/// grants and registration, in the drawer's own registration shape. A crash
+/// anywhere in the replay lands in the registered-not-finalized window the
+/// sweep already handles, because the reservation is only released after that
+/// completes.
+pub(crate) async fn register_claimed_allocations(
+    big_repo: &big_repo::SharedBigRepo,
+    drawer_doc_id: &big_repo::DocumentId,
+    claimed: &[big_repo::DocumentId],
+    local_actor_id: automerge::ActorId,
+) -> Res<()> {
+    if claimed.is_empty() {
+        return Ok(());
+    }
+    let big_repo::DocLookup::Ready(drawer_handle) = big_repo.get_doc(drawer_doc_id).await? else {
+        eyre::bail!(
+            "claimed allocation registration replay: drawer document {drawer_doc_id} not readable"
+        );
+    };
+    let entries: Vec<(DocId, DocEntry)> = claimed
+        .iter()
+        .map(|branch_doc_id| {
+            let entry = DocEntry {
+                branches: [(
+                    "main".to_string(),
+                    StoredBranchRef {
+                        branch_doc_id: branch_doc_id.clone(),
+                    },
+                )]
+                .into(),
+                branches_deleted: HashMap::new(),
+                vtag: VersionTag::mint(local_actor_id.clone()),
+                previous_version_heads: None,
+            };
+            (DocId::from(branch_doc_id.to_string()), entry)
+        })
+        .collect();
+    drawer_handle
+        .with_document(|doc| {
+            doc.set_actor(local_actor_id.clone());
+            let mut tx = doc.transaction();
+            let docs_obj = match tx.get(automerge::ROOT, "docs")? {
+                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                _ => tx.put_object(automerge::ROOT, "docs", automerge::ObjType::Map)?,
+            };
+            let map_id = match tx.get(&docs_obj, "map")? {
+                Some((automerge::Value::Object(automerge::ObjType::Map), id)) => id,
+                _ => tx.put_object(&docs_obj, "map", automerge::ObjType::Map)?,
+            };
+            for (doc_id, entry) in &entries {
+                autosurgeon::reconcile_prop(
+                    &mut tx,
+                    &map_id,
+                    autosurgeon::Prop::Key((&doc_id[..]).into()),
+                    entry,
+                )?;
+            }
+            let (heads, _) = tx.commit();
+            let heads = heads.expect("commit failed");
+            eyre::Ok(ChangeHashSet(Arc::from([heads])))
+        })
+        .await??;
+    Ok(())
 }

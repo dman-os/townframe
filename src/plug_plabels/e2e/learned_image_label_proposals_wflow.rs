@@ -150,6 +150,8 @@ async fn add_blob_image_doc(
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-learned_image_label_proposals_wflow.rs-0".to_string(),
         })
         .await
         .map_err(Into::into)

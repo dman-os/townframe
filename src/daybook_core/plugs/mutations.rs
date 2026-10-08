@@ -74,6 +74,8 @@ impl PlugsRepo {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "init:core-plug-manifest".to_string(),
             })
             .await?;
         let core_doc_id = daybook_types::doc::DocId::from(core_doc_id);
@@ -201,6 +203,8 @@ impl PlugsRepo {
                         branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                         facets: HashMap::new(),
                         user_path: None,
+
+                        idempotency_key: format!("plug-enable:{plug_id}"),
                     })
                     .await?,
             )
@@ -372,6 +376,15 @@ impl PlugsRepo {
         crate::authority::grant_docs_admin(
             &self.big_repo,
             &authority.core_docs,
+            [branch_ref.branch_doc_id.clone()],
+        )
+        .await?;
+        // A plug manifest doc is encryption-eligible like a content doc
+        // (ADR 003 §19): its blobs get encrypted representations for relay
+        // domains.
+        crate::authority::grant_docs_admin(
+            &self.big_repo,
+            &authority.encrypted_blob_docs,
             [branch_ref.branch_doc_id],
         )
         .await?;
@@ -460,6 +473,15 @@ impl PlugsRepo {
         crate::authority::grant_docs_admin(
             &self.big_repo,
             &authority.core_docs,
+            [branch_ref.branch_doc_id.clone()],
+        )
+        .await?;
+        // A plug manifest doc is encryption-eligible like a content doc
+        // (ADR 003 §19): its blobs get encrypted representations for relay
+        // domains.
+        crate::authority::grant_docs_admin(
+            &self.big_repo,
+            &authority.encrypted_blob_docs,
             [branch_ref.branch_doc_id],
         )
         .await?;
@@ -571,6 +593,8 @@ impl PlugsRepo {
                 branch_path: daybook_types::doc::BranchPathBuf::from("main"),
                 facets,
                 user_path: None,
+
+                idempotency_key: { "plug-add-manifest-doc".to_string() },
             })
             .await?;
 
@@ -585,6 +609,15 @@ impl PlugsRepo {
         crate::authority::grant_docs_admin(
             &self.big_repo,
             &authority.core_docs,
+            [branch_ref.branch_doc_id.clone()],
+        )
+        .await?;
+        // A plug manifest doc is encryption-eligible like a content doc
+        // (ADR 003 §19): its blobs get encrypted representations for relay
+        // domains.
+        crate::authority::grant_docs_admin(
+            &self.big_repo,
+            &authority.encrypted_blob_docs,
             [branch_ref.branch_doc_id],
         )
         .await?;
@@ -659,16 +692,50 @@ impl PlugsRepo {
         if let Some(track) = &track
             && track.latest == ref_url
         {
-            // Already recorded at these heads — idempotent replay.
+            // Already recorded at these heads - idempotent replay. What this
+            // re-observation reports is the verdict recorded for that content: a
+            // rejected revision stays rejected. Otherwise whoever reaches these
+            // heads second - the manifest consumer, or an explicit record or add
+            // behind it - would report success for a manifest the gate refused.
             surelock::key::lock_scope(|key| {
                 let (mut cache, _key) = key.lock(&self.cache);
                 cache.upsert_known(&plug_id, &manifest);
             });
-            return Ok(RecordKnownOutcome::Recorded);
+            return Ok(match &track.latest_rejection {
+                Some(reason) => RecordKnownOutcome::Rejected {
+                    reason: reason.clone(),
+                },
+                None => RecordKnownOutcome::Recorded,
+            });
         }
         let mut reason = None;
-        // Gate A: version must strictly bump over the latest version seen.
-        if let Some(track) = &track
+        // A document revision that leaves the manifest facet itself untouched
+        // is not a republish: the same content may legitimately be re-observed
+        // at new heads (any writer adding a sibling facet gives the manifest
+        // document a new revision). Heads-tracking is this function's contract,
+        // so such a revision advances the track, and it carries the verdict
+        // already recorded for that content. That verdict stands: Gate B reads
+        // which plug owns which tag and Gate C reads the enabled baseline, so
+        // re-deriving either from unchanged content could newly reject a manifest
+        // that is already tracked — a maintenance write must not change a plug's
+        // validity.
+        let same_content = match &track {
+            Some(track)
+                if semver::Version::parse(&track.latest_version)
+                    .is_ok_and(|latest| incoming_version <= latest) =>
+            {
+                self.manifest_same_as_ref(&track.latest, &manifest).await?
+            }
+            _ => false,
+        };
+        // Gate A: version must strictly bump over the latest version seen, but
+        // a re-observation of the same content is not a republish and does not
+        // reach the gate at all.
+        if same_content {
+            reason = track
+                .as_ref()
+                .and_then(|track| track.latest_rejection.clone());
+        } else if let Some(track) = &track
             && let Ok(latest_version) = semver::Version::parse(&track.latest_version)
             && incoming_version <= latest_version
         {
@@ -679,6 +746,7 @@ impl PlugsRepo {
         // Gate B: structural validity (garde, tag clashes, dependencies) —
         // no version baseline.
         if reason.is_none()
+            && !same_content
             && let Err(err) = self.validate_structure(&manifest).await
         {
             reason = Some(format!("{err:#}"));
@@ -687,7 +755,7 @@ impl PlugsRepo {
         // surface. We can't enforce that every semver bump across the whole
         // (distributed) history is valid; we only care that a new version
         // doesn't break the previously enabled one.
-        if reason.is_none() {
+        if reason.is_none() && !same_content {
             let enabled_ref = self
                 .config_store()?
                 .query_sync(|config| config.enabled.get(&plug_id).cloned())
@@ -793,10 +861,20 @@ impl PlugsRepo {
                     "latest version {incoming} was rejected: {reason}"
                 )));
             }
-            return Ok((track.latest != *ref_url).then(|| {
+            if track.latest == *ref_url {
+                return Ok(None);
+            }
+            // The same version at different heads is only a republish when the
+            // manifest content differs: a revision that leaves the manifest
+            // facet untouched must not make an already-validated version
+            // unactivatable.
+            if self.manifest_same_as_ref(&track.latest, manifest).await? {
+                return Ok(None);
+            }
+            return Ok(Some(
                 "republish without a version bump: the same version was already validated at different heads"
-                    .to_string()
-            }));
+                    .to_string(),
+            ));
         }
         if incoming < latest_version {
             // Rolling back to the previously enabled version (e.g. after a

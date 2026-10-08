@@ -285,6 +285,8 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
                 user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
+
+                idempotency_key: "test-key-ladder.rs-0".to_string(),
             })
             .await?;
 
@@ -345,6 +347,9 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
+    // The seed runs the production blob workers: the pins a peer pulls, and the
+    // blob-part membership they write, exist only because those machines derived
+    // them.
     let node_a = open_sync_node(&repo_a_path).await?;
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
@@ -373,6 +378,8 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
                 user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
+
+                idempotency_key: "test-key-ladder.rs-1".to_string(),
             })
             .await?;
 
@@ -403,17 +410,35 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
 
         assert_eq!(doc_on_a.0.id, doc_on_b.0.id);
         assert_eq!(doc_on_a.0.facets, doc_on_b.0.facets);
+        // The seed's blob workers run, so its encryption worker publishes the
+        // Blob facet's resolution url through the cipherBlob at the commit point
+        // (ADR 003 §19): the replicated facet carries one extra `?via=` url
+        // beyond the plain `db+blob:///` url the document authored. Assert the
+        // authored fields, then the authored url as the first entry.
+        let blob_on_b = doc_on_b
+            .0
+            .facets
+            .get(&blob_key)
+            .and_then(|raw| WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::Blob).ok())
+            .and_then(|facet| match facet {
+                WellKnownFacet::Blob(blob) => Some(blob),
+                _ => None,
+            })
+            .ok_or_eyre("node_b's replicated doc must carry the Blob facet")?;
+        assert_eq!(blob_on_b.mime, "application/octet-stream");
+        assert_eq!(blob_on_b.length_octets, payload.len() as u64);
         assert_eq!(
-            doc_on_b.0.facets.get(&blob_key),
-            Some(&serde_json::Value::from(WellKnownFacet::Blob(
-                daybook_types::doc::Blob {
-                    mime: "application/octet-stream".to_string(),
-                    length_octets: payload.len() as u64,
-                    digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
-                    inline: None,
-                    urls: Some(vec![format!("db+blob:///{hash}")]),
-                },
-            )))
+            blob_on_b.digest,
+            crate::blobs::blob_id_to_digest_str(hash.clone())
+        );
+        assert!(blob_on_b.inline.is_none());
+        let urls = blob_on_b
+            .urls
+            .ok_or_eyre("the Blob facet must carry its urls")?;
+        assert_eq!(
+            urls.first(),
+            Some(&format!("db+blob:///{hash}")),
+            "the url the document authored must come first"
         );
 
         let blob_part = crate::blobs::blob_inventory_part_id(&node_a.ctx.docs_inventory_doc_id);
@@ -431,7 +456,11 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
             .sync_repo
             .wait_for_full_sync(&[peer_id_a], &[blob_part], None)
             .await?;
-        let got = wait_for_blob_bytes(&node_b.blobs_repo, hash, None).await?;
+        // Presence before the read: a byte read materializes a missing blob from
+        // the active peers, so it would pass whether or not the part sync
+        // delivered the bytes.
+        wait_for_blob_replicated(&node_b.blobs_repo, hash.clone(), Duration::from_secs(60)).await?;
+        let got = node_b.blobs_repo.get_bytes(hash).await?;
         assert_eq!(got, payload);
     }
 
@@ -482,6 +511,8 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
                 user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
+
+                idempotency_key: "test-key-ladder.rs-2".to_string(),
             })
             .await?;
 
@@ -539,6 +570,9 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
     .await?;
     rtx.shutdown().await?;
 
+    // The seed runs the production blob workers: the pins a peer pulls, and the
+    // blob-part membership they write, exist only because those machines derived
+    // them.
     let node_a = open_sync_node(&repo_a_path).await?;
     let ticket_a = node_a.sync_repo.get_clone_ticket_url().await?;
     bootstrap_clone_repo_from_url_for_tests(&ticket_a, &repo_b_path).await?;
@@ -572,6 +606,8 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
                 user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
+
+                idempotency_key: "test-key-ladder.rs-3".to_string(),
             })
             .await?;
 
@@ -583,7 +619,8 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
             .sync_repo
             .wait_for_full_sync(&[peer_id_a], &[blob_part], None)
             .await?;
-        let got = wait_for_blob_bytes(&node_b.blobs_repo, hash.clone(), None).await?;
+        wait_for_blob_replicated(&node_b.blobs_repo, hash.clone(), Duration::from_secs(60)).await?;
+        let got = node_b.blobs_repo.get_bytes(hash.clone()).await?;
         assert_eq!(got, payload);
         wait_for_doc_head_parity(
             &node_a,
@@ -608,17 +645,35 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
         assert_eq!(doc_on_a.0.id, doc_on_b.0.id);
         assert_eq!(doc_on_a.1, doc_on_b.1);
         assert_eq!(doc_on_a.0.facets, doc_on_b.0.facets);
+        // As in the pre-connect case: the seed's encryption worker publishes the
+        // Blob facet's resolution url through the cipherBlob at its commit point
+        // (ADR 003 §19), so the synced facet carries one extra `?via=` url.
+        let blob_on_b = doc_on_b
+            .0
+            .facets
+            .get(&blob_key)
+            .and_then(|raw| WellKnownFacet::from_json(raw.clone(), WellKnownFacetTag::Blob).ok())
+            .and_then(|facet| match facet {
+                WellKnownFacet::Blob(blob) => Some(blob),
+                _ => None,
+            })
+            .ok_or_eyre("node_b's replicated doc must carry the Blob facet")?;
         assert_eq!(
-            doc_on_b.0.facets.get(&blob_key),
-            Some(&serde_json::Value::from(WellKnownFacet::Blob(
-                daybook_types::doc::Blob {
-                    mime: "application/octet-stream".to_string(),
-                    length_octets: payload.len() as u64,
-                    digest: crate::blobs::blob_id_to_digest_str(hash.clone()),
-                    inline: None,
-                    urls: Some(vec![format!("db+blob:///{hash}")]),
-                },
-            ))),
+            blob_on_b.length_octets,
+            payload.len() as u64,
+            "the replicated Blob facet must name the payload's length"
+        );
+        assert_eq!(
+            blob_on_b.digest,
+            crate::blobs::blob_id_to_digest_str(hash.clone())
+        );
+        let urls = blob_on_b
+            .urls
+            .ok_or_eyre("the Blob facet must carry its urls")?;
+        assert_eq!(
+            urls.first(),
+            Some(&format!("db+blob:///{hash}")),
+            "the url the document authored must come first"
         );
     }
 
@@ -646,6 +701,8 @@ async fn iroh_sync_connected_doc_updates_propagate_originator_then_other() -> Re
                 user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
+
+                idempotency_key: "test-key-ladder.rs-4".to_string(),
             })
             .await?;
 
@@ -683,6 +740,8 @@ async fn iroh_sync_connected_doc_updates_propagate_other_then_originator() -> Re
                 user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
+
+                idempotency_key: "test-key-ladder.rs-5".to_string(),
             })
             .await?;
 
@@ -719,6 +778,8 @@ async fn iroh_sync_connected_divergent_facet_updates_propagate_originator_then_o
                 user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
+
+                idempotency_key: "test-key-ladder.rs-6".to_string(),
             })
             .await?;
 
@@ -767,6 +828,8 @@ async fn iroh_sync_connected_divergent_facet_updates_propagate_other_then_origin
                 user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
+
+                idempotency_key: "test-key-ladder.rs-7".to_string(),
             })
             .await?;
 
@@ -816,6 +879,8 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
                 user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_a.ctx.local_user_path.clone(),
                 )),
+
+                idempotency_key: "test-key-ladder.rs-8".to_string(),
             })
             .await?;
         {
@@ -925,6 +990,8 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
             user_path: Some(daybook_types::doc::UserPathBuf::from(
                 node_a.ctx.local_user_path.clone(),
             )),
+
+            idempotency_key: "test-key-ladder.rs-9".to_string(),
         })
         .await?;
     {
@@ -957,6 +1024,8 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
                 user_path: Some(daybook_types::doc::UserPathBuf::from(
                     node_b.ctx.local_user_path.clone(),
                 )),
+
+                idempotency_key: "test-key-ladder.rs-10".to_string(),
             })
             .await?;
         update_title_at_main_branch(&node_b, &doc_on_b, "B offline created title v2").await?;
@@ -1036,6 +1105,8 @@ async fn iroh_sync_offline_divergent_branch_merge_converges() -> Res<()> {
             user_path: Some(daybook_types::doc::UserPathBuf::from(
                 node_a.ctx.local_user_path.clone(),
             )),
+
+            idempotency_key: "test-key-ladder.rs-11".to_string(),
         })
         .await?;
 

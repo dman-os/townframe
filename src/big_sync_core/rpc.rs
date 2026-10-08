@@ -8,10 +8,25 @@ use crate::fingerprint::{Fingerprint, FingerprintSeed};
 use crate::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
 
 pub trait BigSyncRpcClient<K: FutureForm> {
+    /// A per-part answer: readable parts appear in [`PeerSummaryResult::parts`], and a
+    /// refused part is simply *absent* from that map. The batch refusal this replaced
+    /// was `ListPartsError::UnkownParts` over the whole request, which starved every
+    /// granted part behind an ungranted neighbor until the whole batch was granted.
+    ///
+    /// The one refusal that is not per part is a request naming more parts than the
+    /// responder will answer: it is refused whole, as
+    /// [`PeerSummaryError::TooManyParts`]. An empty answer map would be
+    /// indistinguishable from an idle peer, and the asker would mark every part
+    /// unknown and re-ask - the same starvation, only silent.
+    ///
+    /// The asker reports that refusal once, as
+    /// [`crate::SyncStatEvent::PeerPartSetTooLarge`]: the ceiling is a property of the
+    /// part set the asker built, not of any one part, so the machine keeps re-asking
+    /// while the embedder — who owns the part→peer plan — is the one who can narrow it.
     fn peer_summary<'a>(
         &'a self,
         req: PeerSummaryRequest,
-    ) -> K::Future<'a, BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>;
+    ) -> K::Future<'a, BigSyncRpcResult<Result<PeerSummaryResult, PeerSummaryError>>>;
 
     /// One bounded, filtered replay page for a single target.
     ///
@@ -841,6 +856,14 @@ pub enum RpcError {
 pub enum ListPartsError {
     /// UnkownParts {unkown_parts:?}
     UnkownParts { unkown_parts: Vec<PartKey> },
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error, displaydoc::Display,
+)]
+pub enum PeerSummaryError {
+    /// A summary request named {requested} parts, above the ceiling of {cap}
+    TooManyParts { requested: usize, cap: usize },
 }
 
 pub type BigSyncRpcResult<T> = Result<T, RpcError>;

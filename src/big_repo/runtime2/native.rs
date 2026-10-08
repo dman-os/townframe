@@ -1221,15 +1221,9 @@ where
         })
     }
 
-    fn allocate_document(
-        &self,
-        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
-    ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<DocumentId>> {
+    fn allocate_document(&self) -> <Sendable as FutureForm>::Future<'_, eyre::Result<DocumentId>> {
         Sendable::from_future(async move {
-            let doc_id = self
-                .keyhive
-                .reserve_doc_id(parents, &self.keyhive_storage)
-                .await?;
+            let doc_id = self.keyhive.reserve_doc_id(&self.keyhive_storage).await?;
             Ok(doc_id)
         })
     }
@@ -1254,12 +1248,14 @@ where
     fn finalize_document_authority(
         &self,
         doc_id: DocumentId,
+        coparents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         content_heads: NonEmpty<[u8; 32]>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
             self.keyhive
                 .finalize_reserved_doc(
                     doc_id,
+                    coparents,
                     content_heads,
                     &self.keyhive_protocol,
                     &self.keyhive_storage,
@@ -1269,34 +1265,15 @@ where
         })
     }
 
-    fn complete_document_authority(
+    fn delete_doc_reservation(
         &self,
         doc_id: DocumentId,
-        pending_group: crate::keyhive::BigKeyhiveGroup,
-        content_heads: NonEmpty<[u8; 32]>,
     ) -> <Sendable as FutureForm>::Future<'_, eyre::Result<()>> {
         Sendable::from_future(async move {
-            if !self
-                .storage
-                .contains_sedimentree_id(SedimentreeId::new(doc_id.to_bytes32()?))
+            self.keyhive_storage
+                .delete_doc_reservation(doc_id.to_bytes32()?)
                 .await
-                .map_err(|err| ferr!("failed checking finalized sedimentree: {err}"))?
-            {
-                return Err(ferr!(
-                    "cannot complete document {doc_id} before sedimentree persistence"
-                ));
-            }
-            let after_content = content_heads.iter().map(|head| head.to_vec()).collect();
-            self.keyhive
-                .complete_reserved_doc(
-                    &pending_group,
-                    doc_id,
-                    after_content,
-                    &self.keyhive_protocol,
-                    &self.keyhive_storage,
-                )
-                .await?;
-            Ok(())
+                .map_err(|err| ferr!("failed deleting document reservation: {err}"))
         })
     }
 

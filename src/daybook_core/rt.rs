@@ -67,6 +67,14 @@ struct ResolvedStatelessViewProvider {
 pub struct RtConfig {
     pub device_id: String,
     pub startup_progress_task_id: Option<String>,
+    /// Whether to spawn the background blob workers: pins-part, pin, encryption.
+    ///
+    /// Off for tests that drive one of these workers themselves. An ambient
+    /// worker shares the document, the domain and the facet keys such a test
+    /// asserts on, so its assertions stop being attributable to the code under
+    /// test, and two writers race the same facet (a concurrent append to the
+    /// `Blob` facet's url list merges into two identical entries).
+    pub spawn_blob_workers: bool,
 }
 
 pub struct Rt {
@@ -92,6 +100,12 @@ pub struct Rt {
     pub doc_facet_ref_index_repo: Arc<DocFacetRefIndexRepo>,
     pub sqlite_local_state_repo: Arc<SqliteLocalStateRepo>,
     local_wflow_part_id: String,
+    /// Sender half of the §15 rotation trigger (`rotation_channel()`); held
+    /// only when blob workers spawn. `None` otherwise — a rotation request on a
+    /// repo that runs no encryption worker is an error at the call site, not a
+    /// silently dropped message.
+    doc_rotation_tx:
+        Option<tokio::sync::mpsc::Sender<crate::blobs::encryption_worker::RotationRequest>>,
 }
 
 pub struct RtStopToken {
@@ -99,8 +113,9 @@ pub struct RtStopToken {
     rt: Arc<Rt>,
     partition_watcher: tokio::task::JoinHandle<()>,
     doc_processor_stop: crate::rt::triage::DocProcessorStopToken,
-    blob_pin_worker_stop: crate::repos::RepoStopToken,
-    blob_pins_part_worker_stop: crate::repos::RepoStopToken,
+    blob_pin_worker_stop: Option<crate::repos::RepoStopToken>,
+    blob_pins_part_worker_stop: Option<crate::repos::RepoStopToken>,
+    blob_encryption_worker_stop: Option<crate::repos::RepoStopToken>,
     doc_facet_set_index_stop: crate::repos::RepoStopToken,
     plugs_config_consumer_stop: crate::repos::RepoStopToken,
     plugs_manifest_consumer_stop: crate::repos::RepoStopToken,
@@ -131,13 +146,25 @@ impl RtStopToken {
                 "error stopping doc_facet_ref_index_repo during shutdown - continuing"
             );
         }
-        if let Err(err) = self.blob_pins_part_worker_stop.stop().await {
+        if let Some(stop) = self.blob_encryption_worker_stop
+            && let Err(err) = stop.stop().await
+        {
+            warn!(
+                ?err,
+                "error stopping blob_encryption_worker during shutdown - continuing"
+            );
+        }
+        if let Some(stop) = self.blob_pins_part_worker_stop
+            && let Err(err) = stop.stop().await
+        {
             warn!(
                 ?err,
                 "error stopping blob_pins_part_worker during shutdown - continuing"
             );
         }
-        if let Err(err) = self.blob_pin_worker_stop.stop().await {
+        if let Some(stop) = self.blob_pin_worker_stop
+            && let Err(err) = stop.stop().await
+        {
             warn!(
                 ?err,
                 "error stopping blob_pin_worker during shutdown - continuing"
@@ -195,6 +222,33 @@ pub enum InvokeCommandFromWflowError {
 }
 
 impl Rt {
+    /// §15 trigger: rotate the document's existing cipherBlob representations —
+    /// fresh key document, re-encrypted ciphertext, pair roots re-rooted
+    /// through the worker's keyed-task machinery (ADR 003 §15/§19). The task
+    /// shares the reconcile/delta scheduler and its budget, so a rotation for a
+    /// document cannot race its install/delta work.
+    ///
+    /// Errors when this repo spawned no encryption worker (`spawn_blob_workers`
+    /// unset): refusing here is the runtime telling the caller the worker that
+    /// owns the rotation does not exist, rather than the request vanishing into
+    /// a channel nobody reads.
+    pub async fn request_doc_representations_rotation(
+        &self,
+        doc_id: daybook_types::doc::DocId,
+    ) -> Res<()> {
+        let Some(rotation_tx) = self.doc_rotation_tx.as_ref() else {
+            return Err(eyre::eyre!(
+                "cannot rotate {:?}: no blob encryption worker is running in this repo",
+                &doc_id
+            ));
+        };
+        rotation_tx
+            .send(crate::blobs::encryption_worker::RotationRequest {
+                doc_id: doc_id.clone(),
+            })
+            .await
+            .map_err(|_| eyre::eyre!("the encryption worker's rotation channel closed"))
+    }
     async fn emit_startup_progress_status(
         progress_repo: &Arc<crate::progress::ProgressRepo>,
         startup_progress_task_id: Option<&str>,
@@ -247,6 +301,21 @@ impl Rt {
         // One cancel token for the whole Rt, created up front so workers
         // booted before the Rt struct is constructed still share it.
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        // A failed boot must not leak the workers it already started: every
+        // task below is a child of `cancel_token` (each worker holds a child
+        // token), so cancelling the token on any error return tears every
+        // child down - the same effect as aborting a task set, expressed
+        // through the runtime's own cancellation primitive. Disarmed exactly
+        // where boot hands the token to the returned stop token.
+        struct CancelTokenOnBootError(Option<tokio_util::sync::CancellationToken>);
+        impl Drop for CancelTokenOnBootError {
+            fn drop(&mut self) {
+                if let Some(token) = self.0.take() {
+                    token.cancel();
+                }
+            }
+        }
+        let mut cancel_on_boot_error = CancelTokenOnBootError(Some(cancel_token.clone()));
         let authority = crate::authority::ensure(&rcx.big_repo, &rcx.sql, None).await?;
         crate::repo::ensure_authority_partitions(
             &rcx.part_store,
@@ -255,6 +324,14 @@ impl Rt {
             &rcx.docs_inventory_doc_id,
         )
         .await?;
+
+        // The blob presence plane's write edge (ADR 003 §13): from here on,
+        // every put/download announces itself, and the boot announce replays
+        // the blobs already on disk. Both are idempotent in the store, so a
+        // restart costs row reads, and the encryption worker's feeder can open
+        // its stream before any of these facts is missed.
+        blobs_repo.set_blob_presence_sink(Arc::clone(&rcx.blob_presence_store));
+        blobs_repo.announce_held_blobs().await?;
         Self::emit_startup_progress_status(
             &progress_repo,
             startup_progress_task_id.as_deref(),
@@ -295,26 +372,81 @@ impl Rt {
         )
         .await?;
         let stage_started = std::time::Instant::now();
-        let blob_pins_part_worker_stop = crate::blobs::spawn_blob_pins_part_worker(
-            Arc::clone(&rcx.blob_part_store),
-            Arc::clone(&sqlite_local_state_repo),
-            Arc::clone(&drawer),
-            doc_facet_set_index_repo.revision_store(),
-            cancel_token.clone(),
-        )
-        .await?;
-        let blob_pin_worker_stop = crate::blobs::spawn_blob_pin_worker(
-            Arc::clone(&drawer),
-            rcx.sql.clone(),
-            rcx.core_inventory_doc_id.clone(),
-            rcx.docs_inventory_doc_id.clone(),
-            doc_facet_set_index_repo.revision_store(),
-            Arc::clone(&plugs_repo),
-            cancel_token.clone(),
-        )
-        .await?;
+        let blob_pins_part_worker_stop = if config.spawn_blob_workers {
+            Some(
+                crate::blobs::spawn_blob_pins_part_worker(
+                    Arc::clone(&rcx.blob_part_store),
+                    Arc::clone(&sqlite_local_state_repo),
+                    Arc::clone(&drawer),
+                    doc_facet_set_index_repo.revision_store(),
+                    cancel_token.clone(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let blob_pin_worker_stop = if config.spawn_blob_workers {
+            Some(
+                crate::blobs::spawn_blob_pin_worker(crate::blobs::BlobPinWorkerArgs {
+                    drawer_repo: Arc::clone(&drawer),
+                    sql: rcx.sql.clone(),
+                    core_inventory_doc_id: rcx.core_inventory_doc_id.clone(),
+                    docs_inventory_doc_id: rcx.docs_inventory_doc_id.clone(),
+                    encryption_inventory_doc_id: rcx.encryption_inventory_doc_id.clone(),
+                    blobs_repo: Arc::clone(&blobs_repo),
+                    facet_set_store: doc_facet_set_index_repo.revision_store(),
+                    plugs_repo: Arc::clone(&plugs_repo),
+                    parent_cancel_token: cancel_token.clone(),
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
         // The blob-inventory access rows (ADR 013) belong to whoever serves those parts to
         // peers, so `IrohSyncRepo::boot` owns that writer, not this runtime.
+        // Started after the pin workers, so it stops before them: it is the
+        // worker that writes the facets their pin derivation reads. Without an
+        // encrypted-representation inventory it refuses to run - installing a
+        // representation nothing can advertise or release is the one option that
+        // leaks (ADR 003 §19).
+        let mut doc_rotation_tx_sender: Option<
+            tokio::sync::mpsc::Sender<crate::blobs::encryption_worker::RotationRequest>,
+        > = None;
+        let blob_encryption_worker_stop = if config.spawn_blob_workers {
+            Some(
+                crate::blobs::spawn_blob_encryption_worker(
+                    crate::blobs::BlobEncryptionWorkerArgs {
+                        drawer_repo: Arc::clone(&drawer),
+                        sql: rcx.sql.clone(),
+                        blobs_repo: Arc::clone(&blobs_repo),
+                        facet_set_store: doc_facet_set_index_repo.revision_store(),
+                        facet_index: Arc::clone(&doc_facet_set_index_repo),
+                        domain_group: authority.encrypted_blob_docs.clone(),
+                        encryption_inventory_doc_id: rcx.encryption_inventory_doc_id.clone(),
+                        parent_cancel_token: cancel_token.clone(),
+                        // A rotation request for an unspawned worker is refused
+                        // at `Rt::request_doc_representations_rotation`, so the
+                        // channel existence mirrors `spawn_blob_workers`.
+                        rotation_rx: {
+                            let (doc_rotation_tx, doc_rotation_rx) =
+                                crate::blobs::encryption_worker::rotation_channel();
+                            doc_rotation_tx_sender = Some(doc_rotation_tx);
+                            Some(doc_rotation_rx)
+                        },
+                        // The §15 trigger rides with the worker: the runtime
+                        // holds the sender, tests/other callers hold theirs.
+                        feeder_repo_part_store: Arc::clone(&rcx.part_store),
+                        feeder_eligibility_part: authority.encrypted_blob_docs_part_id(),
+                        feeder_presence_store: Arc::clone(&rcx.blob_presence_store),
+                    },
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         Self::emit_startup_progress_status(
             &progress_repo,
             startup_progress_task_id.as_deref(),
@@ -441,6 +573,7 @@ impl Rt {
         let rt = Arc::new(Self {
             config,
             local_wflow_part_id,
+            doc_rotation_tx: doc_rotation_tx_sender,
             cancel_token,
             plugs_repo,
             drawer,
@@ -527,6 +660,7 @@ impl Rt {
             async move { repo.keep_up_with_partition().await.unwrap() }
         });
 
+        cancel_on_boot_error.0.take();
         Ok((
             Arc::clone(&rt),
             RtStopToken {
@@ -535,6 +669,7 @@ impl Rt {
                 doc_processor_stop,
                 blob_pin_worker_stop,
                 blob_pins_part_worker_stop,
+                blob_encryption_worker_stop,
                 doc_facet_set_index_stop,
                 plugs_config_consumer_stop,
                 plugs_manifest_consumer_stop,

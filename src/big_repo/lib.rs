@@ -825,9 +825,10 @@ impl BigRepo {
         self.keyhive.group_document_ids(group).await
     }
 
-    /// List document IDs with a durable reservation but no Keyhive document
-    /// yet (or whose reservation cleanup is pending). These are the crash-
-    /// recovery candidates between ID allocation and finalization.
+    /// List document IDs with a durable reservation. A reservation is the
+    /// crash-recovery record between `allocate_id` and a successful `commit_id`
+    /// (which deletes it as its last step) or `abandon_allocation`; these are
+    /// therefore the crash-recovery candidates in between.
     pub async fn reserved_doc_ids(&self) -> Res<Vec<DocumentId>> {
         let reservations = self
             .keyhive_storage
@@ -840,67 +841,113 @@ impl BigRepo {
             .collect())
     }
 
-    pub async fn recover_allocated_doc(
-        self: &Arc<Self>,
-        doc_id: DocumentId,
-        pending_group: BigKeyhiveGroup,
-    ) -> Result<bool, CreateDocError> {
-        let Some((bytes, initial_keys)) = self
-            .keyhive_storage
-            .staged_doc_content(doc_id.to_bytes32().map_err(|err| {
-                CreateDocError::from(eyre::eyre!(
-                    "staged document id is not a fixed-width key: {err}"
-                ))
-            })?)
-            .await
-            .map_err(|err| {
-                CreateDocError::from(eyre::eyre!("failed loading staged document content: {err}"))
-            })?
-        else {
-            return Ok(false);
-        };
-        let content = automerge::Automerge::load(&bytes).map_err(|err| {
-            CreateDocError::from(eyre::eyre!(
-                "failed decoding staged document content: {err}"
-            ))
-        })?;
-        self.finalize_allocated_doc_with_keys(doc_id, content, pending_group, initial_keys)
-            .await?;
-        Ok(true)
+    /// Reserve a new document identity: mint an id (the verifying key of a
+    /// fresh signing key) and write a reservation row whose staged content is
+    /// empty. Touches nothing else — no keyhive authority, no groups, no
+    /// events. The row is the crash-recovery record until [`Self::commit_id`]
+    /// or [`Self::abandon_allocation`] deletes it.
+    pub async fn allocate_id(self: &Arc<Self>) -> Res<DocumentId> {
+        self.runtime.allocate_doc().await
     }
 
-    pub async fn allocate_doc(
-        self: &Arc<Self>,
-        parents: Vec<BigKeyhiveAuthority>,
-    ) -> Result<DocumentId, CreateDocError> {
-        Ok(self.runtime.allocate_doc(parents).await?)
-    }
-
-    pub async fn finalize_allocated_doc(
+    /// Commit a reserved identity: turn the reservation row into a live local
+    /// document. Idempotent — a re-run with the same arguments reproduces
+    /// byte-identical events.
+    ///
+    /// Sequence: stage the record (the stage guard refuses different content
+    /// or keys with `AlreadyExists` and accepts the identical replay) → create
+    /// the keyhive document from the RESERVED signer with `coparents`
+    /// (empty is a valid genesis: the local active agent is always the head
+    /// parent) → persist its events and the sedimentree → materialize the
+    /// handle → delete the reservation row as the last step, so a crash
+    /// mid-way leaves the row and a re-run reproduces the same events.
+    ///
+    /// One coparents caveat: once the keyhive document exists the genesis is
+    /// frozen and a re-run's coparents are ignored — idempotency assumes the
+    /// caller replays identical arguments, which is what a deterministic
+    /// re-run after a crash does.
+    pub async fn commit_id(
         self: &Arc<Self>,
         doc_id: DocumentId,
         initial_content: automerge::Automerge,
-        pending_group: BigKeyhiveGroup,
-    ) -> Result<BigDocHandle, CreateDocError> {
-        self.finalize_allocated_doc_with_keys(doc_id, initial_content, pending_group, Vec::new())
-            .await
-    }
-
-    pub async fn finalize_allocated_doc_with_keys(
-        self: &Arc<Self>,
-        doc_id: DocumentId,
-        initial_content: automerge::Automerge,
-        pending_group: BigKeyhiveGroup,
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
+        coparents: &[BigKeyhiveAuthority],
     ) -> Result<BigDocHandle, CreateDocError> {
         let handle = self
             .runtime
-            .finalize_allocated_doc(doc_id, initial_content, pending_group, initial_keys)
+            .finalize_allocated_doc(doc_id, coparents.to_vec(), initial_content, initial_keys)
             .await?;
         Ok(BigDocHandle {
             repo: Arc::clone(self),
             handle,
         })
+    }
+
+    /// Discard a reserved identity: delete the reservation row. No keyhive
+    /// operations at all — no revocation, no grant surgery, nothing deleted
+    /// from the document's events, sedimentree or bytes (where any exist).
+    /// The underlying delete is a no-op on an absent row, so abandon is
+    /// idempotent.
+    pub async fn abandon_allocation(&self, doc_id: DocumentId) -> Res<()> {
+        self.keyhive_storage
+            .delete_doc_reservation(doc_id.to_bytes32()?)
+            .await
+            .map_err(|err| ferr!("failed deleting document reservation: {err}"))
+    }
+
+    /// Whether the keyhive document for a reserved/committed id exists locally.
+    /// The reconciliation's commit-vs-never-committed split needs exactly this,
+    /// and `keyhive_document_exists`/handles cannot answer it without
+    /// materializing.
+    /// Whether the keyhive document for a reserved/committed id exists locally.
+    /// The drawer reconciliation's committed-vs-never-committed split needs
+    /// exactly this, and a handle-based answer would materialize a doc worker.
+    pub async fn has_keyhive_document(&self, doc_id: &DocumentId) -> Res<bool> {
+        self.keyhive.keyhive_document_exists(doc_id.clone()).await
+    }
+
+    /// Finish a commit that a crash interrupted inside [`Self::commit_id`]: the
+    /// keyhive document may or may not already exist, the sedimentree may be
+    /// missing, and the reservation row still holds the staged initial content
+    /// exactly as the interrupted call wrote it. Re-running the same idempotent
+    /// finalize sequence from the staged record reproduces byte-identical
+    /// events and ends with the row deleted, like any successful commit.
+    ///
+    /// Reachable only for ids with a live reservation row; an absent row with
+    /// no keyhive document is not a commit error shape — that id is
+    /// abandon-land.
+    pub async fn commit_reserved(
+        self: &Arc<Self>,
+        doc_id: DocumentId,
+        coparents: &[BigKeyhiveAuthority],
+    ) -> Result<BigDocHandle, CreateDocError> {
+        let reservation = self
+            .keyhive_storage
+            .load_doc_reservation(doc_id.to_bytes32()?)
+            .await
+            .map_err(|err| {
+                CreateDocError::from(eyre::eyre!("failed loading document reservation: {err}"))
+            })?
+            .ok_or_else(|| {
+                CreateDocError::from(eyre::eyre!(
+                    "no reservation for {doc_id}; an id without a reservation is \
+                     not committable, only abandonable"
+                ))
+            })?;
+        let bytes = reservation.initial_content.ok_or_else(|| {
+            CreateDocError::from(eyre::eyre!(
+                "reservation for {doc_id} has no staged initial content"
+            ))
+        })?;
+        let initial_content = automerge::Automerge::load(&bytes).map_err(|err| {
+            CreateDocError::from(eyre::eyre!(
+                "failed decoding staged document content: {err}"
+            ))
+        })?;
+        // Same sequence and same idempotency caveat as `commit_id`: once the
+        // genesis exists a re-run's coparents are ignored.
+        self.commit_id(doc_id, initial_content, reservation.initial_keys, coparents)
+            .await
     }
 
     pub async fn create_doc(
@@ -949,8 +996,29 @@ impl BigRepo {
     ) -> Res<()> {
         let mut docs = BTreeMap::new();
         for doc_id in self.keyhive.group_document_ids(group).await {
-            let doc = self.get_doc(&doc_id).await?.into_ready(doc_id.clone())?;
-            docs.insert(doc_id, doc);
+            // A document can be created concurrently with this grant - the encryption
+            // worker creates key documents at runtime - and such a document is already in
+            // Keyhive's graph (`group_document_ids` sees it) while big_repo cannot hand out
+            // a handle for it yet. Both `GetDocError` variants mean only that, and neither
+            // is fatal: the document joins `affected_docs` below, where its checkpoint is
+            // derived per document; it has no pre-grant history to record, because it did
+            // not exist when the grant was conceived; and Keyhive accepts the delegation
+            // without an entry for it (the raced-in shape this replaces proved as much by
+            // completing the grant). Failing here over an unmaterialized member killed
+            // clone provisions outright.
+            match self.get_doc(&doc_id).await?.into_ready(doc_id.clone()) {
+                Ok(doc) => {
+                    docs.insert(doc_id, doc);
+                }
+                Err(err @ (GetDocError::NotFound(_) | GetDocError::PendingMaterialization(_))) => {
+                    tracing::debug!(
+                        %doc_id,
+                        %err,
+                        "group document is not locally materialized at grant preflight; its \
+                         checkpoint is derived after the grant"
+                    );
+                }
+            }
         }
 
         let mut after_content = BTreeMap::new();
@@ -968,9 +1036,23 @@ impl BigRepo {
         // key-only post-grant entrypoint without mutating the Automerge doc.
         if access.is_reader() {
             for doc_id in &affected_docs {
-                let _doc = docs
-                    .get(doc_id)
-                    .ok_or_else(|| ferr!("affected document was not preflighted: {doc_id}"))?;
+                // `affected_docs` is read off the live Keyhive graph after the grant has
+                // landed, while `docs` above is the snapshot taken before it. A document
+                // created inside that window joins the group and is legitimately affected
+                // without having been preflighted: the encryption worker creates key
+                // documents at runtime, so the snapshot is not stable across the grant.
+                // The invariant "every affected document was preflighted" is therefore not
+                // enforceable, and enforcing it failed the whole grant - a clone provision
+                // that raced a key-document creation died outright. The checkpoint does not
+                // need the snapshot: it is derived per document here, and when the causal
+                // keys are still in flight the durable event consumer retries.
+                if !docs.contains_key(doc_id) {
+                    tracing::debug!(
+                        %doc_id,
+                        "document joined the group between the pre-grant snapshot and the \
+                         grant; checkpointing it without a recorded pre-grant head set"
+                    );
+                }
                 if !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
                     tracing::debug!(%doc_id, "group grant causal checkpoint deferred to durable event reconciliation");
                 }
@@ -1313,28 +1395,15 @@ impl std::fmt::Debug for BigDocHandle {
     }
 }
 
-impl BigRepo {
-    /// Finalize a new branch while retaining the source document's encrypted
-    /// causal history. The keys remain inside BigRepo.
-    pub async fn finalize_allocated_doc_from_parent(
-        self: &Arc<BigRepo>,
-        doc_id: DocumentId,
-        initial_content: automerge::Automerge,
-        pending_group: BigKeyhiveGroup,
-        source: &BigDocHandle,
-    ) -> Result<BigDocHandle, CreateDocError> {
-        let initial_keys = source.content_keys().await?;
-        self.finalize_allocated_doc_with_keys(doc_id, initial_content, pending_group, initial_keys)
-            .await
-    }
-}
-
 impl BigDocHandle {
     pub fn document_id(&self) -> DocumentId {
         self.handle.bundle.doc_id.clone()
     }
 
-    pub(crate) async fn content_keys(&self) -> Res<Vec<(Vec<u8>, [u8; 32])>> {
+    /// The key material for this document's causal history. The keys stay on
+    /// this node; a caller uses them as another document's `commit_id`
+    /// `initial_keys` when that document forks this one's encrypted history.
+    pub async fn content_keys(&self) -> Res<Vec<(Vec<u8>, [u8; 32])>> {
         self.repo
             .keyhive
             .document_content_keys(self.document_id())

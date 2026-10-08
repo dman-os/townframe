@@ -168,6 +168,8 @@ async fn test_v2_smoke() -> Res<()> {
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: Uuid::new_v4().to_string(),
         })
         .await?;
 
@@ -316,6 +318,8 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: Uuid::new_v4().to_string(),
         })
         .await?;
 
@@ -595,6 +599,8 @@ async fn a_branch_whose_branch_doc_access_is_revoked_leaves_the_listing_and_is_r
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-2".to_string(),
         })
         .await?;
 
@@ -880,6 +886,8 @@ async fn replicated_branch_fixture(
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-3".to_string(),
         })
         .await?;
 
@@ -936,6 +944,9 @@ async fn delete_a_replicated_branch_revokes_before_it_commits_the_tombstone() ->
     let revoked_groups = [
         node.repo.drawer_group.id().into(),
         node.repo.content_docs_group.id().into(),
+        // The encryption-eligibility grant is the third delegation a branch doc
+        // carries; its revocation on delete is asserted alongside the other two.
+        node.repo.encrypted_blob_docs_group.id().into(),
     ];
     for group in &revoked_groups {
         assert!(
@@ -1260,6 +1271,8 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-tests.rs-4".to_string(),
             },
             AddDocArgs {
                 branch_path: BranchPathBuf::from("main"),
@@ -1269,6 +1282,8 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-tests.rs-5".to_string(),
             },
         ])
         .await?;
@@ -1328,6 +1343,8 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-tests.rs-6".to_string(),
             },
             AddDocArgs {
                 branch_path: BranchPathBuf::from("main"),
@@ -1337,6 +1354,8 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-tests.rs-7".to_string(),
             },
             AddDocArgs {
                 branch_path: BranchPathBuf::from("main"),
@@ -1346,6 +1365,8 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-tests.rs-8".to_string(),
             },
         ])
         .await?;
@@ -1432,6 +1453,8 @@ async fn test_v2_merge() -> Res<()> {
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-9".to_string(),
         })
         .await?;
 
@@ -1593,6 +1616,8 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-10".to_string(),
         })
         .await?;
     let doc_b = repo
@@ -1604,6 +1629,8 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-11".to_string(),
         })
         .await?;
 
@@ -1671,6 +1698,8 @@ async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() 
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-tests.rs-12".to_string(),
             })
             .await?;
 
@@ -2007,6 +2036,8 @@ async fn test_v2_additional_apis() -> Res<()> {
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-13".to_string(),
         })
         .await?;
 
@@ -2193,6 +2224,8 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
             )]
             .into(),
             user_path: Some(user_path.clone()),
+
+            idempotency_key: "test-key-tests.rs-14".to_string(),
         })
         .await?;
 
@@ -2423,6 +2456,8 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-15".to_string(),
         })
         .await?;
 
@@ -2501,6 +2536,8 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-16".to_string(),
         })
         .await?;
 
@@ -2613,6 +2650,8 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-17".to_string(),
         })
         .await?;
 
@@ -2799,6 +2838,8 @@ async fn test_v2_updated_at_merge() -> Res<()> {
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-18".to_string(),
         })
         .await?;
 
@@ -3007,6 +3048,8 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-19".to_string(),
         })
         .await?;
 
@@ -3176,6 +3219,8 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-20".to_string(),
         })
         .await?;
 
@@ -3243,6 +3288,8 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
             ]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-21".to_string(),
         })
         .await?;
 
@@ -3324,6 +3371,8 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-22".to_string(),
         })
         .await?;
     let before_delete = repo.get_drawer_heads();
@@ -3395,6 +3444,8 @@ async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
             branch_path: BranchPathBuf::from("main"),
             facets: [(unknown_facet_key, serde_json::json!({"hello":"world"}))].into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-23".to_string(),
         })
         .await;
     assert!(add_result.is_err());
@@ -3453,6 +3504,8 @@ async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
             branch_path: BranchPathBuf::from("main"),
             facets: [(image_metadata_facet_key, image_metadata_facet.into())].into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-24".to_string(),
         })
         .await;
     assert!(add_result.is_err());
@@ -3521,6 +3574,8 @@ async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_ta
             ]
             .into(),
             user_path: None,
+
+            idempotency_key: "test-key-tests.rs-25".to_string(),
         })
         .await;
 
@@ -3707,6 +3762,8 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
                 ]
                 .into(),
                 user_path: None,
+
+                idempotency_key: "test-key-tests.rs-26".to_string(),
             })
             .await?;
     }
@@ -3725,4 +3782,874 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
         .inspect_err(|err| error!("error cleaning up temp dir: {err}"))
         .ok();
     Ok(())
+}
+
+/// The staging facility's registration order, pinned at the drawer: the
+/// advertising groups are granted BEFORE the `docs.map` commit that registers
+/// the document. The injected commit failure pins the mid-window state —
+/// grants present, nothing registered. The id reservation is already gone by
+/// then (`commit_id` deletes it as its own last step), so enumerating this
+/// granted-not-registered window at boot is the drawer outbox boot lane's
+/// problem (ADR 003 §19), not the reservation sweep's.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_drawer_commit_failure_pins_the_granted_not_registered_window() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+
+            idempotency_key: "test-key-tests.rs-27".to_string(),
+        })
+        .await?;
+    node.repo.fail_next_drawer_doc_commit_for_test();
+    let error = node
+        .repo
+        .commit_temporary(&staged)
+        .await
+        .expect_err("the injected drawer-doc commit failure must fail the commit");
+    assert!(
+        error
+            .to_string()
+            .contains("injected drawer-doc commit failure"),
+        "expected the injected failure, got {error:?}"
+    );
+    let doc_id = staged.branch_doc_id;
+    let doc_identity = big_repo::keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &doc_id
+                .to_bytes32()
+                .expect("generated branch identity is 32 bytes"),
+        )?,
+    );
+
+    // The finalize grants landed before the failing commit.
+    let granted_groups = [
+        node.repo.content_docs_group.id().into(),
+        node.repo.encrypted_blob_docs_group.id().into(),
+        node.repo.drawer_group.id().into(),
+    ];
+    for group in &granted_groups {
+        assert!(
+            node.big_repo
+                .keyhive()
+                .agent_access_on(group, doc_identity)
+                .await
+                .is_some(),
+            "group {group} must be granted before the failed registration"
+        );
+    }
+
+    // ... the row holds `committed-staged` (the crash window the reconciliation
+    // replays: durable doc, no docs.map entry) and nothing registered the
+    // document.
+    assert_eq!(
+        outbox_state(&node, &staged.idempotency_key).await?,
+        "committed-staged"
+    );
+    assert!(
+        node.repo
+            .get_entry(&DocId::from(doc_id.to_string()))
+            .await?
+            .is_none(),
+        "nothing registered the document"
+    );
+
+    node.stop().await?;
+    Ok(())
+}
+
+// ── the transactional staging add (`add_temporary` / `commit_temporary` /
+//    `discard_temporary`, ADR 003 §19) ─────────────────────────────────────
+
+/// Write `key` as the worker's own JWK facet (the same shape
+/// `Ctx::create_representation` stages) so the facet the claim names exists.
+fn staging_jwk_facet(
+    key: &crate::blobs::encrypt::MasterKey,
+) -> (daybook_types::doc::FacetKey, daybook_types::doc::FacetRaw) {
+    let jwk = crate::blobs::encrypt::JwkOct::from_master_key(key);
+    let key = daybook_types::doc::FacetKey {
+        tag: WellKnownFacetTag::Jwk.into(),
+        id: "grp:testdomain".into(),
+    };
+    (
+        key.clone(),
+        WellKnownFacet::Jwk(daybook_types::doc::Jwk {
+            kty: jwk.kty,
+            members: serde_json::json!({ "k": jwk.k }),
+        })
+        .into(),
+    )
+}
+
+async fn agent_reaches_doc(
+    node: &DrawerNode,
+    group: &big_repo::BigKeyhiveGroup,
+    doc_id: &big_repo::DocumentId,
+) -> Res<bool> {
+    let identity = big_repo::keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(
+            &doc_id
+                .to_bytes32()
+                .expect("generated doc identity is 32 bytes"),
+        )?,
+    );
+    Ok(node
+        .big_repo
+        .keyhive()
+        .agent_access_on(&group.id().into(), identity)
+        .await
+        .is_some())
+}
+
+/// The staging contract, pinned: a temporary add is purely local. Nothing is
+/// granted, nothing is registered, nothing is completed — and since
+/// `prepare_add_doc` commits through `commit_id`, the id reservation is
+/// already consumed: the staging doc is a committed, memberless, invisible
+/// document that only its receipt and the caller's durable record (the
+/// cipherBlob claim) can name. The outbox boot lane enumerates it at boot;
+/// the reservation sweep finds nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_temporary_add_grants_nothing_and_registers_nothing() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+
+            idempotency_key: "test-key-tests.rs-28".to_string(),
+        })
+        .await?;
+
+    assert!(
+        !node
+            .big_repo
+            .reserved_doc_ids()
+            .await?
+            .contains(&staged.branch_doc_id),
+        "commit_id consumed the staging reservation; no row may remain"
+    );
+    assert!(
+        node.big_repo
+            .document_sync_snapshot(staged.branch_doc_id.clone())
+            .await?
+            .payload_present,
+        "the staging doc is committed: its content is persisted"
+    );
+    // The receipt's outbox row: committed-staged is the temporary flow's
+    // commit point — the caller's commit/discard advances or removes it.
+    assert_eq!(
+        outbox_state(&node, &staged.idempotency_key).await?,
+        "committed-staged"
+    );
+    for group in [
+        &node.repo.content_docs_group,
+        &node.repo.encrypted_blob_docs_group,
+        &node.repo.drawer_group,
+    ] {
+        assert!(
+            !node
+                .big_repo
+                .documents_in_group(group)
+                .await
+                .contains(&staged.branch_doc_id),
+            "the staging doc must have no membered groups"
+        );
+        assert!(
+            !agent_reaches_doc(&node, group, &staged.branch_doc_id).await?,
+            "no advertising group may reach a staged-but-uncommitted doc"
+        );
+    }
+    assert!(
+        node.repo.get_entry(&staged.doc_id).await?.is_none(),
+        "staging must not write the docs.map entry"
+    );
+
+    node.stop().await?;
+    Ok(())
+}
+
+/// A staged add committed through the receipt lands in exactly the state
+/// `batch_add` produces: grants and registration.
+#[tokio::test(flavor = "multi_thread")]
+async fn committing_a_staged_add_matches_batch_add() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+
+            idempotency_key: "test-key-tests.rs-29".to_string(),
+        })
+        .await?;
+    node.repo.commit_temporary(&staged).await?;
+
+    assert!(
+        !node
+            .big_repo
+            .reserved_doc_ids()
+            .await?
+            .contains(&staged.branch_doc_id),
+        "the commit must drop the reservation (commit_id already did as its last step)"
+    );
+    for group in [
+        &node.repo.content_docs_group,
+        &node.repo.encrypted_blob_docs_group,
+        &node.repo.drawer_group,
+    ] {
+        assert!(
+            agent_reaches_doc(&node, group, &staged.branch_doc_id).await?,
+            "the commit must grant the advertising group"
+        );
+    }
+    assert!(
+        node.repo.get_entry(&staged.doc_id).await?.is_some(),
+        "the commit must register the docs.map entry"
+    );
+    assert_eq!(outbox_state(&node, &staged.idempotency_key).await?, "done");
+    node.stop().await?;
+    Ok(())
+}
+
+/// Discard is pure local bookkeeping: the second call no-ops the
+/// already-gone reservation and still reports success, and a discard of a
+/// committed receipt leaves the commit exactly intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn discarding_a_staged_add_is_idempotent_and_leaves_a_commit_intact() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+
+            idempotency_key: "test-key-tests.rs-30".to_string(),
+        })
+        .await?;
+    node.repo.discard_temporary(&staged).await?;
+    node.repo.discard_temporary(&staged).await?;
+
+    assert!(
+        !node
+            .big_repo
+            .reserved_doc_ids()
+            .await?
+            .contains(&staged.branch_doc_id),
+        "the discard must drop the reservation once and stay gone"
+    );
+    for group in [
+        &node.repo.content_docs_group,
+        &node.repo.encrypted_blob_docs_group,
+        &node.repo.drawer_group,
+    ] {
+        assert!(
+            !node
+                .big_repo
+                .documents_in_group(group)
+                .await
+                .contains(&staged.branch_doc_id),
+            "the discarded staging doc must have no membered groups"
+        );
+        assert!(
+            !agent_reaches_doc(&node, group, &staged.branch_doc_id).await?,
+            "the discarded staging doc must carry no grants"
+        );
+    }
+    assert!(
+        node.repo.get_entry(&staged.doc_id).await?.is_none(),
+        "a discarded staging doc must never register"
+    );
+    let keys: Vec<String> = sqlx::query_scalar("SELECT idempotency_key FROM drawer_add_outbox")
+        .fetch_all(&node.repo.meta_store_sql().write_pool)
+        .await?;
+    assert!(
+        !keys.contains(&staged.idempotency_key),
+        "the discard must delete its outbox row: {keys:?}"
+    );
+
+    // Discard of an already committed receipt: the caller picked commit, so
+    // the abandon behind the discard must not undo a registered document.
+    let committed = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+
+            idempotency_key: "test-key-tests.rs-31".to_string(),
+        })
+        .await?;
+    node.repo.commit_temporary(&committed).await?;
+    node.repo.discard_temporary(&committed).await?;
+
+    assert!(
+        node.repo.get_entry(&committed.doc_id).await?.is_some(),
+        "discarding a committed receipt must not unregister it"
+    );
+    for group in [
+        &node.repo.content_docs_group,
+        &node.repo.encrypted_blob_docs_group,
+        &node.repo.drawer_group,
+    ] {
+        assert!(
+            agent_reaches_doc(&node, group, &committed.branch_doc_id).await?,
+            "discarding a committed receipt must not revert its grants"
+        );
+    }
+
+    node.stop().await?;
+    Ok(())
+}
+// ── the add outbox boot reconciliation (ADR 003 §19) ────────────────────────
+
+/// A decodable manual outbox row (the fixture shape the crash-window tests
+/// plant directly into the drawer's meta store).
+async fn plant_outbox_row(
+    node: &DrawerNode,
+    key: &str,
+    branch_doc_id: &big_repo::DocumentId,
+) -> Res<()> {
+    let entry = super::types::DocEntry {
+        branches: [(
+            "main".to_string(),
+            super::types::StoredBranchRef {
+                branch_doc_id: branch_doc_id.clone(),
+            },
+        )]
+        .into(),
+        branches_deleted: HashMap::new(),
+        vtag: VersionTag::mint(node.repo.local_actor_id.clone()),
+        previous_version_heads: None,
+    };
+    super::outbox::insert_pending(
+        &node.repo.meta_store_sql,
+        key,
+        branch_doc_id,
+        &entry,
+        &ChangeHashSet(Vec::new().into()),
+        false,
+    )
+    .await
+}
+
+/// Write the claim a claimed temporary key doc would carry: a durable
+/// cipherBlob facet on a registered content doc naming the staging doc by
+/// `keyRef` + its staged heads (the ADR 003 §19 window).
+async fn write_claim(
+    node: &DrawerNode,
+    content_doc_id: &DocId,
+    staged: &StagedAdd,
+    jwk_key: &FacetKey,
+) -> Res<()> {
+    let content_heads = node
+        .repo
+        .get_branch_heads_for_path(content_doc_id, BranchPath::new("main"))
+        .await?
+        .ok_or_eyre("content doc has no main branch")?;
+    let cipher = daybook_types::doc::CipherBlob {
+        representation: daybook_types::doc::Representation {
+            digest: crate::blobs::blob_id_to_digest_str(crate::blobs::BlobId::new([9_u8; 32])),
+            length_octets: 4,
+        },
+        content_encoding: crate::blobs::encrypt::CONTENT_ENCODING_AES128GCM.to_string(),
+        key_ref: format!("db+facet:///{}/{jwk_key}", staged.doc_id).parse()?,
+        key_ref_heads: staged.branch_heads.clone(),
+        encoding_parameters: crate::blobs::encrypt::EncodingParams::DEFAULT
+            .to_encoding_parameters(),
+    };
+    node.repo
+        .update_at_heads_with_scope(
+            DocPatch {
+                id: content_doc_id.clone(),
+                facets_set: [(
+                    FacetKey {
+                        tag: WellKnownFacetTag::CipherBlob.into(),
+                        id: "grp:testdomain/blob".into(),
+                    },
+                    WellKnownFacet::CipherBlob(cipher).into(),
+                )]
+                .into(),
+                facets_remove: vec![],
+                user_path: None,
+            },
+            BranchPath::new("main"),
+            Some(content_heads),
+            crate::drawer::FacetWriteScope::System,
+        )
+        .await?;
+    Ok(())
+}
+
+use crate::drawer::StagedAdd;
+
+async fn outbox_state(node: &DrawerNode, key: &str) -> Res<String> {
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM drawer_add_outbox WHERE idempotency_key = ?1")
+            .bind(key)
+            .fetch_one(&node.repo.meta_store_sql().write_pool)
+            .await?;
+    Ok(state)
+}
+
+use tempfile::tempdir;
+
+/// A reservation that outlived its outbox row — the crash before the
+/// write-ahead write — never had content: the leak sweep abandons it and
+/// does nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reservation_without_an_outbox_row_is_abandoned_by_the_leak_sweep() -> Res<()> {
+    let node = boot_drawer_node().await?;
+    let doc_id = node.big_repo.allocate_id().await?;
+    assert!(
+        node.big_repo.reserved_doc_ids().await?.contains(&doc_id),
+        "fixture: the reservation is live"
+    );
+
+    node.repo.reconcile_add_outbox_at_boot().await?;
+
+    assert!(
+        !node.big_repo.reserved_doc_ids().await?.contains(&doc_id),
+        "the leak sweep must abandon the reservation"
+    );
+    node.stop().await?;
+    Ok(())
+}
+
+/// Crash inside `commit_id` before the keyhive authority exists (the row is
+/// `pending-add`, no keyhive doc): abandon + drop the row. The caller's
+/// retry with the same key is then a fresh, deterministic add.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_uncommitted_pending_add_is_abandoned_and_its_row_dropped() -> Res<()> {
+    let node = boot_drawer_node().await?;
+    let branch_doc_id = node.big_repo.allocate_id().await?;
+    plant_outbox_row(&node, "uncommitted-key", &branch_doc_id).await?;
+
+    node.repo.reconcile_add_outbox_at_boot().await?;
+
+    assert!(
+        !node
+            .big_repo
+            .reserved_doc_ids()
+            .await?
+            .contains(&branch_doc_id),
+        "the abandoned reservation must be gone"
+    );
+    let keys: Vec<String> = {
+        sqlx::query_scalar("SELECT idempotency_key FROM drawer_add_outbox")
+            .fetch_all(&node.repo.meta_store_sql().write_pool)
+            .await?
+    };
+    assert!(
+        !keys.contains(&"uncommitted-key".to_string()),
+        "the pending row must be dropped with the reservation: {keys:?}"
+    );
+    node.stop().await?;
+    Ok(())
+}
+
+/// Crash after `commit_id` before the registration (the claimed temporary
+/// flow): the claim machinery re-enters — the durable cipherBlob claim writes
+/// the `docs.map` entry, then the same grant + registration replay runs and
+/// the row lands `done`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claimed_committed_staging_add_is_replayed_through_the_claim_machinery() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let content_doc_id = node
+        .repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+            idempotency_key: "claim-replay-content".to_string(),
+        })
+        .await?;
+    let key = crate::blobs::encrypt::MasterKey::random();
+    let (jwk_key, jwk_raw) = staging_jwk_facet(&key);
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(jwk_key.clone(), jwk_raw)].into(),
+            user_path: None,
+            idempotency_key: "claim-replay-key-doc".to_string(),
+        })
+        .await?;
+    write_claim(&node, &content_doc_id, &staged, &jwk_key).await?;
+    assert!(
+        node.repo.get_entry(&staged.doc_id).await?.is_none(),
+        "fixture: nothing registered the staging doc yet"
+    );
+
+    node.repo.reconcile_add_outbox_at_boot().await?;
+
+    let entry = node
+        .repo
+        .get_entry(&staged.doc_id)
+        .await?
+        .ok_or_eyre("the reconciliation must replay the claimed commit's registration")?;
+    assert_eq!(
+        entry
+            .branches
+            .get("main")
+            .map(|branch_ref| branch_ref.branch_doc_id.clone()),
+        Some(staged.branch_doc_id.clone()),
+        "the replayed registration must name the staging doc"
+    );
+    for group in [
+        &node.repo.content_docs_group,
+        &node.repo.encrypted_blob_docs_group,
+        &node.repo.drawer_group,
+    ] {
+        assert!(
+            agent_reaches_doc(&node, group, &staged.branch_doc_id).await?,
+            "the reconciliation must replay the commit's grants"
+        );
+    }
+    assert_eq!(
+        outbox_state(&node, "claim-replay-key-doc").await?,
+        "done",
+        "a fully replayed commit must land done"
+    );
+    assert!(
+        node.repo
+            .get_doc_with_facets_at_branch(&staged.doc_id, BranchPath::new("main"), None)
+            .await?
+            .is_some_and(|doc| doc.facets.contains_key(&jwk_key)),
+        "the committed key document must serve the JWK facet the claim pinned"
+    );
+    node.stop().await?;
+    Ok(())
+}
+
+/// The incomplete-claim-scan property, restored in its outbox shape: a
+/// `docs.map` entry naming a branch doc no node holds makes the claim scan
+/// report unreadable surfaces; a claim the scan *did* find is still positive
+/// evidence, so the reconciliation replays that registration all the same.
+/// Gating the replay on a complete scan instead lets the key document end up
+/// outside the drawer while the claim's `keyRef` still names it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_reconciliation_registers_a_found_claim_even_when_the_claim_scan_is_incomplete()
+-> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let content_doc_id = node
+        .repo
+        .add(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+            idempotency_key: "claim-scan-content".to_string(),
+        })
+        .await?;
+    let key = crate::blobs::encrypt::MasterKey::random();
+    let (jwk_key, jwk_raw) = staging_jwk_facet(&key);
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: [(jwk_key.clone(), jwk_raw)].into(),
+            user_path: None,
+            idempotency_key: "claim-scan-key-doc".to_string(),
+        })
+        .await?;
+    // The unreadable surface: a foreign registration whose branch doc no node
+    // holds — the partial-clone shape. The claim below stays readable.
+    super::meta::register_claimed_allocations(
+        &node.big_repo,
+        node.repo.drawer_doc_id(),
+        &[big_repo::DocumentId::new([0xAB; 32])],
+        node.repo.local_actor_id.clone(),
+    )
+    .await?;
+    write_claim(&node, &content_doc_id, &staged, &jwk_key).await?;
+
+    node.repo.reconcile_add_outbox_at_boot().await?;
+
+    let entry = node.repo.get_entry(&staged.doc_id).await?.ok_or_eyre(
+        "the reconciliation must replay a found claim's registration even when the \
+             scan could not read every claim surface",
+    )?;
+    assert_eq!(
+        entry
+            .branches
+            .get("main")
+            .map(|branch_ref| branch_ref.branch_doc_id.clone()),
+        Some(staged.branch_doc_id.clone()),
+    );
+    node.stop().await?;
+    Ok(())
+}
+
+/// Registration durable but the row not `done` (crash inside the batch loop's
+/// residuals): the reconciliation finishes the re-derivable residuals and
+/// marks the row done, without dirtying the drawer doc or its entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_durable_entry_finishes_residuals_and_marks_done() -> Res<()> {
+    let node = boot_drawer_node().await?;
+    let staged = node
+        .repo
+        .add_temporary(AddDocArgs {
+            branch_path: BranchPathBuf::from("main"),
+            facets: default(),
+            user_path: None,
+            idempotency_key: "residual-key".to_string(),
+        })
+        .await?;
+    node.repo.commit_temporary(&staged).await?;
+    // Rewind the row to committed-staged: the crash window between the docs.map
+    // commit and the done mark inside the batch loop.
+    sqlx::query(
+        "UPDATE drawer_add_outbox SET state = 'committed-staged', done_at = NULL WHERE idempotency_key = ?1",
+    )
+    .bind("residual-key")
+    .execute(&node.repo.meta_store_sql().write_pool)
+    .await?;
+
+    let entry_before = node
+        .repo
+        .get_entry(&staged.doc_id)
+        .await?
+        .expect("registered");
+    node.repo.reconcile_add_outbox_at_boot().await?;
+
+    let entry_after = node
+        .repo
+        .get_entry(&staged.doc_id)
+        .await?
+        .expect("stays registered");
+    assert_eq!(
+        entry_after.branches.clone(),
+        entry_before.branches.clone(),
+        "the reconciliation must not re-write a durable entry"
+    );
+    assert_eq!(
+        entry_after.vtag.version, entry_before.vtag.version,
+        "the replay must not mint a new version tag over a durable entry"
+    );
+    assert_eq!(
+        outbox_state(&node, "residual-key").await?,
+        "done",
+        "the residual replay must finish the row"
+    );
+    node.stop().await?;
+    Ok(())
+}
+
+/// TTL purge is strictly done-only: a done row older than the TTL is deleted,
+/// while pending rows never age out — they are replayed at every boot until
+/// resolved.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ttl_purge_takes_done_rows_only() -> Res<()> {
+    let node = boot_drawer_node().await?;
+    // done + one week old
+    plant_outbox_row(&node, "old-done", &big_repo::DocumentId::new([9_u8; 32])).await?;
+    // committed-staged + one week old (its branch doc never exists)
+    plant_outbox_row(
+        &node,
+        "old-pending",
+        &big_repo::DocumentId::new([10_u8; 32]),
+    )
+    .await?;
+    let week_ago = jiff::Timestamp::now().as_microsecond() - 8 * 24 * 3600 * 1_000_000;
+    sqlx::query("UPDATE drawer_add_outbox SET state = 'done', done_at = ?1 WHERE idempotency_key = 'old-done'")
+        .bind(week_ago)
+        .execute(&node.repo.meta_store_sql().write_pool)
+        .await?;
+
+    let purged = super::outbox::purge_done_rows(&node.repo.meta_store_sql).await?;
+    assert_eq!(purged, 1, "the old done row must be purged");
+    let keys: Vec<String> = {
+        sqlx::query_scalar("SELECT idempotency_key FROM drawer_add_outbox")
+            .fetch_all(&node.repo.meta_store_sql().write_pool)
+            .await?
+    };
+    assert_eq!(
+        keys,
+        vec!["old-pending".to_string()],
+        "pending rows never age out; replay must be loud instead (their branch \
+         doc does not exist, so a full reconcile errors)"
+    );
+    node.stop().await?;
+    Ok(())
+}
+
+/// Retry contract (drawer_add_outbox): same key + done ⇒ same doc_id without
+/// re-execution; same key in flight ⇒ refused; a batch is one row per
+/// (batch, doc) keyed by the caller's per-doc keys.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_key_retry_contract_holds_for_done_and_inflight_rows() -> Res<()> {
+    let node = boot_drawer_node().await?;
+
+    let add_with = |key: &str| AddDocArgs {
+        branch_path: BranchPathBuf::from("main"),
+        facets: default(),
+        user_path: None,
+        idempotency_key: key.to_string(),
+    };
+    let first = node.repo.add(add_with("retry-key")).await?;
+    let second = node.repo.add(add_with("retry-key")).await?;
+    assert_eq!(first, second, "same key + done ⇒ same doc_id");
+    let rows: i64 = {
+        sqlx::query_scalar("SELECT COUNT(*) FROM drawer_add_outbox")
+            .fetch_one(&node.repo.meta_store_sql().write_pool)
+            .await?
+    };
+    assert_eq!(
+        rows, 1,
+        "the retry must not write a second row or add a second doc"
+    );
+
+    let batch = node
+        .repo
+        .batch_add(vec![add_with("batch-a"), add_with("batch-b")])
+        .await?;
+    assert_eq!(batch.len(), 2, "one row per (batch, doc), keys are per-doc");
+
+    // add_temporary leaves an in-flight (committed-staged) row for this key;
+    // a second add with the same key must be refused, not deduped.
+    node.repo.add_temporary(add_with("inflight-key")).await?;
+    let refused = node.repo.add(add_with("inflight-key")).await;
+    let err = refused.expect_err("an in-flight key must be refused, not deduped");
+    assert!(
+        err.to_string().contains("already in flight"),
+        "the refusal must name the key: {err:?}"
+    );
+    node.stop().await?;
+    Ok(())
+}
+
+/// Cross-restart: a crash after staging + claim is reconciled by the next
+/// DrawerRepo boot on the same repository — the boot pass runs inside `load`.
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_restart_reconciliation_replays_surviving_rows() -> Res<()> {
+    let temp_root = tempdir()?;
+    let storage_path = temp_root.path().join("drawer-outbox-restart");
+    let local_user_path =
+        daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest");
+
+    let (key_branch_doc_id, key_doc_id) = {
+        let node = boot_disk_drawer_node(&storage_path, local_user_path.clone()).await?;
+        let content_doc_id = node
+            .repo
+            .add(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: default(),
+                user_path: None,
+                idempotency_key: "restart-content".to_string(),
+            })
+            .await?;
+        let key = crate::blobs::encrypt::MasterKey::random();
+        let (jwk_key, jwk_raw) = staging_jwk_facet(&key);
+        let staged = node
+            .repo
+            .add_temporary(AddDocArgs {
+                branch_path: BranchPathBuf::from("main"),
+                facets: [(jwk_key.clone(), jwk_raw)].into(),
+                user_path: None,
+                idempotency_key: "restart-key-doc".to_string(),
+            })
+            .await?;
+        write_claim(&node, &content_doc_id, &staged, &jwk_key).await?;
+        node.stop().await?;
+        (staged.branch_doc_id.clone(), staged.doc_id.clone())
+    };
+
+    // The next boot's `DrawerRepo::load` runs the reconciliation itself.
+    let node = boot_disk_drawer_node(&storage_path, local_user_path).await?;
+
+    let entry = node
+        .repo
+        .get_entry(&key_doc_id)
+        .await?
+        .ok_or_eyre("the restart's boot pass must have replayed the surviving row")?;
+    assert_eq!(
+        entry
+            .branches
+            .get("main")
+            .map(|branch_ref| branch_ref.branch_doc_id.clone()),
+        Some(key_branch_doc_id.clone()),
+        "the replayed registration names the staging doc"
+    );
+    assert_eq!(
+        outbox_state(&node, "restart-key-doc").await?,
+        "done",
+        "the fully replayed commit lands done"
+    );
+    // The replay released the allocation's only residual: the reservation.
+    assert!(
+        !node
+            .big_repo
+            .reserved_doc_ids()
+            .await?
+            .contains(&key_branch_doc_id)
+    );
+    node.stop().await?;
+    Ok(())
+}
+
+/// Disk-backed drawer node: same shape as `boot_drawer_node`, but the BigRepo
+/// and the drawer meta store both open on-disk files, so successive opens
+/// restart each layer independently.
+async fn boot_disk_drawer_node(
+    storage_path: &std::path::Path,
+    local_user_path: daybook_types::doc::UserPathBuf,
+) -> Res<DrawerNode> {
+    utils_rs::testing::setup_tracing_once();
+    let (big_repo, big_sync_host, stop) =
+        crate::test_support::boot_disk_repo(storage_path.join("big-repo")).await?;
+    let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::file(
+        storage_path.join("drawer-meta.sqlite"),
+    ))
+    .await?;
+
+    let drawer_doc_id = {
+        let mut doc = automerge::Automerge::new();
+        doc.set_actor(node_local_actor(&local_user_path));
+        doc.transact(|tx| {
+            tx.put(automerge::ROOT, "version", "0")?;
+            Ok::<(), automerge::AutomergeError>(())
+        })
+        .expect("seed drawer doc");
+        big_repo.create_doc(doc).await?.document_id()
+    };
+
+    let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let doc_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));
+    let (repo, stop_token) = DrawerRepo::load(
+        Arc::clone(&big_repo),
+        Arc::clone(&big_sync_host.store),
+        drawer_doc_id,
+        local_user_path.clone(),
+        sql,
+        std::env::temp_dir().join(Uuid::new_v4().to_string()),
+        entry_pool,
+        doc_pool,
+        None,
+    )
+    .await?;
+    Ok(DrawerNode {
+        repo,
+        big_repo,
+        stop_token,
+        stop_workers: stop,
+    })
+}
+
+fn node_local_actor(local_user_path: &daybook_types::doc::UserPathBuf) -> automerge::ActorId {
+    daybook_types::doc::user_path::to_actor_id(&{
+        daybook_types::doc::user_path::for_repo(local_user_path.clone(), "drawer-repo")
+            .expect("valid harness user path")
+    })
 }

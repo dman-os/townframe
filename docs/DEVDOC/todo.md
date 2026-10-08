@@ -36,6 +36,7 @@
     - Reuse the other machinery
     - [ ] Make BigSyncM.set_peer incremental
   - [ ] Evalute every storage layer/API with regards to evolution
+  - [ ] Audit all hash schemes
 
 - [ ] ~Replace sqlx with seaorm~ use sqlx query macros (compile times?)
 - [ ] Plugs
@@ -90,6 +91,7 @@
   - [ ] `KeyId` is a terrible name.
     - [ ] `FacetKey` too, it's misused
   - [ ] Decide on wether to adopt Lexicons
+    - [ ] Lexicons don't have floats??
   - [ ] Deterministic doc ids for main docs [LOST]
   - [ ] Figure out how multi-processed repo access 
     - [ ] Daemon?
@@ -112,8 +114,16 @@
       - [ ] How to avoid missing triage work?
     - [ ] Abort/cancel on StopToken Drop
     - [ ] Drop warning on stop tokens
+- [ ] big_blobs
+  - [ ] Object parts
+  - [ ] Orphan key documents
+  - [ ] announce_held_blobs
+  - [ ] store gc
+  - [ ] Remove blobs from facet_set
+  - [ ] download to tmp dir
 
 - [ ] Cleanup and show it to people
+
  
 - [ ] DEK rotation
 - [ ] Get started on iOS

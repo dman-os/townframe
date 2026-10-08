@@ -34,6 +34,8 @@ async fn test_ocr_image_workflow() -> Res<()> {
         )]
         .into(),
         user_path: None,
+
+        idempotency_key: "test-key-ocr_image_wflow.rs-0".to_string(),
     };
 
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;

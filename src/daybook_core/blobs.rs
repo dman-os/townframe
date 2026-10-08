@@ -1,5 +1,8 @@
 use crate::interlude::*;
 
+use crate::repo::blob_presence_part_id;
+use big_repo::SharedPartStore;
+use big_sync_core::ObjKey;
 use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
 use iroh_blobs::store::fs::FsStore;
 use serde::{Deserialize, Serialize};
@@ -7,13 +10,18 @@ use std::collections::HashMap;
 use std::path::{Component, Path};
 use tokio::io::AsyncWriteExt;
 
+pub mod encrypt;
 pub mod permission_writer;
 pub(crate) use permission_writer::spawn_blob_inventory_permission_writer;
+pub mod encryption_worker;
+pub mod key_source;
+pub mod pair_roots;
 pub mod pin_worker;
 pub mod pins_part_worker;
 pub mod sync;
 
-pub(crate) use pin_worker::spawn_blob_pin_worker;
+pub(crate) use encryption_worker::{BlobEncryptionWorkerArgs, spawn_blob_encryption_worker};
+pub(crate) use pin_worker::{BlobPinWorkerArgs, spawn_blob_pin_worker};
 pub(crate) use pins_part_worker::spawn_blob_pins_part_worker;
 
 pub fn blob_inventory_part_id(doc_id: &DocumentId) -> PartKey {
@@ -32,14 +40,57 @@ pub fn blob_inventory_part_id_from_doc_id(doc_id: &str) -> PartKey {
     }
 }
 
-#[derive(Clone)]
+/// The blob presence plane's write edge (ADR 003 §13). Implemented over the
+/// local presence part store; `BlobsRepo` invokes it at the exact points the
+/// bytes land, so the membership lands with the fact rather than after it —
+/// the same principle the big repo store's `/seds` partition applies to
+/// sedimentrees. Idempotent: the store no-ops a membership that is already
+/// live, so restart announcements and repeated puts cost one no-op row read.
+#[async_trait::async_trait]
+pub trait BlobPresenceSink: Send + Sync {
+    /// The blob's bytes are now on disk at this node. `length_octets` is the
+    /// byte length the materialization observed.
+    async fn blob_now_held(&self, blob_id: BlobId, length_octets: u64) -> Res<()>;
+}
+
+/// The presence sink over a local part store: payload row with the length,
+/// membership of the `/blobs` partition. Both calls are idempotent and the
+/// store publishes exactly one revision event per state change, so replays
+/// and repeats converge.
+struct BlobPresencePartStoreSink(SharedPartStore);
+
+#[async_trait::async_trait]
+impl BlobPresenceSink for BlobPresencePartStoreSink {
+    async fn blob_now_held(&self, blob_id: BlobId, length_octets: u64) -> Res<()> {
+        let obj_id = ObjKey::from(blob_id);
+        self.0
+            .set_obj_payload(
+                obj_id.clone(),
+                serde_json::json!({ "lengthOctets": length_octets }),
+            )
+            .await?;
+        self.0
+            .add_obj_to_parts(obj_id, vec![blob_presence_part_id()])
+            .await?;
+        Ok(())
+    }
+}
+
 pub struct BlobsRepo {
     root: PathBuf,
     src_local_user_path: UserPathBuf,
     iroh_store: iroh_blobs::api::Store,
+    /// Serves a representation's ciphertext from its plaintext. One instance
+    /// repo-wide, because it is also the registry of installed pairs: the worker
+    /// that installs a representation and the store path that serves it must be
+    /// the same object.
+    cipher_provider: Arc<crate::blobs::encrypt::CipherBlobProvider>,
     // FIXME: use surelock
     hash_locks: Arc<std::sync::Mutex<HashMap<BlobId, Arc<tokio::sync::Mutex<()>>>>>,
     sync_backend: Arc<surelock::mutex::Mutex<Option<crate::blobs::sync::BlobSyncBackend>>>,
+    /// The presence plane's write edge. `None` until the repository boot wires
+    /// it — a standalone `BlobsRepo` (no repo around it) has no presence plane.
+    presence_sink: std::sync::RwLock<Option<std::sync::Arc<dyn BlobPresenceSink>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -257,17 +308,103 @@ impl BlobsRepo {
         tokio::fs::create_dir_all(&objects_root).await?;
         let iroh_root = root.join("iroh");
         tokio::fs::create_dir_all(&iroh_root).await?;
-        let fs_store = FsStore::load(&iroh_root)
-            .await
-            .map_err(|err| eyre::eyre!("error loading iroh fs store: {err:?}"))?;
+        // `load_with_virtuals` is the only public way to obtain the provider
+        // registry the store actor consults; `FsStore::load` drops it, and a
+        // virtual entry whose provider is not registered is served as not found.
+        let (fs_store, virtual_providers) = FsStore::load_with_virtuals(
+            iroh_root.join("blobs.db"),
+            iroh_blobs::store::fs::options::Options::new(&iroh_root),
+        )
+        .await
+        .map_err(|err| eyre::eyre!("error loading iroh fs store: {err:?}"))?;
+        let cipher_provider = Arc::new(crate::blobs::encrypt::CipherBlobProvider::new());
+        cipher_provider
+            .register(&virtual_providers)
+            .map_err(|err| eyre::eyre!("registering the cipher blob provider: {err:?}"))?;
 
         Ok(Arc::new(Self {
             root,
             src_local_user_path,
             iroh_store: fs_store.into(),
+            cipher_provider,
             hash_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             sync_backend: Arc::new(surelock::mutex::Mutex::new(default())),
+            presence_sink: std::sync::RwLock::new(None),
         }))
+    }
+    /// Wire the presence plane. Called once at repository boot, before any
+    /// caller can put a blob: from the first put on, membership lands with the
+    /// fact.
+    pub fn set_blob_presence_sink(&self, presence_store: SharedPartStore) {
+        let sink: std::sync::Arc<dyn BlobPresenceSink> =
+            std::sync::Arc::new(BlobPresencePartStoreSink(presence_store));
+        *self
+            .presence_sink
+            .write()
+            .expect("presence sink lock poisoned") = Some(sink);
+    }
+
+    async fn blob_now_held(&self, blob_id: BlobId) -> Res<()> {
+        let Some(sink) = self
+            .presence_sink
+            .read()
+            .expect("presence sink lock poisoned")
+            .clone()
+        else {
+            return Ok(());
+        };
+        let length = tokio::fs::metadata(self.object_paths(blob_id.clone())?.blob)
+            .await
+            .ok()
+            .map(|meta| meta.len())
+            .unwrap_or_default();
+        sink.blob_now_held(blob_id, length).await
+    }
+
+    /// Replay every blob currently held on disk into the presence plane. Run
+    /// once at repository boot, after the sink is wired and before anything
+    /// reacts to the plane. Membership is idempotent in the store, so a
+    /// restart's replay collapses to no-op row reads.
+    pub async fn announce_held_blobs(&self) -> Res<()> {
+        let objects = self.root.join("objects");
+        let mut read = 0usize;
+        let mut announcements = std::collections::HashSet::new();
+        let mut level0 = tokio::fs::read_dir(&objects)
+            .await
+            .wrap_err_with(|| format!("blob presence announce: listing {}", objects.display()))?;
+        while let Some(l0) = level0.next_entry().await? {
+            if !l0.path().is_dir() {
+                continue;
+            }
+            let mut level1 = tokio::fs::read_dir(l0.path()).await?;
+            while let Some(l1) = level1.next_entry().await? {
+                if !l1.path().is_dir() {
+                    continue;
+                }
+                let mut leaves = tokio::fs::read_dir(l1.path()).await?;
+                while let Some(entry) = leaves.next_entry().await? {
+                    let name = entry.file_name();
+                    let Some(name) = name.to_str() else { continue };
+                    let Some(stem) = name.strip_suffix(".blob") else {
+                        continue;
+                    };
+                    // The filename is the bare multibase base58btc `Display`
+                    // spelling `object_paths` wrote — never hex, and never the
+                    // multihash-framed digest text — so only the blob-id parse
+                    // reads back the spelling the objects tree names files
+                    // with. A name that is not a digest names no blob; skip it.
+                    let Ok(blob_id) = blob_id_from_hash(stem) else {
+                        continue;
+                    };
+                    if announcements.insert(blob_id.clone()) {
+                        self.blob_now_held(blob_id).await?;
+                        read += 1;
+                    }
+                }
+            }
+        }
+        tracing::debug!(blobs = read, "blob presence plane: boot announce complete");
+        Ok(())
     }
 
     pub fn set_sync_backend(&self, backend: crate::blobs::sync::BlobSyncBackend) {
@@ -334,6 +471,7 @@ impl BlobsRepo {
                 .await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
+            self.blob_now_held(hash.clone()).await?;
 
             Ok(hash)
         }
@@ -388,6 +526,8 @@ impl BlobsRepo {
                 .await?;
             meta.iroh_ingested = true;
             self.write_meta(&object_paths.meta, &meta).await?;
+            self.blob_now_held(hash.clone()).await?;
+
             Ok(hash)
         }
         .await;
@@ -421,6 +561,7 @@ impl BlobsRepo {
             .await?;
         meta.iroh_ingested = true;
         self.write_meta(&object_paths.meta, &meta).await?;
+        self.blob_now_held(hash.clone()).await?;
 
         Ok(hash)
     }
@@ -495,6 +636,38 @@ impl BlobsRepo {
         self.iroh_store.clone()
     }
 
+    /// The repo's cipher blob provider: it serves `C` from `P` for entries the
+    /// encryption worker installed (ADR 003 §12). Shared, not cloned per caller:
+    /// the pairs it holds are the installed representations.
+    pub(crate) fn cipher_provider(&self) -> Arc<crate::blobs::encrypt::CipherBlobProvider> {
+        Arc::clone(&self.cipher_provider)
+    }
+
+    /// Is this blob possessed by the store without stored bytes: a virtual
+    /// entry whose cipher pair is still rooted (`ct:`/`pt:` tags), so its
+    /// bytes are produced on demand by the registered provider and possession
+    /// needs no transfer (ADR 003 §14 "ready to be served, physically or
+    /// virtually").
+    ///
+    /// How the pieces compose: `blobs().has()` reports virtual entries as
+    /// complete because they are servable; only an entry with *stored* bytes
+    /// hands out a sync reader (the store's `sync_reader` returns `None` for
+    /// absent, partial *and* virtual), so "has but no reader" is exactly
+    /// "virtual". The pair tags are the servability half: an unrooted virtual
+    /// entry would serve as not-found, so there the honest state is "want",
+    /// not "possessed".
+    pub async fn blob_is_possessed_without_bytes(&self, blob_id: &BlobId) -> Res<bool> {
+        let iroh_hash = blob_id_to_iroh_hash(blob_id.clone());
+        let blobs = self.iroh_store.blobs();
+        if !blobs.has(iroh_hash).await? {
+            return Ok(false);
+        }
+        if blobs.sync_reader(iroh_hash).await?.is_some() {
+            return Ok(false);
+        }
+        crate::blobs::encrypt::has_pair_tags(&self.iroh_store, iroh_hash).await
+    }
+
     pub async fn shutdown(&self) -> Res<()> {
         self.iroh_store
             .shutdown()
@@ -524,6 +697,9 @@ impl BlobsRepo {
         let hash = blob_hash_from_id(blob_id.clone());
         self.ensure_local_object_no_meta_rewrite(blob_id.clone())
             .await?;
+        // First materialization *is* the bytes landing: announce presence here
+        // too, or a get/materialize-only blob never joins the presence plane.
+        self.blob_now_held(blob_id.clone()).await?;
         let source_path = self.object_paths(blob_id)?.blob;
         let filename = match request {
             BlobMaterializeRequest::Filename(name) => Self::sanitize_requested_filename(&name)?,
@@ -602,6 +778,7 @@ impl BlobsRepo {
             true,
         );
         self.write_meta(&object_paths.meta, &meta).await?;
+        self.blob_now_held(blob_id.clone()).await?;
 
         Ok(blob_id)
     }
@@ -908,6 +1085,25 @@ pub fn digest_str_to_blob_id(digest: &str) -> Res<BlobId> {
     Ok(BlobId::new(bytes))
 }
 
+/// Parse a digest string in either spelling of the same 32-octet BLAKE3 digest.
+///
+/// ADR 003 §3 makes the multihash form canonical for `representation.digest`
+/// and for a plaintext content digest; a `db+blob:///` URL instead carries the
+/// bare base58 form. A facet value is authored by whoever wrote the facet, so a
+/// reader cannot assume one spelling. Both forms decode to the same digest, so
+/// accepting either cannot name a different blob.
+pub fn digest_str_to_blob_id_lenient(digest: &str) -> Option<BlobId> {
+    if let Ok(blob_id) = digest_str_to_blob_id(digest) {
+        return Some(blob_id);
+    }
+    // `ObjId`'s `FromStr` is the bare base58 form. It zero-pads a short input
+    // rather than rejecting it, so it is a weaker check than its name suggests.
+    // Kept as-is here: pins are already stored and compared in whatever form
+    // their facet used, and narrowing the rule would silently un-pin existing
+    // rows. Tightening it is a separate change with its own migration.
+    digest.parse::<BlobId>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1109,6 +1305,25 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn both_digest_spellings_name_the_same_blob() {
+        let blob_id = BlobId::random();
+        let canonical = blob_id_to_digest_str(blob_id.clone());
+        let bare = blob_id.to_string();
+        assert_ne!(canonical, bare, "the two spellings must differ");
+        let bytes = blob_id.to_bytes32();
+        assert_eq!(
+            digest_str_to_blob_id_lenient(&canonical).map(|id| id.to_bytes32()),
+            Some(bytes),
+            "ADR 003 §3's multihash spelling must resolve"
+        );
+        assert_eq!(
+            digest_str_to_blob_id_lenient(&bare).map(|id| id.to_bytes32()),
+            Some(bytes),
+            "a db+blob URL's bare spelling must resolve"
+        );
+    }
+
     #[tokio::test]
     async fn blob_url_contract_unchanged() -> Res<()> {
         let (repo, _temp) = setup().await;
@@ -1301,6 +1516,60 @@ mod tests {
             repo.get_path(from_digest).await?,
             repo.get_path(blob_id).await?,
             "the digest spelling must resolve to the blob's object on disk"
+        );
+        Ok(())
+    }
+
+    /// A presence sink that records what the announce announced, so a test can
+    /// observe the presence plane without wiring a full part store under it.
+    struct RecordingPresenceSink(std::sync::Mutex<Vec<(BlobId, u64)>>);
+
+    #[async_trait::async_trait]
+    impl BlobPresenceSink for RecordingPresenceSink {
+        async fn blob_now_held(&self, blob_id: BlobId, length_octets: u64) -> Res<()> {
+            self.0
+                .lock()
+                .expect("recording presence sink lock poisoned")
+                .push((blob_id, length_octets));
+            Ok(())
+        }
+    }
+
+    /// The boot announce reads back the filenames `object_paths` wrote: the
+    /// bare multibase base58btc `Display` spelling of the digest. Regression:
+    /// the walker once parsed filenames with `blake3::Hash::from_hex`, rejected
+    /// every real filename, and announced zero blobs, so pre-existing blobs
+    /// were never re-armed via the presence plane across a restart.
+    #[tokio::test]
+    async fn boot_announce_reads_bare_base58_object_filenames() -> Res<()> {
+        let (repo, _temp) = setup().await;
+        let data = b"boot-announce-payload";
+        let blob_id = BlobId::random();
+        let object_paths = repo.object_paths(blob_id.clone())?;
+        tokio::fs::create_dir_all(&object_paths.dir).await?;
+        tokio::fs::write(&object_paths.blob, data).await?;
+        // A filename that is not a digest names no blob: it must be skipped,
+        // not announced under a zero-padded or guessed identity.
+        tokio::fs::write(object_paths.dir.join("not-a-digest.blob"), b"junk").await?;
+
+        let recording = Arc::new(RecordingPresenceSink(std::sync::Mutex::new(Vec::new())));
+        *repo
+            .presence_sink
+            .write()
+            .expect("presence sink lock poisoned") =
+            Some(Arc::clone(&recording) as Arc<dyn BlobPresenceSink>);
+
+        repo.announce_held_blobs().await?;
+
+        let announced = recording
+            .0
+            .lock()
+            .expect("recording presence sink lock poisoned")
+            .clone();
+        assert_eq!(
+            announced,
+            vec![(blob_id, data.len() as u64)],
+            "the boot announce must re-arm blobs the objects tree already holds"
         );
         Ok(())
     }
