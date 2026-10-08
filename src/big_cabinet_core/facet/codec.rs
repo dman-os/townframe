@@ -31,11 +31,13 @@ use serde_json::Value;
 use std::borrow::Cow;
 use std::num::FpCategory;
 
+mod target;
 mod walk;
 
 #[cfg(test)]
 mod e2e;
 
+pub use target::reconcile_json;
 pub use walk::{Stored, hydrate_value};
 
 /// The keyword for the storage forms JSON Schema cannot describe.
@@ -405,6 +407,45 @@ pub enum CodecError {
     /// a reference or a branch chain that does not settle
     #[error("this position's schema does not resolve: {chain}")]
     Unresolved { chain: String },
+
+    /// a position the declarations say nothing about holds a value only a declaration can read
+    #[error(
+        "this position declares nothing about what it holds, and the document holds {held} there: \
+         guessing it back would hide a declaration the writer made"
+    )]
+    Undeclared { held: &'static str },
+
+    /// a known declaration meets native storage it would have to replace
+    #[error(
+        "this position is declared as {declared}, but the document holds {held} native storage \
+         there: the write would replace what the storage holds, so declare and migrate instead"
+    )]
+    Conflict {
+        declared: String,
+        held: &'static str,
+    },
+
+    /// the checked delta a counter would need is outside the counter's range
+    #[error(
+        "this counter holds {base}, and writing {submitted} would need the delta the counter \
+         cannot arrive at"
+    )]
+    CounterDelta { base: i64, submitted: i64 },
+
+    /// a number the native kind at this position cannot hold
+    #[error(
+        "the document holds {held} native storage at this position, and {found} cannot be stored \
+         in it: it would lose the value or the storage's kind, so it is refused"
+    )]
+    Unrepresentable { held: &'static str, found: String },
+
+    /// a write a checked plan asked for was refused by the document
+    #[error(transparent)]
+    Reconcile(#[from] autosurgeon::reconcile::ReconcileError),
+
+    /// an Automerge read a check needed could not be made
+    #[error("the base view could not be read: {source}")]
+    Automerge { source: automerge::AutomergeError },
 
     /// what a refusal says about where it happened
     #[error("at `{path}`: {source}")]

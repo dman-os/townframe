@@ -517,11 +517,15 @@ and `Float64`'s `Deserialize` reads them back, so with a declared type a non-fin
 
 Why the convention at all, in the order it weighed:
 
-1. **A number is unfaithful even when every stack behaves.** RFC 8949's preferred serialisation
-   spells a float that is also a whole number as the integer, because that is shorter and reads back
-   the same double — a *conforming* encoder destroys the distinction. MessagePack stacks that pick
-   float32 truncate an `f64`'s digits. A carrier of cabinet data that knows nothing — a relay, a
-   backup tool, any re-encoder — can mangle every number; it cannot mangle a string.
+1. **Lossy JSON clients can turn a read-modify-write into an unintended edit.** DocumentsRepo owns
+   Automerge; ordinary plugs, XRPC clients, and future local IPC clients exchange whole facets as
+   JSON, not change bytes. A client may read a float through reduced precision and submit it unchanged
+   in intent but changed in value while editing another field. Decimal strings survive that path
+   without requiring every client to implement Automerge. Ciphertext relays are not the threat.
+   RFC 8949's preferred encoding can also erase float-versus-integer spelling, but schema-directed
+   storage already handles that distinction; it is not by itself evidence of precision loss.
+   Epsilon reconciliation is rejected: it would silently discard intentional small edits and needs
+   a field-specific tolerance.
 2. **The float stays a footgun on purpose.** A numeric string cannot be accidentally rounded,
    compared as a number, or put into arithmetic without a conversion every language makes explicit.
    Forcing consumers to deserialize is forcing them to decide, which is what JSON's `1.0` → `1` did
@@ -681,6 +685,46 @@ the type (§9). And a foreign type cannot be a **union member**, because a membe
 can assign ids only to types we declare; it becomes one through a wrapper of ours, or through its own
 declaration if it came from a plug that published an id for it. That is the boundary: **field
 positions take foreign types, union members take declared ones.**
+
+## 11a. Evolution must preserve JSON and native storage
+
+A stable facet tag binds a compatible interpretation, not an arbitrary sequence of schemas.
+Same-tag evolution must work in both directions: older and newer readers accept the other's valid
+values and preserve their native storage. A storage-breaking change requires a new tag or an explicit
+migration protocol; a per-claim schema hash is not adopted as the default solution.
+
+JSON-equivalent does not mean storage-compatible. Str and Text both emit strings, while Int, Uint,
+F64, Counter, and Timestamp may look numeric but have different meanings and merge behavior.
+Changing units or a codec keyword can break interpretation without changing the JSON type. Adding
+an optional Text field is not automatically safe: older software must preserve an existing Text,
+but cannot infer its representation when creating it from JSON without the newer declaration.
+
+Changes requiring compatibility scrutiny include opening or closing objects; adding or removing
+required fields; narrowing or widening closed enums; changing constraints, array item types, or
+additionalProperties; changing integer sign, number kind, format, codec, or units; and adding union
+members whose unknown payloads older code cannot preserve natively. A new optional field can also
+collide with a previously permitted extension key. A single schema publisher does not prevent data
+writers from creating that collision. Namespaced extensions, banning unknown local creation, and a
+publication-time compatibility checker are proposals, not settled requirements.
+
+**Authoring is checked; missing-schema interoperation is best effort.** Provisional field-name
+hints are an additional annotation channel for copied JSON when the schema or corresponding native
+target is unavailable. They do not replace JSON Schema codec annotations. New facet authoring must
+be checked by the macro against the agreed convention; explicit annotations remain the route when
+an author does not control the wire names. The naming grammar, precedence, failed-conversion behavior,
+and supported containers are not yet settled or implemented. A name hint must not be mistaken for
+a complete recovered schema. Native F64 does not retain Float32 versus Float64 width or whether
+its declared JSON form was a number or a decimal string; schema-less signed-value reconstruction
+therefore remains open rather than being solved by target awareness alone.
+
+Full JSON round-tripping is chosen over hidden-field projection (ADR 015 §2); it is not proof of native preservation. Unchanged
+unknown Text, Counter, Bytes, objects, and union payloads must not be rewritten merely because the
+local schema does not describe them. Lists and changed union discriminants make correspondence a
+real design question. Schema-projected reads are not adopted; the base-relative reconciliation and
+copy contracts are to be designed with DocumentsRepo (ADR 015 §2).
+
+A future facet-wide LWW JSON backend is separate work. Sharing a value model does not establish
+that a snapshot-only engine can reproduce Automerge's concurrent Counter/List semantics.
 
 ## 12. Out of scope, and what remains open
 

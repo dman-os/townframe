@@ -5,11 +5,12 @@
 //! branch the content fits, and a member the schema does not name is plain JSON — which is what
 //! makes an open object open.
 
-use super::{Codec, CodecError, kind};
+use super::{Codec, CodecError, KEYWORD, instant_string, kind};
+use crate::facet::codec::target::Plan;
 use automerge::{ObjId, ObjType, ReadDoc, ScalarValue};
-use autosurgeon::reconcile::NoKey;
-use autosurgeon::reconcile::{MapReconciler, SeqReconciler};
+use autosurgeon::reconcile::{MapReconciler, NoKey, SeqReconciler};
 use autosurgeon::{HydrateError, Prop, Reconcile, Reconciler};
+use data_encoding::BASE64 as BASE64_ENCODING;
 use serde_json::Value;
 use std::borrow::Cow;
 use std::fmt::{self, Display};
@@ -18,15 +19,21 @@ use std::fmt::{self, Display};
 /// declaration.
 const HOPS: usize = 16;
 
-/// A value checked against the declarations of the document it is going into.
+/// A value checked against the declarations — and, when it was checked against a transaction's
+/// base view, against the native storage — of the document it is going into.
 ///
 /// A storage declaration is an assertion — a position declared as bytes holds base64, not a string
 /// that failed to decode — so the value is checked once, at the edge where a bad one can still be
-/// reported. Reconciliation afterwards reports only what the reconciler itself reports.
+/// reported. Reconciliation afterwards reports only what the reconciler itself reports: the
+/// conversions a declaration asked for are total, and the decisions a target-aware check recorded
+/// are already made.
 #[derive(Debug)]
 pub struct Stored<'a> {
     document: &'a Value,
     value: Value,
+    /// The decisions the walk may consult while writing: none when this value was checked without a
+    /// document, so reconciliation keeps the behavior of a fresh target throughout.
+    plan: Option<Plan>,
 }
 
 impl<'a> Stored<'a> {
@@ -34,7 +41,11 @@ impl<'a> Stored<'a> {
     pub fn check(document: &'a Value, value: Value) -> Result<Self, CodecError> {
         let path = Path::root();
         Position::new(document, Some(document)).check(&value, &path)?;
-        Ok(Self { document, value })
+        Ok(Self {
+            document,
+            value,
+            plan: None,
+        })
     }
 
     /// The value, as it was checked.
@@ -47,10 +58,26 @@ impl<'a> Stored<'a> {
         self.value
     }
 
+    /// The value a target-aware check produced. The plan tells the write what the base held at
+    /// its positions, and it is not a public spelling on purpose: a caller that wants it checked
+    /// against a base reconciles through `reconcile_json`.
+    pub(super) fn with_plan(document: &'a Value, value: Value, plan: Plan) -> Self {
+        Self {
+            document,
+            value,
+            plan: Some(plan),
+        }
+    }
+
     /// Write the value into a document.
     pub fn reconcile<R: Reconciler>(&self, reconciler: R) -> Result<(), R::Error> {
         let path = Path::root();
-        Position::new(self.document, Some(self.document)).write(&self.value, &path, reconciler)
+        Position::new(self.document, Some(self.document)).write(
+            &self.value,
+            &path,
+            reconciler,
+            self.plan.as_ref(),
+        )
     }
 }
 
@@ -61,7 +88,6 @@ impl Reconcile for Stored<'_> {
         Stored::reconcile(self, reconciler)
     }
 }
-
 /// Read a value out of a document as the JSON form its schema declares.
 ///
 /// A document holds what the declarations say, so a storage form at a position nothing declares is
@@ -79,7 +105,11 @@ pub fn hydrate_value<D: ReadDoc>(
 
 /// Where a position sits, as a chain that is rendered only when something is refused: reading or
 /// writing a value does not allocate for the sake of an error that does not happen.
-struct Path<'p> {
+///
+/// The same rendering is what a target-aware plan keys its decisions by, so both passes of a
+/// reconciliation build the chain the same way and a plan's entries are found where they were
+/// checked.
+pub(super) struct Path<'p> {
     parent: Option<&'p Path<'p>>,
     step: Step<'p>,
 }
@@ -91,7 +121,7 @@ enum Step<'p> {
 }
 
 impl Path<'_> {
-    fn root() -> Path<'static> {
+    pub(super) fn root() -> Path<'static> {
         Path {
             parent: None,
             step: Step::Root,
@@ -100,20 +130,62 @@ impl Path<'_> {
 }
 
 impl<'p> Path<'p> {
-    fn key(parent: &'p Path<'p>, key: &'p str) -> Self {
+    /// The position's structural key, for a plan keyed by something a member's own name cannot
+    /// collide with.
+    pub(super) fn structural(&self) -> PathKey {
+        let mut steps = Vec::new();
+        for path in self.chain() {
+            steps.push(match path.step {
+                Step::Key(key) => PathStep::Key(key.to_owned()),
+                Step::Index(index) => PathStep::Index(index),
+                Step::Root => continue,
+            });
+        }
+        steps.reverse();
+        PathKey(steps)
+    }
+
+    /// The position and its ancestors, root first.
+    fn chain(&self) -> Vec<&Path<'p>> {
+        let mut chain = Vec::new();
+        let mut next: Option<&Path<'p>> = Some(self);
+        while let Some(path) = next {
+            chain.push(path);
+            next = path.parent;
+        }
+        chain.reverse();
+        chain
+    }
+
+    pub(super) fn key(parent: &'p Path<'p>, key: &'p str) -> Self {
         Self {
             parent: Some(parent),
             step: Step::Key(key),
         }
     }
 
-    fn index(parent: &'p Path<'p>, index: usize) -> Self {
+    pub(super) fn index(parent: &'p Path<'p>, index: usize) -> Self {
         Self {
             parent: Some(parent),
             step: Step::Index(index),
         }
     }
 }
+
+/// One step of a position's structural key.
+#[derive(Debug, PartialEq, Eq, Hash)]
+enum PathStep {
+    Key(String),
+    Index(usize),
+}
+
+/// A plan's key for a position: structural, and injective where a rendered chain is not — a
+/// member may be named like one of its neighbors' positions (`a.b`, `a[0]`), so the entries are
+/// keyed by the steps themselves rather than by how they render, and a decision checked at one
+/// position is found only there. Rendering stays in `Path`'s `Display`, which only refusals pay
+/// for.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(super) struct PathKey(Vec<PathStep>);
 
 impl Display for Path<'_> {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -134,10 +206,10 @@ impl Display for Path<'_> {
     }
 }
 
-/// The kind of what sits at a position, which is what a union is decided by: the kind of the JSON
-/// value going in, and the kind of what the document holds coming out.
+/// The kind of what sits at a position. Untagged alternatives such as `Option` narrow by kind;
+/// tagged object alternatives also require their discriminant to match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(super) enum Kind {
     Null,
     Boolean,
     Number,
@@ -173,7 +245,7 @@ impl Kind {
         }
     }
 
-    fn of_json(value: &Value) -> Self {
+    pub(super) fn of_json(value: &Value) -> Self {
         match value {
             Value::Null => Kind::Null,
             Value::Bool(_) => Kind::Boolean,
@@ -186,7 +258,7 @@ impl Kind {
 
     /// The kind a stored value has *as JSON*, which is what a reader gets back: bytes and a timestamp
     /// read as strings, a counter as a number, a text as a string.
-    fn of_stored(stored: &automerge::Value) -> Self {
+    pub(super) fn of_stored(stored: &automerge::Value) -> Self {
         match stored {
             automerge::Value::Scalar(scalar) => match scalar.as_ref() {
                 ScalarValue::Null => Kind::Null,
@@ -207,8 +279,12 @@ impl Kind {
 
 /// A position in a schema: what is declared here, and the document whose definitions those
 /// declarations resolve in.
+///
+/// One interpreter serves every direction a value travels: `Stored::check` and `Stored::reconcile`
+/// here, and the target-aware checks in `super::target` — resolution, tag dispatch and the codec's
+/// conversions are shared, so the target-aware walk is a traversal and not a second decoder.
 #[derive(Debug, Clone, Copy)]
-struct Position<'a> {
+pub(super) struct Position<'a> {
     document: &'a Value,
     /// Nothing when this position is not declared at all, which is what an unnamed member of an open
     /// object is: it holds plain JSON.
@@ -216,49 +292,79 @@ struct Position<'a> {
 }
 
 impl<'a> Position<'a> {
-    fn new(document: &'a Value, schema: Option<&'a Value>) -> Self {
+    pub(super) fn new(document: &'a Value, schema: Option<&'a Value>) -> Self {
         Self { document, schema }
     }
 
-    /// The schema at this position, with a reference followed and a union narrowed to the branch the
-    /// content's kind fits.
-    ///
-    /// A position that composes its schemas in a way this does not walk is refused rather than walked
-    /// in part: a declaration hidden inside one would be stored as a plain value without a word.
-    fn resolved(&self, kind: Kind) -> Result<Option<&'a Value>, CodecError> {
+    /// Follow references and narrow alternatives by kind and, for tagged members, discriminant.
+    /// `member_matches` checks discriminants in JSON on writes and native map entries on reads.
+    pub(super) fn resolved<E>(
+        &self,
+        kind: Kind,
+        member_matches: impl Fn(&str, &Value) -> Result<bool, E>,
+        error: impl Fn(CodecError) -> E,
+    ) -> Result<Option<&'a Value>, E> {
         let Some(mut schema) = self.schema else {
             return Ok(None);
         };
         for _hop in 0..HOPS {
-            if let Some(composed) = composed(schema) {
-                return Err(CodecError::Composed { keyword: composed });
-            }
-            if let Some(reference) = schema.get("$ref") {
-                let Some(stated) = reference.as_str() else {
-                    return Err(CodecError::NotAReference {
-                        stated: reference.to_string(),
-                    });
-                };
-                let Some(name) = stated.strip_prefix("#/$defs/") else {
-                    return Err(CodecError::NotAReference {
-                        stated: stated.to_owned(),
-                    });
-                };
-                schema = self.definition(name)?;
-                continue;
-            }
+            schema = self.referenced(schema).map_err(&error)?;
             if let Some(branches) = any_of(schema) {
                 let mut fit = None;
                 for branch in branches {
-                    if self.fits(branch, kind)? {
+                    let branch = self.referenced(branch).map_err(&error)?;
+                    if !self.fits(branch, kind, 0).map_err(&error)? {
+                        continue;
+                    }
+                    let mut matches = true;
+                    if let Some(properties) = branch.get("properties").and_then(Value::as_object) {
+                        for (key, declaration) in properties {
+                            // These are the string tag constraints emitted by serde/schemars and
+                            // our open fallback. Payload validation still belongs to the validator.
+                            if (declaration.get("const").is_some_and(Value::is_string)
+                                || declaration.pointer("/not/enum").is_some())
+                                && !member_matches(key, declaration)?
+                            {
+                                matches = false;
+                                break;
+                            }
+                        }
+                    }
+                    if matches {
                         fit = Some(branch);
                         break;
                     }
                 }
-                schema = fit.ok_or(CodecError::NoBranch { kind: kind.name() })?;
+                schema = fit.ok_or_else(|| error(CodecError::NoBranch { kind: kind.name() }))?;
                 continue;
             }
             return Ok(Some(schema));
+        }
+        Err(error(CodecError::Unresolved {
+            chain: "it refers back to itself".to_owned(),
+        }))
+    }
+
+    /// A reference or unsupported composition must not hide a branch's discriminant or codec.
+    fn referenced(&self, mut schema: &'a Value) -> Result<&'a Value, CodecError> {
+        for _hop in 0..HOPS {
+            if let Some(composed) = composed(schema) {
+                return Err(CodecError::Composed { keyword: composed });
+            }
+            let Some(reference) = schema.get("$ref") else {
+                return Ok(schema);
+            };
+            let Some(stated) = reference.as_str() else {
+                return Err(CodecError::NotAReference {
+                    stated: reference.to_string(),
+                });
+            };
+            let Some(name) = stated.strip_prefix("#/$defs/") else {
+                return Err(CodecError::NotAReference {
+                    stated: stated.to_owned(),
+                });
+            };
+            schema = self.definition(name)?;
         }
         Err(CodecError::Unresolved {
             chain: "it refers back to itself".to_owned(),
@@ -276,17 +382,23 @@ impl<'a> Position<'a> {
             })
     }
 
-    /// Whether a branch of a union is the one this kind of content belongs in. A branch that states
-    /// no type accepts anything, which is what a reference looks like before it is followed.
-    fn fits(&self, branch: &'a Value, kind: Kind) -> Result<bool, CodecError> {
-        let mut branch = branch;
-        if let Some(name) = branch
-            .get("$ref")
-            .and_then(Value::as_str)
-            .and_then(|stated| stated.strip_prefix("#/$defs/"))
-            && let Ok(definition) = self.definition(name)
-        {
-            branch = definition;
+    /// Whether an alternative accepts this kind, including nested wrappers such as `Option<Union>`.
+    /// A leaf that states no type accepts any kind; references have already been followed.
+    fn fits(&self, branch: &'a Value, kind: Kind, hops: usize) -> Result<bool, CodecError> {
+        if hops >= HOPS {
+            return Err(CodecError::Unresolved {
+                chain: "it refers back to itself".to_owned(),
+            });
+        }
+        // `Option<Union>` wraps the union in anyOf before its null branch. The wrapper has no
+        // type of its own, but must not greedily accept null on behalf of its object members.
+        if let Some(branches) = any_of(branch) {
+            for branch in branches {
+                if self.fits(self.referenced(branch)?, kind, hops + 1)? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
         }
         match Codec::of(branch)? {
             // A position our keyword is on is spelled by the codec, and a float is the one whose
@@ -307,7 +419,7 @@ impl<'a> Position<'a> {
 
     /// The position of one member of an object. A member the schema does not name is plain JSON, or
     /// the schema `additionalProperties` states for the members it does not name.
-    fn member(&self, schema: Option<&'a Value>, key: &str) -> Position<'a> {
+    pub(super) fn member(&self, schema: Option<&'a Value>, key: &str) -> Position<'a> {
         Position {
             document: self.document,
             schema: schema.and_then(|schema| declared_member(schema, key)),
@@ -315,7 +427,7 @@ impl<'a> Position<'a> {
     }
 
     /// The position of one element of an array.
-    fn element(&self, schema: Option<&'a Value>, index: usize) -> Position<'a> {
+    pub(super) fn element(&self, schema: Option<&'a Value>, index: usize) -> Position<'a> {
         Position {
             document: self.document,
             schema: schema.and_then(|schema| declared_element(schema, index)),
@@ -324,9 +436,18 @@ impl<'a> Position<'a> {
 
     /// Refuse a value the declarations here cannot hold. Nothing is written afterwards, so this is
     /// where a declaration turns into an assertion.
-    fn check<'p>(&self, value: &'p Value, path: &'p Path<'p>) -> Result<(), CodecError> {
+    pub(super) fn check<'p>(&self, value: &'p Value, path: &'p Path<'p>) -> Result<(), CodecError> {
         let Some(schema) = self
-            .resolved(Kind::of_json(value))
+            .resolved(
+                Kind::of_json(value),
+                |key, declaration| {
+                    Ok(discriminant_matches(
+                        value.get(key).and_then(Value::as_str),
+                        declaration,
+                    ))
+                },
+                |err| err,
+            )
             .map_err(|err| at(path, err))?
         else {
             return Ok(());
@@ -366,14 +487,36 @@ impl<'a> Position<'a> {
     }
 
     /// Write a value into a document, reading the declaration at this position.
-    fn write<'p, R: Reconciler>(
+    ///
+    /// `plan` carries the decisions a target-aware check made against the base view the caller
+    /// reconciles inside: a position it says something about neither creates nor changes anything,
+    /// which is what keeps an unchanged native value's identity and its concurrent conflicts. The
+    /// plan is consulted here — every position of the value passes through this once — rather than
+    /// at each container, so a plan entry cannot drift out of sync with where it was checked.
+    pub(super) fn write<'p, R: Reconciler>(
         &self,
         value: &'p Value,
         path: &'p Path<'p>,
         mut reconciler: R,
+        plan: Option<&'p Plan>,
     ) -> Result<(), R::Error> {
+        // A plan entry was made against the base and is written as is: a `Skip` writes nothing,
+        // which is what "unchanged" says, so a text keeps its object and a counter keeps the
+        // entries a concurrent writer added after the base.
+        if let Some(op) = plan.and_then(|plan| plan.get(path)) {
+            return op.write(reconciler);
+        }
         let schema = self
-            .resolved(Kind::of_json(value))
+            .resolved(
+                Kind::of_json(value),
+                |key, declaration| {
+                    Ok(discriminant_matches(
+                        value.get(key).and_then(Value::as_str),
+                        declaration,
+                    ))
+                },
+                |err| err,
+            )
             .expect("a checked value resolves at every position");
         if let Some(codec) = schema.and_then(|schema| {
             Codec::of(schema).expect("a checked value declares nothing this build does not have")
@@ -435,10 +578,11 @@ impl<'a> Position<'a> {
                 for (index, item) in items.iter().enumerate() {
                     let child = Path::index(path, index);
                     let position = self.element(schema, index);
+                    let documented = Documented(position, item, &child, plan);
                     if index < existing {
-                        sequence.set(index, Documented(position, item, &child))?;
+                        sequence.set(index, documented)?;
                     } else {
-                        sequence.insert(index, Documented(position, item, &child))?;
+                        sequence.insert(index, documented)?;
                     }
                 }
                 Ok(())
@@ -457,7 +601,7 @@ impl<'a> Position<'a> {
                 for (key, member) in members {
                     let child = Path::key(path, key);
                     let position = self.member(schema, key);
-                    map.put(key, Documented(position, member, &child))?;
+                    map.put(key, Documented(position, member, &child, plan))?;
                 }
                 Ok(())
             }
@@ -475,9 +619,17 @@ impl<'a> Position<'a> {
         let Some((stored, id)) = doc.get(obj, &prop)? else {
             return Ok(Value::Null);
         };
-        let schema = self
-            .resolved(Kind::of_stored(&stored))
-            .map_err(|err| refusal(path, err))?;
+        let schema = self.resolved(
+            Kind::of_stored(&stored),
+            |key, declaration| {
+                let entry = doc.get(&id, key)?;
+                Ok(discriminant_matches(
+                    entry.as_ref().and_then(|(value, _id)| value.to_str()),
+                    declaration,
+                ))
+            },
+            |err| refusal(path, err),
+        )?;
         // A `None` of an option read back: the stored null is the declaration's null, and the
         // codec is never asked about a value it does not have.
         if matches!(
@@ -501,7 +653,10 @@ impl<'a> Position<'a> {
             );
         }
         match stored {
-            automerge::Value::Scalar(scalar) => scalar_json(&scalar, path),
+            automerge::Value::Scalar(scalar) => {
+                let raw = raw_fallback(schema).map_err(|err| refusal(path, err))?;
+                scalar_json(&scalar, path, raw)
+            }
             automerge::Value::Object(ObjType::Map | ObjType::Table) => {
                 let mut members = serde_json::Map::new();
                 for item in doc.map_range(&id, ..) {
@@ -534,19 +689,21 @@ impl<'a> Position<'a> {
         }
     }
 }
-/// A position on its way into a document: what a reconciler's own sub-reconcilers take.
-struct Documented<'p>(Position<'p>, &'p Value, &'p Path<'p>);
+/// A position on its way into a document: what a reconciler's own sub-reconcilers take. The plan a
+/// value was checked with rides along, because a sub-reconciler only receives a `Reconcile`.
+struct Documented<'p>(Position<'p>, &'p Value, &'p Path<'p>, Option<&'p Plan>);
 
 impl Reconcile for Documented<'_> {
     type Key<'a> = NoKey;
 
     fn reconcile<R: Reconciler>(&self, reconciler: R) -> Result<(), R::Error> {
-        self.0.write(self.1, self.2, reconciler)
+        let Self(position, value, path, plan) = self;
+        position.write(value, path, reconciler, *plan)
     }
 }
 
 /// What a schema says a number is, which is what a document holds at that position.
-enum Number {
+pub(super) enum Number {
     /// `type: number`: a float, which is an `F64` whatever the token looks like.
     Float,
     /// `type: integer` and signed: an `Int`, because an `i64` is read from `Int` only.
@@ -563,10 +720,14 @@ enum Number {
 /// types, and `format` states the width and the sign — so this needs no vocabulary of ours. The
 /// default for a bare `type: integer` is signed, because that type includes the negatives; a schema
 /// that means unsigned says `format: uint64`.
-fn number_kind(schema: Option<&Value>) -> Number {
+pub(super) fn number_kind(schema: Option<&Value>) -> Number {
     let Some(schema) = schema else {
         return Number::Token;
     };
+    // The keyword's own marker names a plain number on purpose, `type` or not.
+    if schema.get(KEYWORD).and_then(Value::as_str) == Some("number") {
+        return Number::Float;
+    }
     if type_mentions(schema, "number") {
         return Number::Float;
     }
@@ -579,9 +740,45 @@ fn number_kind(schema: Option<&Value>) -> Number {
     }
 }
 
+/// What a position declares, one spelling for one concept: the storage form's codec, an ordinary
+/// kind stated on purpose, or genuinely nothing at all. Every check consults this, so a
+/// deliberately plain position is never mistaken for an undeclared one, and the other way around:
+/// a marker the keyword carries without a `type` is a statement, not an absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Declared {
+    Codec(Codec),
+    /// A kind this position states itself: plain markers (`number`, `list`) included, with or
+    /// without a `type`.
+    Plain,
+    Undeclared,
+}
+
+/// What the schema at this position declares.
+pub(super) fn declared(schema: Option<&Value>) -> Result<Declared, CodecError> {
+    let Some(schema) = schema else {
+        return Ok(Declared::Undeclared);
+    };
+    match Codec::of(schema)? {
+        Some(codec) => Ok(Declared::Codec(codec)),
+        None => {
+            let stated = (schema.get(KEYWORD).is_some_and(Value::is_string))
+                || [
+                    "string", "number", "integer", "boolean", "array", "object", "null",
+                ]
+                .iter()
+                .any(|kind| type_mentions(schema, kind));
+            Ok(if stated {
+                Declared::Plain
+            } else {
+                Declared::Undeclared
+            })
+        }
+    }
+}
+
 /// Whether a schema's `type` states this, written as one type or as a list of them: an
 /// `Option<i64>` is `{"type": ["integer", "null"]}`.
-fn type_mentions(schema: &Value, stated: &str) -> bool {
+pub(super) fn type_mentions(schema: &Value, stated: &str) -> bool {
     match schema.get("type") {
         Some(Value::String(one)) => one == stated,
         Some(Value::Array(ones)) => ones.iter().any(|one| one.as_str() == Some(stated)),
@@ -594,6 +791,22 @@ fn composed(schema: &Value) -> Option<&'static str> {
     ["allOf", "prefixItems"]
         .into_iter()
         .find(|keyword| schema.get(*keyword).is_some())
+}
+
+/// String discriminants select known members by const; an open fallback excludes those constants.
+pub(super) fn discriminant_matches(stated: Option<&str>, declaration: &Value) -> bool {
+    let Some(stated) = stated else {
+        return false;
+    };
+    if let Some(known) = declaration.get("const").and_then(Value::as_str)
+        && stated != known
+    {
+        return false;
+    }
+    !declaration
+        .pointer("/not/enum")
+        .and_then(Value::as_array)
+        .is_some_and(|known| known.iter().any(|value| value.as_str() == Some(stated)))
 }
 
 fn any_of(schema: &Value) -> Option<&Vec<Value>> {
@@ -627,7 +840,7 @@ fn declared_element(schema: &Value, index: usize) -> Option<&Value> {
 
 /// What a refusal says about where it happened. It is attached where the refusal is raised, so the
 /// path in it is the deepest one and nothing re-wraps it on the way up.
-fn at(path: &Path<'_>, source: CodecError) -> CodecError {
+pub(super) fn at(path: &Path<'_>, source: CodecError) -> CodecError {
     CodecError::At {
         path: path.to_string(),
         source: Box::new(source),
@@ -635,25 +848,29 @@ fn at(path: &Path<'_>, source: CodecError) -> CodecError {
 }
 
 /// The same refusal, said to a reader.
-fn refusal(path: &Path<'_>, source: CodecError) -> HydrateError {
+pub(super) fn refusal(path: &Path<'_>, source: CodecError) -> HydrateError {
     HydrateError::unexpected(
         "a value its declarations hold",
         format!("at `{path}`: {source}"),
     )
 }
 
-/// A stored scalar as the JSON form a reader gets back. A storage form nothing declares as one is
-/// refused: a counter read as a number, or bytes read as a string, is a value whose type the writer
-/// did not intend, and guessing it back would hide a declaration that did not travel.
-fn scalar_json(scalar: &ScalarValue, path: &Path<'_>) -> Result<Value, HydrateError> {
-    let undeclared = |found: &str| {
-        refusal(
-            path,
-            CodecError::Unknown {
-                stated: found.to_owned(),
-            },
-        )
-    };
+/// Whether a position declares nothing about what sits in it. There, and only there, the storage
+/// forms a peer may have written without a schema travel to the read the best-effort raw spellings
+/// the fallback spells them in — bytes as the base64 they are, an instant as its RFC 3339, a
+/// counter as the number it summed to. The spellings are a fallback, and not the signed fidelity a
+/// declaration gives: where a schema declares, everything it says is authoritative, and a mismatch
+/// is a refusal rather than a projection.
+pub(super) fn raw_fallback(schema: Option<&Value>) -> Result<bool, CodecError> {
+    Ok(declared(schema)? == Declared::Undeclared)
+}
+
+/// A stored scalar as the JSON form a reader gets back. Where a declaration says what sits here, a
+/// storage form other than that is refused: a counter read as a plain number, or bytes read as a
+/// string, is a value whose type the writer intended to be read differently. Where nothing is
+/// declared (`raw_fallback`), the scalars Automerge holds are what the raw spellings carry.
+fn scalar_json(scalar: &ScalarValue, path: &Path<'_>, raw: bool) -> Result<Value, HydrateError> {
+    let undeclared = |held: &'static str| refusal(path, CodecError::Undeclared { held });
     match scalar {
         ScalarValue::Null => Ok(Value::Null),
         ScalarValue::Boolean(stated) => Ok(Value::Bool(*stated)),
@@ -669,9 +886,15 @@ fn scalar_json(scalar: &ScalarValue, path: &Path<'_>) -> Result<Value, HydrateEr
             )),
         },
         ScalarValue::Str(stated) => Ok(Value::String(stated.to_string())),
-        ScalarValue::Counter(_) => Err(undeclared("counter")),
-        ScalarValue::Timestamp(_) => Err(undeclared("timestamp")),
+        // The raw fallback, and nothing else: a counter is read as the number it summed to, its
+        // bytes as the canonical base64 they spell, an instant as its RFC 3339. A scalar from a
+        // future Automerge has no spelling at all and is refused wherever it sits.
+        ScalarValue::Counter(stated) if raw => Ok(Value::Number(i64::from(stated).into())),
+        ScalarValue::Timestamp(stated) if raw => Ok(Value::String(instant_string(*stated))),
+        ScalarValue::Bytes(stated) if raw => Ok(Value::String(BASE64_ENCODING.encode(stated))),
+        ScalarValue::Counter(_) => Err(undeclared("a counter")),
+        ScalarValue::Timestamp(_) => Err(undeclared("an instant")),
         ScalarValue::Bytes(_) => Err(undeclared("bytes")),
-        ScalarValue::Unknown { .. } => Err(undeclared("an unknown scalar")),
+        ScalarValue::Unknown { .. } => Err(undeclared("a scalar this build does not know")),
     }
 }

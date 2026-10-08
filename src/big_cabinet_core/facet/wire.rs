@@ -127,8 +127,8 @@ pub struct MemberSchema {
     pub schema: Schema,
 }
 
-/// Builds the `oneOf` a union emits: one branch per declared member, plus, for an open union, the
-/// branch whose discriminant is unconstrained — which is what `check_shape` reads as the fallback.
+/// Builds the `oneOf` a union emits: one branch per declared member, plus, for an open union, a
+/// fallback that excludes known discriminants so each member matches exactly one branch.
 pub fn union_schema(
     tag: &'static str,
     content: &'static str,
@@ -136,6 +136,7 @@ pub fn union_schema(
     members: Vec<MemberSchema>,
 ) -> Schema {
     let mut branches: Vec<Value> = Vec::with_capacity(members.len() + 1);
+    let known: Vec<_> = members.iter().map(|member| member.id).collect();
     for member in members {
         branches.push(adjacent_branch(
             tag,
@@ -150,7 +151,7 @@ pub fn union_schema(
         branches.push(adjacent_branch(
             tag,
             content,
-            serde_json::json!({ "type": "string" }),
+            serde_json::json!({ "type": "string", "not": { "enum": known } }),
             Value::Bool(true),
         ));
     }
@@ -164,6 +165,7 @@ fn adjacent_branch(tag: &str, content: &str, discriminant: Value, payload: Value
     properties.insert(tag.to_owned(), discriminant);
     properties.insert(content.to_owned(), payload);
     let mut branch = serde_json::Map::new();
+    branch.insert("type".to_owned(), Value::from("object"));
     branch.insert("properties".to_owned(), Value::Object(properties));
     branch.insert("required".to_owned(), serde_json::json!([tag, content]));
     Value::Object(branch)

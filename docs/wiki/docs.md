@@ -15,12 +15,11 @@ This requires us to have stringent laws around keeping schema changes backward c
 
 ### Facets
 
-Documents are made up of facets which are JSON objects describing the different pieces of the document.
+Documents are made up of facets which are JSON values describing the different pieces of the document.
 Facets are stored in a map with unordered keys that have a format of `facet.tag/key-id`.
 
 The facet tag indicates expected schema of the value under that key.
-Tags are desigined to be reverse domain name notation similar to AT proto NSIDs.
-<!--TODO: specify design of how NSIDs are locked in-->
+Facet schemas are AT Proto lexicons with specialization and the tag corresponds to the lexicon NSID.
 
 The `key-id` allows multiple facets of the same `tag` in the doc.
 It is an untyped string.
@@ -34,7 +33,7 @@ To put non-utf-8 values, the escaping format from Go string literals is used.
 
 To clarify:
 - Facet: a real data record inside of a document
-- Facet schema: the shape description of the facet in JSON schema
+- Facet schema: the shape description of the facet 
 - Facet key: a key of a real facet inside of a document
 - Facet tag: the schema identification section of a facet key
 - Facekt key-id: the document unique id of a facet in a document
@@ -47,17 +46,6 @@ Some examples of facets:
 }
 ```
 
-#### Facet schemas
-
-Facet shapes are defined by JSON Schema that is attached to their tag.
-
-Breaking changes to facet schemas are disallowed.
-If a breaking change is required, use a new facet tag instead.
-
-To make facet schemas more evolvable, the following advisories should be considered during design:
-- Use open enums to allow adding more variants
-- Use open unions 
-
 ### Automerge
 
 Documents are stored using the Automerge data structure, a JSON based CRDT implementation.
@@ -65,6 +53,84 @@ CRDTs are a family of data structures allowing concurrent edits across devices t
 The design of Automerge requires the full history of the document is kept which can be a feature or a burden depending on the usecase. 
 
 Note that the automerge CRDT is actually called a document but to avoid confusion, it'll be called the CRDT on this document.
+
+### Schemas
+
+Facet shapes are primarily defined by AT Proto [lexicons](https://atproto.com/specs/lexicon), a JSON schema alternative used by the AT protocol network
+Lexicons are identified by their [NSID](https://atproto.com/specs/nsid)(Namespaced Identifiers), which DNS rooted identifiers that are represented in reverse fully qualified host name notation.
+
+In addition to Lexicons, facet schemas carry an optional JSON schema that is used to define the following extra information not representable in Lexicons.
+- Automerge representation
+- Typed maps
+- Float string format
+- Uint string format
+
+Any other JSON schema feature usage is forbidden.
+
+All valid record lexicons are valid facet schemas.
+Asides from the evolvability available to lexicon per it's spec, breaking schemas is disallowed and this extends to JSON schema extensions as well.
+This means the follwing are disallowed:
+- Changing the Automerge representation annotation
+- Change typed map leaf types
+
+If a breaking change is required, use a new facet tag instead.
+
+#### Data model
+
+The documents data model is a layering of a subset of the AT proto datamodel to the Automerge data model.
+
+As the canonical strage format, the canonical data model of documents is the Automerge data model. This means the following types:
+- Scalars
+  - Null
+  - Int64
+  - Uint64
+  - Float64 (IEEE 754)
+  - Boolean
+  - Int64 counters
+  - Int64 timestamps in milliseconds since unix epoch
+  - Utf-8 strings
+  - Byte strings
+- Composites
+  - Maps with string keys
+  - Lists
+  - Text/Collaborative strings
+
+For more information, check out the offical automerge [reference](https://automerge.org/docs/reference/documents/).
+
+The wire and working representation of the data is ATProto Lexicons which are themselves represented using JSON or CBOR and consist of the [ATProto data model](https://atproto.com/specs/data-model).
+So yes, while techincally, the full ATProto data model is available to program with, the following items currently have no meaning in the documents.
+- `cid-link`s or `$link` objects
+
+Facets are stored in then in the CRDT using their JSON based Automerge representation with the following clarifications:
+- Incoming `$bytes` objects are stored using byte string scalars in automerge
+- String fields with `datetime` format will be stored as Automerge timestamps
+
+Additionally, documents writes allow non ATProto supported datatypes like which have special rules.
+The big one is floats which are representable in Automerge but not in Lexicons.
+Documents can contain floats and writing IEEE 754 floats is allowed.
+The adjustment is that all floats will be read or returned from the DocumentRepo in stringfied decimal format.
+
+Similarly, the ATProto data model only supports integers in i64 format.
+If one needes the uint64 range above i64:MAX, stringified representation is the only avail avenue.
+Non-negative JSON numbers are accepted as input but Uint marked fields are stringifed on return.
+
+<!--TODO: specify expectations around float/u64 stringification-->
+
+The whole document design takes heed of the robustness principle: "be conservative in what you do, be liberal in what you accept from others".
+This means specifically the following:
+- While the DocumentRepo will return stringified floats always, it'll accept IEEE 754 float representations
+
+#### Authoring schemas
+
+<!--TODO: define how plugs and nodules bundle schemas-->
+The standard lexicon authoring [guidlines and rules](https://atproto.com/specs/lexicon#lexicon-publication-and-resolution) apply.
+Please explore the atproto spec for more information.
+
+##### Evolvability
+
+To make facet schemas more evolvable, the following advisories should be considered during design:
+- Use open enums to allow adding more variants
+- Use open unions 
 
 #### Heads
 
@@ -94,6 +160,28 @@ By design, branches in the `/tmp` path will never leave that device.
 All other branches are replicated.
 <!-- TODO: test branch deletions + drawer doc sync behavior -->
 <!-- TODO: branches in urls -->
+
+### Conflict resolution
+
+### Rust authorship
+
+### URLs
+
+<!--
+
+ - Does absent heads mean live/current, while supplied heads pin a snapshot? What does [] mean?
+ - Which branch does a reference target?
+ - What does self mean when a facet is copied into another document?
+ - Does a reference pin the whole document frontier, selecting the facet within it?
+ - What happens when the target is unavailable, unauthorized, or deleted?
+ - Is a reference only an address, or does it imply retention/access? Those shouldn’t be conflated.
+
+
+-->
+
+### DocumentRepo
+
+#### Read and write
 
 ### Dmeta
 

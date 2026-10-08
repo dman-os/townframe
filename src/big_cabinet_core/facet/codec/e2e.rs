@@ -2,6 +2,8 @@
 //! whichever field holds it, and what a peer's document holds comes back as the JSON it was.
 
 use super::{Bytes, Codec, Counter, Float64, Stored, Text, hydrate_value};
+
+mod native;
 use crate::facet::{Bundle, Declaration, Extra, Universe};
 use automerge::{AutoCommit, ObjType, ROOT, ReadDoc, transaction::Transactable};
 use schemars::JsonSchema;
@@ -339,17 +341,41 @@ fn an_edited_text_is_the_text_the_document_holds() {
     );
 }
 
-/// A document holding a storage form that no declaration here covers is refused: guessing it back
-/// would hide a declaration that did not travel.
+/// A position whose declaration states a plain kind but which holds a specialized native value
+/// cannot say what it holds as: the type would have to be read differently from what a conformant
+/// reader gets, and no schemaless spelling can fix what a declaration contradicts.
 #[test]
-fn a_stored_form_nothing_declares_is_refused() {
+fn a_specialized_native_at_a_plain_declaration_is_refused() {
     let mut doc = AutoCommit::new();
     doc.put(ROOT, "facet", automerge::ScalarValue::Timestamp(0))
         .unwrap();
     let document = json!({"type": "object", "properties": {"facet": {"type": "string"}}});
     let error = hydrate_value(&doc, &ROOT, facet(), &document)
-        .expect_err("a timestamp at a position that declares nothing is refused");
-    assert!(error.to_string().contains("timestamp"), "{error}");
+        .expect_err("an instant at a position declared a string is refused");
+    assert!(error.to_string().contains("an instant"), "{error}");
+
+    // A scalar a future Automerge wrote has no reader of its own in this build: what reaches the
+    // codec's edge is the payload as Automerge renders it here, bytes. Pin that rendering, because
+    // the raw fallback spellings are defined on it, not on an interpretation no build has.
+    let mut doc = AutoCommit::new();
+    let obj = doc.put_object(ROOT, "facet", ObjType::Map).unwrap();
+    doc.put(
+        &obj,
+        "future",
+        automerge::ScalarValue::Unknown {
+            type_code: 7,
+            bytes: vec![1, 2],
+        },
+    )
+    .unwrap();
+    let (value, _) = doc.get(&obj, "future").unwrap().unwrap();
+    assert!(
+        matches!(
+            value,
+            automerge::Value::Scalar(ref scalar) if matches!(scalar.as_ref(), automerge::ScalarValue::Bytes(_)),
+        ),
+        "this build renders a future Automerge's scalar as bytes: {value:?}",
+    );
 }
 
 /// An open object carries what it does not name, and the codec walks it as plain JSON: the members
@@ -780,3 +806,148 @@ fn a_rust_type_deserializes_the_json_the_document_repo_emits() {
 }
 
 use autosurgeon::Hydrate as _;
+
+#[macros::facet(id = "org.example.bytesMember", closed)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct BytesMember {
+    data: Bytes,
+}
+
+#[macros::facet(id = "org.example.textMember", closed)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TextMember {
+    data: Text,
+}
+
+#[macros::facet]
+#[derive(Debug)]
+#[serde(tag = "kind", content = "payload")]
+enum StorageUnion {
+    Bytes(BytesMember),
+    Text(TextMember),
+    #[facet(other)]
+    Unknown(crate::facet::UnknownMember),
+}
+
+#[macros::facet]
+#[derive(Debug)]
+#[serde(tag = "kind", content = "payload")]
+enum ReversedStorageUnion {
+    Text(TextMember),
+    Bytes(BytesMember),
+    #[facet(other)]
+    Unknown(crate::facet::UnknownMember),
+}
+
+#[macros::facet(closed)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", content = "payload")]
+enum ClosedStorageUnion {
+    #[serde(rename = "org.example.bytesMember")]
+    Bytes(BytesMember),
+    #[serde(rename = "org.example.textMember")]
+    Text(TextMember),
+}
+
+#[test]
+fn tagged_union_codecs_follow_the_discriminant_not_branch_order() {
+    let mut documents: Vec<Value> = [
+        schemars::schema_for!(StorageUnion),
+        schemars::schema_for!(ReversedStorageUnion),
+        schemars::schema_for!(ClosedStorageUnion),
+    ]
+    .into_iter()
+    .map(|schema| serde_json::to_value(schema).unwrap())
+    .collect();
+    let mut referenced = documents[0].clone();
+    referenced["$defs"]["BytesBranch"] = referenced["oneOf"][0].clone();
+    referenced["$defs"]["BytesBranchAlias"] = json!({"$ref": "#/$defs/BytesBranch"});
+    referenced["oneOf"][0] = json!({"$ref": "#/$defs/BytesBranchAlias"});
+    // Fallback position is not dispatch priority, and branch references cannot hide a tag.
+    referenced["oneOf"].as_array_mut().unwrap().reverse();
+    documents.push(referenced);
+    for document in documents {
+        let validator = jsonschema::validator_for(&document).unwrap();
+        for (json, expected) in [
+            (
+                json!({"kind": "org.example.bytesMember", "payload": {"data": "AQID"}}),
+                "bytes",
+            ),
+            (
+                json!({"kind": "org.example.textMember", "payload": {"data": "hello"}}),
+                "text",
+            ),
+        ] {
+            let mut doc = AutoCommit::new();
+            assert!(validator.is_valid(&json), "{json}");
+            let checked = Stored::check(&document, json.clone()).unwrap();
+            autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &checked).unwrap();
+            assert_eq!(
+                hydrate_value(&doc, &ROOT, facet(), &document).unwrap(),
+                json
+            );
+            let (_, member) = doc.get(ROOT, "facet").unwrap().unwrap();
+            let (_, payload) = doc.get(member, "payload").unwrap().unwrap();
+            let (native, _) = doc.get(payload, "data").unwrap().unwrap();
+            assert_eq!(shape(&native), expected);
+        }
+    }
+}
+
+#[test]
+fn tagged_union_unknown_members_and_optional_null_keep_their_json() {
+    let schemas = [
+        schemars::schema_for!(Option<StorageUnion>),
+        schemars::schema_for!(Option<ReversedStorageUnion>),
+    ];
+    for schema in schemas {
+        let document = serde_json::to_value(schema).unwrap();
+        for json in [
+            Value::Null,
+            json!({"kind": "org.example.future", "payload": {"data": "not base64", "nested": [null, 1]}, "extra": true}),
+            json!({"kind": "org.example.textMember", "payload": {"data": "hello"}}),
+        ] {
+            let mut doc = AutoCommit::new();
+            let checked = Stored::check(&document, json.clone())
+                .unwrap_or_else(|err| panic!("{err}; value={json}; schema={document}"));
+            autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &checked).unwrap();
+            assert_eq!(
+                hydrate_value(&doc, &ROOT, facet(), &document).unwrap(),
+                json
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_tagged_union_members_do_not_use_another_members_codec() {
+    for schema in [
+        schemars::schema_for!(StorageUnion),
+        schemars::schema_for!(ReversedStorageUnion),
+    ] {
+        let document = serde_json::to_value(schema).unwrap();
+        let validator = jsonschema::validator_for(&document).unwrap();
+        let malformed =
+            json!({"kind": "org.example.bytesMember", "payload": {"data": "not base64"}});
+        // contentEncoding is an annotation to the validator; the codec must still refuse this,
+        // even when the Text branch comes first and could store this string.
+        assert!(validator.is_valid(&malformed));
+        assert!(Stored::check(&document, malformed).is_err());
+        for malformed in [
+            json!({"kind": "org.example.bytesMember", "payload": {}}),
+            json!({"kind": "org.example.textMember", "payload": 1}),
+            json!({"kind": 1, "payload": {"data": "hello"}}),
+            json!({"payload": {"data": "hello"}}),
+        ] {
+            assert!(!validator.is_valid(&malformed), "{malformed}");
+        }
+        for malformed in [
+            json!({"kind": 1, "payload": {"data": "hello"}}),
+            json!({"payload": {"data": "hello"}}),
+        ] {
+            assert!(Stored::check(&document, malformed).is_err());
+        }
+    }
+}

@@ -29,7 +29,7 @@ pub use value::Extra;
 #[cfg(feature = "schemars")]
 pub use codec::{
     Bytes, Codec, CodecError, Counter, Float32, Float64, KEYWORD, Stored, Text, codec_schema,
-    hydrate_value,
+    hydrate_value, reconcile_json,
 };
 #[cfg(feature = "schemars")]
 pub use shape::{ShapeError, ShapeFlag, check_shape};

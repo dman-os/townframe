@@ -181,6 +181,28 @@ fn the_schema_of_an_open_union_agrees_with_its_declaration() {
 }
 
 #[test]
+fn an_open_union_schema_accepts_each_discriminant_exactly_once() {
+    let schema = serde_json::to_value(schema_for!(OpenAttachment)).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    for member in [
+        json!({"$type": Note::ID, "value": {"content": "hello"}}),
+        json!({"$type": Photo::ID, "value": {"url": "https://example.com"}}),
+        json!({"$type": "org.example.future", "value": {"nested": [1, null]}, "extra": true}),
+    ] {
+        assert!(validator.is_valid(&member), "{member}");
+    }
+    for malformed in [
+        json!({"$type": Photo::ID, "value": {"content": "not a photo"}}),
+        json!({"$type": Note::ID, "value": 7}),
+        json!({"$type": "org.example.future"}),
+        json!({"$type": 7, "value": {}}),
+        json!(7),
+    ] {
+        assert!(!validator.is_valid(&malformed), "{malformed}");
+    }
+}
+
+#[test]
 fn the_schema_of_a_closed_union_agrees_but_is_flagged() {
     let flags = check_shape(
         "ClosedAttachment",
