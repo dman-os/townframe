@@ -2882,6 +2882,7 @@ dependencies = [
  "automerge",
  "autosurgeon",
  "blake3",
+ "bs58",
  "camino",
  "data-encoding",
  "displaydoc",
