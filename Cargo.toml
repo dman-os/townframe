@@ -6,6 +6,7 @@ members = [
   "./src/big_repo/",
   "./src/big_sync/",
   "./src/big_sync_core/",
+  "./src/btress_sysadmin",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",

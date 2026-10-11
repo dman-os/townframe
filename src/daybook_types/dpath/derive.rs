@@ -14,9 +14,8 @@ use crate::dpath::claim::{DpathClaim, RawClaim};
 use crate::dpath::facet::DpathFacet;
 use crate::dpath::label::{Dpath, DpathError};
 use crate::dpath::naming::DpathNamePolicy;
-use crate::dpath::reserved::ReservedSurface;
 
-use resolve::{dir_entries, reserved_entries, resolve};
+use resolve::{dir_entries, resolve};
 
 //--------------------------------------------------------------------------------------
 // The derived tree
@@ -72,7 +71,7 @@ impl DerivedTree {
             found = Some(entry);
             entries = match entry {
                 DerivedEntry::Dir { children, .. } => children.as_slice(),
-                DerivedEntry::Claim { .. } | DerivedEntry::ById { .. } => &[],
+                DerivedEntry::Claim { .. } => &[],
             };
         }
         found
@@ -83,7 +82,7 @@ impl DerivedTree {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DerivedEntry {
     /// A directory: an implicit prefix, a Rule 1 collision directory, a Rule 2/3
-    /// `.d` spill directory, a reserved surface, or a claimant's own subtree
+    /// `.d` spill directory, or a claimant's own subtree
     /// nested inside a collision directory.
     Dir {
         name: String,
@@ -92,15 +91,13 @@ pub enum DerivedEntry {
     },
     /// A claimant's file entry (the root of its lens entry-set).
     Claim { name: String, claim: DerivedClaim },
-    /// A dpathless document under a reserved surface (FDR 001 §5).
-    ById { name: String, doc_id: DocId },
 }
 
 impl DerivedEntry {
     /// The real name of this entry inside its parent directory.
     pub fn name(&self) -> &str {
         match self {
-            Self::Dir { name, .. } | Self::Claim { name, .. } | Self::ById { name, .. } => name,
+            Self::Dir { name, .. } | Self::Claim { name, .. } => name,
         }
     }
 
@@ -113,7 +110,7 @@ impl DerivedEntry {
                     child.collect_paths(&path, out);
                 }
             }
-            Self::Claim { .. } | Self::ById { .. } => out.push(path),
+            Self::Claim { .. } => out.push(path),
         }
     }
 }
@@ -129,8 +126,6 @@ pub enum DerivedDirKind {
     Spill,
     /// A claimant's own subtree, nested inside a collision directory (case 8).
     Claimant,
-    /// A reserved materializer surface (FDR 001 §5).
-    Reserved,
 }
 
 /// A claim as retained in the derived tree.
@@ -172,12 +167,15 @@ pub enum DpathRejection {
 
 /// Derive the real-filesystem mapping of a claimant set (FDR 001 §3).
 ///
+/// Only dpath claims participate here. Checkout-owned surfaces, including a
+/// separate by-ID checkout, are supplied by their checkout class rather than
+/// mixed into this tree.
+///
 /// The result is deterministic and independent of input iteration order; a
 /// malformed claim contributes nothing but is reported in
 /// [`DerivedTree::rejections`].
 pub fn derive_tree(
     claims: impl IntoIterator<Item = RawClaim>,
-    reserved: &[ReservedSurface],
     policy: &DpathNamePolicy,
 ) -> DerivedTree {
     let mut accepted: Vec<DpathClaim> = Vec::new();
@@ -216,8 +214,7 @@ pub fn derive_tree(
         trie.insert(index, &claim.dpath);
     }
 
-    let mut wanted = dir_entries(&trie, &ctx);
-    wanted.extend(reserved_entries(reserved, &ctx));
+    let wanted = dir_entries(&trie, &ctx);
     let root = resolve(wanted, &ctx);
 
     DerivedTree {

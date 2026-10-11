@@ -11,8 +11,7 @@
 //!   UTF-8, no case folding, no normalization, **no reserved namespaces**).
 //! - [`facet::DpathFacet`]: the facet value that declares a claim (FDR 001 §2).
 //! - [`derive::derive_tree`]: the deterministic dpath → real-path mapping implementing
-//!   the collision rules 1–3 (FDR 001 §3), the materialized surfaces of §5
-//!   (`/by-id`, checkout metadata dirs), and conflicts-as-opinions (§4).
+//!   the collision rules 1–3 (FDR 001 §3), and conflicts-as-opinions (§4).
 //! - [`naming::DpathNamePolicy`]: the collision naming knobs (FDR 001 Q1, §3).
 //!
 //! Nothing here touches automerge, the checkout store, or the real filesystem:
@@ -29,7 +28,6 @@ pub mod claim;
 pub mod derive;
 pub mod facet;
 pub mod label;
-pub mod reserved;
 
 mod naming;
 
@@ -40,4 +38,3 @@ pub use derive::{
 pub use facet::{DpathFacet, DpathTarget, DpathTargetIssue};
 pub use label::{DPATH_FACET_TAG, Dpath, DpathError};
 pub use naming::DpathNamePolicy;
-pub use reserved::{BY_ID_SURFACE_NAME, ReservedKind, ReservedSurface};

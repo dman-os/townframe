@@ -1,1 +1,0 @@
-DELETE FROM pauperfuse_observed_entry;

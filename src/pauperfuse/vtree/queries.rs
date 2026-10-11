@@ -25,41 +25,7 @@ pub const EXPLAIN_PAGE_START: &str = include_str!("../sql/queries/vtree/explain_
 pub const PAGE_AFTER: &str = include_str!("../sql/queries/vtree/page_after.sql");
 #[cfg(test)]
 pub const EXPLAIN_PAGE_AFTER: &str = include_str!("../sql/queries/vtree/explain_page_after.sql");
+#[cfg(test)]
 pub const SET_FORMAT: &str = include_str!("../sql/queries/vtree/set_format.sql");
 #[cfg(test)]
 pub const EXPLAIN_SET_FORMAT: &str = include_str!("../sql/queries/vtree/explain_set_format.sql");
-
-pub const CONVERSION_CREATE: &str = include_str!("../sql/queries/vtree/conversion_create.sql");
-#[cfg(test)]
-pub const EXPLAIN_CONVERSION_CREATE: &str =
-    include_str!("../sql/queries/vtree/explain_conversion_create.sql");
-
-pub const CONVERSION_START: &str = include_str!("../sql/queries/vtree/conversion_start.sql");
-#[cfg(test)]
-pub const EXPLAIN_CONVERSION_START: &str =
-    include_str!("../sql/queries/vtree/explain_conversion_start.sql");
-
-pub const CONVERSION_AFTER: &str = include_str!("../sql/queries/vtree/conversion_after.sql");
-#[cfg(test)]
-pub const EXPLAIN_CONVERSION_AFTER: &str =
-    include_str!("../sql/queries/vtree/explain_conversion_after.sql");
-
-pub const CONVERSION_INSERT: &str = include_str!("../sql/queries/vtree/conversion_insert.sql");
-#[cfg(test)]
-pub const EXPLAIN_CONVERSION_INSERT: &str =
-    include_str!("../sql/queries/vtree/explain_conversion_insert.sql");
-
-pub const CONVERSION_CLEAR: &str = include_str!("../sql/queries/vtree/conversion_clear.sql");
-#[cfg(test)]
-pub const EXPLAIN_CONVERSION_CLEAR: &str =
-    include_str!("../sql/queries/vtree/explain_conversion_clear.sql");
-
-pub const CONVERSION_INSTALL: &str = include_str!("../sql/queries/vtree/conversion_install.sql");
-#[cfg(test)]
-pub const EXPLAIN_CONVERSION_INSTALL: &str =
-    include_str!("../sql/queries/vtree/explain_conversion_install.sql");
-
-pub const CONVERSION_DROP: &str = include_str!("../sql/queries/vtree/conversion_drop.sql");
-#[cfg(test)]
-pub const EXPLAIN_CONVERSION_DROP: &str =
-    include_str!("../sql/queries/vtree/explain_conversion_drop.sql");

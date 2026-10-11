@@ -23,13 +23,13 @@ A fresh checkout allocates names from the whole currently known claim/output set
 
 ### By-ID checkouts
 
-A `/by-id` checkout is a separate checkout class, not an extra namespace mixed into a dpath checkout's directory. Users wanting both create separate, possibly sibling, checkout directories. Its identity-oriented representation is particularly useful for agents and virtual filesystem consumers.
+A `/by-id` checkout is a separate checkout class, not an extra namespace mixed into a dpath checkout's directory. Users wanting both create separate, possibly sibling, checkout directories. Its identity-oriented representation is particularly useful for agents and virtual filesystem consumers. The ordinary dpath derivation handles dpath claims only; it does not synthesize `/by-id` entries or accept a by-ID surface as a reserved dpath input.
 
 Creation and ingestion semantics for by-ID checkouts are deferred to a separate design. This ADR does not infer document deletion from an agent removing a generated identity path, invent a creation inbox, or claim ordinary dpath-removal rules apply there. The Daybook backend's checkout-class policy determines available operations.
 
 ### Create, adopt, import, detach
 
-- **Create:** `db checkout` binds a new empty destination to a selected node/content set, initializes checkout state, establishes checkout branches for documents before their first projection, and materializes through the bridge. A conflicting nonempty directory is not silently taken over.
+- **Create:** `db dtree` binds a new empty destination to a selected node/content set, initializes checkout state, establishes checkout branches for documents before their first projection, and materializes through the bridge. A conflicting nonempty directory is not silently taken over.
 - **Adopt:** attaches an existing directory without moving files, creating documents, publishing, or starting watch. It records local candidates and proposed import destinations. Until explicit ingestion/import, candidate paths are not dpath facets of nonexistent documents.
 - **Ingest new files:** creates document identities through the selected lenses and records durable bindings. Default import granularity is one file per document unless a selected compound interpretation or explicit user choice establishes a multi-file document. Equal bytes can permit blob reuse but do not merge document IDs.
 - **One-shot import:** need not create or require a checkout. Repeating a drag-and-drop import may intentionally create a second document. Checkout-tracked import uses its own correspondence and recovery state; one-shot import is not automatically an idempotent ordered checkout walk.

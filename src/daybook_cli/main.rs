@@ -135,7 +135,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         StaticCommands::Server => {
             return cmds::server::run().await;
         }
-        StaticCommands::Checkout { command } => {
+        StaticCommands::Dtree { command } => {
             return cmds::checkout::run(command).await;
         }
         _ => {}
@@ -157,7 +157,7 @@ async fn static_cli(cli: Cli) -> Res<ExitCode> {
         | StaticCommands::Clone { .. }
         | StaticCommands::Completions { .. }
         | StaticCommands::Server
-        | StaticCommands::Checkout { .. } => unreachable!(),
+        | StaticCommands::Dtree { .. } => unreachable!(),
         StaticCommands::Dump => cmds::dump::run().await,
         StaticCommands::Ls => cmds::ls::run().await,
         StaticCommands::Cat { id, branch } => cmds::cat::run(id, branch).await,
@@ -240,7 +240,7 @@ async fn dynamic_cli(static_res: StaticCliResult) -> Res<ExitCode> {
         | Ok(StaticCommands::Devices { .. })
         | Ok(StaticCommands::Plugs { .. })
         | Ok(StaticCommands::Sync { .. })
-        | Ok(StaticCommands::Checkout { .. })
+        | Ok(StaticCommands::Dtree { .. })
         | Ok(StaticCommands::Server) => {
             unreachable!("static_cli will prevent these");
         }
@@ -281,10 +281,10 @@ enum StaticCommands {
         /// Destination directory path (must be empty or non-existent)
         destination: String,
     },
-    /// Project a text document into a checkout or inspect an existing checkout
-    Checkout {
+    /// Manage a durable filesystem dtree
+    Dtree {
         #[clap(subcommand)]
-        command: cmds::checkout::CheckoutCommands,
+        command: cmds::checkout::DtreeCommands,
     },
     /// Dump full automerge contents
     Dump,
@@ -373,6 +373,29 @@ mod tests {
     use daybook_core::sync::IrohSyncRepo;
     use std::collections::HashSet;
     use std::sync::Arc;
+
+    #[test]
+    fn dtree_cli_namespace_has_no_checkout_alias() {
+        let cli = Cli::command();
+        let dtree = cli
+            .get_subcommands()
+            .find(|command| command.get_name() == "dtree")
+            .expect("dtree command is present");
+        let subcommands = dtree
+            .get_subcommands()
+            .map(|command| command.get_name())
+            .collect::<Vec<_>>();
+        assert_eq!(subcommands, ["create", "ingest", "status", "publish"]);
+
+        let parsed = Cli::try_parse_from(["daybook", "dtree", "status"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            StaticCommands::Dtree {
+                command: cmds::checkout::DtreeCommands::Status { directory: None }
+            }
+        ));
+        assert!(Cli::try_parse_from(["daybook", "checkout", "status"]).is_err());
+    }
 
     struct CliSyncNode {
         ctx: Arc<RepoCtx>,

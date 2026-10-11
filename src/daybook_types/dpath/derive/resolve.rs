@@ -9,10 +9,6 @@ use super::{Ctx, compare_claims};
 
 use crate::dpath::naming::{claimant_identity, d_suffix_count, identity_digest};
 
-use crate::dpath::reserved::{ReservedKind, ReservedSurface};
-
-use crate::doc::DocId;
-
 use super::{DerivedClaim, DerivedDirKind, DerivedEntry};
 
 //--------------------------------------------------------------------------------------
@@ -21,8 +17,7 @@ use super::{DerivedClaim, DerivedDirKind, DerivedEntry};
 
 // Priority ranks: rule-generated entries claim names before literal ones, so a
 // `.d` spill directory is awarded `/x.d` and a literal claimant of `/x.d` is
-// demoted (FDR 001 §3 Rule 3, §5).
-const RANK_RESERVED: u8 = 0;
+// demoted (FDR 001 §3 Rule 3).
 const RANK_SPILL: u8 = 1;
 const RANK_IMPLICIT: u8 = 2;
 const RANK_COLLISION: u8 = 3;
@@ -48,9 +43,6 @@ enum WantedKind {
     Dir {
         kind: DerivedDirKind,
         children: Vec<Wanted>,
-    },
-    ById {
-        doc_id: DocId,
     },
 }
 
@@ -81,7 +73,6 @@ impl Wanted {
         slot_holder_of: Option<String>,
     ) -> Self {
         let rank = match kind {
-            DerivedDirKind::Reserved => RANK_RESERVED,
             DerivedDirKind::Spill => RANK_SPILL,
             DerivedDirKind::Implicit => RANK_IMPLICIT,
             DerivedDirKind::Collision => RANK_COLLISION,
@@ -240,50 +231,6 @@ pub(super) fn dir_entries(node: &TrieNode, ctx: &Ctx) -> Vec<Wanted> {
     out
 }
 
-/// The wanted entries of the reserved surfaces.
-pub(super) fn reserved_entries(reserved: &[ReservedSurface], ctx: &Ctx) -> Vec<Wanted> {
-    reserved
-        .iter()
-        .map(|surface| {
-            let children = match &surface.kind {
-                ReservedKind::ById { doc_ids } => {
-                    let mut doc_ids = doc_ids.clone();
-                    doc_ids.sort();
-                    doc_ids.dedup();
-                    doc_ids
-                        .into_iter()
-                        .map(|doc_id| Wanted {
-                            wanted: doc_id.clone(),
-                            rank: RANK_LEAF,
-                            key: EntryKey {
-                                d_suffixes: 0,
-                                assigned_at: None,
-                                doc_id: doc_id.clone(),
-                                dpath: String::new(),
-                            },
-                            slot_holder_of: None,
-                            kind: WantedKind::ById { doc_id },
-                        })
-                        .collect()
-                }
-                ReservedKind::MetadataDir => Vec::new(),
-            };
-            Wanted::dir(
-                surface.name.clone(),
-                DerivedDirKind::Reserved,
-                children,
-                EntryKey {
-                    d_suffixes: d_suffix_count(&surface.name, ctx.policy.spill_suffix),
-                    assigned_at: None,
-                    doc_id: String::new(),
-                    dpath: String::new(),
-                },
-                None,
-            )
-        })
-        .collect()
-}
-
 /// Assign real names to wanted entries (Rules 2 and 3).
 ///
 /// Two rules shape the assignment:
@@ -291,7 +238,7 @@ pub(super) fn reserved_entries(reserved: &[ReservedSurface], ctx: &Ctx) -> Vec<W
 /// 1. **The spill slot is reserved.** For every entry wanting a name `X`, the
 ///    name `X.d` belongs to that entry's divergent side (Rule 2) — so a literal
 ///    claimant of `X.d` is demoted to a deeper suffix, while `X`'s own spill
-///    directory may occupy `X.d` (FDR 001 §3 case 4; §5 `/by-id.d/…`).
+///    directory may occupy `X.d` (FDR 001 §3 case 4).
 /// 2. **Contested names get deeper suffixes**, by repeatedly appending `.d`,
 ///    until every entry has a unique real path; the claimant whose *claimed*
 ///    name carries the most `.d` suffixes sorts last and loses its name first
@@ -367,7 +314,6 @@ fn build_entry(name: String, kind: WantedKind, ctx: &Ctx) -> DerivedEntry {
             name,
             claim: DerivedClaim::from(&ctx.claims[claim]),
         },
-        WantedKind::ById { doc_id } => DerivedEntry::ById { name, doc_id },
         WantedKind::Dir { kind, children } => DerivedEntry::Dir {
             name,
             kind,

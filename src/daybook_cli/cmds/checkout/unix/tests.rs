@@ -2046,7 +2046,7 @@ fn run_cli(args: &[&str]) -> Res<std::process::Output> {
 }
 
 #[test]
-fn checkout_cli_grammar_drives_the_real_binary_grammar_surface() -> Res<()> {
+fn dtree_cli_grammar_drives_the_real_binary_grammar_surface() -> Res<()> {
     block_on_big_stack(async {
         // No repo is opened: DAYB_REPO_PATH points at an absolute non-repo dir,
         // so every invocation takes the repo-resolution/refusal path. The checkout
@@ -2056,7 +2056,7 @@ fn checkout_cli_grammar_drives_the_real_binary_grammar_surface() -> Res<()> {
         let checkout_dir = "/tmp/daybook-cli-grammar-no-repo/co";
 
         // Grammar: the ratified ingest surface through the real binary.
-        let output = run_cli(&["checkout", "--help"])?;
+        let output = run_cli(&["dtree", "--help"])?;
         assert!(
             output.status.success(),
             "{:?}\n{}",
@@ -2065,13 +2065,10 @@ fn checkout_cli_grammar_drives_the_real_binary_grammar_surface() -> Res<()> {
         );
         let help = String::from_utf8_lossy(&output.stdout);
         for verb in ["create", "ingest", "status", "publish"] {
-            assert!(
-                help.contains(verb),
-                "checkout --help must list {verb}\n{help}"
-            );
+            assert!(help.contains(verb), "dtree --help must list {verb}\n{help}");
         }
 
-        let output = run_cli(&["checkout", "ingest", "--help"])?;
+        let output = run_cli(&["dtree", "ingest", "--help"])?;
         assert!(
             output.status.success(),
             "{:?}\n{}",
@@ -2096,7 +2093,7 @@ fn checkout_cli_grammar_drives_the_real_binary_grammar_surface() -> Res<()> {
         // verbs fail in discovery before any repo is opened. Publish joins the
         // grammatical surface here: its parsing/discovery refusal is
         // assertable without a repo (T12).
-        let output = run_cli(&["checkout", "publish", checkout_dir])?;
+        let output = run_cli(&["dtree", "publish", checkout_dir])?;
         assert!(!output.status.success(), "publish outside a repo must fail");
         let report = format!(
             "{}{}",
@@ -2104,7 +2101,7 @@ fn checkout_cli_grammar_drives_the_real_binary_grammar_surface() -> Res<()> {
             String::from_utf8_lossy(&output.stdout)
         );
         assert!(report.contains("repo not initialized"), "{report}");
-        let output = run_cli(&["checkout", "status", checkout_dir])?;
+        let output = run_cli(&["dtree", "status", checkout_dir])?;
         assert!(
             !output.status.success(),
             "status outside a checkout must fail"
@@ -2118,7 +2115,7 @@ fn checkout_cli_grammar_drives_the_real_binary_grammar_surface() -> Res<()> {
 
         // Ingest resolves the repo (lazy singletons for the plug check) before
         // discovery, so its refusal names the missing repo instead.
-        let output = run_cli(&["checkout", "ingest", checkout_dir])?;
+        let output = run_cli(&["dtree", "ingest", checkout_dir])?;
         assert!(!output.status.success(), "ingest outside a repo must fail");
         let report = format!(
             "{}{}",

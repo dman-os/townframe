@@ -76,29 +76,6 @@ fn encode_name(bytes: &[u8]) -> Result<String, NativePathError> {
     Ok(utils_rs::byte_key::encode(bytes))
 }
 
-// One-time legacy storage conversion only. Generic tree readers never decode native bytes.
-#[cfg(feature = "sqlite")]
-pub(crate) fn legacy_path(encoded: &[u8]) -> Result<RelPath, NativePathError> {
-    if encoded.is_empty() {
-        return Ok(RelPath::root());
-    }
-    if encoded.last() != Some(&0) {
-        return Err(NativePathError::Invalid(
-            "unterminated legacy component".into(),
-        ));
-    }
-    let keys = encoded[..encoded.len() - 1]
-        .split(|byte| *byte == 0)
-        .map(encode_name)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(RelPath::try_new(keys)?)
-}
-
-#[cfg(feature = "sqlite")]
-pub(crate) fn legacy_target(bytes: &[u8]) -> Result<String, NativePathError> {
-    TokioFs::from_native_target(OsStr::from_bytes(bytes))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

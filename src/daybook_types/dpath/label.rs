@@ -18,9 +18,8 @@ pub const DPATH_FACET_TAG: &str = "org.example.daybook.dpath";
 /// Canonical form: exactly one leading `/`, no trailing `/`, no empty
 /// segments, no `.`/`..` segments. Comparison is byte-exact (`Ord` is on the
 /// raw bytes); labels are otherwise *unrestricted* — there are no reserved
-/// names in daybook, and `/by-id/…` is a perfectly legal dpath. The reserved
-/// surfaces are handled by collision resolution at materialization time
-/// (FDR 001 §5), not by rewriting labels here.
+/// names in daybook, and `/by-id/…` is a perfectly legal dpath. Checkout-owned
+/// surfaces are a separate materialization concern, not label rewriting here.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 /// camino-backed validated label (`Utf8PathBuf`): interoperates with `UserPathBuf`
@@ -281,9 +280,8 @@ mod tests {
     }
 
     #[test]
-    fn no_reserved_namespaces_in_daybook() {
-        // FDR 001 §5: reserved surfaces win their name through collisions, never
-        // by forbidding labels.
+    fn checkout_surface_names_remain_legal_dpaths() {
+        // Checkout-owned surface names do not reserve dpath labels.
         for input in ["/by-id/x", "/by-id", "/.dtree", "/.dnode/state"] {
             assert!(Dpath::parse(input).is_ok(), "should accept {input}");
         }

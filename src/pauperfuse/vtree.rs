@@ -13,7 +13,6 @@ use crate::backends::RelPath;
 use crate::backends::{BackendId, BackendTree, Description, OutputVersion, Source, TreeEntry};
 
 mod encoding;
-mod migrate;
 mod queries;
 #[cfg(test)]
 mod tests;
@@ -97,7 +96,12 @@ impl VtreeStore {
             .connect_with(options)
             .await?;
         MIGRATOR.run(&pool).await?;
-        migrate::ensure_format(&pool).await?;
+        let format = sqlx::query_scalar::<_, String>(queries::FORMAT)
+            .fetch_one(&pool)
+            .await?;
+        if format != encoding::FORMAT {
+            return Err(StoreError::Format(format));
+        }
         Ok(Self { pool })
     }
 

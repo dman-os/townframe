@@ -4,7 +4,7 @@ CREATE TABLE pauperfuse_tree_format (
 ) STRICT;
 
 INSERT INTO pauperfuse_tree_format (singleton, encoding)
-VALUES (1, 'unix-bytes-v1');
+VALUES (1, 'utf8-components-v1');
 
 CREATE TABLE pauperfuse_backend (
     backend_id INTEGER PRIMARY KEY

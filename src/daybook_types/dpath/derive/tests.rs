@@ -14,7 +14,6 @@ fn raw(doc_id: &str, dpath: &str) -> RawClaim {
 fn derive(spec: &[(&str, &str)]) -> DerivedTree {
     derive_tree(
         spec.iter().map(|(doc_id, dpath)| raw(doc_id, dpath)),
-        &[],
         &DpathNamePolicy::default(),
     )
 }
@@ -174,50 +173,13 @@ fn case8_collision_directory_nests_claimant_subtrees() {
 }
 
 #[test]
-fn case9_reserved_surface_wins_its_literal_name() {
-    let tree = derive_tree(
-        [raw("A", "/by-id/x")],
-        &[ReservedSurface::by_id(["dpathless-doc".to_string()])],
-        &DpathNamePolicy::default(),
-    );
-    assert_eq!(
-        tree.paths(),
-        ["/by-id/", "/by-id/dpathless-doc", "/by-id.d/", "/by-id.d/x",]
-    );
+fn by_id_is_an_ordinary_dpath_not_a_derived_surface() {
+    let tree = derive(&[("A", "/by-id/x")]);
+    assert_eq!(tree.paths(), ["/by-id/", "/by-id/x"]);
     assert!(matches!(
-        tree.lookup("/by-id"),
-        Some(DerivedEntry::Dir {
-            kind: DerivedDirKind::Reserved,
-            ..
-        })
+        tree.lookup("/by-id/x"),
+        Some(DerivedEntry::Claim { claim, .. }) if claim.doc_id == "A"
     ));
-}
-
-#[test]
-fn by_id_surface_holds_dpathless_documents_only() {
-    let tree = derive_tree(
-        [raw("with-dpath", "/notes/a.md")],
-        &[
-            ReservedSurface::by_id([
-                "z-doc".to_string(),
-                "a-doc".to_string(),
-                "a-doc".to_string(),
-            ]),
-            ReservedSurface::metadata_dir(".dtree"),
-        ],
-        &DpathNamePolicy::default(),
-    );
-    assert_eq!(
-        tree.paths(),
-        [
-            "/.dtree/",
-            "/by-id/",
-            "/by-id/a-doc",
-            "/by-id/z-doc",
-            "/notes/",
-            "/notes/a.md",
-        ]
-    );
 }
 
 #[test]
@@ -276,7 +238,7 @@ fn claims_are_ordered_by_assignment_then_doc_id() {
     early.assigned_at = Timestamp::from_second(1_600_000_000).ok();
     let unknown = raw("m-doc", "/notes/c.md");
 
-    let tree = derive_tree(vec![late, unknown, early], &[], &DpathNamePolicy::default());
+    let tree = derive_tree(vec![late, unknown, early], &DpathNamePolicy::default());
     let order: Vec<&str> = tree
         .claims()
         .iter()
@@ -354,7 +316,7 @@ fn duplicate_claims_are_reported() {
 
 #[test]
 fn empty_claim_set_derives_an_empty_tree() {
-    let tree = derive_tree(Vec::new(), &[], &DpathNamePolicy::default());
+    let tree = derive_tree(Vec::new(), &DpathNamePolicy::default());
     assert!(tree.root().is_empty());
     assert!(tree.paths().is_empty());
     assert!(tree.claims().is_empty());
@@ -368,7 +330,7 @@ fn degenerate_name_policy_still_terminates() {
         spill_suffix: "",
         ..DpathNamePolicy::default()
     };
-    let tree = derive_tree([raw("A", "/a"), raw("D", "/a.d")], &[], &policy);
+    let tree = derive_tree([raw("A", "/a"), raw("D", "/a.d")], &policy);
     let paths = tree.paths();
     assert_eq!(paths.len(), 2);
     assert_ne!(paths[0], paths[1]);
