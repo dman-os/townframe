@@ -4,8 +4,8 @@
 //! themselves against competitors, enumerate competitor ids, or decide who
 //! falls back.
 
-use crate::identity::LensIdentity;
-use crate::proposal::{DocumentAccess, LensCategory, LensInput, Proposal, Subject};
+use super::identity::LensIdentity;
+use super::proposal::{DocumentAccess, LensCategory, LensInput, Proposal, Subject};
 
 /// Why a proposal won its subject from the selector's viewpoint (selection is
 /// stateless recompute; the reason is surfaced with the alternatives).

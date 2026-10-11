@@ -1,6 +1,6 @@
 //! Lens #1: the raw-text Note lens — the previously hardcoded
 //! `Projection::select`/`Daybook::open` behavior expressed through the
-//! `pauperfuse_lens` stage contract (ADR 012 §10). A whole-document claim
+//! `crate::lens_contract` stage contract (ADR 012 §10). A whole-document claim
 //! whose Body resolves to one unpinned, same-document, `text/plain` Note is
 //! proposed at that Body-selected facet; every other recognizable state is a
 //! recognition declination with a per-claim visible reason, never a hard
@@ -12,21 +12,21 @@
 //! ingest coordinator keeps consuming it unchanged.
 
 use crate::interlude::*;
-use crate::{prepare_note_ingest, validate_note};
 #[cfg(test)]
-use daybook_types::doc::Note;
-use daybook_types::doc::{Blob, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
-use daybook_types::dpath::DpathFacet;
-use daybook_types::url::{FacetRef, parse_facet_ref};
-#[cfg(test)]
-use pauperfuse_lens::TargetStubState;
-use pauperfuse_lens::{
+use crate::lens_contract::TargetStubState;
+use crate::lens_contract::{
     ClaimScope, Constraint, DepAtHeads, DifferenceView, ExecCompat, FacetAccessError, FacetOp,
     FacetRole, IngestWork, LensCategory, LensDecision, LensFailure, LensIdentity, LensRegistry,
     LensVersion, OutputKind, PlanOutput, PreparedDocOps, PreparedPlan, ProjectWork, Recipe,
     RecognitionContext, Signal, SignalSet, Specificity, Subject, TargetStateClass,
     UninterpretedReason,
 };
+use crate::{prepare_note_ingest, validate_note};
+#[cfg(test)]
+use daybook_types::doc::Note;
+use daybook_types::doc::{Blob, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
+use daybook_types::dpath::DpathFacet;
+use daybook_types::url::{FacetRef, parse_facet_ref};
 
 /// The built-in lens set of the Daybook producer surface: v1 is the raw-text
 /// Note lens only. The blob lens (lens #2) registers here once its design
@@ -236,21 +236,21 @@ fn whole_document_proposal(
         Err(error) => return decline(UninterpretedReason::OutputPath(error.to_string())),
     };
 
-    LensDecision::Proposed(pauperfuse_lens::Proposal {
+    LensDecision::Proposed(crate::lens_contract::Proposal {
         lens: identity,
         subject: ctx.subject.clone(),
         inputs: vec![
             // The Body-selected facet is this lens's owned write
             // destination (its ingest edit target) and its affected
             // production dependency.
-            pauperfuse_lens::LensInput::Facet {
+            crate::lens_contract::LensInput::Facet {
                 document: ctx.document.clone(),
                 facet: reference.facet_key.clone(),
                 role: FacetRole::Owned,
             },
             // The Body is read-only context; it shapes the interpretation
             // and is recorded as recipe context (ADR 012 §3/§8).
-            pauperfuse_lens::LensInput::Facet {
+            crate::lens_contract::LensInput::Facet {
                 document: ctx.document.clone(),
                 facet: body.body_key.clone(),
                 role: FacetRole::Context,
@@ -258,7 +258,7 @@ fn whole_document_proposal(
         ],
         category: LensCategory::BasicFallback,
         specificity: Specificity(0),
-        outputs: vec![pauperfuse_lens::OutputSlot {
+        outputs: vec![crate::lens_contract::OutputSlot {
             slot: "body".into(),
             kind: OutputKind::File,
             path,
@@ -287,7 +287,7 @@ fn body_target_reason(target: &str, value: Option<&serde_json::Value>) -> Uninte
     }
 }
 
-impl pauperfuse_lens::LensInterest for RawTextNoteLens {
+impl crate::lens_contract::LensInterest for RawTextNoteLens {
     fn identity(&self) -> &LensIdentity {
         &self.identity
     }
@@ -302,7 +302,7 @@ impl pauperfuse_lens::LensInterest for RawTextNoteLens {
     }
 }
 
-impl pauperfuse_lens::LensProposal for RawTextNoteLens {
+impl crate::lens_contract::LensProposal for RawTextNoteLens {
     fn propose(&self, ctx: &RecognitionContext<'_>) -> LensDecision {
         let body = match propose_whole_document(ctx) {
             Ok(resolved) => resolved,
@@ -332,7 +332,7 @@ impl pauperfuse_lens::LensProposal for RawTextNoteLens {
 }
 
 #[async_trait]
-impl pauperfuse_lens::LensPrepare for RawTextNoteLens {
+impl crate::lens_contract::LensPrepare for RawTextNoteLens {
     async fn prepare_ingest(&self, work: &IngestWork<'_>) -> Result<PreparedDocOps, LensFailure> {
         if work.recipe.lens != self.identity {
             return Err(LensFailure::Recipe(format!(
@@ -385,11 +385,11 @@ impl pauperfuse_lens::LensPrepare for RawTextNoteLens {
 }
 
 #[async_trait]
-impl pauperfuse_lens::LensProduce for RawTextNoteLens {
+impl crate::lens_contract::LensProduce for RawTextNoteLens {
     async fn produce(
         &self,
         recipe: &Recipe,
-        access: &dyn pauperfuse_lens::FacetAccess,
+        access: &dyn crate::lens_contract::FacetAccess,
     ) -> Result<Vec<u8>, LensFailure> {
         if recipe.lens != self.identity {
             return Err(LensFailure::Recipe(format!(
@@ -418,7 +418,7 @@ impl pauperfuse_lens::LensProduce for RawTextNoteLens {
     }
 }
 
-impl pauperfuse_lens::LensDiff for RawTextNoteLens {
+impl crate::lens_contract::LensDiff for RawTextNoteLens {
     fn describe_difference(
         &self,
         before: Option<&serde_json::Value>,
@@ -507,7 +507,7 @@ impl RawBlobLens {
     }
 }
 
-impl pauperfuse_lens::LensInterest for RawBlobLens {
+impl crate::lens_contract::LensInterest for RawBlobLens {
     fn identity(&self) -> &LensIdentity {
         &self.identity
     }
@@ -521,7 +521,7 @@ impl pauperfuse_lens::LensInterest for RawBlobLens {
     }
 }
 
-impl pauperfuse_lens::LensProposal for RawBlobLens {
+impl crate::lens_contract::LensProposal for RawBlobLens {
     fn propose(&self, ctx: &RecognitionContext<'_>) -> LensDecision {
         let body = match propose_whole_document(ctx) {
             Ok(resolved) => resolved,
@@ -551,7 +551,7 @@ impl pauperfuse_lens::LensProposal for RawBlobLens {
 }
 
 #[async_trait]
-impl pauperfuse_lens::LensPrepare for RawBlobLens {
+impl crate::lens_contract::LensPrepare for RawBlobLens {
     async fn prepare_ingest(&self, work: &IngestWork<'_>) -> Result<PreparedDocOps, LensFailure> {
         if work.recipe.lens != self.identity {
             return Err(LensFailure::Recipe(format!(
@@ -632,11 +632,11 @@ impl pauperfuse_lens::LensPrepare for RawBlobLens {
 }
 
 #[async_trait]
-impl pauperfuse_lens::LensProduce for RawBlobLens {
+impl crate::lens_contract::LensProduce for RawBlobLens {
     async fn produce(
         &self,
         recipe: &Recipe,
-        access: &dyn pauperfuse_lens::FacetAccess,
+        access: &dyn crate::lens_contract::FacetAccess,
     ) -> Result<Vec<u8>, LensFailure> {
         if recipe.lens != self.identity {
             return Err(LensFailure::Recipe(format!(
@@ -673,7 +673,7 @@ impl pauperfuse_lens::LensProduce for RawBlobLens {
     }
 }
 
-impl pauperfuse_lens::LensDiff for RawBlobLens {
+impl crate::lens_contract::LensDiff for RawBlobLens {
     fn describe_difference(
         &self,
         before: Option<&serde_json::Value>,
@@ -754,7 +754,7 @@ impl<'a> BranchFacetAccess<'a> {
 /// would be an availability failure, never a silent other-document read
 /// (ADR 012 §7's cross-document surfaces are later lanes).
 #[async_trait]
-impl pauperfuse_lens::FacetAccess for BranchFacetAccess<'_> {
+impl crate::lens_contract::FacetAccess for BranchFacetAccess<'_> {
     async fn facet_at_heads(
         &self,
         dependency: &DepAtHeads,
@@ -794,10 +794,10 @@ impl pauperfuse_lens::FacetAccess for BranchFacetAccess<'_> {
 mod tests {
     use super::*;
     use crate::MAX_RAW_NOTE_BYTES;
+    use crate::lens_contract::{FacetAccess, FacetRole, LensDiff, LensPrepare, LensProduce};
     use daybook_types::doc::Blob;
     use daybook_types::dpath::Dpath;
     use daybook_types::url::{FACET_SELF_DOC_ID, build_facet_ref};
-    use pauperfuse_lens::{FacetAccess, FacetRole, LensDiff, LensPrepare, LensProduce};
     use std::collections::HashMap;
 
     #[tokio::test]
@@ -1243,7 +1243,7 @@ mod tests {
     }
 
     fn propose<'a>(
-        lens: &'a impl pauperfuse_lens::LensProposal,
+        lens: &'a impl crate::lens_contract::LensProposal,
         facets: &'a HashMap<FacetKey, serde_json::Value>,
         subject: &'a Subject,
     ) -> LensDecision {
@@ -1255,18 +1255,18 @@ mod tests {
         })
     }
 
-    fn proposal_for(document: &DocId, note_key: &FacetKey) -> pauperfuse_lens::Proposal {
-        pauperfuse_lens::Proposal {
+    fn proposal_for(document: &DocId, note_key: &FacetKey) -> crate::lens_contract::Proposal {
+        crate::lens_contract::Proposal {
             lens: RawTextNoteLens::new().identity,
             subject: Subject::Dpath(Dpath::parse("/notes/edit.md").unwrap()),
-            inputs: vec![pauperfuse_lens::LensInput::Facet {
+            inputs: vec![crate::lens_contract::LensInput::Facet {
                 document: document.clone(),
                 facet: note_key.clone(),
                 role: FacetRole::Owned,
             }],
             category: LensCategory::BasicFallback,
             specificity: Specificity(0),
-            outputs: vec![pauperfuse_lens::OutputSlot {
+            outputs: vec![crate::lens_contract::OutputSlot {
                 slot: "body".into(),
                 kind: OutputKind::File,
                 path: "notes/edit.md".into(),

@@ -6,7 +6,7 @@
 use daybook_types::doc::{DocId, FacetKey};
 use daybook_types::dpath::Dpath;
 
-use crate::identity::LensIdentity;
+use super::identity::LensIdentity;
 
 /// Selection granularity for this contract's subjects: one dpath claim of one
 /// document (v1). Workspace/multi-file proposals own several subjects later;

@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::identity::LensIdentity;
-use crate::recipe::Recipe;
+use super::identity::LensIdentity;
+use super::recipe::Recipe;
 
 /// Acknowledged byte evidence of an output's rendered state (the
 /// checkout's existing length/digest currency: length and a BLAKE3 digest,

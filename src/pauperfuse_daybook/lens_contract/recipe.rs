@@ -6,8 +6,8 @@
 use daybook_types::doc::{DocId, FacetKey};
 use serde::{Deserialize, Serialize};
 
-use crate::identity::LensIdentity;
-use crate::proposal::{FacetRole, LensInput, Proposal};
+use super::identity::LensIdentity;
+use super::proposal::{FacetRole, LensInput, Proposal};
 
 /// One dependency at recorded heads (ADR 012 §8: "every declared input that
 /// affects that output"). Heads are serialized commit-head spellings, the

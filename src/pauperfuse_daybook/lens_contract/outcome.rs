@@ -6,8 +6,8 @@
 
 use daybook_types::doc::WellKnownFacet;
 
-use crate::proposal::{Proposal, Subject};
-use crate::recipe::Recipe;
+use super::proposal::{Proposal, Subject};
+use super::recipe::Recipe;
 
 /// How a stub/blob target state presents: the interpreter classes can account
 /// for the claim, but the addressed facet is not renderable bytes today (blob

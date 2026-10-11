@@ -14,6 +14,8 @@
   - [x] Reconcile FDR 001's mixed-surface examples with ADR 011/012.
   - [x] Improve by-ID documentation and record the remaining scope decisions.
   - [x] Add focused tests for the class boundary.
+- [x] Add real Drawer-to-Daybook integration coverage for lens selection, provenance, exact-version reads, and missing documents.
+- [x] Fold `pauperfuse_lens` into `pauperfuse_daybook`; remove the separate workspace crate and preserve `pauperfuse` as the low-level crate.
 - [ ] Recheck the next PR CI run; investigate blob sync only if it reproduces.
 - [ ] Fix the missing `nextest-run.zip` artifact path in CI.
 - [ ] Discuss the proposed `pauperfuse_core` abstraction.

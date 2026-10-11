@@ -6,11 +6,11 @@
 use daybook_types::doc::{DocId, FacetKey, FacetRaw};
 use std::collections::HashMap;
 
-use crate::identity::LensIdentity;
-use crate::outcome::UninterpretedReason;
-use crate::proposal::{OutputKind, Proposal, Subject};
-use crate::recipe::{DepAtHeads, Recipe};
-use crate::signals::{Constraint, Signal};
+use super::identity::LensIdentity;
+use super::outcome::UninterpretedReason;
+use super::proposal::{OutputKind, Proposal, Subject};
+use super::recipe::{DepAtHeads, Recipe};
+use super::signals::{Constraint, Signal};
 
 /// Stage-boundary failure model (ADR 012 §5/§6, design §7): the execution
 /// outcomes are distinct and none triggers automatic fallback. Recognition

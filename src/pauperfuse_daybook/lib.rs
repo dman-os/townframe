@@ -1,5 +1,5 @@
 //! The first Daybook producer lens stack: whole-document dpath claims whose
-//! Body selects a text/plain Note, routed through the `pauperfuse_lens`
+//! Body selects a text/plain Note, routed through the `crate::lens_contract`
 //! stage contract. Recognition declinations are per-claim visible outcomes
 //! (Q5); unsupported *execution* states stay explicit errors.
 
@@ -14,6 +14,7 @@ mod interlude {
     pub use utils_rs::prelude::*;
 }
 pub(crate) mod lens;
+pub mod lens_contract;
 use crate::interlude::*;
 use daybook_core::drawer::DrawerRepo;
 use daybook_types::dpath::Dpath;
@@ -33,18 +34,20 @@ pub enum Error {
     Repository(#[from] eyre::Report),
 }
 
-use pauperfuse_lens::{LensPrepare, LensProduce};
+use crate::lens_contract::{LensPrepare, LensProduce};
 
 pub use lens::lens_registry;
 pub use lens::{RawBlobLens, RawTextNoteLens};
 
-impl From<pauperfuse_lens::LensFailure> for Error {
-    fn from(failure: pauperfuse_lens::LensFailure) -> Self {
+impl From<crate::lens_contract::LensFailure> for Error {
+    fn from(failure: crate::lens_contract::LensFailure) -> Self {
         match failure {
-            pauperfuse_lens::LensFailure::Preparation(detail) => Self::Preparation(detail),
-            pauperfuse_lens::LensFailure::Unavailable(detail) => Self::Unavailable(detail),
-            pauperfuse_lens::LensFailure::Runtime(detail)
-            | pauperfuse_lens::LensFailure::Recipe(detail) => Self::Repository(eyre::eyre!(detail)),
+            crate::lens_contract::LensFailure::Preparation(detail) => Self::Preparation(detail),
+            crate::lens_contract::LensFailure::Unavailable(detail) => Self::Unavailable(detail),
+            crate::lens_contract::LensFailure::Runtime(detail)
+            | crate::lens_contract::LensFailure::Recipe(detail) => {
+                Self::Repository(eyre::eyre!(detail))
+            }
         }
     }
 }
@@ -55,7 +58,7 @@ impl From<pauperfuse_lens::LensFailure> for Error {
 /// `renderHeads`, and `Ready` state's length/digest are exactly the lens
 /// contract's selection provenance for the single output; the marker schema
 /// does not grow this phase). The contract-level types live in
-/// `pauperfuse_lens` — `Recipe`, `SelectionProvenance` — and map onto these
+/// `crate::lens_contract` — `Recipe`, `SelectionProvenance` — and map onto these
 /// fields mechanically.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -74,7 +77,7 @@ pub struct Projection {
 pub struct SelectedClaims {
     pub document: DocId,
     pub heads: ChangeHashSet,
-    pub outcomes: Vec<pauperfuse_lens::ClaimOutcome>,
+    pub outcomes: Vec<crate::lens_contract::ClaimOutcome>,
 }
 
 impl SelectedClaims {
@@ -83,14 +86,14 @@ impl SelectedClaims {
     pub fn projected(
         &self,
     ) -> Vec<(
-        pauperfuse_lens::Subject,
+        crate::lens_contract::Subject,
         Projection,
-        pauperfuse_lens::Recipe,
+        crate::lens_contract::Recipe,
     )> {
         self.outcomes
             .iter()
             .filter_map(|outcome| match outcome {
-                pauperfuse_lens::ClaimOutcome::Projected(projected) => {
+                crate::lens_contract::ClaimOutcome::Projected(projected) => {
                     let subject = &projected.subject;
                     let recipe = &projected.recipe;
                     // A projected recipe has exactly one affected (owned)
@@ -134,7 +137,7 @@ impl Projection {
             .ok_or_else(|| Error::Unavailable(format!("document {document} on main")))?;
         let heads_wire = am_utils_rs::serialize_commit_heads(&heads);
         let registry = lens_registry();
-        let config = pauperfuse_lens::SelectionConfig::default();
+        let config = crate::lens_contract::SelectionConfig::default();
 
         // Deterministic claim order (sorted labels); malformed labels stay
         // enumerated and visible (FDR 001 §4: reported, never silently
@@ -151,20 +154,20 @@ impl Projection {
             let dpath = match Dpath::parse_facet_key(key) {
                 Some(Ok(dpath)) => dpath,
                 Some(Err(error)) => {
-                    outcomes.push(pauperfuse_lens::ClaimOutcome::Uninterpreted(
-                        pauperfuse_lens::Uninterpreted {
+                    outcomes.push(crate::lens_contract::ClaimOutcome::Uninterpreted(
+                        crate::lens_contract::Uninterpreted {
                             subject: None,
-                            reason: pauperfuse_lens::UninterpretedReason::ClaimMalformed(format!(
-                                "{key}: {error}"
-                            )),
+                            reason: crate::lens_contract::UninterpretedReason::ClaimMalformed(
+                                format!("{key}: {error}"),
+                            ),
                         },
                     ));
                     continue;
                 }
                 None => unreachable!("filter kept dpath facets only"),
             };
-            let subject = pauperfuse_lens::Subject::Dpath(dpath.clone());
-            let ctx = pauperfuse_lens::RecognitionContext {
+            let subject = crate::lens_contract::Subject::Dpath(dpath.clone());
+            let ctx = crate::lens_contract::RecognitionContext {
                 subject: &subject,
                 document: &document,
                 facets: &doc.facets,
@@ -173,33 +176,37 @@ impl Projection {
             let mut declined = Vec::new();
             for registered in registry.lenses() {
                 match registered.propose(&ctx) {
-                    pauperfuse_lens::LensDecision::Proposed(proposal) => proposed.push(proposal),
-                    pauperfuse_lens::LensDecision::Declined(reason) => declined.push(reason),
+                    crate::lens_contract::LensDecision::Proposed(proposal) => {
+                        proposed.push(proposal)
+                    }
+                    crate::lens_contract::LensDecision::Declined(reason) => declined.push(reason),
                 }
             }
             if proposed.is_empty() {
                 let reason =
-                    pauperfuse_lens::combine_declinations(&declined).unwrap_or_else(|| {
-                        pauperfuse_lens::UninterpretedReason::NoLens("no lens is installed".into())
+                    crate::lens_contract::combine_declinations(&declined).unwrap_or_else(|| {
+                        crate::lens_contract::UninterpretedReason::NoLens(
+                            "no lens is installed".into(),
+                        )
                     });
-                outcomes.push(pauperfuse_lens::ClaimOutcome::Uninterpreted(
-                    pauperfuse_lens::Uninterpreted {
+                outcomes.push(crate::lens_contract::ClaimOutcome::Uninterpreted(
+                    crate::lens_contract::Uninterpreted {
                         subject: Some(subject),
                         reason,
                     },
                 ));
                 continue;
             }
-            let selection = pauperfuse_lens::select(&proposed, &config)
+            let selection = crate::lens_contract::select(&proposed, &config)
                 .map_err(|error| Error::Selection(error.to_string()))?;
             let subject_selection = selection
                 .winner(&subject)
                 .expect("a subject with proposals has a winner");
-            outcomes.push(pauperfuse_lens::ClaimOutcome::Projected(Box::new(
-                pauperfuse_lens::ProjectedClaim {
+            outcomes.push(crate::lens_contract::ClaimOutcome::Projected(Box::new(
+                crate::lens_contract::ProjectedClaim {
                     subject,
                     proposal: subject_selection.winner.clone(),
-                    recipe: pauperfuse_lens::Recipe::from_proposal(
+                    recipe: crate::lens_contract::Recipe::from_proposal(
                         &subject_selection.winner,
                         heads_wire.clone(),
                     ),
@@ -276,7 +283,7 @@ pub struct Daybook {
     branch: String,
     heads: ChangeHashSet,
     lens: lens::RawTextNoteLens,
-    recipe: pauperfuse_lens::Recipe,
+    recipe: crate::lens_contract::Recipe,
 }
 
 impl Daybook {
@@ -289,14 +296,14 @@ impl Daybook {
     ) -> Self {
         let current = lens::RawTextNoteLens::new();
         let heads_wire = am_utils_rs::serialize_commit_heads(&heads);
-        let affected = pauperfuse_lens::DepAtHeads {
+        let affected = crate::lens_contract::DepAtHeads {
             document: projection.document.clone(),
             facet: projection.facet.clone(),
             heads: heads_wire.clone(),
         };
         // The Body is the claim's read-only context dependency at the same
         // heads (ADR 012 §8: every declared input recorded).
-        let context = pauperfuse_lens::DepAtHeads {
+        let context = crate::lens_contract::DepAtHeads {
             document: projection.document.clone(),
             facet: FacetKey::from(WellKnownFacetTag::Body),
             heads: heads_wire,
@@ -366,7 +373,7 @@ impl Producer for Daybook {
         // identity selector and materializes the ancestor chains.
         let plan = self
             .lens
-            .prepare_project(&pauperfuse_lens::ProjectWork {
+            .prepare_project(&crate::lens_contract::ProjectWork {
                 recipe: &self.recipe,
                 path: &self.projection.path,
             })
@@ -376,7 +383,7 @@ impl Producer for Daybook {
             let path = RelPath::parse(&output.path)
                 .map_err(|error| Error::Unsupported(error.to_string()))?;
             match output.kind {
-                pauperfuse_lens::OutputKind::File => {
+                crate::lens_contract::OutputKind::File => {
                     entries.extend(path.ancestors_inclusive().take(path.len()).map(|path| {
                         TreeEntry {
                             path,
@@ -391,7 +398,7 @@ impl Producer for Daybook {
                         },
                     });
                 }
-                pauperfuse_lens::OutputKind::Directory => {
+                crate::lens_contract::OutputKind::Directory => {
                     entries.push(TreeEntry {
                         path,
                         description: Description::Directory,
@@ -472,3 +479,6 @@ mod ingest_tests {
         assert_eq!(note.content, "");
     }
 }
+
+#[cfg(test)]
+mod e2e;
