@@ -27,6 +27,7 @@ members = [
   "./src/wflow_sdk",
   "./src/wflow_tokio/",
   "./src/xtask",
+  "./src/dayframe_dx/app",
   "./src/dayframe_dx/ui",
   "./src/dayframe_dx/web",
   "./src/dayframe_dx/desktop",

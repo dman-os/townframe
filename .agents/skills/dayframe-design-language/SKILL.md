@@ -18,6 +18,7 @@ Read the repository `AGENTS.md`, then the relevant design-language documents:
 - `docs/design-language/composition.md` — layout and composition rules.
 - `docs/design-language/interaction.md` — state and interaction rules.
 - `src/dayframe_dx/ui/styles/README.md` — stylesheet integration.
+- `docs/adrs/014-dayframe-dx-application-architecture.md` — application crate, feature-module, data-lifecycle, and feature-gate boundaries when UI work crosses presentation into app architecture.
 
 For token or Tailwind work, also inspect:
 

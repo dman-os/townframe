@@ -1,6 +1,8 @@
 # ADR 010: dayframe_dx Architecture — Pieces, Faces, and the Composition Root
 
-**Status:** Accepted.
+**Status:** Superseded by ADR 014, `dayframe_dx Application Architecture`.
+
+This ADR remains as historical context for the pieces/faces/composition-root decision. ADR 014 retains the valid composition-root and node-service principles while replacing its terminology and application/UI structure.
 
 ## Context
 
