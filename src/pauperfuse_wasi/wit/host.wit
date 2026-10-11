@@ -1,0 +1,6 @@
+package townframe:pauperfuse-wasi;
+
+world host {
+  import wasi:filesystem/types@0.2.6;
+  import wasi:filesystem/preopens@0.2.6;
+}

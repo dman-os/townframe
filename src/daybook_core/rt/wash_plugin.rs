@@ -693,6 +693,9 @@ impl drawer::Host for SharedWashCtx {
             Err(crate::drawer::types::DrawerError::BranchAlreadyExists { .. }) => Err(
                 wasmtime_err("unexpected branch already exists on patch_doc"),
             ),
+            Err(crate::drawer::types::DrawerError::HeadConcurrency { .. }) => Err(wasmtime_err(
+                "unexpected heads concurrency refusal on patch_doc",
+            )),
             Err(crate::drawer::types::DrawerError::InvalidKey {
                 inner: root_doc::FacetTagParseError::NotDomainName { _tag: tag },
             }) => Ok(Err(drawer::UpdateDocError::InvalidKey(tag))),

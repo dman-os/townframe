@@ -1139,11 +1139,11 @@ async fn iroh_sync_offline_divergent_branch_merge_converges() -> Res<()> {
     // Merge feature-a into main on Node A, and feature-b into main on Node B.
     node_a
         .drawer
-        .merge_from_branch(&doc_id, &main_branch, &branch_a, Some(&user_path_a))
+        .merge_from_branch(&doc_id, &main_branch, None, &branch_a, Some(&user_path_a))
         .await?;
     reopened_b
         .drawer
-        .merge_from_branch(&doc_id, &main_branch, &branch_b, Some(&user_path_b))
+        .merge_from_branch(&doc_id, &main_branch, None, &branch_b, Some(&user_path_b))
         .await?;
 
     wait_for_sync_convergence(&node_a, &reopened_b, addr_a.id).await?;

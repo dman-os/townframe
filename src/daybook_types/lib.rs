@@ -12,6 +12,7 @@ mod interlude {
 pub use pastey;
 
 pub mod doc;
+pub mod dpath;
 #[cfg(all(test, feature = "wit"))]
 mod test;
 pub mod url;

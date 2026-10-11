@@ -1,0 +1,3 @@
+# These standard interfaces are vendored for the standalone adapter.
+!deps/
+!deps/**

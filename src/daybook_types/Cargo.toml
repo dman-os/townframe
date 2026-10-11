@@ -31,6 +31,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 data-encoding.workspace = true
+bs58.workspace = true
 schemars = { version = "1.2", features = [
     "uuid1",
     "semver1",

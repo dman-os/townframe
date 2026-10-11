@@ -165,7 +165,7 @@ fn test_balance_assertion_star() {
 
 #[test]
 fn test_parse_sample_journal_fixture() {
-    let input = include_str!("fixtures/sample.journal");
+    let input = include_str!("tests/fixtures/sample.journal");
     let txns = parse_journal_ok(input);
 
     assert_eq!(txns.len(), 5);

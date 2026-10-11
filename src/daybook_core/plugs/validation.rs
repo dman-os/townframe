@@ -625,7 +625,7 @@ fn validate_facet_reference_manifests(
 ) -> Res<()> {
     let schema_json = serde_json::to_value(value_schema)?;
     for reference_manifest in references {
-        let reference_path = reference_manifest.json_path();
+        let reference_path = &reference_manifest.json_path;
         let Some(reference_node) =
             daybook_types::reference::schema_node_for_json_path(&schema_json, reference_path)?
         else {
@@ -636,29 +636,27 @@ fn validate_facet_reference_manifests(
             );
         };
 
-        match reference_manifest {
-            manifest::FacetReferenceManifest::UrlString { .. }
-            | manifest::FacetReferenceManifest::UrlStringSplit { .. } => {
-                if !daybook_types::reference::schema_allows_string(reference_node) {
+        match &reference_manifest.value {
+            manifest::FacetReferenceValue::UrlString => {
+                // One declaration serves both scalar and list shapes: arrays
+                // are read item-by-item, so the schema node must allow either.
+                if !daybook_types::reference::schema_allows_url_reference(reference_node) {
                     eyre::bail!(
-                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow a URL string",
+                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow a URL string or an array of URL strings",
                         reference_path,
                         facet_tag
                     );
                 }
             }
-            manifest::FacetReferenceManifest::UrlStringMany { .. } => {
-                if !daybook_types::reference::schema_allows_array_of_strings(reference_node) {
-                    eyre::bail!(
-                        "invalid reference json_path '{}' for facet tag '{}': schema node must allow an array of URL strings",
-                        reference_path,
-                        facet_tag
-                    );
-                }
-            }
-            manifest::FacetReferenceManifest::UrlObject { .. }
-            | manifest::FacetReferenceManifest::UrlObjectMany { .. } => {
-                if !daybook_types::reference::schema_allows_reference_object(reference_node) {
+            manifest::FacetReferenceValue::UrlObject {
+                ref_field,
+                heads_field,
+            } => {
+                if !daybook_types::reference::schema_allows_fields_reference_object(
+                    reference_node,
+                    ref_field,
+                    heads_field,
+                ) {
                     eyre::bail!(
                         "invalid reference json_path '{}' for facet tag '{}': schema node must allow a reference object",
                         reference_path,
@@ -668,7 +666,7 @@ fn validate_facet_reference_manifests(
             }
         }
 
-        if let Some(at_commit_json_path) = reference_manifest.at_commit_json_path() {
+        if let Some(at_commit_json_path) = &reference_manifest.at_commit_json_path {
             let Some(at_commit_node) = daybook_types::reference::schema_node_for_json_path(
                 &schema_json,
                 at_commit_json_path,

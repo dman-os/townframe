@@ -1,4 +1,5 @@
 pub mod cat;
+pub mod checkout;
 pub mod clone;
 pub mod devices;
 pub mod dump;

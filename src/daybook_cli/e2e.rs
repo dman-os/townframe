@@ -69,17 +69,22 @@ fn new_suite() -> TestCases {
     suite.env("NO_COLOR", "1");
     suite.register_bin("daybook_cli", trycmd::schema::Bin::Path(daybook_cli));
     // The test plug OCI artifact lives outside the sandbox (built by
-    // `xtask build-plug-oci` into target/oci). Register `sh` so cases can
+    // `xtask build-plug-oci` into the active target dir's oci/ layout). The
+    // default-target path is the fallback: with a CARGO_TARGET_DIR override
+    // (e.g. a lane-scoped dir) the xtask artifact lands there, not in
+    // <workspace>/target, and the hardcoded path left every import case
+    // failing on a missing $PLUG_OCI (the cp never ran, the import fell
+    // through to the bare-doc-id branch, and exec lost its plug subcmds —
+    // the "Usage: exec" / unused-argument reds). Register `sh` so cases can
     // copy it in with `$ sh -c 'cp -r "$PLUG_OCI" ./plug-oci'`, keeping the
     // whole flow in trycmd while staying portable.
     suite.register_bin("sh", trycmd::schema::Bin::Path("/bin/sh".into()));
-    suite.env(
-        "PLUG_OCI",
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../target/oci/@daybook/test"
-        ),
-    );
+    let oci_artifact = match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir).join("oci/@daybook/test"),
+        None => std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/oci/@daybook/test"),
+    };
+    suite.env("PLUG_OCI", oci_artifact.display().to_string());
     suite
 }
 

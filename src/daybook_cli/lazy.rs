@@ -23,6 +23,10 @@ pub fn rt() -> Arc<tokio::runtime::Runtime> {
     match RT.get_or_init(|| {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            // Checkout projection nests through the Daybook runtime's deep
+            // mailbox futures; default 2 MiB worker stacks overflow the poll
+            // chain. Flatten this before shrinking stacks.
+            .thread_stack_size(96 << 20)
             .build()?;
         eyre::Ok(Arc::new(rt))
     }) {
@@ -68,9 +72,17 @@ pub async fn shutdown() -> Res<()> {
     Ok(())
 }
 
+static CLI_CONFIG: tokio::sync::OnceCell<Arc<CliConfig>> = tokio::sync::OnceCell::const_new();
+
+/// Select a recorded checkout association before any ambient configuration is sourced.
+pub fn select_checkout_repo(repo_path: PathBuf) {
+    CLI_CONFIG
+        .set(Arc::new(CliConfig { repo_path }))
+        .expect("checkout discovery must precede node configuration");
+}
+
 pub async fn cli_config() -> Res<Arc<CliConfig>> {
-    static CONFIG: tokio::sync::OnceCell<Arc<CliConfig>> = tokio::sync::OnceCell::const_new();
-    match CONFIG
+    match CLI_CONFIG
         .get_or_try_init(|| async {
             let conf = CliConfig::source().await?;
             eyre::Ok(Arc::new(conf))
