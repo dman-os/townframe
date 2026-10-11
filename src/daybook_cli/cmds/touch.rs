@@ -16,7 +16,7 @@ pub async fn run() -> Res<ExitCode> {
             cx.local_user_path.clone(),
         )),
 
-        idempotency_key: Uuid::new_v4().to_string(),
+        idempotency_key: None,
     };
     let id = drawer_repo.add(doc).await?;
     info!(id, "created document");

@@ -812,11 +812,13 @@ pub struct AddDocArgs {
     pub branch_path: BranchPathBuf,
     pub facets: HashMap<FacetKey, FacetRaw>,
     pub user_path: Option<UserPathBuf>,
-    /// Caller-chosen idempotency key for the drawer's write-ahead add outbox:
-    /// a retry with the same key returns the same doc instead of adding a
-    /// second one. Required and non-empty; see `drawer/outbox.rs` for the
-    /// exact retry contract.
-    pub idempotency_key: String,
+    /// Optional caller-chosen idempotency key for the drawer's write-ahead add outbox.
+    /// `Some(key)` makes retries with the same key return the same doc instead of
+    /// adding a second one. `None` gives this invocation a fresh internal key;
+    /// crash recovery still uses the durable outbox row, but a later caller retry
+    /// starts a new add. See `drawer/outbox.rs` for the exact retry contract.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

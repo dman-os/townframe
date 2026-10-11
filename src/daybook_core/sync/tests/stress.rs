@@ -1326,7 +1326,7 @@ async fn apply_event(
                         node.ctx.local_user_path.clone(),
                     )),
 
-                    idempotency_key: "test-key-stress.rs-0".to_string(),
+                    idempotency_key: None,
                 })
                 .await?;
             Ok(StressEventOutcome::Applied(format!("created doc {id}")))

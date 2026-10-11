@@ -286,7 +286,7 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: "test-key-ladder.rs-0".to_string(),
+                idempotency_key: None,
             })
             .await?;
 
@@ -379,7 +379,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: "test-key-ladder.rs-1".to_string(),
+                idempotency_key: None,
             })
             .await?;
 
@@ -512,7 +512,7 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: "test-key-ladder.rs-2".to_string(),
+                idempotency_key: None,
             })
             .await?;
 
@@ -607,7 +607,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: "test-key-ladder.rs-3".to_string(),
+                idempotency_key: None,
             })
             .await?;
 
@@ -702,7 +702,7 @@ async fn iroh_sync_connected_doc_updates_propagate_originator_then_other() -> Re
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: "test-key-ladder.rs-4".to_string(),
+                idempotency_key: None,
             })
             .await?;
 
@@ -741,7 +741,7 @@ async fn iroh_sync_connected_doc_updates_propagate_other_then_originator() -> Re
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: "test-key-ladder.rs-5".to_string(),
+                idempotency_key: None,
             })
             .await?;
 
@@ -779,7 +779,7 @@ async fn iroh_sync_connected_divergent_facet_updates_propagate_originator_then_o
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: "test-key-ladder.rs-6".to_string(),
+                idempotency_key: None,
             })
             .await?;
 
@@ -829,7 +829,7 @@ async fn iroh_sync_connected_divergent_facet_updates_propagate_other_then_origin
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: "test-key-ladder.rs-7".to_string(),
+                idempotency_key: None,
             })
             .await?;
 
@@ -880,7 +880,7 @@ async fn iroh_sync_single_doc_survives_remote_restart_and_reconnect() -> Res<()>
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: "test-key-ladder.rs-8".to_string(),
+                idempotency_key: None,
             })
             .await?;
         {
@@ -991,7 +991,7 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
                 node_a.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: "test-key-ladder.rs-9".to_string(),
+            idempotency_key: None,
         })
         .await?;
     {
@@ -1025,7 +1025,7 @@ async fn iroh_sync_shutdown_peer_updates_catch_up_after_reconnect() -> Res<()> {
                     node_b.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: "test-key-ladder.rs-10".to_string(),
+                idempotency_key: None,
             })
             .await?;
         update_title_at_main_branch(&node_b, &doc_on_b, "B offline created title v2").await?;
@@ -1106,7 +1106,7 @@ async fn iroh_sync_offline_divergent_branch_merge_converges() -> Res<()> {
                 node_a.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: "test-key-ladder.rs-11".to_string(),
+            idempotency_key: None,
         })
         .await?;
 

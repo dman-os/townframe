@@ -1415,7 +1415,7 @@ private class RealRepoFixture(
                 branchPath = "main",
                 facets = facets,
                 userPath = null,
-                idempotencyKey = kotlin.uuid.Uuid.random().toString(),
+                idempotencyKey = null,
             ),
         )
     }

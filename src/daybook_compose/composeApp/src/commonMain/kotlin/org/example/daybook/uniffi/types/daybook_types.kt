@@ -1121,12 +1121,13 @@ data class AddDocArgs (
     var `userPath`: Utf8PathBuf?
     , 
     /**
-     * Caller-chosen idempotency key for the drawer's write-ahead add outbox:
-     * a retry with the same key returns the same doc instead of adding a
-     * second one. Required and non-empty; see `drawer/outbox.rs` for the
-     * exact retry contract.
+     * Optional caller-chosen idempotency key for the drawer's write-ahead add outbox.
+     * `Some(key)` makes retries with the same key return the same doc instead of
+     * adding a second one. `None` gives this invocation a fresh internal key;
+     * crash recovery still uses the durable outbox row, but a later caller retry
+     * starts a new add. See `drawer/outbox.rs` for the exact retry contract.
      */
-    var `idempotencyKey`: kotlin.String
+    var `idempotencyKey`: kotlin.String?
     
 ){
     
@@ -1146,7 +1147,7 @@ public object FfiConverterTypeAddDocArgs: FfiConverterRustBuffer<AddDocArgs> {
             FfiConverterTypeUtf8PathBuf.read(buf),
             FfiConverterMapTypeFacetKeyTypeJson.read(buf),
             FfiConverterOptionalTypeUtf8PathBuf.read(buf),
-            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -1154,14 +1155,14 @@ public object FfiConverterTypeAddDocArgs: FfiConverterRustBuffer<AddDocArgs> {
             FfiConverterTypeUtf8PathBuf.allocationSize(value.`branchPath`) +
             FfiConverterMapTypeFacetKeyTypeJson.allocationSize(value.`facets`) +
             FfiConverterOptionalTypeUtf8PathBuf.allocationSize(value.`userPath`) +
-            FfiConverterString.allocationSize(value.`idempotencyKey`)
+            FfiConverterOptionalString.allocationSize(value.`idempotencyKey`)
     )
 
     override fun write(value: AddDocArgs, buf: ByteBuffer) {
             FfiConverterTypeUtf8PathBuf.write(value.`branchPath`, buf)
             FfiConverterMapTypeFacetKeyTypeJson.write(value.`facets`, buf)
             FfiConverterOptionalTypeUtf8PathBuf.write(value.`userPath`, buf)
-            FfiConverterString.write(value.`idempotencyKey`, buf)
+            FfiConverterOptionalString.write(value.`idempotencyKey`, buf)
     }
 }
 

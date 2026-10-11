@@ -1712,16 +1712,10 @@ impl Ctx {
                 user_path: None,
 
                 // Per-invocation (like the rotate site below): the staging add
-                // mints fresh keying material that no prior row names, so the
-                // key cannot derive from (doc, domain) — deduping on it would
-                // re-point a second representation's keyRef at the first
-                // representation's JWK. Replay of an interrupted attempt runs
-                // through the durable claim and the boot pass, not this key.
-                idempotency_key: format!(
-                    "key-doc:{doc_id}/{}/{}",
-                    jwk_key.id,
-                    uuid::Uuid::new_v4()
-                ),
+                // The staging add has no caller retry identity. If the operation
+                // is interrupted after its claim, recovery runs through the durable
+                // claim and boot reconciliation rather than retrying this call.
+                idempotency_key: None,
             })
             .await?;
         let key_doc_id = staged_key.doc_id.clone();
@@ -1820,16 +1814,11 @@ impl Ctx {
                 user_path: None,
 
                 // Per-invocation: a rotation mints a fresh key document, and its
-                // "operation" includes fresh keying material that no prior row
-                // names. Retry recovery of an interrupted rotation goes through
-                // the durable cipherBlob claim (boot reconciliation), never
-                // through this key; a leftover unclaimed staging doc is
-                // abandoned by the boot pass.
-                idempotency_key: format!(
-                    "key-doc-rotate:{doc_id}/{}/{}",
-                    jwk_key.id,
-                    uuid::Uuid::new_v4()
-                ),
+                // The rotation staging add has no caller retry identity. Recovery
+                // of an interrupted rotation runs through the durable cipherBlob
+                // claim and boot reconciliation; an unclaimed staging doc is
+                // abandoned there.
+                idempotency_key: None,
             })
             .await?;
         let key_doc_id = staged_key.doc_id.clone();

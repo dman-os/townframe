@@ -221,7 +221,7 @@ async fn test_plug_version_breaking_change() -> Res<()> {
         }
         .into(),
     );
-    repo.add(p1_v1).await?;
+    let p1_v1_doc_id = repo.add(p1_v1).await?;
 
     // Update version (patch) with command removed -> should fail
     let mut p1_v2 = mock_plug("plug1");
@@ -236,7 +236,11 @@ async fn test_plug_version_breaking_change() -> Res<()> {
     let mut p1_v3 = mock_plug("plug1");
     p1_v3.version = "1.0.0".parse().unwrap(); // major bump from 0.1 to 1.0 (in standard semver terms)
 
-    repo.add(p1_v3).await?;
+    let p1_v3_doc_id = repo.add(p1_v3).await?;
+    assert_ne!(
+        p1_v1_doc_id, p1_v3_doc_id,
+        "different plug versions need different manifest docs"
+    );
     ctx.stop().await?;
     Ok(())
 }

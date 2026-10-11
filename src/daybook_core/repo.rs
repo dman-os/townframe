@@ -747,7 +747,7 @@ impl RepoCtx {
                     facets: default(),
                     user_path: None,
 
-                    idempotency_key: "init:core-inventory".to_string(),
+                    idempotency_key: Some("init:core-inventory".to_string()),
                 })
                 .await?;
             let docs_inventory_daybook_id = _drawer_repo
@@ -756,7 +756,7 @@ impl RepoCtx {
                     facets: default(),
                     user_path: None,
 
-                    idempotency_key: "init:docs-inventory".to_string(),
+                    idempotency_key: Some("init:docs-inventory".to_string()),
                 })
                 .await?;
             let encryption_inventory_daybook_id = _drawer_repo
@@ -765,7 +765,7 @@ impl RepoCtx {
                     facets: default(),
                     user_path: None,
 
-                    idempotency_key: "init:encryption-inventory".to_string(),
+                    idempotency_key: Some("init:encryption-inventory".to_string()),
                 })
                 .await?;
 

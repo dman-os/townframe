@@ -316,7 +316,7 @@ mod tests {
                 facets: default(),
                 user_path: None,
 
-                idempotency_key: "test-key-key_source.rs-0".to_string(),
+                idempotency_key: None,
             })
             .await?;
         Ok(doc_id)

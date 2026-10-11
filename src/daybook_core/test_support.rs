@@ -168,7 +168,7 @@ pub async fn stage_key_doc(
             facets: default(),
             user_path: None,
 
-            idempotency_key: "test-key-test_support.rs-0".to_string(),
+            idempotency_key: None,
         })
         .await?;
     let heads = write_jwk_facet(drawer, &key_doc_id, key).await?;
@@ -388,7 +388,7 @@ pub async fn test_cx_with_options(
             facets: default(),
             user_path: None,
 
-            idempotency_key: "test-key-test_support.rs-1".to_string(),
+            idempotency_key: None,
         })
         .await?;
     let docs_inventory_daybook_id = drawer_repo
@@ -397,7 +397,7 @@ pub async fn test_cx_with_options(
             facets: default(),
             user_path: None,
 
-            idempotency_key: "test-key-test_support.rs-2".to_string(),
+            idempotency_key: None,
         })
         .await?;
     let encryption_inventory_daybook_id = drawer_repo
@@ -406,7 +406,7 @@ pub async fn test_cx_with_options(
             facets: default(),
             user_path: None,
 
-            idempotency_key: "test-key-test_support.rs-3".to_string(),
+            idempotency_key: None,
         })
         .await?;
     let core_entry = drawer_repo

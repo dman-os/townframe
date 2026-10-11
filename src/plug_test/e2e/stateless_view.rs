@@ -20,7 +20,7 @@ async fn render_plug_test_stateless_view() -> Res<()> {
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-stateless_view.rs-0".to_string(),
+            idempotency_key: None,
         })
         .await?;
 

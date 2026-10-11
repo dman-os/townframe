@@ -1,7 +1,7 @@
 //! The drawer's SQLite write-ahead outbox for document adds (ADR 003 §19).
 //!
 //! Every add (`add`/`batch_add`/`add_temporary`) first writes a row keyed by
-//! the caller's idempotency key BEFORE `commit_id` runs — write-ahead is the
+//! the caller's idempotency key or a fresh generated key BEFORE `commit_id` runs — write-ahead is the
 //! integrity requirement — and advances it through
 //! `pending-add → committed-staged → done`. `done` is reached only when the
 //! `docs.map` entry is durable (and the partitions re-derived), never when the

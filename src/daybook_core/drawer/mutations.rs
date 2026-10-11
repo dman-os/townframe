@@ -66,13 +66,16 @@ impl DrawerRepo {
         if args.branch_path != "main" {
             Err(ferr!("new docs must be created on main"))?;
         }
-        if args.idempotency_key.is_empty() {
-            Err(ferr!("add requires a non-empty idempotency key"))?;
+        let idempotency_key = args
+            .idempotency_key
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if idempotency_key.is_empty() {
+            Err(ferr!("add idempotency key cannot be empty"))?;
         }
         // Retry contract (drawer_add_outbox): the same key with a `done` row
         // returns the same doc, no re-execution; an in-flight key is refused.
         // After the TTL purge a late retry re-executes as a fresh add.
-        if let Some(row) = outbox::get_row(&self.meta_store_sql, &args.idempotency_key).await? {
+        if let Some(row) = outbox::get_row(&self.meta_store_sql, &idempotency_key).await? {
             match row.state {
                 OutboxState::Done => {
                     let doc_id = DocId::from(row.branch_doc_id.to_string());
@@ -84,7 +87,7 @@ impl DrawerRepo {
                         .wrap_err_with(|| {
                             eyre::eyre!(
                                 "deduped add for key '{}' cannot materialize its doc",
-                                args.idempotency_key
+                                idempotency_key
                             )
                         })?;
                     return Ok(StagedAdd {
@@ -93,14 +96,14 @@ impl DrawerRepo {
                         entry: row.entry,
                         branch_heads: row.staged_branch_heads,
                         branch_doc_id: row.branch_doc_id,
-                        idempotency_key: args.idempotency_key,
+                        idempotency_key,
                     });
                 }
                 OutboxState::PendingAdd | OutboxState::CommittedStaged => {
                     Err(ferr!(
                         "idempotency key '{}' is already in flight; \
                          retry after the boot pass resolves it",
-                        args.idempotency_key
+                        idempotency_key
                     ))?;
                 }
             }
@@ -204,7 +207,7 @@ impl DrawerRepo {
         // boot's pass or resolved on caller retry.
         outbox::insert_pending(
             &self.meta_store_sql,
-            &args.idempotency_key,
+            &idempotency_key,
             &branch_doc_id,
             &entry,
             &heads,
@@ -217,7 +220,7 @@ impl DrawerRepo {
             .await
             .map_err(|err| eyre::eyre!("{err}"))
             .wrap_err("error committing allocated doc in big repo")?;
-        outbox::mark_committed_staged(&self.meta_store_sql, &args.idempotency_key).await?;
+        outbox::mark_committed_staged(&self.meta_store_sql, &idempotency_key).await?;
 
         Ok(StagedAdd {
             doc_id,
@@ -225,7 +228,7 @@ impl DrawerRepo {
             entry,
             branch_heads: heads,
             branch_doc_id,
-            idempotency_key: args.idempotency_key,
+            idempotency_key,
         })
     }
 

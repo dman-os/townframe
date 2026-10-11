@@ -1735,7 +1735,7 @@ mod tests {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-pin_worker.rs-0".to_string(),
+                idempotency_key: None,
             })
             .await?;
 
@@ -1987,7 +1987,7 @@ mod tests {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-pin_worker.rs-1".to_string(),
+                idempotency_key: None,
             })
             .await?;
 
@@ -2331,7 +2331,7 @@ mod tests {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-pin_worker.rs-2".to_string(),
+                idempotency_key: None,
             })
             .await?;
         roots
@@ -2419,7 +2419,7 @@ mod tests {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-pin_worker.rs-3".to_string(),
+                idempotency_key: None,
             })
             .await?;
         drawer
@@ -2611,7 +2611,7 @@ mod tests {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-pin_worker.rs-4".to_string(),
+                idempotency_key: None,
             })
             .await?;
 

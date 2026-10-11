@@ -21,7 +21,7 @@ async fn test_labeler_workflow() -> Res<()> {
         .into(),
         user_path: None,
 
-        idempotency_key: "test-key-doc_created_wflow.rs-0".to_string(),
+        idempotency_key: None,
     };
 
     // Add the document - DocTriageWorker will automatically queue the workflow job
@@ -99,7 +99,7 @@ async fn test_staging_branch_workflow() -> Res<()> {
         .into(),
         user_path: None,
 
-        idempotency_key: "test-key-doc_created_wflow.rs-1".to_string(),
+        idempotency_key: None,
     };
 
     // Add the document - DocTriageWorker will automatically queue the workflow job

@@ -166,7 +166,7 @@ async fn iroh_sync_between_copied_repos() -> Res<()> {
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: Uuid::new_v4().to_string(),
+                idempotency_key: None,
             })
             .await?;
         created_doc_ids.push(new_doc_id);
@@ -264,7 +264,7 @@ async fn iroh_live_sync_bidirectional_after_clone() -> Res<()> {
                 node_a.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: Uuid::new_v4().to_string(),
+            idempotency_key: None,
         })
         .await?;
     wait_for_doc_presence_with_activity(&node_b, &doc_on_a, Duration::from_secs(60)).await?;
@@ -278,7 +278,7 @@ async fn iroh_live_sync_bidirectional_after_clone() -> Res<()> {
                 node_b.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: Uuid::new_v4().to_string(),
+            idempotency_key: None,
         })
         .await?;
     wait_for_doc_presence_with_activity(&node_a, &doc_on_b, Duration::from_secs(60)).await?;
@@ -333,7 +333,7 @@ async fn iroh_live_sync_propagates_repeated_doc_updates() -> Res<()> {
                 node_a.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: Uuid::new_v4().to_string(),
+            idempotency_key: None,
         })
         .await?;
     wait_for_doc_presence_with_activity(&node_b, &doc_id, Duration::from_secs(60)).await?;
@@ -408,7 +408,7 @@ async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
                 node_a.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: Uuid::new_v4().to_string(),
+            idempotency_key: None,
         })
         .await?;
     wait_for_doc_presence_with_activity(&node_a, &created_doc_id, Duration::from_secs(30)).await?;
@@ -502,7 +502,7 @@ async fn long_af_test_iroh_clone_sync_batch_100_docs_with_blobs() -> Res<()> {
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: Uuid::new_v4().to_string(),
+                idempotency_key: None,
             });
         }
         let created = node_a.drawer.batch_add(args_batch).await?;
@@ -585,7 +585,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
 
             // One key per add: the batch carries three independent adds, and a
             // key shared across them would dedupe #2 and #3 onto #1's doc.
-            idempotency_key: format!("test-key-tests.rs-6-{idx}"),
+            idempotency_key: None,
         });
     }
     node_a.drawer.batch_add(args_batch).await?;
@@ -688,7 +688,7 @@ async fn iroh_clone_bootstrap_syncs_encrypted_representation_inventory() -> Res<
                 node_a.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: "test-key-tests.rs-7".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -1074,7 +1074,7 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
             )),
 
             // One key per add (see the clone-bootstrap batch above).
-            idempotency_key: format!("test-key-tests.rs-8-{idx}"),
+            idempotency_key: None,
         });
     }
     node_a.drawer.batch_add(args_batch).await?;
@@ -1162,7 +1162,7 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
                 node_a.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: "test-key-tests.rs-9".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -1283,7 +1283,7 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
                     node_a.ctx.local_user_path.clone(),
                 )),
 
-                idempotency_key: "test-key-tests.rs-10".to_string(),
+                idempotency_key: None,
             })
             .await?;
         created_doc_ids.push(new_doc_id);
@@ -1800,7 +1800,7 @@ async fn a_peer_holds_its_revoked_branch_until_the_delete_lands_on_the_doc_chann
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-11".to_string(),
+            idempotency_key: None,
         })
         .await?;
     let main_heads = node_a
@@ -2551,7 +2551,7 @@ async fn long_test_told_not_cloned_inventory_part_is_refused_until_the_inventory
                 node_a.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: "test-key-tests.rs-12".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -2976,7 +2976,7 @@ async fn relay_granted_only_the_encrypted_inventory_cannot_decrypt_but_retains_a
                 node_a.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: "test-key-tests.rs-13".to_string(),
+            idempotency_key: None,
         })
         .await?;
 

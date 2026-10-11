@@ -26,7 +26,7 @@ async fn test_embed_text_workflow() -> Res<()> {
         .into(),
         user_path: None,
 
-        idempotency_key: "test-key-embed_text_wflow.rs-0".to_string(),
+        idempotency_key: None,
     };
 
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;

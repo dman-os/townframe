@@ -180,7 +180,7 @@ class CaptureScreenViewModel(
                         branchPath = "main",
                         facets = facets,
                         userPath = null,
-                        idempotencyKey = kotlin.uuid.Uuid.random().toString(),
+                        idempotencyKey = null,
                     )
 
                 drawerRepo.add(args)

@@ -503,7 +503,7 @@ mod tests {
                         node_a.ctx.local_user_path.clone(),
                     )),
 
-                    idempotency_key: Uuid::new_v4().to_string(),
+                    idempotency_key: None,
                 })
                 .await?;
         }

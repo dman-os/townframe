@@ -169,7 +169,7 @@ async fn test_v2_smoke() -> Res<()> {
             .into(),
             user_path: None,
 
-            idempotency_key: Uuid::new_v4().to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -319,7 +319,7 @@ async fn test_partitions_track_non_tmp_branches() -> Res<()> {
             .into(),
             user_path: None,
 
-            idempotency_key: Uuid::new_v4().to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -600,7 +600,7 @@ async fn a_branch_whose_branch_doc_access_is_revoked_leaves_the_listing_and_is_r
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-2".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -887,7 +887,7 @@ async fn replicated_branch_fixture(
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-3".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -1272,7 +1272,7 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-tests.rs-4".to_string(),
+                idempotency_key: None,
             },
             AddDocArgs {
                 branch_path: BranchPathBuf::from("main"),
@@ -1283,7 +1283,7 @@ async fn test_v2_batch_add_smoke() -> Res<()> {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-tests.rs-5".to_string(),
+                idempotency_key: None,
             },
         ])
         .await?;
@@ -1344,7 +1344,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-tests.rs-6".to_string(),
+                idempotency_key: None,
             },
             AddDocArgs {
                 branch_path: BranchPathBuf::from("main"),
@@ -1355,7 +1355,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-tests.rs-7".to_string(),
+                idempotency_key: None,
             },
             AddDocArgs {
                 branch_path: BranchPathBuf::from("main"),
@@ -1366,7 +1366,7 @@ async fn test_v2_batch_add_emits_single_list_changed() -> Res<()> {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-tests.rs-8".to_string(),
+                idempotency_key: None,
             },
         ])
         .await?;
@@ -1454,7 +1454,7 @@ async fn test_v2_merge() -> Res<()> {
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-9".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -1617,7 +1617,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-10".to_string(),
+            idempotency_key: None,
         })
         .await?;
     let doc_b = repo
@@ -1630,7 +1630,7 @@ async fn test_resolve_handle_for_heads_does_not_match_foreign_doc_heads() -> Res
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-11".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -1699,7 +1699,7 @@ async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() 
                 .into(),
                 user_path: None,
 
-                idempotency_key: format!("test-key-tests.rs-12-{round}"),
+                idempotency_key: None,
             })
             .await?;
 
@@ -2037,7 +2037,7 @@ async fn test_v2_additional_apis() -> Res<()> {
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-13".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -2225,7 +2225,7 @@ async fn test_v2_metadata_maintenance() -> Res<()> {
             .into(),
             user_path: Some(user_path.clone()),
 
-            idempotency_key: "test-key-tests.rs-14".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -2457,7 +2457,7 @@ async fn test_update_at_heads_uses_patch_user_path_actor() -> Res<()> {
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-15".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -2537,7 +2537,7 @@ async fn test_merge_from_heads_uses_user_path_actor() -> Res<()> {
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-16".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -2651,7 +2651,7 @@ async fn test_facet_keys_touched_by_local_actor_includes_user_path_scoped_actor(
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-17".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -2839,7 +2839,7 @@ async fn test_v2_updated_at_merge() -> Res<()> {
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-18".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -3049,7 +3049,7 @@ async fn test_v2_facet_blame_maintenance() -> Res<()> {
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-19".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -3220,7 +3220,7 @@ async fn test_v2_listener_is_scoped_to_drawer_doc() -> Res<()> {
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-20".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -3289,7 +3289,7 @@ async fn test_v2_content_update_does_not_emit_drawer_membership_events() -> Res<
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-21".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -3372,7 +3372,7 @@ async fn test_diff_events_delete_origin_uses_map_deleted_tombstone() -> Res<()> 
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-22".to_string(),
+            idempotency_key: None,
         })
         .await?;
     let before_delete = repo.get_drawer_heads();
@@ -3445,7 +3445,7 @@ async fn test_add_rejects_unknown_facet_tag() -> Res<()> {
             facets: [(unknown_facet_key, serde_json::json!({"hello":"world"}))].into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-23".to_string(),
+            idempotency_key: None,
         })
         .await;
     assert!(add_result.is_err());
@@ -3505,7 +3505,7 @@ async fn test_add_rejects_self_reference_without_target_facet() -> Res<()> {
             facets: [(image_metadata_facet_key, image_metadata_facet.into())].into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-24".to_string(),
+            idempotency_key: None,
         })
         .await;
     assert!(add_result.is_err());
@@ -3575,7 +3575,7 @@ async fn test_add_accepts_body_self_reference_with_empty_fragment_for_present_ta
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-25".to_string(),
+            idempotency_key: None,
         })
         .await;
 
@@ -3763,7 +3763,7 @@ async fn perf_drawer_add_disk_baseline() -> Res<()> {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-tests.rs-26".to_string(),
+                idempotency_key: None,
             })
             .await?;
     }
@@ -3802,7 +3802,7 @@ async fn the_drawer_commit_failure_pins_the_granted_not_registered_window() -> R
             facets: default(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-27".to_string(),
+            idempotency_key: None,
         })
         .await?;
     node.repo.fail_next_drawer_doc_commit_for_test();
@@ -3923,7 +3923,7 @@ async fn a_temporary_add_grants_nothing_and_registers_nothing() -> Res<()> {
             facets: default(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-28".to_string(),
+            idempotency_key: None,
         })
         .await?;
 
@@ -3988,7 +3988,7 @@ async fn committing_a_staged_add_matches_batch_add() -> Res<()> {
             facets: default(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-29".to_string(),
+            idempotency_key: None,
         })
         .await?;
     node.repo.commit_temporary(&staged).await?;
@@ -4034,7 +4034,7 @@ async fn discarding_a_staged_add_is_idempotent_and_leaves_a_commit_intact() -> R
             facets: default(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-30".to_string(),
+            idempotency_key: None,
         })
         .await?;
     node.repo.discard_temporary(&staged).await?;
@@ -4087,7 +4087,7 @@ async fn discarding_a_staged_add_is_idempotent_and_leaves_a_commit_intact() -> R
             facets: default(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-31".to_string(),
+            idempotency_key: None,
         })
         .await?;
     node.repo.commit_temporary(&committed).await?;
@@ -4272,7 +4272,7 @@ async fn a_claimed_committed_staging_add_is_replayed_through_the_claim_machinery
             branch_path: BranchPathBuf::from("main"),
             facets: default(),
             user_path: None,
-            idempotency_key: "claim-replay-content".to_string(),
+            idempotency_key: None,
         })
         .await?;
     let key = crate::blobs::encrypt::MasterKey::random();
@@ -4283,7 +4283,7 @@ async fn a_claimed_committed_staging_add_is_replayed_through_the_claim_machinery
             branch_path: BranchPathBuf::from("main"),
             facets: [(jwk_key.clone(), jwk_raw)].into(),
             user_path: None,
-            idempotency_key: "claim-replay-key-doc".to_string(),
+            idempotency_key: None,
         })
         .await?;
     write_claim(&node, &content_doc_id, &staged, &jwk_key).await?;
@@ -4318,7 +4318,7 @@ async fn a_claimed_committed_staging_add_is_replayed_through_the_claim_machinery
         );
     }
     assert_eq!(
-        outbox_state(&node, "claim-replay-key-doc").await?,
+        outbox_state(&node, &staged.idempotency_key).await?,
         "done",
         "a fully replayed commit must land done"
     );
@@ -4350,7 +4350,7 @@ async fn the_reconciliation_registers_a_found_claim_even_when_the_claim_scan_is_
             branch_path: BranchPathBuf::from("main"),
             facets: default(),
             user_path: None,
-            idempotency_key: "claim-scan-content".to_string(),
+            idempotency_key: None,
         })
         .await?;
     let key = crate::blobs::encrypt::MasterKey::random();
@@ -4361,7 +4361,7 @@ async fn the_reconciliation_registers_a_found_claim_even_when_the_claim_scan_is_
             branch_path: BranchPathBuf::from("main"),
             facets: [(jwk_key.clone(), jwk_raw)].into(),
             user_path: None,
-            idempotency_key: "claim-scan-key-doc".to_string(),
+            idempotency_key: None,
         })
         .await?;
     // The unreadable surface: a foreign registration whose branch doc no node
@@ -4404,7 +4404,7 @@ async fn a_durable_entry_finishes_residuals_and_marks_done() -> Res<()> {
             branch_path: BranchPathBuf::from("main"),
             facets: default(),
             user_path: None,
-            idempotency_key: "residual-key".to_string(),
+            idempotency_key: None,
         })
         .await?;
     node.repo.commit_temporary(&staged).await?;
@@ -4413,7 +4413,7 @@ async fn a_durable_entry_finishes_residuals_and_marks_done() -> Res<()> {
     sqlx::query(
         "UPDATE drawer_add_outbox SET state = 'committed-staged', done_at = NULL WHERE idempotency_key = ?1",
     )
-    .bind("residual-key")
+    .bind(&staged.idempotency_key)
     .execute(&node.repo.meta_store_sql().write_pool)
     .await?;
 
@@ -4439,7 +4439,7 @@ async fn a_durable_entry_finishes_residuals_and_marks_done() -> Res<()> {
         "the replay must not mint a new version tag over a durable entry"
     );
     assert_eq!(
-        outbox_state(&node, "residual-key").await?,
+        outbox_state(&node, &staged.idempotency_key).await?,
         "done",
         "the residual replay must finish the row"
     );
@@ -4496,7 +4496,7 @@ async fn the_key_retry_contract_holds_for_done_and_inflight_rows() -> Res<()> {
         branch_path: BranchPathBuf::from("main"),
         facets: default(),
         user_path: None,
-        idempotency_key: key.to_string(),
+        idempotency_key: Some(key.to_string()),
     };
     let first = node.repo.add(add_with("retry-key")).await?;
     let second = node.repo.add(add_with("retry-key")).await?;
@@ -4539,7 +4539,7 @@ async fn cross_restart_reconciliation_replays_surviving_rows() -> Res<()> {
     let local_user_path =
         daybook_types::doc::UserPathBuf::from("/duser-wip-localtest/ddev-wip-iroh-localtest");
 
-    let (key_branch_doc_id, key_doc_id) = {
+    let (key_branch_doc_id, key_doc_id, restart_key) = {
         let node = boot_disk_drawer_node(&storage_path, local_user_path.clone()).await?;
         let content_doc_id = node
             .repo
@@ -4547,7 +4547,7 @@ async fn cross_restart_reconciliation_replays_surviving_rows() -> Res<()> {
                 branch_path: BranchPathBuf::from("main"),
                 facets: default(),
                 user_path: None,
-                idempotency_key: "restart-content".to_string(),
+                idempotency_key: None,
             })
             .await?;
         let key = crate::blobs::encrypt::MasterKey::random();
@@ -4558,12 +4558,17 @@ async fn cross_restart_reconciliation_replays_surviving_rows() -> Res<()> {
                 branch_path: BranchPathBuf::from("main"),
                 facets: [(jwk_key.clone(), jwk_raw)].into(),
                 user_path: None,
-                idempotency_key: "restart-key-doc".to_string(),
+                idempotency_key: None,
             })
             .await?;
         write_claim(&node, &content_doc_id, &staged, &jwk_key).await?;
+        let restart_key = staged.idempotency_key.clone();
         node.stop().await?;
-        (staged.branch_doc_id.clone(), staged.doc_id.clone())
+        (
+            staged.branch_doc_id.clone(),
+            staged.doc_id.clone(),
+            restart_key,
+        )
     };
 
     // The next boot's `DrawerRepo::load` runs the reconciliation itself.
@@ -4583,7 +4588,7 @@ async fn cross_restart_reconciliation_replays_surviving_rows() -> Res<()> {
         "the replayed registration names the staging doc"
     );
     assert_eq!(
-        outbox_state(&node, "restart-key-doc").await?,
+        outbox_state(&node, &restart_key).await?,
         "done",
         "the fully replayed commit lands done"
     );

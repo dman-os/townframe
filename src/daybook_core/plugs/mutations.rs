@@ -75,7 +75,7 @@ impl PlugsRepo {
                 .into(),
                 user_path: None,
 
-                idempotency_key: "init:core-plug-manifest".to_string(),
+                idempotency_key: Some("init:core-plug-manifest".to_string()),
             })
             .await?;
         let core_doc_id = daybook_types::doc::DocId::from(core_doc_id);
@@ -204,7 +204,7 @@ impl PlugsRepo {
                         facets: HashMap::new(),
                         user_path: None,
 
-                        idempotency_key: format!("plug-enable:{plug_id}"),
+                        idempotency_key: Some(format!("plug-enable:{plug_id}")),
                     })
                     .await?,
             )
@@ -509,6 +509,14 @@ impl PlugsRepo {
         // and compatibility with existing versions of the same plug.
         self.validate_incoming_plug(&manifest).await?;
 
+        // A manifest identity is stable across a caller retry, while different
+        // plug versions must never share the same add key.
+        let manifest_add_key = format!(
+            "plug-add-manifest-doc:{}:{}",
+            manifest.id(),
+            manifest.version
+        );
+
         // 1.5 Convert file:// URLs to db+blob:// URLs
         // This ensures that all components are stored in the BlobsRepo for portability.
         for bundle in manifest.wflow_bundles.values_mut() {
@@ -594,7 +602,7 @@ impl PlugsRepo {
                 facets,
                 user_path: None,
 
-                idempotency_key: { "plug-add-manifest-doc".to_string() },
+                idempotency_key: Some(manifest_add_key),
             })
             .await?;
 
