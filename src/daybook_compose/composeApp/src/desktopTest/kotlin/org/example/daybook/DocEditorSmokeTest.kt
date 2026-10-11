@@ -1,3 +1,5 @@
+@file:OptIn(kotlin.uuid.ExperimentalUuidApi::class)
+
 package org.example.daybook
 
 import androidx.compose.runtime.CompositionLocalProvider

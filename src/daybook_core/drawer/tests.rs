@@ -1699,7 +1699,7 @@ async fn long_test_create_branch_at_stale_main_heads_after_intervening_merges() 
                 .into(),
                 user_path: None,
 
-                idempotency_key: "test-key-tests.rs-12".to_string(),
+                idempotency_key: format!("test-key-tests.rs-12-{round}"),
             })
             .await?;
 
@@ -4614,15 +4614,29 @@ async fn boot_disk_drawer_node(
     ))
     .await?;
 
-    let drawer_doc_id = {
-        let mut doc = automerge::Automerge::new();
-        doc.set_actor(node_local_actor(&local_user_path));
-        doc.transact(|tx| {
-            tx.put(automerge::ROOT, "version", "0")?;
-            Ok::<(), automerge::AutomergeError>(())
-        })
-        .expect("seed drawer doc");
-        big_repo.create_doc(doc).await?.document_id()
+    // A restart must reopen the *same* drawer document: the registration surface
+    // the outbox boot pass reads (`docs.map`) lives in it, so a fresh doc per boot
+    // would make every surviving row look unregistered. Production persists its core
+    // doc ids and reloads them (`load_core_docs`); this harness does the same, in the
+    // directory it already keeps the drawer's sqlite.
+    let drawer_doc_id_file = storage_path.join("drawer-doc-id");
+    let drawer_doc_id = match tokio::fs::read_to_string(&drawer_doc_id_file).await {
+        Ok(text) => text
+            .trim()
+            .parse::<big_repo::DocumentId>()
+            .map_err(|err| ferr!("drawer-doc-id is not a document id: {err}"))?,
+        Err(_) => {
+            let mut doc = automerge::Automerge::new();
+            doc.set_actor(node_local_actor(&local_user_path));
+            doc.transact(|tx| {
+                tx.put(automerge::ROOT, "version", "0")?;
+                Ok::<(), automerge::AutomergeError>(())
+            })
+            .expect("seed drawer doc");
+            let drawer_doc_id = big_repo.create_doc(doc).await?.document_id();
+            tokio::fs::write(&drawer_doc_id_file, drawer_doc_id.to_string()).await?;
+            drawer_doc_id
+        }
     };
 
     let entry_pool = Arc::new(surelock::mutex::Mutex::new(KeyedLruPool::new(1000)));

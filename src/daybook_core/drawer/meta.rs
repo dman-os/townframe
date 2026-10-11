@@ -412,6 +412,10 @@ impl DrawerRepo {
 pub(crate) struct AllocationRegistrationRead {
     pub shapes: HashMap<big_repo::DocumentId, RegisteredAllocationShape>,
     pub claims: HashSet<big_repo::DocumentId>,
+    /// False when any registered content doc's branch could not be read, so an
+    /// absent claim is *unknown* rather than "no claim". The reconciliation must
+    /// not release a temporary row on an incomplete read.
+    pub claims_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,6 +454,7 @@ pub(crate) async fn registered_allocation_shapes(
 
     let mut shapes = HashMap::new();
     let mut claims = HashSet::new();
+    let mut claims_complete = true;
     // The branch docs of every registered content doc: what the claim scan
     // reads when there are reservations to classify.
     let mut content_branch_docs = Vec::new();
@@ -526,6 +531,7 @@ pub(crate) async fn registered_allocation_shapes(
             if !claims_in_branch_doc(big_repo, branch_doc_id, &candidates_by_string, &mut claims)
                 .await?
             {
+                claims_complete = false;
                 tracing::warn!(
                     %branch_doc_id,
                     "outbox rows keep their replay check: a registered content doc's \
@@ -535,7 +541,11 @@ pub(crate) async fn registered_allocation_shapes(
         }
     }
 
-    Ok(Some(AllocationRegistrationRead { shapes, claims }))
+    Ok(Some(AllocationRegistrationRead {
+        shapes,
+        claims,
+        claims_complete,
+    }))
 }
 
 /// Read one registered branch doc's durable `cipherBlob` facets at its current
@@ -562,9 +572,17 @@ async fn claims_in_branch_doc(
             return Ok(false);
         }
     };
-    let heads = handle
+    let heads: Arc<[automerge::ChangeHash]> = handle
         .with_document_read(|doc| Arc::from(doc.get_heads()))
         .await;
+    // A `Ready` handle is not proof of content: a doc whose payload has not been
+    // materialized yet presents as a live doc with no ops, and an absent `facets`
+    // path then decodes to the same empty map as "this doc names no claim". Only
+    // one of those is an answer, so report the read as incomplete and let the
+    // caller treat the claim as unknown.
+    if heads.is_empty() {
+        return Ok(false);
+    }
     let facets = handle
         .hydrate_path_at_heads::<
             am_utils_rs::codecs::ThroughJson<HashMap<FacetKey, daybook_types::doc::FacetRaw>>,

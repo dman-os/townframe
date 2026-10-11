@@ -107,6 +107,15 @@ impl DrawerRepo {
                 // row goes; the doc stays exactly as ADR 003 §19 leaves unclaimed
                 // staging docs (no events, sedimentree, bytes or claims touched)
                 // and its retry — or the boot pass — starts fresh.
+                // An incomplete claim scan cannot tell "unclaimed" from "not readable
+                // yet": a branch doc whose content has not materialized reads exactly
+                // like one that names no claim. Releasing on that would discard the
+                // only durable record of a claimed operation, so keep the row and let
+                // the next boot - with the surface materialized - decide.
+                if !read.claims_complete {
+                    warn_unclaimed_temporary_unreadable(&row);
+                    continue;
+                }
                 warn_unclaimed_temporary(&row);
                 outbox::delete_row(&self.meta_store_sql, &row.idempotency_key).await?;
                 continue;
@@ -172,5 +181,13 @@ fn warn_unclaimed_temporary(row: &outbox::OutboxRow) {
         key = %row.idempotency_key,
         "dropping an unclaimed temporary-add outbox row: the staging doc stays \
          node-local and unregistered; the retry re-derives it fresh"
+    );
+}
+
+fn warn_unclaimed_temporary_unreadable(row: &outbox::OutboxRow) {
+    tracing::warn!(
+        doc_id = %row.branch_doc_id,
+        key = %row.idempotency_key,
+        "keeping a temporary-add outbox row: the claim surfaces could not all be read, so unclaimed is not an answer; the next boot re-runs the replay"
     );
 }

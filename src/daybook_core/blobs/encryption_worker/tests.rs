@@ -62,7 +62,10 @@ async fn stage_document_with_blob(
             .into(),
             user_path: None,
 
-            idempotency_key: "test-key-tests.rs-0".to_string(),
+            // One key per call: this helper stages a *fresh* document, and a test
+            // that stages more than one doc (its own plus a barrier doc, say)
+            // would otherwise have the second call dedupe onto the first's doc.
+            idempotency_key: format!("test-key-tests.rs-0-{}", uuid::Uuid::new_v4()),
         })
         .await?;
     Ok((doc_id, blob_key))

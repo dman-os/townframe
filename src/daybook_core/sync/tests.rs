@@ -583,7 +583,9 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
                 node_a.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: "test-key-tests.rs-6".to_string(),
+            // One key per add: the batch carries three independent adds, and a
+            // key shared across them would dedupe #2 and #3 onto #1's doc.
+            idempotency_key: format!("test-key-tests.rs-6-{idx}"),
         });
     }
     node_a.drawer.batch_add(args_batch).await?;
@@ -1071,7 +1073,8 @@ async fn iroh_blob_sync_validates_bytes() -> Res<()> {
                 node_a.ctx.local_user_path.clone(),
             )),
 
-            idempotency_key: "test-key-tests.rs-8".to_string(),
+            // One key per add (see the clone-bootstrap batch above).
+            idempotency_key: format!("test-key-tests.rs-8-{idx}"),
         });
     }
     node_a.drawer.batch_add(args_batch).await?;
