@@ -896,10 +896,6 @@ impl BigRepo {
     }
 
     /// Whether the keyhive document for a reserved/committed id exists locally.
-    /// The reconciliation's commit-vs-never-committed split needs exactly this,
-    /// and `keyhive_document_exists`/handles cannot answer it without
-    /// materializing.
-    /// Whether the keyhive document for a reserved/committed id exists locally.
     /// The drawer reconciliation's committed-vs-never-committed split needs
     /// exactly this, and a handle-based answer would materialize a doc worker.
     pub async fn has_keyhive_document(&self, doc_id: &DocumentId) -> Res<bool> {

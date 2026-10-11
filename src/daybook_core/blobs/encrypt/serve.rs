@@ -231,14 +231,44 @@ impl CipherBlobProvider {
         p_hash: Hash,
         encoding: EncodingParams,
     ) -> Res<()> {
+        roots.record_before_root(c_hash).await?;
+        self.register_pair_recorded(store, c_hash, key, p_hash, encoding)
+            .await
+    }
+
+    /// Register a pair with the document whose cipherBlob facet is expected to
+    /// name it. Recording that provenance in the same transaction as the root
+    /// row closes the crash window between rooting and the facet write.
+    #[expect(clippy::too_many_arguments)]
+    pub async fn register_pair_with_provenance(
+        &self,
+        store: &Store,
+        roots: &PairRoots,
+        c_hash: Hash,
+        key: &MasterKey,
+        p_hash: Hash,
+        encoding: EncodingParams,
+        doc_id: &daybook_types::doc::DocId,
+        branch_path: &str,
+    ) -> Res<()> {
+        roots
+            .record_before_root_with_provenance(c_hash, doc_id, branch_path)
+            .await?;
+        self.register_pair_recorded(store, c_hash, key, p_hash, encoding)
+            .await
+    }
+
+    async fn register_pair_recorded(
+        &self,
+        store: &Store,
+        c_hash: Hash,
+        key: &MasterKey,
+        p_hash: Hash,
+        encoding: EncodingParams,
+    ) -> Res<()> {
         let Some(reader) = store.sync_reader(p_hash).await? else {
             eyre::bail!("cannot serve {c_hash}: plaintext {p_hash} has no readable stored data");
         };
-        // The record goes in before the tags, and that ordering is the contract:
-        // a rooted pair therefore always has a row, which is what lets the boot
-        // drain tell a pair the inventory never recorded (release it) from one
-        // the inventory has not caught up with yet (leave it). See `PairRoots`.
-        roots.record_before_root(c_hash).await?;
         set_pair_tags(store, c_hash, p_hash).await?;
         let pair = Arc::new(PlainPair::new(key, p_hash, reader, encoding));
         self.pairs
@@ -270,6 +300,33 @@ impl CipherBlobProvider {
         let c_hash = install_virtual_encrypted(store, key, p_hash, encoding).await?;
         self.register_pair(store, roots, c_hash, key, p_hash, encoding)
             .await?;
+        Ok(c_hash)
+    }
+
+    /// Install and root a representation whose expected cipherBlob owner is known.
+    #[expect(clippy::too_many_arguments)]
+    pub async fn install_with_provenance(
+        &self,
+        store: &Store,
+        roots: &PairRoots,
+        key: &MasterKey,
+        p_hash: Hash,
+        encoding: EncodingParams,
+        doc_id: &daybook_types::doc::DocId,
+        branch_path: &str,
+    ) -> Res<Hash> {
+        let c_hash = install_virtual_encrypted(store, key, p_hash, encoding).await?;
+        self.register_pair_with_provenance(
+            store,
+            roots,
+            c_hash,
+            key,
+            p_hash,
+            encoding,
+            doc_id,
+            branch_path,
+        )
+        .await?;
         Ok(c_hash)
     }
 

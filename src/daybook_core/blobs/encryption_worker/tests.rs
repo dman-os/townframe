@@ -11,7 +11,7 @@ async fn test_ctx(ctx: &DaybookTestContext, group: Option<BigKeyhiveGroup>) -> R
     let authority = crate::authority::ensure(&ctx.rt.rcx.big_repo, &ctx.rt.rcx.sql, None).await?;
     let group = match group {
         Some(group) => group,
-        None => authority.encrypted_blob_docs.clone(),
+        None => authority.encryption_candidates.clone(),
     };
     let inventory = ctx.rt.rcx.encryption_inventory_doc_id.clone();
     Ok(Arc::new(Ctx {
@@ -795,7 +795,7 @@ async fn blob_arriving_later_is_rearmed_by_the_presence_stream() -> Res<()> {
     let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(64);
     let _feeder = spawn_encryption_trigger_feeder(EncryptionFeederArgs {
         repo_part_store: Arc::clone(&ctx.rt.rcx.part_store),
-        eligibility_part: authority.encrypted_blob_docs_part_id(),
+        eligibility_part: authority.encryption_candidates_part_id(),
         presence_store: Arc::clone(&ctx.rt.rcx.blob_presence_store),
         facet_index: Arc::clone(&ctx.rt.doc_facet_set_index_repo),
         sql: ctx.rt.rcx.sql.clone(),
@@ -853,14 +853,17 @@ async fn blob_arriving_while_ineligible_rearms_the_presence_plane() -> Res<()> {
     ctx.rt
         .rcx
         .big_repo
-        .revoke_doc_access(branch_doc_id.clone(), authority.encrypted_blob_docs.clone())
+        .revoke_doc_access(
+            branch_doc_id.clone(),
+            authority.encryption_candidates.clone(),
+        )
         .await?;
 
     // Production spawn: both feeder lines + the trigger-fed machine.
     let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(64);
     let _feeder = spawn_encryption_trigger_feeder(EncryptionFeederArgs {
         repo_part_store: Arc::clone(&ctx.rt.rcx.part_store),
-        eligibility_part: authority.encrypted_blob_docs_part_id(),
+        eligibility_part: authority.encryption_candidates_part_id(),
         presence_store: Arc::clone(&ctx.rt.rcx.blob_presence_store),
         facet_index: Arc::clone(&ctx.rt.doc_facet_set_index_repo),
         sql: ctx.rt.rcx.sql.clone(),
@@ -935,7 +938,7 @@ async fn blob_arriving_while_ineligible_rearms_the_presence_plane() -> Res<()> {
     ctx.rt
         .rcx
         .big_repo
-        .add_admin_member_to_doc(branch_doc_id, authority.encrypted_blob_docs.clone())
+        .add_admin_member_to_doc(branch_doc_id, authority.encryption_candidates.clone())
         .await?;
     await_representation(
         &ctx,
@@ -980,14 +983,17 @@ async fn doc_joining_the_group_later_rearms_the_eligibility_stream() -> Res<()> 
     ctx.rt
         .rcx
         .big_repo
-        .revoke_doc_access(branch_doc_id.clone(), authority.encrypted_blob_docs.clone())
+        .revoke_doc_access(
+            branch_doc_id.clone(),
+            authority.encryption_candidates.clone(),
+        )
         .await?;
 
     // Production spawn: both feeder lines + the trigger-fed machine.
     let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(64);
     let _feeder = spawn_encryption_trigger_feeder(EncryptionFeederArgs {
         repo_part_store: Arc::clone(&ctx.rt.rcx.part_store),
-        eligibility_part: authority.encrypted_blob_docs_part_id(),
+        eligibility_part: authority.encryption_candidates_part_id(),
         presence_store: Arc::clone(&ctx.rt.rcx.blob_presence_store),
         facet_index: Arc::clone(&ctx.rt.doc_facet_set_index_repo),
         sql: ctx.rt.rcx.sql.clone(),
@@ -1033,7 +1039,10 @@ async fn doc_joining_the_group_later_rearms_the_eligibility_stream() -> Res<()> 
     ctx.rt
         .rcx
         .big_repo
-        .add_admin_member_to_doc(branch_doc_id.clone(), authority.encrypted_blob_docs.clone())
+        .add_admin_member_to_doc(
+            branch_doc_id.clone(),
+            authority.encryption_candidates.clone(),
+        )
         .await?;
 
     await_representation(&ctx, &doc_id, &cipher_key, "the eligibility re-arm").await?;
@@ -1669,16 +1678,12 @@ async fn rotation_retry_after_a_fault_at_entry_is_idempotent_and_orphan_free() -
     Ok(())
 }
 
-/// §19's declared crash window, asserted rather than asserted away: a fault
-/// after the §19 step-1 install leaves the interrupted attempt's pair
-/// rooted but unreferenced ("a crash before step 5 leaves unreferenced
-/// artifacts"), and the retry recovers to a correct end state while the
-/// orphan stays — the pin diff that releases pairs only drives pairs some
-/// facet once named, so collecting such an orphan is GC/collect territory
-/// (ADR-005-era), not the release path's.
+/// §19's declared crash window: a fault after installation leaves the
+/// interrupted pair rooted before its `cipherBlob` facet is committed. A
+/// subsequent pin-worker boot uses the provenance ledger to release that
+/// unclaimed pair, and the retry recovers to a correct end state.
 #[tokio::test(flavor = "multi_thread")]
-async fn crash_after_install_leaves_the_declared_unreferenced_pair_and_the_retry_recovers()
--> Res<()> {
+async fn crash_after_install_releases_unclaimed_pair_on_pin_worker_restart() -> Res<()> {
     let ctx = test_cx(utils_rs::function_full!()).await?;
     let worker_ctx = test_ctx(&ctx, None).await?;
     let worker = Worker::new(Arc::clone(&worker_ctx), None, None);
@@ -1698,7 +1703,7 @@ async fn crash_after_install_leaves_the_declared_unreferenced_pair_and_the_retry
         .expect("the document names a representation");
     let c1 = digest_str_to_blob_id_lenient(&cipher1.representation.digest).expect("a blob id");
     let ctx_store = ctx.rt.blobs_repo.iroh_store();
-    spawn_pin_worker_for_test(&ctx).await?;
+    let pin_stop = spawn_pin_worker_for_test(&ctx).await?;
 
     worker_ctx
         .faults
@@ -1726,6 +1731,20 @@ async fn crash_after_install_leaves_the_declared_unreferenced_pair_and_the_retry
         "the commit point was not reached"
     );
 
+    // The provenance row survives the failed facet commit. Reboot the pin worker
+    // before retrying so its boot drain can prove that the document names no pair.
+    let orphan_hash = PairRoots::boot(ctx.rt.rcx.sql.clone())
+        .await?
+        .unresolved()
+        .await?
+        .into_iter()
+        .find(|pair| pair.cipher_hash != blob_id_to_iroh_hash(c1.clone()))
+        .map(|pair| pair.cipher_hash)
+        .ok_or_eyre("the failed rotation left no unresolved pair")?;
+    let orphan = BlobId::new(*orphan_hash.as_bytes());
+    pin_stop.stop().await?;
+    let restarted_pin_stop = spawn_pin_worker_for_test(&ctx).await?;
+    wait_for_pair_tags(&ctx_store, &orphan, false).await?;
     worker_ctx
         .faults
         .fail_rotate_after_install
@@ -1757,8 +1776,8 @@ async fn crash_after_install_leaves_the_declared_unreferenced_pair_and_the_retry
     let names = pair_tag_names(&ctx_store).await?;
     assert_eq!(
         names.len(),
-        4,
-        "c1 released, c2 rooted, the orphaned attempt's pair still rooted: got {names:?}"
+        2,
+        "c1 and the orphaned attempt released; c2 rooted: got {names:?}"
     );
     let keys = DocKeySource::new(
         Arc::clone(&ctx.drawer_repo),
@@ -1775,6 +1794,7 @@ async fn crash_after_install_leaves_the_declared_unreferenced_pair_and_the_retry
         plaintext_bytes,
         "the recovered representation decrypts"
     );
+    restarted_pin_stop.stop().await?;
     ctx.stop().await?;
     Ok(())
 }

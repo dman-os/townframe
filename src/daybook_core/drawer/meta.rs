@@ -560,7 +560,7 @@ pub(crate) async fn registered_allocation_shapes(
 /// branches (`/tmp`) are skipped: local branch docs never enter a replicated
 /// partition, so the encryption worker never writes their facets and a claim
 /// can never ride one.
-async fn claims_in_branch_doc(
+pub(super) async fn claims_in_branch_doc(
     big_repo: &big_repo::SharedBigRepo,
     branch_doc_id: &big_repo::DocumentId,
     candidates_by_string: &HashMap<String, big_repo::DocumentId>,
@@ -583,29 +583,69 @@ async fn claims_in_branch_doc(
     if heads.is_empty() {
         return Ok(false);
     }
-    let facets = handle
+    let facets = match handle
         .hydrate_path_at_heads::<
             am_utils_rs::codecs::ThroughJson<HashMap<FacetKey, daybook_types::doc::FacetRaw>>,
         >(&heads, automerge::ROOT, vec!["facets".into()])
         .await
-        .wrap_err("hydrate facets for the add-outbox claim scan")?
-        .map(|value| value.0)
-        .unwrap_or_default();
+    {
+        Ok(value) => value.map(|value| value.0).unwrap_or_default(),
+        Err(err) => {
+            tracing::warn!(
+                %branch_doc_id,
+                error = ?err,
+                "claim scan could not decode a branch's facets"
+            );
+            return Ok(false);
+        }
+    };
+    let mut complete = true;
     for (key, raw) in facets {
         if key.tag != FacetTag::WellKnown(WellKnownFacetTag::CipherBlob) {
             continue;
         }
-        let WellKnownFacet::CipherBlob(cipher) =
-            WellKnownFacet::from_json(raw, WellKnownFacetTag::CipherBlob)?
-        else {
-            unreachable!("cipherBlob facet decoded to another well-known variant");
+        let cipher = match WellKnownFacet::from_json(raw, WellKnownFacetTag::CipherBlob) {
+            Ok(WellKnownFacet::CipherBlob(cipher)) => cipher,
+            Ok(other) => {
+                complete = false;
+                tracing::warn!(
+                    %branch_doc_id,
+                    facet = %key,
+                    tag = ?other.tag(),
+                    "claim scan skipped a cipherBlob facet decoded as another facet"
+                );
+                continue;
+            }
+            Err(err) => {
+                complete = false;
+                tracing::warn!(
+                    %branch_doc_id,
+                    facet = %key,
+                    error = ?err,
+                    "claim scan skipped a malformed cipherBlob facet"
+                );
+                continue;
+            }
         };
-        let reference = parse_facet_ref(&cipher.key_ref)?;
+        let reference = match parse_facet_ref(&cipher.key_ref) {
+            Ok(reference) => reference,
+            Err(err) => {
+                complete = false;
+                tracing::warn!(
+                    %branch_doc_id,
+                    facet = %key,
+                    key_ref = %cipher.key_ref,
+                    error = ?err,
+                    "claim scan skipped a cipherBlob facet with an invalid keyRef"
+                );
+                continue;
+            }
+        };
         if let Some(candidate) = candidates_by_string.get(&reference.doc_id.to_string()) {
             claims.insert(candidate.clone());
         }
     }
-    Ok(true)
+    Ok(complete)
 }
 
 /// Replay the registration write for the claimed-but-uncommitted staging

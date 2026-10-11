@@ -384,7 +384,7 @@ impl PlugsRepo {
         // domains.
         crate::authority::grant_docs_admin(
             &self.big_repo,
-            &authority.encrypted_blob_docs,
+            &authority.encryption_candidates,
             [branch_ref.branch_doc_id],
         )
         .await?;
@@ -481,7 +481,7 @@ impl PlugsRepo {
         // domains.
         crate::authority::grant_docs_admin(
             &self.big_repo,
-            &authority.encrypted_blob_docs,
+            &authority.encryption_candidates,
             [branch_ref.branch_doc_id],
         )
         .await?;
@@ -625,7 +625,7 @@ impl PlugsRepo {
         // domains.
         crate::authority::grant_docs_admin(
             &self.big_repo,
-            &authority.encrypted_blob_docs,
+            &authority.encryption_candidates,
             [branch_ref.branch_doc_id],
         )
         .await?;

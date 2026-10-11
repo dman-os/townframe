@@ -176,7 +176,7 @@ pub struct DrawerRepo {
     partition_store: SharedPartStore,
     drawer_doc_id: DocumentId,
     content_docs_group: BigKeyhiveGroup,
-    encrypted_blob_docs_group: BigKeyhiveGroup,
+    encryption_candidates_group: BigKeyhiveGroup,
     drawer_group: BigKeyhiveGroup,
     local_actor_id: ActorId,
     local_peer_id: PeerKey,
@@ -312,7 +312,7 @@ impl DrawerRepo {
             partition_store,
             drawer_doc_id,
             content_docs_group: authority.content_docs.clone(),
-            encrypted_blob_docs_group: authority.encrypted_blob_docs.clone(),
+            encryption_candidates_group: authority.encryption_candidates.clone(),
             drawer_group: authority.default_drawer.clone(),
             local_actor_id,
             local_user_path,
@@ -358,7 +358,6 @@ impl DrawerRepo {
         // outlived their outbox row, before any other repo machinery boots on
         // possibly-half-registered entries.
         repo.reconcile_add_outbox_at_boot().await?;
-        repo.migrate_content_doc_authority().await?;
         repo.ensure_replicated_branch_partitions().await?;
         let worker_handle = tokio::spawn({
             let repo = Arc::clone(&repo);
@@ -379,39 +378,6 @@ impl DrawerRepo {
         ))
     }
 
-    /// One-shot backfill of the authority groups every document branch must
-    /// belong to (see `drawer`'s own groups; keyed so the walk runs once).
-    async fn migrate_content_doc_authority(&self) -> Res<()> {
-        const MIGRATION_KEY: &str = "global.authority.content_docs_and_drawer_migrated";
-        if crate::repo::globals::get_string_global(&self.meta_store_sql, MIGRATION_KEY)
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-        for item in self.list().await? {
-            let Some(entry) = self.get_entry(&item.doc_id).await? else {
-                continue;
-            };
-            for branch in entry.branches.values() {
-                self.big_repo
-                    .add_admin_member_to_doc(
-                        branch.branch_doc_id.clone(),
-                        self.content_docs_group.clone(),
-                    )
-                    .await?;
-                self.big_repo
-                    .add_admin_member_to_doc(
-                        branch.branch_doc_id.clone(),
-                        self.drawer_group.clone(),
-                    )
-                    .await?;
-            }
-        }
-        crate::repo::globals::upsert_string_global(&self.meta_store_sql, MIGRATION_KEY, "1")
-            .await?;
-        Ok(())
-    }
     fn branch_kind_for_path(
         &self,
         branch_path: &daybook_types::doc::BranchPath,
@@ -491,13 +457,13 @@ impl DrawerRepo {
                 .await?;
             // The encryption-eligibility membership is the third grant a branch
             // doc carries (commit_staged_adds grants the content-docs and
-            // drawer groups at registration; the encrypted_blob_docs migration
-            // backfills older repos). Leaving it on
+            // drawer groups at registration; it is the group watched by the
+            // encryption worker. Leaving it on
             // lets every repo agent - via repo_agents' admin membership of the
             // group - still reach a tombstoned branch doc, so `branch_doc_reachable`
             // stays true and the doc-channel/keyhive two-channel contract breaks.
             self.big_repo
-                .revoke_doc_access(branch_doc_id, self.encrypted_blob_docs_group.clone())
+                .revoke_doc_access(branch_doc_id, self.encryption_candidates_group.clone())
                 .await?;
         }
         Ok(())

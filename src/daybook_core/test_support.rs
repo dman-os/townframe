@@ -481,7 +481,7 @@ pub async fn test_cx_with_options(
     .await?;
     crate::authority::grant_docs_admin(
         &big_repo,
-        &authority.encrypted_blob_docs,
+        &authority.encryption_candidates,
         [app_doc_id.clone(), drawer_doc_id.clone()],
     )
     .await?;

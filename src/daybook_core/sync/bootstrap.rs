@@ -97,7 +97,7 @@ pub struct CloneProvisionResponse {
     /// group still deserializes; a clone from such a seeder then creates its
     /// own group, i.e. the two devices name different encryption domains.
     #[serde(default)]
-    pub encrypted_blob_docs_group: Option<[u8; 32]>,
+    pub encryption_candidates_group: Option<[u8; 32]>,
     pub default_drawer_group: [u8; 32],
     pub blob_inventories_group: [u8; 32],
 }
@@ -158,7 +158,7 @@ impl CloneProvisionResponse {
                 repo_agents: self.repo_agents_group,
                 core_docs: self.core_docs_group,
                 content_docs: self.content_docs_group,
-                encrypted_blob_docs: self.encrypted_blob_docs_group,
+                encryption_candidates: self.encryption_candidates_group,
                 default_drawer: self.default_drawer_group,
                 blob_inventories: self.blob_inventories_group,
             },
@@ -327,9 +327,9 @@ async fn pull_required_partitions_via_big_sync_worker(
     // The encryption-eligibility group is a document-bearing group like the
     // three above, so its state has to reach the clone or the clone cannot
     // evaluate eligibility. Absent on a seeder that predates the group.
-    let encrypted_blob_docs_partition_id = bootstrap
+    let encryption_candidates_partition_id = bootstrap
         .authority_ids
-        .encrypted_blob_docs
+        .encryption_candidates
         .map(big_repo::group_part_id);
     let blob_sync_backend = Arc::new(crate::blobs::sync::BlobSyncBackend::new(
         Arc::clone(blobs_repo),
@@ -438,7 +438,7 @@ async fn pull_required_partitions_via_big_sync_worker(
     ]
     .into_iter()
     .chain(
-        encrypted_blob_docs_partition_id
+        encryption_candidates_partition_id
             .clone()
             .into_iter()
             .map(|part_id| (part_id, Arc::clone(&repo_backend_id))),
@@ -478,7 +478,7 @@ async fn pull_required_partitions_via_big_sync_worker(
             drawer_partition_id,
         ]
         .into_iter()
-        .chain(encrypted_blob_docs_partition_id)
+        .chain(encryption_candidates_partition_id)
         .collect::<Vec<_>>();
         big_sync_worker
             .wait_for_full_sync(vec![peer_id.clone()], required_partitions)
@@ -770,7 +770,7 @@ async fn ensure_bootstrap_local_partitions(
     .chain(
         bootstrap
             .authority_ids
-            .encrypted_blob_docs
+            .encryption_candidates
             .map(big_repo::group_part_id),
     );
     for part_id in part_ids {

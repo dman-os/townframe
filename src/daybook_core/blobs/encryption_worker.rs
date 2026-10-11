@@ -1663,16 +1663,15 @@ impl Ctx {
         let new_key = MasterKey::random();
         let c2_hash = self
             .provider
-            .install(
+            .install_with_provenance(
                 &self.store,
                 &self.pair_roots,
                 &new_key,
                 crate::blobs::blob_id_to_iroh_hash(plaintext.clone()),
                 encoding,
+                doc_id,
+                branch.as_ref(),
             )
-            .await?;
-        self.pair_roots
-            .attach_provenance(c2_hash, doc_id, branch.as_ref())
             .await?;
         eyre::ensure!(
             c2_hash != crate::blobs::blob_id_to_iroh_hash(plaintext.clone()),
@@ -1772,19 +1771,15 @@ impl Ctx {
         // servable and rooted.
         let c_hash = self
             .provider
-            .install(
+            .install_with_provenance(
                 &self.store,
                 &self.pair_roots,
                 &key,
                 crate::blobs::blob_id_to_iroh_hash(plaintext),
                 EncodingParams::DEFAULT,
+                doc_id,
+                branch.as_ref(),
             )
-            .await?;
-        // Provenance for the pair the install just rooted: if this process dies
-        // before the facet write below lands, the drain needs to know which
-        // document's facet to check (ADR 003 §19).
-        self.pair_roots
-            .attach_provenance(c_hash, doc_id, branch.as_ref())
             .await?;
         let c_len = self.blob_status(c_hash).await?.ok_or_else(|| {
             eyre::eyre!("representation {c_hash} is not complete immediately after install")
@@ -1899,13 +1894,15 @@ impl Ctx {
             // The entry is still there: only the in-process pair is missing.
             Some(_) => {
                 self.provider
-                    .register_pair(
+                    .register_pair_with_provenance(
                         &self.store,
                         &self.pair_roots,
                         c_hash,
                         &key,
                         p_hash,
                         encoding,
+                        doc_id,
+                        branch.as_ref(),
                     )
                     .await?;
             }
@@ -1915,7 +1912,15 @@ impl Ctx {
             None => {
                 let recomputed = self
                     .provider
-                    .install(&self.store, &self.pair_roots, &key, p_hash, encoding)
+                    .install_with_provenance(
+                        &self.store,
+                        &self.pair_roots,
+                        &key,
+                        p_hash,
+                        encoding,
+                        doc_id,
+                        branch.as_ref(),
+                    )
                     .await?;
                 eyre::ensure!(
                     recomputed == c_hash,

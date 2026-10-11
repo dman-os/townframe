@@ -2335,7 +2335,7 @@ mod tests {
             })
             .await?;
         roots
-            .attach_provenance(
+            .record_before_root_with_provenance(
                 crate::blobs::blob_id_to_iroh_hash(checked.clone()),
                 &doc_id,
                 "main",
@@ -2439,7 +2439,9 @@ mod tests {
                 crate::drawer::FacetWriteScope::System,
             )
             .await?;
-        roots.attach_provenance(c_hash, &doc_id, "main").await?;
+        roots
+            .record_before_root_with_provenance(c_hash, &doc_id, "main")
+            .await?;
 
         let _pin_worker = spawn_pin_worker_for_test(&test_context).await?;
 

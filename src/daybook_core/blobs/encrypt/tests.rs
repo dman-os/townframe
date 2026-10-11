@@ -54,6 +54,9 @@ fn encoding_parameters_match_the_facet_shape() {
         EncodingParams::from_encoding_parameters("br", &json).is_err(),
         "an unknown content coding must not be read as aes128gcm"
     );
+    assert!(EncodingParams::new(MAX_WIRE_RECORD_SIZE, Padding::Record).is_ok());
+    assert!(EncodingParams::new(MAX_WIRE_RECORD_SIZE + 1, Padding::Record).is_err());
+    assert!(EncodingParams::new(RECORD_OVERHEAD as u64, Padding::Record).is_err());
     // ...and neither is a parameters object that does not fit the scheme.
     for bad in [
         serde_json::json!({"recordSize": 4096}),

@@ -277,11 +277,45 @@ impl DrawerRepo {
             }
         }
 
-        let mut staged_docs = Vec::with_capacity(args_batch.len());
-        for args in args_batch {
+        // A completed idempotency row is the durable result of the add, not an
+        // instruction to replay its registration. In particular, the document
+        // may have been deleted after the original add; the retry still returns
+        // its recorded id and must not restore the docs.map entry.
+        let mut resolved: Vec<Option<DocId>> = (0..args_batch.len()).map(|_| None).collect();
+        let mut fresh_args = Vec::with_capacity(args_batch.len());
+        let mut fresh_positions = Vec::with_capacity(args_batch.len());
+        for (position, args) in args_batch.into_iter().enumerate() {
+            let done_id = match args.idempotency_key.as_deref() {
+                Some(key) => outbox::get_row(&self.meta_store_sql, key)
+                    .await?
+                    .filter(|row| row.state == OutboxState::Done)
+                    .map(|row| DocId::from(row.branch_doc_id.to_string())),
+                None => None,
+            };
+            if let Some(doc_id) = done_id {
+                resolved[position] = Some(doc_id);
+            } else {
+                fresh_positions.push(position);
+                fresh_args.push(args);
+            }
+        }
+
+        let mut staged_docs = Vec::with_capacity(fresh_args.len());
+        for args in fresh_args {
             staged_docs.push(self.prepare_add_doc(args, false).await?);
         }
-        self.commit_staged_adds(&staged_docs).await
+        let created = if staged_docs.is_empty() {
+            Vec::new()
+        } else {
+            self.commit_staged_adds(&staged_docs).await?
+        };
+        for (position, doc_id) in fresh_positions.into_iter().zip(created) {
+            resolved[position] = Some(doc_id);
+        }
+        Ok(resolved
+            .into_iter()
+            .map(|doc_id| doc_id.expect("every add position resolves to a document id"))
+            .collect())
     }
 
     /// The registration half of the drawer's add flow, shared by `batch_add`
@@ -309,7 +343,7 @@ impl DrawerRepo {
             self.big_repo
                 .add_admin_member_to_doc(
                     staged.branch_doc_id.clone(),
-                    self.encrypted_blob_docs_group.clone(),
+                    self.encryption_candidates_group.clone(),
                 )
                 .await?;
             self.big_repo
@@ -512,7 +546,7 @@ impl DrawerRepo {
         self.big_repo
             .add_admin_member_to_doc(
                 branch_doc_id.clone(),
-                self.encrypted_blob_docs_group.clone(),
+                self.encryption_candidates_group.clone(),
             )
             .await?;
         self.big_repo
@@ -1028,7 +1062,7 @@ impl DrawerRepo {
         self.big_repo
             .add_admin_member_to_doc(
                 branch_doc_id.clone(),
-                self.encrypted_blob_docs_group.clone(),
+                self.encryption_candidates_group.clone(),
             )
             .await?;
         if branch_kind == BranchKind::Replicated {

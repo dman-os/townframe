@@ -946,7 +946,7 @@ async fn delete_a_replicated_branch_revokes_before_it_commits_the_tombstone() ->
         node.repo.content_docs_group.id().into(),
         // The encryption-eligibility grant is the third delegation a branch doc
         // carries; its revocation on delete is asserted alongside the other two.
-        node.repo.encrypted_blob_docs_group.id().into(),
+        node.repo.encryption_candidates_group.id().into(),
     ];
     for group in &revoked_groups {
         assert!(
@@ -3829,7 +3829,7 @@ async fn the_drawer_commit_failure_pins_the_granted_not_registered_window() -> R
     // The finalize grants landed before the failing commit.
     let granted_groups = [
         node.repo.content_docs_group.id().into(),
-        node.repo.encrypted_blob_docs_group.id().into(),
+        node.repo.encryption_candidates_group.id().into(),
         node.repo.drawer_group.id().into(),
     ];
     for group in &granted_groups {
@@ -3950,7 +3950,7 @@ async fn a_temporary_add_grants_nothing_and_registers_nothing() -> Res<()> {
     );
     for group in [
         &node.repo.content_docs_group,
-        &node.repo.encrypted_blob_docs_group,
+        &node.repo.encryption_candidates_group,
         &node.repo.drawer_group,
     ] {
         assert!(
@@ -4003,7 +4003,7 @@ async fn committing_a_staged_add_matches_batch_add() -> Res<()> {
     );
     for group in [
         &node.repo.content_docs_group,
-        &node.repo.encrypted_blob_docs_group,
+        &node.repo.encryption_candidates_group,
         &node.repo.drawer_group,
     ] {
         assert!(
@@ -4050,7 +4050,7 @@ async fn discarding_a_staged_add_is_idempotent_and_leaves_a_commit_intact() -> R
     );
     for group in [
         &node.repo.content_docs_group,
-        &node.repo.encrypted_blob_docs_group,
+        &node.repo.encryption_candidates_group,
         &node.repo.drawer_group,
     ] {
         assert!(
@@ -4099,7 +4099,7 @@ async fn discarding_a_staged_add_is_idempotent_and_leaves_a_commit_intact() -> R
     );
     for group in [
         &node.repo.content_docs_group,
-        &node.repo.encrypted_blob_docs_group,
+        &node.repo.encryption_candidates_group,
         &node.repo.drawer_group,
     ] {
         assert!(
@@ -4309,7 +4309,7 @@ async fn a_claimed_committed_staging_add_is_replayed_through_the_claim_machinery
     );
     for group in [
         &node.repo.content_docs_group,
-        &node.repo.encrypted_blob_docs_group,
+        &node.repo.encryption_candidates_group,
         &node.repo.drawer_group,
     ] {
         assert!(
@@ -4328,6 +4328,65 @@ async fn a_claimed_committed_staging_add_is_replayed_through_the_claim_machinery
             .await?
             .is_some_and(|doc| doc.facets.contains_key(&jwk_key)),
         "the committed key document must serve the JWK facet the claim pinned"
+    );
+    node.stop().await?;
+    Ok(())
+}
+
+/// A malformed cipherBlob is an incomplete claim scan, not a fatal boot error.
+/// Valid claims found beside it remain positive evidence and are still returned.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_claim_scan_skips_malformed_cipher_blobs_and_keeps_valid_claims() -> Res<()> {
+    let node = boot_drawer_node().await?;
+    let candidate = big_repo::DocumentId::new([0x41; 32]);
+    let valid_cipher = daybook_types::doc::CipherBlob {
+        representation: daybook_types::doc::Representation {
+            digest: crate::blobs::blob_id_to_digest_str(crate::blobs::BlobId::new([9_u8; 32])),
+            length_octets: 4,
+        },
+        content_encoding: crate::blobs::encrypt::CONTENT_ENCODING_AES128GCM.to_string(),
+        key_ref: format!("db+facet:///{candidate}/grp:testdomain/key").parse()?,
+        key_ref_heads: ChangeHashSet(Vec::new().into()),
+        encoding_parameters: crate::blobs::encrypt::EncodingParams::DEFAULT
+            .to_encoding_parameters(),
+    };
+    let malformed_key = FacetKey {
+        tag: WellKnownFacetTag::CipherBlob.into(),
+        id: "grp:testdomain/malformed".into(),
+    };
+    let valid_key = FacetKey {
+        tag: WellKnownFacetTag::CipherBlob.into(),
+        id: "grp:testdomain/valid".into(),
+    };
+    let mut doc = automerge::Automerge::new();
+    let mut tx = doc.transaction();
+    let facets = tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)?;
+    autosurgeon::reconcile_prop(
+        &mut tx,
+        &facets,
+        &*malformed_key.to_string(),
+        am_utils_rs::codecs::ThroughJson(serde_json::json!({"not": "a cipherBlob"})),
+    )?;
+    autosurgeon::reconcile_prop(
+        &mut tx,
+        &facets,
+        &*valid_key.to_string(),
+        am_utils_rs::codecs::ThroughJson(serde_json::Value::from(WellKnownFacet::CipherBlob(
+            valid_cipher,
+        ))),
+    )?;
+    tx.commit();
+    let branch_doc_id = node.big_repo.create_doc(doc).await?.document_id();
+
+    let candidates = HashMap::from([(candidate.to_string(), candidate.clone())]);
+    let mut claims = HashSet::new();
+    let complete =
+        super::meta::claims_in_branch_doc(&node.big_repo, &branch_doc_id, &candidates, &mut claims)
+            .await?;
+    assert!(!complete, "a malformed facet makes the scan incomplete");
+    assert!(
+        claims.contains(&candidate),
+        "a valid claim remains positive evidence beside malformed data"
     );
     node.stop().await?;
     Ok(())
@@ -4499,8 +4558,13 @@ async fn the_key_retry_contract_holds_for_done_and_inflight_rows() -> Res<()> {
         idempotency_key: Some(key.to_string()),
     };
     let first = node.repo.add(add_with("retry-key")).await?;
+    node.repo.del(&first).await?;
     let second = node.repo.add(add_with("retry-key")).await?;
     assert_eq!(first, second, "same key + done ⇒ same doc_id");
+    assert!(
+        node.repo.get_entry(&first).await?.is_none(),
+        "a done retry must not restore a document deleted after the original add"
+    );
     let rows: i64 = {
         sqlx::query_scalar("SELECT COUNT(*) FROM drawer_add_outbox")
             .fetch_one(&node.repo.meta_store_sql().write_pool)

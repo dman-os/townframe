@@ -423,7 +423,7 @@ impl Rt {
                         blobs_repo: Arc::clone(&blobs_repo),
                         facet_set_store: doc_facet_set_index_repo.revision_store(),
                         facet_index: Arc::clone(&doc_facet_set_index_repo),
-                        domain_group: authority.encrypted_blob_docs.clone(),
+                        domain_group: authority.encryption_candidates.clone(),
                         encryption_inventory_doc_id: rcx.encryption_inventory_doc_id.clone(),
                         parent_cancel_token: cancel_token.clone(),
                         // A rotation request for an unspawned worker is refused
@@ -438,7 +438,7 @@ impl Rt {
                         // The §15 trigger rides with the worker: the runtime
                         // holds the sender, tests/other callers hold theirs.
                         feeder_repo_part_store: Arc::clone(&rcx.part_store),
-                        feeder_eligibility_part: authority.encrypted_blob_docs_part_id(),
+                        feeder_eligibility_part: authority.encryption_candidates_part_id(),
                         feeder_presence_store: Arc::clone(&rcx.blob_presence_store),
                     },
                 )

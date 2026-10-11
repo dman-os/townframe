@@ -957,7 +957,7 @@ impl IrohSyncRepo {
             repo_agents_group: self.authority.ids().repo_agents,
             core_docs_group: self.authority.ids().core_docs,
             content_docs_group: self.authority.ids().content_docs,
-            encrypted_blob_docs_group: self.authority.ids().encrypted_blob_docs,
+            encryption_candidates_group: self.authority.ids().encryption_candidates,
             default_drawer_group: self.authority.ids().default_drawer,
             blob_inventories_group: self.authority.ids().blob_inventories,
         })

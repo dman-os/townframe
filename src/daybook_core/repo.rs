@@ -513,7 +513,7 @@ impl RepoCtx {
             // the sponsored set (ADR 005).
             crate::authority::grant_docs_admin(
                 &big_repo,
-                &authority.encrypted_blob_docs,
+                &authority.encryption_candidates,
                 [
                     doc_app.document_id(),
                     doc_drawer.document_id(),
@@ -836,7 +836,7 @@ impl RepoCtx {
             // inventories are not.
             crate::authority::grant_docs_admin(
                 big_repo,
-                &authority.encrypted_blob_docs,
+                &authority.encryption_candidates,
                 [
                     doc_app.document_id(),
                     doc_drawer.document_id(),
@@ -1126,7 +1126,7 @@ pub(crate) async fn ensure_authority_partitions(
     for part_id in [
         authority.core_docs_part_id(),
         authority.content_docs_part_id(),
-        authority.encrypted_blob_docs_part_id(),
+        authority.encryption_candidates_part_id(),
         authority.default_drawer_part_id(),
         authority.blob_inventories_part_id(),
     ] {

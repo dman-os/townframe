@@ -96,23 +96,24 @@ impl PairRoots {
         Ok(())
     }
 
-    /// Record which document's facet is expected to name this pair.
+    /// Record a pair and its expected cipherBlob owner atomically before rooting it.
     ///
-    /// Called by the rooting path straight after the tags are written, while it
-    /// still knows the document it is about to author the `cipherBlob` facet
-    /// into. An `UPDATE`, not an insert: the row already exists (see
-    /// [`PairRoots::record_before_root`]), and a missing row means a rooting path
-    /// skipped the record, which is the one bug this ledger exists to prevent.
-    ///
-    /// A crash between the tags and this call leaves a row with no provenance, so
-    /// the drain leaves that pair alone rather than guessing at the facets.
-    pub(crate) async fn attach_provenance(
+    /// The provenance must be in the same transaction as the root row: a crash
+    /// after the tags are written but before a separate provenance update must
+    /// still leave boot reconciliation able to prove that an unclaimed pair is
+    /// safe to release.
+    pub(crate) async fn record_before_root_with_provenance(
         &self,
         c_hash: Hash,
         doc_id: &DocId,
         branch_path: &str,
     ) -> Res<()> {
-        let updated = sqlx::query(
+        let mut tx = self.sql.write_pool.begin().await?;
+        sqlx::query("INSERT OR IGNORE INTO blob_pair_root (cipher_hash) VALUES (?)")
+            .bind(c_hash.to_hex())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
             "UPDATE blob_pair_root
                 SET doc_id = ?
                   , branch_path = ?
@@ -121,14 +122,9 @@ impl PairRoots {
         .bind(doc_id)
         .bind(branch_path)
         .bind(c_hash.to_hex())
-        .execute(&self.sql.write_pool)
-        .await?
-        .rows_affected();
-        eyre::ensure!(
-            updated == 1,
-            "pair {c_hash} was given provenance with no root record: \
-             record_before_root must run before the tags are written"
-        );
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -183,51 +179,25 @@ mod tests {
     use super::*;
 
     /// A row survives a reboot with its provenance, and `clear` retires it.
-    ///
-    /// The reboot is the point: the drain only ever runs over rows an earlier
-    /// process wrote, so the columns and the hex round trip have to survive
-    /// `boot` over the same database.
     #[tokio::test]
     async fn provenance_round_trips_across_a_boot() -> Res<()> {
         let sql = SqlCtx::memory().await?;
         let roots = PairRoots::boot(sql.clone()).await?;
         let blob_id = crate::blobs::BlobId::new(*blake3::hash(b"pair root round trip").as_bytes());
         let c_hash = crate::blobs::blob_id_to_iroh_hash(blob_id);
+        let doc_id: DocId = "doc-pair-root-test".to_string();
 
-        roots.record_before_root(c_hash).await?;
+        roots
+            .record_before_root_with_provenance(c_hash, &doc_id, "main")
+            .await?;
         let rebooted = PairRoots::boot(sql.clone()).await?;
         let unresolved = rebooted.unresolved().await?;
         assert_eq!(unresolved.len(), 1);
         assert_eq!(unresolved[0].cipher_hash, c_hash);
-        assert!(
-            unresolved[0].claimed_by.is_none(),
-            "nothing attached provenance yet"
-        );
-
-        let doc_id: DocId = "doc-pair-root-test".to_string();
-        rebooted.attach_provenance(c_hash, &doc_id, "main").await?;
-        let unresolved = rebooted.unresolved().await?;
         assert_eq!(unresolved[0].claimed_by, Some((doc_id, "main".to_string())));
 
         rebooted.clear(c_hash).await?;
         assert!(rebooted.unresolved().await?.is_empty());
-        Ok(())
-    }
-
-    /// A rooting path cannot attach provenance for a pair it never recorded.
-    #[tokio::test]
-    async fn provenance_without_a_record_is_a_loud_failure() -> Res<()> {
-        let roots = PairRoots::boot(SqlCtx::memory().await?).await?;
-        let blob_id = crate::blobs::BlobId::new(*blake3::hash(b"unrecorded pair").as_bytes());
-        let c_hash = crate::blobs::blob_id_to_iroh_hash(blob_id);
-        let err = roots
-            .attach_provenance(c_hash, &"doc-unrecorded".to_string(), "main")
-            .await
-            .expect_err("attach without record_before_root must fail");
-        assert!(
-            err.to_string().contains("no root record"),
-            "unexpected error: {err}"
-        );
         Ok(())
     }
 }
