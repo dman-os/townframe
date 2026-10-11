@@ -113,7 +113,7 @@
   .column-dot[data-window-position="middle"],
   .column-dot[data-window-position="trailing"],
   .column-dot[data-window-position="single"] {
-    @apply h-2.5 w-4 shadow-sm shadow-primary/50;
+    @apply h-2.5 w-4 shadow-primary-sm;
   }
 
   .column-dot[data-window-position="leading"] {

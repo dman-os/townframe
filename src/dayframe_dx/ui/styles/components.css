@@ -2,6 +2,15 @@
   @apply border-0 bg-transparent shadow-none;
 }
 
+@utility shadow-primary-sm {
+  --tw-shadow: 0 1px 3px 0 var(--df-color-primary), 0 1px 2px -1px var(--df-color-primary);
+  box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+
+  @supports (color: color-mix(in lab, red, red)) {
+    --tw-shadow: 0 1px 3px 0 color-mix(in srgb, var(--df-color-primary) 50%, transparent), 0 1px 2px -1px color-mix(in srgb, var(--df-color-primary) 50%, transparent);
+  }
+}
+
 @utility df-card-header {
   @apply px-5 pt-4 pb-2;
 }
@@ -31,7 +40,7 @@
 }
 
 @utility df-button-default {
-  @apply bg-primary text-primary-foreground;
+  @apply bg-primary text-on-primary;
 }
 
 @utility df-button-secondary {
@@ -39,15 +48,15 @@
 }
 
 @utility df-button-outline {
-  @apply border-border bg-transparent text-foreground;
+  @apply border-border bg-transparent text-text;
 }
 
 @utility df-button-ghost {
-  @apply bg-transparent text-foreground;
+  @apply bg-transparent text-text;
 }
 
 @utility df-button-destructive {
-  @apply bg-destructive text-destructive-foreground;
+  @apply bg-danger text-on-danger;
 }
 
 @utility df-tabs {

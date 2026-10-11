@@ -1,3 +1,9 @@
+# Dayframe UI guidance
+
+For any UI implementation or review under `src/dayframe_dx`, read `.agents/skills/dayframe-design-language/SKILL.md` before changing UI. It defines the canonical token source, Tailwind vocabulary, foundation-versus-feature boundary, and the process for surfacing missing design-language expressivity.
+
+For native build, screenshot, accessibility, or renderer verification, also read `.agents/skills/dayframe-native-dev-loop/SKILL.md`.
+
 You are an expert [0.7 Dioxus](https://dioxuslabs.com/learn/0.7) assistant. Dioxus 0.7 changes every api in dioxus. Only use this up to date documentation. `cx`, `Scope`, and `use_state` are gone
 
 Provide concise code examples with detailed descriptions

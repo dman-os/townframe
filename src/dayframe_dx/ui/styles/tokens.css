@@ -1,110 +1,53 @@
-/* Dayframe semantic and compact utility tokens. */
+/* Runtime reset and theme-provider adapters. Foundation defaults are generated from tokens/*.tokens.json. */
 
 @layer base {
-  html, body {
+  html,
+  body {
     margin: 0;
     padding: 0;
     min-width: 100%;
     min-height: 100%;
   }
 
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     box-sizing: border-box;
   }
 }
 
+/*
+ * Material remains an external theme provider during migration. It overrides
+ * only theme-dependent semantic color roles; dimensions, typography, and
+ * elevation come from tokens.generated.css.
+ */
 @layer theme {
-/* Values that do not vary by theme. */
-:root {
-  /* Tailwind spacing is driven by the single Dayframe base unit. */
-  --df-spacing: 0.25rem;
-  --df-font-family: system-ui, sans-serif;
-  /* Shape and borders */
-  --df-radius-sm: 4px;
-  --df-radius-md: 8px;
-  --df-radius-lg: 12px;
-  --df-radius-xl: 16px;
-  --df-radius-pill: 999px;
-  --df-border-width-hairline: 1px;
-  --df-border-width-thin: 1px;
-  --df-border-width-thick: 2px;
+  .df-theme {
+    --df-color-canvas: var(--scheme-color-background);
+    --df-color-surface: var(--scheme-color-surface-container-low);
+    --df-color-surface-raised: var(--scheme-color-surface-container);
+    --df-color-surface-sunken: var(--scheme-color-surface-dim);
+    --df-color-text: var(--scheme-color-on-background);
+    --df-color-text-muted: var(--scheme-color-on-surface-variant);
+    --df-color-text-subtle: var(--scheme-color-outline);
+    --df-color-border: var(--scheme-color-outline-variant);
+    --df-color-focus: var(--scheme-color-primary);
+    --df-color-primary: var(--scheme-color-primary);
+    --df-color-on-primary: var(--scheme-color-on-primary);
+    --df-color-accent: var(--scheme-color-secondary);
+    --df-color-on-accent: var(--scheme-color-on-secondary);
+    --df-color-accent-container: var(--scheme-color-secondary-container);
+    --df-color-on-accent-container: var(--scheme-color-on-secondary-container);
+    --df-color-danger: var(--scheme-color-error);
+    --df-color-on-danger: var(--scheme-color-on-error);
+    --df-color-success: var(--scheme-color-tertiary);
+    --df-color-warning: var(--scheme-color-secondary);
 
-  /* Type */
-  /* Typography is provided by Tailwind's native font, text, leading, tracking, and weight tokens. */
-
-  /* Motion */
-}
-
-/* Theme-backed values must be declared on the theme boundary. */
-.df-theme {
-  --df-color-canvas: var(--scheme-color-background);
-  --df-color-surface: var(--scheme-color-surface-container-low);
-  --df-color-surface-raised: var(--scheme-color-surface-container);
-  --df-color-surface-sunken: var(--scheme-color-surface-dim);
-  --df-color-text: var(--scheme-color-on-background);
-  --df-color-text-muted: var(--scheme-color-on-surface-variant);
-  --df-color-text-subtle: var(--scheme-color-outline);
-  --df-color-border: var(--scheme-color-outline-variant);
-  --df-color-focus: var(--scheme-color-primary);
-  --df-color-primary: var(--scheme-color-primary);
-  --df-color-on-primary: var(--scheme-color-on-primary);
-  --df-color-on-danger: var(--scheme-color-on-error);
-  --df-color-accent: var(--scheme-color-secondary);
-  --df-color-on-accent: var(--scheme-color-on-secondary);
-  --df-color-accent-container: var(--scheme-color-secondary-container);
-  --df-color-on-accent-container: var(--scheme-color-on-secondary-container);
-  --df-color-danger: var(--scheme-color-error);
-  --df-color-success: var(--scheme-color-tertiary);
-  --df-color-warning: var(--scheme-color-secondary);
-  --df-shadow-raised: 0 8px 24px var(--scheme-color-shadow);
-  --df-shadow-none: none;
-  --df-shadow-sm: 0 1px 2px var(--scheme-color-shadow);
-  --df-shadow-md: 0 4px 12px var(--scheme-color-shadow);
-
-  /* Runtime aliases used by generated Tailwind utilities. */
-  --color-background: var(--df-color-canvas);
-  --color-foreground: var(--df-color-text);
-  --color-card: var(--df-color-surface);
-  --color-surface-raised: var(--df-color-surface-raised);
-  --color-surface-sunken: var(--df-color-surface-sunken);
-  --color-card-foreground: var(--df-color-text);
-  --color-primary: var(--df-color-primary);
-  --color-primary-foreground: var(--df-color-on-primary);
-  --color-border: var(--df-color-border);
-  --color-ring: var(--df-color-focus);
-  --color-secondary: var(--df-color-accent);
-  --color-secondary-foreground: var(--df-color-on-accent);
-  --color-destructive: var(--df-color-danger);
-  --color-destructive-foreground: var(--df-color-on-danger);
-}
-}
-
-/* Build-time Tailwind aliases. Runtime values come from .df-theme above. */
-@theme inline {
-  --spacing: var(--df-spacing);
-  --color-background: var(--df-color-canvas);
-  --color-foreground: var(--df-color-text);
-  --color-foreground-muted: var(--df-color-text-muted);
-  --color-foreground-subtle: var(--df-color-text-subtle);
-  --color-card: var(--df-color-surface);
-  --color-surface-raised: var(--df-color-surface-raised);
-  --color-surface-sunken: var(--df-color-surface-sunken);
-  --color-card-foreground: var(--df-color-text);
-  --color-primary: var(--df-color-primary);
-  --color-primary-foreground: var(--df-color-on-primary);
-  --color-secondary: var(--df-color-accent);
-  --color-secondary-foreground: var(--df-color-on-accent);
-  --color-destructive: var(--df-color-danger);
-  --color-destructive-foreground: var(--df-color-on-danger);
-  --color-border: var(--df-color-border);
-  --color-ring: var(--df-color-focus);
-  --font-sans: var(--df-font-family);
-  --radius-sm: var(--df-radius-sm);
-  --radius-md: var(--df-radius-md);
-  --radius-lg: var(--df-radius-lg);
-  --radius-xl: var(--df-radius-xl);
-  --radius-pill: var(--df-radius-pill);
-  --border-width-thin: var(--df-border-width-thin);
-  --border-width-hairline: var(--df-border-width-hairline);
-  --border-width-thick: var(--df-border-width-thick);
+    /* Compatibility aliases for existing utility and component vocabulary. */
+    --color-foreground-muted: var(--df-color-text-muted);
+    --color-foreground-subtle: var(--df-color-text-subtle);
+    --color-surface-raised: var(--df-color-surface-raised);
+    --color-secondary: var(--df-color-accent);
+    --color-secondary-foreground: var(--df-color-on-accent);
+  }
 }

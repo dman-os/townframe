@@ -113,9 +113,9 @@ fn App() -> Element {
                 }
                 ThemeLabNav { viewport: (available_width(), 860.0) }
                 FoundationSection {
-                    id: "tiles".to_string(),
-                    title: "Tile grammar".to_string(),
-                    description: "Ordered lists combine App, Widget, and Group tiles. Content variants such as Media and StickyNote remain content, while sublists use Column or Overlay presentation.".to_string(),
+                    id: "tile-grammar".to_string(),
+                    title: "Feature grammar: Tiles".to_string(),
+                    description: "This feature grammar is executable evidence, not part of the foundation token language. Ordered lists combine App, Widget, and Group tiles; content variants and sublist presentation remain feature-specific.".to_string(),
                     TileGrammarFoundation { available_width: available_width() }
                 }
                 FoundationSection {
@@ -186,7 +186,7 @@ fn content_width(width: f64) -> f64 {
 fn ThemeLabNav(viewport: (f64, f64)) -> Element {
     let anchors = use_context::<Signal<BTreeMap<String, Rc<MountedData>>>>();
     let ids = [
-        "tiles",
+        "tile-grammar",
         "typography",
         "spacing",
         "shape",

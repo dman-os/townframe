@@ -3,6 +3,7 @@
 @layer theme, base, components, utilities;
 @layer theme {
   :root, :host {
+    --font-sans: var(--df-font-family-sans);
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
     monospace;
     --color-amber-400: oklch(82.8% 0.189 84.429);
@@ -34,8 +35,21 @@
     --leading-relaxed: 1.625;
     --default-transition-duration: 150ms;
     --default-transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-    --default-font-family: var(--df-font-family);
+    --default-font-family: var(--df-font-family-sans);
     --default-mono-font-family: var(--font-mono);
+    --color-background: var(--df-color-canvas);
+    --color-foreground: var(--df-color-text);
+    --color-card: var(--df-color-surface);
+    --color-card-foreground: var(--df-color-text);
+    --color-primary-foreground: var(--df-color-on-primary);
+    --color-secondary: var(--df-color-accent);
+    --color-secondary-foreground: var(--df-color-on-accent);
+    --color-destructive: var(--df-color-danger);
+    --color-destructive-foreground: var(--df-color-on-danger);
+    --color-ring: var(--df-color-focus);
+    --color-surface-sunken: var(--df-color-surface-sunken);
+    --color-foreground-muted: var(--df-color-text-muted);
+    --color-foreground-subtle: var(--df-color-text-subtle);
   }
 }
 @layer base {
@@ -199,6 +213,9 @@
   .collapse {
     visibility: collapse;
   }
+  .invisible {
+    visibility: hidden;
+  }
   .visible {
     visibility: visible;
   }
@@ -234,8 +251,17 @@
   .fixed {
     position: fixed;
   }
+  .relative {
+    position: relative;
+  }
   .static {
     position: static;
+  }
+  .sticky {
+    position: sticky;
+  }
+  .isolate {
+    isolation: isolate;
   }
   .container {
     width: 100%;
@@ -536,8 +562,14 @@
     color: var(--df-color-text-muted);
     text-transform: uppercase;
   }
+  .\!table {
+    display: table !important;
+  }
   .block {
     display: block;
+  }
+  .contents {
+    display: contents;
   }
   .flex {
     display: flex;
@@ -545,8 +577,14 @@
   .grid {
     display: grid;
   }
+  .hidden {
+    display: none;
+  }
   .inline {
     display: inline;
+  }
+  .table {
+    display: table;
   }
   .path-back {
     width: calc(var(--df-spacing) * 5);
@@ -592,6 +630,22 @@
     overflow-y: auto;
     padding-inline: calc(var(--df-spacing) * 2);
     padding-bottom: calc(var(--df-spacing) * 3);
+  }
+  .df-button-lg {
+    min-height: calc(var(--df-spacing) * 12);
+    padding-inline: calc(var(--df-spacing) * 5);
+    font-size: var(--text-lg);
+    line-height: var(--tw-leading, var(--text-lg--line-height));
+  }
+  .df-button-sm {
+    min-height: calc(var(--df-spacing) * 8);
+    padding-inline: calc(var(--df-spacing) * 3);
+    font-size: var(--text-sm);
+    line-height: var(--tw-leading, var(--text-sm--line-height));
+  }
+  .df-button-md {
+    min-height: calc(var(--df-spacing) * 10);
+    padding-inline: calc(var(--df-spacing) * 4);
   }
   .min-h-16 {
     min-height: calc(var(--df-spacing) * 16);
@@ -666,6 +720,9 @@
   }
   .cursor-pointer {
     cursor: pointer;
+  }
+  .resize {
+    resize: both;
   }
   .scroll-mt-18 {
     scroll-margin-top: calc(var(--df-spacing) * 18);
@@ -769,14 +826,35 @@
     border-style: var(--tw-border-style);
     border-width: var(--df-border-width-thin);
   }
+  .df-button-outline {
+    border-color: var(--df-color-border);
+    background-color: transparent;
+    color: var(--df-color-text);
+  }
   .border-border {
     border-color: var(--df-color-border);
   }
   .df-tab-trigger-active {
     background-color: var(--df-color-surface);
     color: var(--df-color-text);
-    --tw-shadow: 0 1px 3px 0 var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 1px 2px -1px var(--tw-shadow-color, rgb(0 0 0 / 0.1));
+    --tw-shadow: var(--df-shadow-sm);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+  }
+  .df-button-default {
+    background-color: var(--df-color-primary);
+    color: var(--df-color-on-primary);
+  }
+  .df-button-destructive {
+    background-color: var(--df-color-danger);
+    color: var(--df-color-on-danger);
+  }
+  .df-button-ghost {
+    background-color: transparent;
+    color: var(--df-color-text);
+  }
+  .df-button-secondary {
+    background-color: var(--df-color-accent);
+    color: var(--df-color-on-accent);
   }
   .bg-background {
     background-color: var(--df-color-canvas);
@@ -849,7 +927,7 @@
     text-align: center;
   }
   .font-sans {
-    font-family: var(--df-font-family);
+    font-family: var(--df-font-family-sans);
   }
   .df-tile-body {
     font-size: var(--text-sm);
@@ -947,6 +1025,13 @@
   .text-foreground-muted {
     color: var(--df-color-text-muted);
   }
+  .text-muted {
+    color: var(--scheme-color-surface-variant);
+  }
+  .ordinal {
+    --tw-ordinal: ordinal;
+    font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
+  }
   .accent-foreground {
     accent-color: var(--df-color-text);
   }
@@ -958,15 +1043,19 @@
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .shadow-md {
-    --tw-shadow: 0 4px 6px -1px var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 2px 4px -2px var(--tw-shadow-color, rgb(0 0 0 / 0.1));
+    --tw-shadow: var(--df-shadow-md);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .shadow-none {
     --tw-shadow: 0 0 #0000;
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
+  .shadow-raised {
+    --tw-shadow: var(--df-shadow-raised);
+    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+  }
   .shadow-sm {
-    --tw-shadow: 0 1px 3px 0 var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 1px 2px -1px var(--tw-shadow-color, rgb(0 0 0 / 0.1));
+    --tw-shadow: var(--df-shadow-sm);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .ring {
@@ -982,6 +1071,29 @@
   .outline {
     outline-style: var(--tw-outline-style);
     outline-width: 1px;
+  }
+  .blur {
+    --tw-blur: blur(8px);
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+  }
+  .grayscale {
+    --tw-grayscale: grayscale(100%);
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+  }
+  .invert {
+    --tw-invert: invert(100%);
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+  }
+  .\!filter {
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,) !important;
+  }
+  .filter {
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+  }
+  .transition {
+    transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter, display, content-visibility, overlay, pointer-events;
+    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-duration: var(--tw-duration, var(--default-transition-duration));
   }
   @media (width >= 64rem) {
     .lg\:p-12 {
@@ -1295,6 +1407,81 @@
   --scheme-color-surface-container-high: oklch(35.46% 0.01 285.863);
   --scheme-color-surface-container-highest: oklch(39.638% 0.01 285.935);
 }
+@layer theme {
+  :root {
+    --df-dimension-spacing-0: 0rem;
+    --df-dimension-spacing-1: 0.25rem;
+    --df-dimension-spacing-2: 0.5rem;
+    --df-dimension-spacing-3: 0.75rem;
+    --df-dimension-spacing-4: 1rem;
+    --df-dimension-spacing-6: 1.5rem;
+    --df-dimension-spacing-8: 2rem;
+    --df-dimension-spacing-12: 3rem;
+    --df-dimension-radius-sm: 0.25rem;
+    --df-dimension-radius-md: 0.5rem;
+    --df-dimension-radius-lg: 0.75rem;
+    --df-dimension-radius-xl: 1rem;
+    --df-dimension-radius-pill: 999px;
+    --df-dimension-border-hairline: 1px;
+    --df-dimension-border-thin: 1px;
+    --df-dimension-border-thick: 2px;
+    --df-color-neutral-0: #ffffff;
+    --df-color-neutral-50: #fafafc;
+    --df-color-neutral-100: #f0f0f5;
+    --df-color-neutral-600: #5c5c6b;
+    --df-color-neutral-900: #1f1f29;
+    --df-color-neutral-1000: #000000;
+    --df-color-blue-100: #dbe8ff;
+    --df-color-blue-600: #2952c7;
+    --df-color-blue-900: #0f1f61;
+    --df-color-red-100: #ffe0e0;
+    --df-color-red-600: #bd1f1f;
+    --df-font-family-sans: system-ui, sans-serif;
+    --df-font-weight-regular: 400;
+    --df-font-weight-medium: 500;
+    --df-font-weight-semibold: 600;
+    --df-font-weight-bold: 700;
+    --df-shadow-none: none;
+    --df-shadow-sm: 0px 1px 2px 0px #000000;
+    --df-shadow-md: 0px 4px 12px 0px #000000;
+    --df-shadow-raised: 0px 8px 24px 0px #000000;
+    --df-color-canvas: #fafafc;
+    --df-color-surface: #ffffff;
+    --df-color-surface-raised: #ffffff;
+    --df-color-surface-sunken: #f0f0f5;
+    --df-color-text: #1f1f29;
+    --df-color-text-muted: #5c5c6b;
+    --df-color-text-subtle: #5c5c6b;
+    --df-color-border: #5c5c6b;
+    --df-color-focus: #2952c7;
+    --df-color-primary: #2952c7;
+    --df-color-on-primary: #ffffff;
+    --df-color-accent: #2952c7;
+    --df-color-on-accent: #ffffff;
+    --df-color-accent-container: #dbe8ff;
+    --df-color-on-accent-container: #0f1f61;
+    --df-color-danger: #bd1f1f;
+    --df-color-on-danger: #ffffff;
+    --df-dimension-spacing: 0.25rem;
+    --df-spacing: 0.25rem;
+    --df-radius-sm: 0.25rem;
+    --df-radius-md: 0.5rem;
+    --df-radius-lg: 0.75rem;
+    --df-radius-xl: 1rem;
+    --df-radius-pill: 999px;
+    --df-dimension-border-width-hairline: 1px;
+    --df-border-width-hairline: 1px;
+    --df-dimension-border-width-thin: 1px;
+    --df-border-width-thin: 1px;
+    --df-dimension-border-width-thick: 2px;
+    --df-border-width-thick: 2px;
+    --df-elevation-none: none;
+    --df-elevation-sm: 0px 1px 2px 0px #000000;
+    --df-elevation-md: 0px 4px 12px 0px #000000;
+    --df-elevation-raised: 0px 8px 24px 0px #000000;
+    --df-font-family: var(--df-font-family-sans);
+  }
+}
 @layer base {
   html, body {
     margin: 0;
@@ -1307,18 +1494,6 @@
   }
 }
 @layer theme {
-  :root {
-    --df-spacing: 0.25rem;
-    --df-font-family: system-ui, sans-serif;
-    --df-radius-sm: 4px;
-    --df-radius-md: 8px;
-    --df-radius-lg: 12px;
-    --df-radius-xl: 16px;
-    --df-radius-pill: 999px;
-    --df-border-width-hairline: 1px;
-    --df-border-width-thin: 1px;
-    --df-border-width-thick: 2px;
-  }
   .df-theme {
     --df-color-canvas: var(--scheme-color-background);
     --df-color-surface: var(--scheme-color-surface-container-low);
@@ -1331,32 +1506,19 @@
     --df-color-focus: var(--scheme-color-primary);
     --df-color-primary: var(--scheme-color-primary);
     --df-color-on-primary: var(--scheme-color-on-primary);
-    --df-color-on-danger: var(--scheme-color-on-error);
     --df-color-accent: var(--scheme-color-secondary);
     --df-color-on-accent: var(--scheme-color-on-secondary);
     --df-color-accent-container: var(--scheme-color-secondary-container);
     --df-color-on-accent-container: var(--scheme-color-on-secondary-container);
     --df-color-danger: var(--scheme-color-error);
+    --df-color-on-danger: var(--scheme-color-on-error);
     --df-color-success: var(--scheme-color-tertiary);
     --df-color-warning: var(--scheme-color-secondary);
-    --df-shadow-raised: 0 8px 24px var(--scheme-color-shadow);
-    --df-shadow-none: none;
-    --df-shadow-sm: 0 1px 2px var(--scheme-color-shadow);
-    --df-shadow-md: 0 4px 12px var(--scheme-color-shadow);
-    --color-background: var(--df-color-canvas);
-    --color-foreground: var(--df-color-text);
-    --color-card: var(--df-color-surface);
+    --color-foreground-muted: var(--df-color-text-muted);
+    --color-foreground-subtle: var(--df-color-text-subtle);
     --color-surface-raised: var(--df-color-surface-raised);
-    --color-surface-sunken: var(--df-color-surface-sunken);
-    --color-card-foreground: var(--df-color-text);
-    --color-primary: var(--df-color-primary);
-    --color-primary-foreground: var(--df-color-on-primary);
-    --color-border: var(--df-color-border);
-    --color-ring: var(--df-color-focus);
     --color-secondary: var(--df-color-accent);
     --color-secondary-foreground: var(--df-color-on-accent);
-    --color-destructive: var(--df-color-danger);
-    --color-destructive-foreground: var(--df-color-on-danger);
   }
 }
 @layer components {
@@ -1397,11 +1559,10 @@
   .column-dot[aria-current="true"], .column-dot[data-selected="true"], .column-dot[data-window-position="leading"], .column-dot[data-window-position="middle"], .column-dot[data-window-position="trailing"], .column-dot[data-window-position="single"] {
     height: calc(var(--df-spacing) * 2.5);
     width: calc(var(--df-spacing) * 4);
-    --tw-shadow: 0 1px 3px 0 var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 1px 2px -1px var(--tw-shadow-color, rgb(0 0 0 / 0.1));
+    --tw-shadow: 0 1px 3px 0 var(--df-color-primary), 0 1px 2px -1px var(--df-color-primary);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
-    --tw-shadow-color: var(--df-color-primary);
     @supports (color: color-mix(in lab, red, red)) {
-      --tw-shadow-color: color-mix(in oklab, color-mix(in oklab, var(--df-color-primary) 50%, transparent) var(--tw-shadow-alpha), transparent);
+      --tw-shadow: 0 1px 3px 0 color-mix(in srgb, var(--df-color-primary) 50%, transparent), 0 1px 2px -1px color-mix(in srgb, var(--df-color-primary) 50%, transparent);
     }
   }
   .column-dot[data-window-position="leading"] {
@@ -1692,6 +1853,59 @@
   inherits: false;
   initial-value: solid;
 }
+@property --tw-blur {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-brightness {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-contrast {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-grayscale {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-hue-rotate {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-invert {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-opacity {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-saturate {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-sepia {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-drop-shadow {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-drop-shadow-color {
+  syntax: "*";
+  inherits: false;
+}
+@property --tw-drop-shadow-alpha {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 100%;
+}
+@property --tw-drop-shadow-size {
+  syntax: "*";
+  inherits: false;
+}
 @layer properties {
   @supports ((-webkit-hyphens: none) and (not (margin-trim: inline))) or ((-moz-orient: inline) and (not (color:rgb(from red r g b)))) {
     *, ::before, ::after, ::backdrop {
@@ -1725,6 +1939,19 @@
       --tw-ring-offset-color: #fff;
       --tw-ring-offset-shadow: 0 0 #0000;
       --tw-outline-style: solid;
+      --tw-blur: initial;
+      --tw-brightness: initial;
+      --tw-contrast: initial;
+      --tw-grayscale: initial;
+      --tw-hue-rotate: initial;
+      --tw-invert: initial;
+      --tw-opacity: initial;
+      --tw-saturate: initial;
+      --tw-sepia: initial;
+      --tw-drop-shadow: initial;
+      --tw-drop-shadow-color: initial;
+      --tw-drop-shadow-alpha: 100%;
+      --tw-drop-shadow-size: initial;
     }
   }
 }
