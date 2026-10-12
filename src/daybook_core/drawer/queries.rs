@@ -457,6 +457,36 @@ impl DrawerRepo {
         Ok((drawer_heads, results))
     }
 
+    /// The local drawer document whose branch is `branch_doc_id`.
+    ///
+    /// A drawer doc id is local while the branch doc id is the shareable
+    /// identity, so this mapping has to be read off the drawer. One pass over
+    /// the entries answers it: walking `list_just_ids` and then probing
+    /// `get_entry` per document reads the same drawer *and* fills the entry
+    /// cache with every entry, both to resolve one id. A branch no entry names
+    /// falls back to the branch doc id's own spelling, which is what a repo
+    /// whose branch predates its document expects.
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub(crate) async fn resolve_doc_id_for_branch_doc_id(
+        &self,
+        branch_doc_id: big_repo::DocumentId,
+    ) -> Res<DocId> {
+        if self.cancel_token.is_cancelled() {
+            eyre::bail!("repo is stopped");
+        }
+        let (_, entries) = self.current_drawer_entries().await?;
+        for (doc_id, entry) in &entries {
+            if entry
+                .branches
+                .values()
+                .any(|branch| branch.branch_doc_id == branch_doc_id)
+            {
+                return Ok(doc_id.clone());
+            }
+        }
+        Ok(DocId::from(branch_doc_id.to_string()))
+    }
+
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn list(&self) -> Res<Vec<DocNBranches>> {
         if self.cancel_token.is_cancelled() {

@@ -180,6 +180,7 @@ class CaptureScreenViewModel(
                         branchPath = "main",
                         facets = facets,
                         userPath = null,
+                        idempotencyKey = null,
                     )
 
                 drawerRepo.add(args)

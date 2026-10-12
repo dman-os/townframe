@@ -46,8 +46,10 @@ sqlx_utils_rs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zstd.workspace = true
-sha2 = "0.10.9"
+bytes.workspace = true
+sha2.workspace = true
 blake3.workspace = true
+data-encoding.workspace = true
 semver.workspace = true
 atproto-dasl.workspace = true
 
@@ -126,6 +128,11 @@ iroh-tickets.workspace = true
 iroh-blobs.workspace = true
 
 #
+# crypto (RFC 8188 aes128gcm envelope)
+aes-gcm.workspace = true
+bao-tree.workspace = true
+hkdf.workspace = true
+
 # actors
 irpc-iroh.workspace = true
 irpc.workspace = true
@@ -144,7 +151,10 @@ ed25519-dalek = { version = "2.2.0", features = ["digest"] }
 
 [dev-dependencies]
 big_repo = { workspace = true, features = ["test-support"] }
+keyhive_core.workspace = true
+subduction_iroh.workspace = true
 big_sync = { workspace = true, features = ["test-support"] }
+secrets_rs = { workspace = true, features = ["test-support"] }
 tokio-util = { workspace = true }
 wflow = { workspace = true, features = ["test-harness"] }
 insta = { workspace = true, features = ["json"] }

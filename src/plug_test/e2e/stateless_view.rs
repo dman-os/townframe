@@ -19,6 +19,8 @@ async fn render_plug_test_stateless_view() -> Res<()> {
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: None,
         })
         .await?;
 

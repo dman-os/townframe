@@ -150,6 +150,8 @@ async fn add_blob_image_doc(
             )]
             .into(),
             user_path: None,
+
+            idempotency_key: None,
         })
         .await
         .map_err(Into::into)

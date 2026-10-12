@@ -1,190 +1,123 @@
-use crate::{interlude::*, wit};
+use crate::interlude::*;
 
 use crate::doc::{
-    Blob, BlobPin, Body, Doc, FacetKey, FacetRaw, ImageMetadata, WellKnownFacet, WellKnownFacetTag,
+    BlobPin, ChangeHashSet, CipherBlob, FacetRaw, Representation, WellKnownFacet, WellKnownFacetTag,
 };
-use std::collections::HashMap;
-
-fn create_test_doc() -> Doc {
-    let mut props = HashMap::new();
-
-    props.insert(
-        FacetKey::from(WellKnownFacetTag::RefGeneric),
-        FacetRaw::from(WellKnownFacet::RefGeneric("ref-123".to_string())),
-    );
-    props.insert(
-        FacetKey::from(WellKnownFacetTag::LabelGeneric),
-        FacetRaw::from(WellKnownFacet::LabelGeneric("label-1".to_string())),
-    );
-    props.insert(
-        FacetKey::from(WellKnownFacetTag::Note),
-        FacetRaw::from(WellKnownFacet::Note("Test note".into())),
-    );
-    props.insert(
-        FacetKey::from(WellKnownFacetTag::Body),
-        FacetRaw::from(WellKnownFacet::Body(Body {
-            order: vec![
-                crate::url::build_facet_ref(
-                    crate::url::FACET_SELF_DOC_ID,
-                    &FacetKey::from(WellKnownFacetTag::Note),
-                )
-                .unwrap(),
-            ],
-        })),
-    );
-
-    Doc {
-        id: "test-doc-id".to_string(),
-        facets: props,
-    }
-}
 
 #[test]
-fn test_root_to_wit_conversion() {
-    let root_doc = create_test_doc();
-    let wit_doc: wit::doc::Doc = root_doc.clone().into();
-
-    assert_eq!(wit_doc.id, root_doc.id);
-
-    // Check if note exists in props
-    let note_prop = wit_doc
-        .facets
-        .iter()
-        .find(|(key, _)| key == &FacetKey::from(WellKnownFacetTag::Note).to_string());
-    assert!(note_prop.is_some());
-
-    assert_eq!(wit_doc.facets.len(), root_doc.facets.len());
-}
-
-#[test]
-fn test_wit_to_root_conversion() -> Res<()> {
-    let root_doc = create_test_doc();
-    let wit_doc: wit::doc::Doc = root_doc.clone().into();
-    let converted_back: Doc = wit_doc.try_into()?;
-
-    assert_eq!(converted_back.id, root_doc.id);
-    assert_eq!(converted_back.facets.len(), root_doc.facets.len());
-
-    // Check specific prop
-    let key = FacetKey::from(WellKnownFacetTag::Note);
-    assert_eq!(converted_back.facets.get(&key), root_doc.facets.get(&key));
-
-    Ok(())
-}
-
-#[test]
-fn test_round_trip_root_wit_root() -> Res<()> {
-    let original = create_test_doc();
-    let wit: wit::doc::Doc = original.clone().into();
-    let back: Doc = wit.try_into()?;
-
-    assert_eq!(back.id, original.id);
-    assert_eq!(back.facets.len(), original.facets.len());
-    assert_eq!(back.facets, original.facets);
-
-    Ok(())
-}
-
-#[test]
-fn test_doc_with_blob() -> Res<()> {
-    let mut props = HashMap::new();
-    let blob = Blob {
-        mime: "image/jpeg".to_string(),
-        length_octets: 1024,
-        digest: "hash123".to_string(),
-        inline: Some(vec![1, 2, 3]),
-        urls: Some(vec!["db+blob:///hash123".to_string()]),
-    };
-    props.insert(
-        FacetKey::from(WellKnownFacetTag::Note),
-        FacetRaw::from(WellKnownFacet::Blob(blob)),
-    );
-
-    let root_doc = Doc {
-        id: "blob-doc".to_string(),
-        facets: props,
-    };
-
-    let wit_doc: wit::doc::Doc = root_doc.clone().into();
-    let back: Doc = wit_doc.try_into()?;
-
-    assert_eq!(back.facets, root_doc.facets);
-    Ok(())
-}
-
-#[test]
-fn test_doc_with_all_prop_types() -> Res<()> {
-    let mut props = HashMap::new();
-    props.insert(
-        FacetKey::from(WellKnownFacetTag::RefGeneric),
-        FacetRaw::from(WellKnownFacet::RefGeneric("ref1".to_string())),
-    );
-    props.insert(
-        FacetKey::from(WellKnownFacetTag::LabelGeneric),
-        FacetRaw::from(WellKnownFacet::LabelGeneric("label1".to_string())),
-    );
-    props.insert(
-        FacetKey::from(WellKnownFacetTag::ImageMetadata),
-        FacetRaw::from(WellKnownFacet::ImageMetadata(ImageMetadata {
-            facet_ref: "db+facet:///self/org.example.daybook.blob/main"
-                .parse()
-                .unwrap(),
-            ref_heads: crate::doc::ChangeHashSet(Vec::new().into()),
-            mime: "image/png".to_string(),
-            width_px: 1920,
-            height_px: 1080,
-        })),
-    );
-    props.insert(
-        FacetKey::from(WellKnownFacetTag::PathGeneric),
-        FacetRaw::from(WellKnownFacet::PathGeneric("/path/to/file".to_string())),
-    );
-    props.insert(
-        FacetKey::from(WellKnownFacetTag::TitleGeneric),
-        FacetRaw::from(WellKnownFacet::TitleGeneric("Title".to_string())),
-    );
-
-    let root_doc = Doc {
-        id: "all-props-doc".to_string(),
-        facets: props,
-    };
-
-    let wit_doc: wit::doc::Doc = root_doc.clone().into();
-    let back: Doc = wit_doc.try_into()?;
-
-    assert_eq!(back.facets.len(), root_doc.facets.len());
-
-    for (key, orig_val) in &root_doc.facets {
-        let conv_val = back.facets.get(key).unwrap();
-        assert_eq!(orig_val, conv_val);
-    }
-    Ok(())
-}
-
-#[test]
-fn test_doc_with_blob_pin() -> Res<()> {
+fn test_blob_pin_facet_schema() -> Res<()> {
     assert_eq!(
         WellKnownFacetTag::BlobPin.as_str(),
         "org.example.daybook.blobPin"
     );
 
-    let mut props = HashMap::new();
-    let blob_pin = BlobPin {
+    let facet = WellKnownFacet::BlobPin(BlobPin {
         length_octets: 12345,
+    });
+    let json = FacetRaw::from(facet);
+    assert_eq!(json, serde_json::json!({ "lengthOctets": 12345 }));
+    assert_eq!(
+        FacetRaw::from(WellKnownFacet::from_json(
+            json.clone(),
+            WellKnownFacetTag::BlobPin
+        )?),
+        json,
+        "a blobPin facet read from a peer must parse back to what was written"
+    );
+    Ok(())
+}
+
+/// The cipherBlob/JWK pair is the encrypted-representation schema (ADR 003 §3,
+/// §5). This pins the contract peers see: the facet tags, the exact JSON shape,
+/// and the fact that a cross-document `keyRef` carries the heads that decide
+/// which JWK state it means.
+#[test]
+fn test_cipherblob_facet_schema() -> Res<()> {
+    assert_eq!(
+        WellKnownFacetTag::CipherBlob.as_str(),
+        "org.example.daybook.cipherBlob"
+    );
+    assert_eq!(WellKnownFacetTag::Jwk.as_str(), "org.example.daybook.jwk");
+    // Encryption metadata is the encryption worker's to maintain: an ordinary
+    // facet write must not be able to repoint `keyRef` at another document's
+    // key, nor claim a representation digest the store cannot serve.
+    assert!(WellKnownFacetTag::CipherBlob.is_system_managed());
+    assert!(WellKnownFacetTag::Jwk.is_system_managed());
+
+    let head = am_utils_rs::serialize_commit_heads(&[automerge::ChangeHash([1u8; 32])])[0].clone();
+    let cipher_blob = CipherBlob {
+        representation: Representation {
+            digest: "bafkrei-example-ciphertext-digest".to_string(),
+            length_octets: 125_337,
+        },
+        content_encoding: "aes128gcm".to_string(),
+        // A key document rather than `/self/`: the JWK is readable only by
+        // decryptors, while whoever may *serve* the ciphertext reads this facet
+        // (ADR 003 §19).
+        key_ref: "db+facet:///abc123/org.example.daybook.jwk/relay".parse()?,
+        key_ref_heads: ChangeHashSet(Arc::from([automerge::ChangeHash([1u8; 32])])),
+        encoding_parameters: serde_json::json!({
+            "recordSize": 65_536,
+            "padding": "record",
+        }),
     };
-    props.insert(
-        FacetKey::from("org.example.daybook.blobPin/hash123"),
-        FacetRaw::from(WellKnownFacet::BlobPin(blob_pin)),
+
+    let facet = WellKnownFacet::CipherBlob(cipher_blob);
+    let json = FacetRaw::from(facet.clone());
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "representation": {
+                "digest": "bafkrei-example-ciphertext-digest",
+                "lengthOctets": 125_337,
+            },
+            "contentEncoding": "aes128gcm",
+            "keyRef": "db+facet:///abc123/org.example.daybook.jwk/relay",
+            "keyRefHeads": [head],
+            "encodingParameters": {"recordSize": 65_536, "padding": "record"},
+        }),
+        "the cipherBlob facet JSON is the wire contract (ADR 003 §3)"
+    );
+    assert_eq!(
+        FacetRaw::from(WellKnownFacet::from_json(
+            json.clone(),
+            WellKnownFacetTag::CipherBlob
+        )?),
+        json,
+        "a facet read from a peer must parse back to what was written"
     );
 
-    let root_doc = Doc {
-        id: "blob-pin-doc".to_string(),
-        facets: props,
-    };
+    // The JWK stays a plain RFC 7517 JWK rather than a Daybook-specific shape,
+    // so a key type Daybook never interprets has to round-trip unchanged.
+    let jwk_json = serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "unused-by-this-test",
+    });
+    let jwk = WellKnownFacet::from_json(jwk_json.clone(), WellKnownFacetTag::Jwk)?;
+    assert_eq!(FacetRaw::from(jwk.clone()), jwk_json);
 
-    let wit_doc: wit::doc::Doc = root_doc.clone().into();
-    let back: Doc = wit_doc.try_into()?;
+    // Facets are also read through untagged deserialization - the drawer does
+    // exactly that for the branches facet - where variant order decides the
+    // result. So the JWK must be discriminated by `kty`, and must not swallow
+    // payloads that are not JWKs.
+    assert_eq!(
+        serde_json::from_value::<WellKnownFacet>(json.clone())?.tag(),
+        WellKnownFacetTag::CipherBlob
+    );
+    assert_eq!(
+        serde_json::from_value::<WellKnownFacet>(FacetRaw::from(jwk.clone()))?.tag(),
+        WellKnownFacetTag::Jwk
+    );
+    assert_ne!(
+        serde_json::from_value::<WellKnownFacet>(serde_json::json!({
+            "byName": {},
+            "byId": {},
+        }))?
+        .tag(),
+        WellKnownFacetTag::Jwk,
+        "the JWK facet must not swallow payloads that are not JWKs"
+    );
 
-    assert_eq!(back.facets, root_doc.facets);
     Ok(())
 }

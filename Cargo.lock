@@ -2988,6 +2988,7 @@ dependencies = [
 name = "daybook_core"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "am_utils_rs",
  "anyhow",
  "api_utils_rs",
@@ -2996,10 +2997,13 @@ dependencies = [
  "atproto-dasl",
  "automerge",
  "autosurgeon",
+ "bao-tree",
  "big_repo",
  "big_sync",
  "big_sync_core",
  "blake3",
+ "bytes",
+ "data-encoding",
  "daybook_pdk",
  "daybook_types",
  "directories",
@@ -3009,6 +3013,7 @@ dependencies = [
  "futures",
  "futures-buffered",
  "garde",
+ "hkdf 0.12.4",
  "image",
  "insta",
  "iroh",
@@ -3017,6 +3022,7 @@ dependencies = [
  "irpc",
  "irpc-iroh",
  "jsonschema",
+ "keyhive_core",
  "loom",
  "mltools",
  "oci-client 0.15.0",
@@ -3032,6 +3038,7 @@ dependencies = [
  "sqlx_utils_rs",
  "struct-patch",
  "structstruck",
+ "subduction_iroh",
  "surelock",
  "tempfile",
  "thiserror 2.0.20",
@@ -5725,8 +5732,7 @@ dependencies = [
 [[package]]
 name = "iroh-blobs"
 version = "0.103.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5be50b0e2d0a9ba65cee4e0dfb708b3704e02ad12bd4c14c6307e94245943126"
+source = "git+https://github.com/dman-os/iroh-blobs?rev=b3d641036c807b30d9fc62fd22a83801a38386d3#b3d641036c807b30d9fc62fd22a83801a38386d3"
 dependencies = [
  "arrayvec",
  "bao-tree",

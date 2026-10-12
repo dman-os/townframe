@@ -72,13 +72,10 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     // ── doc lifecycle ──────────────────────────────────────────────────────
 
-    pub async fn allocate_doc(
-        &self,
-        parents: Vec<crate::keyhive::BigKeyhiveAuthority>,
-    ) -> eyre::Result<DocumentId> {
+    pub async fn allocate_doc(&self) -> eyre::Result<DocumentId> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
-            .send(Runtime2Cmd::AllocateDoc { parents, resp })
+            .send(Runtime2Cmd::AllocateDoc { resp })
             .await
             .map_err(|_| eyre::eyre!(ERROR_ACTOR))?;
         rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
@@ -87,17 +84,17 @@ impl<F: FutureForm> Runtime2Handle<F> {
     pub async fn finalize_allocated_doc(
         &self,
         doc_id: DocumentId,
+        coparents: Vec<crate::keyhive::BigKeyhiveAuthority>,
         initial_content: automerge::Automerge,
-        pending_group: crate::keyhive::BigKeyhiveGroup,
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
     ) -> eyre::Result<crate::runtime2::types::LiveDocHandle> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
             .send(Runtime2Cmd::FinalizeAllocatedDoc {
                 doc_id,
+                coparents,
                 initial_content: Box::new(initial_content),
                 initial_keys,
-                pending_group,
                 resp,
             })
             .await

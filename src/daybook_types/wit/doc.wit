@@ -17,6 +17,19 @@ interface doc {
         urls: option<list<string>>,
     }
 
+    record representation {
+        digest: multihash,
+        length-octets: u64,
+    }
+
+    record cipher-blob {
+        representation: representation,
+        content-encoding: string,
+        key-ref: string,
+        key-ref-heads: list<string>,
+        encoding-parameters: json,
+    }
+
     record note {
         mime: mime-type,
         content: string,
@@ -92,22 +105,6 @@ interface doc {
 
     record pseudo-label-candidates-facet {
         labels: list<pseudo-label-candidate>,
-    }
-
-    variant well-known-facet {
-        ref-generic(doc-ref), 
-        label-generic(string), 
-        pseudo-label(list<string>), 
-        title-generic(string), 
-        path-generic(string), 
-        image-metadata(image-metadata), 
-        ocr-result(ocr-result),
-        embedding(embedding),
-        dmeta(dmeta),
-        note(note),
-        blob(blob),
-        pending(pending),
-        pseudo-label-candidates(pseudo-label-candidates-facet),
     }
 
     type facet-raw = json;

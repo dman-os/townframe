@@ -33,6 +33,8 @@ async fn long_af_test_image_label_fallback_nomic_pipeline() -> Res<()> {
         )]
         .into(),
         user_path: None,
+
+        idempotency_key: None,
     };
 
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;

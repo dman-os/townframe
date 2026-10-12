@@ -1146,7 +1146,7 @@ mod tests {
     /// part with no access rows, which refuses every peer (and reads to it as an
     /// unknown part, blocking its full sync forever — the failure the serving
     /// boundary's own tests, `cli_clone_and_wait_until_synced_smoke` and
-    /// `long_test_iroh_clone_sync_batch_100_docs_with_blobs`, exercise end to end).
+    /// `long_af_test_iroh_clone_sync_batch_100_docs_with_blobs`, exercise end to end).
     /// The document ids and the part store come from the booted `RepoCtx`, never from
     /// a fixture the test picked.
     #[tokio::test(flavor = "multi_thread")]

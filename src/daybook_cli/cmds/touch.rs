@@ -15,6 +15,8 @@ pub async fn run() -> Res<ExitCode> {
         user_path: Some(daybook_types::doc::UserPathBuf::from(
             cx.local_user_path.clone(),
         )),
+
+        idempotency_key: None,
     };
     let id = drawer_repo.add(doc).await?;
     info!(id, "created document");

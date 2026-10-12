@@ -20,6 +20,8 @@ async fn test_labeler_workflow() -> Res<()> {
         ]
         .into(),
         user_path: None,
+
+        idempotency_key: None,
     };
 
     // Add the document - DocTriageWorker will automatically queue the workflow job
@@ -96,6 +98,8 @@ async fn test_staging_branch_workflow() -> Res<()> {
         )]
         .into(),
         user_path: None,
+
+        idempotency_key: None,
     };
 
     // Add the document - DocTriageWorker will automatically queue the workflow job

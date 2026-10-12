@@ -2,4 +2,4 @@
 
 import { $ } from "./utils.ts";
 
-await $`scrcpy --no-audio -S`;
+await $`scrcpy --no-audio -S ${$.argv}`;
