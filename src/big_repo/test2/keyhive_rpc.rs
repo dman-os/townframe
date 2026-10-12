@@ -189,3 +189,138 @@ async fn pulled_keyhive_change_is_forwarded_across_line_topology() -> Res<()> {
     drop(owner_doc);
     Ok(())
 }
+
+/// A revocation must reach the peer it revokes through the notification path
+/// alone.
+///
+/// Two load-bearing halves make this work and nothing pins either: Keyhive
+/// deliberately emits revocation events *for* an agent that is already fully
+/// revoked (so the revoked peer can learn it was revoked), and the dispatcher
+/// selects the connected peers a change batch is attributed to. The other
+/// notification tests in this module either use the well-known public agent,
+/// whose events are visible to every subscriber, or assert on a *creation*
+/// batch; none of them pins that a revocation - a batch whose only audience is
+/// the agent it revokes - selects that peer at all.
+///
+/// The connection is established before the document exists and the revoked
+/// member is never told to sync explicitly, so the creator's wake-up is the only
+/// path available - no connect-time catch-up can cover for a missing
+/// notification.
+#[tokio::test(flavor = "multi_thread")]
+async fn revocation_notification_reaches_the_revoked_member_without_manual_sync() -> Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(228, 229, "Creator", "RevokedMember").await?;
+
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "revocation-notice"))
+        .map_err(|err| crate::ferr!("failed creating revocation-notice doc: {err:?}"))?;
+    let owner_doc = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+
+    // A real agent, not `fixtures::public_agent()`: the delegation and the
+    // revocation naming it are private to the pair, which is the audience the
+    // notification classifier has to get right.
+    //
+    // The revocable shape is a member the creator itself delegated to: a
+    // document's genesis members (its coparents) are delegated by the document's
+    // own ephemeral signer, which leaves the creator with no revocation proof for
+    // them (`RevokeMemberError::NoProof`), so a coparent cannot be revoked by its
+    // creator today.
+    let revoked_member = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    pair.left()
+        .repo
+        .grant_doc_access(
+            doc_id.clone(),
+            revoked_member.clone(),
+            keyhive_core::access::Access::Read,
+        )
+        .await?;
+
+    // Non-vacuous precondition: the member must already hold the document's
+    // Keyhive state *and* still have access, or the post-revocation assertion
+    // below would hold for the wrong reason. The grant reaches it through a
+    // notification-driven pull too - no explicit sync was issued for it either.
+    wait_for_local_agent_access(&pair.right().repo, doc_id.clone(), true, "RevokedMember").await?;
+
+    pair.left()
+        .repo
+        .revoke_doc_access(doc_id.clone(), revoked_member)
+        .await?;
+
+    // No `sync_keyhive_with_peer` after the revocation: the creator's
+    // notification is the only thing that can tell the member to pull, and
+    // pulling is the only way it can learn it was revoked.
+    wait_for_local_agent_access(&pair.right().repo, doc_id.clone(), false, "RevokedMember").await?;
+
+    // An access lookup can only go empty because a revocation was applied
+    // locally, so name that the revocation event itself landed rather than a
+    // stale Keyhive view answering for it.
+    let snapshot =
+        super::harness::keyhive::document_snapshot(&pair.right().repo, doc_id.clone()).await?;
+    assert!(
+        !snapshot.revocation_heads.is_empty(),
+        "the revoked member lost access without holding the revocation that revoked it: \
+         {snapshot:?}"
+    );
+
+    drop(owner_doc);
+    Ok(())
+}
+
+/// `repo`'s own agent access on `doc_id`, as that node observes it.
+///
+/// A node asks about *itself*: its peer id is its agent identity, and the
+/// document's Keyhive id derives from the document id - the same lookup
+/// `fixtures::assert_reader_has_access` makes, kept here in the direction that
+/// needs to observe access *disappearing*.
+async fn local_agent_access(
+    repo: &crate::BigRepo,
+    doc_id: crate::DocumentId,
+) -> Res<Option<keyhive_core::access::Access>> {
+    use keyhive_core::principal::identifier::Identifier;
+    use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
+
+    let agent_key = ed25519_dalek::VerifyingKey::from_bytes(
+        &repo.local_peer_id().to_bytes32().expect(ERROR_IMPOSSIBLE),
+    )
+    .map_err(|_| crate::ferr!("local peer id is not a verifying key"))?;
+    let doc_key =
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .map_err(|_| crate::ferr!("document id is not a verifying key"))?;
+    Ok(repo
+        .keyhive()
+        .agent_access_on(&Identifier::from(agent_key), Identifier::from(doc_key))
+        .await)
+}
+
+/// Wait until `repo` observes access (`expect_access`) or its absence on
+/// `doc_id`, failing with the Keyhive ledger that says which side of the
+/// delivery pipeline stalled: never delivered, or delivered but never applied.
+async fn wait_for_local_agent_access(
+    repo: &crate::BigRepo,
+    doc_id: crate::DocumentId,
+    expect_access: bool,
+    label: &str,
+) -> Res<()> {
+    let expectation = if expect_access {
+        "granted access"
+    } else {
+        "the revocation that removes its access"
+    };
+    let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(Duration::from_secs(20));
+    loop {
+        let access = local_agent_access(repo, doc_id.clone()).await?;
+        if access.is_some() == expect_access {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let ledger = super::harness::keyhive::describe_ledger(repo).await?;
+            return Err(crate::ferr!(
+                "{label} never observed {expectation} on {doc_id} without a manual \
+                 `sync_keyhive_with_peer`: access={access:?} keyhive_ledger={ledger}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}

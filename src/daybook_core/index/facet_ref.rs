@@ -924,6 +924,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: None,
             })
             .await?;
 
@@ -948,6 +950,8 @@ mod tests {
                 )]
                 .into(),
                 user_path: None,
+
+                idempotency_key: None,
             })
             .await?;
 

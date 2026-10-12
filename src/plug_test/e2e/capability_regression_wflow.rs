@@ -128,6 +128,8 @@ async fn setup_doc(test_cx: &daybook_core::test_support::DaybookTestContext) -> 
             ]
             .into(),
             user_path: None,
+
+            idempotency_key: None,
         })
         .await?;
     Ok(doc_id)

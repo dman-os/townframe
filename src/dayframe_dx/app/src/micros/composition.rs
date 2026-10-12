@@ -1,0 +1,271 @@
+//! Reconcile a projection of owner configuration with live micro incarnations.
+//! This module does not persist configuration or grant data permissions. Those remain separate
+//! host facilities. Bindings determine dependency order; registration order is irrelevant.
+use std::collections::{BTreeMap, BTreeSet};
+
+use super::{MicroDescriptor, MicroId, MicroRegistry, MicroRegistryError};
+use crate::host::{CloseReason, Host, Instance};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Enablement {
+    Enabled,
+    Disabled,
+}
+
+/// Desired boot instance. The map key is its stable configured identity; an activation creates a
+/// fresh runtime identity. A binding names the supplier instance for one declared contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfiguredMicro {
+    pub provider: MicroId,
+    pub enablement: Enablement,
+    pub bindings: BTreeMap<String, String>,
+}
+
+/// Observable result of a reconciliation, not a promise that a declaration is a live provision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstanceState {
+    Disabled,
+    /// The incarnation was explicitly closed outside configuration reconciliation. It stays stopped
+    /// until its configuration changes; dependency withdrawal alone does not enter this state.
+    Stopped,
+    UnavailableProvider(MicroId),
+    Blocked {
+        requirements: Vec<String>,
+    },
+    Active,
+    Failed(MicroRegistryError),
+}
+
+#[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
+pub enum ConfigurationError {
+    #[error("missing binding for {instance}: {contract}")]
+    MissingBinding { instance: String, contract: String },
+    #[error("undeclared binding for {instance}: {contract}")]
+    UnexpectedBinding { instance: String, contract: String },
+    #[error("incompatible supplier for {instance}: {contract}")]
+    IncompatibleBinding { instance: String, contract: String },
+    #[error("dependency cycle prevents ordering instances {0:?}")]
+    Cycle(Vec<String>),
+}
+
+struct Active {
+    configuration: ConfiguredMicro,
+    instance: Instance,
+}
+
+struct Failed {
+    configuration: ConfiguredMicro,
+    dependencies: Vec<Instance>,
+    error: MicroRegistryError,
+}
+
+#[derive(Default)]
+pub(crate) struct Composition {
+    active: BTreeMap<String, Active>,
+    failed: BTreeMap<String, Failed>,
+    stopped: BTreeMap<String, ConfiguredMicro>,
+    order: Vec<String>,
+}
+
+impl Composition {
+    pub fn reconcile(
+        &mut self,
+        host: &Host,
+        registry: &MicroRegistry,
+        desired: &BTreeMap<String, ConfiguredMicro>,
+    ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
+        let definitions: BTreeMap<_, _> = registry
+            .descriptors()
+            .map(|descriptor| (descriptor.id.clone(), descriptor))
+            .collect();
+        // Validate before withdrawing anything: a malformed edit must not destroy a working graph.
+        let order = activation_order(&definitions, desired)?;
+        for name in self.order.iter().rev() {
+            let active = self.active.get(name).unwrap();
+            if desired.get(name) != Some(&active.configuration) {
+                active.instance.close();
+            }
+        }
+        for (name, active) in &self.active {
+            if active.instance.close_reason() == Some(CloseReason::Requested)
+                && desired.get(name) == Some(&active.configuration)
+            {
+                // Do not turn a self-stop or administrative close into an automatic restart loop.
+                self.stopped
+                    .insert(name.clone(), active.configuration.clone());
+            }
+        }
+        self.stopped
+            .retain(|name, configuration| desired.get(name) == Some(configuration));
+        self.active
+            .retain(|_, active| active.instance.check().is_ok());
+        self.failed
+            .retain(|name, failed| desired.get(name) == Some(&failed.configuration));
+        let mut states: BTreeMap<_, _> = desired
+            .iter()
+            .filter(|(_, configuration)| configuration.enablement == Enablement::Disabled)
+            .map(|(name, _)| (name.clone(), InstanceState::Disabled))
+            .collect();
+        for name in &order {
+            let configuration = &desired[name];
+            if !definitions.contains_key(&configuration.provider) {
+                states.insert(
+                    name.clone(),
+                    InstanceState::UnavailableProvider(configuration.provider.clone()),
+                );
+                continue;
+            }
+            if self.stopped.contains_key(name) {
+                states.insert(name.clone(), InstanceState::Stopped);
+                continue;
+            }
+            let missing: Vec<_> = configuration
+                .bindings
+                .iter()
+                .filter(|(_, supplier)| !self.active.contains_key(*supplier))
+                .map(|(contract, _)| contract.clone())
+                .collect();
+            if !missing.is_empty() {
+                states.insert(
+                    name.clone(),
+                    InstanceState::Blocked {
+                        requirements: missing,
+                    },
+                );
+                continue;
+            }
+            if self.active.contains_key(name) {
+                states.insert(name.clone(), InstanceState::Active);
+                continue;
+            }
+            let dependencies: Vec<_> = configuration
+                .bindings
+                .values()
+                .map(|supplier| self.active[supplier].instance.clone())
+                .collect();
+            // Failure is retained until its inputs change. Unrelated configuration edits do not
+            // repeatedly run a failing activation; disable/re-enable explicitly permits another try.
+            if let Some(failed) = self.failed.get(name)
+                && failed.dependencies == dependencies
+            {
+                states.insert(name.clone(), InstanceState::Failed(failed.error.clone()));
+                continue;
+            }
+            match registry.activate(
+                host,
+                &configuration.provider,
+                name.clone(),
+                configuration.bindings.clone(),
+            ) {
+                Ok(instance) => {
+                    self.failed.remove(name);
+                    assert!(
+                        self.active
+                            .insert(
+                                name.clone(),
+                                Active {
+                                    configuration: configuration.clone(),
+                                    instance,
+                                }
+                            )
+                            .is_none()
+                    );
+                    states.insert(name.clone(), InstanceState::Active);
+                }
+                Err(error) => {
+                    states.insert(name.clone(), InstanceState::Failed(error.clone()));
+                    self.failed.insert(
+                        name.clone(),
+                        Failed {
+                            configuration: configuration.clone(),
+                            dependencies,
+                            error,
+                        },
+                    );
+                }
+            }
+        }
+        self.order = order
+            .into_iter()
+            .filter(|name| self.active.contains_key(name))
+            .collect();
+        Ok(states)
+    }
+}
+
+fn activation_order(
+    definitions: &BTreeMap<MicroId, MicroDescriptor>,
+    desired: &BTreeMap<String, ConfiguredMicro>,
+) -> Result<Vec<String>, ConfigurationError> {
+    let mut dependencies = BTreeMap::new();
+    for (name, configuration) in desired {
+        if configuration.enablement == Enablement::Disabled {
+            continue;
+        }
+        let mut required = BTreeSet::new();
+        if let Some(definition) = definitions.get(&configuration.provider) {
+            for contract in configuration.bindings.keys() {
+                if !definition
+                    .requirements
+                    .iter()
+                    .any(|requirement| &requirement.id == contract)
+                {
+                    return Err(ConfigurationError::UnexpectedBinding {
+                        instance: name.clone(),
+                        contract: contract.clone(),
+                    });
+                }
+            }
+            for requirement in &definition.requirements {
+                let supplier_name =
+                    configuration.bindings.get(&requirement.id).ok_or_else(|| {
+                        ConfigurationError::MissingBinding {
+                            instance: name.clone(),
+                            contract: requirement.id.clone(),
+                        }
+                    })?;
+                if let Some(supplier) = desired.get(supplier_name) {
+                    if let Some(supplier_definition) = definitions.get(&supplier.provider)
+                        && !supplier_definition.provisions.iter().any(|provision| {
+                            provision.id == requirement.id
+                                && provision.version == requirement.version
+                        })
+                    {
+                        return Err(ConfigurationError::IncompatibleBinding {
+                            instance: name.clone(),
+                            contract: requirement.id.clone(),
+                        });
+                    }
+                    if supplier.enablement == Enablement::Enabled {
+                        required.insert(supplier_name.clone());
+                    }
+                }
+            }
+        }
+        dependencies.insert(name.clone(), required);
+    }
+    let mut order = Vec::with_capacity(dependencies.len());
+    while !dependencies.is_empty() {
+        let ready: Vec<_> = dependencies
+            .iter()
+            .filter(|(_, required)| required.is_empty())
+            .map(|(name, _)| name.clone())
+            .collect();
+        if ready.is_empty() {
+            return Err(ConfigurationError::Cycle(
+                dependencies.into_keys().collect(),
+            ));
+        }
+        for name in ready {
+            dependencies.remove(&name).unwrap();
+            for required in dependencies.values_mut() {
+                required.remove(&name);
+            }
+            order.push(name);
+        }
+    }
+    Ok(order)
+}
+
+#[cfg(test)]
+mod tests;

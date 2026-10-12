@@ -54,6 +54,10 @@ Consequences and the pattern to use instead:
   `inner_size()` → `surface_size()`.)
 - Verified 0.8.0-alpha / `blitz-dom` 0.3.0-beta.2.
 
+### Linux accessibility: enable the backend; semantic actions are not wired
+
+`blitz-shell 0.3.0-beta.2` disables defaults on `accesskit_xplat 0.1.1`. Accessibility alone does not enable its Unix backend; desktop explicitly enables xplat defaults on Linux. Once enabled, AT-SPI inspection can work, but `BlitzShellEvent::Accessibility → ActionRequested` is still an empty TODO in this resolved version. An accessibility CLI click can therefore report dispatch success without changing the UI. Do not use that receipt as evidence of an interaction; verify the resulting state. Use normal keyboard input or operator input for activation; do not patch the upstream TODO as part of unrelated feature work.
+
 ### `tabindex` panics, so keyboard focus is unavailable
 
 Setting `tabindex: 0` routes Dioxus into `set_focus`, which calls `doc_mut()` and panics the same way

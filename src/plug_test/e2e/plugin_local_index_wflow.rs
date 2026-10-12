@@ -43,6 +43,8 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
         ]
         .into(),
         user_path: None,
+
+        idempotency_key: None,
     };
 
     let doc_id = test_context.drawer_repo.add(new_doc).await?;

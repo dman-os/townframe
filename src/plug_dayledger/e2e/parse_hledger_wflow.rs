@@ -79,6 +79,8 @@ async fn test_parse_hledger_writes_one_claim_per_transaction() -> Res<()> {
         )]
         .into(),
         user_path: None,
+
+        idempotency_key: None,
     };
 
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;
@@ -149,6 +151,8 @@ async fn test_parse_hledger_reparse_preserves_claim_ids_when_transaction_inserte
         )]
         .into(),
         user_path: None,
+
+        idempotency_key: None,
     };
 
     let doc_id = test_cx.drawer_repo.add(new_doc).await?;

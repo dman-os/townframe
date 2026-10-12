@@ -4,9 +4,14 @@
 //! will inject an [`ApplicationBackend`] and a future UI layer will observe the data contracts
 //! exposed here.
 
+pub mod application;
 pub mod backend;
 pub mod data;
+pub mod documents;
 pub mod features;
+pub mod host;
+pub mod micros;
+pub mod native;
 
 pub use backend::{
     ApplicationBackend, BackendError, BackendEvent, Command, CommandId, CommandOutcome,

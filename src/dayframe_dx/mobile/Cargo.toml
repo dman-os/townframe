@@ -22,4 +22,4 @@ native = ["dioxus/native"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }
-winit = { version = "0.31.0-beta.2", features = ["android-native-activity"] }
+winit = { version = "0.31.0-beta.3", features = ["android-native-activity"] }

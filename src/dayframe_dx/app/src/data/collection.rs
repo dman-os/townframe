@@ -78,7 +78,20 @@ where
     }
 
     pub fn get(&self, key: &K) -> Option<V> {
-        self.visible_snapshot().get(key).cloned()
+        // Point reads must not clone the whole projection. Latest optimistic intent wins.
+        for pending in self.pending.values().rev() {
+            for change in pending.changes.iter().rev() {
+                match change {
+                    CollectionChange::Upsert {
+                        key: changed,
+                        value,
+                    } if changed == key => return Some(value.clone()),
+                    CollectionChange::Remove { key: changed } if changed == key => return None,
+                    CollectionChange::Upsert { .. } | CollectionChange::Remove { .. } => {}
+                }
+            }
+        }
+        self.base.get(key).cloned()
     }
 
     pub fn live_query(&self) -> LiveQuery<K, V> {
@@ -209,6 +222,15 @@ where
     pub fn transaction_status(&self, transaction: TransactionId) -> Option<TransactionStatus> {
         self.statuses.get(&transaction).copied()
     }
+    /// Releases a settled receipt after its consumer has incorporated the outcome.
+    /// Pending transactions cannot be forgotten: their overlays still belong to this runtime.
+    pub fn forget_completed(&mut self, transaction: TransactionId) -> Option<TransactionStatus> {
+        assert!(
+            !self.pending.contains_key(&transaction),
+            "cannot forget a pending transaction"
+        );
+        self.statuses.remove(&transaction)
+    }
 
     fn rollback_after_submit_failure(&mut self, transaction: TransactionId) {
         self.rollback(transaction)
@@ -231,6 +253,9 @@ where
         transaction: Option<(TransactionId, TransactionStatus)>,
     ) -> u64 {
         self.notification_revision += 1;
+        if self.events.receiver_count() == 0 {
+            return self.notification_revision;
+        }
         let event = CollectionEvent {
             notification_revision: self.notification_revision,
             snapshot: self.visible_snapshot(),

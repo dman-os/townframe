@@ -9,6 +9,8 @@
 
 @source "./src/**/*.rs";
 @source "../showcase/src/**/*.rs";
+@source "../app/src/**/*.rs";
+@source "../desktop/src/**/*.rs";
 
 /* Button props form class names at runtime; keep every declared variant in the bundle. */
 @source inline("df-button-default df-button-secondary df-button-outline df-button-ghost df-button-destructive df-button-sm df-button-md df-button-lg");

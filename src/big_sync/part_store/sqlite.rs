@@ -641,7 +641,10 @@ impl HostPartStore for SqlitePartStore {
     async fn set_obj_payload(&self, obj_id: ObjKey, payload: ObjPayload) -> Res<()> {
         let payload_json = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
         let mut frontier_tx = self.frontier.begin().await?;
-        let cursor = frontier_tx.revision().await?;
+        // Every read this write needs comes before the revision it might allocate, because
+        // allocating is itself the cursor bump: `revision()` reserves the next frontier
+        // revision in `big_sync_meta`, so a store that reserved first and then discovered
+        // nothing had changed would still advance the cursor space on every repeat write.
         let tx = frontier_tx.context_mut();
         let obj_ref = self.core.ensure_obj_ref(tx, obj_id.clone()).await?;
         let old_payload_json: Option<String> = sqlx::query_scalar!(
@@ -651,13 +654,6 @@ impl HostPartStore for SqlitePartStore {
         .fetch_optional(&mut **tx)
         .await?
         .flatten();
-        sqlx::query!(
-            "UPDATE big_sync_objs SET payload_json = ?1 WHERE obj_ref = ?2",
-            payload_json,
-            obj_ref
-        )
-        .execute(&mut **tx)
-        .await?;
         let live_parts = sqlx::query!(
             "SELECT m.maybe_part_ref, p.part_id
              FROM big_sync_members m
@@ -680,12 +676,40 @@ impl HostPartStore for SqlitePartStore {
         )
         .fetch_all(&mut **tx)
         .await?;
+        let previously_present = old_payload_json
+            .as_deref()
+            .is_some_and(|stored| !stored.is_empty());
         let old_payload: ObjPayload = old_payload_json
             .as_deref()
-            .filter(|str| !str.is_empty())
-            .map(|str| serde_json::from_str(str).wrap_err(ERROR_JSON))
+            .filter(|stored| !stored.is_empty())
+            .map(|stored| serde_json::from_str(stored).wrap_err(ERROR_JSON))
             .transpose()?
             .unwrap_or(serde_json::Value::Null);
+        // Re-writing the payload an object already holds, with its membership already live and
+        // no membership transition riding along, is not a change. The presence plane's boot
+        // announce replays every blob this node holds, so a repeat that reserved a revision here
+        // would restamp every live part's `latest_cursor` and publish a `Changed` per part on
+        // every restart — a revision of the whole blob plane for bytes that never moved.
+        // `add_obj_to_parts` already refuses a repeat for a present membership; the payload
+        // write has to make the same refusal. The parts-less case deliberately keeps its emit:
+        // an object with no live membership may still be one the object route has yet to hear
+        // about.
+        if previously_present
+            && old_payload == payload
+            && pending_parts.is_empty()
+            && !live_parts.is_empty()
+        {
+            return Ok(());
+        }
+        let cursor = frontier_tx.revision().await?;
+        let tx = frontier_tx.context_mut();
+        sqlx::query!(
+            "UPDATE big_sync_objs SET payload_json = ?1 WHERE obj_ref = ?2",
+            payload_json,
+            obj_ref
+        )
+        .execute(&mut **tx)
+        .await?;
         for part in &live_parts {
             let old_state = MemberState::Live(old_payload.clone());
             self.core

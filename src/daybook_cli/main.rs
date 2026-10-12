@@ -502,6 +502,8 @@ mod tests {
                     user_path: Some(daybook_types::doc::UserPathBuf::from(
                         node_a.ctx.local_user_path.clone(),
                     )),
+
+                    idempotency_key: None,
                 })
                 .await?;
         }

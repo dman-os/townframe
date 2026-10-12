@@ -42,17 +42,15 @@ const TMP_SUBDIR: &str = "tmp";
 pub(crate) const DOC_RESERVATION_MAGIC: [u8; 4] = *b"DRSV";
 
 /// A durably reserved document identity: the ephemeral signing key whose
-/// verifying key is the eventual document ID, plus the parent authorities the
-/// document will be created under at finalization.
+/// verifying key is the eventual document ID.
 ///
 /// Stored in Keyhive's local-secret storage (never synchronized); it is the
-/// crash-recovery record between ID allocation and Keyhive document creation.
+/// crash-recovery record between ID allocation and the document commit.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DocReservation {
     pub magic: [u8; 4],
     pub doc_id: [u8; 32],
     pub signing_key: [u8; 32],
-    pub parents: Vec<[u8; 32]>,
     /// Keys for causal parents inherited from another document, if any.
     pub initial_keys: Vec<(Vec<u8>, [u8; 32])>,
     /// Serialized initial Automerge content, staged before Keyhive creation.
@@ -1073,20 +1071,6 @@ impl BigRepoKeyhiveStorage {
         self.save_doc_reservation(&reservation).await
     }
 
-    pub(crate) async fn staged_doc_content(
-        &self,
-        doc_id: [u8; 32],
-    ) -> io::Result<Option<(Vec<u8>, Vec<(Vec<u8>, [u8; 32])>)>> {
-        Ok(self
-            .load_doc_reservation(doc_id)
-            .await?
-            .and_then(|reservation| {
-                reservation
-                    .initial_content
-                    .map(|content| (content, reservation.initial_keys))
-            }))
-    }
-
     pub(crate) async fn delete_doc_reservation(&self, doc_id: [u8; 32]) -> io::Result<()> {
         match &self.inner {
             BigRepoKeyhiveStorageInner::Fs { archives, .. } => {
@@ -1596,7 +1580,6 @@ mod tests {
             magic: DOC_RESERVATION_MAGIC,
             doc_id,
             signing_key: [12u8; 32],
-            parents: Vec::new(),
             initial_keys: Vec::new(),
             initial_content: None,
         };
@@ -1742,7 +1725,6 @@ mod tests {
             magic: DOC_RESERVATION_MAGIC,
             doc_id,
             signing_key: [52u8; 32],
-            parents: vec![[53u8; 32]],
             initial_keys: vec![(vec![1, 2], [54u8; 32])],
             initial_content: Some(vec![1, 2, 3]),
         };

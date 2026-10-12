@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["vendor/sledgehammer-bindgen-macro"]
 members = [
   "./src/am_utils_rs",
   "./src/api_utils_rs",
@@ -28,6 +29,7 @@ members = [
   "./src/wflow_tokio/",
   "./src/xtask",
   "./src/dayframe_dx/app",
+  "./src/dayframe_dx/guest",
   "./src/dayframe_dx/ui",
   "./src/dayframe_dx/web",
   "./src/dayframe_dx/desktop",
@@ -148,6 +150,10 @@ fs4 = "0.13.1"
 #
 # crypto
 chacha20poly1305 = "0.10"
+aes-gcm = "0.10"
+bao-tree = { version = "0.16", default-features = false, features = ["experimental-mixed", "tokio_fsm", "validate", "serde"] }
+hkdf = "0.12"
+sha2 = "0.10"
 
 #
 # http
@@ -226,7 +232,9 @@ clap_complete = "4.5"
 # networks
 iroh = "1"
 iroh-tickets = "1"
-iroh-blobs = "0.103.0"
+# iroh-blobs = "0.103.0"
+iroh-blobs = { git = "https://github.com/dman-os/iroh-blobs", rev = "b3d641036c807b30d9fc62fd22a83801a38386d3" }
+
 
 #
 # actors
@@ -236,14 +244,19 @@ irpc-iroh = "0.17.0"
 #
 # gui
 dioxus = { version = "0.8.0-alpha.1" }
+dioxus-core = { path = "../dioxus/packages/core" }
+dioxus-html = { path = "../dioxus/packages/html" }
+dioxus-interpreter-js = { path = "../dioxus/packages/interpreter", features = ["sledgehammer"] }
 ui = { path = "./src/dayframe_dx/ui" }
 # xilem = { path = "../xilem/xilem/" }
 
 [patch.crates-io]
+# Binary-only Wasm guests must not generate a JS-channel flush method.
+sledgehammer_bindgen_macro = { path = "vendor/sledgehammer-bindgen-macro" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
-dioxus = { git = "https://github.com/DioxusLabs/dioxus", rev = "ada3b67c73c1c5484dd2e8408cb21c470b200423" }
-dioxus-native = { git = "https://github.com/DioxusLabs/dioxus", rev = "ada3b67c73c1c5484dd2e8408cb21c470b200423" }
+dioxus = { path = "../dioxus/packages/dioxus" }
+dioxus-native = { path = "../dioxus/packages/native" }
 # automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
 # leptos = { path = "../leptos/leptos/" }
 # leptos_meta = { path = "../leptos/meta/" }
@@ -428,17 +441,13 @@ clippy.let_underscore_untyped = "deny"
 rust.let_underscore_drop = "deny"
 # clippy.used_underscore_binding = "warn"
 
-# Subduction is taken straight from the local checkout by the path dependencies above: its own
-# workspace members depend on each other by path, so nothing has to negotiate versions and the graph
-# holds exactly one copy of each crate. Keyhive stays declared by `rev` and is redirected by the
-# patch below, because subduction's own keyhive dependency is a git edge at the pushed rev — only a
-# patch on the shared URL unifies that edge with ours onto the one local checkout.
-# Remember to re-check resolution after editing either block: a partial block silently
-# duplicates a crate across the local path and the pinned git source.
-[patch."https://github.com/dman-os/keyhive"]
+# [patch."https://github.com/dman-os/iroh-blobs"]
+# iroh-blobs = { path = "/home/asdf/repos/rust/iroh-blobs" }
+# [patch."https://github.com/dman-os/keyhive"]
 # keyhive_core = { path = "../keyhive/keyhive_core" }
 # keyhive_crypto = { path = "../keyhive/keyhive_crypto" }
 # beekem = { path = "../keyhive/beekem" }
+# [patch."https://github.com/dman-os/subduction"]
 # subduction_core = { path = "../subduction/subduction_core" }
 # subduction_iroh = { path = "../subduction/subduction_iroh" }
 # subduction_websocket = { path = "../subduction/subduction_websocket" }

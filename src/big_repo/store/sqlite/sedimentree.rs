@@ -45,6 +45,12 @@ impl SqliteBigRepoStore {
         )
         .execute(&mut **tx)
         .await?;
+        let old_payload: ObjPayload = old_payload_json
+            .as_deref()
+            .filter(|str| !str.is_empty())
+            .map(|str| serde_json::from_str(str).wrap_err(ERROR_JSON))
+            .transpose()?
+            .unwrap_or(serde_json::Value::Null);
         let parts = sqlx::query!(
             "SELECT m.maybe_part_ref, p.part_id
              FROM big_sync_members m JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
@@ -60,6 +66,24 @@ impl SqliteBigRepoStore {
         )
         .fetch_all(&mut **tx)
         .await?;
+        // Re-writing the payload an object already holds, with its membership already live and
+        // no membership transition riding along, is not a change. `next_cursor` reserves the
+        // next cursor, so a repeat that got past this point would restamp every live part's
+        // `txid`/`latest_cursor` and publish a `Changed` per part. The presence plane's boot
+        // announce replays every blob this node holds, so a repeat here turns each restart into
+        // a revision of the whole blob plane for bytes that never moved. `add_obj_to_parts`
+        // already refuses a repeat for a present membership; the payload write makes the same
+        // refusal. The parts-less case keeps its emit: an object with no live membership may
+        // still be one the object route has yet to hear about.
+        if old_payload_json
+            .as_deref()
+            .is_some_and(|stored| !stored.is_empty())
+            && old_payload == payload
+            && pending_parts.is_empty()
+            && !parts.is_empty()
+        {
+            return Ok(Vec::new());
+        }
         let cursor = Self::next_cursor(tx).await?;
         // The object's own row carries a change only when no part row carries it. A part is
         // the finer key, and it is the object route's rows that a client pages through, so
@@ -87,12 +111,6 @@ impl SqliteBigRepoStore {
             .execute(&mut **tx)
             .await?;
         }
-        let old_payload: ObjPayload = old_payload_json
-            .as_deref()
-            .filter(|str| !str.is_empty())
-            .map(|str| serde_json::from_str(str).wrap_err(ERROR_JSON))
-            .transpose()?
-            .unwrap_or(serde_json::Value::Null);
         let mut changed_part_ids = Vec::new();
         let mut added_events = Vec::new();
         for row in &parts {

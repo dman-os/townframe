@@ -59,7 +59,25 @@ impl BlobSyncBackend {
         }
 
         let iroh_hash = blob_id_to_iroh_hash(blob_id.clone());
-        if self.blobs_repo.iroh_store().blobs().has(iroh_hash).await? {
+        // The store's `has()` answers "can this store serve the hash without a
+        // download", and it reports virtual entries (outboard here, ciphertext
+        // produced on demand by the registered provider) as complete. Export
+        // can only materialize *stored* bytes and is refused for virtual ones
+        // ("cannot export a virtual entry to a path; it has no stored data"),
+        // so gate the export on a sync reader: only a stored-complete entry
+        // hands one out (`fs.rs` `sync_reader`). A virtual entry reaching this
+        // function still asked for materialization, so it falls through to the
+        // download branch - the serving peer produces the real bytes - rather
+        // than failing the same way on every retry.
+        if self.blobs_repo.iroh_store().blobs().has(iroh_hash).await?
+            && self
+                .blobs_repo
+                .iroh_store()
+                .blobs()
+                .sync_reader(iroh_hash)
+                .await?
+                .is_some()
+        {
             self.blobs_repo.put_from_store(blob_id).await?;
             return Ok(());
         }
@@ -102,8 +120,23 @@ impl SyncBackend for BlobSyncBackend {
         let blob_id = BlobId::try_from(&obj_id)
             .wrap_err_with(|| format!("blob object key is not a blob digest: {obj_id}"))?;
         let local_has_blob = self.blobs_repo.has_blob_on_disk(blob_id.clone()).await?;
+        // ADR 003 §14: possession of a cipher representation is "ready to be
+        // served, physically or virtually". A node that holds the plaintext
+        // serves the ciphertext on demand through its registered provider, so
+        // a virtual entry whose `ct:`/`pt:` pair is still rooted is terminal
+        // possession: there is no transfer this node could want. Without this
+        // branch the possession leg below demanded an export the store refuses
+        // for virtual entries and this task failed-and-rescheduled forever -
+        // the randomized stress's "big sync object task failed; rescheduling"
+        // storm, hundreds of identical retries per (peer, object), which the
+        // settlement fence can never ride out.
+        let local_possessed_virtual = !local_has_blob
+            && self
+                .blobs_repo
+                .blob_is_possessed_without_bytes(&blob_id)
+                .await?;
         let local_payload = self.part_store.obj_payload(obj_id.clone()).await?;
-        if local_has_blob {
+        if local_has_blob || local_possessed_virtual {
             match &remote_payload {
                 Some(remote_payload) if local_payload.as_ref() == Some(remote_payload) => {
                     return Ok(SyncTaskRunOutcome::Completion(SyncTaskCompletion {
@@ -121,7 +154,12 @@ impl SyncBackend for BlobSyncBackend {
             }
         }
 
-        self.ensure_local_blob(peer_id, blob_id).await?;
+        // Possessed virtually: skip the possession leg (its export and its
+        // `blob_now_held` row are meaningless without stored bytes), but still
+        // reconcile the part payload and membership below.
+        if !local_possessed_virtual {
+            self.ensure_local_blob(peer_id, blob_id.clone()).await?;
+        }
         let payload = remote_payload
             .clone()
             .or_else(|| local_payload.clone())
@@ -692,6 +730,192 @@ mod tests {
         for node in nodes {
             node.router.shutdown().await?;
         }
+        Ok(())
+    }
+    /// ADR 003 §14 possession regression. A key-holder holds the ciphertext
+    /// only virtually (outboard + rooted provider pair; the bytes it serves are
+    /// re-encrypted from the stored plaintext on demand). When a peer
+    /// advertises the ciphertext's object, the task must settle without any
+    /// transfer: before the fix the possession leg took the `has()` shortcut
+    /// into `export`, which the store refuses for virtual entries, and the
+    /// task failed-and-rescheduled forever - the four-node randomized stress's
+    /// ~800-identical-retries-per-(peer, object) storm, whose settlement fence
+    /// starved with every document already converged. The peer here is
+    /// deliberately never registered for downloads: touching the download
+    /// branch would error loudly instead of passing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blob_sync_obj_settles_for_a_virtually_possessed_cipher_representation() -> Res<()> {
+        let (backend, _part_store, blobs_repo, _temp_root) = build_blob_backend().await?;
+        let pair_roots =
+            crate::blobs::pair_roots::PairRoots::boot(crate::app::SqlCtx::memory().await?).await?;
+        let key = crate::blobs::encrypt::MasterKey::random();
+        // The full add pass installs and registers as one act: P gets stored
+        // bytes, C gets the virtual entry, and the pair roots both under the
+        // `ct:`/`pt:` tags.
+        let (c, p_hash) = crate::blobs::encrypt::add_encrypted(
+            &blobs_repo.iroh_store(),
+            &blobs_repo.cipher_provider(),
+            &pair_roots,
+            &key,
+            crate::blobs::encrypt::EncodingParams::DEFAULT,
+            b"cipherblob virtual possession",
+        )
+        .await?;
+
+        let blob_id = BlobId::new(*c.as_bytes());
+        let store = blobs_repo.iroh_store();
+        let blobs = store.blobs();
+        assert!(blobs.has(c).await?, "the virtual entry is servable");
+        assert!(
+            blobs.sync_reader(c).await?.is_none(),
+            "installed C must be virtual: no stored bytes behind it"
+        );
+        assert!(
+            blobs.sync_reader(p_hash).await?.is_some(),
+            "the plaintext it serves from is the stored side"
+        );
+        assert!(
+            blobs_repo.blob_is_possessed_without_bytes(&blob_id).await?,
+            "virtual entry with its pair rooted is possessed without bytes"
+        );
+
+        let obj_id = ObjKey::from(blob_id);
+        let outcome = backend
+            .sync_obj(
+                PeerKey::new([2; 32]),
+                obj_id,
+                test_parts(),
+                Some(serde_json::json!({"mime": "application/octet-stream"})),
+            )
+            .await?;
+        match outcome {
+            SyncTaskRunOutcome::Completion(comp) => {
+                assert_eq!(
+                    comp.deets,
+                    SyncCompletionDeets::AddedMember,
+                    "the part payload was reconciled without any transfer"
+                );
+            }
+            other => panic!("expected completion for the virtually held object, got {other:?}"),
+        }
+        assert!(
+            !blobs_repo
+                .has_blob_on_disk(BlobId::new(*c.as_bytes()))
+                .await?,
+            "settling a virtually possessed object must never export the ciphertext to disk"
+        );
+        Ok(())
+    }
+
+    /// The relay-shape negative control: a node with no pair (no tags, no keys,
+    /// nothing virtual of its own) still takes the download branch and lands
+    /// real stored bytes, while the serving side holds C only virtually. This
+    /// is the world where the possession leg's export is correct.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blob_sync_materializes_ciphertext_for_a_node_without_a_pair() -> Res<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let dir_a = temp_dir.path().join("origin");
+        let dir_b = temp_dir.path().join("relay");
+
+        let address_lookup_a = iroh::address_lookup::MemoryLookup::default();
+        let endpoint_a = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .address_lookup(address_lookup_a.clone())
+            .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await?;
+
+        let address_lookup_b = iroh::address_lookup::MemoryLookup::default();
+        let endpoint_b = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .address_lookup(address_lookup_b.clone())
+            .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))?
+            .relay_mode(iroh::RelayMode::Disabled)
+            .bind()
+            .await?;
+
+        let blobs_repo_a = BlobsRepo::new(
+            dir_a.join("blobs"),
+            daybook_types::doc::UserPathBuf::from("/user-a/device-a"),
+        )
+        .await?;
+        let blobs_repo_b = BlobsRepo::new(
+            dir_b.join("blobs"),
+            daybook_types::doc::UserPathBuf::from("/user-b/device-b"),
+        )
+        .await?;
+
+        let router_a = iroh::protocol::Router::builder(endpoint_a.clone())
+            .accept(
+                iroh_blobs::ALPN,
+                iroh_blobs::BlobsProtocol::new(&blobs_repo_a.iroh_store(), None),
+            )
+            .spawn();
+
+        let part_store_b: big_repo::SharedPartStore = Arc::new(MemoryPartStore::new());
+        let backend_b = BlobSyncBackend::new(
+            Arc::clone(&blobs_repo_b),
+            Arc::clone(&part_store_b),
+            endpoint_b.clone(),
+            address_lookup_b.clone(),
+        );
+
+        let pair_roots =
+            crate::blobs::pair_roots::PairRoots::boot(crate::app::SqlCtx::memory().await?).await?;
+        let key = crate::blobs::encrypt::MasterKey::random();
+        let (c, _p_hash) = crate::blobs::encrypt::add_encrypted(
+            &blobs_repo_a.iroh_store(),
+            &blobs_repo_a.cipher_provider(),
+            &pair_roots,
+            &key,
+            crate::blobs::encrypt::EncodingParams::DEFAULT,
+            b"ciphertext served on demand to a pairless relay",
+        )
+        .await?;
+        let blob_id = BlobId::new(*c.as_bytes());
+        assert!(
+            blob_id_to_iroh_hash(blob_id.clone()) == c,
+            "the object identity is the ciphertext digest itself"
+        );
+        assert!(
+            !crate::blobs::encrypt::has_pair_tags(&blobs_repo_b.iroh_store(), c).await?,
+            "the relay holds no pair: nothing of its own is virtual"
+        );
+
+        let addr_a = iroh::EndpointAddr::from_parts(
+            endpoint_a.id(),
+            endpoint_a
+                .bound_sockets()
+                .into_iter()
+                .map(iroh::TransportAddr::Ip),
+        );
+        let peer_id_a = PeerKey::new(*endpoint_a.id().as_bytes());
+        backend_b.register_peer_addr(peer_id_a.clone(), addr_a);
+        backend_b
+            .ensure_local_blob(peer_id_a, blob_id.clone())
+            .await?;
+
+        assert!(
+            blobs_repo_b.has_blob_on_disk(blob_id.clone()).await?,
+            "the relay materializes the served ciphertext it had no bytes for"
+        );
+        let on_disk = blobs_repo_b.get_path(blob_id.clone()).await?;
+        let bytes = tokio::fs::read(on_disk).await?;
+        assert_eq!(
+            BlobId::new(*blake3::hash(&bytes).as_bytes()),
+            blob_id,
+            "the materialized object is the ciphertext itself"
+        );
+        assert!(
+            blobs_repo_b
+                .iroh_store()
+                .blobs()
+                .sync_reader(c)
+                .await?
+                .is_some(),
+            "the relay's store now holds the stored bytes"
+        );
+
+        router_a.shutdown().await?;
         Ok(())
     }
 }

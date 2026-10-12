@@ -640,7 +640,7 @@ impl BigKeyhiveHandle {
             .collect())
     }
 
-    pub(crate) async fn document_has_content(&self, doc_id: DocumentId) -> Res<bool> {
+    pub(crate) async fn keyhive_document_exists(&self, doc_id: DocumentId) -> Res<bool> {
         let kh_doc_id = keyhive_doc_id(doc_id)?;
         Ok(self.keyhive.get_document(kh_doc_id).await.is_some())
     }
@@ -797,10 +797,19 @@ impl BigKeyhiveHandle {
         let missing_id = **missing_id;
         let detail = match self.keyhive.get_individual(missing_id).await {
             None => "individual not registered locally: no op of its own was applied".to_owned(),
-            Some(individual) => format!(
-                "individual registered: held prekey ops={}",
-                individual.lock().await.prekey_ops().len()
-            ),
+            Some(individual) => {
+                let locked = individual.lock().await;
+                // TEMP-INSTRUMENTATION(prekey-dive): `pick_prekey` reads the live set, which
+                // `PrekeyState::build` provably cannot empty while the op log is non-empty
+                // (it skips a tombstone that would empty the set). A zero beside a non-zero
+                // op count therefore means this field was deserialized stale, or that the
+                // selection used a different copy of the same individual.
+                format!(
+                    "individual registered: held prekey ops={}, live prekeys={}",
+                    locked.prekey_ops().len(),
+                    locked.prekeys().len(),
+                )
+            }
         };
         tracing::warn!(
             %missing_id,
@@ -811,9 +820,79 @@ impl BigKeyhiveHandle {
         );
     }
 
+    /// TEMP-INSTRUMENTATION(prekey-dive): which copy of a coparent's individual the prekey
+    /// selection walks, and how it compares with the hive registry's.
+    ///
+    /// A `Peer::Individual` selects from the `Individual` it carries; a group or document
+    /// peer walks the individuals embedded in its members' delegation payloads. Neither is
+    /// necessarily the registry's copy, and only the registry's is what
+    /// [`Self::explain_missing_prekeys`] reports on.
+    async fn probe_coparent_prekeys(&self, coparents: &[BigKeyhivePeer], doc_id: &DocumentId) {
+        let probe_doc_id = match keyhive_doc_id(doc_id.clone()) {
+            Ok(id) => id,
+            Err(err) => {
+                tracing::warn!(%err, "prekey probe: cannot compute the keyhive document id");
+                return;
+            }
+        };
+        for peer in coparents {
+            let selected = peer.pick_individual_prekeys(probe_doc_id).await;
+            match peer {
+                BigKeyhivePeer::Individual(id, indie) => {
+                    let (peer_ops, peer_live) = {
+                        let locked = indie.lock().await;
+                        (locked.prekey_ops().len(), locked.prekeys().len())
+                    };
+                    let registry = self.keyhive.get_individual(*id).await;
+                    let (reg_ops, reg_live, same_arc) = match registry {
+                        Some(registry) => {
+                            let locked = registry.lock().await;
+                            (
+                                locked.prekey_ops().len(),
+                                locked.prekeys().len(),
+                                Arc::ptr_eq(&registry, indie),
+                            )
+                        }
+                        None => (0, 0, false),
+                    };
+                    tracing::warn!(
+                        %id,
+                        peer_ops,
+                        peer_live,
+                        reg_ops,
+                        reg_live,
+                        same_arc,
+                        selection_ok = selected.is_ok(),
+                        selection_err = %selected.as_ref().err().map(ToString::to_string).unwrap_or_default(),
+                        "prekey probe: individual coparent"
+                    );
+                }
+                BigKeyhivePeer::Group(id, group) => {
+                    tracing::warn!(group = %id, "prekey probe: group coparent");
+                    let members = group.lock().await.transitive_members().await;
+                    for (member, (agent, _access)) in members {
+                        if let BigKeyhiveAgent::Individual(member_id, indie) = agent {
+                            let locked = indie.lock().await;
+                            tracing::warn!(
+                                group = %id,
+                                %member,
+                                %member_id,
+                                member_ops = locked.prekey_ops().len(),
+                                member_live = locked.prekeys().len(),
+                                "prekey probe: group member's embedded individual"
+                            );
+                        }
+                    }
+                }
+                BigKeyhivePeer::Document(id, _doc) => {
+                    tracing::warn!(document = %id, "prekey probe: document coparent");
+                }
+            }
+        }
+    }
+
     pub(crate) async fn reserve_doc_id(
         &self,
-        parents: Vec<BigKeyhiveAuthority>,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
     ) -> Res<DocumentId> {
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand_08::rngs::OsRng);
@@ -822,10 +901,6 @@ impl BigKeyhiveHandle {
             magic: crate::keyhive_storage::DOC_RESERVATION_MAGIC,
             doc_id: doc_id.to_bytes32()?,
             signing_key: signing_key.to_bytes(),
-            parents: parents
-                .into_iter()
-                .map(|parent| parent.into_identifier().to_bytes())
-                .collect(),
             initial_keys: Vec::new(),
             initial_content: None,
         };
@@ -866,16 +941,18 @@ impl BigKeyhiveHandle {
     }
 
     /// Ensure the Keyhive document exists with the reserved signing key and
-    /// real, non-empty content heads. Reservation cleanup is performed only by
-    /// the outer lifecycle after Sedimentree persistence and pending-group
-    /// cleanup have completed.
+    /// the caller's coparents, and persist its initial events. The
+    /// reservation row is deleted by the outer commit sequence only after
+    /// Sedimentree persistence and handle materialization.
     ///
     /// Idempotent: if the reservation is already gone the document was already
-    /// finalized; if the Keyhive document already exists the events were
-    /// persisted and only the reservation cleanup is retried.
+    /// committed; if the Keyhive document already exists the events were
+    /// persisted and the caller-passed coparents are ignored (the genesis was
+    /// created under whatever coparents the first successful commit passed).
     pub(crate) async fn finalize_reserved_doc(
         &self,
         doc_id: DocumentId,
+        coparents: Vec<BigKeyhiveAuthority>,
         content_heads: NonEmpty<[u8; 32]>,
         protocol: &BigRepoKeyhiveProtocol,
         storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
@@ -897,8 +974,8 @@ impl BigKeyhiveHandle {
         };
         if self.keyhive.get_document(kh_doc_id).await.is_some() {
             // Events were already persisted. Leave the reservation in place;
-            // the outer lifecycle still has to persist the Sedimentree and
-            // remove the pending-group authority.
+            // the outer commit sequence still has to persist the Sedimentree,
+            // materialize the handle and delete the reservation row.
             return Ok(Vec::new());
         }
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&reservation.signing_key);
@@ -907,25 +984,25 @@ impl BigKeyhiveHandle {
                 "reserved signing key does not match document id {doc_id}"
             ));
         }
-        let mut coparents = Vec::with_capacity(reservation.parents.len());
-        for parent_id in reservation.parents {
-            let vk = ed25519_dalek::VerifyingKey::from_bytes(&parent_id)
-                .map_err(|_| ferr!("reserved parent is not a valid Ed25519 point"))?;
-            let identifier = Identifier::from(vk);
-            let agent =
-                self.keyhive.get_agent(identifier).await.ok_or_else(|| {
-                    ferr!("cannot resolve reserved parent authority {identifier:?}")
-                })?;
-            coparents.push(BigKeyhiveAuthority::Agent(agent).into_peer()?);
-        }
+        // Resolve each authority through `into_peer` so it is still validated
+        // on the way through; `generate_doc_with_reserved_signer` takes peers.
+        let peers = coparents
+            .into_iter()
+            .map(BigKeyhiveAuthority::into_peer)
+            .collect::<Res<Vec<_>>>()?;
         let initial_content_heads = NonEmpty {
             head: content_heads.head.to_vec(),
             tail: content_heads.tail.into_iter().map(Vec::from).collect(),
         };
-        let coparent_count = coparents.len();
+        let coparent_count = peers.len();
+        // TEMP-INSTRUMENTATION(prekey-dive): the selection reads the individual each
+        // coparent `Peer` carries, and a group/document peer walks the individuals embedded
+        // in its delegation payloads -- neither is necessarily the hive registry's copy.
+        // Keep them so the error branch can say which copy failed to produce a prekey.
+        let coparents_for_probe = peers.clone();
         let kh_doc_id = match self
             .keyhive
-            .generate_doc_with_reserved_signer(signing_key, coparents, initial_content_heads)
+            .generate_doc_with_reserved_signer(signing_key, peers, initial_content_heads)
             .await
         {
             Ok(kh_doc_id) => kh_doc_id,
@@ -939,59 +1016,13 @@ impl BigKeyhiveHandle {
                     self.explain_missing_prekeys(missing, coparent_count, "reserved")
                         .await;
                 }
+                self.probe_coparent_prekeys(&coparents_for_probe, &doc_id)
+                    .await;
                 return Err(ferr!("failed creating keyhive document: {err}"));
             }
         };
         let hashes = self.persist_document_events(kh_doc_id, protocol).await?;
         Ok(hashes)
-    }
-
-    pub(crate) async fn complete_reserved_doc(
-        &self,
-        pending_group: &BigKeyhiveGroup,
-        doc_id: DocumentId,
-        after_content: Vec<Vec<u8>>,
-        protocol: &BigRepoKeyhiveProtocol,
-        storage: &crate::keyhive_storage::BigRepoKeyhiveStorage,
-    ) -> Res<Vec<EventHash>> {
-        let Some(_reservation) = storage
-            .load_doc_reservation(doc_id.to_bytes32()?)
-            .await
-            .map_err(|err| ferr!("failed loading document reservation: {err}"))?
-        else {
-            if self
-                .keyhive
-                .get_document(keyhive_doc_id(doc_id.clone())?)
-                .await
-                .is_none()
-            {
-                return Err(ferr!("no reservation and no keyhive document for {doc_id}"));
-            }
-            return Ok(Vec::new());
-        };
-        let document_ids = self.group_document_ids(pending_group).await;
-        let hashes = if document_ids.contains(&doc_id) {
-            self.revoke_group_from_doc(pending_group, doc_id.clone(), after_content, protocol)
-                .await?
-        } else {
-            Vec::new()
-        };
-        storage
-            .delete_doc_reservation(doc_id.to_bytes32()?)
-            .await
-            .map_err(|err| ferr!("failed deleting document reservation: {err}"))?;
-        Ok(hashes)
-    }
-
-    pub(crate) async fn revoke_group_from_doc(
-        &self,
-        pending_group: &BigKeyhiveGroup,
-        doc_id: DocumentId,
-        after_content: Vec<Vec<u8>>,
-        protocol: &BigRepoKeyhiveProtocol,
-    ) -> Res<Vec<EventHash>> {
-        self.revoke_doc_access(pending_group.clone(), doc_id, true, after_content, protocol)
-            .await
     }
 
     async fn persist_document_events(

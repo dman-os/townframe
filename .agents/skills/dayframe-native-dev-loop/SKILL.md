@@ -25,10 +25,9 @@ least once. Read the **False signals** section before concluding a build failed.
 - The dev shell must provide AT-SPI (`at-spi2-core`) and put its service directory on
   `XDG_DATA_DIRS`, or the native app will run but never register on the accessibility bus. The
   `feat/dayframe` flake does this; a bare `nix develop` on another branch may not.
-- `accessibility-cli` is not published. It must be built from source (last known:
-  `../accessibility-cli/target/release/accessibility-cli`).
+- `accessibility-cli` is not published. Build it from source and use the resulting binary; on this
+  machine the configured target is `/run/media/asdf/p3N/tmp/townframe-target/debug/accessibility-cli`.
 
-## The one command
 ## The one command
 
 ```sh
@@ -36,6 +35,7 @@ deno run --allow-all x/dx.ts serve --desktop -p desktop --renderer native --hot-
 ```
 
 - **Native renderer always.** `--renderer native` is the default expectation for this work; wry exists only as a production fallback.
+- **Webview fallback for interaction checks.** When native/Blitz cannot dispatch accessibility actions, stop the native serve process and run the same command with `--renderer webview`. The webview build is slower on a cold target, but its AT-SPI tree exposes element titles and `accessibility-cli --click '[title="..."]'` can verify real callbacks. The native `with_window_attributes(...with_title(...))` configuration does not control the webview window title; expect `dioxus | ⛺` there.
 - **Do not pass `-p ui`.** `ui` is a lib crate, so the Dioxus CLI cannot target it. Target the binary crate `desktop`.
 - **Let the serve process own compilation.** Do not run `cargo build` alongside it. The wrapper forwards the arguments to the repository-local Dioxus CLI, and installs that CLI through `x/install-dx.ts` when needed.
 - Use the same wrapper for other Dioxus commands, for example `deno run --allow-all x/dx.ts check ...`.
@@ -89,17 +89,15 @@ asynchronous). Check the file exists before reading it rather than concluding th
 
 ## Semantic inspection and interaction (AT-SPI)
 
-`accessibility-cli` drives the app over the OS accessibility tree — no browser, no pixels:
+`accessibility-cli` drives the app over the OS accessibility tree — no browser, no pixels. The local helper resolves a niri window and finds the CLI binary:
 
 ```sh
-A=../accessibility-cli/target/release/accessibility-cli
-$A --platform linux --list-windows                      # find the app PID
-$A --platform linux --pid "$PID" --llm-query            # compact tree + CSS-like selectors
-$A --platform linux --pid "$PID" --click '[title="Daybook ▸"]'
-$A --platform linux --pid "$PID" --listen               # watch a11y events
+.agents/skills/dayframe-native-dev-loop/scripts/a11y.sh desktop --llm-query
+.agents/skills/dayframe-native-dev-loop/scripts/a11y.sh --pid "$PID" --click '[title="Refresh configuration"]'
+.agents/skills/dayframe-native-dev-loop/scripts/a11y.sh --id "$NIRI_ID" --interactive
 ```
 
-Actions and queries poll (`--timeout`, `--poll-interval`), so they can wait for UI that appears after
+Use `ACCESSIBILITY_CLI=/path/to/accessibility-cli` when the binary is outside the usual locations. Direct CLI calls still work; actions and queries poll (`--timeout`, `--poll-interval`), so they can wait for UI that appears after
 a state change. `--screenshot` / `--mouse-click x,y` exist but are position-dependent; prefer
 semantic selectors.
 
@@ -158,6 +156,11 @@ The operator has interrupted this loop to ask for less noise. When inspecting a 
 
 ## Recently bitten by
 
+- Capture `a11y.sh --llm-query` to a file, then filter that file. Piping the CLI directly into `head` closes stdout early and makes its Rust printing path panic with `Broken pipe`; that is a CLI output failure, not an application crash.
+- Semantic verification must target the actual lifecycle control, not a configuration switch with a similar label. Expand `Mock node and micro lifecycle controls` before targeting the demo lifecycle buttons. Selectors can include `[role-description="push button"]` to distinguish buttons from switches. The sample's configuration-flag toggle is now labelled separately from micro enablement.
+
+- (2026-09) `blitz-shell 0.3.0-beta.2` enables accessibility but depends on `accesskit_xplat 0.1.1` with defaults disabled. Without an explicit Linux dependency enabling xplat defaults, its Unix adapter is absent and the app never registers on AT-SPI even with the service configured. Desktop now enables that backend. This is distinct from missing `XDG_DATA_DIRS`.
+- The native window may have a CLI-generated title (`dioxus | ⛺`) and no app ID. Resolve it from `niri msg -j windows` rather than assuming `desktop` matches. Desktop now explicitly requests the title `Dayframe`.
 - (2026-09) bare `dx` resolving to deno's shim; wrapped Dioxus checks being stale; CSS-only edits needing a Rust
   touch; tailwind watcher death; the wrapped serve process silently exiting after ~3.5h; misreading an overlapping
   glyph as a missing one.

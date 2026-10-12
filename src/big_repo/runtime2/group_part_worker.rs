@@ -718,7 +718,7 @@ async fn reconcile_doc(
     let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&doc.to_bytes32()?)
         .map_err(|_| ferr!("document id is not a valid Ed25519 point"))?;
     let has_content = keyhive
-        .document_has_content(crate::DocumentId::new(doc.as_bytes()))
+        .keyhive_document_exists(crate::DocumentId::new(doc.as_bytes()))
         .await?;
     let (agents, part_agents, candidate_group_parts) = if has_content {
         let identifier = keyhive_core::principal::identifier::Identifier::from(verifying_key);

@@ -162,6 +162,29 @@ pub fn system_plugs() -> Vec<manifest::PlugManifest> {
                 display_config: default(),
                 references: default(),
             },
+            // ADR 003 §19: the encrypted representation and its key. Both are
+            // declared here because the drawer resolves every facet write's
+            // manifest through the system plugs - an undeclared tag cannot be
+            // written at all, by the encryption worker or anyone else.
+            FacetManifest {
+                key_tag: WellKnownFacetTag::CipherBlob.into(),
+                value_schema: schemars::schema_for!(daybook_types::doc::CipherBlob),
+                display_config: default(),
+                // The dict's "changes that violate self references will be
+                // rejected": a write that repoints `keyRef` or drops
+                // `keyRefHeads` would silently change which key an existing
+                // representation decrypts under.
+                references: vec![FacetReferenceManifest::UrlStringSplit {
+                    json_path: "/keyRef".into(),
+                    at_commit_json_path: "/keyRefHeads".into(),
+                }],
+            },
+            FacetManifest {
+                key_tag: WellKnownFacetTag::Jwk.into(),
+                value_schema: schemars::schema_for!(daybook_types::doc::Jwk),
+                display_config: default(),
+                references: default(),
+            },
             FacetManifest {
                 key_tag: WellKnownFacetTag::Pending.into(),
                 value_schema: schemars::schema_for!(Pending),

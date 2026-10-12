@@ -86,6 +86,25 @@ impl PlugsRepo {
         Ok(Some((heads, manifest)))
     }
 
+    /// Is `incoming` the manifest content recorded at `ref_url`?
+    ///
+    /// A document revision that leaves the manifest facet itself untouched — a
+    /// sibling facet written next to it, which is what the encryption worker's
+    /// cipherBlob write into a manifest doc is — must not be read as a
+    /// republish. `PlugManifest` carries no structural equality of its own, so
+    /// the comparison goes through the manifests' JSON form. An unreadable
+    /// `ref_url` (ADR 007 §6 pending resolution) is not evidence of equivalence.
+    pub(crate) async fn manifest_same_as_ref(
+        &self,
+        ref_url: &url::Url,
+        incoming: &manifest::PlugManifest,
+    ) -> Res<bool> {
+        let Some((_, tracked)) = self.read_manifest_at_ref(ref_url).await? else {
+            return Ok(false);
+        };
+        Ok(serde_json::to_value(&*tracked)? == serde_json::to_value(incoming)?)
+    }
+
     /// Materialize a plug's manifest at its enabled ref (pinned heads, or
     /// current branch heads when unpinned). None when the ref is not locally
     /// readable (pending) or the manifest id mismatches the plug. Pure read —

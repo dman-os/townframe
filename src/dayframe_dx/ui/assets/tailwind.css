@@ -18,6 +18,8 @@
     --text-base--line-height: calc(1.5 / 1);
     --text-lg: 1.125rem;
     --text-lg--line-height: calc(1.75 / 1.125);
+    --text-xl: 1.25rem;
+    --text-xl--line-height: calc(1.75 / 1.25);
     --text-2xl: 1.5rem;
     --text-2xl--line-height: calc(2 / 1.5);
     --text-4xl: 2.25rem;
@@ -328,6 +330,9 @@
   }
   .mb-3 {
     margin-bottom: calc(var(--df-spacing) * 3);
+  }
+  .mb-4 {
+    margin-bottom: calc(var(--df-spacing) * 4);
   }
   .mb-6 {
     margin-bottom: calc(var(--df-spacing) * 6);
@@ -706,11 +711,20 @@
   .df-tile {
     min-width: 0px;
   }
+  .min-w-0 {
+    min-width: 0px;
+  }
   .strip-count {
     flex: none;
     color: var(--df-color-text-subtle);
     --tw-numeric-spacing: tabular-nums;
     font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
+  }
+  .flex-1 {
+    flex: 1;
+  }
+  .shrink {
+    flex-shrink: 1;
   }
   .grow {
     flex-grow: 1;
@@ -739,6 +753,9 @@
   .grid-cols-\[repeat\(auto-fit\,minmax\(15rem\,1fr\)\)\] {
     grid-template-columns: repeat(auto-fit,minmax(15rem,1fr));
   }
+  .flex-col {
+    flex-direction: column;
+  }
   .flex-wrap {
     flex-wrap: wrap;
   }
@@ -762,6 +779,9 @@
   }
   .gap-4 {
     gap: calc(var(--df-spacing) * 4);
+  }
+  .gap-6 {
+    gap: calc(var(--df-spacing) * 6);
   }
   .df-tile-title {
     overflow: hidden;
@@ -865,6 +885,9 @@
   .bg-primary {
     background-color: var(--df-color-primary);
   }
+  .bg-surface {
+    background-color: var(--df-color-surface);
+  }
   .bg-surface-sunken {
     background-color: var(--df-color-surface-sunken);
   }
@@ -926,6 +949,9 @@
   .text-center {
     text-align: center;
   }
+  .text-left {
+    text-align: left;
+  }
   .font-sans {
     font-family: var(--df-font-family-sans);
   }
@@ -980,6 +1006,10 @@
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));
   }
+  .text-xl {
+    font-size: var(--text-xl);
+    line-height: var(--tw-leading, var(--text-xl--line-height));
+  }
   .leading-normal {
     --tw-leading: var(--leading-normal);
     line-height: var(--leading-normal);
@@ -1008,6 +1038,10 @@
     --tw-font-weight: var(--font-weight-normal);
     font-weight: var(--font-weight-normal);
   }
+  .font-semibold {
+    --tw-font-weight: var(--font-weight-semibold);
+    font-weight: var(--font-weight-semibold);
+  }
   .tracking-tight {
     --tw-tracking: var(--tracking-tight);
     letter-spacing: var(--tracking-tight);
@@ -1027,6 +1061,12 @@
   }
   .text-muted {
     color: var(--scheme-color-surface-variant);
+  }
+  .text-muted-foreground {
+    color: var(--scheme-color-on-surface-variant);
+  }
+  .lowercase {
+    text-transform: lowercase;
   }
   .ordinal {
     --tw-ordinal: ordinal;
@@ -1094,6 +1134,10 @@
     transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter, display, content-visibility, overlay, pointer-events;
     transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
     transition-duration: var(--tw-duration, var(--default-transition-duration));
+  }
+  .focus-visible\:outline:focus-visible {
+    outline-style: var(--tw-outline-style);
+    outline-width: 1px;
   }
   @media (width >= 64rem) {
     .lg\:p-12 {

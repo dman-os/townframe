@@ -317,6 +317,260 @@ This lets the UI act as the product design surface while backend work follows th
 
 Race-sensitive completion behavior must have deterministic interleaving tests. Sleeps, retries, and enlarged timeouts are not substitutes for ordering tests.
 
+## Proposed amendment: micro composition requirements
+
+**Status:** Proposed; the accepted decisions above remain the foundation. This amendment records
+agreed direction from the micro design discussion, but requires resolution of the questions below
+before its composition contract is accepted. It specifies responsibilities, not concrete Rust APIs.
+Where this amendment revises shell ownership or feature registration, the revised direction is
+identified explicitly; it does not imply that the existing runtime already implements it.
+
+### Purpose and boundaries
+
+Dayframe is a configurable, browser-shaped workbench for consuming Daybook services. It must make
+ordinary features inexpensive to develop, independently testable, and replaceable without reworking
+unrelated features. End users must be able to change composition beyond CSS. The default chrome is
+not a privileged hardcoded arrangement: a composition micro may implement the sidebar/main-content
+layout, and a future alternative may arrange content on a canvas.
+
+This revises the feature-first shell direction in sections 1 and 7: feature modules remain useful
+code organization, but contribute through explicit contracts rather than assuming a fixed shell.
+Feature gates remain availability policy; they are not the composition or extension mechanism.
+
+The ownership boundary is:
+
+- **Nodes and nodules:** durable computation, persistence, synchronization, and long-lived work.
+- **Application data runtime:** service-backed reactive collections and optimistic mutations,
+  retaining the acceptance and source-adapter semantics established above.
+- **Dayframe host:** configuration reconciliation, capability mediation, dependency lifetimes,
+  effect ownership, and adapters to rendering/platform facilities.
+- **Micros:** transient interactive features and composition, consuming explicitly granted facilities.
+- **Portable tiles/views:** the narrower, host-independent presentation surface. A tile MUST NOT
+  require knowledge of micros, Dayframe chrome, or a particular workspace arrangement.
+
+A micro may start durable node work and display progress; unloading the micro MUST NOT undo accepted
+mutations or implicitly cancel work whose lifetime belongs to the node. Micros are not a second
+backend. General process hosting, an ECS scheduler, and a universal micro-to-micro event bus are not
+requirements.
+
+### Vocabulary and provision inventory
+
+These names identify roles, not a mandatory public type for every row:
+
+| Name | Responsibility |
+| --- | --- |
+| Host | Supplies the stable runtime boundary and mediates access and lifecycle. |
+| Micro provider | Implementation and declared contracts from which instances can be configured. |
+| Micro instance | Configured identity that composes functionality and owns its transient effects. |
+| Integration | A composable part of a micro with its own requirements and owned lifetime. |
+| Mount | One live presentation, distinct from registering its provider. |
+| Capability | Opaque authority token restricting permitted operations; not an interface or an ability. |
+| API contract | A known, typed facility against which a micro compiles. |
+| Provision | An actually published implementation of an API contract. |
+| Contribution | An owned registration into a facility exposed by the host or another micro. |
+| Override | An independently owned presentation adjustment, permitted only by an explicit contract. |
+| Action | Invocable operation; its implementation is separate from UI discovery and placement. |
+| Trigger | Provider-defined occurrence with explicit context, not an ambient broadcast of the world. |
+| Observable query | Maintained result over state available through a granted capability. |
+| Composition | Arrangement and binding of presentations, driven by configuration/workspace state. |
+
+The initial provision needs are **panel content**, **semantic toolbar/menu entries**, **actions and
+input/UI placements**, **scoped interaction context**, and **contribution facilities exposed by
+composition owners**. Micros may also supply or host tiles; portable tiles remain independent.
+This is not a closed list of micro kinds. A normal chat feature can be one panel-providing micro;
+its component tree MUST NOT require micro-specific ceremony throughout its implementation.
+
+Capabilities needed to support these provisions include:
+
+- granted application-data reads and mutation intents through the existing data boundary;
+- configuration-facet access using existing manifest facet tags, key IDs, owner selection, and rights;
+- owned contribution registration and observation for named collections/extension points;
+- explicitly granted action definition/invocation and contextual presentation;
+- provider-defined triggers and structured observable queries;
+- component-provider registration, mediated mounting adapters, and appropriately granted composition access;
+- theme/presentation environment and required platform adapters supplied by the host.
+
+The precise contract granularity, scope resolution, and initial platform inventory remain open.
+No micro receives an unrestricted service, facet, action, or collection lookup by default.
+
+### Shared state, observation, and interaction
+
+Composition contribution collections MUST remain separate from service-backed data collections.
+Their writes concern registration ownership and disposal, not optimistic persistence or source cursors.
+A micro may update or withdraw entries it owns. It MUST NOT mutate another owner's entries by default.
+An owner may expose an override facility whose separately owned entries derive effective presentation
+without restoring stale snapshots during cleanup. Override precedence and permitted properties
+require an explicit provider contract.
+
+Toolbar/menu entries SHOULD describe semantic content and action references rather than arbitrary
+DOM fragments. Their owner controls rendering, theming, and layout. Internal DOM structure is not a
+stable micro extension interface. Editor/buffer-specific malleability is outside this decision.
+
+The host/provider executes structured queries over granted context or contribution state and tracks
+active subscriptions. Micro-owned callbacks consume results; a generic callback does not require a
+generic world broadcast. Query inspection must identify its owner and requested contract; retaining
+actual result values is a separate tracing/privacy policy. Structured descriptions allow evaluation
+sharing or indexing where justified, but do not require a universal query language.
+
+Triggers and maintained query results are distinct. A menu-opening trigger may supply an explicit
+resource target and a contribution facility for that occurrence. Normal DOM events inside a native
+component use the renderer's normal component APIs. Cross-provider interactions use explicit semantic
+contracts rather than making native event objects the portable boundary.
+
+Panels, buttons, and placement roles belong to composition grammar and its providers, not necessarily
+host primitives. The host mediates component references and mounting as well as action invocation;
+ordinary native components use local adapters. A portable component reference is not a DOM pointer.
+Required renderer facilities and ownership/teardown contracts remain to be established. This direction
+does not grant unrestricted cross-micro DOM querying or make internal DOM structure a stable API.
+
+### Composition and lifecycle requirements
+
+Configured enablement, dependency availability, implementation activation, and presentation mounting
+are different facts. The design MUST permit enabled functionality to remain unloaded/inactive until
+needed; exact demand triggers and descriptor requirements remain unresolved.
+
+Boot configuration selects root instances. Downstream creation occurs through an explicitly granted
+instantiation capability and MUST name an owning lifetime. Instantiating a child is an owned effect;
+removing its owner disposes the child. Multiple windows may instead be mounts within one instance.
+Persistence is a separate operation through granted configuration facilities, not an automatic
+consequence of instantiation. Persisted entries retain identity independent of placement.
+
+Explicitly granted ambient scopes may own longer-lived transient instances that clean themselves up.
+They remain bounded by application shutdown; they are not unowned tasks, implicit persistence, or
+substitutes for durable node work. Boot ownership and downstream owned creation settle the lifecycle
+structure. Multiple instances are permitted; launching once is not a singleton enforcement policy.
+
+A broad micro MUST be composable from smaller units without requiring one trait implementation per
+contribution role. Shared authoring helpers may implement conditions and integrations in micro-owned
+code on top of simpler trusted registration/dependency primitives. The host owns enforcement of
+ownership and authority, not every authoring policy. Optional integrations must be able to appear and
+disappear without restarting unrelated parts of their parent micro.
+
+Every host-mediated transient effect MUST have an attributable owner and a disposal path. Removal
+withdraws that owner's effects without erasing unrelated contributions. A contribution created for a
+trigger occurrence must be bounded by both the contributing integration and the occurrence lifetime.
+Activation/disposal races, partial activation, and provider replacement must not leak registrations.
+Dependents must finish required cleanup before their bound provider is destroyed, retaining access to
+that dependency for cleanup. Persistent workspace/configuration records are not transient effects.
+
+Stable configuration identities and live registration identities MUST be distinguished so stale
+cleanup cannot withdraw a replacement registration. Configuration must retain enough identity to
+refer to providers across disablement or unavailability; placeholder/restoration policy is open.
+
+Declarations, desired configuration, and live provisions MUST NOT be conflated. A declaration that a
+provider supports a contract does not satisfy a consumer dependency; an actual live provision does.
+Absent requirements must be inspectable. Mandatory versus conditional provision declarations and the
+response to a missing promised provision remain to be decided.
+
+### Authority, portability, and verification
+
+Dependency requests name contracts rather than importing another micro's implementation. Requests
+are not automatic grants. Authority must build on the existing capability-oriented regime, including
+facet-tag/key access; read, contribute, arrange, override, and invoke need not be the same permission.
+Native micros are trusted linked code: this API discipline is not an OS sandbox.
+
+Contracts MUST preserve a path to WIT/JS and separate-address-space implementations. Data, explicit
+handles, subscriptions, invocation, and acknowledged disposal form the portable boundary. Native
+callbacks and Dioxus factories may remain convenient local adapters; they are not transport values.
+No immediate WASM loader, marketplace, process model, or universal serialized DOM is required.
+
+A deterministic test environment must exercise independent contributors, disable/re-enable, failed
+activation, dependency withdrawal, context changes, and cancellation/late results without requiring
+full application startup. Inspection must identify active requirements, provisions, queries, owned
+registrations, and outstanding lifecycle work. Renderer/input behavior requires separate native
+verification; type checking an authoring example is not lifecycle evidence.
+
+### Desktop Settings slice and the document narrow waist
+
+The desktop MUST consume a running Settings micro and a separate configurable contributor before
+expanding the framework. Settings defines a typed section API; the host owns collection storage,
+read/insert/own-entry authority, component references, root mounts, and recovery. The contributor
+receives Settings as an explicit typed dependency, not through generic interface discovery.
+Settings MUST NOT receive the contributor's document grant merely because it mounts its content.
+Native render factories stay in the renderer adapter; only mediated references cross the host boundary.
+
+Each context receives an authorized sparse document mirror. A shared host service owns targeted
+hydration, refresh deduplication, retention/eviction, and the existing optimistic collection runtime.
+Watch selections MUST support multiple explicit documents and ordinary facet tags or exact keys;
+well-known tags are not a separate watch vocabulary. A document ID obtained through another service
+is not authority. The host MUST filter before hydration/delivery, revoke subscriptions, and reject
+stale handles. Active watches and pending writes retain their projections. Failed writes roll back;
+accepted writes commit without waiting for a later source event. Instance closure does not undo writes.
+
+The future core adapter will consume `index/facet_set.rs` and hydrate values through drawer. It MUST
+preserve bounded frontier reads, replay/removal semantics, source-owned cursors, and gap-free handoff.
+The current document-selector scan is not an indexed lookup and MUST NOT be described as one.
+Listing/discovering documents by facet requires a future, separately granted API. The desktop slice
+uses a mock source; it does not introduce a public index/search service or wire to core.
+
+### Initial micro provider seam
+
+The first implementation keeps feature code modular without making the application runtime a hand-written list of concrete micros. `ApplicationRuntime` owns a dynamic provider registry. A provider has a stable `MicroId` and versioned descriptor, declares its surface/command/placement/context contribution contracts, implements the host's `MicroProvider` contract, and is activated through a fresh host-owned instance. Provider registration and configured activation are separate operations, so one implementation can serve multiple instances and an instance can be withdrawn without unregistering its provider.
+
+Native activation adapters construct their micro's typed context from host facilities and explicitly bound requirements. `MicroActivation` is trusted adapter authority, not the feature's capability context. Configuration binds a declared contract to a configured supplier instance. The registry checks that an actual live provision with a compatible version exists before activating the consumer, and records the dependency for host-owned withdrawal. No arbitrary interface enumeration is exposed to feature code.
+
+Publication is staged until activation succeeds and all declared mandatory provisions are fulfilled. Failure closes owned effects without exposing partial outputs. Committed provisions belong to the runtime incarnation; owner closure withdraws them, and stale cleanup cannot remove a replacement. The initial native adapter permits one output per contract per instance; foreign adapters and multiple named outputs remain future extensions, not simulated transport values.
+
+Micros live under `dayframe_app::micros`, using the `settings.rs` plus `settings/` convention. Consumers import public contracts, not provider controllers. Settings and Sample use the same registration and activation boundary. The application runtime contains neither implementation; desktop selects instance bindings and retains mock/demo controls, but does not assemble their feature contexts. Portable tiles remain below this boundary.
+
+Boot reconciliation consumes a projection of configured instances: stable identity, provider identity, enablement, and explicit requirement-to-supplier bindings. It does not introduce another configuration store. Dependency order is derived from declarations and bindings; unchanged live incarnations are retained. Disabled, removed, or reconfigured instances are closed, and host dependency ownership withdraws affected consumers without restarting unrelated instances. Enabled consumers remain blocked when suppliers are unavailable, and a later reconciliation restores fresh incarnations when their requirements become available.
+
+Malformed binding edits and dependency cycles are rejected before changing the live graph. Reconciliation reports disabled, stopped, unavailable-provider, blocked, active, and failed states separately. Activation failures are retained until configuration or dependency incarnations change; unrelated edits do not repeatedly invoke a failing provider. `ApplicationRuntime::configure` applies a desired projection; one application-owned local `observe` future reconciles host closure and provider-registration changes and publishes current reports. Subscription precedes the initial snapshot, and host closure notifications follow the complete dependent recovery. Explicitly closing an incarnation leaves it stopped until its configuration changes, rather than automatically restarting it; dependency withdrawal blocks consumers until the supplier can return. Host shutdown ends observation after cleanup. Newly available incompatible declarations publish a configuration error without disturbing the previous live graph. This remains an event-driven mechanism, not a timer retry loop; the desktop's desired projection is still in-memory, not a durable storage adapter.
+
+### Decisions required before implementing the composition contract
+
+1. **Identity:** support multiple configured instances with stable configured identities, fresh runtime
+   incarnations, and independently owned presentation mounts. No provider multiplicity barrier is imposed.
+   Keyed creation may reuse a resource experience; it is not a universal singleton rule.
+2. **Activation:** use a shared, host-evaluated structured query/condition vocabulary for activation,
+   observation, and trigger selection, extensible as real needs arise. Its syntax and treatment of
+   occurrences versus maintained state remain open; dependency availability is a separate condition.
+3. **Contextual contributions:** support asynchronous activation and contribution directly. Authors may
+   implement placeholders/staging through shared primitives; predeclared synchronous stubs are not a
+   mandatory contract. Fixed occurrence targets and maintained contextual results remain distinct;
+   cancellation, late-result handling, and visible-update policy need specification.
+4. **Provision fulfillment:** all mandatory provisions MUST be present before activation is reported
+   successful. A missing promised mandatory provision fails activation and requires partial-effect
+   cleanup. Conditional provisions must be identified separately. Cordis resolves actual provisions
+   but does not itself enforce this stronger fulfillment rule; failure reporting remains to be specified.
+5. **Invocation:** host-mediated action handles, not transferred callbacks/pointers. The provider
+   executes its action in its own runtime; the invoker need not know the provider's embedding details.
+   Use an asynchronous public contract across address spaces, permitting local direct-call optimization
+   without changing authority or lifecycle semantics. Results and in-flight cancellation remain open.
+6. **Composition persistence:** layout implementations own remembering placement through granted
+   persistence/configuration facilities; common implementations/helpers can supply ordinary behavior.
+   Panel availability and micro enablement do not imply a particular placement. Develop a shared layout
+   grammar for semantic placement intent (for example primary/secondary), interpreted by layout owners
+   rather than exposing their physical arrangement. Whether that grammar is provided by a dedicated
+   micro or a common contract, provider-switch migration, and unavailable-layout recovery remain open.
+7. **Resolution and overrides:** use deterministic tie-breaking rather than activation order for
+   equally ranked candidates; exact priority and stable tie-break keys remain to be specified. Provider
+   selection, placement/presentation resolution, and invalid-configuration recovery still need contracts.
+8. **Capability surface:** which frontend contracts micros may define, optional dependency semantics,
+   scope isolation, and compatibility checking against existing manifest/configuration mechanisms.
+
+### Evidence and deliberately limited borrowing
+
+- [Cordis paper](https://arxiv.org/abs/2608.25512), sections 3.4.2 and 5–6: tagged owned registrations,
+  dependency-mediated lifetimes, configuration reconciliation, and access mediation. Its implementation
+  tracks supplied inverses but does not verify their correctness; declaration-only predictions assume
+  fulfillment of declared provisions. Dependency activation is not demand-based module fetching.
+- [VS Code commands](https://code.visualstudio.com/api/extension-guides/command) and
+  [contributions](https://code.visualstudio.com/api/references/contribution-points): handler registration,
+  contextual visibility/enablement, and UI placement are distinct.
+- [Emacs named features](https://www.gnu.org/software/emacs/manual/html_node/elisp/Named-Features.html):
+  composable libraries and demand loading, not our authority or removal guarantees.
+- [lazy.nvim specifications](https://lazy.folke.io/spec): explicit loading triggers; not evidence of
+  general reversible runtime unloading.
+- [Bevy plugins](https://docs.rs/bevy/latest/bevy/app/trait.Plugin.html): ordinary function-based assembly;
+  startup `cleanup` and entity despawn do not constitute general plugin removal.
+- Patchwork motivates data-driven, inspectable composition. Detailed correspondence to its current
+  source must be verified before adopting implementation-specific claims.
+
+The TypeScript material in `.agents/drafts/dayframe-micros.*` is exploratory evidence only. Subsequent
+work should implement bounded real Rust contracts and verify them with ordinary Dioxus integration,
+not mechanically translate that sketch or treat its unchecked generics as capability enforcement.
+
 ## Consequences
 
 - Desktop, mobile, and web share one application architecture without sharing platform assumptions.

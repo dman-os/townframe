@@ -1,0 +1,64 @@
+package townframe:dayframe@0.1.0;
+
+/// Retained presentation, independent of the guest framework and execution engine.
+/// These resources are issued by the host, never obtained by guessing a global ID.
+interface presentation {
+    /// Dioxus element identities are local to one surface, including its interpreter stack.
+    type node-id = u32;
+
+    variant presentation-error {
+        revoked,
+        unsupported(string),
+        invalid-batch(string),
+    }
+
+    resource surface {
+        /// Uses dioxus-interpreter-js MutationState's binary protocol from the repository's pinned
+        /// Dioxus revision (ada3b67). This is deliberately not a second Dayframe mutation language.
+        /// Host and guest must agree on that encoding when linking the presentation adapter.
+        /// The receipt describes the logical edit commit, not completion of layout or paint.
+        apply: func(edits: list<u8>) -> result<u64, presentation-error>;
+    }
+
+    resource mount-point {
+        /// Opens one owned surface in this explicitly granted placement.
+        /// Dropping a surface withdraws its tree; closing the incarnation revokes every handle.
+        open: func() -> result<surface, presentation-error>;
+    }
+}
+
+/// Synchronous event delivery permits browser default-action decisions before dispatch returns.
+/// A framework adapter dispatches by element and event name; closures never cross WIT.
+interface presentation-events {
+    use presentation.{surface, mount-point, presentation-error, node-id};
+
+    /// Mirrors Dioxus HtmlEvent's envelope and preserves its serialized EventData payload.
+    /// The surface supplies render-target scope; element IDs never identify application-global nodes.
+    record event {
+        /// The logical-tree revision against which the host selected the event target.
+        revision: u64,
+        element: node-id,
+        name: string,
+        bubbles: bool,
+        /// JSON produced by Dioxus's serialized HTML event adapter, not a second event schema.
+        data-json: string,
+    }
+
+    record event-response {
+        prevent-default: bool,
+        stop-propagation: bool,
+    }
+
+    /// The host retains the placement and receives the owned surface for event routing and cleanup.
+    /// The guest receives a borrowed placement, not authority to mount at arbitrary application roots.
+    mount: func(placement: borrow<mount-point>) -> result<surface, presentation-error>;
+
+    dispatch: func(surface: borrow<surface>, event: event) -> event-response;
+}
+
+/// Renderer-adapter contract only. Feature worlds add their explicit capability imports and async
+/// entry point; this world is not a universal micro context or an application service locator.
+world presentation-client {
+    import presentation;
+    export presentation-events;
+}

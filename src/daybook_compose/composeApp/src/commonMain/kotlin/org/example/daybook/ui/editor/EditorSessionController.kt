@@ -294,6 +294,7 @@ class EditorSessionController(
                             branchPath = "main",
                             facets = nextFacets,
                             userPath = null,
+                            idempotencyKey = null,
                         ),
                     )
                 onDocCreated?.invoke(addedId)

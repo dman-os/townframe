@@ -5,9 +5,10 @@ use crate::part_store::{HostPartStore, ReadTarget, validate_replay_targets};
 use big_sync_core::PeerKey;
 use big_sync_core::rpc::{
     BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
-    LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult, ReplayPage,
-    ReplayPageRequest, ReplaySessionId, ReplaySubscriptionPage, ReplaySubscriptionRequest,
-    ReplaySubscriptionResponse, ReplaySubscriptionTarget, RpcError, TargetVerdict,
+    LeafBucketsRequest, ListPartsError, PeerSummaryError, PeerSummaryRequest, PeerSummaryResult,
+    ReplayPage, ReplayPageRequest, ReplaySessionId, ReplaySubscriptionPage,
+    ReplaySubscriptionRequest, ReplaySubscriptionResponse, ReplaySubscriptionTarget, RpcError,
+    TargetVerdict,
 };
 use irpc::{WithChannels, channel, rpc_requests};
 use tokio::sync::mpsc;
@@ -91,7 +92,7 @@ pub trait WireBigSyncRpcClient: Send + Sync {
     async fn peer_summary(
         &self,
         req: ScopedRequest<PeerSummaryRequest>,
-    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>;
+    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, PeerSummaryError>>>;
 
     async fn replay_page(
         &self,
@@ -126,7 +127,7 @@ impl HostBigRpcClient for ScopedRpcClient {
     async fn peer_summary(
         &self,
         req: PeerSummaryRequest,
-    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
+    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, PeerSummaryError>>> {
         self.inner
             .peer_summary(ScopedRequest {
                 scope_key: Arc::clone(&self.scope_key),
@@ -185,7 +186,7 @@ pub trait HostBigRpcClient: Send + Sync {
     async fn peer_summary(
         &self,
         req: PeerSummaryRequest,
-    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>>;
+    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, PeerSummaryError>>>;
 
     async fn replay_page(&self, req: ReplayPageRequest) -> Res<BigSyncRpcResult<ReplayPage>>;
     async fn replay_subscription(
@@ -207,7 +208,7 @@ pub trait HostBigRpcClient: Send + Sync {
 #[rpc_requests(message = BigSyncRpcMessage)]
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum BigSyncIrpc {
-    #[rpc(tx = channel::oneshot::Sender<Result<PeerSummaryResult, ListPartsError>>)]
+    #[rpc(tx = channel::oneshot::Sender<Result<PeerSummaryResult, PeerSummaryError>>)]
     PeerSummary(ScopedRequest<PeerSummaryRequest>),
     #[rpc(tx = channel::oneshot::Sender<Result<ReplayPage, RpcError>>)]
     ReplayPage(ScopedRequest<ReplayPageRequest>),
@@ -462,7 +463,7 @@ impl WireBigSyncRpcClient for BigSyncRpcClient {
     async fn peer_summary(
         &self,
         req: ScopedRequest<PeerSummaryRequest>,
-    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, ListPartsError>>> {
+    ) -> Res<BigSyncRpcResult<Result<PeerSummaryResult, PeerSummaryError>>> {
         let response = match self.client.rpc(req).await {
             Ok(response) => response,
             Err(err) => {
@@ -1247,6 +1248,10 @@ impl BigSyncRpcWorker {
     }
 }
 
+/// Ceiling on the parts set one `PeerSummary` request may name. Remote input;
+/// see the refusal in the message handler.
+const MAX_SUMMARY_PARTS: usize = 64;
+
 impl BigSyncRpcWorker {
     #[tracing::instrument(
         skip(self, msg),
@@ -1272,10 +1277,35 @@ impl BigSyncRpcWorker {
         match msg {
             BigSyncRpcMessage::PeerSummary(req) => {
                 let WithChannels { inner, tx, .. } = req;
+                // The parts set is remote input; the handler answers per part.
+                // A peer that names thousands of parts makes this handler run
+                // store work for every one of them; the answer set is bounded
+                // instead (a summary request names a peer's newly pending
+                // parts - the number of told inventories - so this ceiling is
+                // orders of magnitude above any honest request).
+                //
+                // Over the ceiling the refusal is the whole request, and it is answered
+                // as an error: an empty answer map would read to the asker as an idle peer.
+                if inner.inner.parts.len() > MAX_SUMMARY_PARTS {
+                    let requested = inner.inner.parts.len();
+                    warn!(
+                        requested,
+                        cap = MAX_SUMMARY_PARTS,
+                        "peer_summary names too many parts; refusing all"
+                    );
+                    tx.send(Err(PeerSummaryError::TooManyParts {
+                        requested,
+                        cap: MAX_SUMMARY_PARTS,
+                    }))
+                    .await
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+                    return;
+                }
                 let Some(store) = self.stores.get(&inner.scope_key) else {
                     warn!(scope_key = %inner.scope_key, "peer_summary for unknown scope");
-                    tx.send(Err(ListPartsError::UnkownParts {
-                        unkown_parts: vec![],
+                    tx.send(Ok(PeerSummaryResult {
+                        parts: HashMap::new(),
                     }))
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1284,12 +1314,11 @@ impl BigSyncRpcWorker {
                 };
                 // An unauthenticated caller is refused on every arm: this surface has
                 // no local caller to serve, and a local in-process caller reaches the
-                // store directly. Refused as unknown rather than empty, so "not for
-                // you" cannot be told apart from "no such part".
+                // store directly. An empty answer refuses every named part.
                 let Some(asker) = authenticated_peer else {
                     warn!(scope_key = %inner.scope_key, "rejecting unauthenticated peer_summary request");
-                    tx.send(Err(ListPartsError::UnkownParts {
-                        unkown_parts: inner.inner.parts.into_iter().collect(),
+                    tx.send(Ok(PeerSummaryResult {
+                        parts: HashMap::new(),
                     }))
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1303,52 +1332,56 @@ impl BigSyncRpcWorker {
                         parts,
                         asker_part_cursors,
                     } = inner.inner;
-                    // The access half, asked for every named part before anything is
-                    // summarized: a part the asker may not read has to look exactly like
-                    // one this scope does not know, so it is folded into the same
-                    // `UnkownParts` answer rather than omitted from it.
-                    let mut unreadable = Vec::new();
-                    let mut readable = HashSet::new();
+                    // The answer is per part. A part the asker may not read is
+                    // simply absent from the answer map - denied and missing fold
+                    // together in what the map omits - but a part's absence must
+                    // never swallow a readable part's summary riding the same
+                    // request: a granted part starved beside an ungranted one is
+                    // the batch-refusal defect this per-part shape exists to close.
+                    // The store's own `summarize_parts` contract still folds an
+                    // unknown part into an error, so each part is summarized on its
+                    // own; a summary request names a peer's newly pending parts (the
+                    // number of told inventories), not an unbounded set.
+                    let mut summaries = HashMap::new();
+                    // The store is local and owned by this process, so these three reads
+                    // fail only when the substrate itself is broken — a store error, not
+                    // a per-part condition. There is no conservative partial answer to
+                    // fall back on: a part omitted here reads to the asker as "not
+                    // readable", which is a wrong verdict that silently starves that
+                    // part's sync, where the unknown-part answer is already folded into
+                    // the map by `summarize_parts` (handled below) instead of erroring.
+                    // So a failure here names a system-level error and panics rather than
+                    // degrading the answer.
                     for part_id in parts {
                         if store
                             .read_denied(ReadTarget::Part(part_id.clone()), asker.clone())
                             .await
-                            .unwrap()
+                            .expect(ERROR_IMPOSSIBLE)
                         {
-                            unreadable.push(part_id);
-                        } else {
-                            readable.insert(part_id);
+                            continue;
                         }
-                    }
-                    if !unreadable.is_empty() {
-                        unreadable.sort_unstable();
-                        Err(ListPartsError::UnkownParts {
-                            unkown_parts: unreadable,
-                        })
-                    } else {
-                        match store.summarize_parts(readable).await.unwrap() {
-                            Ok(parts) => {
-                                let mut summaries = HashMap::new();
-                                for (part_id, summary) in parts {
-                                    let since =
-                                        asker_part_cursors.get(&part_id).copied().unwrap_or(0);
-                                    let dirty = store
-                                        .part_dirty_count(
-                                            part_id.clone(),
-                                            Some(asker.clone()),
-                                            since,
-                                        )
-                                        .await
-                                        .unwrap();
-                                    summaries.insert(part_id, summary.into_strat_summaries(dirty));
-                                }
-                                Ok(PeerSummaryResult { parts: summaries })
-                            }
-                            Err(err) => Err(err),
+                        if let Ok(mut parts) = store
+                            .summarize_parts(HashSet::from([part_id.clone()]))
+                            .await
+                            .expect(ERROR_IMPOSSIBLE)
+                        {
+                            let Some(summary) = parts.remove(&part_id) else {
+                                continue;
+                            };
+                            let since = asker_part_cursors.get(&part_id).copied().unwrap_or(0);
+                            let dirty = store
+                                .part_dirty_count(part_id.clone(), Some(asker.clone()), since)
+                                .await
+                                .expect(ERROR_IMPOSSIBLE);
+                            summaries.insert(part_id, summary.into_strat_summaries(dirty));
                         }
+                        // The store reports an unknown part by name - that part is
+                        // just absent from the answer; this part passed the
+                        // readability pre-pass so the race is unknown-parts only.
                     }
+                    PeerSummaryResult { parts: summaries }
                 };
-                tx.send(out)
+                tx.send(Ok(out))
                     .await
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
@@ -2219,7 +2252,7 @@ mod tests {
     async fn summary_answer(
         caller: Caller<'_>,
         req: ScopedRequest<PeerSummaryRequest>,
-    ) -> Res<Result<PeerSummaryResult, ListPartsError>> {
+    ) -> Res<Result<PeerSummaryResult, PeerSummaryError>> {
         Ok(match caller {
             Caller::Peer(client) => client.peer_summary(req).await??,
             Caller::Unauthenticated(client) => client.rpc(req).await?,
@@ -2256,31 +2289,32 @@ mod tests {
         })
     }
 
-    /// A permitted asker gets the part's own summary; a refused one gets the part named
-    /// as unknown, which is the same answer an unknown part gets.
+    /// A permitted asker gets the part's own summary; a refused one gets an
+    /// empty answer map (the part's absence is the refusal) — the per-part
+    /// answer that keeps the part's neighbors' summaries on the wire — and
+    /// denied stays indistinguishable from unknown.
     async fn assert_peer_summary_arm(
         caller: Caller<'_>,
         caller_label: &str,
         entitlement: Entitlement,
-        part_id: &PartKey,
         req: ScopedRequest<PeerSummaryRequest>,
         expected: &PeerSummaryResult,
     ) -> Res<()> {
-        let answer = summary_answer(caller, req).await?;
+        let answer = summary_answer(caller, req).await?.expect(
+            "these arms name a legal part count, so a refusal here is per part, not TooManyParts",
+        );
         match (entitlement, answer) {
-            (Entitlement::Permitted, Ok(answer)) => assert_eq!(
+            (Entitlement::Permitted, answer) => assert_eq!(
                 &answer, expected,
                 "{caller_label}: a permitted asker gets the store's own summary"
             ),
-            (Entitlement::Refused, Err(ListPartsError::UnkownParts { unkown_parts })) => {
-                assert_eq!(
-                    unkown_parts,
-                    vec![part_id.clone()],
-                    "{caller_label}: the refusal names the part it will not answer for"
+            (Entitlement::Refused, answer) => {
+                // Refusal is an empty answer map: a part the response does not
+                // name is refused by its absence.
+                assert!(
+                    answer.parts.is_empty(),
+                    "{caller_label}: a refusal answers no part summaries"
                 );
-            }
-            (entitlement, answer) => {
-                panic!("{caller_label}: {entitlement:?} peer_summary answered {answer:?}")
             }
         }
         Ok(())
@@ -2390,6 +2424,58 @@ mod tests {
         }
     }
 
+    /// A request naming more parts than the responder will answer is refused whole, by
+    /// name.
+    ///
+    /// An empty answer map would be indistinguishable from an idle peer: the asker would
+    /// mark every part unknown and re-ask, which is the starvation the per-part answer
+    /// exists to prevent, only silent. The ceiling itself still answers - what is refused
+    /// is the request that exceeds it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_over_ceiling_summary_request_is_refused_by_name() -> Res<()> {
+        let store: Arc<dyn HostPartStore> = Arc::new(MemoryPartStore::new());
+        let (rpc_handle, _rpc_stop) =
+            spawn_big_sync_rpc(HashMap::from([(Arc::from("test-scope"), store)])).await?;
+
+        // The refusal happens before any part is looked up, so none of these parts has to
+        // exist in the store. The ceiling is 64, so one byte indexes them.
+        let part_at = |i: usize| {
+            let mut bytes = [0u8; 32];
+            bytes[0] = i as u8;
+            PartKey(ByteKey::new(bytes))
+        };
+        let request_naming = |count: usize| ScopedRequest {
+            scope_key: Arc::from("test-scope"),
+            inner: PeerSummaryRequest {
+                parts: (0..count).map(part_at).collect(),
+                asker_part_cursors: HashMap::new(),
+            },
+        };
+
+        let at_ceiling = rpc_handle
+            .client
+            .rpc(request_naming(MAX_SUMMARY_PARTS))
+            .await?;
+        assert!(
+            at_ceiling.is_ok(),
+            "a request at the ceiling is answered, not refused whole: {at_ceiling:?}"
+        );
+
+        let over_ceiling = rpc_handle
+            .client
+            .rpc(request_naming(MAX_SUMMARY_PARTS + 1))
+            .await?;
+        assert_eq!(
+            over_ceiling,
+            Err(PeerSummaryError::TooManyParts {
+                requested: MAX_SUMMARY_PARTS + 1,
+                cap: MAX_SUMMARY_PARTS,
+            }),
+            "an over-ceiling request names the count that tripped the ceiling"
+        );
+        Ok(())
+    }
+
     /// The peer-facing read arms are authorized in one place, and this table is what
     /// keeps them unified: every arm answers a permitted peer with its own read, and
     /// answers an unpermitted peer and an unauthenticated caller with its refusal.
@@ -2493,6 +2579,8 @@ mod tests {
                     .await?;
                 summaries.insert(part_id, summary.into_strat_summaries(dirty));
             }
+            // A granted part is never refused, and the store contract guarantees
+            // coverage of every granted part asked.
             PeerSummaryResult { parts: summaries }
         };
         let expected_changed = store
@@ -2559,7 +2647,6 @@ mod tests {
                 caller,
                 caller_label,
                 entitlement,
-                &part_id,
                 summary_request(),
                 &expected_summary,
             )
