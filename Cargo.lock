@@ -13449,6 +13449,7 @@ dependencies = [
  "educe",
  "futures",
  "indexmap 2.14.0",
+ "irpc",
  "jiff",
  "json-canon",
  "multibase",

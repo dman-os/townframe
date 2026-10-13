@@ -79,6 +79,7 @@ tracing-subscriber = { workspace = true }
 tracing-unwrap.workspace = true
 tracing-error.workspace = true
 tracing-futures.workspace = true
+irpc.workspace = true
 color-eyre.workspace = true
 multibase = "0.9.2"
 
