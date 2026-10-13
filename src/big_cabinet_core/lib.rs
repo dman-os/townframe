@@ -2,6 +2,14 @@
 // alias is what makes the same expansion resolve inside the crate's own tests.
 extern crate self as big_cabinet_core;
 
+pub mod index;
+pub mod schema_compat;
+
+pub use index::facet_set::{
+    Availability, FacetMembership, FacetRecord, FacetRoute, FacetSetDelta, FacetSetError,
+    FacetSetQuery, FacetSetStore, ProjectionCursor, ProjectionOutcome,
+};
+
 #[cfg(feature = "schemars")]
 pub mod facet;
 

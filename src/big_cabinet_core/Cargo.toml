@@ -45,6 +45,7 @@ schemars = { version = "1.2", features = [
 #
 # error
 thiserror.workspace = true
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 displaydoc.workspace = true
 
 #
@@ -87,3 +88,4 @@ panproto-protocols = "=0.74.4"
 panproto-schema = "=0.74.4"
 panproto-vcs = "=0.74.4"
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

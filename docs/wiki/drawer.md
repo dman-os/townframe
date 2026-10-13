@@ -94,7 +94,7 @@ Usually, this means the greatest access it's allowed to a document through other
 1. Single document drawer: a normal document that's also a drawer.
   - It's just the drawer metadata facets in the document.
   - This solves the single document share case.
-2. Self-group drawer: all the documents in the drawer are stored in a single group represented byt the drawer document itself. 
+2. Self-group drawer: all the documents in the drawer are stored in a single group represented by the drawer document itself. 
   - This means that acess given to the document is acces given to the drawer.
   - The drawer can contain multiple documents with different delegation kinds for each one. 
   - So even if an agent has admin access on the drawer, if the drawer itself has read access, the agent only gets read.
@@ -143,9 +143,9 @@ These must not necessarily be expressed using keyhive delegations.
 
 A drawer can contain another drawer
 Usecases for this include:
-  - Allow access given on parent drawers to transitively apply to all child draweres
-  - Relay sponorship drawers can use children relationships to indicate broad sponsorship of documents in other drawers without bothering to add every child drawer document
-  - Use child drawers to segregate documents on different access levers for agents
+- Allow access given on parent drawers to transitively apply to all child draweres
+- Relay sponorship drawers can use children relationships to indicate broad sponsorship of documents in other drawers without bothering to add every child drawer document
+- Use child drawers to segregate documents on different access levers for agents
 
 Now, the drawer metadata doc will specify the different children drawers and in what means they're related.
 Since we have different drawer archs, child relationships can take many different forms in the graph according to the architectures.

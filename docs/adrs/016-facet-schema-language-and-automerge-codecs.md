@@ -2,35 +2,27 @@
 
 **Status:** Proposed
 
-**Related:** ADR 007 (plug manifests), ADR 014 (drawers), ADR 015 (document format and facet
+**Related:** ADR 007 (doc and branch identity), ADR 014 (drawers), ADR 015 (document format and facet
 writes — §2 codec declarations, §4 claim canonicalization, §6 verification).
 
 ## 1. What a facet schema has to do, and the three layers it is made of
 
-A facet value is described twice. The host needs a Rust type it can read, write and hand to
-Automerge; a peer needs the schema it validates against. Publishing a facet also has to be able to
-refuse — at the moment a developer adds a type, not months later when a round trip silently drops a
-peer's field.
+A facet has three related representations with different jobs:
 
-Three layers, each with one job:
+- **Automerge storage** preserves collaborative semantics: `Text`, `Counter`, object
+  identity, lists, timestamps, bytes, and scalar kinds. It is not constrained to JSON's
+  value distinctions.
+- **Lexicon describes canonical JSON.** Rust-authored facets emit values compatible with
+  the ATProto data model by default. The facet tag identifies the Lexicon definition.
+- **Sidecar JSON Schema** supplies the supported supplementary constraints and
+  `x-automerge` storage annotations that Lexicon cannot express. It may narrow a Lexicon
+  `unknown` map but never admit a value outside the canonical data model.
 
-- **Values are Automerge's.** `ObjType` is `Map`, `List` and `Text` (`Table` is retained for
-  backwards compatibility and behaves as a `Map`), over the scalars `Bytes`, `Str`, `Int`, `Uint`,
-  `F64`, `Counter`, `Timestamp`, `Boolean`, `Null`, and an `Unknown` scalar for values from a future
-  Automerge. This model — not a JSON-shaped one — is what a facet holds, which is why a `Counter`
-  accumulates concurrent increments where an `Int` is last-writer-wins, and a `Text` merges character
-  edits where a `Str` does not. JSON is the transfer representation, not the storage model.
-- **Schemas are JSON Schema 2020-12.** `schemars` derives one from the Rust type. The keywords
-  already reach the whole value model: `object` and `array` for `Map` and `List`, `string` for `Str`
-  and `Text`, `number` for `F64` and the integer types, plus `required`, `enum`, `const`, `$ref`,
-  `$defs`, and `additionalProperties`, which is also how a map of known value type is written.
-- **The conventions are ours.** Openness, where a union's discriminant sits, and how a value is
-  *stored* are decisions JSON Schema deliberately leaves open. They are not a divergence from the
-  specification: an unknown keyword is an annotation by specification — "A JSON Schema MAY contain
-  properties which are not schema keywords. Unknown keywords SHOULD be treated as annotations" —
-  and a vocabulary "need not be published outside of its scope of use". So a convention is a sidecar
-  key that a conforming validator collects and ignores, and our schemas stay machine-readable by
-  anyone else's tooling.
+`schemars` remains the Rust authoring mechanism for the sidecar schema and storage walk.
+The declaration macro checks that the Rust wire representation, Lexicon-facing shape, and
+sidecar declarations agree or refuses the type. SchemaRepo identifies a facet Lexicon by
+its tag and makes its sidecar bundle available to Cabinet; discovery and publication of
+those bundles are embedder concerns.
 
 ## 2. The use cases we actually have
 
@@ -43,77 +35,63 @@ vocabularies are plabels (pseudo-label, pseudo-label-error, pseudo-label-candida
 
 | need | today |
 | --- | --- |
-| identifiers as strings | `DocId`, `Uuid`, `BranchId`, and `FacetKey`, which serializes as one `tag/instance` string |
+| identifiers as strings | `DocId`, `Uuid`, and `FacetKey`, which serializes as one `tag/instance` string |
 | hashes | `Multihash` for blob digests; `ChangeHashSet` for Automerge heads |
-| urls with a frontier | `db+facet:///<docId>/<tag>/<instance>?branch=…&at=<head>\|<head>` |
+| urls with a frontier | `db+facet:/<docId>/<tag>/<instance...>` plus a separate heads field |
 | timestamps | `Dmeta.createdAt` and `updatedAt: Vec<Timestamp>`, unix seconds, carrying a `FIXME: unix timestamp codec` |
 | integers | `Blob.lengthOctets: u64`, `ImageMetadata.widthPx`, `Embedding.dim: u32` |
 | bytes | `Blob.inline: Option<Vec<u8>>`; `Embedding.vector: Vec<u8>` with an `EmbeddingDtype` |
-| maps keyed by string | `HashMap<String, UserMeta>`, `PlugsConfig.enabled`, `Branches.byName` |
-| maps keyed by an identifier | `HashMap<Uuid, FacetKey>`, `HashMap<FacetKey, FacetMeta>`, `HashMap<BranchId, BranchDeclaration>` |
+| maps keyed by string | `HashMap<String, UserMeta>` and `PlugsConfig.enabled` |
+| maps keyed by an identifier | `HashMap<Uuid, FacetKey>` and `HashMap<FacetKey, FacetMeta>` |
 | arrays, nested objects | `Body.order`, `updatedAt`, `OcrResult.textRegions`; `FacetMeta`, `UserMeta`, `KnownPlug`, `OcrTextRegion` |
 | open strings, closed sets | `MimeType`, `modelTag`, `compression`; `EmbeddingDtype { F32, F16, I8, Binary }` |
-| references | `facetRef: Url` together with `refHeads: ChangeHashSet`; `Branch.documentId` |
+| references | `facetRef: Url` together with `refHeads: ChangeHashSet`; weak branch doc references |
 | text | `Note.content`, `OcrResult.text`, chat transcripts |
 | unions of named types | facet values themselves (`WellKnownFacet` or `FacetRaw`), the profile example's attachment, plabels' three variants |
 | non-integer numbers | `OcrTextRegion.confidenceScore: Option<f32>`, OCR bounding boxes, plabels' `topScore: f64` |
 
 Three consequences shape the rest of this document.
 
-**Typed maps are load-bearing.** dmeta is `FacetKey -> FacetMeta`; `Branches` is two maps. JSON
+**Typed maps are load-bearing.** Dmeta includes `FacetKey -> FacetMeta`. JSON
 Schema expresses this directly as `{"type":"object","additionalProperties": <schema>}`, with the
 keys necessarily strings, which is also what Automerge's `Map` allows. `FacetKey` and `Uuid` already
 produce their string form, so nothing is strained.
 
-**A reference carries a version frontier.** `facetRef` is meaningless without `refHeads`.
+**A facet URL names a facet; an optional sibling `refHeads` selects a frontier.** The URL uses `db+facet:/<doc-id>/<tag>/<key-id...>` with no authority component. `self` resolves against the containing doc, and the entire path remainder after the tag is the key ID.
 
 **Non-integer numbers appear in exactly three places**, all of which already have a better
 representation, and none of which is a reason to remove `F64` from the storage model.
 
-## 3. Why not adopt the AT Proto Lexicon
+## 3. Canonical ATProto-compatible JSON and the sidecar
 
-An earlier draft of this ADR adopted Lexicon as the schema language. Two things ended that.
+Canonical facet JSON uses the ATProto data model rather than unrestricted JSON Schema.
+This gives Rust-authored facets one outgoing spelling that can travel through ordinary
+Lexicon-aware systems. JSON Schema remains necessary as a sidecar because storage forms,
+typed dynamic-map refinements, and several validation constraints are not Lexicon
+semantics.
 
-**Lexicons have no place to put a convention.** The type table is closed, so a new `type` is not a
-lexicon. `format` on a string is a closed enum in practice — `LexStringFormat` has eleven variants
-and no catch-all — so an unknown format fails to deserialize the whole document rather than
-degrading. And a definition has no extension field: `LexString` is exactly `description`, `format`,
-`default`, `minLength`, `maxLength`, `minGraphemes`, `maxGraphemes`, `enum`, `const`, `knownValues`.
-An extra key is not rejected — a conforming reader uses no `deny_unknown_fields` here — it is
-*silently dropped* on any parse and re-emit, which is worse than a rejection for a signed artifact.
-The one extension convention in AT Proto is `x-`-prefixed **data field names**, not schema keys.
-JSON Schema, by contrast, is built out of annotations.
+The canonical rules include:
 
-**Our interoperability requirement is wider than AT Proto.** Any JSON document has to be
-representable, because the software we exchange data with is arbitrary, and any JSON object is
-representable by the boolean schema `true`. Requiring every facet declaration to be a valid lexicon
-would put a foreign type system in front of that requirement.
+- signed integers restricted further to JavaScript's exact safe range,
+  `-(2^53 - 1)..=(2^53 - 1)`;
+- declared floats emitted as decimal strings, though declared float positions may accept
+  JSON-number input and normalize it;
+- inline bytes emitted only as `{"$bytes":"..."}`;
+- protocol-defined `$type`, `$bytes`, and `$link`, while application-defined `$` keys are
+  rejected in the normal canonical path;
+- `unknown` as the broad object-oriented escape hatch, with optional sidecar constraints
+  for typed maps;
+- open vocabularies represented by `knownValues` and open unions preserving unknown
+  tagged members;
+- explicit adjacent or internal union layouts rather than runtime shape guessing.
 
-What we did keep from AT Proto, because the specification reached these conclusions first and
-independently of us:
+Rust-authored types do not serialize alternative spellings. Foreign base64, key mappings,
+renaming, or wrapping belong to an explicitly selected adapter outside ordinary facet
+reconciliation. Legacy plain-base64 input is not accepted by the canonical path.
 
-- **Unions are open by default.** The specification says implementations "should be permissive when
-  validating, in case they do not have the most recent version", which is our forward-compatibility
-  requirement in someone else's words.
-- **`knownValues`, not `enum`, for a vocabulary of strings.** The style guide says closed enum sets
-  "should almost always be avoided" because they cannot be extended without breaking evolution. That
-  matches the vocabulary above, where only `EmbeddingDtype` and the delegation scope kind are
-  genuinely closed.
-- **A discriminant is the member's own identifier, not a local label.** In a union the tag is the
-  member's NSID, which is the same shape as our facet tag: reverse domain notation, already required
-  of `FacetKey.tag`.
-- **`$type` appears exactly where the type is ambiguous** — at a union member, not on an object whose
-  type the declaration already names. This is what lets a facet payload itself be untagged, since
-  `FacetKey.tag` names its type from outside the value.
-- **The `map` definition type**, which is a proposal by an atproto maintainer rather than adopted
-  spec: `{"type":"map","keys":{"type":"string",…},"values":<schema>}`. Its notes say values "could be
-  almost any lexicon definition type" and, decisively, that it "would not impact the data model,
-  just schema validation". If we ever emit a lexicon for interop, we adopt that shape and are an
-  early implementer of it.
-
-What we do not adopt at all: record keys, TIDs, the collection and repository model, the DNS
-`_lexicon` resolution chain, any global registry, and the XRPC primary types. Section 11 says how
-values still reach a system that expects those.
+Facet tags are NSID-shaped identifiers, but this decision does not adopt ATProto record
+keys, TIDs, PDS repositories, DNS resolution, or XRPC. Those are independent publication
+and node-interface designs.
 
 ## 3a. Enforcement is rejection, not rewriting
 
@@ -375,28 +353,23 @@ What replaces it is a bounded vocabulary of storage forms, declared at the posit
 
 | JSON | the document holds | declared by |
 | --- | --- | --- |
-| a base64 string | bytes | `contentEncoding: "base64"` |
+| `{"$bytes":"..."}` | bytes | the `facet::Bytes` Lexicon/sidecar declaration |
 | an RFC 3339 string | a timestamp in milliseconds | `format: "date-time"` |
 | a number | a counter | `x-automerge: "counter"` |
 | a string | a collaborative text | `x-automerge: "text"` |
 | a decimal string | a float | `x-automerge: "float"`, which `facet::Float32`/`Float64` emit |
 
-The right-hand column is what keeps us from owning a schema language: **two of the five storage forms
-are standard JSON Schema keywords, and our schemas already say them without our help.** `jiff`'s
-`Timestamp` emits `format: "date-time"` (`schemars/src/json_schema_impls/jiff02.rs:42`), and the
-daybook's byte fields already emit `contentEncoding: "base64"` (`daybook_types/doc.rs`'s
-`base64_string_json_schema`, on `Embedding.vectorBase64` among others). Three shapes need the
-keyword, and there is exactly one: `x-automerge`. Two are the CRDT shapes JSON Schema cannot describe
-— a counter, which is a number that merges by addition, and a text, which is a string with an
-identity of its own. The third is a float, whose JSON spelling the convention owns (§9 below), and
-whose declaration is its value's own type; a bare `f64` derives a plain number, which is the opt-out
-stated by the Rust type itself, not by anything of ours.
+The timestamp row uses JSON Schema's standard `format: "date-time"`. Canonical bytes use the
+ATProto `$bytes` object rather than a plain base64 string; `facet::Bytes` supplies the matching
+Lexicon, serde, and sidecar storage declaration. Counter and Text merge behavior, and the float
+storage convention, use `x-automerge` because neither Lexicon nor ordinary JSON Schema describes
+those native semantics. A bare `f64` derives a plain number only through the explicit authoring
+opt-out described above.
 
-So a type declares its storage by what its `JsonSchema` says, and nothing opts in or registers:
-`jiff::Timestamp` is stored as a timestamp today, and `chrono`'s or `bytes::Bytes` would be the
-moment its schema says so. This is also the complete list: `Map` and `List` are already CRDTs and need
-nothing declared, `F64`, `Unknown` and `Table` are not exposed, and a transport that ignores the
-declaration still yields a valid string or number, so it degrades rather than corrupts.
+A type declares the complete representation it owns. No registry guesses from a field name, and
+neither `chrono` nor an arbitrary bytes type gains native storage merely because its JSON happens to
+look similar. Map and List remain ordinary Automerge objects; unsupported native shapes are not
+exposed as authoring shortcuts.
 
 The boundary is three data models, and each one states its own part:
 
@@ -411,9 +384,8 @@ to serde and bytes to Automerge, and the declaration is the only part serde cann
 
 **A value is checked before anything is written, and the check is the type state.**
 `Stored::check(document, value)` walks the value and the schema together and refuses a value the
-declarations cannot hold — a string that is not base64 where the schema says bytes, a number where it
-says text — naming the position: ``at `$.vectorBase64`: this position is stored as bytes, so it is a
-base64 string, not a number``. What comes back is a `Stored`, whose `reconcile` cannot fail on the
+declarations cannot hold — a malformed `$bytes` object where the schema says bytes, a number where
+it says text — naming the position. What comes back is a `Stored`, whose `reconcile` cannot fail on the
 value's account: the conversions inside it are `expect`s, because the check is what makes them total.
 This is "asserted rather than sniffed" made structural, and it is exactly where the old codec is soft:
 `json.rs` logs a warning and stores an undecodable base64 field as a string, so a reader that trusts
@@ -553,14 +525,15 @@ type change per field, exactly where the decision is made; and `minimum`/`maximu
 declared float position, because a stock validator does not range-check a string (the walk still
 refuses a value that is not a number at all, and the plug-level checks can carry the rest).
 
-And the boundary is a table, not a rule: an **integer** stays a JSON number, because every stack
-carries a small integer faithfully (the JS `2^53` boundary is its known cost, and no facet today
-declares a `u64` that big). A **vector of floats** is better carried as bytes, little-endian with
+And the boundary is a table, not a rule: an **integer** stays a JSON number only in the
+JavaScript-safe range `-(2^53 - 1)..=(2^53 - 1)`; a value outside that range needs a separately
+declared string or bytes representation rather than silent rounding. A **vector of floats** is
+better carried as bytes, little-endian with
 its width stated in the declaration — which is `Embedding.vector`'s practice today — because a
 thousand-element float list is a thousand scalars the CRDT addresses one by one. And the same model
 catches the byte containers: a facet's bare `Vec<u8>` field is refused, since almost certainly a blob
 is what was meant and a CRDT list stores it one op per byte and grows per edit; it compiles as
-`facet::Bytes` (`contentEncoding: "base64"`), as the field's own `#[serde(with = "…")]`, or as the
+`facet::Bytes` (canonical `$bytes`), as the field's own `#[serde(with = "…")]`, or as the
 deliberate array marker `#[schemars(extend("x-automerge" = "list"))]`. The container drift the scan
 does *not* catch is a map of numbers stored inside a facet — what a map holds is its own convention,
 `Table` is not exposed, and nobody has asked for one yet.
@@ -649,42 +622,27 @@ root that is a `$ref` to the named facet's definition, so the facet is carried o
 definition rather than spliced into the root. The manifest carries definitions flat because that is what lets two facets share one; the
 document is what keeps that from costing a consumer anything.
 
-## 11. Interoperating with AT Proto
+## 11. ATProto-compatible by default
 
-Ingest is mechanical and lossless. A lexicon document translates to JSON Schema one for one —
-`object` to `object`, `string` with `knownValues` to `string`, `union` to a `oneOf` of `$type` consts,
-`bytes`, `cid-link` and `blob` to our own formats — and AT Proto data is JSON-expressible, so any
-AT Proto value validates against a schema of ours. `$link` and `$bytes` are not types to adopt; they
-are the JSON projection of a CID and of a byte string, and our links are already strings (a facet
-url, or a multibase multihash) for as long as we choose to keep them that way.
+Canonical facet JSON is already compatible with the ATProto data model; interoperability is not a
+second stringified representation at the boundary. A facet Lexicon supplies the broad representation,
+while its sidecar JSON Schema adds storage annotations and supported refinements. `$bytes`, `$type`,
+and `$link` retain their protocol meanings. Application-defined `$` keys are refused in the normal
+canonical path.
 
-Egress is deliberately asymmetric and should not be made to look otherwise: we can read them, they
-can carry us. A facet that has to reach a system expecting AT Proto shapes is encoded as a JSON
-string or as bytes — one field, opaque to them, lossless to us. For a union specifically, the
-conversion is a flatten, `{"$type": t, "value": {…}}` to `{"$type": t, …}`, which works whenever the
-member is an object and is not available when it is a scalar, in which case the stringified form is
-the only route. That asymmetry follows from adjacent tagging (§5) and is the reason to keep the
-stringified escape hatch permanently documented rather than as a temporary measure.
+Imported/internal ATProto object unions and our explicit adjacent wrapper layout can both be declared.
+Scalar or list union payloads need object wrappers when represented in Lexicon. Runtime code follows
+the declaration and discriminant rather than guessing a layout. Lexicon references use one optional
+`#definition` fragment; `main` is referenced without `#main`.
 
-AT Proto compatibility is therefore a property of a conversion at the boundary, not a constraint on
-any declaration. When XRPC arrives it should enter as a **second consumer of the same schema
-language** — the published wire contract — rather than as a new set of primaries that facet
-declarations have to satisfy.
+Rust-authored facets emit only the canonical spelling. A foreign schema that needs renaming,
+wrapping, plain base64, or incompatible `$` keys uses an explicit embedder-selected adapter. Ordinary
+facet reconciliation neither guesses such mappings nor invokes Panproto. Third-party Rust types whose
+wire form is already canonical may still use `schemars`'s `with` or `schema_with`; incompatible types
+need a wrapper owned by the authoring crate.
 
-**Third-party types are handled at the use site, using what `schemars` already provides.** For a field
-whose wire form is already acceptable, `#[schemars(with = "TheirType")]` describes it using their
-schema — schema only, leaving `serde` alone — and `#[schemars(schema_with = "fn")]` does the same when
-the type has no `JsonSchema` impl at all. Because that path goes through `subschema_for`, a type that
-does not inline itself gets a `$defs` entry named by its own `schema_name` and a `$ref` at the field,
-which is how a foreign type ends up named in our schema without us declaring anything;
-`#[schemars(inline)]` forces the other way, and `crate = "…"` controls the reference path. `with` and
-`schema_with` are mutually exclusive.
-
-Where the wire form needs translating, a wrapper of ours is required, because the codec belongs to
-the type (§9). And a foreign type cannot be a **union member**, because a member needs an id and we
-can assign ids only to types we declare; it becomes one through a wrapper of ours, or through its own
-declaration if it came from a plug that published an id for it. That is the boundary: **field
-positions take foreign types, union members take declared ones.**
+Using Lexicon for facet values does not adopt PDS publication, record keys, repositories, XRPC, or
+node discovery. Those remain separate protocols around the same values.
 
 ## 11a. Evolution must preserve JSON and native storage
 
@@ -704,18 +662,15 @@ required fields; narrowing or widening closed enums; changing constraints, array
 additionalProperties; changing integer sign, number kind, format, codec, or units; and adding union
 members whose unknown payloads older code cannot preserve natively. A new optional field can also
 collide with a previously permitted extension key. A single schema publisher does not prevent data
-writers from creating that collision. Namespaced extensions, banning unknown local creation, and a
-publication-time compatibility checker are proposals, not settled requirements.
+writers from creating that collision. The core comparator can report JSON, native-storage, and
+Lexicon compatibility or “not established”; SchemaRepo v1 only resolves known schemas. Publication
+and evolution policy are later repository features.
 
-**Authoring is checked; missing-schema interoperation is best effort.** Provisional field-name
-hints are an additional annotation channel for copied JSON when the schema or corresponding native
-target is unavailable. They do not replace JSON Schema codec annotations. New facet authoring must
-be checked by the macro against the agreed convention; explicit annotations remain the route when
-an author does not control the wire names. The naming grammar, precedence, failed-conversion behavior,
-and supported containers are not yet settled or implemented. A name hint must not be mistaken for
-a complete recovered schema. Native F64 does not retain Float32 versus Float64 width or whether
-its declared JSON form was a number or a decimal string; schema-less signed-value reconstruction
-therefore remains open rather than being solved by target awareness alone.
+**Authoring is checked; unknown-schema content is read-only best effort.** A local write to a
+facet whose schema is unavailable is refused. Field-name prefix or suffix hints are not part of the
+Cabinet codec: they cannot recover a complete schema, float width, declared JSON spelling, or native
+merge semantics. Known schemas and explicit adapters are the only authoring routes. Unknown facets
+may still be exposed as unresolved data without being silently treated as validated or writable.
 
 Full JSON round-tripping is chosen over hidden-field projection (ADR 015 §2); it is not proof of native preservation. Unchanged
 unknown Text, Counter, Bytes, objects, and union payloads must not be rewritten merely because the
@@ -728,18 +683,15 @@ that a snapshot-only engine can reproduce Automerge's concurrent Counter/List se
 
 ## 12. Out of scope, and what remains open
 
-Not adopted: Lexicon as the schema language, its type table and primaries, record keys and TIDs, the
-repository and collection model, DNS resolution, and any global registry. Registries may distribute
-and endorse plugs, but conflicting definitions for one tag must still be reported rather than
-resolved by installation order (ADR 015 §2).
+Not adopted here: record keys and TIDs, the ATProto repository/collection model, DNS
+resolution, PDS publication, XRPC, CID/link adoption, and a global schema registry. Lexicon describes
+the canonical value while the sidecar JSON Schema carries supplementary constraints and storage
+annotations. Conflicting definitions for one tag are reported rather than selected by installation
+order (ADR 015 §2).
 
-1. Whether the manifest's published artifact stays a JSON Schema document or becomes a Lexicon
-   document with a derived JSON Schema view. ADR 015 §2 defines a facet definition as describing its
-   JSON value, so the second is closer to the specification, and it would change
-   `FacetManifest.value_schema`.
-2. Whether `Blob.digest` stays a `Multihash` or migrates to a link, and whether a reference frontier
+1. Whether `Blob.digest` stays a `Multihash` or migrates to a link, and whether a reference frontier
    becomes its own type or stays a sibling field.
-3. ~~The member id, the codec keyword, and the shape of the published artifact.~~ Settled: `id` or
+2. ~~The member id, the codec keyword, and the shape of the published artifact.~~ Settled: `id` or
    `id_prefix` on the type, validation at the plug level, definitions hoisted into the manifest flat
    and resolved in a `Bundle`, a stock validator served the assembled document. And the codec is now
    built rather than planned: the vocabulary is two standard keywords plus `x-automerge`
@@ -749,22 +701,22 @@ resolved by installation order (ADR 015 §2).
    opt-out the Rust type states, and an earlier draft's *re-spelling layer* — a walk that converted
    the convention's JSON back at every parse, against a schema handed over per read — is deliberately
    **not** adopted: one JSON shape and plain serde is the read contract.
-4. **The daybook's timestamps are a thousand times too small, and that is a migration.** Its existing
+3. **The daybook's timestamps are a thousand times too small, and that is a migration.** Its existing
    documents hold seconds in a field the format defines as milliseconds, so reading them with this
    codec shifts every date to 1970. Converting the scalars is a pass over synced documents — every
    node, every replica — and it belongs with the daybook's own migration rather than with the
    facility. Until then, the daybook's timestamps cannot be declared. The float is the opposite
    case and needs no migration: today's documents write plain numbers at float positions, and the
    read accepts both spellings, so the convention lands without touching a document.
-5. **The declarations the core mirrors.** `display_config` moves off the facet declaration into
+4. **The declarations the core mirrors.** `display_config` moves off the facet declaration into
    another field of the manifest, and facet references are adopted as they are; both then have to
    land somewhere when the plug manifest is broken into sections — some of which are daybook-only,
    since the same core has to move data without a daybook node. §10's plug-level codec check —
    refusing a declaration that states a storage form this build does not implement — belongs with
    that work, because today it fires when a *value* arrives rather than when a manifest is validated.
-6. The tag-table half of `define_enum_and_tag!`: which part of it survives as the well-known facet
+5. The tag-table half of `define_enum_and_tag!`: which part of it survives as the well-known facet
    vocabulary and how those tags are declared once rather than twice.
-7. Test vectors for the conformance work. Already in place: a codec round trip in both directions for
+6. Test vectors for the conformance work. Already in place: a codec round trip in both directions for
    every storage form, the schema-decides-not-the-field-name pair, the accept-and-reject pairs of §4
    and §10, and a schema of ours validated by an independent implementation. The float's are there
    too: the decimal-string projection with the point kept and the width stated, the non-finite
@@ -779,3 +731,7 @@ resolved by installation order (ADR 015 §2).
    `DocumentRepo` reads nothing yet, so the first real call site is its read path — emission, then
    the consumer's own serde — and the daybook's existing hydrate-through-JSON read
    (`am_utils_rs`'s `ThroughJson`) migrates onto the same shape at adoption.
+
+
+Panproto integration is deferred. The existing proof of concept remains unchanged and is not the
+validation, schema-store, or transformation engine for this PR.
