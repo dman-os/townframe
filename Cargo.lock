@@ -1103,6 +1103,13 @@ version = "0.1.0"
 dependencies = [
  "atproto-dasl",
  "big_repo",
+ "blake3",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
  "utils_rs",
 ]
 

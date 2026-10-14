@@ -1,6 +1,18 @@
+#![expect(dead_code)]
+
 mod interlude {
     pub use utils_rs::prelude::*;
 }
+
+pub mod index;
+
+use crate::interlude::*;
+use std::sync::Arc;
+
+pub use index::facet_set::{
+    Availability, FacetMembership, FacetRecord, FacetRoute, FacetSetDelta, FacetSetError,
+    FacetSetQuery, FacetSetStore, ProjectionCursor, ProjectionOutcome,
+};
 
 use big_repo::SharedBigRepo;
 

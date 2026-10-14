@@ -22,7 +22,6 @@ tokio::task_local! {
     static TEST_TASK_MARKER: u64;
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetValueParams;
 
@@ -103,7 +102,6 @@ impl ClientError {
         }
     }
 }
-
 
 /// The canonical operation declaration.  It is deliberately declarative for
 /// this reference: the same entries generate the XRPC descriptors, the typed
@@ -709,14 +707,6 @@ fn operation_descriptor(operation: Operation) -> XrpcOperation {
         Operation::ReadState => 2,
         Operation::SubscribeEvents => 3,
     }]
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpRequest {
-    pub context: RequestContext,
-    pub operation: XrpcOperation,
-    pub query: Option<serde_json::Value>,
-    pub body: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]

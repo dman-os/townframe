@@ -10,11 +10,20 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
-#
 # internal
 utils_rs.workspace = true
 big_repo.workspace = true
 
-#
 # encoding
 atproto-dasl.workspace = true
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+# db
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile.workspace = true
