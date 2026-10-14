@@ -1115,6 +1115,7 @@ dependencies = [
  "api_utils_rs",
  "automerge",
  "autosurgeon",
+ "big_sync_core",
  "blake3",
  "camino",
  "data-encoding",
@@ -1139,7 +1140,9 @@ dependencies = [
  "structstruck",
  "tempfile",
  "thiserror 2.0.20",
+ "unicode-properties",
  "uniffi",
+ "url",
  "utils_rs",
  "uuid",
 ]
@@ -13165,9 +13168,9 @@ dependencies = [
 
 [[package]]
 name = "unicode-properties"
-version = "0.1.4"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+checksum = "e4259d9d4425d9f0661581b804cb85fe66a4c631cadd8f490d1c13a35d5d9291"
 
 [[package]]
 name = "unicode-segmentation"
