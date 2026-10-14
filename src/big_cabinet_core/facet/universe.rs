@@ -275,36 +275,120 @@ fn without_definitions(schema: &Schema) -> Schema {
     Schema::try_from(document).expect("a definition is a valid JSON Schema")
 }
 
-/// Every `#/$defs/<name>` a schema points at, anywhere inside it.
+/// Every `#/$defs/<name>` a schema points at, in schema positions.
+///
+/// JSON values used by `const`, `default`, `enum`, and Cabinet data metadata
+/// are literals, not schemas. In particular, a property whose name is `$ref`
+/// is still a property schema and is visited through the `properties` map.
 fn references(schema: &Schema) -> Vec<String> {
-    let document = serde_json::to_value(schema).expect("a schema serializes to a JSON document");
+    let document = serde_json::to_value(schema).expect("a schema serializes to JSON");
     let mut out = Vec::new();
-    collect_references(&document, &mut out);
+    collect_schema_references(&document, &mut out);
     out
 }
 
-fn collect_references(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::Object(object) => {
-            for (key, nested) in object {
-                if key == "$ref"
-                    && let Some(target) = nested.as_str().and_then(|it| it.strip_prefix("#/$defs/"))
-                {
-                    out.push(target.to_owned());
+fn collect_schema_references(value: &Value, out: &mut Vec<String>) {
+    let Value::Object(object) = value else {
+        return;
+    };
+    if let Some(target) = object
+        .get("$ref")
+        .and_then(Value::as_str)
+        .and_then(|it| it.strip_prefix("#/$defs/"))
+    {
+        out.push(target.to_owned());
+    }
+    for (key, nested) in object {
+        match key.as_str() {
+            "$defs" | "definitions" | "properties" | "patternProperties" | "dependentSchemas" => {
+                let Some(schemas) = nested.as_object() else {
                     continue;
+                };
+                for schema in schemas.values() {
+                    collect_schema_references(schema, out);
                 }
-                collect_references(nested, out);
             }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_references(item, out);
+            "additionalProperties"
+            | "additionalItems"
+            | "propertyNames"
+            | "contains"
+            | "contentSchema"
+            | "not"
+            | "if"
+            | "then"
+            | "else"
+            | "unevaluatedProperties"
+            | "unevaluatedItems"
+            | "items" => collect_schema_references(nested, out),
+            "prefixItems" | "allOf" | "anyOf" | "oneOf" => {
+                let Some(schemas) = nested.as_array() else {
+                    continue;
+                };
+                for schema in schemas {
+                    collect_schema_references(schema, out);
+                }
             }
+            _ => {}
         }
-        _ => {}
     }
 }
 
 fn same_schema(one: &Schema, two: &Schema) -> bool {
     serde_json::to_value(one).ok() == serde_json::to_value(two).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn universe_with_schema(schema: Value, types: Vec<TypeDecl>) -> Universe {
+        Universe {
+            facets: vec![FacetDecl {
+                id: "org.example.schema.test".to_owned(),
+                name: "Main".to_owned(),
+                schema: Schema::try_from(schema).expect("test schema"),
+                flags: Vec::new(),
+            }],
+            types,
+        }
+    }
+
+    fn carried_type(name: &str) -> TypeDecl {
+        TypeDecl {
+            name: name.to_owned(),
+            schema: Schema::try_from(json!({"type": "string"})).expect("carried schema"),
+        }
+    }
+
+    #[test]
+    fn validation_walks_schema_positions_not_literal_values() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "$ref": {"$ref": "#/$defs/Carried"}
+            },
+            "const": {"$ref": "#/$defs/NotCarried"},
+            "default": {"$ref": "#/$defs/NotCarried"},
+            "enum": [{"$ref": "#/$defs/NotCarried"}],
+            "data": {"$ref": "#/$defs/NotCarried"}
+        });
+        let universe = universe_with_schema(schema, vec![carried_type("Carried")]);
+        Bundle::new(&universe, Vec::new())
+            .validate()
+            .expect("literal values are not schema references");
+    }
+
+    #[test]
+    fn validation_rejects_missing_reference_in_a_schema_position() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"value": {"$ref": "#/$defs/NotCarried"}}
+        });
+        let universe = universe_with_schema(schema, Vec::new());
+        assert!(matches!(
+            Bundle::new(&universe, Vec::new()).validate(),
+            Err(UniverseError::Undeclared { name, .. }) if name == "NotCarried"
+        ));
+    }
 }

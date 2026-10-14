@@ -1,11 +1,16 @@
 //! What the storage codec has to get right: a value sits in a document the way its *schema* says,
 //! whichever field holds it, and what a peer's document holds comes back as the JSON it was.
 
-use super::{Bytes, Codec, Counter, Float64, Stored, Text, hydrate_value};
+use super::{
+    Bytes, Codec, CompiledSchema, Counter, Float64, Stored, Text, hydrate_value, reconcile_json,
+    reconcile_json_atomic,
+};
 
 mod native;
 use crate::facet::{Bundle, Declaration, Extra, Universe};
-use automerge::{AutoCommit, ObjType, ROOT, ReadDoc, transaction::Transactable};
+use automerge::{
+    AutoCommit, Automerge, ObjType, ROOT, ReadDoc, ScalarValue, transaction::Transactable,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -38,12 +43,40 @@ fn document() -> Value {
     serde_json::to_value(bundle.document("Stored0").unwrap()).unwrap()
 }
 
+fn compiled(document: &Value) -> CompiledSchema {
+    CompiledSchema::compile(document.clone()).unwrap()
+}
+
+/// Supply the required members for focused tests that intentionally vary one member. The public
+/// write boundary validates complete whole-facet values, so test fixtures must not accidentally use
+/// omission as a shortcut when they are testing a nested refusal.
+fn complete_stored(value: Value) -> Value {
+    let mut complete = json!({
+        "bytes": {"$bytes": "AQ=="},
+        "instant": "2024-01-02T03:04:05Z",
+        "counter": 0,
+        "text": "",
+        "plain": [],
+        "many": [],
+        "fraction": "0.0",
+        "maybe": null,
+        "plain_number": 0.0,
+    });
+    let Some(members) = value.as_object() else {
+        return value;
+    };
+    for (key, member) in members {
+        complete[key] = member.clone();
+    }
+    complete
+}
+
 /// A value with one of everything, and the same value as the JSON a peer exchanges.
 fn value() -> (Stored0, Value) {
     let value = Stored0 {
         bytes: Bytes(vec![1, 2, 3, 4]),
         instant: "2024-01-02T03:04:05Z".parse().unwrap(),
-        counter: Counter(7),
+        counter: Counter::new(7),
         text: Text::from("hello"),
         // the *same* Rust type as `bytes`, and a list because this field's marker says an array
         // of numbers is what it meant, on purpose
@@ -99,18 +132,170 @@ fn facet() -> autosurgeon::Prop<'static> {
 fn stored(json: &Value) -> AutoCommit {
     let mut doc = AutoCommit::new();
     let document = document();
-    let stored = Stored::check(&document, json.clone()).expect("the value is what it declares");
-    autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &stored)
-        .expect("a map reconciles at a key");
+    let stored = Stored::check(&compiled(&document), complete_stored(json.clone()))
+        .expect("the value is what it declares");
+    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
     doc
 }
 
 fn read(doc: &AutoCommit) -> Value {
-    hydrate_value(doc, &ROOT, facet(), &document())
+    hydrate_value(doc, &ROOT, facet(), &compiled(&document()))
         .expect("what a declaration wrote, a declaration reads")
 }
 
 /// The five storage forms, each in the shape only the document has.
+#[test]
+fn atomic_reconcile_returns_the_only_commit_capability() {
+    let schema = document();
+    let compiled_schema = super::walk::CompiledSchema::compile(schema.clone()).unwrap();
+    let mut doc = Automerge::new();
+    let tx = doc.transaction();
+    let tx = reconcile_json_atomic(
+        tx,
+        &compiled_schema,
+        &ROOT,
+        facet(),
+        complete_stored(json!({
+            "bytes": {"$bytes": "AQID"},
+            "instant": "1970-01-01T00:00:00Z",
+            "counter": 1,
+            "text": "atomic",
+            "plain": [1],
+            "many": [],
+            "fraction": "1",
+            "maybe": null,
+            "plain_number": 1.0
+        })),
+    )
+    .unwrap();
+    tx.commit();
+    assert_eq!(
+        hydrate_value(&doc, &ROOT, facet(), &compiled(&schema)).unwrap()["text"],
+        "atomic"
+    );
+}
+
+#[test]
+fn atomic_reconcile_discards_pending_transaction_on_preflight_error() {
+    let schema = document();
+    let compiled_schema = CompiledSchema::compile(schema).unwrap();
+    let mut doc = Automerge::new();
+    let mut tx = doc.transaction();
+    tx.put(&ROOT, "pending", "must-disappear").unwrap();
+    let error = reconcile_json_atomic(
+        tx,
+        &compiled_schema,
+        &ROOT,
+        facet(),
+        complete_stored(json!({
+            "bytes": "plain-base64-is-not-canonical",
+            "instant": "1970-01-01T00:00:00Z",
+            "counter": 1,
+            "text": "atomic",
+            "plain": [1],
+            "many": [],
+            "fraction": "1",
+            "maybe": null,
+            "plain_number": 1.0
+        })),
+    )
+    .expect_err("invalid canonical input must fail before apply");
+    assert!(error.to_string().contains("bytes"), "{error}");
+    assert!(doc.get(&ROOT, "pending").unwrap().is_none());
+}
+
+#[test]
+fn atomic_integer_write_commits_signed_and_unsigned_native_kinds() {
+    for (schema, value, expected) in [
+        (
+            json!({"type": "integer", "format": "int64"}),
+            json!(1),
+            ScalarValue::Int(1),
+        ),
+        (
+            json!({"type": "integer", "format": "uint64"}),
+            json!(9_007_199_254_740_991u64),
+            ScalarValue::Uint(9_007_199_254_740_991),
+        ),
+        (
+            json!({
+                "$ref": "#/$defs/NullableSigned",
+                "$defs": {
+                    "NullableSigned": {"type": ["integer", "null"], "format": "int64"}
+                }
+            }),
+            Value::Null,
+            ScalarValue::Null,
+        ),
+    ] {
+        let compiled = CompiledSchema::compile(schema).unwrap();
+        let mut doc = Automerge::new();
+        let tx = doc.transaction();
+        let tx = reconcile_json_atomic(tx, &compiled, &ROOT, "facet".into(), value).unwrap();
+        tx.commit();
+        let (stored, _) = doc
+            .get(ROOT, "facet")
+            .unwrap()
+            .expect("integer was committed");
+        assert!(matches!(stored, automerge::Value::Scalar(actual) if actual.as_ref() == &expected));
+    }
+}
+
+#[test]
+fn atomic_integer_fractional_tokens_refuse_without_panicking_or_mutating() {
+    let schemas = [
+        json!({
+            "$ref": "#/$defs/NullableSigned",
+            "$defs": {
+                "NullableSigned": {"type": ["integer", "null"], "format": "int64"}
+            }
+        }),
+        json!({
+            "$ref": "#/$defs/NullableUnsigned",
+            "$defs": {
+                "NullableUnsigned": {"type": ["integer", "null"], "format": "uint64"}
+            }
+        }),
+    ];
+    for schema in schemas {
+        let compiled = CompiledSchema::compile(schema).unwrap();
+        for value in [json!(1.0), json!(-0.0)] {
+            let mut doc = Automerge::new();
+            let mut tx = doc.transaction();
+            tx.put(&ROOT, "pending", true).unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reconcile_json_atomic(tx, &compiled, &ROOT, "facet".into(), value)
+            }));
+            assert!(result.is_ok(), "integer refusal must not panic");
+            let error = result
+                .unwrap()
+                .expect_err("non-integral token must be refused");
+            assert!(error.to_string().contains("without losing"), "{error}");
+            assert!(doc.get(&ROOT, "pending").unwrap().is_none());
+            assert!(doc.get(&ROOT, "facet").unwrap().is_none());
+        }
+    }
+}
+
+#[test]
+fn canonical_projection_is_idempotent_at_the_target_aware_boundary() {
+    let (_, authored) = value();
+    let first = stored(&authored);
+    let canonical = read(&first);
+
+    let document = document();
+    let mut second = first.clone();
+    second.commit();
+    reconcile_json(&mut second, &ROOT, facet(), &document, canonical.clone())
+        .expect("canonical projection is accepted again");
+    assert_eq!(
+        second.pending_ops(),
+        0,
+        "writing canonical projection again must be idempotent"
+    );
+    assert_eq!(read(&second), canonical);
+}
+
 #[test]
 fn a_declared_position_is_stored_by_its_declaration() {
     let (_value, json) = value();
@@ -167,7 +352,7 @@ fn a_declared_position_is_stored_by_its_declaration() {
 fn an_instant_keeps_the_precision_a_document_has() {
     assert_eq!(
         read(&stored(&json!({
-            "bytes": "AQ==",
+            "bytes": {"$bytes": "AQ=="},
             "instant": "2024-01-02T03:04:05.123Z",
             "counter": 0,
             "text": "",
@@ -178,7 +363,7 @@ fn an_instant_keeps_the_precision_a_document_has() {
     );
 
     let finer = read(&stored(&json!({
-        "bytes": "AQ==",
+        "bytes": {"$bytes": "AQ=="},
         "instant": "2024-01-02T03:04:05.123456789Z",
         "counter": 0,
         "text": "",
@@ -226,16 +411,16 @@ struct Unnamed {
 
 #[test]
 fn the_schema_decides_and_the_spelling_of_a_field_does_not() {
-    let json = json!({"vectorBase64": "AQIDBA=="});
-    // Both fields carry the name the old heuristics keyed on, and both hold the same string.
-    let declares = |declaration: Declaration| -> &'static str {
+    // Both fields carry the name the old heuristics keyed on, but each uses its declared
+    // canonical JSON form. The schema, not the name, selects bytes versus a list.
+    let declares = |declaration: Declaration, json: Value| -> &'static str {
         let name = declaration.facet.name.clone();
         let universe = Universe::collect(vec![declaration]);
         let bundle = Bundle::new(&universe, Vec::new());
         let document = serde_json::to_value(bundle.document(&name).unwrap()).unwrap();
         let mut doc = AutoCommit::new();
-        let stored = Stored::check(&document, json.clone()).unwrap();
-        autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &stored).unwrap();
+        let stored = Stored::check(&compiled(&document), json.clone()).unwrap();
+        reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
         let (_, facet) = doc
             .get(&ROOT, automerge::Prop::Map("facet".to_owned()))
             .unwrap()
@@ -248,14 +433,20 @@ fn the_schema_decides_and_the_spelling_of_a_field_does_not() {
     };
 
     assert_eq!(
-        declares(Declaration::of::<Named>().unwrap()),
+        declares(
+            Declaration::of::<Named>().unwrap(),
+            json!({"vectorBase64": {"$bytes": "AQIDBA=="}}),
+        ),
         "bytes",
         "bytes because the schema says so, whatever the field is called"
     );
     assert_eq!(
-        declares(Declaration::of::<Unnamed>().unwrap()),
-        "string",
-        "and a field that declares nothing is whatever serde made of it"
+        declares(
+            Declaration::of::<Unnamed>().unwrap(),
+            json!({"vectorBase64": [1, 2, 3, 4]}),
+        ),
+        "list",
+        "and a field that declares a list is the list serde authored"
     );
 }
 
@@ -275,7 +466,7 @@ fn a_value_the_declaration_cannot_hold_is_refused_with_its_path() {
     ];
     for (broken, expected) in cases {
         let mut json = json!({
-            "bytes": "AQIDBA==",
+            "bytes": {"$bytes": "AQIDBA=="},
             "instant": "2024-01-02T03:04:05Z",
             "counter": 7,
             "text": "hello",
@@ -285,11 +476,16 @@ fn a_value_the_declaration_cannot_hold_is_refused_with_its_path() {
         for (key, value) in broken.as_object().unwrap() {
             json[key] = value.clone();
         }
-        let error = Stored::check(&document(), json)
+        let error = Stored::check(&compiled(&document()), complete_stored(json))
             .expect_err("a value the declaration cannot hold is refused");
         let error = error.to_string();
+        let expected_pointer = expected
+            .strip_prefix('$')
+            .expect("test paths start at the root")
+            .replace(['.', '['], "/")
+            .replace(']', "");
         assert!(
-            error.starts_with(&format!("at `{expected}`")),
+            error.contains(&expected_pointer) || error.contains(expected),
             "the refusal points at the position: {error}"
         );
     }
@@ -305,8 +501,12 @@ fn a_storage_form_this_build_does_not_have_is_refused() {
         "bytes",
         json!({"type": "string", "x-automerge": "vectorClock"}),
     );
-    let error = Stored::check(&document, json!({ "bytes": "AQ==" })).expect_err("refused");
-    assert!(error.to_string().contains("vectorClock"), "{error}");
+    let error = Stored::check(
+        &compiled(&document),
+        complete_stored(json!({ "bytes": {"$bytes": "AQ=="} })),
+    )
+    .expect_err("refused");
+    assert!(error.to_string().contains("JSON Schema"), "{error}");
 
     assert_eq!(
         Codec::of(&json!({"x-automerge": "counter"})).unwrap(),
@@ -336,7 +536,7 @@ fn an_edited_text_is_the_text_the_document_holds() {
     let mut document = json!({"type": "object", "properties": {"facet": {"type": "string", "x-automerge": "text"}}});
     document["$defs"] = json!({});
     assert_eq!(
-        hydrate_value(&doc, &ROOT, facet(), &document).unwrap(),
+        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
         json!("hello there")
     );
 }
@@ -350,7 +550,7 @@ fn a_specialized_native_at_a_plain_declaration_is_refused() {
     doc.put(ROOT, "facet", automerge::ScalarValue::Timestamp(0))
         .unwrap();
     let document = json!({"type": "object", "properties": {"facet": {"type": "string"}}});
-    let error = hydrate_value(&doc, &ROOT, facet(), &document)
+    let error = hydrate_value(&doc, &ROOT, facet(), &compiled(&document))
         .expect_err("an instant at a position declared a string is refused");
     assert!(error.to_string().contains("an instant"), "{error}");
 
@@ -394,14 +594,14 @@ fn a_member_the_schema_does_not_name_is_plain_json() {
     let bundle = Bundle::new(&universe, Vec::new());
     let document = serde_json::to_value(bundle.document("Open").unwrap()).unwrap();
     let json = json!({
-        "named": "AQ==",
+        "named": {"$bytes": "AQ=="},
         "carried": {"nested": [1, 2, {"deep": true}]},
     });
     let mut doc = AutoCommit::new();
-    let stored = Stored::check(&document, json.clone()).unwrap();
-    autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &stored).unwrap();
+    let stored = Stored::check(&compiled(&document), json.clone()).unwrap();
+    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
     assert_eq!(
-        hydrate_value(&doc, &ROOT, facet(), &document).unwrap(),
+        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
         json,
         "the member nobody declared survives the round trip whole"
     );
@@ -413,7 +613,8 @@ fn a_member_the_schema_does_not_name_is_plain_json() {
 fn a_reference_that_the_document_does_not_carry_is_refused() {
     let mut document = document();
     redeclare(&mut document, "bytes", json!({"$ref": "#/$defs/Absent"}));
-    let error = Stored::check(&document, json!({"bytes": "AQ=="})).expect_err("refused");
+    let error =
+        CompiledSchema::compile(document).expect_err("unresolved carried reference refused");
     assert!(error.to_string().contains("Absent"), "{error}");
 }
 
@@ -442,8 +643,12 @@ fn a_number_is_stored_as_the_schema_declares_it() {
         },
     });
     let mut doc = AutoCommit::new();
-    let stored = Stored::check(&document, json!({"signed": 1, "unsigned": 1, "float": 1})).unwrap();
-    autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &stored).unwrap();
+    let stored = Stored::check(
+        &compiled(&document),
+        json!({"signed": 1, "unsigned": 1, "float": 1}),
+    )
+    .unwrap();
+    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
 
     let (_, obj) = doc
         .get(&ROOT, automerge::Prop::Map("facet".to_owned()))
@@ -484,8 +689,12 @@ fn a_number_type_written_as_a_list_or_without_a_width_is_still_read() {
         },
     });
     let mut doc = AutoCommit::new();
-    let stored = Stored::check(&document, json!({"maybe": 1, "bare": 1, "undeclared": 1})).unwrap();
-    autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &stored).unwrap();
+    let stored = Stored::check(
+        &compiled(&document),
+        json!({"maybe": 1, "bare": 1, "undeclared": 1}),
+    )
+    .unwrap();
+    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
 
     let (_, obj) = doc
         .get(&ROOT, automerge::Prop::Map("facet".to_owned()))
@@ -517,6 +726,194 @@ fn a_number_type_written_as_a_list_or_without_a_width_is_still_read() {
 /// digit it had. That is the opt-out, which keeps a plain JSON number; the convention's decimal
 /// string is what a declared float position reads back as, and its tests are below it.
 #[test]
+fn a_float_union_ref_normalizes_before_owned_write() {
+    let schema = json!({
+        "$ref": "#/$defs/Float",
+        "$defs": {
+            "Float": {"type": "string", "x-automerge": "float", "format": "double"}
+        }
+    });
+    let compiled = CompiledSchema::compile(schema.clone()).unwrap();
+    let mut doc = Automerge::new();
+    let tx = doc.transaction();
+    let tx = reconcile_json_atomic(tx, &compiled, &ROOT, "facet".into(), json!(1.25)).unwrap();
+    tx.commit();
+    assert_eq!(
+        hydrate_value(&doc, &ROOT, "facet".into(), &compiled).unwrap(),
+        json!("1.25")
+    );
+}
+
+#[test]
+fn authoring_normalization_is_stack_safe_for_wide_values_and_bounded_for_ambiguity() {
+    assert!(CompiledSchema::compile(json!({"allOf": [{"type": "string"}]})).is_err());
+    let wide_schema = json!({
+        "type": "object",
+        "additionalProperties": {
+            "type": "array",
+            "items": {"type": "string", "x-automerge": "float", "format": "double"}
+        }
+    });
+    let mut wide_members = serde_json::Map::new();
+    for map_index in 0..3_000 {
+        wide_members.insert(format!("map_{map_index}"), json!([1.25]));
+    }
+    let wide = Stored::check(&compiled(&wide_schema), Value::Object(wide_members))
+        .expect("wide authored values normalize without sibling stack growth")
+        .into_value();
+    assert_eq!(wide["map_0"][0], json!("1.25"));
+    assert_eq!(wide["map_2999"][0], json!("1.25"));
+
+    let ambiguous_schema = json!({
+        "type": "object",
+        "additionalProperties": {
+            "anyOf": [
+                {"type": "string", "x-automerge": "float", "format": "double"},
+                {"type": "string", "x-automerge": "float", "format": "float"}
+            ]
+        }
+    });
+    let first = Stored::check(&compiled(&ambiguous_schema), json!({"value": 1.25}))
+        .unwrap_err()
+        .to_string();
+    let second = Stored::check(&compiled(&ambiguous_schema), json!({"value": 1.25}))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(first, second, "ambiguous refusal is deterministic");
+    assert!(first.contains("ambiguous carried branches"), "{first}");
+
+    let constrained_schema = json!({
+        "type": "object",
+        "additionalProperties": {
+            "anyOf": [
+                {"type": "string", "x-automerge": "float", "format": "double", "pattern": "^1\\.25$"},
+                {"type": "string", "x-automerge": "float", "format": "float", "pattern": "^2$"}
+            ]
+        }
+    });
+    let constrained = Stored::check(&compiled(&constrained_schema), json!({"value": 1.25}))
+        .expect("branch constraints resolve an authored value uniquely")
+        .into_value();
+    assert_eq!(constrained["value"], json!("1.25"));
+}
+
+#[test]
+fn authored_nested_union_dispatch_validates_objects_arrays_and_carried_container_refs() {
+    let object_branch_a = json!({
+        "type": "object",
+        "properties": {
+            "kind": {"const": "a"},
+            "value": {"type": "string", "x-automerge": "float", "format": "double"}
+        },
+        "required": ["kind", "value"]
+    });
+    let object_branch_b = json!({
+        "type": "object",
+        "properties": {
+            "kind": {"const": "b"},
+            "value": {"type": "string", "x-automerge": "float", "format": "float"}
+        },
+        "required": ["kind", "value"]
+    });
+    let object_schema = json!({"anyOf": [object_branch_b, object_branch_a]});
+    let object = Stored::check(
+        &compiled(&object_schema),
+        json!({"kind": "a", "value": 1.25}),
+    )
+    .expect("object constraints select one branch regardless of branch order")
+    .into_value();
+    assert_eq!(object, json!({"kind": "a", "value": "1.25"}));
+
+    let array_schema = json!({
+        "anyOf": [
+            {"type": "array", "items": {"type": "string", "x-automerge": "float", "format": "double"}, "minItems": 2},
+            {"type": "array", "items": {"type": "string", "x-automerge": "float", "format": "double"}, "minItems": 1, "maxItems": 1}
+        ]
+    });
+    let array = Stored::check(&compiled(&array_schema), json!([1.25]))
+        .expect("array length constraints select one normalized branch")
+        .into_value();
+    assert_eq!(array, json!(["1.25"]));
+
+    let carried_schema = json!({
+        "anyOf": [
+            {"$ref": "#/$defs/B"},
+            {"$ref": "#/$defs/A"}
+        ],
+        "$defs": {
+            "A": {
+                "type": "object",
+                "properties": {
+                    "tag": {"const": "a"},
+                    "value": {"type": "string", "x-automerge": "float", "format": "double"}
+                },
+                "required": ["tag", "value"]
+            },
+            "B": {
+                "type": "object",
+                "properties": {
+                    "tag": {"const": "b"},
+                    "value": {"type": "string", "x-automerge": "float", "format": "double"}
+                },
+                "required": ["tag", "value"]
+            }
+        }
+    });
+    let carried = Stored::check(
+        &compiled(&carried_schema),
+        json!({"tag": "a", "value": 1.25}),
+    )
+    .expect("carried container references use their nested constraints")
+    .into_value();
+    assert_eq!(carried, json!({"tag": "a", "value": "1.25"}));
+
+    let canonical = Stored::check(
+        &compiled(&object_schema),
+        json!({"kind": "a", "value": "1.25"}),
+    )
+    .expect("canonical valid values remain unchanged")
+    .into_value();
+    assert_eq!(canonical, json!({"kind": "a", "value": "1.25"}));
+
+    let nested_ambiguous_schema = json!({
+        "anyOf": [
+            {"type": "object", "properties": {"value": {"type": "string", "x-automerge": "float", "format": "double"}}, "required": ["value"]},
+            {"type": "object", "properties": {"value": {"type": "string", "x-automerge": "float", "format": "double"}}, "required": ["value"]}
+        ]
+    });
+    let error = Stored::check(&compiled(&nested_ambiguous_schema), json!({"value": 1.25}))
+        .expect_err("nested branch ambiguity must not pick the first branch");
+    assert!(
+        error.to_string().contains("ambiguous carried branches"),
+        "{error}"
+    );
+}
+
+#[test]
+fn normalization_depth_preflight_covers_canonical_values_and_wide_canonical_values() {
+    let schema = json!({});
+    let mut value = json!(1);
+    for _ in 0..1_025 {
+        value = Value::Array(vec![value]);
+    }
+    let error = Stored::check(&compiled(&schema), value)
+        .expect_err("depth guard must precede validator fast path");
+    assert!(
+        error.to_string().contains("deterministic resource budget"),
+        "{error}"
+    );
+
+    let wide_schema = json!({"type": "object", "additionalProperties": {"type": "string"}});
+    let mut members = serde_json::Map::new();
+    for index in 0..3_000 {
+        members.insert(format!("member_{index}"), json!("canonical"));
+    }
+    let stored = Stored::check(&compiled(&wide_schema), Value::Object(members))
+        .expect("wide canonical values remain within the preflight budget");
+    assert_eq!(stored.value()["member_2999"], json!("canonical"));
+}
+
+#[test]
 fn a_float_round_trips_at_the_precision_its_json_had() {
     let document = json!({
         "type": "object",
@@ -528,10 +925,10 @@ fn a_float_round_trips_at_the_precision_its_json_had() {
     });
     let value = json!({"single": 0.1f32, "double": 0.1f64});
     let mut doc = AutoCommit::new();
-    let stored = Stored::check(&document, value.clone()).unwrap();
-    autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &stored).unwrap();
+    let stored = Stored::check(&compiled(&document), value.clone()).unwrap();
+    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
     assert_eq!(
-        hydrate_value(&doc, &ROOT, facet(), &document).unwrap(),
+        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
         value
     );
     assert_eq!(
@@ -555,7 +952,8 @@ fn a_number_json_cannot_state_is_refused() {
     doc.put(ROOT, "facet", automerge::ScalarValue::F64(f64::NAN))
         .unwrap();
     let document = json!({"type": "object", "properties": {"facet": {"type": "number"}}});
-    let error = hydrate_value(&doc, &ROOT, facet(), &document).expect_err("NaN has no JSON form");
+    let error = hydrate_value(&doc, &ROOT, facet(), &compiled(&document))
+        .expect_err("NaN has no JSON form");
     assert!(error.to_string().contains("NaN"), "{error}");
 }
 
@@ -596,22 +994,21 @@ fn a_float_travels_as_a_decimal_string_and_a_number_arrives_too() {
     // both are the value the document holds, and the projection spells it.
     let write = |json: Value| {
         let mut doc = AutoCommit::new();
-        let stored = Stored::check(&document, json).unwrap();
-        autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &stored)
-            .expect("a map reconciles at a key");
+        let stored = Stored::check(&compiled(&document), complete_stored(json)).unwrap();
+        reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
         doc
     };
     let doc = write(json!({"maybe": 0.1}));
-    let projected = hydrate_value(&doc, &ROOT, facet(), &document).unwrap();
+    let projected = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
     assert_eq!(projected["maybe"], json!("0.1"), "spelled at the f32 width");
 
     let doc = write(json!({"maybe": "0.1"}));
-    let projected = hydrate_value(&doc, &ROOT, facet(), &document).unwrap();
+    let projected = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
     assert_eq!(projected["maybe"], json!("0.1"), "kept as it was spelled");
 
     // A whole number keeps the point that says it is not an integer.
     let doc = write(json!({"maybe": 30.0}));
-    let projected = hydrate_value(&doc, &ROOT, facet(), &document).unwrap();
+    let projected = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
     assert_eq!(projected["maybe"], json!("30.0"));
 }
 
@@ -651,9 +1048,13 @@ fn the_non_finite_values_travel_by_their_names() {
         ("-Infinity", f64::NEG_INFINITY),
     ] {
         let mut doc = AutoCommit::new();
-        let stored = Stored::check(&document, json!({"fraction": spelled})).unwrap();
-        autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &stored).unwrap();
-        let projected = hydrate_value(&doc, &ROOT, facet(), &document).unwrap();
+        let stored = Stored::check(
+            &compiled(&document),
+            complete_stored(json!({"fraction": spelled})),
+        )
+        .unwrap();
+        reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+        let projected = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
         assert_eq!(projected["fraction"], json!(spelled));
         let round: f64 = projected["fraction"]
             .as_str()
@@ -676,10 +1077,10 @@ fn a_float_position_refuses_a_value_that_does_not_spell_a_number() {
 
     let cases = [
         (json!({"fraction": "not a number"}), "not a number"),
-        (json!({"fraction": true}), "a boolean"),
+        (json!({"fraction": true}), "true"),
     ];
     for (broken, stated) in cases {
-        let error = Stored::check(&document, broken)
+        let error = Stored::check(&compiled(&document), complete_stored(broken))
             .expect_err("a value that does not spell a number is refused");
         assert!(
             error.to_string().contains(stated),
@@ -698,11 +1099,11 @@ fn a_non_number_at_a_plain_number_position_is_refused() {
         json!({"plain_number": [1.0]}),
     ];
     for broken in cases {
-        let error = Stored::check(&document(), broken)
+        let error = Stored::check(&compiled(&document()), complete_stored(broken))
             .expect_err("a plain number's position is a number's");
         let error = error.to_string();
         assert!(
-            error.starts_with("at `$.plain_number`"),
+            error.contains("plain_number"),
             "the refusal points at the position: {error}"
         );
     }
@@ -737,7 +1138,7 @@ fn a_consumer_that_holds_the_document_hydrates_it_typed() {
             "fraction": {"type": "string", "x-automerge": "float"},
             "maybe": {"type": "string", "x-automerge": "float"},
             "listed": {"type": "array", "items": {"type": "string", "x-automerge": "float"}},
-            "bytes": {"type": "string", "contentEncoding": "base64"},
+            "bytes": {"type": "object", "x-automerge": "bytes", "properties": {"$bytes": {"type": "string", "contentEncoding": "base64"}}, "required": ["$bytes"], "additionalProperties": false},
             "counter": {"x-automerge": "counter"},
         },
     });
@@ -746,13 +1147,12 @@ fn a_consumer_that_holds_the_document_hydrates_it_typed() {
         "fraction": 0.1,
         "maybe": 30.0,
         "listed": [0.1, 1.5],
-        "bytes": "AQIDBA==",
+        "bytes": {"$bytes": "AQIDBA=="},
         "counter": 7,
     });
     let mut doc = AutoCommit::new();
-    let stored = Stored::check(&document, json).unwrap();
-    autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &stored)
-        .expect("a map reconciles at a key");
+    let stored = Stored::check(&compiled(&document), complete_stored(json)).unwrap();
+    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
 
     // The typed read is the document's, and a typed `f64` is not a string anywhere on it.
     let plain: Plain = autosurgeon::hydrate_prop(&doc, &ROOT, facet()).unwrap();
@@ -760,11 +1160,11 @@ fn a_consumer_that_holds_the_document_hydrates_it_typed() {
     assert_eq!(plain.maybe, Some(30.0));
     assert_eq!(plain.listed, vec![0.1, 1.5]);
     assert_eq!(plain.bytes, Bytes(vec![1, 2, 3, 4]));
-    assert_eq!(plain.counter, Counter(7));
+    assert_eq!(plain.counter, Counter::new(7));
 
     // The same two models, side by side: the projection says the strings the convention spells,
     // the typed read says the floats.
-    let projected = hydrate_value(&doc, &ROOT, facet(), &document).unwrap();
+    let projected = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
     assert_eq!(projected["fraction"], json!("0.1"));
     assert_eq!(plain.fraction, 0.1);
 }
@@ -787,13 +1187,12 @@ fn a_rust_type_deserializes_the_json_the_document_repo_emits() {
     });
     let document = document();
     let mut doc = AutoCommit::new();
-    let stored = Stored::check(&document, json).unwrap();
-    autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &stored)
-        .expect("a map reconciles at a key");
+    let stored = Stored::check(&compiled(&document), complete_stored(json)).unwrap();
+    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
 
     // What the repo emits is what the type's Deserialize reads: the convention's strings at a
     // declared float, the plain number at a bare one, and none.
-    let emitted = hydrate_value(&doc, &ROOT, facet(), &document).unwrap();
+    let emitted = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
     assert_eq!(emitted["fraction"], json!("0.1"));
     assert_eq!(emitted["maybe"], Value::Null);
     assert_eq!(emitted["plain_number"], json!(2.5));
@@ -872,7 +1271,7 @@ fn tagged_union_codecs_follow_the_discriminant_not_branch_order() {
         let validator = jsonschema::validator_for(&document).unwrap();
         for (json, expected) in [
             (
-                json!({"kind": "org.example.bytesMember", "payload": {"data": "AQID"}}),
+                json!({"kind": "org.example.bytesMember", "payload": {"data": {"$bytes": "AQID"}}}),
                 "bytes",
             ),
             (
@@ -882,10 +1281,10 @@ fn tagged_union_codecs_follow_the_discriminant_not_branch_order() {
         ] {
             let mut doc = AutoCommit::new();
             assert!(validator.is_valid(&json), "{json}");
-            let checked = Stored::check(&document, json.clone()).unwrap();
-            autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &checked).unwrap();
+            let checked = Stored::check(&compiled(&document), json.clone()).unwrap();
+            reconcile_json(&mut doc, &ROOT, facet(), &document, checked.into_value()).unwrap();
             assert_eq!(
-                hydrate_value(&doc, &ROOT, facet(), &document).unwrap(),
+                hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
                 json
             );
             let (_, member) = doc.get(ROOT, "facet").unwrap().unwrap();
@@ -910,11 +1309,11 @@ fn tagged_union_unknown_members_and_optional_null_keep_their_json() {
             json!({"kind": "org.example.textMember", "payload": {"data": "hello"}}),
         ] {
             let mut doc = AutoCommit::new();
-            let checked = Stored::check(&document, json.clone())
+            let checked = Stored::check(&compiled(&document), json.clone())
                 .unwrap_or_else(|err| panic!("{err}; value={json}; schema={document}"));
-            autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &checked).unwrap();
+            reconcile_json(&mut doc, &ROOT, facet(), &document, checked.into_value()).unwrap();
             assert_eq!(
-                hydrate_value(&doc, &ROOT, facet(), &document).unwrap(),
+                hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
                 json
             );
         }
@@ -929,12 +1328,10 @@ fn malformed_tagged_union_members_do_not_use_another_members_codec() {
     ] {
         let document = serde_json::to_value(schema).unwrap();
         let validator = jsonschema::validator_for(&document).unwrap();
-        let malformed =
-            json!({"kind": "org.example.bytesMember", "payload": {"data": "not base64"}});
-        // contentEncoding is an annotation to the validator; the codec must still refuse this,
-        // even when the Text branch comes first and could store this string.
+        let malformed = json!({"kind": "org.example.bytesMember", "payload": {"data": {"$bytes": "not base64"}}});
+        // contentEncoding is an annotation to the validator; the codec must still refuse this.
         assert!(validator.is_valid(&malformed));
-        assert!(Stored::check(&document, malformed).is_err());
+        assert!(Stored::check(&compiled(&document), malformed).is_err());
         for malformed in [
             json!({"kind": "org.example.bytesMember", "payload": {}}),
             json!({"kind": "org.example.textMember", "payload": 1}),
@@ -947,7 +1344,181 @@ fn malformed_tagged_union_members_do_not_use_another_members_codec() {
             json!({"kind": 1, "payload": {"data": "hello"}}),
             json!({"payload": {"data": "hello"}}),
         ] {
-            assert!(Stored::check(&document, malformed).is_err());
+            assert!(Stored::check(&compiled(&document), malformed).is_err());
         }
     }
+}
+
+#[test]
+fn canonical_bytes_use_the_protocol_object_and_reject_plain_base64() {
+    let bytes = Bytes(vec![1, 2, 3]);
+    assert_eq!(
+        serde_json::to_value(&bytes).unwrap(),
+        json!({"$bytes": "AQID"})
+    );
+    assert_eq!(
+        serde_json::from_value::<Bytes>(json!({"$bytes": "AQID"})).unwrap(),
+        bytes
+    );
+    assert!(serde_json::from_value::<Bytes>(json!("AQID")).is_err());
+    assert!(
+        Stored::check(
+            &compiled(&document()),
+            complete_stored(json!({"bytes": "AQID"}))
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn public_check_agrees_with_stock_validator_on_closed_object_boundaries() {
+    let schema = document();
+    let (_, valid) = value();
+    let mut missing = valid.clone();
+    missing.as_object_mut().unwrap().remove("text");
+    let mut unknown = valid.clone();
+    unknown["unmentioned"] = json!(true);
+    let mut protocol = valid.clone();
+    protocol["$type"] = json!("not-a-declared-union");
+
+    for candidate in [valid, missing, unknown, protocol] {
+        let stock = jsonschema::validator_for(&schema)
+            .expect("the generated schema is valid JSON Schema")
+            .is_valid(&candidate);
+        let ours = Stored::check(&compiled(&schema), candidate).is_ok();
+        assert_eq!(ours, stock, "public check disagrees with stock validator");
+    }
+}
+
+#[test]
+fn sidecar_validation_rejects_supported_json_schema_constraints() {
+    let reject = |schema: Value, value: Value| {
+        assert!(
+            Stored::check(&compiled(&schema), value).is_err(),
+            "the sidecar accepted an invalid value for {schema}"
+        );
+    };
+
+    reject(
+        json!({
+            "type": "string",
+            "enum": ["ready"],
+            "const": "ready",
+            "pattern": "^[a-z]+$",
+            "minLength": 5,
+            "maxLength": 8
+        }),
+        json!("NO"),
+    );
+    reject(
+        json!({
+            "type": "number",
+            "minimum": 1,
+            "maximum": 10,
+            "exclusiveMinimum": 1,
+            "exclusiveMaximum": 10,
+            "multipleOf": 2
+        }),
+        json!(11),
+    );
+    reject(json!({"type": "integer"}), json!(1.5));
+    reject(
+        json!({
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 2,
+            "maxItems": 3
+        }),
+        json!([1]),
+    );
+    reject(
+        json!({
+            "$ref": "#/$defs/Map",
+            "$defs": {
+                "Map": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": false
+                }
+            }
+        }),
+        json!({"value": 1}),
+    );
+    reject(
+        json!({
+            "anyOf": [{"type": "string"}, {"type": "number"}]
+        }),
+        json!(null),
+    );
+    reject(
+        json!({
+            "type": "object",
+            "properties": {
+                "$bytes": {"type": "string", "contentEncoding": "base64"}
+            },
+            "required": ["$bytes"],
+            "additionalProperties": false,
+            "x-automerge": "bytes"
+        }),
+        json!({"$bytes": "not base64"}),
+    );
+}
+
+#[test]
+fn canonical_integers_are_javascript_safe_and_application_dollars_are_rejected() {
+    assert!(
+        Stored::check(
+            &compiled(&document()),
+            complete_stored(json!({"plain_number": 9_007_199_254_740_991i64}))
+        )
+        .is_ok()
+    );
+    assert!(
+        Stored::check(
+            &compiled(&document()),
+            complete_stored(json!({"plain_number": 9_007_199_254_740_992u64}))
+        )
+        .is_err()
+    );
+    assert!(
+        Stored::check(
+            &compiled(&document()),
+            complete_stored(json!({"plain_number": -9_007_199_254_740_991i64})),
+        )
+        .is_ok()
+    );
+    assert!(
+        Stored::check(
+            &compiled(&document()),
+            complete_stored(json!({"plain_number": -9_007_199_254_740_992i64})),
+        )
+        .is_err()
+    );
+    let prefix_items_schema = json!({
+        "type": "array",
+        "prefixItems": [{"type": "integer"}]
+    });
+    assert!(CompiledSchema::compile(prefix_items_schema).is_err());
+    let integer_schema = json!({
+        "type": "object",
+        "properties": {"value": {"type": "integer"}},
+        "required": ["value"],
+        "additionalProperties": false
+    });
+    assert!(Stored::check(&compiled(&integer_schema), json!({"value": 1.5})).is_err());
+    let negative_zero = Stored::check(&compiled(&integer_schema), json!({"value": -0.0}))
+        .expect_err("negative zero must be refused rather than reaching integer storage");
+    assert!(
+        negative_zero.to_string().contains("without losing"),
+        "{negative_zero}"
+    );
+    assert!(serde_json::from_value::<Counter>(json!(i64::MAX)).is_err());
+    assert!(std::panic::catch_unwind(|| Counter::new(i64::MAX)).is_err());
+    let error = Stored::check(
+        &compiled(&document()),
+        complete_stored(json!({"$application": true})),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("$application"), "{error}");
 }

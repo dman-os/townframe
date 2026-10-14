@@ -1,19 +1,32 @@
+pub mod authority;
+pub mod schema;
+
+pub use authority::{
+    ActorClaim, ActorPublicKey, AuthorityError, AuthorityRepo, CapabilityToken, DrawerId, Grant,
+    Signature, TokenId,
+};
+pub use schema::{
+    SchemaHandle, SchemaRegistration, SchemaRegistrationGroup, SchemaRepo, SchemaRepoError,
+};
+
 mod interlude {
     pub use utils_rs::prelude::*;
 }
 
+use crate::interlude::Res;
 use big_repo::SharedBigRepo;
-
-pub struct AuthorityRepo {}
-impl AuthorityRepo {
-    // methods
-    // get_actor_capability
-}
-
-pub struct SchemaRepo {}
+use std::sync::Arc;
 
 pub struct DocumentRepo {
+    #[expect(
+        dead_code,
+        reason = "DocumentRepo wiring is reserved for the later document layer"
+    )]
     big_repo: SharedBigRepo,
+    #[expect(
+        dead_code,
+        reason = "DocumentRepo wiring is reserved for the later document layer"
+    )]
     schema_repo: Arc<SchemaRepo>,
 }
 

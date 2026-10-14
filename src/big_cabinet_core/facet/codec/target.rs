@@ -21,19 +21,22 @@
 //! it writes inside, and the contract — omission removes at the *supplied* base heads, `AtCurrent`
 //! is an explicit choice, no retries — is met by building that transaction at the heads the write
 //! is based on (`transaction_at(&heads)`), since every read here sees that view. A transaction
-//! built at current heads checks a different contract. On an error the caller owns the
-//! transaction's pending effects: the checks that need converting are made before a mutation, an
-//! error raised while writing propagates unchanged, and the write's operations are not promised
-//! atomic across them.
+//! built at current heads checks a different contract. Schema, input, and base-view errors are
+//! returned before mutation. If the underlying reconciler reports an apply-time error, the caller
+//! owns the transaction and must discard it rather than commit it; this generic API cannot rollback
+//! an arbitrary `Transactable`, and it propagates that error unchanged.
 
 use super::walk::{
-    Declared, Kind, Number, Path, PathKey, Position, at, discriminant_matches, number_kind,
-    type_mentions,
+    CompiledSchema, Declared, Kind, Number, Path, PathKey, Position, at, discriminant_matches,
+    number_kind, type_mentions,
 };
-use super::{Codec, CodecError, decode_base64, instant_millis, kind};
-use automerge::{ObjId, ObjType, ScalarValue, transaction::Transactable};
+use super::{Codec, CodecError, bytes_value, instant_millis, kind};
+#[cfg(test)]
+use automerge::transaction::Transactable;
+use automerge::{ObjId, ObjType, ScalarValue, transaction::Transaction};
+use autosurgeon::ReadDoc as AutoDoc;
 use autosurgeon::reconcile::{CounterReconciler, TextReconciler};
-use autosurgeon::{Prop, ReadDoc as AutoDoc, Reconciler};
+use autosurgeon::{Prop, Reconciler};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -52,7 +55,12 @@ use std::collections::HashMap;
 ///   identity-safe, and a keyed correspondence for submitted lists is its own open question.
 /// - Content at a position nothing declares and no base holds writes plain JSON: what native
 ///   storage fresh unknown content should take is its own open question.
-pub fn reconcile_json<D>(
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "the legacy AutoCommit harness is test-only; production writes use reconcile_json_atomic"
+)]
+pub(crate) fn reconcile_json<D>(
     doc: &mut D,
     obj: &ObjId,
     prop: Prop<'_>,
@@ -60,22 +68,52 @@ pub fn reconcile_json<D>(
     value: Value,
 ) -> Result<(), CodecError>
 where
-    D: AutoDoc,
-    D: Transactable,
+    D: AutoDoc + Transactable,
 {
+    let compiled =
+        CompiledSchema::compile(document.clone()).map_err(|err| at(&Path::root(), err))?;
+    let checked_value =
+        super::Stored::check(&compiled, value).map_err(|err| at(&Path::root(), err))?;
+    let (schema, value) = checked_value.into_target_parts();
     let path = Path::root();
-    let position = Position::new(document, Some(document));
-    // Declarations first, exactly as `Stored::check` does them: a value the declarations cannot
-    // hold is refused before the document is read for its position at all.
-    position
-        .check(&value, &path)
-        .map_err(|err| at(&path, err))?;
+    let position = Position::new(schema.document(), Some(schema.document()));
     let mut plan = Plan::default();
     checked(&position, doc, obj, &prop, &value, &path, &mut plan).map_err(|err| at(&path, err))?;
-    let stored = super::Stored::with_plan(document, value, plan);
-    // The write the codec always made, now carrying the decisions the base was read into; a
-    // document refusing an operation on it propagates to the caller that owns the transaction.
-    autosurgeon::reconcile_prop(doc, obj, prop, stored).map_err(CodecError::from)
+    let stored = super::Stored::with_plan(schema, value, plan);
+    autosurgeon::reconcile_prop(doc, obj, prop, stored.planned()).map_err(CodecError::from)
+}
+
+/// Reconcile through an owned transaction. On every error the transaction is rolled back and
+/// dropped, so callers cannot accidentally commit a partially applied write. The returned
+/// transaction is the only successful commit capability.
+pub fn reconcile_json_atomic<'a>(
+    mut doc: Transaction<'a>,
+    schema: &CompiledSchema,
+    obj: &ObjId,
+    prop: Prop<'_>,
+    value: Value,
+) -> Result<Transaction<'a>, CodecError> {
+    let checked_value = match super::Stored::check(schema, value) {
+        Ok(checked_value) => checked_value,
+        Err(error) => {
+            doc.rollback();
+            return Err(at(&Path::root(), error));
+        }
+    };
+    let (schema, value) = checked_value.into_target_parts();
+    let path = Path::root();
+    let position = Position::new(schema.document(), Some(schema.document()));
+    let mut plan = Plan::default();
+    if let Err(error) = checked(&position, &doc, obj, &prop, &value, &path, &mut plan) {
+        doc.rollback();
+        return Err(at(&path, error));
+    }
+    let stored = super::Stored::with_plan(schema, value, plan);
+    if let Err(error) = autosurgeon::reconcile_prop(&mut doc, obj, prop, stored.planned()) {
+        doc.rollback();
+        return Err(CodecError::from(error));
+    }
+    Ok(doc)
 }
 
 /// The decisions a checked write consults while it writes, keyed by the path they were checked
@@ -197,8 +235,8 @@ fn same_scalar(scalar: &ScalarValue, value: &Value) -> bool {
         (ScalarValue::Counter(stated), Value::Number(submitted)) => {
             submitted.as_i64() == Some(i64::from(stated))
         }
-        (ScalarValue::Bytes(stated), Value::String(submitted)) => {
-            decode_base64(submitted).as_deref() == Some(stated.as_slice())
+        (ScalarValue::Bytes(stated), submitted) => {
+            bytes_value(submitted).as_deref() == Some(stated.as_slice())
         }
         (ScalarValue::Timestamp(stated), Value::String(submitted)) => {
             instant_millis(submitted) == Some(*stated)
@@ -374,9 +412,9 @@ fn scalar_checked(
         // The conversions below are the fallback of the positions nothing declares: the storage
         // the base holds is what decides what a changed submission is spelled in.
         Declared::Undeclared => match (scalar, value) {
-            // Undeclared native bytes spell the canonical base64 of what they are: a submission
+            // Undeclared native bytes spell the canonical `$bytes` object of what they are: a submission
             // that says other bytes changes them, and one that is not bytes is refused.
-            (ScalarValue::Bytes(_), _) => match value.as_str().and_then(decode_base64) {
+            (ScalarValue::Bytes(_), _) => match bytes_value(value) {
                 Some(byte) => {
                     plan.set(path, Op::Scalar(Spelled::Bytes(byte)));
                     Ok(())
