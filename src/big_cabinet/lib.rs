@@ -1,14 +1,13 @@
-mod interlude {
-    pub use utils_rs::prelude::*;
-}
+pub mod authority;
+
+pub use authority::{
+    ActorClaim, ActorPublicKey, AuthorityError, AuthorityRepo, CapabilityToken, DrawerId, Grant,
+    Signature, TokenId,
+};
 
 use big_repo::SharedBigRepo;
-
-pub struct AuthorityRepo {}
-impl AuthorityRepo {
-    // methods
-    // get_actor_capability
-}
+use std::sync::Arc;
+use utils_rs::prelude::Res;
 
 pub struct SchemaRepo {}
 
@@ -24,7 +23,4 @@ impl DocumentRepo {
             schema_repo,
         })
     }
-    // mutations
-    // create_doc(facets, actor_capability)
-    // write_doc(doc_id, facets, actor_revision, actor_capability)
 }

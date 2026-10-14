@@ -13,8 +13,30 @@ path = "lib.rs"
 #
 # internal
 utils_rs.workspace = true
+big_cabinet_core = { path = "../big_cabinet_core", default-features = false }
 big_repo.workspace = true
+secrets_rs.workspace = true
 
 #
 # encoding
 atproto-dasl.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
+
+#
+# crypto and identity
+ed25519-dalek.workspace = true
+rand.workspace = true
+uuid.workspace = true
+
+#
+# errors and durable authority state
+thiserror.workspace = true
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+secrets_rs = { workspace = true, features = ["test-support"] }
+keyring-core = { version = "1.0", default-features = false }
+tempfile.workspace = true
