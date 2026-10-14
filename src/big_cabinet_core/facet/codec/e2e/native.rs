@@ -26,10 +26,127 @@ fn open_document() -> Json {
     serde_json::to_value(bundle.document("OpenFacet").unwrap()).unwrap()
 }
 
+#[macros::facet(id = "org.example.listFacet", closed)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListFacet {
+    values: Vec<String>,
+}
+
+fn list_document() -> Json {
+    let universe = Universe::collect(vec![Declaration::of::<ListFacet>().unwrap()]);
+    let bundle = Bundle::new(&universe, Vec::new());
+    serde_json::to_value(bundle.document("ListFacet").unwrap()).unwrap()
+}
+
+/// A target-aware list write uses the same positional/no-key Autosurgeon baseline as a direct
+/// reconciler: concurrent insertion survives, an edit at the supplied head targets that baseline
+/// position, and omission deletes only the supplied base tail.
+#[test]
+fn list_writes_follow_autosurgeon_positional_heads() {
+    let document = list_document();
+    let mut doc = Automerge::new();
+    let heads0 = {
+        let mut tx = doc.transaction();
+        reconcile_json(
+            &mut tx,
+            &ROOT,
+            facet(),
+            &document,
+            json!({"values": ["a", "b", "c"]}),
+        )
+        .unwrap();
+        let (heads, _) = tx.commit();
+        heads.expect("the initial list commits")
+    };
+
+    let mut peer = doc.fork();
+    peer.set_actor(ActorId::from([9u8; 32]));
+    {
+        let mut tx = peer.transaction();
+        let (_, map) = tx.get(ROOT, "facet").unwrap().unwrap();
+        let (_, list) = tx.get(&map, "values").unwrap().unwrap();
+        tx.insert(&list, 1, "peer").unwrap();
+        tx.commit();
+    }
+    let peer_changes = peer.get_changes(&[heads0]);
+
+    let mut tx = doc
+        .transaction_at(automerge::PatchLog::null(), &[heads0])
+        .unwrap();
+    reconcile_json(
+        &mut tx,
+        &ROOT,
+        facet(),
+        &document,
+        json!({"values": ["a", "B"]}),
+    )
+    .unwrap();
+    tx.commit();
+    doc.apply_changes(peer_changes).unwrap();
+
+    assert_eq!(
+        hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap(),
+        json!({"values": ["a", "peer", "B"]}),
+        "the remote insertion survives while the supplied-head edit and omission apply"
+    );
+}
+
 /// An old-schema document knows only the member its declaration names, so its writer's write
 /// carries the neighbor and leaves what the schema does not name native: a future collaborative
 /// text is not turned into a Str, and a splice a concurrent writer makes after the base survives,
 /// because nothing was written over the text at all.
+#[test]
+fn list_delete_and_move_conflicts_follow_the_same_baseline() {
+    let document = list_document();
+    let mut doc = Automerge::new();
+    let heads0 = {
+        let mut tx = doc.transaction();
+        reconcile_json(
+            &mut tx,
+            &ROOT,
+            facet(),
+            &document,
+            json!({"values": ["a", "b", "c"]}),
+        )
+        .unwrap();
+        let (heads, _) = tx.commit();
+        heads.expect("the initial list commits")
+    };
+
+    let mut peer = doc.fork();
+    peer.set_actor(ActorId::from([10u8; 32]));
+    {
+        let mut tx = peer.transaction();
+        let (_, map) = tx.get(ROOT, "facet").unwrap().unwrap();
+        let (_, list) = tx.get(&map, "values").unwrap().unwrap();
+        tx.delete(&list, 1).unwrap();
+        tx.insert(&list, 1, "b").unwrap();
+        tx.commit();
+    }
+    let peer_changes = peer.get_changes(&[heads0]);
+
+    let mut tx = doc
+        .transaction_at(automerge::PatchLog::null(), &[heads0])
+        .unwrap();
+    reconcile_json(
+        &mut tx,
+        &ROOT,
+        facet(),
+        &document,
+        json!({"values": ["a", "b", "B", "c"]}),
+    )
+    .unwrap();
+    tx.commit();
+    doc.apply_changes(peer_changes).unwrap();
+
+    assert_eq!(
+        hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap(),
+        json!({"values": ["a", "b", "B", "c"]}),
+        "a delete-plus-insert move and edit preserve both no-key list insertions"
+    );
+}
+
 #[test]
 fn an_undeclared_native_text_keeps_its_object_while_a_neighbor_changes() {
     let document = open_document();
@@ -88,7 +205,7 @@ fn an_undeclared_native_text_keeps_its_object_while_a_neighbor_changes() {
         "a splice no writer rewrote merges with the change"
     );
     assert_eq!(
-        hydrate_value(&doc, &ROOT, facet(), &document).unwrap(),
+        hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap(),
         json!({"title": "changed", "note": "hello world"}),
         "the read is the carry the contract spells"
     );
@@ -144,7 +261,7 @@ fn a_declared_plain_string_wins_over_a_native_text() {
             "{stated} is a Str, spelled by the declaration"
         );
         assert_eq!(
-            hydrate_value(&doc, &ROOT, facet(), &document).unwrap(),
+            hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap(),
             submitted,
         );
     }
@@ -217,7 +334,7 @@ fn a_declared_counter_takes_the_checked_delta_of_a_concurrent_change() {
 
     doc.apply_changes(changes).unwrap();
 
-    let projected = hydrate_value(&doc, &ROOT, facet(), &document).unwrap();
+    let projected = hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap();
     assert_eq!(
         projected["counter"],
         json!(10),
@@ -242,8 +359,8 @@ fn a_counter_delta_outside_the_counter_is_refused_before_anything_is_written() {
     let heads = {
         let mut tx = doc.transaction();
         let map = tx.put_object(ROOT, "facet", ObjType::Map).unwrap();
-        // a counter at -1: i64::max would need the delta i64 cannot state
-        tx.put(&map, "counter", ScalarValue::Counter((-1i64).into()))
+        // The canonical maximum is safe JSON, but it still cannot be reached from i64::MIN.
+        tx.put(&map, "counter", ScalarValue::Counter(i64::MIN.into()))
             .unwrap();
         let (heads, _) = tx.commit();
         heads.expect("a creator change commits")
@@ -253,7 +370,7 @@ fn a_counter_delta_outside_the_counter_is_refused_before_anything_is_written() {
         .transaction_at(automerge::PatchLog::null(), &[heads])
         .unwrap();
     let mut json = super::value().1;
-    json["counter"] = json!(i64::MAX);
+    json["counter"] = json!(9_007_199_254_740_991i64);
     let error = reconcile_json(&mut tx, &ROOT, facet(), &document, json)
         .expect_err("the delta is outside the counter's range");
     assert!(error.to_string().contains("cannot arrive at"), "{error}");
@@ -302,7 +419,7 @@ fn omission_removes_at_the_supplied_base_and_an_unseen_addition_survives() {
 
     doc.apply_changes(changes).unwrap();
 
-    let projected = hydrate_value(&doc, &ROOT, facet(), &document).unwrap();
+    let projected = hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap();
     assert_eq!(
         projected,
         json!({"title": "changed", "pasted": 1}),
@@ -333,8 +450,12 @@ fn undeclared_bytes_and_an_instant_round_trip_in_their_raw_spellings() {
         let (heads, _) = tx.commit();
         heads.expect("a creator change commits")
     };
-    let projected = hydrate_value(&doc, &ROOT, facet(), &document).unwrap();
-    assert_eq!(projected["blob"], json!("AQI="), "the canonical base64");
+    let projected = hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap();
+    assert_eq!(
+        projected["blob"],
+        json!({"$bytes": "AQI="}),
+        "the canonical bytes object"
+    );
     assert_eq!(
         projected["when"],
         json!("1970-01-01T00:00:00Z"),
@@ -362,7 +483,7 @@ fn undeclared_bytes_and_an_instant_round_trip_in_their_raw_spellings() {
         &ROOT,
         facet(),
         &document,
-        json!({"title": "base", "blob": "AQID", "when": "1970-01-01T00:00:00Z"}),
+        json!({"title": "base", "blob": {"$bytes": "AQID"}, "when": "1970-01-01T00:00:00Z"}),
     )
     .unwrap();
     assert_eq!(
@@ -372,8 +493,8 @@ fn undeclared_bytes_and_an_instant_round_trip_in_their_raw_spellings() {
     );
     tx.commit();
 
-    let projected = hydrate_value(&doc, &ROOT, facet(), &document).unwrap();
-    assert_eq!(projected["blob"], json!("AQID"));
+    let projected = hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap();
+    assert_eq!(projected["blob"], json!({"$bytes": "AQID"}));
     assert_eq!(projected["when"], json!("1970-01-01T00:00:00Z"));
 }
 
@@ -466,7 +587,7 @@ fn a_declared_integer_takes_whole_values_over_a_counter() {
             "the declared sign is what landed ({how}): {field:?}"
         );
         assert_eq!(
-            hydrate_value(&doc, &ROOT, facet(), &document).unwrap()["field"],
+            hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap()["field"],
             stated,
         );
     }
@@ -534,7 +655,7 @@ fn a_plain_marker_without_a_type_is_still_a_declaration() {
         tx.put(&_obj, "field", ScalarValue::Timestamp(0)).unwrap();
         tx.commit();
     };
-    let error = hydrate_value(&doc, &ROOT, facet(), &list_document)
+    let error = hydrate_value(&doc, &ROOT, facet(), &super::compiled(&list_document))
         .expect_err("a marker states a plain position, and nothing projects a projection there");
     assert!(error.to_string().contains("an instant"), "{error}");
 }
@@ -625,10 +746,41 @@ fn a_member_named_like_a_chain_position_is_not_another_position() {
         );
         tx.commit();
 
-        let projected = hydrate_value(&doc, &ROOT, facet(), &document).unwrap();
+        let projected = hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap();
         assert_eq!(
             projected, expected,
             "the decisions landed where they were checked ({name})"
         );
     }
+}
+
+#[test]
+fn invalid_late_content_is_preflighted_before_any_write() {
+    let document = open_document();
+    let mut doc = Automerge::new();
+    let heads = {
+        let mut tx = doc.transaction();
+        let map = tx.put_object(ROOT, "facet", ObjType::Map).unwrap();
+        tx.put(&map, "title", "base").unwrap();
+        let (heads, _) = tx.commit();
+        heads.expect("a creator change commits")
+    };
+
+    let mut tx = doc
+        .transaction_at(automerge::PatchLog::null(), &[heads])
+        .unwrap();
+    let error = reconcile_json(
+        &mut tx,
+        &ROOT,
+        facet(),
+        &document,
+        json!({"title": "changed", "note": {"$application": true}}),
+    )
+    .expect_err("application dollar keys are refused");
+    assert!(error.to_string().contains("$application"), "{error}");
+    assert_eq!(
+        tx.pending_ops(),
+        0,
+        "preflight refused before writing title"
+    );
 }

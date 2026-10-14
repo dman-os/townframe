@@ -45,6 +45,7 @@ schemars = { version = "1.2", features = [
 #
 # error
 thiserror.workspace = true
+jsonschema = { version = "0.42.0", default-features = false }
 displaydoc.workspace = true
 
 #
@@ -77,10 +78,6 @@ jsonpath-rust = "1.0.4"
 [dev-dependencies]
 # The declaration macro the facet tests exercise.
 macros = { path = "../macros" }
-# The bundle test validates against a real JSON Schema implementation rather than
-# asserting the shape of the document we assembled: hoisting is only correct if a
-# stock validator can still check a value against it. Already in the tree, no network.
-jsonschema = { version = "0.42.0", default-features = false }
 panproto-lens = "=0.74.4"
 panproto-mig = "=0.74.4"
 panproto-protocols = "=0.74.4"

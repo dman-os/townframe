@@ -26,8 +26,9 @@ use automerge::{ObjId, ObjType, ReadDoc, ScalarValue};
 use autosurgeon::reconcile::{CounterReconciler, TextReconciler};
 use autosurgeon::{HydrateError, Reconciler};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
+use serde::ser::{Error as SerError, SerializeMap};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::num::FpCategory;
 
@@ -37,8 +38,10 @@ mod walk;
 #[cfg(test)]
 mod e2e;
 
-pub use target::reconcile_json;
-pub use walk::{Stored, hydrate_value};
+#[cfg(test)]
+pub(crate) use target::reconcile_json;
+pub use target::reconcile_json_atomic;
+pub use walk::{CompiledSchema, Stored, hydrate_value};
 
 /// The keyword for the storage forms JSON Schema cannot describe.
 pub const KEYWORD: &str = "x-automerge";
@@ -48,11 +51,12 @@ const CONTENT_ENCODING: &str = "contentEncoding";
 const BASE64: &str = "base64";
 const FORMAT: &str = "format";
 const DATE_TIME: &str = "date-time";
+const JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
 
 /// A shape whose storage in a document is not its JSON form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
-    /// Bytes in the document, a base64 string in JSON.
+    /// Bytes in the document, the protocol `{ "$bytes": "…" }` object in JSON.
     Bytes,
     /// A timestamp in milliseconds in the document, an RFC 3339 string in JSON.
     Timestamp,
@@ -135,8 +139,8 @@ impl Codec {
     fn write<R: Reconciler>(self, value: &Value, reconciler: &mut R) -> Result<(), R::Error> {
         match self {
             Codec::Bytes => {
-                let stated = value.as_str().expect("checked");
-                reconciler.bytes(decode_base64(stated).expect("checked"))
+                let stated = bytes_value(value).expect("checked");
+                reconciler.bytes(stated)
             }
             Codec::Timestamp => {
                 let stated = value.as_str().expect("checked");
@@ -170,7 +174,9 @@ impl Codec {
         let at_f32 = schema.get(FORMAT).and_then(Value::as_str) == Some("float");
         match (self, stored) {
             (Codec::Bytes, automerge::Value::Scalar(stated)) => match stated.as_ref() {
-                ScalarValue::Bytes(bytes) => Ok(Value::String(data_encoding::BASE64.encode(bytes))),
+                ScalarValue::Bytes(bytes) => {
+                    Ok(json!({"$bytes": data_encoding::BASE64.encode(bytes)}))
+                }
                 other => Err(unexpected(stored_scalar(other))),
             },
             (Codec::Timestamp, automerge::Value::Scalar(stated)) => match stated.as_ref() {
@@ -190,7 +196,15 @@ impl Codec {
                 other => Err(unexpected(stored_scalar(other))),
             },
             (Codec::Counter, automerge::Value::Scalar(stated)) => match stated.as_ref() {
-                ScalarValue::Counter(value) => Ok(Value::Number(i64::from(value).into())),
+                ScalarValue::Counter(value)
+                    if i64::from(value).unsigned_abs() <= JS_SAFE_INTEGER_MAX as u64 =>
+                {
+                    Ok(Value::Number(i64::from(value).into()))
+                }
+                ScalarValue::Counter(value) => Err(unexpected(&format!(
+                    "counter {} is outside the JavaScript-safe integer range",
+                    i64::from(value)
+                ))),
                 other => Err(unexpected(stored_scalar(other))),
             },
             (Codec::Text, automerge::Value::Object(ObjType::Text)) => {
@@ -204,7 +218,7 @@ impl Codec {
     fn holds(self, value: &Value) -> Result<(), CodecError> {
         let found = kind(value);
         match self {
-            Codec::Bytes => match value.as_str().and_then(decode_base64) {
+            Codec::Bytes => match bytes_value(value) {
                 Some(_) => Ok(()),
                 None => Err(CodecError::NotBytes { found }),
             },
@@ -261,11 +275,21 @@ fn kind(value: &Value) -> &'static str {
 
 /// Base64, padded or not on the way in: both spell the same bytes, and a writer that leaves the
 /// padding off is unambiguous.
-fn decode_base64(stated: &str) -> Option<Vec<u8>> {
+pub(super) fn decode_base64(stated: &str) -> Option<Vec<u8>> {
     data_encoding::BASE64
         .decode(stated.as_bytes())
         .or_else(|_| data_encoding::BASE64_NOPAD.decode(stated.as_bytes()))
         .ok()
+}
+
+/// Read the one canonical bytes object. Plain base64 strings belong to explicit foreign adapters,
+/// never to the Cabinet canonical path.
+pub(super) fn bytes_value(value: &Value) -> Option<Vec<u8>> {
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    object.get("$bytes")?.as_str().and_then(decode_base64)
 }
 
 /// The milliseconds of an RFC 3339 instant.
@@ -293,7 +317,7 @@ fn instant_string(millis: i64) -> String {
 /// way through a JSON value — with the decimal point kept (`"1.0"`, which is how a reader knows
 /// this was never a whole number) and the three values JSON cannot state at all by the names every
 /// parser reads.
-fn float_string(stated: f64, at_f32: bool) -> String {
+pub(super) fn float_string(stated: f64, at_f32: bool) -> String {
     match stated.classify() {
         FpCategory::Nan => return "NaN".to_owned(),
         FpCategory::Infinite if stated.is_sign_negative() => return "-Infinity".to_owned(),
@@ -328,7 +352,9 @@ pub fn codec_schema(codec: Codec, schema: Schema) -> Schema {
     let mut schema = schema;
     match codec {
         Codec::Bytes => {
-            schema.insert(CONTENT_ENCODING.to_owned(), BASE64.into());
+            // The canonical bytes object carries the standard encoding annotation on its
+            // `$bytes` member; the sidecar marks the enclosing object as the storage form.
+            schema.insert(KEYWORD.to_owned(), codec.name().into());
         }
         Codec::Timestamp => {
             schema.insert(FORMAT.to_owned(), DATE_TIME.into());
@@ -354,8 +380,8 @@ pub enum CodecError {
     #[error("`{KEYWORD}` names a storage form, but this position states {stated}")]
     NotASpelling { stated: Value },
 
-    /// the position is declared as bytes, and the value is not base64
-    #[error("this position is stored as bytes, so it is a base64 string, not {found}")]
+    /// the position is declared as bytes, and the value is not the protocol bytes object
+    #[error("this position is stored as bytes, so it is a {{$bytes}} object, not {found}")]
     NotBytes { found: &'static str },
 
     /// the position is declared as an instant, and the value is not an RFC 3339 string
@@ -384,6 +410,36 @@ pub enum CodecError {
     /// the document holds a number JSON has no way to write
     #[error("this position holds {stated}, which JSON cannot state: it has no NaN and no infinity")]
     NotAJsonNumber { stated: f64 },
+
+    /// the carried JSON Schema itself is invalid or cannot resolve a non-carried reference
+    #[error("the carried JSON Schema is invalid: {message}")]
+    InvalidSchema { message: String },
+
+    /// the submitted value violates the carried JSON Schema
+    #[error("the submitted value violates JSON Schema at `{path}`: {message}")]
+    SchemaViolation { path: String, message: String },
+
+    /// a canonical integer is outside JavaScript's exact-integer range
+    #[error("the canonical integer {stated} is outside the JavaScript-safe range")]
+    NotAJsonInteger { stated: String },
+
+    /// an integer declaration received a JSON number without an integral representation
+    #[error(
+        "the integer declaration cannot store JSON number {stated} without losing its authored value"
+    )]
+    NonIntegralInteger { stated: String },
+
+    /// authored normalization exceeded its deterministic resource budget
+    #[error("authored normalization exceeded its deterministic resource budget of {limit} visits")]
+    NormalizationLimit { limit: usize },
+
+    /// authoring normalization has more than one carried branch with no deterministic selection
+    #[error("authored normalization has ambiguous carried branches")]
+    NormalizationAmbiguous,
+
+    /// an application tried to use a protocol-reserved object key
+    #[error("{key} is reserved by the canonical protocol and cannot be an application key")]
+    ReservedKey { key: String },
 
     /// a reference names a definition the document does not carry
     #[error("the schema refers to `{name}`, which this document does not define")]
@@ -456,7 +512,7 @@ pub enum CodecError {
     },
 }
 
-/// Bytes in the document, a base64 string in JSON.
+/// Bytes in the document, the protocol `{ "$bytes": "…" }` object in JSON.
 ///
 /// A byte field needs a type of its own: `autosurgeon` reconciles `Vec<T>` as a list, so `Vec<u8>` is
 /// an array of numbers to it. This type carries the whole declaration — the JSON form, the schema and
@@ -486,14 +542,26 @@ impl From<Bytes> for Vec<u8> {
 
 impl Serialize for Bytes {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&data_encoding::BASE64.encode(&self.0))
+        let mut object = serializer.serialize_map(Some(1))?;
+        object.serialize_entry("$bytes", &data_encoding::BASE64.encode(&self.0))?;
+        object.end()
     }
 }
 
 impl<'de> Deserialize<'de> for Bytes {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let stated = String::deserialize(deserializer)?;
-        decode_base64(&stated)
+        let value = Value::deserialize(deserializer)?;
+        let Some(stated) = value.get("$bytes").and_then(Value::as_str) else {
+            return Err(serde::de::Error::custom(
+                "bytes need a $bytes base64 string",
+            ));
+        };
+        if value.as_object().is_none_or(|object| object.len() != 1) {
+            return Err(serde::de::Error::custom(
+                "bytes only contain the $bytes member",
+            ));
+        }
+        decode_base64(stated)
             .map(Bytes)
             .ok_or_else(|| serde::de::Error::custom(format!("`{stated}` is not base64")))
     }
@@ -514,7 +582,17 @@ impl JsonSchema for Bytes {
     }
 
     fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
-        codec_schema(Codec::Bytes, json_schema!({"type": "string"}))
+        codec_schema(
+            Codec::Bytes,
+            json_schema!({
+                "type": "object",
+                "properties": {
+                    "$bytes": {"type": "string", "contentEncoding": "base64"}
+                },
+                "required": ["$bytes"],
+                "additionalProperties": false
+            }),
+        )
     }
 }
 
@@ -538,23 +616,51 @@ impl autosurgeon::Hydrate for Bytes {
 /// document and not a number. A JSON document states a value, so reconciling one *sets* the counter;
 /// an editor that means "add five" increments the counter it hydrated instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct Counter(pub i64);
+pub struct Counter(i64);
+
+impl Counter {
+    /// Construct a canonical counter. An unsafe integer is a programming error because it cannot
+    /// be represented by the facet JSON contract or read back by a canonical consumer.
+    pub fn new(value: i64) -> Self {
+        assert!(
+            value.unsigned_abs() <= JS_SAFE_INTEGER_MAX as u64,
+            "a counter is outside the JavaScript-safe integer range"
+        );
+        Self(value)
+    }
+
+    /// The counter's canonical integer value.
+    pub fn value(self) -> i64 {
+        self.0
+    }
+}
 
 impl From<i64> for Counter {
     fn from(value: i64) -> Self {
-        Self(value)
+        Self::new(value)
     }
 }
 
 impl Serialize for Counter {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.0.unsigned_abs() > JS_SAFE_INTEGER_MAX as u64 {
+            return Err(S::Error::custom(
+                "a counter is outside the JavaScript-safe integer range",
+            ));
+        }
         serializer.serialize_i64(self.0)
     }
 }
 
 impl<'de> Deserialize<'de> for Counter {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(Counter(i64::deserialize(deserializer)?))
+        let stated = i64::deserialize(deserializer)?;
+        if stated.unsigned_abs() > JS_SAFE_INTEGER_MAX as u64 {
+            return Err(serde::de::Error::custom(
+                "a counter is outside the JavaScript-safe integer range",
+            ));
+        }
+        Ok(Counter(stated))
     }
 }
 
@@ -581,12 +687,22 @@ impl autosurgeon::Reconcile for Counter {
     type Key<'a> = autosurgeon::reconcile::NoKey;
 
     fn reconcile<R: autosurgeon::Reconciler>(&self, mut reconciler: R) -> Result<(), R::Error> {
+        assert!(
+            self.0.unsigned_abs() <= JS_SAFE_INTEGER_MAX as u64,
+            "a counter is outside the JavaScript-safe integer range"
+        );
         reconciler.counter()?.set(self.0)
     }
 }
 
 impl autosurgeon::Hydrate for Counter {
     fn hydrate_counter(stated: i64) -> Result<Self, autosurgeon::HydrateError> {
+        if stated.unsigned_abs() > JS_SAFE_INTEGER_MAX as u64 {
+            return Err(autosurgeon::HydrateError::unexpected(
+                "a JavaScript-safe counter",
+                stated.to_string(),
+            ));
+        }
         Ok(Counter(stated))
     }
 }

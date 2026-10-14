@@ -5,19 +5,597 @@
 //! branch the content fits, and a member the schema does not name is plain JSON — which is what
 //! makes an open object open.
 
-use super::{Codec, CodecError, KEYWORD, instant_string, kind};
+use super::{Codec, CodecError, KEYWORD, bytes_value, instant_string, kind};
 use crate::facet::codec::target::Plan;
 use automerge::{ObjId, ObjType, ReadDoc, ScalarValue};
 use autosurgeon::reconcile::{MapReconciler, NoKey, SeqReconciler};
 use autosurgeon::{HydrateError, Prop, Reconcile, Reconciler};
-use data_encoding::BASE64 as BASE64_ENCODING;
 use serde_json::Value;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt::{self, Display};
+use std::sync::Arc;
 
 /// How many reference and branch hops a position may take before its schema is a loop rather than a
 /// declaration.
 const HOPS: usize = 16;
+/// Maximum heap work units for one submitted value. The iterative normalizer never recurses through
+/// sibling entries; wide ordinary values therefore consume linear work without consuming call stack.
+const NORMALIZATION_STEPS: usize = 1_000_000;
+/// Maximum authored schema/value nesting depth; exceeding it is a structured refusal, not a stack overflow.
+const NORMALIZATION_DEPTH: usize = 1024;
+
+/// Canonical JSON integers remain exactly representable in JavaScript consumers.
+const JS_SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991;
+
+type BranchValidators = HashMap<usize, Arc<jsonschema::Validator>>;
+
+#[derive(Debug, Clone)]
+pub struct CompiledSchema {
+    document: Arc<Value>,
+    validator: Arc<jsonschema::Validator>,
+    branch_validators: Arc<BranchValidators>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CarriedSchemaRetriever;
+
+// This proof is private so callers can only obtain it from an immutable compiled handle after
+// validation; it is carried into Stored without validating the submitted value a second time.
+#[derive(Debug, Clone)]
+struct ValidationProof {
+    validator: Arc<jsonschema::Validator>,
+}
+
+impl jsonschema::Retrieve for CarriedSchemaRetriever {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<String>,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err(format!("external schema reference is not carried: {uri}").into())
+    }
+}
+
+impl CompiledSchema {
+    /// Compile one carried Bundle schema for reuse by checks and target writes.
+    pub fn compile(document: Value) -> Result<Self, CodecError> {
+        reject_unsupported_schema_keywords(&document)?;
+        let validator = jsonschema::options()
+            .with_retriever(CarriedSchemaRetriever)
+            .build(&document)
+            .map_err(|error| CodecError::InvalidSchema {
+                message: error.to_string(),
+            })?;
+        let branch_validators = compile_branch_validators(&document)?;
+        Ok(Self {
+            document: Arc::new(document),
+            validator: Arc::new(validator),
+            branch_validators: Arc::new(branch_validators),
+        })
+    }
+
+    /// The immutable carried schema document.
+    pub fn document(&self) -> &Value {
+        &self.document
+    }
+
+    fn proof(&self) -> ValidationProof {
+        ValidationProof {
+            validator: Arc::clone(&self.validator),
+        }
+    }
+
+    fn validate(&self, value: &Value) -> Result<Value, CodecError> {
+        let proof = self.proof();
+        enforce_value_resource_bound(value)?;
+        // Canonical values need no authoring walk at all. The resource preflight above applies the
+        // same depth/work policy before this wide-map/list fast path and before cloning the value.
+        if proof.validator.is_valid(value) {
+            return Ok(value.clone());
+        }
+        let mut budget = NormalizationBudget { work: 0 };
+        let Some(normalized) = normalize_authoring(
+            &self.document,
+            &self.branch_validators,
+            &self.document,
+            value,
+            &mut budget,
+        )?
+        else {
+            return Err(CodecError::NormalizationAmbiguous);
+        };
+        if let Some(error) = proof.validator.iter_errors(&normalized).next() {
+            return Err(CodecError::SchemaViolation {
+                path: error.instance_path().to_string(),
+                message: error.to_string(),
+            });
+        }
+        Ok(normalized)
+    }
+}
+
+fn enforce_value_resource_bound(value: &Value) -> Result<(), CodecError> {
+    let mut pending = vec![(value, 0usize)];
+    let mut work = 0usize;
+    while let Some((value, depth)) = pending.pop() {
+        work += 1;
+        if work > NORMALIZATION_STEPS {
+            return Err(CodecError::NormalizationLimit {
+                limit: NORMALIZATION_STEPS,
+            });
+        }
+        if depth > NORMALIZATION_DEPTH {
+            return Err(CodecError::NormalizationLimit {
+                limit: NORMALIZATION_DEPTH,
+            });
+        }
+        match value {
+            Value::Object(members) => {
+                pending.extend(members.values().map(|value| (value, depth + 1)))
+            }
+            Value::Array(items) => pending.extend(items.iter().map(|value| (value, depth + 1))),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn compile_branch_validators(document: &Value) -> Result<BranchValidators, CodecError> {
+    let definitions = document.get("$defs").cloned();
+    let mut pending = vec![document];
+    let mut validators = HashMap::new();
+    while let Some(schema) = pending.pop() {
+        let Some(object) = schema.as_object() else {
+            if let Some(items) = schema.as_array() {
+                pending.extend(items);
+            }
+            continue;
+        };
+        for (keyword, value) in object {
+            if matches!(keyword.as_str(), "anyOf" | "oneOf") {
+                if let Some(branches) = value.as_array() {
+                    for branch in branches {
+                        let mut branch_document = branch.clone();
+                        if let (
+                            Some(Value::Object(root_definitions)),
+                            Value::Object(branch_object),
+                        ) = (definitions.as_ref(), &mut branch_document)
+                        {
+                            let branch_definitions = branch_object
+                                .entry("$defs")
+                                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                            if let Value::Object(branch_definitions) = branch_definitions {
+                                for (name, definition) in root_definitions {
+                                    branch_definitions
+                                        .entry(name.clone())
+                                        .or_insert_with(|| definition.clone());
+                                }
+                            }
+                        }
+                        let validator = jsonschema::options()
+                            .with_retriever(CarriedSchemaRetriever)
+                            .build(&branch_document)
+                            .map_err(|error| CodecError::InvalidSchema {
+                                message: error.to_string(),
+                            })?;
+                        validators.insert(branch as *const Value as usize, Arc::new(validator));
+                        pending.push(branch);
+                    }
+                }
+            } else {
+                pending.push(value);
+            }
+        }
+    }
+    Ok(validators)
+}
+
+fn reject_unsupported_schema_keywords(schema: &Value) -> Result<(), CodecError> {
+    match schema {
+        Value::Object(object) => {
+            if object.contains_key("prefixItems") || object.contains_key("allOf") {
+                return Err(CodecError::InvalidSchema {
+                    message: "the carried JSON Schema uses an unsupported composition keyword (`allOf` or `prefixItems`)".to_owned(),
+                });
+            }
+            if object.contains_key("anyOf") && object.contains_key("oneOf") {
+                return Err(CodecError::InvalidSchema {
+                    message: "the carried JSON Schema uses both `anyOf` and `oneOf` at one position, which this codec cannot dispatch without composing branch candidates".to_owned(),
+                });
+            }
+            for child in object.values() {
+                reject_unsupported_schema_keywords(child)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                reject_unsupported_schema_keywords(item)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+enum NormalizationTask<'a> {
+    Visit {
+        schema: &'a Value,
+        value: Value,
+        hops: usize,
+        depth: usize,
+    },
+    Object {
+        schema: &'a Value,
+        entries: serde_json::map::IntoIter,
+        out: serde_json::Map<String, Value>,
+        pending: Option<String>,
+        hops: usize,
+        depth: usize,
+    },
+    Array {
+        schema: &'a Value,
+        items: std::vec::IntoIter<Value>,
+        out: Vec<Value>,
+        pending: bool,
+        hops: usize,
+        depth: usize,
+    },
+    Branch {
+        branches: &'a [Value],
+        index: usize,
+        value: Value,
+        selected: Option<Value>,
+        ambiguous: bool,
+        pending: Option<usize>,
+        hops: usize,
+        depth: usize,
+    },
+}
+
+struct NormalizationBudget {
+    work: usize,
+}
+
+impl NormalizationBudget {
+    fn consume(&mut self, limit: usize) -> Result<(), CodecError> {
+        self.work += 1;
+        if self.work > limit {
+            return Err(CodecError::NormalizationLimit { limit });
+        }
+        Ok(())
+    }
+}
+
+fn normalize_authoring(
+    document: &Value,
+    branch_validators: &BranchValidators,
+    schema: &Value,
+    value: &Value,
+    budget: &mut NormalizationBudget,
+) -> Result<Option<Value>, CodecError> {
+    let mut tasks = vec![NormalizationTask::Visit {
+        schema,
+        value: value.clone(),
+        hops: HOPS,
+        depth: 0,
+    }];
+    let mut results: Vec<Option<Value>> = Vec::new();
+
+    while let Some(task) = tasks.pop() {
+        budget.consume(NORMALIZATION_STEPS)?;
+        match task {
+            NormalizationTask::Visit {
+                schema,
+                value,
+                hops,
+                depth,
+            } => {
+                if depth > NORMALIZATION_DEPTH || hops == 0 {
+                    return Err(CodecError::NormalizationLimit {
+                        limit: NORMALIZATION_DEPTH,
+                    });
+                }
+                let schema = resolve_schema(document, schema, hops)?;
+                if let Some(branches) = schema
+                    .get("anyOf")
+                    .or_else(|| schema.get("oneOf"))
+                    .and_then(Value::as_array)
+                {
+                    tasks.push(NormalizationTask::Branch {
+                        branches,
+                        index: 0,
+                        value,
+                        selected: None,
+                        ambiguous: false,
+                        pending: None,
+                        hops,
+                        depth,
+                    });
+                    continue;
+                }
+                if schema.get(KEYWORD).and_then(Value::as_str) == Some("float")
+                    && let Some(number) = value.as_f64()
+                {
+                    let at_f32 = schema.get("format").and_then(Value::as_str) == Some("float");
+                    results.push(Some(Value::String(super::float_string(number, at_f32))));
+                    continue;
+                }
+                match value {
+                    Value::Object(members) => {
+                        tasks.push(NormalizationTask::Object {
+                            schema,
+                            entries: members.into_iter(),
+                            out: serde_json::Map::new(),
+                            pending: None,
+                            hops,
+                            depth: depth + 1,
+                        });
+                    }
+                    Value::Array(items) => {
+                        tasks.push(NormalizationTask::Array {
+                            schema,
+                            items: items.into_iter(),
+                            out: Vec::new(),
+                            pending: false,
+                            hops,
+                            depth: depth + 1,
+                        });
+                    }
+                    scalar => results.push(Some(scalar)),
+                }
+            }
+            NormalizationTask::Object {
+                schema,
+                mut entries,
+                mut out,
+                mut pending,
+                hops,
+                depth,
+            } => {
+                if let Some(key) = pending.take() {
+                    let child = results.pop().expect("child normalization result");
+                    let Some(child) = child else {
+                        results.push(None);
+                        continue;
+                    };
+                    out.insert(key, child);
+                }
+                if let Some((key, value)) = entries.next() {
+                    let member_schema = schema
+                        .get("properties")
+                        .and_then(Value::as_object)
+                        .and_then(|properties| properties.get(&key))
+                        .or_else(|| {
+                            schema
+                                .get("additionalProperties")
+                                .filter(|schema| schema.is_object())
+                        });
+                    if let Some(member_schema) = member_schema {
+                        pending = Some(key);
+                        tasks.push(NormalizationTask::Object {
+                            schema,
+                            entries,
+                            out,
+                            pending,
+                            hops,
+                            depth,
+                        });
+                        tasks.push(NormalizationTask::Visit {
+                            schema: member_schema,
+                            value,
+                            hops: hops - 1,
+                            depth,
+                        });
+                    } else {
+                        out.insert(key, value);
+                        tasks.push(NormalizationTask::Object {
+                            schema,
+                            entries,
+                            out,
+                            pending,
+                            hops,
+                            depth,
+                        });
+                    }
+                } else {
+                    results.push(Some(Value::Object(out)));
+                }
+            }
+            NormalizationTask::Array {
+                schema,
+                mut items,
+                mut out,
+                pending,
+                hops,
+                depth,
+            } => {
+                if pending {
+                    let child = results.pop().expect("child normalization result");
+                    let Some(child) = child else {
+                        results.push(None);
+                        continue;
+                    };
+                    out.push(child);
+                }
+                if let Some(value) = items.next() {
+                    let item_schema = schema.get("items");
+                    if let Some(item_schema) = item_schema {
+                        tasks.push(NormalizationTask::Array {
+                            schema,
+                            items,
+                            out,
+                            pending: true,
+                            hops,
+                            depth,
+                        });
+                        tasks.push(NormalizationTask::Visit {
+                            schema: item_schema,
+                            value,
+                            hops: hops - 1,
+                            depth,
+                        });
+                    } else {
+                        out.push(value);
+                        tasks.push(NormalizationTask::Array {
+                            schema,
+                            items,
+                            out,
+                            pending: false,
+                            hops,
+                            depth,
+                        });
+                    }
+                } else {
+                    results.push(Some(Value::Array(out)));
+                }
+            }
+            NormalizationTask::Branch {
+                branches,
+                mut index,
+                value,
+                mut selected,
+                mut ambiguous,
+                mut pending,
+                hops,
+                depth,
+            } => {
+                if let Some(branch_index) = pending.take() {
+                    let candidate = results.pop().expect("branch normalization result");
+                    let Some(candidate) = candidate else {
+                        ambiguous = true;
+                        tasks.push(NormalizationTask::Branch {
+                            branches,
+                            index,
+                            value,
+                            selected,
+                            ambiguous,
+                            pending,
+                            hops,
+                            depth,
+                        });
+                        continue;
+                    };
+                    let branch = &branches[branch_index];
+                    let validator = branch_validators
+                        .get(&(branch as *const Value as usize))
+                        .expect("compiled branch validator");
+                    if validator.is_valid(&candidate) {
+                        if selected.is_some() {
+                            ambiguous = true;
+                        } else {
+                            selected = Some(candidate);
+                        }
+                    }
+                }
+                if index < branches.len() {
+                    let branch_index = index;
+                    index += 1;
+                    let branch = &branches[branch_index];
+                    let resolved = resolve_schema(document, branch, hops)?;
+                    if !authoring_matches(resolved, &value) {
+                        tasks.push(NormalizationTask::Branch {
+                            branches,
+                            index,
+                            value,
+                            selected,
+                            ambiguous,
+                            pending,
+                            hops,
+                            depth,
+                        });
+                        continue;
+                    }
+                    budget.consume(NORMALIZATION_STEPS)?;
+                    tasks.push(NormalizationTask::Branch {
+                        branches,
+                        index,
+                        value: value.clone(),
+                        selected,
+                        ambiguous,
+                        pending: Some(branch_index),
+                        hops,
+                        depth,
+                    });
+                    tasks.push(NormalizationTask::Visit {
+                        schema: resolved,
+                        value: value.clone(),
+                        hops: hops - 1,
+                        depth,
+                    });
+                } else {
+                    results.push(if ambiguous { None } else { selected });
+                }
+            }
+        }
+        if tasks.is_empty() {
+            return Ok(results.pop().flatten());
+        }
+    }
+    Ok(results.pop().flatten())
+}
+
+fn resolve_schema<'a>(
+    document: &'a Value,
+    mut schema: &'a Value,
+    mut hops: usize,
+) -> Result<&'a Value, CodecError> {
+    while let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        if hops == 0 {
+            return Err(CodecError::Unresolved {
+                chain: "schema reference depth exceeded".to_owned(),
+            });
+        }
+        let Some(name) = reference.strip_prefix("#/$defs/") else {
+            return Ok(schema);
+        };
+        let Some(definition) = document.get("$defs").and_then(|defs| defs.get(name)) else {
+            return Ok(schema);
+        };
+        schema = definition;
+        hops -= 1;
+    }
+    Ok(schema)
+}
+
+fn authoring_matches(schema: &Value, value: &Value) -> bool {
+    if schema.get(KEYWORD).and_then(Value::as_str) == Some("float") && value.is_number() {
+        return true;
+    }
+    let Some(kind) = schema.get("type") else {
+        return schema.get("properties").is_some_and(|_| value.is_object())
+            || schema
+                .get("additionalProperties")
+                .is_some_and(|_| value.is_object())
+            || schema.get("items").is_some_and(|_| value.is_array())
+            || schema.get("const").is_some()
+            || schema.get("enum").is_some()
+            || schema.get("anyOf").is_some()
+            || schema.get("oneOf").is_some();
+    };
+    let matches = |kind: &str| match kind {
+        "null" => value.is_null(),
+        "boolean" => value.is_boolean(),
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "number" => value.is_number(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        _ => false,
+    };
+    match kind {
+        Value::String(kind) => matches(kind),
+        Value::Array(kinds) => kinds.iter().filter_map(Value::as_str).any(matches),
+        _ => false,
+    }
+}
+
+fn js_safe_integer(value: i128) -> bool {
+    (-i128::from(JS_SAFE_INTEGER_MAX)..=i128::from(JS_SAFE_INTEGER_MAX)).contains(&value)
+}
+
+fn protocol_key(key: &str) -> bool {
+    matches!(key, "$type" | "$bytes" | "$link")
+}
 
 /// A value checked against the declarations — and, when it was checked against a transaction's
 /// base view, against the native storage — of the document it is going into.
@@ -28,21 +606,25 @@ const HOPS: usize = 16;
 /// conversions a declaration asked for are total, and the decisions a target-aware check recorded
 /// are already made.
 #[derive(Debug)]
-pub struct Stored<'a> {
-    document: &'a Value,
+pub struct Stored {
+    schema: CompiledSchema,
+    proof: ValidationProof,
     value: Value,
     /// The decisions the walk may consult while writing: none when this value was checked without a
     /// document, so reconciliation keeps the behavior of a fresh target throughout.
     plan: Option<Plan>,
 }
 
-impl<'a> Stored<'a> {
+impl Stored {
     /// Check a value against the declarations of the document it will be stored in.
-    pub fn check(document: &'a Value, value: Value) -> Result<Self, CodecError> {
+    pub fn check(schema: &CompiledSchema, value: Value) -> Result<Self, CodecError> {
+        let value = schema.validate(&value)?;
+        let proof = schema.proof();
         let path = Path::root();
-        Position::new(document, Some(document)).check(&value, &path)?;
+        Position::new(schema.document(), Some(schema.document())).check(&value, &path)?;
         Ok(Self {
-            document,
+            schema: schema.clone(),
+            proof,
             value,
             plan: None,
         })
@@ -61,18 +643,37 @@ impl<'a> Stored<'a> {
     /// The value a target-aware check produced. The plan tells the write what the base held at
     /// its positions, and it is not a public spelling on purpose: a caller that wants it checked
     /// against a base reconciles through `reconcile_json`.
-    pub(super) fn with_plan(document: &'a Value, value: Value, plan: Plan) -> Self {
+    pub(super) fn with_plan(schema: CompiledSchema, value: Value, plan: Plan) -> Self {
         Self {
-            document,
+            proof: schema.proof(),
+            schema,
             value,
             plan: Some(plan),
         }
     }
 
-    /// Write the value into a document.
-    pub fn reconcile<R: Reconciler>(&self, reconciler: R) -> Result<(), R::Error> {
+    pub(super) fn into_target_parts(self) -> (CompiledSchema, Value) {
+        let Self {
+            schema,
+            proof: _proof,
+            value,
+            plan: None,
+        } = self
+        else {
+            unreachable!("a newly checked value cannot already have a target plan");
+        };
+        (schema, value)
+    }
+
+    /// Write a target-aware checked value. This is private to the target-aware boundary; a plain
+    /// `Stored::check` is validation evidence only and cannot be used as a no-plan write.
+    pub(super) fn reconcile<R: Reconciler>(&self, reconciler: R) -> Result<(), R::Error> {
+        assert!(
+            self.plan.is_some(),
+            "a target-aware Stored value needs a plan"
+        );
         let path = Path::root();
-        Position::new(self.document, Some(self.document)).write(
+        Position::new(self.schema.document(), Some(self.schema.document())).write(
             &self.value,
             &path,
             reconciler,
@@ -81,26 +682,34 @@ impl<'a> Stored<'a> {
     }
 }
 
-impl Reconcile for Stored<'_> {
+pub(super) struct Planned<'a>(&'a Stored);
+
+impl Stored {
+    pub(super) fn planned(&self) -> Planned<'_> {
+        Planned(self)
+    }
+}
+
+impl Reconcile for Planned<'_> {
     type Key<'a> = NoKey;
 
     fn reconcile<R: Reconciler>(&self, reconciler: R) -> Result<(), R::Error> {
-        Stored::reconcile(self, reconciler)
+        self.0.reconcile(reconciler)
     }
 }
 /// Read a value out of a document as the JSON form its schema declares.
 ///
 /// A document holds what the declarations say, so a storage form at a position nothing declares is
-/// refused: reading a counter as a number, or bytes as a base64 string, hands back a value whose type
+/// refused: reading a counter as a number, or bytes as a plain base64 string, hands back a value whose type
 /// the writer did not intend.
 pub fn hydrate_value<D: ReadDoc>(
     doc: &D,
     obj: &ObjId,
     prop: Prop<'_>,
-    document: &Value,
+    schema: &CompiledSchema,
 ) -> Result<Value, HydrateError> {
     let path = Path::root();
-    Position::new(document, Some(document)).read(doc, obj, prop, &path)
+    Position::new(schema.document(), Some(schema.document())).read(doc, obj, prop, &path)
 }
 
 /// Where a position sits, as a chain that is rendered only when something is refused: reading or
@@ -437,6 +1046,31 @@ impl<'a> Position<'a> {
     /// Refuse a value the declarations here cannot hold. Nothing is written afterwards, so this is
     /// where a declaration turns into an assertion.
     pub(super) fn check<'p>(&self, value: &'p Value, path: &'p Path<'p>) -> Result<(), CodecError> {
+        if let Value::Number(number) = value
+            && (number
+                .as_i64()
+                .is_some_and(|integer| !js_safe_integer(i128::from(integer)))
+                || number
+                    .as_u64()
+                    .is_some_and(|integer| integer > JS_SAFE_INTEGER_MAX))
+        {
+            return Err(at(
+                path,
+                CodecError::NotAJsonInteger {
+                    stated: number.to_string(),
+                },
+            ));
+        }
+        if let Value::Object(members) = value {
+            for key in members.keys().filter(|key| key.starts_with('$')) {
+                if !protocol_key(key) {
+                    return Err(at(
+                        &Path::key(path, key),
+                        CodecError::ReservedKey { key: key.clone() },
+                    ));
+                }
+            }
+        }
         let Some(schema) = self
             .resolved(
                 Kind::of_json(value),
@@ -450,27 +1084,67 @@ impl<'a> Position<'a> {
             )
             .map_err(|err| at(path, err))?
         else {
+            if let Value::Object(members) = value {
+                if members.len() == 1
+                    && members.contains_key("$bytes")
+                    && bytes_value(value).is_some()
+                {
+                    return Ok(());
+                }
+                if let Some(key) = members.keys().find(|key| key.starts_with('$')) {
+                    return Err(at(
+                        &Path::key(path, key),
+                        CodecError::ReservedKey {
+                            key: key.to_owned(),
+                        },
+                    ));
+                }
+            }
             return Ok(());
         };
+        if type_mentions(schema, "integer")
+            && let Value::Number(number) = value
+            && number.as_i64().is_none()
+            && number.as_u64().is_none()
+        {
+            return Err(at(
+                path,
+                CodecError::NonIntegralInteger {
+                    stated: number.to_string(),
+                },
+            ));
+        }
         if let Some(codec) = Codec::of(schema).map_err(|err| at(path, err))? {
             // A `null` a declaration claims — the `None` of an option, whose `type` carries it —
             // belongs to the declaration and not to the codec, whose holds is schema-blind.
             if !(value.is_null() && type_mentions(schema, "null")) {
                 codec.holds(value).map_err(|err| at(path, err))?;
             }
+            return Ok(());
         }
         // A scalar that is not a number, at a position declared one, would store a value the Rust
         // type cannot read — the storage's only fidelity rule; the rest of a kind mismatch is the
         // validator's business. Reaching an object or array at such a position is the same drift.
         if (type_mentions(schema, "number") || type_mentions(schema, "integer"))
+            && !(value.is_null() && type_mentions(schema, "null"))
             && !matches!(value, Value::Number(_))
         {
             return Err(at(path, CodecError::KindMismatch { found: kind(value) }));
         }
         match value {
             Value::Object(members) => {
+                let properties = schema.get("properties").and_then(Value::as_object);
                 for (key, member) in members {
                     let child = Path::key(path, key);
+                    let declared = properties.and_then(|properties| properties.get(key));
+                    if declared.is_none() && key.starts_with('$') {
+                        return Err(at(
+                            &child,
+                            CodecError::ReservedKey {
+                                key: key.to_owned(),
+                            },
+                        ));
+                    }
                     self.member(Some(schema), key).check(member, &child)?;
                 }
                 Ok(())
@@ -857,7 +1531,7 @@ pub(super) fn refusal(path: &Path<'_>, source: CodecError) -> HydrateError {
 
 /// Whether a position declares nothing about what sits in it. There, and only there, the storage
 /// forms a peer may have written without a schema travel to the read the best-effort raw spellings
-/// the fallback spells them in — bytes as the base64 they are, an instant as its RFC 3339, a
+/// the fallback spells them in — bytes as the canonical `$bytes` object they are, an instant as its RFC 3339, a
 /// counter as the number it summed to. The spellings are a fallback, and not the signed fidelity a
 /// declaration gives: where a schema declares, everything it says is authoritative, and a mismatch
 /// is a refusal rather than a projection.
@@ -874,8 +1548,24 @@ fn scalar_json(scalar: &ScalarValue, path: &Path<'_>, raw: bool) -> Result<Value
     match scalar {
         ScalarValue::Null => Ok(Value::Null),
         ScalarValue::Boolean(stated) => Ok(Value::Bool(*stated)),
-        ScalarValue::Int(stated) => Ok(Value::Number((*stated).into())),
-        ScalarValue::Uint(stated) => Ok(Value::Number((*stated).into())),
+        ScalarValue::Int(stated) if js_safe_integer(i128::from(*stated)) => {
+            Ok(Value::Number((*stated).into()))
+        }
+        ScalarValue::Int(stated) => Err(refusal(
+            path,
+            CodecError::NotAJsonInteger {
+                stated: stated.to_string(),
+            },
+        )),
+        ScalarValue::Uint(stated) if *stated <= JS_SAFE_INTEGER_MAX => {
+            Ok(Value::Number((*stated).into()))
+        }
+        ScalarValue::Uint(stated) => Err(refusal(
+            path,
+            CodecError::NotAJsonInteger {
+                stated: stated.to_string(),
+            },
+        )),
         // JSON has no NaN and no infinity, so a document that holds one holds a number this
         // direction cannot state: it is refused rather than rounded or dropped.
         ScalarValue::F64(stated) => match serde_json::Number::from_f64(*stated) {
@@ -887,11 +1577,23 @@ fn scalar_json(scalar: &ScalarValue, path: &Path<'_>, raw: bool) -> Result<Value
         },
         ScalarValue::Str(stated) => Ok(Value::String(stated.to_string())),
         // The raw fallback, and nothing else: a counter is read as the number it summed to, its
-        // bytes as the canonical base64 they spell, an instant as its RFC 3339. A scalar from a
+        // bytes as the canonical `$bytes` object they spell, an instant as its RFC 3339. A scalar from a
         // future Automerge has no spelling at all and is refused wherever it sits.
-        ScalarValue::Counter(stated) if raw => Ok(Value::Number(i64::from(stated).into())),
+        ScalarValue::Counter(stated)
+            if raw && i64::from(stated).unsigned_abs() <= JS_SAFE_INTEGER_MAX =>
+        {
+            Ok(Value::Number(i64::from(stated).into()))
+        }
+        ScalarValue::Counter(stated) if raw => Err(refusal(
+            path,
+            CodecError::NotAJsonInteger {
+                stated: i64::from(stated).to_string(),
+            },
+        )),
         ScalarValue::Timestamp(stated) if raw => Ok(Value::String(instant_string(*stated))),
-        ScalarValue::Bytes(stated) if raw => Ok(Value::String(BASE64_ENCODING.encode(stated))),
+        ScalarValue::Bytes(stated) if raw => {
+            Ok(serde_json::json!({"$bytes": data_encoding::BASE64.encode(stated)}))
+        }
         ScalarValue::Counter(_) => Err(undeclared("a counter")),
         ScalarValue::Timestamp(_) => Err(undeclared("an instant")),
         ScalarValue::Bytes(_) => Err(undeclared("bytes")),
