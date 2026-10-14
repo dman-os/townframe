@@ -5,23 +5,23 @@
 //! optimization.  The fake HTTP executor below stands in for the real XRPC over
 //! Iroh adapter; it is not a complete HTTP server.
 
-use super::{HttpInput, HttpMethod, HttpRequest, Request, RequestContext, XrpcKind, XrpcOperation};
-use irpc::{WithChannels, channel, rpc_requests};
+use super::{
+    CancellationReceiver, ContextError, HttpInput, HttpRequest, OwnedIrpcAdapter, Request,
+    RequestContext, XrpcKind, XrpcOperation, XrpcTransportError,
+};
+use crate::declare_typed_service;
+use irpc::channel;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::VecDeque,
-    sync::{
-        Arc, Mutex as StdMutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex as StdMutex},
 };
-use tokio::sync::{Mutex, Notify, RwLock, Semaphore, broadcast, mpsc, watch};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc, watch};
 
 #[cfg(test)]
 tokio::task_local! {
     static TEST_TASK_MARKER: u64;
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GetValueParams;
@@ -76,6 +76,8 @@ pub struct StatePage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum SampleError {
+    #[error("request context failed: {0}")]
+    Context(#[from] ContextError),
     #[error("invalid value: {message}")]
     InvalidValue { message: String },
     #[error("subscription lagged by {skipped}; reread current service state")]
@@ -84,247 +86,43 @@ pub enum SampleError {
     SubscriptionCapacityExceeded { limit: usize },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ClientError {
-    #[error("transport failed: {message}")]
-    Transport {
-        message: String,
-        outcome_unknown: bool,
-    },
-    #[error("operation failed: {0}")]
-    Operation(#[from] SampleError),
+pub type ClientError = super::ClientError<SampleError>;
+
+fn subscription_capacity_error(limit: usize) -> SampleError {
+    SampleError::SubscriptionCapacityExceeded { limit }
 }
 
-impl ClientError {
-    fn transport(error: impl std::fmt::Display, outcome_unknown: bool) -> Self {
-        Self::Transport {
-            message: error.to_string(),
-            outcome_unknown,
-        }
-    }
-}
-
-
-/// The canonical operation declaration.  It is deliberately declarative for
-/// this reference: the same entries generate the XRPC descriptors, the typed
-/// client methods, and the optimized IRPC message/client.
-macro_rules! declare_sample_service {
-    (
-        unary {
-            $(
-                $variant:ident => $method:ident(
-                    $params:ty
-                ) -> $output:ty = $kind:ident, $http:ident, $input:ident,
-                    $nsid:literal, $output_schema:literal, $error_schema:literal;
-            )+
-        }
-        stream {
-            $(
-                $stream_variant:ident => $stream_method:ident(
-                    $stream_params:ty
-                ) -> $stream_item:ty = $stream_kind:ident, $stream_http:ident, $stream_input:ident,
-                    $stream_nsid:literal, $stream_output_schema:literal, $stream_error_schema:literal;
-            )+
-        }
-    ) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub enum Operation {
-            $( $variant, )+
-            $( $stream_variant, )+
-        }
-
-        #[rpc_requests(message = SampleIrpcMessage)]
-        #[derive(Debug, Serialize, Deserialize)]
-        pub enum SampleIrpc {
-            $(
-                #[rpc(tx = channel::oneshot::Sender<Result<$output, SampleError>>)]
-                $variant(Request<$params>),
-            )+
-            $(
-                #[rpc(tx = channel::mpsc::Sender<Result<$stream_item, SampleError>>)]
-                $stream_variant(Request<$stream_params>),
-            )+
-        }
-
-        /// Generated from the canonical XRPC declaration.  This is the schema
-        /// and adapter seam; a production build would additionally emit and
-        /// check Lexicon files from these operation entries.
-        pub const XRPC_OPERATIONS: &[XrpcOperation] = &[
-            $( XrpcOperation {
-                nsid: $nsid,
-                kind: XrpcKind::$kind,
-                method: HttpMethod::$http,
-                input: HttpInput::$input,
-                output_schema: $output_schema,
-                error_schema: $error_schema,
-            }, )+
-            $( XrpcOperation {
-                nsid: $stream_nsid,
-                kind: XrpcKind::$stream_kind,
-                method: HttpMethod::$stream_http,
-                input: HttpInput::$stream_input,
-                output_schema: $stream_output_schema,
-                error_schema: $stream_error_schema,
-            }, )+
-        ];
-
-        impl SampleClient {
-            $(
-                pub async fn $method(
-                    &self,
-                    context: RequestContext,
-                    params: $params,
-                ) -> Result<$output, ClientError> {
-                    let request = Request { context, params };
-                    match &self.transport {
-                        SampleTransport::Direct(service) => service.invoke(Operation::$variant, request).await.map_err(ClientError::Operation),
-                        SampleTransport::Irpc(client) => client
-                            .rpc(request)
-                            .await
-                            .map_err(|error| ClientError::transport(error, false))?
-                            .map_err(ClientError::Operation),
-                        SampleTransport::Xrpc(executor) => {
-                            let operation = operation_descriptor(Operation::$variant);
-                            let http = encode_http_request(operation, &request)?;
-                            let response = executor
-                                .execute(http)
-                                .await
-                                .map_err(|error| {
-                                    ClientError::transport(
-                                        error,
-                                        matches!(operation.kind, XrpcKind::Procedure | XrpcKind::Subscription),
-                                    )
-                                })?;
-                            decode_http_response(response)
-                        }
-                    }
-                }
-            )+
-
-            $(
-                pub async fn $stream_method(
-                    &self,
-                    context: RequestContext,
-                    params: $stream_params,
-                ) -> Result<SampleEventSubscription, ClientError> {
-                    let request = Request { context, params };
-                    match &self.transport {
-                        SampleTransport::Direct(service) => Ok(SampleEventSubscription {
-                            inner: SubscriptionTransport::Direct(service.invoke_subscription(request).await),
-                        }),
-                        SampleTransport::Irpc(client) => client
-                            .server_streaming(request, EVENT_REPLAY_WINDOW)
-                            .await
-                            .map(|receiver| SampleEventSubscription {
-                                inner: SubscriptionTransport::Irpc(receiver),
-                            })
-                            .map_err(|error| ClientError::transport(error, false)),
-                        SampleTransport::Xrpc(executor) => {
-                            let operation = operation_descriptor(Operation::$stream_variant);
-                            let http = encode_http_request(operation, &request)?;
-                            let response = executor
-                                .execute(http)
-                                .await
-                                .map_err(|error| {
-                                    ClientError::transport(
-                                        error,
-                                        matches!(operation.kind, XrpcKind::Procedure | XrpcKind::Subscription),
-                                    )
-                                })?;
-                            let stream = response
-                                .stream
-                                .ok_or_else(|| ClientError::transport("XRPC response was not a stream", false))?;
-                            Ok(SampleEventSubscription {
-                                inner: SubscriptionTransport::Xrpc(stream),
-                            })
-                        }
-                    }
-                }
-            )+
-        }
-
-        async fn dispatch_irpc(
-            service: Arc<SampleService>,
-            unary_permits: Arc<Semaphore>,
-            stream_permits: Arc<Semaphore>,
-            activity: Arc<AdapterActivity>,
-            message: SampleIrpcMessage,
-            stream_limit: usize,
-        ) {
-            let is_stream = match &message {
-                $(SampleIrpcMessage::$stream_variant(_) => true,)+
-                _ => false,
-            };
-            if is_stream {
-                let Some(stream_permit) = stream_permits.try_acquire_owned().ok() else {
-                    match message {
-                        $( SampleIrpcMessage::$stream_variant(request) => {
-                            let WithChannels { tx, .. } = request;
-                            let _unused = tx.send(Err(SampleError::SubscriptionCapacityExceeded {
-                                limit: stream_limit,
-                            })).await;
-                        } )+
-                        _ => unreachable!(),
-                    }
-                    return;
-                };
-                let stream = StreamPump::new(Arc::clone(&activity));
-                tokio::spawn(async move {
-                    let _stream_permit = stream_permit;
-                    let _stream = stream;
-                    match message {
-                        $( SampleIrpcMessage::$stream_variant(request) => {
-                            let WithChannels { inner, tx, .. } = request;
-                            let mut subscription = service.invoke_subscription(inner).await;
-                            loop {
-                                let item = match subscription.recv().await {
-                                    Ok(Some(event)) => Ok(event),
-                                    Ok(None) => break,
-                                    Err(error) => Err(error),
-                                };
-                                let terminal = item.is_err();
-                                if tx.send(item).await.is_err() || terminal { break; }
-                            }
-                        } )+
-                        _ => unreachable!(),
-                    }
-                });
-                return;
-            }
-
-            // Admission happens before spawning, so a bounded input queue cannot
-            // be drained into an unbounded set of parked Tokio tasks.
-            let permit = unary_permits.acquire_owned().await.expect("permit semaphore lives");
-            let admitted = AdmittedHandler::new(Arc::clone(&activity));
-            let spawned = SpawnedHandler::new(Arc::clone(&activity));
-            tokio::spawn(async move {
-                let _permit = permit;
-                let _admitted = admitted;
-                let _spawned = spawned;
-                let _active = ActiveHandler::new(activity);
-                match message {
-                    $( SampleIrpcMessage::$variant(request) => {
-                        let WithChannels { inner, tx, .. } = request;
-                        let _unused = tx.send(service.invoke(Operation::$variant, inner).await).await;
-                    } )+
-                    _ => unreachable!(),
-                }
-            });
-        }
-    };
-}
-
-declare_sample_service! {
+declare_typed_service! {
+    service = SampleService;
+    operation = Operation;
+    descriptors = XRPC_OPERATIONS;
+    error = SampleError;
+    client = SampleClient;
+    transport = SampleTransport;
+    irpc = SampleIrpc;
+    irpc_message = SampleIrpcMessage;
+    serde_module = sample_typed_serde;
+    subscription = SampleEventSubscription;
+    direct_subscription = DirectSubscription;
+    subscription_transport = SubscriptionTransport;
+    executor = XrpcExecutor;
+    request_encoder = encode_http_request;
+    response_decoder = decode_http_response;
+    stream_decoder = decode_http_stream_response;
+    event_window = EVENT_REPLAY_WINDOW;
+    dispatch = dispatch_irpc;
+    dispatch_loop = dispatch_irpc_loop;
+    stream_capacity_error = subscription_capacity_error;
     unary {
-        GetValue => get_value(GetValueParams) -> GetValueOutput = Query, Get, Query,
+        GetValue => get_value / get_value_with_metadata(GetValueParams) -> GetValueOutput = Query, Get, Query,
             "org.example.sample.getValue", "GetValueOutput", "SampleError";
-        PutValue => put_value(PutValueParams) -> PutValueOutput = Procedure, Post, JsonBody,
+        PutValue => put_value / put_value_with_metadata(PutValueParams) -> PutValueOutput = Procedure, Post, JsonBody,
             "org.example.sample.putValue", "PutValueOutput", "SampleError";
-        ReadState => read_state(ReadStateParams) -> StatePage = Query, Get, Query,
+        ReadState => read_state / read_state_with_metadata(ReadStateParams) -> StatePage = Query, Get, Query,
             "org.example.sample.readState", "StatePage", "SampleError";
     }
     stream {
-        SubscribeEvents => subscribe_events(SubscribeEventsParams) -> SampleEvent = Subscription, Get, Query,
+        SubscribeEvents => subscribe_events / subscribe_events_with_metadata(SubscribeEventsParams) -> SampleEvent = Subscription, Get, Query,
             "org.example.sample.subscribeEvents", "SampleEvent", "SampleError";
     }
 }
@@ -350,6 +148,8 @@ pub struct SampleService {
     state: RwLock<ServiceState>,
     source_tx: watch::Sender<SourceSnapshot>,
     source_writer: StdMutex<SourceSnapshot>,
+    shutdown_tx: watch::Sender<bool>,
+    projector_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     projection_watermark: watch::Sender<u64>,
     projection_lock: Mutex<()>,
     events: broadcast::Sender<SampleEvent>,
@@ -357,9 +157,9 @@ pub struct SampleService {
     #[cfg(test)]
     last_handler_task: std::sync::Mutex<Option<u64>>,
     #[cfg(test)]
-    read_gate: std::sync::Mutex<Option<Arc<Semaphore>>>,
+    read_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     #[cfg(test)]
-    projector_gate: std::sync::Mutex<Option<Arc<Semaphore>>>,
+    projector_gate: std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
 }
 
 impl SampleService {
@@ -369,6 +169,7 @@ impl SampleService {
             revision: 0,
         };
         let (source_tx, source_rx) = watch::channel(source.clone());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (projection_watermark, _) = watch::channel(0);
         let (events, _) = broadcast::channel(EVENT_REPLAY_WINDOW);
         let service = Arc::new(Self {
@@ -383,6 +184,8 @@ impl SampleService {
             }),
             source_tx,
             source_writer: StdMutex::new(source.clone()),
+            shutdown_tx,
+            projector_task: StdMutex::new(None),
             projection_watermark,
             projection_lock: Mutex::new(()),
             events,
@@ -395,16 +198,31 @@ impl SampleService {
             projector_gate: std::sync::Mutex::new(None),
         });
         let worker = Arc::clone(&service);
-        tokio::spawn(async move {
-            worker.projector(source_rx).await;
+        let projector_task = tokio::spawn(async move {
+            worker.projector(source_rx, shutdown_rx).await;
         });
+        *service.projector_task.lock().expect("projector task mutex") = Some(projector_task);
         service
     }
 
-    async fn projector(self: Arc<Self>, mut source_rx: watch::Receiver<SourceSnapshot>) {
+    async fn projector(
+        self: Arc<Self>,
+        mut source_rx: watch::Receiver<SourceSnapshot>,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) {
         loop {
-            if source_rx.changed().await.is_err() {
-                return;
+            tokio::select! {
+                changed = source_rx.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        return;
+                    }
+                    continue;
+                }
             }
             #[cfg(test)]
             {
@@ -455,8 +273,8 @@ impl SampleService {
     }
 
     #[cfg(test)]
-    fn block_projector(&self) -> Arc<Semaphore> {
-        let gate = Arc::new(Semaphore::new(0));
+    fn block_projector(&self) -> Arc<tokio::sync::Semaphore> {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
         *self.projector_gate.lock().expect("gate mutex") = Some(Arc::clone(&gate));
         gate
     }
@@ -474,11 +292,7 @@ impl SampleService {
             .lock()
             .await
             .push(format!("{}:context", operation_name(operation)));
-        if context.request_id.is_nil() || context.trace_id.is_nil() {
-            return Err(SampleError::InvalidValue {
-                message: "request context is incomplete".into(),
-            });
-        }
+        context.validate().map_err(SampleError::Context)?;
         self.middleware_log
             .lock()
             .await
@@ -590,6 +404,20 @@ impl SampleService {
         }
     }
 
+    /// Stops and joins the owned projector task. Callers that retain a service
+    /// beyond a runtime shutdown use this to make task completion observable.
+    pub async fn shutdown(&self) {
+        self.shutdown_tx.send_replace(true);
+        let task = self
+            .projector_task
+            .lock()
+            .expect("projector task mutex")
+            .take();
+        if let Some(task) = task {
+            task.await.expect("projector task must stop cleanly");
+        }
+    }
+
     pub async fn middleware_log(&self) -> Vec<String> {
         self.middleware_log.lock().await.clone()
     }
@@ -671,25 +499,66 @@ impl Dispatch<ReadStateParams, StatePage> for SampleService {
     }
 }
 
-impl SampleService {
-    async fn invoke_subscription(
-        &self,
+impl super::UnaryServiceDispatch<Operation, GetValueParams, GetValueOutput, SampleError>
+    for SampleService
+{
+    fn dispatch<'a>(
+        &'a self,
+        operation: Operation,
+        request: Request<GetValueParams>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<GetValueOutput, SampleError>> + Send + 'a>,
+    > {
+        <Self as Dispatch<GetValueParams, GetValueOutput>>::dispatch(self, operation, request)
+    }
+}
+
+impl super::UnaryServiceDispatch<Operation, PutValueParams, PutValueOutput, SampleError>
+    for SampleService
+{
+    fn dispatch<'a>(
+        &'a self,
+        operation: Operation,
+        request: Request<PutValueParams>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<PutValueOutput, SampleError>> + Send + 'a>,
+    > {
+        <Self as Dispatch<PutValueParams, PutValueOutput>>::dispatch(self, operation, request)
+    }
+}
+
+impl super::UnaryServiceDispatch<Operation, ReadStateParams, StatePage, SampleError>
+    for SampleService
+{
+    fn dispatch<'a>(
+        &'a self,
+        operation: Operation,
+        request: Request<ReadStateParams>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<StatePage, SampleError>> + Send + 'a>,
+    > {
+        <Self as Dispatch<ReadStateParams, StatePage>>::dispatch(self, operation, request)
+    }
+}
+
+impl super::StreamServiceDispatch<Operation, SubscribeEventsParams, DirectSubscription, SampleError>
+    for SampleService
+{
+    fn dispatch<'a>(
+        &'a self,
+        operation: Operation,
         request: Request<SubscribeEventsParams>,
-    ) -> DirectSubscription {
-        self.middleware_log
-            .lock()
-            .await
-            .push("subscribeEvents:context".into());
-        self.middleware_log
-            .lock()
-            .await
-            .push("subscribeEvents:validate".into());
-        let result = self.subscribe_impl(request).await;
-        self.middleware_log
-            .lock()
-            .await
-            .push("subscribeEvents:complete".into());
-        result
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<DirectSubscription, SampleError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            debug_assert!(matches!(operation, Operation::SubscribeEvents));
+            let context = request.context.clone();
+            let subscription =
+                async move { Ok::<_, SampleError>(self.subscribe_impl(request).await) };
+            self.middleware(Operation::SubscribeEvents, &context, subscription)
+                .await
+        })
     }
 }
 
@@ -702,23 +571,6 @@ fn operation_name(operation: Operation) -> &'static str {
     }
 }
 
-fn operation_descriptor(operation: Operation) -> XrpcOperation {
-    XRPC_OPERATIONS[match operation {
-        Operation::GetValue => 0,
-        Operation::PutValue => 1,
-        Operation::ReadState => 2,
-        Operation::SubscribeEvents => 3,
-    }]
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpRequest {
-    pub context: RequestContext,
-    pub operation: XrpcOperation,
-    pub query: Option<serde_json::Value>,
-    pub body: Option<serde_json::Value>,
-}
-
 #[derive(Debug)]
 pub struct HttpResponse {
     pub status: u16,
@@ -727,12 +579,6 @@ pub struct HttpResponse {
 }
 
 pub type XrpcStream = mpsc::Receiver<Result<SampleEvent, SampleError>>;
-
-#[derive(Debug, thiserror::Error)]
-#[error("XRPC transport failed: {message}")]
-pub struct XrpcTransportError {
-    message: String,
-}
 
 #[async_trait::async_trait]
 pub trait XrpcExecutor: Send + Sync {
@@ -747,6 +593,7 @@ fn encode_http_request<P: Serialize>(
         .map_err(|error| ClientError::transport(error, false))?;
     Ok(HttpRequest {
         context: request.context.clone(),
+        metadata: request.metadata.clone(),
         operation,
         query: matches!(operation.input, HttpInput::Query).then_some(params.clone()),
         body: matches!(operation.input, HttpInput::JsonBody).then_some(params),
@@ -765,14 +612,53 @@ fn decode_http_response<T: DeserializeOwned>(response: HttpResponse) -> Result<T
     serde_json::from_value(body).map_err(|error| ClientError::transport(error, false))
 }
 
+fn decode_http_stream_response(response: HttpResponse) -> Result<XrpcStream, ClientError> {
+    if response.status >= 400 {
+        let body = response
+            .body
+            .ok_or_else(|| ClientError::transport("XRPC response omitted body", false))?;
+        let error = serde_json::from_value::<SampleError>(body)
+            .map_err(|error| ClientError::transport(error, false))?;
+        return Err(ClientError::Operation(error));
+    }
+    response
+        .stream
+        .ok_or_else(|| ClientError::transport("XRPC response was not a stream", false))
+}
+
 /// Fake local XRPC/HTTP server used only to demonstrate canonical JSON mapping.
 pub struct LocalXrpcExecutor {
     service: Arc<SampleService>,
+    stream_tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl LocalXrpcExecutor {
     pub fn new(service: Arc<SampleService>) -> Arc<Self> {
-        Arc::new(Self { service })
+        Arc::new(Self {
+            service,
+            stream_tasks: StdMutex::new(Vec::new()),
+        })
+    }
+
+    pub async fn shutdown(&self) {
+        let tasks = std::mem::take(&mut *self.stream_tasks.lock().expect("stream task mutex"));
+        for task in tasks {
+            task.abort();
+            match task.await {
+                Ok(()) => {}
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => panic!("XRPC stream task failed: {error}"),
+            }
+        }
+    }
+}
+
+impl Drop for LocalXrpcExecutor {
+    fn drop(&mut self) {
+        let tasks = self.stream_tasks.get_mut().expect("stream task mutex");
+        for task in tasks.drain(..) {
+            task.abort();
+        }
     }
 }
 
@@ -791,10 +677,11 @@ impl XrpcExecutor for LocalXrpcExecutor {
                     .service
                     .invoke(
                         Operation::GetValue,
-                        Request {
-                            context: request.context,
+                        Request::with_metadata(
+                            request.context.for_receiver(),
+                            request.metadata.clone(),
                             params,
-                        },
+                        ),
                     )
                     .await;
                 Ok(json_response(output))
@@ -809,10 +696,11 @@ impl XrpcExecutor for LocalXrpcExecutor {
                     .service
                     .invoke(
                         Operation::PutValue,
-                        Request {
-                            context: request.context,
+                        Request::with_metadata(
+                            request.context.for_receiver(),
+                            request.metadata.clone(),
                             params,
-                        },
+                        ),
                     )
                     .await;
                 Ok(json_response(output))
@@ -827,13 +715,63 @@ impl XrpcExecutor for LocalXrpcExecutor {
                     .service
                     .invoke(
                         Operation::ReadState,
-                        Request {
-                            context: request.context,
+                        Request::with_metadata(
+                            request.context.for_receiver(),
+                            request.metadata.clone(),
                             params,
-                        },
+                        ),
                     )
                     .await;
                 Ok(json_response(output))
+            }
+            XrpcKind::Subscription if operation.nsid == "org.example.sample.subscribeEvents" => {
+                let params: SubscribeEventsParams =
+                    serde_json::from_value(request.query.unwrap_or(serde_json::Value::Null))
+                        .map_err(|error| XrpcTransportError {
+                            message: error.to_string(),
+                        })?;
+                let mut subscription = match <SampleService as super::StreamServiceDispatch<
+                    Operation,
+                    SubscribeEventsParams,
+                    DirectSubscription,
+                    SampleError,
+                >>::dispatch(
+                    self.service.as_ref(),
+                    Operation::SubscribeEvents,
+                    Request::with_metadata(
+                        request.context.for_receiver(),
+                        request.metadata,
+                        params,
+                    ),
+                )
+                .await
+                {
+                    Ok(subscription) => subscription,
+                    Err(error) => return Ok(json_response::<()>(Err(error))),
+                };
+                let (sender, receiver) = mpsc::channel(EVENT_REPLAY_WINDOW);
+                let task = tokio::spawn(async move {
+                    loop {
+                        let item = match subscription.recv().await {
+                            Ok(Some(event)) => Ok(event),
+                            Ok(None) => break,
+                            Err(error) => Err(error),
+                        };
+                        let terminal = item.is_err();
+                        if sender.send(item).await.is_err() || terminal {
+                            break;
+                        }
+                    }
+                });
+                self.stream_tasks
+                    .lock()
+                    .expect("stream task mutex")
+                    .push(task);
+                Ok(HttpResponse {
+                    status: 200,
+                    body: None,
+                    stream: Some(receiver),
+                })
             }
             _ => Err(XrpcTransportError {
                 message: format!("unsupported sample operation {}", operation.nsid),
@@ -854,31 +792,6 @@ fn json_response<T: Serialize>(result: Result<T, SampleError>) -> HttpResponse {
             body: Some(serde_json::to_value(error).expect("sample error serializes")),
             stream: None,
         },
-    }
-}
-
-#[derive(Clone)]
-enum SampleTransport {
-    Direct(Arc<SampleService>),
-    Irpc(irpc::Client<SampleIrpc>),
-    Xrpc(Arc<dyn XrpcExecutor>),
-}
-
-#[derive(Clone)]
-pub struct SampleClient {
-    transport: SampleTransport,
-}
-
-impl SampleClient {
-    pub fn direct(service: Arc<SampleService>) -> Self {
-        Self {
-            transport: SampleTransport::Direct(service),
-        }
-    }
-    pub fn xrpc(executor: Arc<dyn XrpcExecutor>) -> Self {
-        Self {
-            transport: SampleTransport::Xrpc(executor),
-        }
     }
 }
 
@@ -912,7 +825,10 @@ impl DirectSubscription {
 
 enum SubscriptionTransport {
     Direct(DirectSubscription),
-    Irpc(channel::mpsc::Receiver<Result<SampleEvent, SampleError>>),
+    Irpc {
+        receiver: channel::mpsc::Receiver<Result<SampleEvent, SampleError>>,
+        cancellation: Option<crate::service::CancellationRequestGuard>,
+    },
     Xrpc(XrpcStream),
 }
 
@@ -926,15 +842,20 @@ impl SampleEventSubscription {
             SubscriptionTransport::Direct(subscription) => {
                 subscription.recv().await.map_err(ClientError::Operation)
             }
-            SubscriptionTransport::Irpc(receiver) => match receiver
-                .recv()
-                .await
-                .map_err(|error| ClientError::transport(error, false))?
-            {
-                Some(Ok(event)) => Ok(Some(event)),
-                Some(Err(error)) => Err(ClientError::Operation(error)),
-                None => Ok(None),
-            },
+            SubscriptionTransport::Irpc {
+                receiver,
+                cancellation: _cancellation,
+            } => {
+                match receiver
+                    .recv()
+                    .await
+                    .map_err(|error| ClientError::transport(error, false))?
+                {
+                    Some(Ok(event)) => Ok(Some(event)),
+                    Some(Err(error)) => Err(ClientError::Operation(error)),
+                    None => Ok(None),
+                }
+            }
             SubscriptionTransport::Xrpc(receiver) => receiver
                 .recv()
                 .await
@@ -944,119 +865,59 @@ impl SampleEventSubscription {
     }
 }
 
-#[derive(Default)]
-struct AdapterActivity {
-    admitted: AtomicUsize,
-    peak_admitted: AtomicUsize,
-    spawned: AtomicUsize,
-    peak_spawned: AtomicUsize,
-    active: AtomicUsize,
-    peak: AtomicUsize,
-    stream_pumps: AtomicUsize,
-    peak_stream_pumps: AtomicUsize,
-    changed: Notify,
-}
-
-struct AdmittedHandler(Arc<AdapterActivity>);
-impl AdmittedHandler {
-    fn new(activity: Arc<AdapterActivity>) -> Self {
-        let count = activity.admitted.fetch_add(1, Ordering::SeqCst) + 1;
-        activity.peak_admitted.fetch_max(count, Ordering::SeqCst);
-        activity.changed.notify_waiters();
-        Self(activity)
-    }
-}
-impl Drop for AdmittedHandler {
-    fn drop(&mut self) {
-        self.0.admitted.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-struct SpawnedHandler(Arc<AdapterActivity>);
-impl SpawnedHandler {
-    fn new(activity: Arc<AdapterActivity>) -> Self {
-        let count = activity.spawned.fetch_add(1, Ordering::SeqCst) + 1;
-        activity.peak_spawned.fetch_max(count, Ordering::SeqCst);
-        Self(activity)
-    }
-}
-impl Drop for SpawnedHandler {
-    fn drop(&mut self) {
-        self.0.spawned.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-struct ActiveHandler(Arc<AdapterActivity>);
-impl ActiveHandler {
-    fn new(activity: Arc<AdapterActivity>) -> Self {
-        let count = activity.active.fetch_add(1, Ordering::SeqCst) + 1;
-        activity.peak.fetch_max(count, Ordering::SeqCst);
-        Self(activity)
-    }
-}
-impl Drop for ActiveHandler {
-    fn drop(&mut self) {
-        self.0.active.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-struct StreamPump(Arc<AdapterActivity>);
-impl StreamPump {
-    fn new(activity: Arc<AdapterActivity>) -> Self {
-        let count = activity.stream_pumps.fetch_add(1, Ordering::SeqCst) + 1;
-        activity
-            .peak_stream_pumps
-            .fetch_max(count, Ordering::SeqCst);
-        activity.changed.notify_waiters();
-        Self(activity)
-    }
-}
-impl Drop for StreamPump {
-    fn drop(&mut self) {
-        self.0.stream_pumps.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
 pub struct SampleIrpcAdapter {
     dispatch_task: tokio::task::JoinHandle<()>,
-    activity: Arc<AdapterActivity>,
-    max_handlers: usize,
-    max_stream_pumps: usize,
+    owned: Arc<OwnedIrpcAdapter>,
 }
 
 impl SampleIrpcAdapter {
     pub fn admitted_handlers(&self) -> usize {
-        self.activity.admitted.load(Ordering::SeqCst)
+        self.owned.activity().admitted_count()
     }
     pub fn spawned_handlers(&self) -> usize {
-        self.activity.spawned.load(Ordering::SeqCst)
+        self.owned.activity().spawned_count()
     }
     pub fn active_handlers(&self) -> usize {
-        self.activity.active.load(Ordering::SeqCst)
+        self.owned.activity().active_count()
     }
     pub fn peak_handlers(&self) -> usize {
-        self.activity.peak.load(Ordering::SeqCst)
+        self.owned.activity().peak_count()
     }
     pub fn peak_stream_pumps(&self) -> usize {
-        self.activity.peak_stream_pumps.load(Ordering::SeqCst)
+        self.owned.activity().peak_stream_pump_count()
     }
     pub fn stream_pumps(&self) -> usize {
-        self.activity.stream_pumps.load(Ordering::SeqCst)
+        self.owned.activity().stream_pump_count()
     }
     pub fn max_handlers(&self) -> usize {
-        self.max_handlers
+        self.owned.max_handlers()
     }
     pub fn max_stream_pumps(&self) -> usize {
-        self.max_stream_pumps
+        self.owned.max_stream_pumps()
     }
     #[cfg(test)]
     async fn wait_for_stream_peak(&self, target: usize) {
         loop {
-            let notified = self.activity.changed.notified();
             if self.peak_stream_pumps() >= target {
                 return;
             }
-            notified.await;
+            self.owned.activity().wait_for_change().await;
         }
     }
+
+    /// Stops the dispatcher and all admitted child handlers, joining every
+    /// owned task so no request can outlive the transport adapter.
+    pub async fn shutdown(&mut self) {
+        self.dispatch_task.abort();
+        match (&mut self.dispatch_task).await {
+            Ok(()) => {}
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => panic!("IRPC dispatcher failed: {error}"),
+        }
+        self.owned.shutdown_children().await;
+    }
 }
+
 impl Drop for SampleIrpcAdapter {
     fn drop(&mut self) {
         self.dispatch_task.abort();
@@ -1069,269 +930,50 @@ pub fn spawn_sample_irpc(
     max_handlers: usize,
     max_stream_pumps: usize,
 ) -> (SampleClient, SampleIrpcAdapter) {
-    assert!(queue_capacity > 0 && max_handlers > 0 && max_stream_pumps > 0);
-    let (sender, mut receiver) = mpsc::channel(queue_capacity);
+    spawn_sample_irpc_with_owned(
+        service,
+        queue_capacity,
+        OwnedIrpcAdapter::new(max_handlers, max_stream_pumps),
+    )
+}
+
+/// Spawns the native Sample adapter with a transport-scoped cancellation
+/// receiver. Cancellation commands are applied only to requests admitted by
+/// this adapter; shutdown still joins the receiver and all operation tasks.
+pub fn spawn_sample_irpc_with_cancellation(
+    service: Arc<SampleService>,
+    queue_capacity: usize,
+    max_handlers: usize,
+    max_stream_pumps: usize,
+    cancellation: CancellationReceiver,
+) -> (SampleClient, SampleIrpcAdapter) {
+    spawn_sample_irpc_with_owned(
+        service,
+        queue_capacity,
+        OwnedIrpcAdapter::new_with_cancellation(max_handlers, max_stream_pumps, cancellation),
+    )
+}
+
+fn spawn_sample_irpc_with_owned(
+    service: Arc<SampleService>,
+    queue_capacity: usize,
+    owned: Arc<OwnedIrpcAdapter>,
+) -> (SampleClient, SampleIrpcAdapter) {
+    assert!(queue_capacity > 0);
+    let (sender, receiver) = mpsc::channel(queue_capacity);
     let client = SampleClient {
         transport: SampleTransport::Irpc(irpc::Client::<SampleIrpc>::local(sender)),
     };
-    let unary_permits = Arc::new(Semaphore::new(max_handlers));
-    let stream_permits = Arc::new(Semaphore::new(max_stream_pumps));
-    let activity = Arc::new(AdapterActivity::default());
-    let task_activity = Arc::clone(&activity);
-    let dispatch_task = tokio::spawn(async move {
-        while let Some(message) = receiver.recv().await {
-            dispatch_irpc(
-                Arc::clone(&service),
-                Arc::clone(&unary_permits),
-                Arc::clone(&stream_permits),
-                Arc::clone(&task_activity),
-                message,
-                max_stream_pumps,
-            )
-            .await;
-        }
-    });
+    let task_owned = Arc::clone(&owned);
+    let dispatch_task = tokio::spawn(dispatch_irpc_loop(service, task_owned, receiver));
     (
         client,
         SampleIrpcAdapter {
             dispatch_task,
-            activity,
-            max_handlers,
-            max_stream_pumps,
+            owned,
         },
     )
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn direct_and_irpc_use_the_same_inline_middleware_without_direct_spawn() {
-        let service = SampleService::new("initial");
-        let direct = SampleClient::direct(Arc::clone(&service));
-        let root = RequestContext::root();
-        let child = root.child();
-        let direct_result = TEST_TASK_MARKER
-            .scope(41, direct.get_value(child.clone(), GetValueParams))
-            .await
-            .expect("direct query");
-        assert_eq!(direct_result.observed_context, child);
-        assert_eq!(
-            *service.last_handler_task.lock().expect("task mutex"),
-            Some(41)
-        );
-        let direct_log = service.middleware_log().await;
-        assert_eq!(
-            direct_log,
-            vec!["getValue:context", "getValue:validate", "getValue:complete"]
-        );
-
-        let (irpc, adapter) = spawn_sample_irpc(Arc::clone(&service), 4, 1, 1);
-        let irpc_result = irpc
-            .get_value(root.child(), GetValueParams)
-            .await
-            .expect("irpc query");
-        assert_eq!(irpc_result.snapshot.source_revision, 0);
-        assert_eq!(adapter.peak_handlers(), 1);
-        assert_eq!(*service.last_handler_task.lock().expect("task mutex"), None);
-        assert_eq!(
-            &service.middleware_log().await[3..],
-            &["getValue:context", "getValue:validate", "getValue:complete"]
-        );
-    }
-
-    #[tokio::test]
-    async fn local_and_external_source_changes_share_projector_and_coalesce() {
-        let service = SampleService::new("initial");
-        let gate = service.block_projector();
-        let client = SampleClient::direct(Arc::clone(&service));
-        let events = service.subscribe_events();
-        let _a = service.inject_source("A");
-        let _b = service.inject_source("B");
-        let _c = service.inject_source("C");
-        gate.add_permits(1);
-        tokio::task::yield_now().await;
-        let mut events = events;
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
-            .await
-            .expect("event")
-            .expect("broadcast");
-        assert_eq!(event.value, "C");
-        let state = client
-            .read_state(
-                RequestContext::root(),
-                ReadStateParams {
-                    after_source_revision: 0,
-                },
-            )
-            .await
-            .expect("state");
-        assert_eq!(state.snapshot.value, "C");
-        assert_eq!(state.snapshot.source_revision, 3);
-    }
-
-    #[tokio::test]
-    async fn mutation_waits_for_projector_and_external_changes_are_not_mutation_events() {
-        let service = SampleService::new("initial");
-        let client = SampleClient::direct(Arc::clone(&service));
-        let written = client
-            .put_value(
-                RequestContext::root(),
-                PutValueParams {
-                    value: "local".into(),
-                },
-            )
-            .await
-            .expect("write");
-        assert_eq!(written.snapshot.value, "local");
-
-        let mut events = service.subscribe_events();
-        let external_revision = service.inject_source("remote");
-        let external_event = events.recv().await.expect("external projection event");
-        assert_eq!(external_event.source_revision, external_revision);
-        assert_eq!(external_event.value, "remote");
-        let page = client
-            .read_state(
-                RequestContext::root(),
-                ReadStateParams {
-                    after_source_revision: external_revision,
-                },
-            )
-            .await
-            .expect("read");
-        assert_eq!(page.snapshot.source_revision, external_revision);
-        assert_eq!(page.snapshot.value, "remote");
-    }
-
-    #[tokio::test]
-    async fn concurrent_source_writers_get_distinct_monotonic_revisions() {
-        let service = SampleService::new("initial");
-        let client = SampleClient::direct(Arc::clone(&service));
-        let (left, right) = tokio::join!(
-            client.put_value(
-                RequestContext::root(),
-                PutValueParams {
-                    value: "left".into()
-                }
-            ),
-            client.put_value(
-                RequestContext::root(),
-                PutValueParams {
-                    value: "right".into()
-                }
-            ),
-        );
-        left.expect("left write");
-        right.expect("right write");
-        let state = client
-            .read_state(
-                RequestContext::root(),
-                ReadStateParams {
-                    after_source_revision: 0,
-                },
-            )
-            .await
-            .expect("final state");
-        assert_eq!(state.snapshot.source_revision, 2);
-    }
-
-    #[tokio::test]
-    async fn xrpc_query_and_procedure_transport_failures_have_different_outcomes() {
-        struct FailingExecutor;
-        #[async_trait::async_trait]
-        impl XrpcExecutor for FailingExecutor {
-            async fn execute(
-                &self,
-                _request: HttpRequest,
-            ) -> Result<HttpResponse, XrpcTransportError> {
-                Err(XrpcTransportError {
-                    message: "connection lost".into(),
-                })
-            }
-        }
-        let client = SampleClient::xrpc(Arc::new(FailingExecutor));
-        let query = client
-            .get_value(RequestContext::root(), GetValueParams)
-            .await;
-        let procedure = client
-            .put_value(RequestContext::root(), PutValueParams { value: "x".into() })
-            .await;
-        assert!(matches!(
-            query,
-            Err(ClientError::Transport {
-                outcome_unknown: false,
-                ..
-            })
-        ));
-        assert!(matches!(
-            procedure,
-            Err(ClientError::Transport {
-                outcome_unknown: true,
-                ..
-            })
-        ));
-    }
-
-    #[tokio::test]
-    async fn canonical_xrpc_query_and_procedure_use_json_http_mapping() {
-        let service = SampleService::new("initial");
-        let xrpc = SampleClient::xrpc(LocalXrpcExecutor::new(Arc::clone(&service)));
-        assert_eq!(XRPC_OPERATIONS[0].nsid, "org.example.sample.getValue");
-        assert_eq!(XRPC_OPERATIONS[1].input, HttpInput::JsonBody);
-        let read = xrpc
-            .get_value(RequestContext::root(), GetValueParams)
-            .await
-            .expect("xrpc query");
-        assert_eq!(read.snapshot.value, "initial");
-        let write = xrpc
-            .put_value(
-                RequestContext::root(),
-                PutValueParams {
-                    value: "next".into(),
-                },
-            )
-            .await
-            .expect("xrpc procedure");
-        assert_eq!(write.snapshot.value, "next");
-    }
-
-    #[tokio::test]
-    async fn stream_capacity_is_independent_from_unary_capacity() {
-        let service = SampleService::new("initial");
-        let (client, adapter) = spawn_sample_irpc(Arc::clone(&service), 8, 1, 1);
-        let subscription = client
-            .subscribe_events(
-                RequestContext::root(),
-                SubscribeEventsParams {
-                    after_source_revision: 0,
-                },
-            )
-            .await
-            .expect("sub");
-        adapter.wait_for_stream_peak(1).await;
-        let query = client
-            .get_value(RequestContext::root(), GetValueParams)
-            .await
-            .expect("query remains available");
-        assert_eq!(query.snapshot.value, "initial");
-        assert_eq!(adapter.stream_pumps(), 1);
-        let second = client
-            .subscribe_events(
-                RequestContext::root(),
-                SubscribeEventsParams {
-                    after_source_revision: 0,
-                },
-            )
-            .await
-            .expect("second sub request");
-        let mut second = second;
-        assert!(matches!(
-            second.recv().await,
-            Err(ClientError::Operation(
-                SampleError::SubscriptionCapacityExceeded { limit: 1 }
-            ))
-        ));
-        drop(subscription);
-    }
-}
+mod tests;
