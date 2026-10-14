@@ -5,9 +5,21 @@
 //! module contains only transport-neutral request context and XRPC metadata.
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
 
+/// Transport metadata shared by native, IRPC, and HTTP service adapters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpMetadata {
+    pub authorization: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub traceparent: Option<String>,
+    pub tracestate: Option<String>,
+    pub timeout: Option<Duration>,
+}
+
 pub mod sample;
+pub mod xrpc;
 
 /// Propagated state for a native request. This is the small native equivalent
 /// of the HTTP metadata currently shared by every transport.
