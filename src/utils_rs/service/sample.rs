@@ -711,14 +711,6 @@ fn operation_descriptor(operation: Operation) -> XrpcOperation {
     }]
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HttpRequest {
-    pub context: RequestContext,
-    pub operation: XrpcOperation,
-    pub query: Option<serde_json::Value>,
-    pub body: Option<serde_json::Value>,
-}
-
 #[derive(Debug)]
 pub struct HttpResponse {
     pub status: u16,
