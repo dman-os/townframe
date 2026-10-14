@@ -10,11 +10,16 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
-#
 # internal
 utils_rs.workspace = true
 big_repo.workspace = true
+big_cabinet_core = { path = "../big_cabinet_core" }
 
-#
 # encoding
+automerge.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
 atproto-dasl.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true

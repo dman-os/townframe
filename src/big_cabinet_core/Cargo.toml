@@ -22,6 +22,7 @@ manifest = ["dep:garde", "dep:semver", "schemars"]
 api_utils_rs = { workspace = true, default-features = false }
 utils_rs = { workspace = true, default-features = false }
 am_utils_rs = { workspace = true }
+big_sync_core = { workspace = true, default-features = false }
 
 #
 # encoding
@@ -29,6 +30,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 data-encoding.workspace = true
+json-canon = "0.1.3"
 # An instant is stored as seconds and written as RFC 3339, and jiff is what a schema in this tree
 # states one with.
 jiff = { version = "0.2", features = ["serde"] }
@@ -51,6 +53,8 @@ displaydoc.workspace = true
 # ds
 garde = { workspace = true, optional = true }
 semver = { workspace = true, optional = true }
+url.workspace = true
+unicode-properties = { version = "=0.1.1", default-features = false, features = ["general-category"] }
 
 #
 # automerge
@@ -60,7 +64,7 @@ automerge = { workspace = true }
 #
 # ffi
 uniffi = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
+uuid.workspace = true
 
 #
 # macros
@@ -73,8 +77,11 @@ addr.workspace = true
 blake3.workspace = true
 camino.workspace = true
 jsonpath-rust = "1.0.4"
+ed25519-dalek.workspace = true
 
 [dev-dependencies]
+# Independent CBOR fixture decoding for the normative claim-wire tests.
+ciborium = "0.2.2"
 # The declaration macro the facet tests exercise.
 macros = { path = "../macros" }
 # The bundle test validates against a real JSON Schema implementation rather than
