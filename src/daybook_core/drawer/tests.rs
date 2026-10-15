@@ -2605,8 +2605,11 @@ async fn test_merge_from_heads_user_path_cannot_override_node_author() -> Res<()
     Ok(())
 }
 
+/// Local classification follows the node author only: a write under any
+/// user_path counts as local, a write by another node's author does not.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_facet_keys_touched_by_local_author_includes_custom_user_path() -> Res<()> {
+async fn test_facet_keys_touched_by_local_author_ignores_user_path_and_rejects_foreign_author()
+-> Res<()> {
     utils_rs::testing::setup_tracing_once();
     let (big_repo, big_sync_host, acx_stop) = boot_repo().await?;
     let drawer_doc_id = {
@@ -2653,33 +2656,76 @@ async fn test_facet_keys_touched_by_local_author_includes_custom_user_path() -> 
             )]
             .into(),
             facets_remove: vec![],
-            user_path: Some(user_path),
+            user_path: Some(user_path.clone()),
         },
         BranchPath::new("main"),
         None,
     )
     .await?;
 
-    let main_heads = repo
-        .get_doc_branches(&doc_id)
+    // A foreign node's write merged into the branch doc: same user_path as the
+    // local write above, different author.
+    let branch_doc_id = repo
+        .get_branch_state(&doc_id, BranchPath::new("main"))
         .await?
-        .ok_or_eyre("missing entry")?
-        .branches
-        .get("main")
-        .cloned()
-        .ok_or_eyre("missing main branch")?;
+        .ok_or_eyre("missing main branch state")?
+        .branch_doc_id;
+    let handle = big_repo
+        .get_doc(&branch_doc_id)
+        .await?
+        .into_ready(branch_doc_id.clone())?;
+    let foreign_author = automerge::Author::from(vec![9; 32]);
+    let foreign_role_id = repo.dmeta_role_id(Some(&user_path), branch_doc_id);
+    let title_key = FacetKey::from(WellKnownFacetTag::TitleGeneric);
+    let main_heads = handle
+        .with_document(|doc| -> Res<ChangeHashSet> {
+            let mut foreign = doc.fork();
+            foreign.set_author(Some(foreign_author.clone()));
+            let mut tx = foreign.transaction();
+            let Some((automerge::Value::Object(automerge::ObjType::Map), facets_obj)) =
+                tx.get(automerge::ROOT, "facets")?
+            else {
+                eyre::bail!("facets object not found in content doc");
+            };
+            autosurgeon::reconcile_prop(
+                &mut tx,
+                &facets_obj,
+                &*title_key.to_string(),
+                ThroughJson(serde_json::Value::from(WellKnownFacet::TitleGeneric(
+                    "from-foreign-author".into(),
+                ))),
+            )?;
+            crate::drawer::dmeta::apply_update(
+                &mut tx,
+                &facets_obj,
+                std::slice::from_ref(&title_key),
+                &[],
+                Timestamp::now(),
+                Some(&user_path),
+                &foreign_role_id,
+            )?;
+            tx.commit();
+            doc.merge(&mut foreign)?;
+            Ok(ChangeHashSet(Arc::from(doc.get_heads())))
+        })
+        .await??;
+
     let touched = repo
         .facet_keys_touched_by_local_author(
             &doc_id,
             BranchPath::new("main"),
             &main_heads,
-            std::slice::from_ref(&note_key),
+            &[note_key.clone(), title_key.clone()],
         )
         .await?
         .expect("doc resolvable in test");
     assert!(
         touched.contains(&note_key),
-        "expected Note facet change from user_path-scoped actor to count as local"
+        "expected Note facet written under a custom user_path to count as local"
+    );
+    assert!(
+        !touched.contains(&title_key),
+        "expected TitleGeneric facet written by a foreign author to count as remote"
     );
 
     stop_token.stop().await?;

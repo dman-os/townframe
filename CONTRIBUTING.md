@@ -37,7 +37,11 @@ Automerge 0.12 and Autosurgeon 0.14 are upgraded together. Both Autosurgeon
 crates are pinned to the published `dman-os/autosurgeon` fork, rebased onto
 upstream 0.14 with tuple/historical-read/hydration fixes retained; no sibling
 checkout is required. Drawer and native store writes set node authors, never
-path-derived session actor IDs.
+path-derived session actor IDs. Because `Automerge::set_author` mints a fresh
+random session `ActorId` for each in-memory document instance (every load,
+re-materialization, or branch fork), a document's actor table grows by one
+session actor per write session over a node's lifetime, all mapped to the
+node's single `Author`.
 Keep fixed-width `VersionTag` IDs and legacy dmeta role IDs separate from node
 authors; do not derive an author from an old unlabelled change's actor ID.
 

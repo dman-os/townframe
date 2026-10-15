@@ -871,6 +871,7 @@ impl DrawerRepo {
             let drawer_heads = self
                 .drawer_doc_handle
                 .with_document(|doc| {
+                    doc.set_author(Some(self.local_author.clone()));
                     let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
                     new_entry.previous_version_heads = Some(current_drawer_heads);
 
@@ -970,8 +971,7 @@ impl DrawerRepo {
             .get_handle_by_branch_doc_id(to_branch_ref.branch_doc_id.clone())
             .await?
             .ok_or_else(|| DrawerError::DocNotFound { id: id.clone() })?;
-        let mutation_actor_id =
-            self.dmeta_role_id(user_path, to_branch_ref.branch_doc_id.clone());
+        let mutation_actor_id = self.dmeta_role_id(user_path, to_branch_ref.branch_doc_id.clone());
         let from_branch_ref = self.get_branch_ref(id, from_branch).await?.ok_or_else(|| {
             DrawerError::BranchNotFound {
                 name: from_branch.to_string(),
@@ -1203,6 +1203,7 @@ impl DrawerRepo {
         let res = self
             .drawer_doc_handle
             .with_document(|doc| {
+                doc.set_author(Some(self.local_author.clone()));
                 let docs_id = match doc.get(automerge::ROOT, "docs")? {
                     Some((automerge::Value::Object(automerge::ObjType::Map), docs_id)) => docs_id,
                     _ => {
@@ -1449,6 +1450,7 @@ impl DrawerRepo {
                 if self.take_fail_next_drawer_doc_commit() {
                     eyre::bail!("injected drawer-doc commit failure (test only)");
                 }
+                doc.set_author(Some(self.local_author.clone()));
                 let current_drawer_heads = ChangeHashSet(doc.get_heads().into());
                 new_entry.previous_version_heads = Some(current_drawer_heads);
 

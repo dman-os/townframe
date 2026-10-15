@@ -25,21 +25,19 @@ fn recover_facet_heads_inner(
     };
 
     let mut recovered = Vec::new();
-    let length = match read_heads {
-        Some(read_heads) => doc.length_at(&updated_at_list, read_heads),
-        None => doc.length(&updated_at_list),
+    let values = match read_heads {
+        Some(read_heads) => doc.values_at(&updated_at_list, read_heads),
+        None => doc.values(&updated_at_list),
     };
-    for ii in 0..length {
-        if let Some((_, exid)) = get(doc, &updated_at_list, ii, read_heads)? {
-            let Some(hash) = doc.hash_for_opid(&exid) else {
-                eyre::bail!(
-                    "failed recovering facet heads: missing hash for updatedAt entry index={} opid={}",
-                    ii,
-                    exid
-                );
-            };
-            recovered.push(hash);
-        }
+    for (ii, (_, exid)) in values.enumerate() {
+        let Some(hash) = doc.hash_for_opid(&exid) else {
+            eyre::bail!(
+                "failed recovering facet heads: missing hash for updatedAt entry index={} opid={}",
+                ii,
+                exid
+            );
+        };
+        recovered.push(hash);
     }
 
     Ok(recovered)
@@ -47,6 +45,11 @@ fn recover_facet_heads_inner(
 
 /// Latest visible marker operation in Automerge's Lamport order, with actor
 /// bytes breaking concurrent ties. Timestamp values and arrival order are irrelevant.
+///
+/// `values_at` builds one historical `Clock` per list and streams `top_ops` without
+/// per-index `Clock`/`Vec` allocations (`updatedAt` is cleared to one element on
+/// sequential writes; concurrent inserts order higher `OpId`s first in RGA, so all
+/// visible elements must be compared; `deletedAt` appends on tombstone).
 pub(super) fn facet_write_author_at<'a>(
     doc: &'a Automerge,
     facet_key: &FacetKey,
@@ -57,19 +60,16 @@ pub(super) fn facet_write_author_at<'a>(
         let Some(list) = facet_marker_list(doc, facet_key, Some(heads), marker)? else {
             continue;
         };
-        for index in 0..doc.length_at(&list, heads) {
-            for (_, operation) in doc.get_all_at(&list, index, heads)? {
-                if latest.as_ref().is_none_or(|prior| &operation > prior) {
-                    latest = Some(operation);
-                }
+        for (_, operation) in doc.values_at(&list, heads) {
+            if latest.as_ref().is_none_or(|prior| &operation > prior) {
+                latest = Some(operation);
             }
         }
     }
     Ok(latest.map(|operation| {
         let hash = doc.hash_for_opid(&operation).expect(ERROR_IMPOSSIBLE);
         let change = doc.get_change_meta_by_hash(&hash).expect(ERROR_IMPOSSIBLE);
-        let author = doc.get_author_for_actor(&change.actor);
-        (operation, author)
+        (operation, change.author)
     }))
 }
 
@@ -166,15 +166,13 @@ pub fn facet_write_points(
             }
         }
     }
-    // Causal order + heads + author from the change graph.
+    // Causal order + heads + author from the change graph metadata.
     let mut points = Vec::new();
-    for change in doc.get_changes(from) {
-        if write_hashes.contains(&change.hash()) {
-            let mut heads: Vec<ChangeHash> = change.deps().to_vec();
-            heads.push(change.hash());
-            let author = doc
-                .get_author_for_actor(change.actor_id())
-                .map(automerge::Author::into_owned);
+    for change in doc.get_changes_meta(from) {
+        if write_hashes.contains(&change.hash) {
+            let mut heads: Vec<ChangeHash> = change.deps;
+            heads.push(change.hash);
+            let author = change.author.map(automerge::Author::into_owned);
             points.push((ChangeHashSet(heads.into()), author));
         }
     }

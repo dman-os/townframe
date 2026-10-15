@@ -393,7 +393,7 @@ impl TablesRepo {
         let store = crate::stores::AmStoreHandle::new(
             store_val,
             app_doc_handle.clone(),
-            automerge::Author::from(big_repo.local_peer_id().to_bytes32()?.to_vec()),
+            big_repo.local_author(),
         );
         store
             .mutate_sync(|store| {

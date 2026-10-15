@@ -43,13 +43,13 @@ pub(crate) fn facet_snapshot_metadata(
     doc: &automerge::Automerge,
     facet_key: &FacetKey,
     heads: &[automerge::ChangeHash],
-) -> Res<(ChangeHashSet, Option<Vec<u8>>)> {
+) -> Res<(ChangeHashSet, Option<PeerKey>)> {
     let facet_heads = facet_recovery::recover_facet_heads_at(doc, facet_key, heads)?;
     let (_, author) = facet_recovery::facet_write_author_at(doc, facet_key, heads)?
         .ok_or_else(|| ferr!("active facet has no dmeta write point"))?;
     Ok((
         ChangeHashSet(Arc::from(facet_heads)),
-        author.map(|author| author.as_bytes().to_vec()),
+        author.map(|author| PeerKey::new(author.as_bytes())),
     ))
 }
 
@@ -68,7 +68,9 @@ pub(crate) struct ExactDmetaState {
     pub document_id: DocId,
     pub branch_id: daybook_types::doc::BranchId,
     pub branch_heads: ChangeHashSet,
-    pub facets: HashMap<FacetKey, (ChangeHashSet, Option<Vec<u8>>)>,
+    /// Node author of each facet's latest dmeta write: the writing peer's key, or
+    /// None for changes recorded before writes carried authors.
+    pub facets: HashMap<FacetKey, (ChangeHashSet, Option<PeerKey>)>,
     pub all_facet_keys: Vec<FacetKey>,
 }
 
@@ -176,7 +178,12 @@ pub struct DrawerRepo {
     drawer_group: BigKeyhiveGroup,
     pending_documents_group: BigKeyhiveGroup,
     local_actor_id: ActorId,
-    // A node authors changes; Automerge owns the per-session actor IDs.
+    // A node authors changes; Automerge owns the per-session actor IDs. Every
+    // in-memory doc instance (each load into the LRU pool, each restart) gets a
+    // fresh actor minted for this author on its first write, so a doc's actor
+    // table grows with the number of instances that wrote it rather than staying
+    // at the one deterministic actor the drawer used before. Readers resolve
+    // provenance through `get_author_for_actor`, never by comparing actors.
     local_author: automerge::Author<'static>,
     local_peer_id: PeerKey,
     local_user_path: daybook_types::doc::UserPathBuf,
@@ -286,7 +293,7 @@ impl DrawerRepo {
         let local_user_path =
             daybook_types::doc::user_path::for_repo(local_user_path, "drawer-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
-        let local_author = automerge::Author::from(big_repo.local_peer_id().to_bytes32()?.to_vec());
+        let local_author = big_repo.local_author();
         let drawer_am_handle = big_repo
             .get_doc(&drawer_doc_id)
             .await?

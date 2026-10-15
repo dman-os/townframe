@@ -4,6 +4,7 @@
 //! module contains only the value contract shared by that source and walkers.
 #![allow(dead_code)]
 use crate::index::doc_delta_store::DocDelta;
+use crate::interlude::*;
 use daybook_types::doc::{BranchId, ChangeHashSet, DocId, FacetKey};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -38,9 +39,11 @@ impl PartialOrd for FacetRouteKey {
 pub(crate) struct FacetSnapshot {
     pub branch_heads: ChangeHashSet,
     pub facet_heads: ChangeHashSet,
-    /// Older changes may have no author; an actor ID is not an attribution fallback.
+    /// Node author (peer key) of the facet's latest dmeta write. Older changes
+    /// may have no author; an actor ID is not an attribution fallback, so
+    /// persisted rows predating authors read back as None.
     #[serde(default)]
-    pub author: Option<Vec<u8>>,
+    pub author: Option<PeerKey>,
 }
 
 /// One collapsed current-state transition. `current = None` is a typed

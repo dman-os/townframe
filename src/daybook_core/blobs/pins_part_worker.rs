@@ -828,7 +828,7 @@ mod tests {
             .hydrate_dmeta_state_at_heads(&branch_id, heads_1.clone())
             .await?
             .ok_or_eyre("missing first dmeta state")?;
-        let (facet_heads_1, actor_id_1) = state_1
+        let (facet_heads_1, author_1) = state_1
             .facets
             .get(&key_pin_1)
             .cloned()
@@ -860,7 +860,7 @@ mod tests {
             .hydrate_dmeta_state_at_heads(&branch_id, heads_2.clone())
             .await?
             .ok_or_eyre("missing second dmeta state")?;
-        let (facet_heads_2, actor_id_2) = state_2
+        let (facet_heads_2, author_2) = state_2
             .facets
             .get(&key_pin_2)
             .cloned()
@@ -875,7 +875,7 @@ mod tests {
                 current: Some(FacetSnapshot {
                     branch_heads: heads_1.clone(),
                     facet_heads: facet_heads_1,
-                    actor_id: actor_id_1,
+                    author: author_1,
                 }),
                 current_branch_heads: Some(heads_1),
                 removed_local: false,
@@ -889,7 +889,7 @@ mod tests {
                 current: Some(FacetSnapshot {
                     branch_heads: heads_2.clone(),
                     facet_heads: facet_heads_2,
-                    actor_id: actor_id_2,
+                    author: author_2,
                 }),
                 current_branch_heads: Some(heads_2.clone()),
                 removed_local: false,

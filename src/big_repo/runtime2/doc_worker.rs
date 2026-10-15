@@ -2391,7 +2391,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .0
-                .to_i64(),
+                .as_i64(),
             Some(1)
         );
         assert_eq!(
@@ -2399,7 +2399,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .0
-                .to_i64(),
+                .as_i64(),
             Some(1)
         );
         assert_eq!(
@@ -2407,7 +2407,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .0
-                .to_i64(),
+                .as_i64(),
             Some(1)
         );
     }
@@ -2748,7 +2748,7 @@ mod tests {
                 .expect("title read")
                 .expect("title present")
                 .0
-                .to_str()
+                .as_str()
                 .expect("title is text"),
             "seed"
         );

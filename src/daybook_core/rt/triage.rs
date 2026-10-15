@@ -474,7 +474,13 @@ fn processor_doc_state_key(document_id: &DocId, branch_id: &str) -> Vec<u8> {
 }
 
 fn processor_snapshot_changed(previous: &FacetSnapshot, current: &FacetSnapshot) -> bool {
-    previous.facet_heads != current.facet_heads || previous.actor_id != current.actor_id
+    // Legacy persisted snapshots deserialize with `author: None` (`#[serde(default)]`) and
+    // migrated rows clear `author_json` to null because session actor IDs cannot be relabelled
+    // as node authors. Treat `previous.author == None` as unknown provenance so the first
+    // post-upgrade hydration with `Some(author)` at unchanged `facet_heads` does not trigger
+    // a full-dataset processor re-dispatch storm.
+    previous.facet_heads != current.facet_heads
+        || (previous.author.is_some() && previous.author != current.author)
 }
 
 async fn plan_processor_group(
@@ -536,7 +542,7 @@ async fn plan_processor_group(
         let Some(local_changed) = triage
             .rt
             .drawer
-            .facet_keys_touched_by_local_actor(
+            .facet_keys_touched_by_local_author(
                 &group.document_id,
                 &branch_path,
                 current_heads,
@@ -1081,5 +1087,28 @@ mod tests {
         assert!(!changed_intersects_read_set(
             &changed, &read_tags, &read_keys
         ));
+    }
+
+    #[test]
+    fn processor_snapshot_changed_ignores_upgrade_hydration_of_missing_author() {
+        let legacy: FacetSnapshot = serde_json::from_str(
+            r#"{"branch_heads":[],"facet_heads":[],"actor_id":"00112233445566778899aabbccddeeff"}"#,
+        )
+        .expect("legacy FacetSnapshot JSON should deserialize");
+        assert_eq!(legacy.author, None);
+
+        let hydrated = FacetSnapshot {
+            branch_heads: legacy.branch_heads.clone(),
+            facet_heads: legacy.facet_heads.clone(),
+            author: Some(PeerKey::new([7_u8; 32])),
+        };
+        assert!(!processor_snapshot_changed(&legacy, &hydrated));
+
+        let different_author = FacetSnapshot {
+            branch_heads: hydrated.branch_heads.clone(),
+            facet_heads: hydrated.facet_heads.clone(),
+            author: Some(PeerKey::new([8_u8; 32])),
+        };
+        assert!(processor_snapshot_changed(&hydrated, &different_author));
     }
 }

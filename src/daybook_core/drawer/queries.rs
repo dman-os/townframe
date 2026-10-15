@@ -12,7 +12,6 @@ use crate::drawer::{
     types::{DocBundle, DocEntry, DocNBranches},
 };
 
-use automerge::ReadDoc;
 use daybook_types::doc::{
     BranchId, ChangeHashSet, Doc, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
 };
@@ -348,12 +347,12 @@ impl DrawerRepo {
         }
         let dmeta_author = handle
             .with_document_read(|doc| {
-                doc.get_changes(&[])
+                branch_heads
+                    .0
                     .last()
-                    .map(|change| {
-                        doc.get_author_for_actor(change.actor_id())
-                            .map(|author| author.as_bytes().to_vec())
-                    })
+                    .and_then(|head| doc.get_change_meta_by_hash(head))
+                    .or_else(|| doc.get_changes_meta(&[]).pop())
+                    .map(|change| change.author.map(|author| PeerKey::new(author.as_bytes())))
                     .ok_or_else(|| ferr!("dmeta facet has no write point"))
             })
             .await?;
@@ -966,9 +965,8 @@ impl DrawerRepo {
             let is_local = handle
                 .with_document_read(|am_doc| {
                     for head in &facet_heads {
-                        if let Some(change) = am_doc.get_change_by_hash(head)
-                            && am_doc.get_author_for_actor(change.actor_id()).as_ref()
-                                == Some(&self.local_author)
+                        if let Some(change) = am_doc.get_change_meta_by_hash(head)
+                            && change.author.as_ref() == Some(&self.local_author)
                         {
                             return true;
                         }

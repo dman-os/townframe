@@ -43,7 +43,10 @@ pub enum DocFacetMembership {
         facet_key: FacetKey,
         branch_heads: ChangeHashSet,
         facet_heads: ChangeHashSet,
-        author: Option<Vec<u8>>,
+        /// Frontier rows written before authors existed carry an `actor_id`
+        /// field instead; they decode with no author rather than failing.
+        #[serde(default)]
+        author: Option<PeerKey>,
     },
     Removed {
         document_id: DocId,
@@ -1156,6 +1159,48 @@ mod tests {
                 "null".into(),
                 r#"["branch"]"#.into()
             )
+        );
+        Ok(())
+    }
+
+    /// Frontier rows and triage sparse state written before authors existed
+    /// carry `actor_id`; they must decode as "no author", not fail, because the
+    /// first walk after upgrade reads every persisted row.
+    #[test]
+    fn legacy_persisted_rows_decode_without_author() -> Res<()> {
+        let legacy_membership = serde_json::json!({
+            "Present": {
+                "document_id": "doc",
+                "branch_id": "branch",
+                "facet_key": "org.example.daybook.note/main",
+                "branch_heads": [],
+                "facet_heads": [],
+                "actor_id": "6c65676163792d73657373696f6e",
+            }
+        });
+        let DocFacetMembership::Present { author, .. } = serde_json::from_value(legacy_membership)?
+        else {
+            unreachable!()
+        };
+        assert_eq!(author, None);
+
+        let legacy_snapshot = serde_json::json!({
+            "branch_heads": [],
+            "facet_heads": [],
+            "actor_id": "6c65676163792d73657373696f6e",
+        });
+        let snapshot: FacetSnapshot = serde_json::from_value(legacy_snapshot)?;
+        assert_eq!(snapshot.author, None);
+
+        let peer = PeerKey::new([7u8; 32]);
+        let json = serde_json::to_string(&FacetSnapshot {
+            branch_heads: ChangeHashSet(Vec::new().into()),
+            facet_heads: ChangeHashSet(Vec::new().into()),
+            author: Some(peer.clone()),
+        })?;
+        assert!(
+            json.contains(&format!("\"author\":\"{peer}\"")),
+            "author persists as the peer key's base58 text form: {json}"
         );
         Ok(())
     }

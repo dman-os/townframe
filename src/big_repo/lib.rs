@@ -505,6 +505,14 @@ impl BigRepo {
         self.local_peer_id.clone()
     }
 
+    /// The node author stamped on every local Automerge write: the local peer key's
+    /// bytes. Automerge records the author once per actor (on that actor's first change)
+    /// and maps every later change by the same actor back to it; a reader should go
+    /// through `Automerge::get_author_for_actor`, never through the actor ID.
+    pub fn local_author(&self) -> automerge::Author<'static> {
+        automerge::Author::from(self.local_peer_id.as_bytes().to_vec())
+    }
+
     /// Update the Automerge frontier worker's group scope at runtime.
     ///
     /// Daybook sync nodes keep [`WorkerGroupScope::All`]; relays constrain
@@ -1466,7 +1474,7 @@ impl BigDocHandle {
         obj_id: automerge::ObjId,
         prop_name: P,
         update: &T,
-        author: Option<automerge::Author<'static>>,
+        author: automerge::Author<'static>,
     ) -> Res<Option<ChangeHash>>
     where
         T: Hydrate + Reconcile + Send + Sync + 'static,
@@ -1474,7 +1482,9 @@ impl BigDocHandle {
     {
         let res = self
             .with_document(|doc| {
-                doc.set_author(author);
+                // Idempotent for the same author; a different author (or a freshly
+                // loaded doc) gets a new session actor minted by Automerge.
+                doc.set_author(Some(author));
                 doc.transact(|tx| {
                     autosurgeon::reconcile_prop(tx, obj_id, prop_name, update)
                         .wrap_err("error reconciling")?;

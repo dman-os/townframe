@@ -16,7 +16,7 @@ pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
     async fn flush(
         &mut self,
         doc_handle: &BigDocHandle,
-        author: Option<automerge::Author<'static>>,
+        author: automerge::Author<'static>,
     ) -> Res<Option<automerge::ChangeHash>> {
         self.flush_with_prop(doc_handle, Self::prop(), author).await
     }
@@ -25,7 +25,7 @@ pub trait AmStore: Hydrate + Reconcile + Send + Sync + 'static {
         &mut self,
         doc_handle: &BigDocHandle,
         prop: Cow<'static, str>,
-        author: Option<automerge::Author<'static>>,
+        author: automerge::Author<'static>,
     ) -> Res<Option<automerge::ChangeHash>> {
         doc_handle
             .reconcile_prop_with_author(automerge::ROOT, prop, self, author)
@@ -89,10 +89,10 @@ impl<S: AmStore> Inner<S> {
         match &self.store_prop {
             Some(prop) => {
                 self.store
-                    .flush_with_prop(&self.doc_handle, Cow::Owned(prop.clone()), Some(author))
+                    .flush_with_prop(&self.doc_handle, Cow::Owned(prop.clone()), author)
                     .await
             }
-            None => self.store.flush(&self.doc_handle, Some(author)).await,
+            None => self.store.flush(&self.doc_handle, author).await,
         }
     }
 }
