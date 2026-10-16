@@ -26,9 +26,10 @@
 //! owns the transaction and must discard it rather than commit it; this generic API cannot rollback
 //! an arbitrary `Transactable`, and it propagates that error unchanged.
 
+use super::validation::CompiledSchema;
 use super::walk::{
-    CompiledSchema, Declared, Kind, Number, Path, PathKey, Position, at, discriminant_matches,
-    number_kind, type_mentions,
+    Declared, Kind, Number, Path, PathKey, Position, at, discriminant_matches, number_kind,
+    type_mentions,
 };
 use super::{Codec, CodecError, bytes_value, instant_millis, kind};
 #[cfg(test)]

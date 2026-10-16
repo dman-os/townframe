@@ -33,6 +33,7 @@ use std::borrow::Cow;
 use std::num::FpCategory;
 
 mod target;
+mod validation;
 mod walk;
 
 #[cfg(test)]
@@ -41,7 +42,8 @@ mod e2e;
 #[cfg(test)]
 pub(crate) use target::reconcile_json;
 pub use target::reconcile_json_atomic;
-pub use walk::{CompiledSchema, Stored, hydrate_value};
+pub use validation::CompiledSchema;
+pub use walk::{Stored, hydrate_value};
 
 /// The keyword for the storage forms JSON Schema cannot describe.
 pub const KEYWORD: &str = "x-automerge";

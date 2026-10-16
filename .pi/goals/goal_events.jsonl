@@ -44,3 +44,13 @@
 {"type":"goal_paused","goalId":"mv9gulef-8qseoq","reason":"Scheduling paused","source":"agent","at":"2026-10-16T17:23:01.200Z"}
 {"type":"goal_resumed","goalId":"mv9gulef-8qseoq","reason":"user","at":"2026-10-16T17:23:05.238Z"}
 {"type":"task_started","goalId":"mv9gulef-8qseoq","taskId":"service-foundation","at":"2026-10-16T18:08:37.327Z"}
+{"type":"goal_paused","goalId":"mv9gulef-8qseoq","reason":"user","status":"paused","at":"2026-10-16T22:05:34.207Z"}
+{"type":"goal_paused","goalId":"mv9gulef-8qseoq","reason":"Scheduling paused","source":"agent","at":"2026-10-16T22:06:49.660Z"}
+{"type":"goal_paused","goalId":"mv9gulef-8qseoq","reason":"Scheduling paused","source":"agent","at":"2026-10-16T22:09:53.594Z"}
+{"type":"goal_paused","goalId":"mv9gulef-8qseoq","reason":"Scheduling paused","source":"agent","at":"2026-10-16T22:11:40.668Z"}
+{"type":"goal_paused","goalId":"mv9gulef-8qseoq","reason":"Scheduling paused","source":"agent","at":"2026-10-16T22:15:18.599Z"}
+{"type":"goal_resumed","goalId":"mv9gulef-8qseoq","reason":"user","at":"2026-10-16T22:16:36.182Z"}
+{"type":"goal_paused","goalId":"mv9gulef-8qseoq","reason":"user","status":"paused","at":"2026-10-16T22:31:06.995Z"}
+{"type":"goal_paused","goalId":"mv9gulef-8qseoq","reason":"Scheduling paused","source":"agent","at":"2026-10-16T22:31:29.848Z"}
+{"type":"goal_paused","goalId":"mv9gulef-8qseoq","reason":"Scheduling paused","source":"agent","at":"2026-10-16T22:31:37.652Z"}
+{"type":"goal_resumed","goalId":"mv9gulef-8qseoq","reason":"user","at":"2026-10-16T22:35:00.437Z"}

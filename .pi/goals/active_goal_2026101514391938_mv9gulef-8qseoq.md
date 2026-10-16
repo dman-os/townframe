@@ -5,19 +5,19 @@
   "status": "active",
   "autoContinue": true,
   "usage": {
-    "tokensUsed": 4334030,
-    "activeSeconds": 46645
+    "tokensUsed": 5821984,
+    "activeSeconds": 50136
   },
   "sisyphus": false,
   "createdAt": "2026-10-15T11:39:19.383Z",
-  "updatedAt": "2026-10-16T18:34:26.161Z",
+  "updatedAt": "2026-10-16T23:00:46.358Z",
   "activePath": ".pi/goals/active_goal_2026101514391938_mv9gulef-8qseoq.md",
-  "revision": 804,
+  "revision": 1230,
   "scheduler": {
     "version": 1,
     "owner": "01a1382a-38dd-740e-ad82-f7ed726e882d",
-    "generation": "3daa763f-7b6e-443e-86c1-77caf0a7c5c3",
-    "used": 42,
+    "generation": "1d5f12c9-9d50-496f-bfc9-cb7f56e02dbb",
+    "used": 39,
     "phase": "idle",
     "repairUsed": false
   },
@@ -160,8 +160,8 @@ If blocked: Consult original transcript evidence first, then actual consumer usa
 - Status: running
 - Auto-continue: on
 - Sisyphus mode: no
-- Time spent: 12h57m25s
-- Tokens used: 4.3M (4,334,030) tokens
+- Time spent: 13h55m36s
+- Tokens used: 5.8M (5,821,984) tokens
 ## Tasks
 
 <!-- blockCompletion: true -->
