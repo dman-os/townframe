@@ -2,6 +2,8 @@
 
 **Status:** Proposed
 
+**Implementation transport:** use standard iroh/IRPC following the existing BigRepo RPC design. XRPC and service-interface migration are deferred to a separate PR; ADR 016 is an unaccepted draft, not a dependency.
+
 ## Context
 
 Daybook needs to allocate work across intermittently connected nodes without requiring an always-available server or consensus system. Distributed triage is the first consumer, but commands, recurring automation, collaborative batches, GPU work, and personal agents need the same networking and scheduling machinery.
@@ -353,6 +355,16 @@ BigEphemeral is appropriate for repeated heartbeats because messages are useful 
 
 After discovery, executor nodes establish a live routing session using an advertised transport. A pool may advertise a dedicated BigEphemeral request/response topic as a lossy fallback, but reliable iRPC/HTTP is preferred and targeted traffic must not be broadcast to every pool subscriber.
 
+#### RPC compatibility and rolling upgrades
+
+The initial cross-node transport follows the existing BigRepo iroh/IRPC pattern: an explicitly versioned ALPN identifies a supported wire protocol. Incompatible peers need not allocate work together; unsupported ALPN fails connection establishment rather than translating task messages. No cross-version shim is required. ALPN selection is an application-defined compatibility gate, not automatic schema negotiation by IRPC.
+
+IRPC uses postcard. Derived structs are positional, not named-field maps: Serde JSON-style unknown-field tolerance does not establish wire compatibility. Adding, removing, reordering, or changing fields, or changing enum variant indices, can fail decoding or silently change meaning. Keep an ALPN only when old/new byte fixtures demonstrate compatibility in both directions and operation semantics remain compatible; otherwise bump it. Optional fields and Serde defaults alone do not establish compatibility. Any skippable extension mechanism must be explicitly framed and distinguish optional hints from required execution, authority, or placement semantics.
+
+Rolling upgrades retain one shared router election per pool, not independent version cohorts. Authenticated claims advertise a scheduling protocol version and supported live RPC versions, independently of pool-descriptor and ticket-payload schema versions. Prefer the newer live scheduling version among otherwise eligible candidates; workers incompatible with the selected router do not accept offers and do not form a second version-specific election. The shared election envelope/projection must remain understandable to supported older participants so they can stand down. A dead newer-version historical claim must not block compatible takeover: version preference applies to live candidacy, not permanent retention of an old claim. Heartbeats/session discovery expose compatibility and unavailability. Changing these election semantics requires an explicit versioned contract, not merely bumping an RPC ALPN.
+
+Live RPC versions are distinct from persisted task-ticket, processor-slot, and router-slot payload versions. An ALPN bump does not migrate retained data. Unknown persisted versions are unsupported data, not proof of cancellation or permission to prune; schema upgrades require their own compatibility or migration decision.
+
 ### 7. Executor registration and allocation
 
 On every router change or executor restart, an interested executor registers:
@@ -378,6 +390,8 @@ Executor -> AttemptChanged(...)
 
 The exact start handshake may be collapsed after implementation testing. The executor must never begin solely because it received an unauthenticated or stale offer.
 
+For each accepted or origin attempt, the executor captures the domain's `ResolvedInvocation { args: Vec<u8> }` and the canonical declaration digest. `PersistAttempt` writes both before its exact attempt acknowledgement permits `StartDispatch`. Dispatch consumes that captured invocation, even if classification changes while persistence is pending or the executor reconnects; a fresh attempt resolves anew. Argument encoding belongs to the domain/handler, not the generic task protocol.
+
 Allocations live only in router/executor memory and local DispatchRepo state. If all live witnesses disappear, the pending BigSync ticket becomes allocatable again. Router heartbeat and RPC session liveness do not prove useful task progress; DispatchRepo/wflow must report or fail unexpected hung attempts according to local policy.
 
 ### 8. Task ticket payload
@@ -396,7 +410,7 @@ TaskDeclarationV1 {
     domain: TaskDomainId
     producer: NodePubkey
     handler: HandlerRef
-    encrypted_input: Vec<u8>
+    input: Vec<u8>
     coordination_ref: Optional<DomainCoordinationRef>
     placement: Placement
     preference: Preference
@@ -418,6 +432,8 @@ enum TerminalFactV1 {
 ```
 
 A task declaration is immutable for one TaskId. Concurrent unequal declarations for the same ID are an invalid collision/equivocation, not “desired revision siblings.” Replacement creates a different TaskId and retires the old ticket.
+
+Canonical equality and the declaration digest include the domain-owned input bytes, not encryption envelopes or publisher evidence. Different input under one TaskId is rejected atomically as a collision. Local invalid declarations are programming-invariant failures; malformed remote declarations are rejected before publisher, terminal, readiness, or admission state changes. `AuthoritativePlacement` requires `Preference::Only`; ordinary preference is not an execution-authority constraint.
 
 Terminal lanes use latest signed per-writer sequence and preserve concurrent authenticated facts. Any valid success or cancellation stops ordinary scheduling. Detailed logs, retries, and intermediate failures remain in DispatchRepo or domain state; a failed attempt leaves the task pending unless policy makes it terminal.
 
@@ -467,10 +483,11 @@ enum ResultRetention {
 
 For `ExternalSettlement`, task data may be fully removed after the local domain state proves the obligation settled or obsolete. Multiple authorized domain replicas may race to remove it; removal is idempotent. The router is not the semantic pruning authority.
 
-For `TaskTicketAuthoritative`, the ticket leaves the active part but remains in the authority/archive part. With no retention horizon it is retained until explicit deletion. With a horizon, `not_after` must ensure stale pending copies are permanently non-runnable before terminal evidence can be discarded.
+For `TaskTicketAuthoritative`, the ticket leaves the active part but remains in the authority/archive part. With no retention horizon it is retained until explicit deletion and no execution deadline is required. With a finite horizon, an immutable `not_after` is required and must be less than or equal to `retain_until`; equality is valid. Stale pending copies must be permanently non-runnable when terminal evidence can be discarded.
 
 BigSync removal/tombstone mechanics prevent ordinary local resurrection, but no permanent task tombstone is required for domains whose durable compact settlement rejects stale tasks. An old replica may temporarily reintroduce a ticket; domain classification makes it inert and removes it again.
 
+This semantic task-retention rule does not imply physical BigSync tombstone collection. ADR 012 decision 9 retains dead membership rows until an authority/reconstruction rule makes their removal safe. Dropping a ticket payload leaves such metadata behind; a drained active pool can therefore still accumulate historical dead rows and dead fingerprints. Request-cursor filtering avoids sending removals to readers that never saw the add, but does not bound local storage. The task/domain backend needs an explicit membership-authority and stale-reintroduction rule, including what a ciphertext-only relay can verify, before claiming bounded total pool storage. Arbitrary tombstone TTL or cursor rotation is not a substitute.
 Relay-local eviction is never published as cancellation or protocol removal.
 
 ### 12. Producer and router cursors

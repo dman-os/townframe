@@ -48,6 +48,7 @@ pub mod secrets;
 pub mod stores;
 pub mod sync;
 pub mod tables;
+pub mod tasks;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 

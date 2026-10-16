@@ -33,6 +33,14 @@ prek -a
 cargo x build-plug-oci --plug-root ./src/plug_test/
 ```
 
+`daybook_core` tests enable the `test-support` features of `big_repo`, `big_sync`,
+and `secrets_rs` through dev-dependencies. Repository identity and key material
+use the process-local in-memory keyring during tests, not a desktop secret
+service or kernel keyring. A standalone runtime smoke that needs the same
+isolation should explicitly enable `daybook_core/test-support`; ordinary
+production builds retain the platform keyring. The in-memory keyring is not
+cross-process persistence, so identity-reopen checks must run in one process.
+
 ## Repo guide
 
 - `./src/utils_rs/`: General purpose utilities.
