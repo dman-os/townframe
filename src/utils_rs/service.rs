@@ -56,6 +56,7 @@ pub use tokio as __tokio;
 pub use tracing as __tracing;
 
 pub mod sample;
+pub mod xrpc;
 
 /// The scoped key carried by a cancellation command. The token distinguishes
 /// separately admitted requests that happen to reuse the same request UUID.

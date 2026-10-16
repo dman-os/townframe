@@ -10,7 +10,6 @@ workspace = true
 path = "lib.rs"
 
 [dependencies]
-#
 # internal
 utils_rs.workspace = true
 big_cabinet_core = { path = "../big_cabinet_core" }
@@ -18,18 +17,18 @@ big_sync_core.workspace = true
 big_repo.workspace = true
 secrets_rs.workspace = true
 
-#
 # encoding
-atproto-dasl.workspace = true
+automerge.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 blake3.workspace = true
+uuid.workspace = true
+atproto-dasl.workspace = true
 
 #
 # crypto and identity
 ed25519-dalek.workspace = true
 rand.workspace = true
-uuid.workspace = true
 
 #
 # errors and durable authority state
@@ -42,3 +41,5 @@ secrets_rs = { workspace = true, features = ["test-support"] }
 keyring-core = { version = "1.0", default-features = false }
 tempfile.workspace = true
 schemars = "1.2.2"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+ed25519-dalek.workspace = true
