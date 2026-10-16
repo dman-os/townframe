@@ -26,12 +26,26 @@
 ## Stack
 
 - Top
+  - [ ] SQlx redo
+  - [ ] Merge Automerge 0.12
+  - [ ] Better pre-commit hooks
+  - [ ] big_cabinet
+  - [ ] big_node
+  - [ ] big_blobs
+  - [ ] dpaths
+  - [ ] big_relay
+  - [ ] big_tasks
+  - [ ] day_node
+  - [ ] relay_node
+  - [ ] dayframe
+  - [ ] plug_pds
+  - [ ] Cleanup diff to subduction
+  - [ ] Cleanup diff to keyhive
   - [ ] Built in updater
-  - [x] Per sink switch/index rebuild
   - [ ] Some std::mem::take sites can be a drain()
   - [x] Rewrite big_sync_core
-    - Avoid push based or channel based replay
-      - Pull RPC with limits
+    - [x] Avoid push based or channel based replay
+      - [x] Pull RPC with limits
       - i.e. rev store
     - Reuse the other machinery
     - [ ] Make BigSyncM.set_peer incremental
@@ -90,9 +104,8 @@
 - [ ] Schema
   - [ ] `KeyId` is a terrible name.
     - [ ] `FacetKey` too, it's misused
-  - [ ] Decide on wether to adopt Lexicons
-    - [ ] Lexicons don't have floats??
-  - [ ] Deterministic doc ids for main docs [LOST]
+  - [x] Decide on wether to adopt Lexicons
+    - [x] Lexicons don't have floats??
   - [ ] Figure out how multi-processed repo access 
     - [ ] Daemon?
   - [ ] Local app doc

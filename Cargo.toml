@@ -3,6 +3,8 @@ resolver = "3"
 members = [
   "./src/am_utils_rs",
   "./src/api_utils_rs",
+  "./src/big_cabinet/",
+  "./src/big_cabinet_core/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
@@ -12,6 +14,7 @@ members = [
   "./src/daybook_ffi",
   "./src/daybook_pdk",
   "./src/daybook_types",
+  "./src/macros",
   "./src/mltools/",
   "./src/plug_dayledger/",
   "./src/secrets_rs",
@@ -64,6 +67,8 @@ big_repo = { path = "./src/big_repo/" }
 #
 # meta
 syn = { version = "2", features = ["extra-traits"] }
+proc-macro2 = "1"
+quote = "1"
 bon = "3.9"
 
 #
