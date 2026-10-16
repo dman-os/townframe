@@ -12,6 +12,7 @@ use axum::{
     routing::any,
 };
 use futures::StreamExt;
+#[cfg(feature = "iroh-http")]
 use http_body_util::BodyExt;
 use hyper::server::conn::http1;
 use hyper_util::{rt::TokioIo, service::TowerToHyperService};
@@ -21,8 +22,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 use thiserror::Error;
+#[cfg(feature = "iroh-http")]
+use tokio::sync::watch;
 use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     task::JoinSet,
 };
 

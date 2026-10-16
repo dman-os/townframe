@@ -11,18 +11,24 @@ The current scope is:
 ```text
 caller ── direct ───────────────► SampleService
        ── native IRPC ───────────► OwnedIrpcAdapter ─► SampleService
-       ── XRPC-shaped executor ──► HttpRequest/HttpResponse seam
+       ── local XRPC executor ──► HttpRequest/HttpResponse seam
+       ── HTTP/Iroh ────────────► xrpc::XrpcRouter ─► registered typed handler
 
-real HTTP/Iroh transport and Cabinet integration are outside this module
+Cabinet repository integration remains outside this reference service
 ```
 
-`LocalXrpcExecutor` is a fake local executor for JSON mapping tests. It is not a real HTTP server, a real network, or an Iroh
-implementation. Production HTTP/Iroh wiring is not integrated here; do not infer that it is from the XRPC-shaped names.
+`LocalXrpcExecutor` is a fake local executor for JSON mapping tests, not a network transport. The separate
+`utils_rs::service::xrpc` module implements real unary HTTP transport and, with `iroh-http`, HTTP over Iroh streams.
+Those transport implementations do not imply completed Cabinet authorization or repository integration.
 
 Useful source and tests:
 
-* [`service.rs`](../src/utils_rs/service.rs) defines context, metadata, the
-declaration macro, dispatch traits, cancellation, and owned IRPC lifecycle.
+* [`service.rs`](../src/utils_rs/service.rs) exposes the service vocabulary and owns
+request context, the declaration macro, cancellation, and owned IRPC lifecycle.
+* [`operations.rs`](../src/utils_rs/service/operations.rs) defines operation metadata,
+request envelopes, dispatch traits, and typed client errors, reexported through `service`.
+* [`xrpc.rs`](../src/utils_rs/service/xrpc.rs) implements unary HTTP transport and
+feature-gated Iroh multiplexing, with loopback transport and lifecycle tests.
 * [`sample.rs`](../src/utils_rs/service/sample.rs) defines the reference service
 and its generated client.
 * [`sample/tests.rs`](../src/utils_rs/service/sample/tests.rs) exercises all
@@ -143,12 +149,13 @@ The generated full IRPC expansion uses the library's `$crate` paths, but the ups
 documentation and gives each declaration a unique `serde_module` name. The renamed-package fixture demonstrates this arrangement.
 
 Use the public service types and generated client. The `service::__serde`, `__irpc`, `__tokio`, and `__tracing` reexports exist to
-support generated code; they are hidden implementation support, not an application API. Do not expose cancellation keys or promise
-atomicity, authorization, real HTTP, Iroh, or Doc-drawer flows that this seam does not implement.
+support generated code; they are hidden implementation support, not an application API. Do not expose cancellation keys or infer
+atomicity, authorization, or Doc-drawer flows from the generated transport seam.
 
 ## Evidence boundaries
 
-The sample tests prove source/compile/runtime behavior for direct dispatch, local XRPC-shaped JSON mapping, native IRPC bounds,
-metadata propagation, context validation, cancellation/lifecycle behavior, and joined shutdown. They do not prove a production
-HTTP server, network transport, Iroh behavior, Cabinet authorization, distributed atomicity, or Root-history permissions. Those
-are integration gates for the eventual owning service, not properties of this reference module.
+The sample tests cover direct dispatch, local XRPC-shaped JSON mapping, native IRPC bounds, metadata propagation,
+context validation, cancellation/lifecycle behavior, and joined shutdown. The separate XRPC transport tests cover real
+loopback HTTP and feature-gated Iroh transport, body and concurrency bounds, ambiguous procedure outcomes, and shutdown.
+Neither suite establishes Cabinet authorization, distributed atomicity, or Root-history permissions. Those remain integration
+gates for the eventual owning repository.

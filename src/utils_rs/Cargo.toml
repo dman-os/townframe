@@ -22,6 +22,7 @@ hash = [
 ]
 native = [
     "tokio/rt-multi-thread",
+    "tokio/fs",
     # "dep:ahash",
 ]
 wasm = ["uuid/js"]

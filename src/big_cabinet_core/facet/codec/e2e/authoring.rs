@@ -1,6 +1,7 @@
 //! Schema-directed authoring, normalization, and hydration behavior.
 
 use super::*;
+use autosurgeon::Hydrate as _;
 
 /// The whole point of the facility: the codec reads what the schema says, not how the field is
 /// spelled. Two facets hold a field of the same name and the same Rust type, and the schema alone

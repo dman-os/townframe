@@ -2,8 +2,6 @@
 
 use super::*;
 
-use autosurgeon::Hydrate as _;
-
 #[macros::facet(id = "org.example.bytesMember", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

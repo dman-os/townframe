@@ -9,10 +9,10 @@ use uuid::Uuid;
 
 /// Limits history hydration without turning refusal into a cryptographic failure.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct HistoryBudget {
-    pub(crate) max_claims: usize,
-    pub(crate) max_entries_per_frontier: usize,
-    pub(crate) max_value_nodes: usize,
+pub struct HistoryBudget {
+    pub max_claims: usize,
+    pub max_entries_per_frontier: usize,
+    pub max_value_nodes: usize,
 }
 
 impl Default for HistoryBudget {
@@ -26,7 +26,7 @@ impl Default for HistoryBudget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ClaimHistoryError {
+pub enum ClaimHistoryError {
     MissingEvidence(&'static str),
     ResourceRefused(&'static str),
     MalformedWitness(&'static str),
@@ -45,36 +45,36 @@ impl ClaimHistoryError {
 
 /// The result intentionally keeps pending evidence distinct from a proven bad witness.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ClaimHistoryResult {
-    Accepted(ReconstructedClaim),
+pub enum ClaimHistoryResult {
+    Accepted(Box<ReconstructedClaim>),
     Pending(ClaimHistoryError),
     ProvenForgery(ClaimHistoryError),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SignatureIntroduction {
-    pub(crate) marker: automerge::ExId,
-    pub(crate) introduction_hash: ChangeHash,
-    pub(crate) parents: Vec<ChangeHash>,
-    pub(crate) resulting_heads: Vec<ChangeHash>,
-    pub(crate) automerge_actor: automerge::ActorId,
+pub struct SignatureIntroduction {
+    pub marker: ObjId,
+    pub introduction_hash: ChangeHash,
+    pub parents: Vec<ChangeHash>,
+    pub resulting_heads: Vec<ChangeHash>,
+    pub automerge_actor: automerge::ActorId,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ReconstructedClaim {
-    pub(crate) introduction: SignatureIntroduction,
-    pub(crate) signature: FacetSignature,
-    pub(crate) claim: FacetClaim,
+pub struct ReconstructedClaim {
+    pub introduction: SignatureIntroduction,
+    pub signature: FacetSignature,
+    pub claim: FacetClaim,
 }
 
 /// Map the signature list operation that introduced a marker to its Automerge change.
 /// Automerge's operation-to-change index is the authoritative assignment; no later scan of the
 /// whole history is needed and a missing index remains pending evidence.
-pub(crate) fn reconstruct_claim_for_marker(
+pub fn reconstruct_claim_for_marker(
     doc: &Automerge,
     origin_document: &DocumentId,
     facet_key: &FacetKey,
-    marker: &automerge::ExId,
+    marker: &ObjId,
     budget: HistoryBudget,
 ) -> ClaimHistoryResult {
     let Some(introduction_hash) = doc.hash_for_opid(marker) else {
@@ -96,13 +96,13 @@ pub(crate) fn reconstruct_claim_for_marker(
         active: HashSet::new(),
     };
     match state.claim_for_entry(introduction_hash, marker.clone()) {
-        Ok(claim) => ClaimHistoryResult::Accepted(claim),
+        Ok(claim) => ClaimHistoryResult::Accepted(Box::new(claim)),
         Err(error) if error.pending() => ClaimHistoryResult::Pending(error),
         Err(error) => ClaimHistoryResult::ProvenForgery(error),
     }
 }
 
-pub(crate) fn reconstruct_claim(
+pub fn reconstruct_claim(
     doc: &Automerge,
     origin_document: &DocumentId,
     facet_key: &FacetKey,
@@ -123,7 +123,7 @@ pub(crate) fn reconstruct_claim(
         active: HashSet::new(),
     };
     match state.claim_for_hash(introduction_hash) {
-        Ok(claim) => ClaimHistoryResult::Accepted(claim),
+        Ok(claim) => ClaimHistoryResult::Accepted(Box::new(claim)),
         Err(error) if error.pending() => ClaimHistoryResult::Pending(error),
         Err(error) => ClaimHistoryResult::ProvenForgery(error),
     }
@@ -131,7 +131,7 @@ pub(crate) fn reconstruct_claim(
 
 /// Recover signatures visible now. The list is a competing set, not an audit log; older entries
 /// remain discoverable by passing their introduction hash to [`reconstruct_claim`].
-pub(crate) fn reconstruct_current_claims(
+pub fn reconstruct_current_claims(
     doc: &Automerge,
     origin_document: &DocumentId,
     facet_key: &FacetKey,
@@ -168,7 +168,7 @@ struct FrontierKey(Vec<ChangeHash>);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SignatureKey {
     hash: ChangeHash,
-    marker: automerge::ExId,
+    marker: ObjId,
 }
 
 fn frontier_key(heads: &[ChangeHash]) -> FrontierKey {
@@ -186,7 +186,7 @@ struct Reconstruction<'a> {
     claims_seen: usize,
     value_nodes: usize,
     cache: HashMap<SignatureKey, ReconstructedClaim>,
-    signature_cache: HashMap<FrontierKey, Vec<(automerge::ExId, ChangeHash, FacetSignature)>>,
+    signature_cache: HashMap<FrontierKey, Vec<(ObjId, ChangeHash, FacetSignature)>>,
     hydrated_signatures: HashMap<SignatureKey, FacetSignature>,
     frontier_entries: HashMap<FrontierKey, usize>,
     active: HashSet<ChangeHash>,
@@ -200,9 +200,11 @@ fn account_frontier_values(
 ) -> Result<(), ClaimHistoryError> {
     let key = frontier_key(heads);
     let used = frontier_entries.entry(key).or_default();
-    let total = used.checked_add(count).ok_or(ClaimHistoryError::ResourceRefused(
-        "signature frontier budget exceeded",
-    ))?;
+    let total = used
+        .checked_add(count)
+        .ok_or(ClaimHistoryError::ResourceRefused(
+            "signature frontier budget exceeded",
+        ))?;
     if total > budget.max_entries_per_frontier {
         return Err(ClaimHistoryError::ResourceRefused(
             "signature frontier budget exceeded",
@@ -217,12 +219,12 @@ impl Reconstruction<'_> {
         &mut self,
         hash: ChangeHash,
     ) -> Result<ReconstructedClaim, ClaimHistoryError> {
-        let change = self
-            .doc
-            .get_change_by_hash(&hash)
-            .ok_or(ClaimHistoryError::MissingEvidence(
-                "signature introduction change",
-            ))?;
+        let change =
+            self.doc
+                .get_change_by_hash(&hash)
+                .ok_or(ClaimHistoryError::MissingEvidence(
+                    "signature introduction change",
+                ))?;
         let mut resulting_heads = change.deps().to_vec();
         resulting_heads.push(hash);
         let markers: Vec<_> = self
@@ -246,7 +248,7 @@ impl Reconstruction<'_> {
     fn claim_for_entry(
         &mut self,
         hash: ChangeHash,
-        marker: automerge::ExId,
+        marker: ObjId,
     ) -> Result<ReconstructedClaim, ClaimHistoryError> {
         let key = SignatureKey {
             hash,
@@ -278,14 +280,14 @@ impl Reconstruction<'_> {
     fn claim_for_entry_uncached(
         &mut self,
         hash: ChangeHash,
-        marker: automerge::ExId,
+        marker: ObjId,
     ) -> Result<ReconstructedClaim, ClaimHistoryError> {
-        let change = self
-            .doc
-            .get_change_by_hash(&hash)
-            .ok_or(ClaimHistoryError::MissingEvidence(
-                "signature introduction change",
-            ))?;
+        let change =
+            self.doc
+                .get_change_by_hash(&hash)
+                .ok_or(ClaimHistoryError::MissingEvidence(
+                    "signature introduction change",
+                ))?;
         let parents = change.deps().to_vec();
         let mut resulting_heads = parents.clone();
         resulting_heads.push(hash);
@@ -380,7 +382,7 @@ impl Reconstruction<'_> {
     fn signature_entries(
         &mut self,
         heads: &[ChangeHash],
-    ) -> Result<Vec<(automerge::ExId, ChangeHash, FacetSignature)>, ClaimHistoryError> {
+    ) -> Result<Vec<(ObjId, ChangeHash, FacetSignature)>, ClaimHistoryError> {
         let key = frontier_key(heads);
         if let Some(entries) = self.signature_cache.get(&key) {
             return Ok(entries.clone());
@@ -454,12 +456,7 @@ impl Reconstruction<'_> {
                 .doc
                 .get_all_at(&meta, "signatures", heads)
                 .map_err(|error| ClaimHistoryError::Automerge(error.to_string()))?;
-            account_frontier_values(
-                &mut self.frontier_entries,
-                self.budget,
-                heads,
-                values.len(),
-            )?;
+            account_frontier_values(&mut self.frontier_entries, self.budget, heads, values.len())?;
             let values: Vec<_> = values
                 .into_iter()
                 .map(|(value, marker)| (value.into_owned(), marker))
@@ -528,12 +525,7 @@ impl Reconstruction<'_> {
             .doc
             .get_all_at(object, property, heads)
             .map_err(|error| ClaimHistoryError::Automerge(error.to_string()))?;
-        account_frontier_values(
-            &mut self.frontier_entries,
-            self.budget,
-            heads,
-            values.len(),
-        )?;
+        account_frontier_values(&mut self.frontier_entries, self.budget, heads, values.len())?;
         let values: Vec<_> = values
             .into_iter()
             .map(|(value, marker)| (value.into_owned(), marker))
@@ -577,12 +569,7 @@ impl Reconstruction<'_> {
             .doc
             .get_all_at(object, property, heads)
             .map_err(|error| ClaimHistoryError::Automerge(error.to_string()))?;
-        account_frontier_values(
-            &mut self.frontier_entries,
-            self.budget,
-            heads,
-            values.len(),
-        )?;
+        account_frontier_values(&mut self.frontier_entries, self.budget, heads, values.len())?;
         let values: Vec<_> = values
             .into_iter()
             .map(|(value, marker)| (value.into_owned(), marker))
@@ -683,7 +670,10 @@ impl Reconstruction<'_> {
             .ok_or(ClaimHistoryError::MissingEvidence("facet UUID alias"))
     }
 
-    fn read_operation(&mut self, heads: &[ChangeHash]) -> Result<ClaimOperation, ClaimHistoryError> {
+    fn read_operation(
+        &mut self,
+        heads: &[ChangeHash],
+    ) -> Result<ClaimOperation, ClaimHistoryError> {
         let mut saw_set = false;
         let mut saw_remove = false;
         let mut malformed = false;
@@ -692,12 +682,7 @@ impl Reconstruction<'_> {
                 .doc
                 .get_all_at(&meta, "deletedAt", heads)
                 .map_err(|error| ClaimHistoryError::Automerge(error.to_string()))?;
-            account_frontier_values(
-                &mut self.frontier_entries,
-                self.budget,
-                heads,
-                values.len(),
-            )?;
+            account_frontier_values(&mut self.frontier_entries, self.budget, heads, values.len())?;
             let values: Vec<_> = values
                 .into_iter()
                 .map(|(value, marker)| (value.into_owned(), marker))
@@ -784,7 +769,7 @@ impl Reconstruction<'_> {
             ));
         }
         match self.doc.object_type(object) {
-            Some(ObjType::Map) => {
+            Ok(ObjType::Map | ObjType::Table) => {
                 let keys: Vec<String> = self
                     .doc
                     .map_range_at(object, .., heads)
@@ -829,7 +814,7 @@ impl Reconstruction<'_> {
                 }
                 Ok(JsonValue::Object(result))
             }
-            Some(ObjType::List) => {
+            Ok(ObjType::List) => {
                 let mut result = Vec::new();
                 for index in 0..self.doc.length_at(object, heads) {
                     let entries = self
@@ -868,12 +853,12 @@ impl Reconstruction<'_> {
                 }
                 Ok(JsonValue::Array(result))
             }
-            Some(ObjType::Text) => {
+            Ok(ObjType::Text) => {
                 Ok(JsonValue::String(self.doc.text_at(object, heads).map_err(
                     |error| ClaimHistoryError::Automerge(error.to_string()),
                 )?))
             }
-            None => Err(ClaimHistoryError::MissingEvidence("facet value object")),
+            Err(error) => Err(ClaimHistoryError::Automerge(error.to_string())),
         }
     }
 
@@ -990,29 +975,7 @@ mod tests {
         key: &SigningKey,
         operation: ClaimOperation,
         value: &JsonValue,
-    ) -> (automerge::ExId, ChangeHash) {
-        append_claim_with_predecessors(
-            doc,
-            document_id,
-            facet_key,
-            uuid,
-            key,
-            operation,
-            value,
-            Vec::new(),
-        )
-    }
-
-    fn append_claim_with_predecessors(
-        doc: &mut Automerge,
-        document_id: &DocumentId,
-        facet_key: &FacetKey,
-        uuid: Uuid,
-        key: &SigningKey,
-        operation: ClaimOperation,
-        value: &JsonValue,
-        predecessors: Vec<Vec<u8>>,
-    ) -> (automerge::ExId, ChangeHash) {
+    ) -> (ObjId, ChangeHash) {
         let claim = FacetClaim {
             origin_document: document_id.clone(),
             facet_key: facet_key.clone(),
@@ -1022,15 +985,24 @@ mod tests {
                 ClaimOperation::Set => Some(value_cid(value).unwrap()),
                 ClaimOperation::Remove => None,
             },
-            predecessors,
+            predecessors: Vec::new(),
         };
+        append_signed_claim(doc, key, value, claim)
+    }
+
+    fn append_signed_claim(
+        doc: &mut Automerge,
+        key: &SigningKey,
+        value: &JsonValue,
+        claim: FacetClaim,
+    ) -> (ObjId, ChangeHash) {
         let signature = key
             .sign(&claim.signing_bytes().unwrap())
             .to_bytes()
             .to_vec();
         let (facets, _, _, meta, signatures, _) = paths(doc);
         let mut tx = doc.transaction();
-        match operation {
+        match claim.operation {
             ClaimOperation::Set => match value {
                 JsonValue::Null => tx.put(&facets, FACET, ScalarValue::Null).unwrap(),
                 JsonValue::String(text) => tx.put(&facets, FACET, text.as_str()).unwrap(),
@@ -1063,7 +1035,7 @@ mod tests {
         doc: &mut Automerge,
         key: &SigningKey,
         signature: Vec<u8>,
-    ) -> (automerge::ExId, ChangeHash) {
+    ) -> (ObjId, ChangeHash) {
         let (_, _, _, _, signatures, _) = paths(doc);
         let mut tx = doc.transaction();
         assert_eq!(tx.length(&signatures), 1);
@@ -1082,7 +1054,7 @@ mod tests {
     fn append_invalid_signature_replacement(
         doc: &mut Automerge,
         key: &SigningKey,
-    ) -> (automerge::ExId, ChangeHash) {
+    ) -> (ObjId, ChangeHash) {
         replace_signature_slot(doc, key, vec![0; 64])
     }
 
@@ -1195,7 +1167,7 @@ mod tests {
 
     #[test]
     fn invalid_signature_is_forgery_but_missing_signature_evidence_is_pending() {
-        let (mut doc, document_id, facet_key, uuid, key) = fixture();
+        let (mut doc, document_id, facet_key, _, key) = fixture();
         let (facets, _, _, _, signatures, _) = paths(&doc);
         let mut tx = doc.transaction();
         tx.put(&facets, FACET, "invalid").unwrap();
@@ -1310,15 +1282,15 @@ mod tests {
         // A sequential successor replaces the entry observed at its base.  The
         // first claim remains reconstructable from its introducing change, but
         // is no longer in the current competing set.
-        let (successor_marker, successor_hash) = append_claim_with_predecessors(
+        let (successor_marker, successor_hash) = append_signed_claim(
             &mut doc,
-            &document_id,
-            &facet_key,
-            uuid,
             &key,
-            ClaimOperation::Set,
             &json!("two"),
-            vec![first_id.clone()],
+            FacetClaim {
+                value_cid: Some(value_cid(&json!("two")).unwrap()),
+                predecessors: vec![first_id.clone()],
+                ..first_signed.claim.clone()
+            },
         );
         let ClaimHistoryResult::Accepted(successor) = reconstruct_claim_for_marker(
             &doc,
@@ -1343,15 +1315,15 @@ mod tests {
         // successor, while the first claim remains historical evidence.
         let mut clean_chain = doc.fork();
         let mut invalid_branch = doc.fork();
-        let (third_marker, third_hash) = append_claim_with_predecessors(
+        let (third_marker, third_hash) = append_signed_claim(
             &mut clean_chain,
-            &document_id,
-            &facet_key,
-            uuid,
             &key,
-            ClaimOperation::Set,
             &json!("three"),
-            vec![successor_id.clone()],
+            FacetClaim {
+                value_cid: Some(value_cid(&json!("three")).unwrap()),
+                predecessors: vec![successor_id.clone()],
+                ..successor.claim.clone()
+            },
         );
         let ClaimHistoryResult::Accepted(third) = reconstruct_claim_for_marker(
             &clean_chain,
@@ -1362,6 +1334,7 @@ mod tests {
         ) else {
             panic!("valid multi-level successor was not accepted")
         };
+        assert_eq!(third.introduction.introduction_hash, third_hash);
         assert_eq!(third.introduction.parents, vec![successor_hash]);
         assert_eq!(third.claim.predecessors, vec![successor_id]);
         let third_signed = SignedFacetClaim::from_signature(
@@ -1379,15 +1352,15 @@ mod tests {
             append_invalid_signature_replacement(&mut invalid_branch, &key);
         clean_chain.merge(&mut invalid_branch).unwrap();
 
-        let (fourth_marker, fourth_hash) = append_claim_with_predecessors(
+        let (fourth_marker, fourth_hash) = append_signed_claim(
             &mut clean_chain,
-            &document_id,
-            &facet_key,
-            uuid,
             &key,
-            ClaimOperation::Set,
             &json!("four"),
-            vec![third_id.clone()],
+            FacetClaim {
+                value_cid: Some(value_cid(&json!("four")).unwrap()),
+                predecessors: vec![third_id.clone()],
+                ..third.claim.clone()
+            },
         );
         let fourth_change = clean_chain.get_change_by_hash(&fourth_hash).unwrap();
         assert!(fourth_change.deps().contains(&invalid_hash));
@@ -1444,9 +1417,7 @@ mod tests {
             frontier_entries: HashMap::new(),
             active: HashSet::new(),
         };
-        let fourth_from_state = state
-            .claim_for_entry(fourth_hash, fourth_marker)
-            .unwrap();
+        let fourth_from_state = state.claim_for_entry(fourth_hash, fourth_marker).unwrap();
         let parent_frontier = frontier_key(&fourth_from_state.introduction.parents);
         assert!(state.signature_cache.contains_key(&parent_frontier));
         let cache_len = state.signature_cache.len();
@@ -1519,7 +1490,8 @@ mod tests {
         tx.commit().0.unwrap();
         let (_, _, _, live_meta, _, _) = paths(&live);
         let mut tx = live.transaction();
-        tx.put_object(&live_meta, "deletedAt", ObjType::List).unwrap();
+        tx.put_object(&live_meta, "deletedAt", ObjType::List)
+            .unwrap();
         tx.commit().0.unwrap();
         tombstone.merge(&mut live).unwrap();
         let (marker, _) = append_claim(
@@ -1624,8 +1596,8 @@ mod tests {
             .sign(&claim.signing_bytes().unwrap())
             .to_bytes()
             .to_vec();
-        let mut tx = doc.transaction();
         let (facets, _, _, _, signatures, _) = paths(&doc);
+        let mut tx = doc.transaction();
         tx.put(&facets, FACET, "same").unwrap();
         for _ in 0..2 {
             let signature_index = tx.length(&signatures);
@@ -1650,9 +1622,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(claims.len(), 2);
-        assert!(claims
-            .iter()
-            .all(|claim| claim.introduction.introduction_hash == hash));
+        assert!(
+            claims
+                .iter()
+                .all(|claim| claim.introduction.introduction_hash == hash)
+        );
         let by_marker: HashSet<_> = claims
             .iter()
             .map(|claim| claim.introduction.marker.clone())
