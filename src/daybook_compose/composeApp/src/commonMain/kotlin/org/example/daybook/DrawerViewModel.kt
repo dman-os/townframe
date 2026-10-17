@@ -179,11 +179,13 @@ class DrawerViewModel(private val drawerRepo: DrawerRepoFfi) : ViewModel() {
             // `viewModelScope` and take the whole scope down with it. Any other
             // `IllegalStateException` is a real bug and keeps propagating.
             if (e.message?.contains("has already been destroyed") != true) {
-                throw IllegalStateException(e)
+                rethrowRefreshFailure(e)
             }
             refreshRunner.cancel()
         }
     }
+
+    private fun rethrowRefreshFailure(error: IllegalStateException): Nothing = throw error
 
     private suspend fun refreshDocIdsNow() {
         val hadData = _docListState.value is DocListState.Data
