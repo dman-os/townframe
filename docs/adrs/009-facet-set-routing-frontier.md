@@ -20,7 +20,7 @@ The new layer must preserve two properties that can be easy to lose in a
 conventional append-only event log:
 
 - consumers need the latest routed state for each
-  `(facet tag, logical document)` key, not every obsolete intermediate payload
+  `(facet tag, doc)` key, not every obsolete intermediate payload
   forever;
 - removal must remain observable long enough for every interested consumer to
   remove its derived state.
@@ -35,14 +35,11 @@ implementation.
 - **Facet tag:** the schema/type tag shared by one or more facet instances,
   distinct from a full `FacetKey`.
 - **Route key:** `(FacetTag, DocumentId)`.
-- **Routing value:** the latest accepted default-branch version and matching
-  facet keys for one route key.
+- **Routing value:** the latest accepted doc version and matching facet keys for one route key.
 - **Routing tombstone:** a durable frontier value saying that the document no
   longer matches the tag.
 - **Source cursor:** the durable contiguous `DocDeltaRevisionStore` cursor
   through which the routing projection has been updated.
-- **Default branch:** the logical document's main branch, whose `BranchId`
-  equals `DocumentId` under ADR 007.
 
 ## Decision
 
@@ -53,7 +50,7 @@ and adds a KeyedFrontier-backed collapsed routing projection. These are two
 views of the same accepted index state and must advance atomically.
 
 The facet-set builder is a specialized durable projector, not a new walker state
-model. It consumes a main-branch-filtered `DocDeltaRevisionStore` through an
+model. It consumes a `DocDeltaRevisionStore` through an
 active `DeltaWalker`, and publishes a `RepoDeltaRevisionStore<FacetSetEvent>`.
 Its projection state records the accepted source cursor and sparse document
 state; downstream consumers own their own `DeltaWalker` state and progress. The
@@ -66,16 +63,11 @@ The output routing frontier is exposed through the inert typed
 active store-plus-consumer-state machine driven by an embedder; no separate
 facet-set walker or acknowledgment model is introduced.
 
-Branch-specific consumers use `DocDeltaRevisionStore` or
-`FacetDeltaRevisionStore` directly; routing every branch through the default
-facet-set index would blur logical document membership and multiply common index
-work.
+Every branch is an ordinary doc. Broad and branch-specific consumers can use
+the same projection keyed by the exact `DocumentId`; a branch relationship does
+not create a second logical route.
 
-This default is especially useful because broad consumers ordinarily model the
-logical document's published/current content, while editors and branch review
-tools already know the exact physical `BranchId` they want.
-
-### 2. Route keys are tag and logical document
+### 2. Route keys are tag and doc
 
 The frontier key is:
 
@@ -88,7 +80,6 @@ The live value contains at least:
 ```text
 FacetRoute {
     document_id: DocumentId,
-    branch_id: BranchId,           // the default branch
     document_version: Version,
     matching_keys: Set<FacetKey>,
 }
@@ -100,13 +91,9 @@ matches” and “which concrete facets caused the match.” The version is the
 explicit accepted version a downstream walker must read; it must not infer
 content from a mutable current store.
 
-`BranchId` is retained even though it equals `DocumentId` for the default
-branch. This makes the read target explicit and prevents callers from depending
-on the equality as an untyped storage shortcut.
-
 ### 3. Every source revision updates all current tags
 
-For each accepted default-branch document revision, the projection performs one
+For each accepted doc revision, the projection performs one
 transaction:
 
 1. Load the distinct facet tags and matching keys at the explicit new document
@@ -129,7 +116,7 @@ tag's tombstone.
 
 ### 4. Deletion and removal use tombstones
 
-When a document is deleted or leaves the accepted default-branch scope, the
+When a document is deleted or leaves the accepted doc scope, the
 projection writes a tombstone for every tag previously present on that document
 in the same revision.
 
@@ -139,7 +126,6 @@ document that may no longer be available:
 ```text
 FacetRouteRemoved {
     document_id: DocumentId,
-    prior_branch_id: BranchId,
     prior_document_version: Version,
 }
 ```
@@ -275,8 +261,6 @@ contract.
 - Documents with unusually many tags cause proportional write amplification.
 - Tombstones require a safe retention/pruning policy in the frontier
   implementation.
-- The default-branch focus means branch-aware consumers use a different, more
-  exact walker.
 - Authority-filtered projections may differ between peers, as intended by the
   idiocentric model.
 

@@ -229,21 +229,20 @@ Keyhive and Sedimentree materialization barriers, and only then publishes
 materialized Automerge heads. The new keyed frontier replaces its output part
 log; it does not bypass those input streams or barriers.
 
-The physical store reports branch document ID, source revision, current heads,
+The physical store reports doc ID, source revision, current heads,
 source-group membership changes, and removals. This layer knows storage IDs but
 does not claim Daybook logical semantics.
 
 #### Document delta revisioned store
 
-`DocDeltaRevisionStore` validates `daybook.branch` and maps accepted physical
-changes to logical `DocumentId` and `BranchId` values defined by ADR 007. It is
-an inert filtered store over the physical store. Its own sparse, revisioned
-state records the accepted per-branch version needed to calculate
-`previous -> current`. Advancing that projection is part of polling the store;
-it does not acknowledge downstream consumption.
+`DocDeltaRevisionStore` maps accepted physical changes to the `DocumentId`
+that identifies that doc. A branch is another doc and needs no identity
+translation. The store is an inert filtered view over the physical store. Its
+own sparse, revisioned state records the accepted per-doc version needed to
+calculate `previous -> current`. Advancing that projection is part of polling
+the store; it does not acknowledge downstream consumption.
 
-That sparse state is keyed by physical `BranchId`, not logical `DocumentId`, and
-contains at least:
+That sparse state is keyed by `DocumentId` and contains at least:
 
 ```text
 DocDeltaItemState {
@@ -252,26 +251,22 @@ DocDeltaItemState {
 }
 ```
 
-It exists only for branch documents admitted by that store's filters. Separate
+It exists only for docs admitted by that store's filters. Separate
 filtered stores may therefore have different sparse state. Downstream walkers
 retain independent consumer progress and may consume the same store serially or
 concurrently.
 
-Source routes can target exact branch IDs or Keyhive groups. Keyhive groups are
+Source routes can target exact doc IDs or Keyhive groups. Keyhive groups are
 valid tag-like physical filters: they may be private/local or shared and a
-document may appear in many. A drawer may therefore maintain one group for all
-of its shared branches and another for main branches. Attaching a document to a
-shared group still deliberately changes its authority/synchronization graph;
-local/private routing groups do not expose that membership to other peers.
-
-Filtering to main branches may use such a main-branch group. Where one is not
-maintained, a thin revisioned-store projection over `DocDeltaRevisionStore`
-accepts only branch identities for which `BranchId == DocumentId` and can
-materialize a local keyed route for later consumers.
+document may appear in many. A drawer may therefore route the docs reachable through its groups. Attaching
+a doc to a shared group deliberately changes its authority/synchronization
+graph; local routing groups do not expose that entry to other peers. Branch
+relationships do not create routes: a branch doc is routed only by its own ID
+or authority-group membership.
 
 #### Facet delta revisioned store
 
-`FacetDeltaRevisionStore` is an inert projection configured with an exact branch
+`FacetDeltaRevisionStore` is an inert projection configured with an exact doc ID
 and `FacetKey`. It composes `DocDeltaRevisionStore`, enumerates accepted facet
 write points, and includes the authored identity/provenance required by the
 dmeta model. Downstream consumer progress remains owned by whichever serial or

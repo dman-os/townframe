@@ -11,7 +11,10 @@ path = "lib.rs"
 
 [dependencies]
 # internal
+utils_rs.workspace = true
 big_cabinet_core = { path = "../big_cabinet_core" }
+big_sync_core.workspace = true
+big_repo.workspace = true
 secrets_rs.workspace = true
 service_utils_rs.workspace = true
 sqlx_utils_rs.workspace = true
@@ -21,23 +24,27 @@ irpc.workspace = true
 tracing.workspace = true
 
 # encoding
+automerge.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
 uuid = { workspace = true, features = ["v4"] }
+atproto-dasl.workspace = true
 
-#
 # crypto and identity
 ed25519-dalek.workspace = true
 rand.workspace = true
 zeroize = "1"
 
-#
 # errors and durable authority state
 thiserror.workspace = true
 sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
-serde_json.workspace = true
 keyring-core = { version = "1.0", default-features = false }
 tempfile.workspace = true
 url.workspace = true
+schemars = "1.2.2"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+ed25519-dalek.workspace = true
