@@ -1,161 +1,203 @@
 # Big Cabinet services
 
-## What this module is
+## What this crate is
 
-The reusable service foundation is `utils_rs::service`; the reference service is `utils_rs::service::sample`. This is a typed,
-transport-neutral service seam, not a completed Cabinet server. The historical name `SampleRepo` does not exist in this checkout:
-use the public `SampleService` and generated `SampleClient`.
+The reusable service foundation is the `service_utils_rs` crate; the reference service is `service_utils_rs::sample`. This is a
+typed, transport-neutral service seam, not a completed Cabinet server. Nothing here implements Cabinet authorization, drawer
+flows, or repository integration.
 
-The current scope is:
+A service is declared once and reached three ways, all of which run the same hosted handler:
 
 ```text
-caller ── direct ───────────────► SampleService
-       ── native IRPC ───────────► OwnedIrpcAdapter ─► SampleService
-       ── local XRPC executor ──► HttpRequest/HttpResponse seam
-       ── HTTP/Iroh ────────────► xrpc::XrpcRouter ─► registered typed handler
-
-Cabinet repository integration remains outside this reference service
+Client<Proto>::call(ctx, params)
+    ├─ Direct ─ routed inline on the caller's task ──┐
+    ├─ Irpc ─── bounded adapter spawns one task ──────┼─► Host<H> ─► layers ─► Handler<P>
+    └─ Xrpc ─── HTTP router decodes the request ──────┘
 ```
 
-`LocalXrpcExecutor` is a fake local executor for JSON mapping tests, not a network transport. The separate
-`utils_rs::service::xrpc` module implements real unary HTTP transport and, with `iroh-http`, HTTP over Iroh streams.
-Those transport implementations do not imply completed Cabinet authorization or repository integration.
+XRPC over HTTP is the canonical interface; direct and IRPC are same-process and same-node optimizations of it. With the
+`iroh-http` feature the same HTTP/1 wire is also served over Iroh streams.
 
-Useful source and tests:
+Where things live:
 
-* [`service.rs`](../src/utils_rs/service.rs) exposes the service vocabulary and owns
-request context, the declaration macro, cancellation, and owned IRPC lifecycle.
-* [`operations.rs`](../src/utils_rs/service/operations.rs) defines operation metadata,
-request envelopes, dispatch traits, and typed client errors, reexported through `service`.
-* [`xrpc.rs`](../src/utils_rs/service/xrpc.rs) implements unary HTTP transport and
-feature-gated Iroh multiplexing, with loopback transport and lifecycle tests.
-* [`sample.rs`](../src/utils_rs/service/sample.rs) defines the reference service
-and its generated client.
-* [`sample/tests.rs`](../src/utils_rs/service/sample/tests.rs) exercises all
-three local transport shapes.
-* [`external_consumer_fixture.rs`](../src/utils_rs/external_consumer_fixture.rs)
-is a renamed-package consumer fixture for macro hygiene and public API use.
+* [`operation.rs`](../src/service_utils_rs/operation.rs): the `Operation` trait a request type implements, `XrpcOperation`
+  identity, `Envelope`, the `Reply`/`EventReply` channel aliases, and `ClientError`.
+* [`context.rs`](../src/service_utils_rs/context.rs): `RequestContext`, `HttpMetadata`, `ContextError`.
+* [`middleware.rs`](../src/service_utils_rs/middleware.rs): `Handler<P>`, tower-shaped `Layer`/`Stack`/`ServiceBuilder`, and the
+  built-in `Trace` layer.
+* [`host.rs`](../src/service_utils_rs/host.rs): `Host<H>` (validation, cancellation, dispatch) and the per-protocol `Route` trait.
+* [`client.rs`](../src/service_utils_rs/client.rs): the one `Client<Proto>` and `ClientStream`.
+* [`admission.rs`](../src/service_utils_rs/admission.rs): bounded permits, activity counters, and cancellation transport for
+  received requests.
+* [`irpc_adapter.rs`](../src/service_utils_rs/irpc_adapter.rs): serves a protocol from an IRPC queue.
+* [`lifecycle.rs`](../src/service_utils_rs/lifecycle.rs): `StopToken`/`Spawner`, the one shutdown idiom.
+* [`xrpc.rs`](../src/service_utils_rs/xrpc.rs) and `xrpc/`: HTTP router, client, TCP server, Iroh wire, and their tests.
+* [`sample.rs`](../src/service_utils_rs/sample.rs), `sample/protocol.rs`, `sample/service.rs`, `sample/tests.rs`: the reference
+  service, laid out the way a new service should be.
+* [`e2e.rs`](../src/service_utils_rs/e2e.rs) and `e2e/`: contracts that must hold across all three transports, exercised
+  against the sample.
 
-## Declare one closed operation vocabulary
+## Declare a protocol
 
-`declare_typed_service!` is the single operation declaration. In the sample it is the block beginning at `service/sample.rs:95`.
-Each row supplies the Rust operation variant, typed params, typed output, XRPC kind, HTTP method/input, external NSID, and schema
-names:
+There is no declaration macro. A protocol is three ordinary items, shown here from `sample/protocol.rs`.
+
+**The request type names its operation.** Output, error, and XRPC identity hang off the params type, so no transport ever
+re-spells them:
 
 ```rust
-unary {
-    GetValue => get_value / get_value_with_metadata(GetValueParams)
-        -> GetValueOutput = Query, Get, Query,
-        "org.example.sample.getValue", "GetValueOutput", "SampleError";
-}
-stream {
-    SubscribeEvents => subscribe_events /
-        subscribe_events_with_metadata(SubscribeEventsParams) -> SampleEvent
-        = Subscription, Get, Query,
-        "org.example.sample.subscribeEvents", "SampleEvent", "SampleError";
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutValue { pub value: String }
+
+impl Operation for PutValue {
+    type Output = PutValueOutput;
+    type Error = SampleError;
+    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.sample.putValue")
+        .with_schemas("PutValueOutput", "SampleError");
 }
 ```
 
-The real declaration also has `PutValue` and `ReadState`, plus named generated transport/IRPC/dispatch items. The macro emits the
-closed operation enum, `XRPC_OPERATIONS`, typed methods, native IRPC messages, and transport adapters from these rows. Adding an
-operation means changing this declaration and its handler; callers do not register arbitrary operation strings at runtime.
+`XrpcOperation::query`/`procedure`/`subscription` fix the conventional HTTP mapping (queries and subscriptions are `GET` with
+query-string input, procedures are `POST` with a JSON body). A subscription additionally implements `Subscription { type Event }`
+and its `Output` is the handler-side `EventStream<Event, Error>`.
 
-Params, outputs, stream items, and errors are domain-owned types. The sample's `GetValueParams` is a closed unit struct;
-`PutValueParams`, `ReadStateParams`, and `SubscribeEventsParams` carry only their declared fields. `SampleError` contains context
-failure, invalid input, subscription lag, and bounded stream capacity errors. Keep domain errors separate from transport errors:
-`super::ClientError<SampleError>` (exposed as the sample's `ClientError`) distinguishes `Operation(SampleError)` from `Transport { message, outcome_unknown }`. Query transport failure is known not to have committed; procedure and subscription failure can have an unknown outcome, so do not blindly retry them.
-
-The declaration also connects the shared request context and HTTP metadata. Use `Request<P>` when metadata is needed; the
-convenience method constructs it with default metadata. `HttpMetadata` carries authorization, idempotency key,
-traceparent/tracestate, and timeout beside domain JSON. It is not a claim that a service has implemented authorization or
-idempotency semantics.
-
-## Calling the sample directly
-
-Direct execution is caller-owned and inline: `SampleClient::direct` stores an `Arc<SampleService>` and invokes the service
-dispatch implementation without spawning a handler for each call. This is a useful local composition boundary, not a hidden
-server.
-
-This complete example uses only actual public symbols from `utils_rs::service::sample`:
+**The protocol enum is irpc's own derive.** Each variant wraps one request in an `Envelope` and names its reply channel through
+the request's `Operation` impl:
 
 ```rust
-use std::sync::Arc;
-use utils_rs::service::RequestContext;
-use utils_rs::service::sample::{
-    ClientError, GetValueParams, PutValueParams, SampleClient, SampleService,
-};
-
-#[tokio::main]
-async fn main() -> Result<(), ClientError> {
-    let service = SampleService::new("initial");
-    let client = SampleClient::direct(Arc::clone(&service));
-    let context = RequestContext::root();
-
-    let before = client.get_value(context.child(), GetValueParams).await?;
-    let after = client
-        .put_value(
-            context.child(),
-            PutValueParams { value: "ready".into() },
-        )
-        .await?;
-
-    println!("{} -> {}", before.snapshot.value, after.snapshot.value);
-    service.shutdown().await;
-    Ok(())
+#[rpc_requests(message = SampleMessage)]
+#[derive(Debug, Serialize, Deserialize)]
+pub enum SampleProtocol {
+    #[rpc(tx = Reply<GetValue>)]            GetValue(Envelope<GetValue>),
+    #[rpc(tx = Reply<PutValue>)]            PutValue(Envelope<PutValue>),
+    #[rpc(tx = Reply<ReadState>)]           ReadState(Envelope<ReadState>),
+    #[rpc(tx = EventReply<SubscribeEvents>)] SubscribeEvents(Envelope<SubscribeEvents>),
 }
 ```
 
-`SampleService::new` starts its projector task. `put_value` writes the source, then waits for the independent projector watermark
-before returning. The projector is also the path for `inject_source`; external source changes are not mutation events.
-`read_state` returns a snapshot and a `reset_required` signal when the caller's cursor is ahead. `subscribe_events` is a separate
-process observation receiver, while `SampleClient::subscribe_events` is the typed client subscription operation.
+**`Route` is the one hand-written match.** Its `where` clause is the honest statement of what a service must implement to host
+the protocol; `mount` lists the unary operations for the HTTP router:
 
-## Native IRPC and bounded work
+```rust
+impl<H> Route<H> for SampleProtocol
+where
+    H: Handler<GetValue> + Handler<PutValue> + Handler<ReadState> + Handler<SubscribeEvents>,
+{
+    fn route(host: Arc<Host<H>>, dispatch: Dispatch, message: SampleMessage) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            match message {
+                SampleMessage::GetValue(m) => host.unary(dispatch, m).await,
+                SampleMessage::PutValue(m) => host.unary(dispatch, m).await,
+                SampleMessage::ReadState(m) => host.unary(dispatch, m).await,
+                SampleMessage::SubscribeEvents(m) => host.stream(dispatch, m).await,
+            }
+        })
+    }
 
-`SampleClient::irpc` sends generated messages through an `irpc::Client`. The sample helper `spawn_sample_irpc(service,
-queue_capacity, max_handlers, max_stream_pumps)` creates the bounded Tokio input queue and a `SampleIrpcAdapter`. The queue
-bounds waiting messages; `max_handlers` bounds unary admitted/spawned work; `max_stream_pumps` independently bounds active
-subscription pumps. Unary admission obtains a permit before spawning, so a bounded queue is not drained into an unbounded set of
-parked tasks. A stream that cannot obtain its pump permit receives the typed `SubscriptionCapacityExceeded` error.
+    fn mount(router: &mut XrpcRouter, host: Arc<Host<H>>) -> Result<(), XrpcRegistrationError> {
+        router.mount::<GetValue, H>(Arc::clone(&host))?;
+        router.mount::<PutValue, H>(Arc::clone(&host))?;
+        router.mount::<ReadState, H>(host)
+    }
+}
+```
 
-`OwnedIrpcAdapter` owns child join handles and exposes activity counters for qualification. `shutdown()` on `SampleIrpcAdapter`
-stops the dispatcher and joins owned handlers. `OwnedIrpcAdapter::shutdown_children` is the explicit join path. `Drop` can only
-abort: synchronous drop cannot join and therefore must not be described as proof of clean completion. Shut down service, adapter,
-and executor explicitly in reverse ownership order when their tasks matter.
+Adding an operation means a new request type, a new variant, and a new match arm; the compiler reports every site that is missing.
+Params, outputs, events, and errors are domain-owned types. Every service error type must implement `From<ContextError>` because
+the host, not the handler, rejects invalid, expired, or cancelled requests and reports that through the operation's own error.
+
+## Implement and host a service
+
+A service implements `Handler<P>` once per operation. The whole `Envelope` is passed so a handler or layer can read the request
+context and HTTP metadata without a side channel:
+
+```rust
+impl Handler<PutValue> for SampleService {
+    async fn call(&self, request: Envelope<PutValue>) -> Result<PutValueOutput, SampleError> { .. }
+}
+```
+
+Middleware is tower-shaped: a `Layer` wraps a handler in another handler, generic over `P`, so one layer applies to every
+operation without naming any of them. `ServiceBuilder` composes layers; the first `.layer(..)` is closest to the handler. The
+crate ships `Trace` (a `tracing` span per call with NSID and request identity); the sample adds a demonstration `Log` layer.
+
+```rust
+let handler = ServiceBuilder::new()
+    .layer(Trace::new("sample"))
+    .layer(Log::new(calls.clone()))
+    .service(Arc::clone(&service));
+let (host, host_stop) = Host::new(handler);
+```
+
+`Host` enforces the two guarantees no transport may skip: the request context is validated before the stack runs, and the stack is
+raced against request cancellation and host shutdown. Those are not optional layers. Everything else (authorization, idempotency,
+tracing) is a layer.
+
+## Call a service
+
+`Client<Proto>` is named by the protocol, not the implementation, so a consumer holds a `Client<SampleProtocol>` whether the
+service runs in-process, in another process on the node, or over HTTP. The request value selects the operation:
+
+```rust
+let client = Client::<SampleProtocol>::direct(host);          // or ::irpc(irpc_client) / ::xrpc(xrpc_client)
+let snapshot = client.call(ctx.child(), GetValue {}).await?;
+let mut events = client.subscribe(ctx.child(), SubscribeEvents { after_source_revision: 0 }).await?;
+while let Some(event) = events.recv().await? { .. }
+```
+
+`call_with_metadata`/`subscribe_with_metadata` take an explicit `Envelope` when `HttpMetadata` (authorization, idempotency key,
+traceparent/tracestate, timeout) matters. Carrying metadata is not a claim that a service implements those semantics.
+
+`ClientError<E>` keeps transport failure distinct from a semantic `Operation(E)`. `Transport { outcome_unknown }` is `true` for a
+procedure or subscription whose response was lost, because the server may have committed before the loss; a query is safe to retry.
+Subscription establishment failures arrive as the first, terminal item of the `ClientStream` on every transport; `Err` from
+`subscribe` itself means the client could not send the request. The unary HTTP transport does not carry subscriptions and says so
+with a transport error.
+
+Over HTTP a typed domain error travels in the standard XRPC error envelope with status `DOMAIN_ERROR_STATUS` (400): `error` is the
+operation's declared error schema name, `message` is the error's `Debug`, and `operationError` (`DOMAIN_ERROR_FIELD`) is the
+serialized error value the client decodes back into `E`.
+
+## IRPC and bounded work
+
+`IrpcAdapter::local(host, admission, queue)` returns an `irpc::Client` for `Client::irpc` plus a `StopToken`. The queue bounds
+waiting messages; `Admission::new(max_handlers, max_stream_pumps)` bounds unary work and subscription pumps independently. Unary
+admission obtains a permit before spawning, so a bounded queue is never drained into an unbounded set of parked tasks. A
+subscription that cannot obtain a pump permit receives `ContextError::StreamCapacityExceeded` as its first item. A pump ends on
+stream EOF, a terminal error, request cancellation, adapter stop, or the subscriber going away, and releases its permit on each path.
+
+## Lifecycle
+
+Every long-lived component boots into `(Arc<Self>, StopToken)`. Background work is spawned through the token's `Spawner` and
+watches its cancellation. `StopToken::stop` cancels, closes, and *joins*: it never aborts, so a task that ignores cancellation is
+a liveness bug that shows up as a hung stop rather than silently lost work. Tokens compose in construction order reversed with
+`then`: `sample::boot` returns `host_stop.then(service_stop)` so in-flight calls end before the projector they may be waiting on.
+Work admitted by the IRPC adapter also observes the adapter's own stop, so stopping the adapter never waits on the host.
 
 ## Context, clocks, and cancellation
 
-`RequestContext::root()` supplies request, trace, and span IDs. `child()` keeps the request/trace identity while creating a child
-span. `with_command_id` and `with_time_budget` add optional propagation data. `for_receiver()` rebuilds a receiver-local `Instant`
-from the serialized absolute Unix-millisecond boundary; it does not reset elapsed budget. Validate at the receiving boundary.
-Wall-clock transport data and monotonic local waiting are deliberately distinct; clock skew and clock failure are not converted
-into an authorization claim.
+`RequestContext::root()` supplies request, trace, and span IDs; `child()` keeps request/trace identity and opens a child span.
+`with_command_id` and `with_time_budget` add optional propagation data. `Envelope::for_receiver()` rebuilds a receiver-local
+deadline from the serialized absolute Unix-millisecond boundary without resetting elapsed budget; the IRPC adapter applies it on
+admission. Wall-clock transport data and monotonic local waiting are deliberately distinct.
 
-Cancellation is a one-shot state transition, not rollback. `cancel()` marks the request state and wakes waiters; a handler may
-stop at the cancellation select, but an already completed source write is not undone. Transport cancellation is bounded by
-`cancellation_channel(scope_capacity)`, and admitted work is keyed by the full `(request_id, token)` plus the transport
-epoch/ordinal lease. A request token is one-shot: do not reuse it for another transport request.
+Cancellation is a one-shot state transition, not rollback: `cancel()` wakes the host's select, but a completed source write is not
+undone. Transport cancellation is bounded by `cancellation_channel(scope_capacity)`; admitted work is keyed by `(request_id, token)`
+plus the transport lease. `Client` opens the transport scope around an IRPC call and keeps it inside the returned `ClientStream` for
+a subscription, so a caller can still cancel after establishment.
 
-The producer owns the transport scope. Keep the returned `CancellationRequestGuard` until a unary terminal result or deliberate
-drop. For a stream, generated IRPC stores the guard in the returned subscription so it remains live through EOF, an error, or
-subscription drop. Guard retirement removes the live lease; dropping a guard is not an implicit cancellation and cancellation is
-not a rollback. Terminal scope history is bounded rather than an ever-growing tombstone set. The receiver's cancellation admission
-and the adapter's handler/stream permits are separate bounds. On server EOF or error, the stream pump stops and releases its task/permit/registration; the client-side guard remains in the returned subscription until that subscription is dropped.
+## The sample
 
-## Serialization and macro hygiene
-
-The generated full IRPC expansion uses the library's `$crate` paths, but the upstream `irpc` derive emits absolute `::irpc`,
-`::serde`, and `::tracing` paths. A full consumer therefore declares those direct dependencies as shown in the module
-documentation and gives each declaration a unique `serde_module` name. The renamed-package fixture demonstrates this arrangement.
-
-Use the public service types and generated client. The `service::__serde`, `__irpc`, `__tokio`, and `__tracing` reexports exist to
-support generated code; they are hidden implementation support, not an application API. Do not expose cancellation keys or infer
-atomicity, authorization, or Doc-drawer flows from the generated transport seam.
+`sample::boot("initial")` returns a `Sample { service, host, calls }` and one stop token. `SampleService` models a
+source-and-projector service: writers allocate source revisions at one boundary, an owned projector task interprets the latest
+source into readable state (coalescing bursts), and `SubscribeEvents` observes interpreted changes. `PutValue` writes only the
+source and waits for the projector watermark, which is a completion contract, not a direct projector call. `inject_source` is the
+same path for externally synchronised changes, so those are not mutation events. `ReadState` returns `reset_required` when the
+caller's cursor is ahead of the source, and a lagged subscriber receives `SubscriptionLagged` as a terminal item and must reread.
 
 ## Evidence boundaries
 
-The sample tests cover direct dispatch, local XRPC-shaped JSON mapping, native IRPC bounds, metadata propagation,
-context validation, cancellation/lifecycle behavior, and joined shutdown. The separate XRPC transport tests cover real
-loopback HTTP and feature-gated Iroh transport, body and concurrency bounds, ambiguous procedure outcomes, and shutdown.
-Neither suite establishes Cabinet authorization, distributed atomicity, or Root-history permissions. Those remain integration
-gates for the eventual owning repository.
+`sample/tests.rs` covers the sample's own semantics through the direct transport. `e2e/` boots the full stack and proves parity
+of outputs, typed domain errors, host-side context rejection, and metadata delivery across direct, IRPC, and HTTP, plus IRPC
+admission bounds, cancellation, lost-reply classification, and joined shutdown. `xrpc/tests.rs` covers the HTTP wire itself: body
+and concurrency bounds, ambiguous procedure outcomes, request-id correlation, and server shutdown, with the Iroh wire under
+`iroh-http`. None of this establishes Cabinet authorization, distributed atomicity, or Root-history permissions.
