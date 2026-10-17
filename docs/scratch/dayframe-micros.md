@@ -247,14 +247,18 @@ Recorded because they shape what a turn can attempt.
   Do not create a per-generation target directory. Budget for the cold first build, prefer
   `-p dayframe_app`-scoped checks, run long builds in the background, and never run the full
   workspace test suite.
-- **Arena townframe builds are blocked by a pre-existing issue**: `cargo check` (any `-p`) resolves the
-  whole workspace dependency graph, and `api_utils_rs` fails `wit_bindgen::generate!` because its
-  vendored WIT deps (`wasi:clocks@0.2.6`, `wasmcloud:postgres`, …) are not present in the gitignored
-  `wit/deps/` (fetch via `wkg`; see `src/api_utils_rs/wkg.toml`/`wkg.lock`). This is unrelated to
-  dayframe/dioxus. Excluding `api_utils_rs` from `members` alone does not help because
-  `[workspace.dependencies]` still declares its `path`. Until `wit/deps` is populated, dayframe
-  crates cannot be compile-checked through the workspace here; dioxus-side changes are verified in
-  the dioxus workspace.
+- **Arena dayframe build matrix (turn 6, verified):** `cargo check --manifest-path <crate>/Cargo.toml`
+  builds only that crate's dependency closure (never `-p`, which resolves the whole workspace graph).
+  `dayframe_guest` builds **clean** at dioxus alpha.3/beta.4 through the `../dioxus` symlink (37s;
+  only the pre-existing `sledgehammer_bindgen_macro` dead-code warning). `dayframe_app`, `desktop`,
+  `mobile`, `web` all fail — not on dayframe code, but because `daybook_types`
+  (`src/daybook_types/Cargo.toml:24`) unconditionally depends on `api_utils_rs`, whose
+  `wit_bindgen::generate!` fails: the vendored WIT deps (`wasi:clocks@0.2.6`, `wasmcloud:postgres`,
+  …) are not present in the gitignored `wit/deps/` (fetch via `wkg`, which needs network the arena
+  blocks). This is **pre-existing and unrelated to dayframe/dioxus**. `dayframe_guest` escapes it
+  only because it has no `daybook_types` dependency. To make app/desktop/etc. checkable here the
+  operator must populate `wit/deps` (or drop `daybook_types`'s hard dep on `api_utils_rs`). Dioxus
+  itself is verified independently in its own workspace.
 - Disk: the worktree filesystem has ~71G free; the root filesystem (`/home`, `/tmp`) has ~6G. Keep
   dioxus worktrees and build artifacts on the worktree filesystem.
 - The arena allows bash writes to `/home/asdf/repos/rust/dioxus`, but the file tools are restricted to
@@ -307,3 +311,13 @@ To be fixed as the slices land, not all at once.
   cargo rebuilt ~20 dioxus crates at alpha.3/beta.4 through it. Discovered arena dayframe builds are
   blocked by the pre-existing `api_utils_rs` WIT-deps gap (unrelated). Both dioxus patches remain
   uncommitted in working copy `f77ca86f`. No townframe code edits.
+- **Turn 7** — Operator authorized the dioxus commit and directed per-crate checks (not the whole
+  workspace). **Committed** the dioxus fork: `340719ec` on upstream main `7a817390` (subsecond
+  non-browser Wasm + native-dom `DioxusState::writer`/`MutationBuffer` exposure + the alpha.3
+  rebase resolutions), bookmark `dayframe-fork-340719ec`; re-verified `cargo check -p
+  dioxus-native-dom --all-features` clean (0.8s). Committed townframe `f068aa6` (Cargo.lock alpha.3
+  resolution + this log). Freed disk (removed the native-dom debug incremental dir) after a
+  disk-full. Verified the build matrix above: `dayframe_guest` checks clean at alpha.3 via the
+  symlink; `dayframe_app`/`desktop`/`mobile`/`web` are blocked only by the `api_utils_rs` WIT-deps
+  gap. The dioxus workspace (`…/tmp/dayframe-gen-aa578c2c49e78545-5-a`) is kept alive because the
+  operator will push the fork later; the `…/aa578c2c49e78545/dioxus` symlink still points at it.
