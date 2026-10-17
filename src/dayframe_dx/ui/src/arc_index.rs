@@ -518,10 +518,10 @@ pub fn ArcIndex(
                 style: "position:absolute; width:1px; height:1px; overflow:hidden;",
                 onkeydown: move |event| {
                     let step = match event.data().key() {
-                        Key::ArrowDown | Key::ArrowRight | Key::PageDown => 1.0,
-                        Key::ArrowUp | Key::ArrowLeft | Key::PageUp => -1.0,
-                        Key::Home => -(count as f64),
-                        Key::End => count as f64,
+                        Key::Named(NamedKey::ArrowDown | NamedKey::ArrowRight | NamedKey::PageDown) => 1.0,
+                        Key::Named(NamedKey::ArrowUp | NamedKey::ArrowLeft | NamedKey::PageUp) => -1.0,
+                        Key::Named(NamedKey::Home) => -(count as f64),
+                        Key::Named(NamedKey::End) => count as f64,
                         _ => 0.0,
                     };
                     if step != 0.0 {
