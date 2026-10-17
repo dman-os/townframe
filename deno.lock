@@ -14,6 +14,7 @@
     "jsr:@std/io@0.225": "0.225.3",
     "jsr:@std/path@*": "1.1.6",
     "jsr:@std/path@1": "1.1.6",
+    "jsr:@std/path@1.0.8": "1.0.8",
     "jsr:@std/path@^1.1.4": "1.1.6"
   },
   "jsr": {
@@ -63,6 +64,9 @@
       "dependencies": [
         "jsr:@std/bytes"
       ]
+    },
+    "@std/path@1.0.8": {
+      "integrity": "548fa456bb6a04d3c1a1e7477986b6cffbce95102d0bb447c67c4ee70e0364be"
     },
     "@std/path@1.1.6": {
       "integrity": "c68485c2a4dfbb5ae3cc74fae4e8c4e5d874cf8a8ed12927917235c758b46cbe",

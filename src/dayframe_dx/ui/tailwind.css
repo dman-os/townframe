@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@import "./styles/material.css";
+@import "./styles/tokens.generated.css";
+@import "./styles/tokens.css";
+@import "./styles/tiles.css";
+@import "./styles/components.css";
+@import "./styles/tile-grammar.css";
+
+@source "./src/**/*.rs";
+@source "../showcase/src/**/*.rs";
+@source "../app/src/**/*.rs";
+@source "../desktop/src/**/*.rs";
+
+/* Button props form class names at runtime; keep every declared variant in the bundle. */
+@source inline("df-button-default df-button-secondary df-button-outline df-button-ghost df-button-destructive df-button-sm df-button-md df-button-lg");
