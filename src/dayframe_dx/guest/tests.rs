@@ -4,6 +4,7 @@
 //! Blitz-backed native-dom writer takes, so what this test proves about ordering and content holds
 //! for the real renderer; only tree semantics differ.
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     process::Command,
     sync::{
@@ -21,13 +22,15 @@ mod host_bindings {
         imports: { default: trappable },
         additional_derives: [PartialEq],
         with: {
-            "townframe:dayframe/presentation.surface": super::RecordedSurface,
+            "townframe:dayframe/presentation.surface": super::Surface,
             "townframe:dayframe/presentation.mount-point": super::Placement,
         },
     });
 }
 
+use blitz_dom::{BaseDocument, DocumentConfig, LocalName, NodeId, QualName, ns};
 use dioxus_core::{BorrowedAttributeValue, ElementId, WriteMutations};
+use dioxus_native_dom::DioxusState;
 use host_bindings::exports::townframe::dayframe::presentation_events::Event;
 use host_bindings::townframe::dayframe::presentation::{self, *};
 
@@ -134,55 +137,195 @@ impl WriteMutations for RecordingWriter {
     }
 }
 
-pub struct RecordedSurface {
-    batches: Vec<Vec<Mutation>>,
-    alive: Arc<AtomicBool>,
-}
-pub struct Placement {
-    alive: Arc<AtomicBool>,
-}
-#[derive(Default)]
-struct RecordingHost {
-    table: ResourceTable,
+/// Where a surface's edits land. One host, two backends: the recording backend keeps wire batches
+/// for assertions, the Blitz backend replays them into a real retained tree through native-dom's
+/// writer. A webview backend would replay the same batches into a real DOM; the batch format is the
+/// contract, so a backend is a `WriteMutations` implementation plus event translation.
+enum Backend {
+    Recording(Vec<Vec<Mutation>>),
+    /// Committed revisions. The Blitz tree state itself lives in [`TestHost::states`]: a
+    /// `DioxusState` holds `Rc` attribute values, so it is not `Send` and cannot live in Wasmtime's
+    /// resource table.
+    Blitz {
+        revisions: u64,
+    },
 }
 
-impl presentation::Host for RecordingHost {}
-impl presentation::HostMountPoint for RecordingHost {
+pub struct Surface {
+    alive: Arc<AtomicBool>,
+    backend: Backend,
+}
+
+impl Surface {
+    fn batches(&self) -> &[Vec<Mutation>] {
+        match &self.backend {
+            Backend::Recording(batches) => batches,
+            Backend::Blitz { .. } => {
+                panic!("a Blitz surface commits into a real tree; it records nothing")
+            }
+        }
+    }
+}
+
+/// A granted placement. `root` is the real document node the surface renders into; a placement
+/// without one is synthetic and its surface records batches instead.
+pub struct Placement {
+    alive: Arc<AtomicBool>,
+    root: Option<NodeId>,
+}
+
+impl Placement {
+    fn synthetic(alive: Arc<AtomicBool>) -> Self {
+        Self { alive, root: None }
+    }
+}
+
+struct TestHost {
+    table: ResourceTable,
+    doc: Option<BaseDocument>,
+    /// Per-surface Blitz tree state, keyed by the surface resource's rep.
+    states: BTreeMap<u32, DioxusState>,
+}
+
+impl TestHost {
+    fn new() -> Self {
+        Self {
+            table: ResourceTable::new(),
+            doc: None,
+            states: BTreeMap::new(),
+        }
+    }
+
+    /// Grants a placement rooted at a real node in this host's document, creating the document on
+    /// first use so recording-only hosts never pay for one.
+    fn grant_blitz_placement(&mut self) -> Resource<Placement> {
+        let doc = self
+            .doc
+            .get_or_insert_with(|| BaseDocument::new(DocumentConfig::default()));
+        let mut mutator = doc.mutate();
+        let root = mutator.create_element(
+            QualName {
+                prefix: None,
+                ns: ns!(html),
+                local: LocalName::from("div"),
+            },
+            vec![],
+        );
+        let document_root = mutator.doc.root_node().id;
+        mutator.append_children(document_root, &[root]);
+        drop(mutator);
+        self.table
+            .push(Placement {
+                alive: Arc::new(AtomicBool::new(true)),
+                root: Some(root),
+            })
+            .expect("resource table is unbounded")
+    }
+
+    /// The ids of the counter's buttons in a granted placement's real subtree.
+    fn buttons(&self, placement: &Resource<Placement>) -> Vec<NodeId> {
+        let root = self
+            .table
+            .get(placement)
+            .expect("placement is live")
+            .root
+            .expect("placement is Blitz-backed");
+        let doc = self
+            .doc
+            .as_ref()
+            .expect("a Blitz placement implies a document");
+        doc.query_selector_all_in(root, "button")
+            .expect("selector is valid")
+            .into_vec()
+    }
+
+    /// The counter's visible text, read structurally out of the real document rather than parsed
+    /// back out of serialized HTML.
+    fn counter_text(&self, placement: &Resource<Placement>) -> String {
+        let doc = self.doc.as_ref().expect("document exists");
+        let buttons = self.buttons(placement);
+        assert_eq!(buttons.len(), 1, "the counter renders exactly one button");
+        doc.get_node(buttons[0])
+            .expect("button is in the document")
+            .text_content()
+    }
+
+    /// Whether the counter's button carries a registered click listener. Blitz records listeners
+    /// as attributes, so this proves `add-event-listener` reached the real tree.
+    fn has_click_listener(&self, placement: &Resource<Placement>) -> bool {
+        let buttons = self.buttons(placement);
+        assert_eq!(buttons.len(), 1, "the counter renders exactly one button");
+        self.doc
+            .as_ref()
+            .expect("document exists")
+            .get_node(buttons[0])
+            .expect("button is in the document")
+            .attr(LocalName::from("click"))
+            .is_some()
+    }
+}
+
+impl presentation::Host for TestHost {}
+impl presentation::HostMountPoint for TestHost {
     fn open(
         &mut self,
         placement: Resource<Placement>,
-    ) -> wasmtime::Result<Result<Resource<RecordedSurface>, PresentationError>> {
-        let alive = self.table.get(&placement)?.alive.clone();
-        if !alive.load(Ordering::Acquire) {
+    ) -> wasmtime::Result<Result<Resource<Surface>, PresentationError>> {
+        let granted = self.table.get(&placement)?;
+        if !granted.alive.load(Ordering::Acquire) {
             return Ok(Err(PresentationError::Revoked));
         }
-        Ok(Ok(self.table.push(RecordedSurface {
-            batches: Vec::new(),
-            alive,
-        })?))
+        let alive = granted.alive.clone();
+        let root = granted.root;
+        let backend = match root {
+            Some(_) => Backend::Blitz { revisions: 0 },
+            None => Backend::Recording(Vec::new()),
+        };
+        let surface = self.table.push(Surface { alive, backend })?;
+        if let Some(root) = root {
+            let previous = self.states.insert(surface.rep(), DioxusState::create(root));
+            assert!(previous.is_none(), "surface rep reused while still mounted");
+        }
+        Ok(Ok(surface))
     }
     fn drop(&mut self, placement: Resource<Placement>) -> wasmtime::Result<()> {
         self.table.delete(placement)?;
         Ok(())
     }
 }
-impl presentation::HostSurface for RecordingHost {
+impl presentation::HostSurface for TestHost {
     fn apply(
         &mut self,
-        surface: Resource<RecordedSurface>,
+        surface: Resource<Surface>,
         edits: Vec<Mutation>,
     ) -> wasmtime::Result<Result<u64, PresentationError>> {
-        let surface = self.table.get_mut(&surface)?;
+        let Self { table, doc, states } = self;
+        let rep = surface.rep();
+        let surface = table.get_mut(&surface)?;
         if !surface.alive.load(Ordering::Acquire) {
             return Ok(Err(PresentationError::Revoked));
         }
-        // Replay through a real `WriteMutations`, exactly as the Blitz adapter will.
-        let mut writer = RecordingWriter::default();
-        replay(&edits, &mut writer);
-        surface.batches.push(writer.0);
-        Ok(Ok(surface.batches.len().try_into().unwrap()))
+        match &mut surface.backend {
+            Backend::Recording(batches) => {
+                let mut writer = RecordingWriter::default();
+                replay(&edits, &mut writer);
+                batches.push(writer.0);
+                Ok(Ok(batches.len().try_into().unwrap()))
+            }
+            Backend::Blitz { revisions } => {
+                let state = states
+                    .get_mut(&rep)
+                    .expect("a Blitz surface always has tree state");
+                let doc = doc.as_mut().expect("a Blitz placement implies a document");
+                let mut writer = state.writer(doc);
+                replay(&edits, &mut writer);
+                *revisions += 1;
+                Ok(Ok(*revisions))
+            }
+        }
     }
-    fn drop(&mut self, surface: Resource<RecordedSurface>) -> wasmtime::Result<()> {
+    fn drop(&mut self, surface: Resource<Surface>) -> wasmtime::Result<()> {
+        self.states.remove(&surface.rep());
         self.table.delete(surface)?;
         Ok(())
     }
@@ -347,21 +490,23 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
     let engine = Engine::default();
     let component = Component::new(&engine, counter_component())?;
     let mut linker = Linker::new(&engine);
-    presentation::add_to_linker::<_, HasSelf<RecordingHost>>(&mut linker, |host| host)?;
-    let mut store = Store::new(&engine, RecordingHost::default());
+    presentation::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| host)?;
+    let mut store = Store::new(&engine, TestHost::new());
     let first = host_bindings::PresentationClient::instantiate(&mut store, &component, &linker)?;
     let events = first.townframe_dayframe_presentation_events();
-    let denied = store.data_mut().table.push(Placement {
-        alive: Arc::new(AtomicBool::new(false)),
-    })?;
+    let denied = store
+        .data_mut()
+        .table
+        .push(Placement::synthetic(Arc::new(AtomicBool::new(false))))?;
     assert!(matches!(
         events.call_mount(&mut store, Resource::new_borrow(denied.rep()))?,
         Err(PresentationError::Revoked)
     ));
     let first_lifetime = Arc::new(AtomicBool::new(true));
-    let placement = store.data_mut().table.push(Placement {
-        alive: first_lifetime.clone(),
-    })?;
+    let placement = store
+        .data_mut()
+        .table
+        .push(Placement::synthetic(first_lifetime.clone()))?;
     let surface = events
         .call_mount(&mut store, Resource::new_borrow(placement.rep()))?
         .unwrap();
@@ -376,16 +521,17 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
         assert!(!response.prevent_default && !response.stop_propagation);
     }
     assert_eq!(
-        store.data().table.get(&surface)?.batches,
+        store.data().table.get(&surface)?.batches(),
         expected_batches[..3].to_vec()
     );
 
     // A second instance of the same compiled component has a separate counter/address space.
     let second = host_bindings::PresentationClient::instantiate(&mut store, &component, &linker)?;
     let second_events = second.townframe_dayframe_presentation_events();
-    let second_placement = store.data_mut().table.push(Placement {
-        alive: Arc::new(AtomicBool::new(true)),
-    })?;
+    let second_placement = store
+        .data_mut()
+        .table
+        .push(Placement::synthetic(Arc::new(AtomicBool::new(true))))?;
     let second_surface = second_events
         .call_mount(&mut store, Resource::new_borrow(second_placement.rep()))?
         .unwrap();
@@ -395,12 +541,12 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
         &click(1),
     )?;
     assert_eq!(
-        store.data().table.get(&second_surface)?.batches,
+        store.data().table.get(&second_surface)?.batches(),
         expected_batches[..2].to_vec()
     );
     events.call_dispatch(&mut store, Resource::new_borrow(surface.rep()), &click(3))?;
     let expected = expected_batches[..4].to_vec();
-    assert_eq!(store.data().table.get(&surface)?.batches, expected);
+    assert_eq!(store.data().table.get(&surface)?.batches(), expected);
 
     // Revocation is enforced at the imported operation, not trusted to the guest's event handler.
     first_lifetime.store(false, Ordering::Release);
@@ -411,7 +557,7 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
         error.downcast_ref::<wasmtime::Trap>(),
         Some(&wasmtime::Trap::UnreachableCodeReached)
     );
-    assert_eq!(store.data().table.get(&surface)?.batches, expected);
+    assert_eq!(store.data().table.get(&surface)?.batches(), expected);
     let error = second_events
         .call_dispatch(
             &mut store,
@@ -424,7 +570,7 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
         Some(&wasmtime::Trap::CannotEnterComponent)
     );
     assert_eq!(
-        store.data().table.get(&second_surface)?.batches,
+        store.data().table.get(&second_surface)?.batches(),
         expected_batches[..2].to_vec()
     );
     Ok(())
@@ -435,15 +581,16 @@ fn separate_stores_isolate_guest_traps_and_revoke_only_their_own_surface() -> wa
     let engine = Engine::default();
     let component = Component::new(&engine, counter_component())?;
     let mut linker = Linker::new(&engine);
-    presentation::add_to_linker::<_, HasSelf<RecordingHost>>(&mut linker, |host| host)?;
+    presentation::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| host)?;
     let create = || -> wasmtime::Result<_> {
-        let mut store = Store::new(&engine, RecordingHost::default());
+        let mut store = Store::new(&engine, TestHost::new());
         let guest =
             host_bindings::PresentationClient::instantiate(&mut store, &component, &linker)?;
         let alive = Arc::new(AtomicBool::new(true));
-        let placement = store.data_mut().table.push(Placement {
-            alive: alive.clone(),
-        })?;
+        let placement = store
+            .data_mut()
+            .table
+            .push(Placement::synthetic(alive.clone()))?;
         let surface = guest
             .townframe_dayframe_presentation_events()
             .call_mount(&mut store, Resource::new_borrow(placement.rep()))?
@@ -466,15 +613,18 @@ fn separate_stores_isolate_guest_traps_and_revoke_only_their_own_surface() -> wa
         Resource::new_borrow(second_surface.rep()),
         &click(1),
     )?;
+    // No `?` inside this chain: an early return would hold the store borrow across the dispatch
+    // calls that follow.
     let first_before_close = first_store
         .data()
         .table
-        .get(&first_surface)?
-        .batches
-        .clone();
+        .get(&first_surface)
+        .expect("surface is live")
+        .batches()
+        .to_vec();
     assert_eq!(
         first_before_close,
-        second_store.data().table.get(&second_surface)?.batches
+        second_store.data().table.get(&second_surface)?.batches()
     );
     first_lifetime.store(false, Ordering::Release);
     let error = first_events
@@ -494,12 +644,120 @@ fn separate_stores_isolate_guest_traps_and_revoke_only_their_own_surface() -> wa
         &click(2),
     )?;
     assert_eq!(
-        first_store.data().table.get(&first_surface)?.batches,
+        first_store.data().table.get(&first_surface)?.batches(),
         first_before_close
     );
     assert_eq!(
-        second_store.data().table.get(&second_surface)?.batches,
+        second_store.data().table.get(&second_surface)?.batches(),
         expected_batches[..3].to_vec()
     );
+    Ok(())
+}
+
+/// A host wired to the real Blitz backend, with the counter component ready to instantiate.
+struct BlitzRig {
+    store: Store<TestHost>,
+    component: Component,
+    linker: Linker<TestHost>,
+}
+
+impl BlitzRig {
+    fn new() -> wasmtime::Result<Self> {
+        let engine = Engine::default();
+        let component = Component::new(&engine, counter_component())?;
+        let mut linker = Linker::new(&engine);
+        presentation::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| host)?;
+        Ok(Self {
+            store: Store::new(&engine, TestHost::new()),
+            component,
+            linker,
+        })
+    }
+
+    /// Starts another incarnation of the counter. Each owns its virtual DOM, so two surfaces in one
+    /// document need two instances.
+    fn spawn(&mut self) -> wasmtime::Result<host_bindings::PresentationClient> {
+        host_bindings::PresentationClient::instantiate(
+            &mut self.store,
+            &self.component,
+            &self.linker,
+        )
+    }
+
+    fn grant(&mut self) -> Resource<Placement> {
+        self.store.data_mut().grant_blitz_placement()
+    }
+
+    fn counter_text(&self, placement: &Resource<Placement>) -> String {
+        self.store.data().counter_text(placement)
+    }
+
+    fn has_click_listener(&self, placement: &Resource<Placement>) -> bool {
+        self.store.data().has_click_listener(placement)
+    }
+}
+
+#[test]
+fn blitz_backend_renders_a_guest_component_into_a_real_tree() -> wasmtime::Result<()> {
+    let mut rig = BlitzRig::new()?;
+    let guest = rig.spawn()?;
+    let events = guest.townframe_dayframe_presentation_events();
+    let placement = rig.grant();
+    let surface = events
+        .call_mount(&mut rig.store, Resource::new_borrow(placement.rep()))?
+        .unwrap();
+
+    // The initial batch built a real retained subtree with a registered listener, not a blob.
+    assert_eq!(rig.counter_text(&placement), "0");
+    assert!(rig.has_click_listener(&placement));
+
+    // Clicks update that same real node in place; the tree is not rebuilt.
+    for (revision, expected) in [(1, "1"), (2, "2")] {
+        events.call_dispatch(
+            &mut rig.store,
+            Resource::new_borrow(surface.rep()),
+            &click_event(revision),
+        )?;
+        assert_eq!(rig.counter_text(&placement), expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::Result<()> {
+    let mut rig = BlitzRig::new()?;
+    let first = rig.spawn()?;
+    let second = rig.spawn()?;
+    let first_events = first.townframe_dayframe_presentation_events();
+    let second_events = second.townframe_dayframe_presentation_events();
+
+    let first_placement = rig.grant();
+    let second_placement = rig.grant();
+    let first_surface = first_events
+        .call_mount(&mut rig.store, Resource::new_borrow(first_placement.rep()))?
+        .unwrap();
+    let second_surface = second_events
+        .call_mount(&mut rig.store, Resource::new_borrow(second_placement.rep()))?
+        .unwrap();
+
+    assert_eq!(rig.counter_text(&first_placement), "0");
+    assert_eq!(rig.counter_text(&second_placement), "0");
+
+    // Both guests address their button as element 1. Per-surface state must keep them apart.
+    for _ in 0..2 {
+        first_events.call_dispatch(
+            &mut rig.store,
+            Resource::new_borrow(first_surface.rep()),
+            &click_event(1),
+        )?;
+    }
+    second_events.call_dispatch(
+        &mut rig.store,
+        Resource::new_borrow(second_surface.rep()),
+        &click_event(1),
+    )?;
+
+    assert_eq!(rig.counter_text(&first_placement), "2");
+    assert_eq!(rig.counter_text(&second_placement), "1");
     Ok(())
 }

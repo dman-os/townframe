@@ -196,18 +196,34 @@ Current fork state (verify before relying on it — other agents move it):
   `default-features = false`; mutation_writer.rs vs upstream's buffered-replay rewrite) are resolved
   in the working copy. Verified `cargo check -p dioxus-native-dom --all-features` clean
   (alpha.3 / beta.4).
-- Native-dom exposure after rebase: `DioxusState::writer` is `pub … -> impl WriteMutations + '_`, and
-  upstream's `MutationBuffer` is exposed (`pub mod mutation_buffer`, `pub struct`, `pub fn replay`).
-  Host-adapter recipe: for a guest subtree create a fresh `DioxusState::create(granted_node_id)`
-  (its internal buffer is empty, so the buffered-replay in `writer()` is a no-op) and feed the guest's
-  typed mutation stream via `.writer(&mut base_doc)` — or write into a fresh `MutationBuffer` and
-  `replay` into `state.writer(doc)`. `StackWriter`/`BlitzBackend`/`RealDom` stay private. Upstream
-  alpha.3's own flow is `vdom.render_immediate(&mut state.buffered_mutations)` then
-  `state.apply_buffered_mutations(doc)`; we expose the underlying pieces because a guest has no host
-  vdom.
+- **Correction to the turn-7 record:** commit `340719ec` did *not* add `DioxusState::writer`. My
+  rebase conflict resolution replaced upstream's `apply_buffered_mutations` signature instead of
+  adding a new method, so the exposure was `apply_buffered_mutations` made `pub` — and the
+  follow-up `cargo check` was a 0.81s cache hit that never recompiled, so it did not catch it.
+  Lesson recorded: after a conflict resolution, force a real rebuild (touch the file or
+  `cargo check` with a changed feature) before claiming verification.
+- Fork head is now `c47a76bd8097` (bookmark `dayframe-fork-c47a76bd8097`), a child of `340719ec`
+  rather than a rewrite of it, so the earlier SHA stays valid. It re-exports `DioxusState` from the
+  native-dom crate root and adds `DioxusState::writer(&mut BaseDocument) -> impl WriteMutations`,
+  which drives the Blitz stack machine from an external producer without reading or draining the
+  buffered mutations. `apply_buffered_mutations` (upstream's own vdom flow) is untouched.
+  `MutationBuffer` remains public from `340719ec`. `StackWriter`/`BlitzBackend`/`RealDom` stay private.
+- **Host-adapter recipe, now proven:** `DioxusState::create(granted_node_id)` per surface, then
+  `state.writer(&mut base_doc)` and `replay(&batch, &mut writer)`. A guest's typed batches build a
+  real Blitz subtree under the granted node, and clicks update that same node in place.
+- **Constraint discovered: `DioxusState` is not `Send`** (its `MutationBuffer` holds
+  `Rc<dyn AnyValue>`), so it cannot be stored in Wasmtime's `ResourceTable`, which requires
+  `Send + 'static`. The host must keep per-surface tree state in a side map keyed by the resource
+  rep, and store only `Send` data in the table. This matters for D10: any engine-neutral host
+  resource model has to separate "opaque handle the guest holds" from "non-Send renderer state the
+  backend owns".
 - Isolated workspace `dayframe-gen-aa578c2c49e78545-5-a` at
-  `/home/asdf/repos/rust/dioxus/tmp/dayframe-gen-aa578c2c49e78545-5-a`, working copy `f77ca86f`.
-  The `5-b` contestant has a sibling workspace in the same checkout; never touch it.
+  `/home/asdf/repos/rust/dioxus/tmp/dayframe-gen-aa578c2c49e78545-5-a`. The `5-b` contestant has a
+  sibling workspace in the same checkout; never touch it.
+- **Not ours:** that workspace's working copy carries an uncommitted ~100-line `#[cfg(test)] mod
+  tests` in `packages/native-dom/src/mutation_buffer.rs` (a `Recording` sink asserting `replay`
+  fidelity). It was not written by this workstream. It was backed up, excluded from `c47a76bd`, and
+  restored untouched. Whoever owns it should commit or drop it.
 
 
 ### D9 — Keep the existing dioxus path dependency; isolate only the temporary worktree
@@ -229,6 +245,44 @@ record the SHA, `jj workspace forget <name>`, and delete the temporary directory
 from `/home/asdf/repos/rust/dioxus`; never leave the worktree as the only reference. Do not fork or
 modify Blitz in this slice.
 
+
+### D10 — Two neutral seams: the component engine and the renderer
+
+Running micros must work on native and in the browser, and must not be tied to Blitz. So there are
+two independent seams, and neither may leak into the other:
+
+- **Component engine**: instantiate a component from bytes, own its store/instance, call its exports,
+  schedule its async work, cancel and clean up per incarnation. Native is Wasmtime; the browser is
+  `jco` (or equivalent) driving the same component from JS. This is the runtime abstraction the
+  settled rules already require — independent of `daybook_core::Rt`, Wasmtime and Wash, and not
+  assuming a Tokio executor.
+- **Renderer backend**: replay a typed `list<mutation>` batch into a real tree at a granted
+  placement, route events back as WIT `event`s, and withdraw the subtree on close. Blitz/native-dom
+  is one backend (via the fork's `DioxusState::writer`); the non-Blitz dioxus desktop backend and a
+  webview/JS-DOM backend are others. The batch format is the contract, so a backend is an
+  implementation of `WriteMutations` plus event translation — nothing else.
+
+Consequences:
+
+- The wire types and `replay` are renderer-neutral and must not live in a crate that depends on
+  Blitz or Wasmtime. Backends are separate crates; `desktop`/`web` pick one.
+- A browser host cannot use Wasmtime's `Store`/`ResourceTable`, so host resources (placement,
+  surface) must be expressible as opaque ids in anything shared across engines.
+- Incremental order: prove the Blitz backend headlessly (real `BaseDocument`, no window), then
+  extract the neutral seam, then add the engine seam when the second engine (browser) is real. Do not
+  build an engine abstraction before a second engine exists to check it against.
+
+**Step 1 is done (turn 9).** A headless `BaseDocument`, a granted `<div>` root, and the real counter
+component: the guest's typed batches build `<button click=… data-dioxus-id="1">0</button>` in the real
+tree, a dispatched click updates that same node to `1` then `2` without rebuilding it, and two
+incarnations mounted into two placements in one document both address their button as element 1 and
+stay independent. That is the per-surface element-id scoping D5 depends on, proven in a real retained
+tree rather than a recording. Still missing: Blitz DOM event → WIT `event` translation, subtree
+withdrawal on surface drop, and incarnation cleanup.
+
+Because `DioxusState` is not `Send`, the proof keeps tree state in a host side map keyed by resource
+rep rather than in the Wasmtime resource table. Whatever shape the engine-neutral seam takes, it has
+to allow for renderer state that is neither `Send` nor storable in the engine's own handle table.
 
 ## Settled operator answers
 
@@ -258,6 +312,10 @@ Recorded because they shape what a turn can attempt.
   Do not create a per-generation target directory. Budget for the cold first build, prefer
   `-p dayframe_app`-scoped checks, run long builds in the background, and never run the full
   workspace test suite.
+- **WIT deps are gitignored and must be fetched per fresh worktree — and the harness can rotate the
+  worktree mid-turn**, which silently deletes them again (observed in turn 9: a check that passed
+  earlier in the same turn failed later with the same `api_utils_rs` WIT error). Re-run the fetch
+  whenever that error appears; tracked edits survive the rotation, gitignored files do not.
 - **WIT deps are gitignored and must be fetched per fresh worktree.** The workspace graph pulls
   `api_utils_rs` (via `daybook_types`), whose `wit_bindgen::generate!` needs `wasi:clocks`,
   `wasmcloud:postgres`, … under the gitignored `wit/deps/`. Run `deno run --allow-all x/wit-fetch.ts`
@@ -342,4 +400,18 @@ To be fixed as the slices land, not all at once.
   to alpha.3; guest README rewritten. Verified: 3 crates `cargo check --all-targets` clean,
   `nextest -p dayframe_guest` 4/4 pass (guest batches identical to native Dioxus), clippy clean on
   all touched files (remaining warnings are pre-existing `ui` and upstream `dioxus-html`).
+- **Turn 9** — Operator constraints recorded as D10 (engine seam vs renderer seam; jco for the
+  browser; must not be tied to Blitz, since the non-Blitz dioxus desktop backend also exists). Took
+  the highest-risk unknown first: does a typed batch actually drive a real retained tree? It does.
+  Restructured the test host into one bindgen with two backends (recording + Blitz) so there is a
+  single `Mutation` type and a single `replay`; added `grant_blitz_placement`, structural assertions
+  via `query_selector_all_in`/`text_content`/`attr` (string-matching `outer_html` broke on `&gt;`
+  inside an attribute value), and two new tests. Found and fixed two real problems: `DioxusState` is
+  not `Send` so it cannot live in Wasmtime's resource table (moved to a host side map keyed by rep),
+  and dioxus `340719ec` never actually exposed `writer` (my rebase resolution had renamed upstream's
+  method; a cached re-check hid it) — fixed in dioxus `c47a76bd8097`. Verified: `nextest -p
+  dayframe_guest` 6/6 pass, `clippy -p dayframe_guest -p dayframe_app -p desktop --all-targets
+  --all-features` clean (only the 5 pre-existing `ui` warnings), `clippy -p dioxus-native-dom
+  --all-features` clean. Excluded and preserved an uncommitted `mutation_buffer.rs` test module in the
+  dioxus workspace that is not ours.
 

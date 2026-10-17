@@ -4153,9 +4153,11 @@ dependencies = [
 name = "dayframe_guest"
 version = "0.1.0"
 dependencies = [
+ "blitz-dom",
  "dioxus",
  "dioxus-core",
  "dioxus-html",
+ "dioxus-native-dom",
  "serde_json",
  "wasmtime",
  "wit-bindgen 0.60.0",

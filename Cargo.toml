@@ -245,6 +245,8 @@ irpc-iroh = "0.17.0"
 dioxus = { version = "0.8.0-alpha.3" }
 dioxus-core = { path = "../dioxus/packages/core" }
 dioxus-html = { path = "../dioxus/packages/html" }
+dioxus-native-dom = { path = "../dioxus/packages/native-dom" }
+blitz-dom = "=0.3.0-beta.4"
 ui = { path = "./src/dayframe_dx/ui" }
 # xilem = { path = "../xilem/xilem/" }
 
