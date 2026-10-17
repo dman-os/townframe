@@ -13888,6 +13888,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "service_utils_rs"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "iroh",
+ "irpc",
+ "mime",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -16561,7 +16585,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "axum",
  "blake3",
  "bs58",
  "color-eyre",
@@ -16569,28 +16592,20 @@ dependencies = [
  "data-encoding",
  "displaydoc",
  "dotenv-flow",
- "educe",
+  "educe",
   "futures",
   "getrandom 0.3.4",
   "getrandom 0.4.3",
-  "http-body-util",
-  "hyper",
-  "hyper-util",
   "indexmap 2.14.0",
-  "iroh",
-  "irpc",
   "jiff",
   "json-canon",
-  "mime",
   "multibase",
   "multihash",
   "rand 0.9.5",
   "regex",
-  "reqwest 0.12.28",
   "serde",
   "serde_json",
-  "serde_urlencoded",
- "sha2 0.11.0",
+  "sha2 0.11.0",
  "structstruck",
  "surelock",
  "thiserror 2.0.20",

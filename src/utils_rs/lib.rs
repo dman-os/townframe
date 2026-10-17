@@ -2,7 +2,6 @@ pub mod batching;
 pub mod census;
 pub mod lru;
 mod macros;
-pub mod service;
 pub mod testing;
 
 pub mod prelude {
