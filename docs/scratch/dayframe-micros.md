@@ -108,6 +108,17 @@ Trade-off accepted: we lose byte-for-byte parity with upstream's JS interpreter,
 decision to carry Dioxus's sledgehammer stream is reversed. The vendored
 `sledgehammer-bindgen-macro` patch is expected to become unnecessary and should be removed with it.
 
+**Implemented (turn 8, commit `4c88c77`).** `presentation.wit` now carries `list<mutation>` with
+`attribute-value = text | float | int | boolean | none` (`bool` is a WIT keyword, hence `boolean`;
+Dioxus's `Any` is excluded — a process-local Rust object cannot cross, and the guest adapter panics
+on it as an adapter bug). Guest side: `dayframe_guest::wire::WireMutations` implements
+`WriteMutations` and records a batch. Host side: a `replay(&[Mutation], &mut impl WriteMutations)`
+drives any host writer — the test backend records through a `RecordingWriter`, the native adapter
+will use native-dom's `DioxusState::writer`. Tests prove the guest's batches are identical to a
+natively driven Dioxus `VirtualDom` rendering the same counter, so the wire is lossless.
+`dioxus-interpreter-js`, the `sledgehammer` feature and the whole `vendor/sledgehammer-bindgen-macro`
+patch are gone.
+
 ### D5 — One virtual DOM per micro instance, one render target per granted mount
 
 A micro that presents in several places (a Settings detail, a toolbar item, its own window) runs one
@@ -247,18 +258,17 @@ Recorded because they shape what a turn can attempt.
   Do not create a per-generation target directory. Budget for the cold first build, prefer
   `-p dayframe_app`-scoped checks, run long builds in the background, and never run the full
   workspace test suite.
-- **Arena dayframe build matrix (turn 6, verified):** `cargo check --manifest-path <crate>/Cargo.toml`
-  builds only that crate's dependency closure (never `-p`, which resolves the whole workspace graph).
-  `dayframe_guest` builds **clean** at dioxus alpha.3/beta.4 through the `../dioxus` symlink (37s;
-  only the pre-existing `sledgehammer_bindgen_macro` dead-code warning). `dayframe_app`, `desktop`,
-  `mobile`, `web` all fail — not on dayframe code, but because `daybook_types`
-  (`src/daybook_types/Cargo.toml:24`) unconditionally depends on `api_utils_rs`, whose
-  `wit_bindgen::generate!` fails: the vendored WIT deps (`wasi:clocks@0.2.6`, `wasmcloud:postgres`,
-  …) are not present in the gitignored `wit/deps/` (fetch via `wkg`, which needs network the arena
-  blocks). This is **pre-existing and unrelated to dayframe/dioxus**. `dayframe_guest` escapes it
-  only because it has no `daybook_types` dependency. To make app/desktop/etc. checkable here the
-  operator must populate `wit/deps` (or drop `daybook_types`'s hard dep on `api_utils_rs`). Dioxus
-  itself is verified independently in its own workspace.
+- **WIT deps are gitignored and must be fetched per fresh worktree.** The workspace graph pulls
+  `api_utils_rs` (via `daybook_types`), whose `wit_bindgen::generate!` needs `wasi:clocks`,
+  `wasmcloud:postgres`, … under the gitignored `wit/deps/`. Run `deno run --allow-all x/wit-fetch.ts`
+  (it runs `wash wit fetch` for every crate with a `wkg.toml`) **once per new worktree** before any
+  dayframe build. There is no network restriction in the arena — do not assume one. After the fetch,
+  `cargo check -p dayframe_app -p desktop -p dayframe_guest --all-targets` works directly.
+- **`../dioxus` symlink is per-generation.** The harness creates a fresh worktree per generation and
+  the shared `…/aa578c2c49e78545/dioxus` symlink may be absent; recreate it to the dioxus workspace at
+  the start of any turn that builds townframe. Verified build matrix (turn 8): `dayframe_app`,
+  `desktop`, `dayframe_guest` all check clean (`--all-targets`) at dioxus alpha.3 / Blitz beta.4;
+  `cargo nextest run -p dayframe_guest` 4/4 pass; clippy clean on everything touched.
 - Disk: the worktree filesystem has ~71G free; the root filesystem (`/home`, `/tmp`) has ~6G. Keep
   dioxus worktrees and build artifacts on the worktree filesystem.
 - The arena allows bash writes to `/home/asdf/repos/rust/dioxus`, but the file tools are restricted to
@@ -278,10 +288,10 @@ To be fixed as the slices land, not all at once.
 5. `ProvisionKind` is speculative — only `Context` is ever constructed.
 6. A missing mandatory provision is reported as `AccessError::Denied`, which tells the operator
    nothing.
-7. The guest still ships the sledgehammer binary stream (D4 replaces it).
-8. (Resolved) `../dioxus` resolves through the shared symlink — see "Settled operator answers". The
-   remaining arena build blocker is the `api_utils_rs` WIT-deps issue described in "Arena and build
-   constraints", which is pre-existing and unrelated to dayframe.
+7. (Resolved, turn 8) Guest ships the typed `list<mutation>` wire; sledgehammer and its vendored
+   patch are gone.
+8. (Resolved) `../dioxus` resolves through the shared symlink and WIT deps are fetched with
+   `x/wit-fetch.ts` — all dayframe crates build in the arena. See "Arena and build constraints".
 
 
 ## Turn log
@@ -321,3 +331,15 @@ To be fixed as the slices land, not all at once.
   symlink; `dayframe_app`/`desktop`/`mobile`/`web` are blocked only by the `api_utils_rs` WIT-deps
   gap. The dioxus workspace (`…/tmp/dayframe-gen-aa578c2c49e78545-5-a`) is kept alive because the
   operator will push the fork later; the `…/aa578c2c49e78545/dioxus` symlink still points at it.
+- **Turn 8** — Operator: no sandbox/network restriction; fetch WIT with the repo script. Ran
+  `x/wit-fetch.ts` (10 crates), recreated the per-generation `../dioxus` symlink, and got
+  `dayframe_app`/`desktop`/`dayframe_guest` checking clean for the first time in the arena. Found and
+  fixed one real alpha.3 rebase fallout: `ui/src/arc_index.rs` used removed `Key::ArrowDown` etc.
+  (keyboard-types 0.8 → `Key::Named(NamedKey::…)`), commit `fa830b6`. Implemented D4 — the typed
+  presentation wire — commit `4c88c77`: `presentation.wit` `list<mutation>` mirroring
+  `WriteMutations`; `guest/wire.rs` `WireMutations`; host `replay` into any `WriteMutations`; counter
+  guest and tests ported; `dioxus-interpreter-js`/sledgehammer/vendored patch removed; dioxus bumped
+  to alpha.3; guest README rewritten. Verified: 3 crates `cargo check --all-targets` clean,
+  `nextest -p dayframe_guest` 4/4 pass (guest batches identical to native Dioxus), clippy clean on
+  all touched files (remaining warnings are pre-existing `ui` and upstream `dioxus-html`).
+
