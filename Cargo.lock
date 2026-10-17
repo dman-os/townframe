@@ -1108,11 +1108,17 @@ dependencies = [
 name = "big_cabinet"
 version = "0.1.0"
 dependencies = [
+ "atproto-dasl",
+ "automerge",
  "big_cabinet_core",
+ "big_repo",
+ "big_sync_core",
+ "blake3",
  "ed25519-dalek 2.2.0",
  "irpc",
  "keyring-core",
  "rand 0.9.5",
+ "schemars 1.2.2",
  "secrets_rs",
  "serde",
  "serde_json",
@@ -1124,6 +1130,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "utils_rs",
  "uuid",
  "zeroize",
 ]
@@ -1203,7 +1210,6 @@ dependencies = [
  "subduction_ephemeral",
  "subduction_iroh",
  "subduction_keyhive",
- "subduction_redb_storage",
  "subduction_websocket",
  "surelock",
  "tempfile",
@@ -12065,22 +12071,6 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "subduction_redb_storage"
-version = "0.2.2"
-source = "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95"
-dependencies = [
- "future_form",
- "futures",
- "redb",
- "sedimentree_core",
- "subduction_core",
- "subduction_crypto",
- "thiserror 2.0.20",
- "tokio",
  "tracing",
 ]
 
