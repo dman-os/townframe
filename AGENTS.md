@@ -92,9 +92,12 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 >
 > Don't be lazy with solutions, why would you be? The world is your oyster. You can build and change whatever you need to, one small step at a time.
 
-- CRITICAL: Never ever use git commands. Never! 
-  - In most machine's you're working on, `jj` is being used and the safest looking git commands could mess up the `jj` state destroying work.
-  - Even if on other machines, git mutation commands are too destructive and unsafe.
+- **INSIDE AGENT DUEL / ARENA WORKTREES** (when `$PASEO_CURRENT_BRANCH` is set or working directory is under `.agent-duel/worktrees`):
+  - **CRITICAL: NEVER USE `jj` (Jujutsu). Use standard `git` commands ONLY.**
+  - Agent Duel's promotion and battle engine is Git-based. Do NOT run any `jj` commands, and do NOT touch or initialize `.jj`.
+  - When committing, use standard `git add` and `git commit`.
+- **OUTSIDE AGENT DUEL (standalone host developer sessions)**:
+  - In most machines you're working on, `jj` is being used. Avoid raw git mutations that could mess up the `jj` state.
 
 ### Resolving conflicts
 
