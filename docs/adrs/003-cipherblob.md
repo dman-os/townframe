@@ -87,7 +87,7 @@ A cipherBlob facet describes exactly one encrypted physical representation:
 
     "contentEncoding": "aes128gcm",
 
-    "keyRef": "db+facet:///<doc-id|self>/org.example.daybook.jwk/relay",
+    "keyRef": "db+facet:/<doc-id|self>/org.example.daybook.jwk/relay",
     "keyRefHeads": ["<change-hash>", "..."],
 
     "encodingParameters": {
@@ -186,7 +186,7 @@ cipherBlob's `keyRef` is a general URI. It does not require the key to live in a
 Today:
 
 ```text
-db+facet:///.../org.example.daybook.jwk/relay
+db+facet:/.../org.example.daybook.jwk/relay
 ```
 
 Future mechanisms may use another key-storage system without changing the cipherBlob abstraction.
