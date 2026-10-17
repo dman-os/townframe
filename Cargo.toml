@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "./src/am_utils_rs",
+  "./src/big_cabinet_core/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
@@ -10,6 +11,7 @@ members = [
   "./src/daybook_ffi",
   "./src/daybook_pdk",
   "./src/daybook_types",
+  "./src/macros",
   "./src/mltools/",
   "./src/pauperfuse/",
   "./src/native_utils_rs",
@@ -19,10 +21,6 @@ members = [
   "./src/secrets_rs",
   "./src/service_utils_rs/",
   "./src/sqlite_rs/",
-  "./src/plug_plabels/",
-  "./src/plug_test/",
-  "./src/sqlx_utils_rs/",
-  "./src/test_wflows",
   "./src/utils_rs",
   "./src/wash_plugin_sqlite/",
   "./src/wash_plugin_wflow/",
@@ -99,6 +97,8 @@ big_repo = { path = "./src/big_repo/" }
 #
 # meta
 syn = { version = "2", features = ["extra-traits"] }
+proc-macro2 = "1"
+quote = "1"
 bon = "3.9"
 
 #
