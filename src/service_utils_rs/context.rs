@@ -1,22 +1,19 @@
-//! Propagated per-request state: identity, tracing, budget, and cancellation.
-//!
-//! [`RequestContext`] is the native equivalent of the HTTP request metadata
-//! every transport shares. It travels inside an [`Envelope`](crate::Envelope)
-//! and is chained Go-style with [`RequestContext::child`] when one service
-//! calls another on the same request.
-
 use crate::admission::{CancellationSignal, CancellationTransport};
+use opentelemetry::{Context, propagation::TextMapPropagator, trace::TraceContextExt};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::time::Instant;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
-/// Errors found before a service handler is admitted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 pub enum ContextError {
     #[error("request context is missing a request id")]
     MissingRequestId,
-    #[error("request context is missing a trace id")]
-    MissingTraceId,
     #[error("request was cancelled")]
     Cancelled,
     #[error("request cancellation key is already admitted")]
@@ -29,32 +26,60 @@ pub enum ContextError {
     DeadlineExceeded,
 }
 
-/// Transport metadata carried beside domain parameters. The HTTP adapter maps
-/// these fields to headers; native callers carry the same typed values without
-/// putting them into domain JSON.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpMetadata {
     pub authorization: Option<String>,
     pub idempotency_key: Option<String>,
-    pub traceparent: Option<String>,
-    pub tracestate: Option<String>,
-    pub timeout: Option<Duration>,
 }
 
-/// Propagated state for a native request. `time_budget` is the serializable
-/// transport value; `deadline` is rebuilt by a receiver when it accepts the
-/// envelope locally, so elapsed budget is never reset by a hop.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceContext {
+    headers: HashMap<String, String>,
+}
+
+impl TraceContext {
+    pub fn current() -> Self {
+        let mut headers = HashMap::new();
+        TraceContextPropagator::new()
+            .inject_context(&tracing::Span::current().context(), &mut headers);
+        Self { headers }
+    }
+
+    pub fn from_headers(traceparent: Option<&str>, tracestate: Option<&str>) -> Self {
+        let mut headers = HashMap::new();
+        if let Some(value) = traceparent {
+            headers.insert("traceparent".to_owned(), value.to_owned());
+        }
+        if let Some(value) = tracestate {
+            headers.insert("tracestate".to_owned(), value.to_owned());
+        }
+        let context = TraceContextPropagator::new().extract_with_context(&Context::new(), &headers);
+        headers.clear();
+        TraceContextPropagator::new().inject_context(&context, &mut headers);
+        Self { headers }
+    }
+
+    pub fn traceparent(&self) -> Option<&str> {
+        self.headers.get("traceparent").map(String::as_str)
+    }
+
+    pub fn tracestate(&self) -> Option<&str> {
+        self.headers.get("tracestate").map(String::as_str)
+    }
+
+    pub(crate) fn parent(&self) -> Option<Context> {
+        let context =
+            TraceContextPropagator::new().extract_with_context(&Context::new(), &self.headers);
+        context.span().span_context().is_valid().then_some(context)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestContext {
     pub request_id: Uuid,
-    pub trace_id: Uuid,
-    pub span_id: Uuid,
-    pub parent_span_id: Option<Uuid>,
+    pub trace: TraceContext,
     pub command_id: Option<Uuid>,
-    pub time_budget: Option<Duration>,
     pub cancellation: CancellationSignal,
-    /// Absolute wall-clock deadline carried across serialized boundaries.
-    /// Receiver-local `Instant` state is rebuilt from this value.
     deadline_unix_ms: Option<u64>,
     #[serde(skip)]
     deadline: Option<Instant>,
@@ -64,30 +89,23 @@ impl RequestContext {
     pub fn root() -> Self {
         Self {
             request_id: Uuid::now_v7(),
-            trace_id: Uuid::now_v7(),
-            span_id: Uuid::now_v7(),
-            parent_span_id: None,
+            trace: TraceContext::current(),
             command_id: None,
-            time_budget: None,
             cancellation: CancellationSignal::default(),
             deadline_unix_ms: None,
             deadline: None,
         }
     }
 
-    /// A child span on the same request: shares identity, budget, and
-    /// cancellation with its parent.
     pub fn child(&self) -> Self {
+        let current = TraceContext::current();
         Self {
-            request_id: self.request_id,
-            trace_id: self.trace_id,
-            span_id: Uuid::now_v7(),
-            parent_span_id: Some(self.span_id),
-            command_id: self.command_id,
-            time_budget: self.time_budget,
-            cancellation: self.cancellation.clone(),
-            deadline_unix_ms: self.deadline_unix_ms,
-            deadline: self.deadline,
+            trace: if current.parent().is_some() {
+                current
+            } else {
+                self.trace.clone()
+            },
+            ..self.clone()
         }
     }
 
@@ -96,28 +114,27 @@ impl RequestContext {
         self
     }
 
-    pub fn with_time_budget(mut self, time_budget: Duration) -> Self {
-        self.time_budget = Some(time_budget);
-        self.deadline = Some(Instant::now() + time_budget);
-        self.deadline_unix_ms =
-            Some(wall_clock_millis().saturating_add(time_budget.as_millis() as u64));
+    pub fn with_time_budget(mut self, budget: Duration) -> Self {
+        self = self.for_receiver();
+        let deadline = Instant::now()
+            .checked_add(budget)
+            .expect("request budget exceeds clock range");
+        self.deadline = Some(self.deadline.map_or(deadline, |old| old.min(deadline)));
+        let millis = u64::try_from(budget.as_millis()).expect("request budget exceeds wire range");
+        let wall = wall_clock_millis().saturating_add(millis);
+        self.deadline_unix_ms = Some(self.deadline_unix_ms.map_or(wall, |old| old.min(wall)));
         self
     }
 
-    /// Rebuilds receiver-local deadline state without resetting elapsed budget.
     pub fn for_receiver(mut self) -> Self {
-        self.deadline = self.deadline_unix_ms.map(|deadline| {
-            let remaining = deadline.saturating_sub(wall_clock_millis());
-            Instant::now() + Duration::from_millis(remaining)
-        });
+        if self.deadline.is_none() {
+            self.deadline = self.deadline_unix_ms.map(|deadline| {
+                Instant::now() + Duration::from_millis(deadline.saturating_sub(wall_clock_millis()))
+            });
+        }
         self
     }
 
-    /// Attaches a caller-owned cancellation transport. [`crate::Client`] opens
-    /// and closes the request scope around an IRPC call; a caller that
-    /// serializes a context separately must hold
-    /// [`CancellationSignal::begin_transport_request`] until that request's
-    /// terminal result or drop.
     pub fn with_cancellation_transport(mut self, transport: CancellationTransport) -> Self {
         self.cancellation = self.cancellation.bound_to(transport);
         self
@@ -127,22 +144,32 @@ impl RequestContext {
         self.cancellation.cancel();
     }
 
+    pub fn remaining_budget(&self) -> Option<Duration> {
+        match self.deadline {
+            Some(deadline) => Some(deadline.saturating_duration_since(Instant::now())),
+            None => self.deadline_unix_ms.map(|deadline| {
+                Duration::from_millis(deadline.saturating_sub(wall_clock_millis()))
+            }),
+        }
+    }
+
+    pub async fn expired(&self) {
+        match self.remaining_budget() {
+            Some(budget) => tokio::time::sleep(budget).await,
+            None => std::future::pending().await,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ContextError> {
         if self.request_id.is_nil() {
             return Err(ContextError::MissingRequestId);
-        }
-        if self.trace_id.is_nil() {
-            return Err(ContextError::MissingTraceId);
         }
         if self.cancellation.is_cancelled() {
             return Err(ContextError::Cancelled);
         }
         if self
-            .deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
-            || self
-                .deadline_unix_ms
-                .is_some_and(|deadline| wall_clock_millis() >= deadline)
+            .remaining_budget()
+            .is_some_and(|budget| budget.is_zero())
         {
             return Err(ContextError::DeadlineExceeded);
         }
@@ -153,62 +180,74 @@ impl RequestContext {
 fn wall_clock_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock must be after UNIX epoch")
-        .as_millis() as u64
+        .expect("clock before UNIX epoch")
+        .as_millis()
+        .try_into()
+        .unwrap()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admission::cancellation_channel;
 
-    #[test]
-    fn context_carries_command_budget_and_cancellation() {
-        let command_id = Uuid::now_v7();
-        let context = RequestContext::root()
-            .with_command_id(command_id)
-            .with_time_budget(Duration::from_secs(1));
-        let child = context.child();
-        assert_eq!(child.command_id, Some(command_id));
-        assert_eq!(child.time_budget, context.time_budget);
-        assert!(child.validate().is_ok());
-
+    #[tokio::test(start_paused = true)]
+    async fn child_and_receiver_do_not_extend_deadlines() {
+        let context = RequestContext::root().with_time_budget(Duration::from_secs(5));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        let child = context
+            .child()
+            .with_time_budget(Duration::from_secs(30))
+            .for_receiver();
+        assert_eq!(child.remaining_budget(), Some(Duration::from_secs(3)));
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(child.validate(), Err(ContextError::DeadlineExceeded));
         child.cancel();
-        assert_eq!(child.validate(), Err(ContextError::Cancelled));
         assert_eq!(context.validate(), Err(ContextError::Cancelled));
-
-        let expired = RequestContext::root().with_time_budget(Duration::ZERO);
-        assert_eq!(expired.validate(), Err(ContextError::DeadlineExceeded));
     }
 
-    #[tokio::test]
-    async fn cancellation_uses_transport_owned_state() {
-        let (transport, _receiver) = cancellation_channel(8);
-        let context = RequestContext::root().with_cancellation_transport(transport);
-        let _request = context
-            .cancellation
-            .begin_transport_request()
-            .expect("scope result")
-            .expect("transport scope");
-        context.cancel();
-        assert_eq!(context.validate(), Err(ContextError::Cancelled));
+    #[tokio::test(start_paused = true)]
+    async fn narrowing_a_deserialized_context_does_not_extend_its_deadline() {
+        let original = RequestContext::root().with_time_budget(Duration::from_secs(5));
+        let wire = serde_json::to_vec(&original).unwrap();
+        let received: RequestContext = serde_json::from_slice(&wire).unwrap();
+        let received = received.with_time_budget(Duration::from_secs(30));
+        assert_eq!(received.deadline_unix_ms, original.deadline_unix_ms);
+        assert!(received.remaining_budget().unwrap() <= Duration::from_secs(5));
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(received.validate(), Err(ContextError::DeadlineExceeded));
     }
 
     #[test]
-    fn serialized_context_preserves_elapsed_budget_and_cancellation() {
-        let context = RequestContext::root().with_time_budget(Duration::from_millis(5));
-        let wire = serde_json::to_vec(&context).expect("context serializes");
-        std::thread::sleep(Duration::from_millis(10));
-        let received: RequestContext = serde_json::from_slice(&wire).expect("context deserializes");
+    fn serialization_preserves_elapsed_budget_and_cancellation() {
+        let context = RequestContext::root().with_time_budget(Duration::ZERO);
+        let wire = serde_json::to_vec(&context).unwrap();
+        let received: RequestContext = serde_json::from_slice(&wire).unwrap();
         assert_eq!(
             received.for_receiver().validate(),
             Err(ContextError::DeadlineExceeded)
         );
-
-        let context = RequestContext::root();
         context.cancel();
-        let wire = serde_json::to_vec(&context).expect("context serializes");
-        let received: RequestContext = serde_json::from_slice(&wire).expect("context deserializes");
+        let wire = serde_json::to_vec(&context).unwrap();
+        let received: RequestContext = serde_json::from_slice(&wire).unwrap();
         assert_eq!(received.validate(), Err(ContextError::Cancelled));
+    }
+
+    #[test]
+    fn standard_propagator_preserves_tracestate_and_rejects_invalid_parents() {
+        let parent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        let trace = TraceContext::from_headers(Some(parent), Some("vendor=value"));
+        assert_eq!(trace.traceparent(), Some(parent));
+        assert_eq!(trace.tracestate(), Some("vendor=value"));
+        for bad in [
+            "garbage",
+            "ff-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+            "00-00000000000000000000000000000000-b7ad6b7169203331-01",
+        ] {
+            assert!(
+                TraceContext::from_headers(Some(bad), None)
+                    .parent()
+                    .is_none()
+            );
+        }
     }
 }

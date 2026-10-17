@@ -9,6 +9,7 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     task::JoinSet,
 };
+use tracing::instrument::WithSubscriber;
 
 pub(super) type AcceptFuture<'a> = Pin<
     Box<
@@ -134,7 +135,7 @@ pub(super) async fn serve_with_acceptor<A: ConnectionAcceptor + 'static>(
                 }
             }
         }
-    });
+    }.with_current_subscriber());
     Ok((task, shutdown_sender))
 }
 
@@ -158,13 +159,16 @@ fn spawn_connection(
     connection_permit: OwnedSemaphorePermit,
     stream: tokio::net::TcpStream,
 ) {
-    connections.spawn(async move {
-        let _connection_permit = connection_permit;
-        let service = TowerToHyperService::new(router);
-        http1::Builder::new()
-            .serve_connection(TokioIo::new(stream), service)
-            .await
-    });
+    connections.spawn(
+        async move {
+            let _connection_permit = connection_permit;
+            let service = TowerToHyperService::new(router);
+            http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+        }
+        .with_current_subscriber(),
+    );
 }
 
 async fn abort_and_reap(

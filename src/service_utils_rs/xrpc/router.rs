@@ -2,11 +2,11 @@
 
 use super::{
     AUTHORIZATION_HEADER, DOMAIN_ERROR_FIELD, DOMAIN_ERROR_STATUS, IDEMPOTENCY_KEY_HEADER,
-    PARENT_SPAN_ID_HEADER, REQUEST_ID_HEADER, SPAN_ID_HEADER, TIMEOUT_HEADER, TRACE_ID_HEADER,
-    TRACEPARENT_HEADER, TRACESTATE_HEADER, XrpcErrorEnvelope, XrpcHandlerError, XrpcRequest,
+    REQUEST_ID_HEADER, TIMEOUT_HEADER, TRACEPARENT_HEADER, XrpcErrorEnvelope, XrpcHandlerError,
+    XrpcRequest,
 };
 use crate::{
-    context::{HttpMetadata, RequestContext},
+    context::{HttpMetadata, RequestContext, TraceContext},
     host::Host,
     middleware::Handler,
     operation::{Envelope, HttpInput, HttpMethod, Unary, XrpcKind, XrpcOperation},
@@ -34,7 +34,8 @@ pub struct XrpcOperationHandler {
     handler: Arc<dyn Fn(XrpcRequest) -> HandlerFuture + Send + Sync>,
 }
 
-type HandlerFuture = Pin<Box<dyn Future<Output = Result<Value, XrpcHandlerError>> + Send>>;
+type HandlerFuture =
+    Pin<Box<dyn Future<Output = Result<crate::ResponseEnvelope<Value>, XrpcHandlerError>> + Send>>;
 
 impl std::fmt::Debug for XrpcOperationHandler {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -46,14 +47,18 @@ impl std::fmt::Debug for XrpcOperationHandler {
 }
 
 impl XrpcOperationHandler {
-    pub fn new<F, Fut>(operation: XrpcOperation, handler: F) -> Self
+    pub fn new<F, Fut, O>(operation: XrpcOperation, handler: F) -> Self
     where
         F: Fn(XrpcRequest) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Value, XrpcHandlerError>> + Send + 'static,
+        Fut: Future<Output = Result<O, XrpcHandlerError>> + Send + 'static,
+        O: Into<crate::ResponseEnvelope<Value>> + 'static,
     {
         Self {
             operation,
-            handler: Arc::new(move |request| Box::pin(handler(request))),
+            handler: Arc::new(move |request| {
+                let future = handler(request);
+                Box::pin(async move { future.await.map(Into::into) })
+            }),
         }
     }
 
@@ -90,7 +95,10 @@ impl XrpcOperationHandler {
         self.operation
     }
 
-    async fn call(&self, request: XrpcRequest) -> Result<Value, XrpcHandlerError> {
+    async fn call(
+        &self,
+        request: XrpcRequest,
+    ) -> Result<crate::ResponseEnvelope<Value>, XrpcHandlerError> {
         (self.handler)(request).await
     }
 }
@@ -156,17 +164,31 @@ impl XrpcRouter {
         P: Unary,
         H: Handler<P>,
     {
-        self.register(XrpcOperationHandler::typed(
-            P::XRPC,
-            move |context, metadata, params: P| {
-                let host = Arc::clone(&host);
-                async move {
-                    host.invoke(Envelope::with_metadata(context, metadata, params))
-                        .await
-                        .map_err(|error| domain_error(P::XRPC, &error))
-                }
-            },
-        ))
+        self.register(XrpcOperationHandler::new(P::XRPC, move |request| {
+            let host = Arc::clone(&host);
+            async move {
+                let params: P = match P::XRPC.input {
+                    HttpInput::Query => {
+                        serde_urlencoded::from_str(request.raw_query.as_deref().unwrap_or_default())
+                            .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string()))?
+                    }
+                    HttpInput::JsonBody => serde_json::from_value(request.params)
+                        .map_err(|error| XrpcHandlerError::InvalidInput(error.to_string()))?,
+                };
+                let mut envelope =
+                    Envelope::with_metadata(request.context, request.metadata, params);
+                envelope.transport = request.transport;
+                let response = host
+                    .invoke(envelope)
+                    .await
+                    .map_err(|error| domain_error(P::XRPC, &error))?;
+                Ok(crate::ResponseEnvelope {
+                    output: serde_json::to_value(response.output)
+                        .expect("operation output must serialize"),
+                    metadata: response.metadata,
+                })
+            }
+        }))
     }
 
     pub fn register(&mut self, handler: XrpcOperationHandler) -> Result<(), XrpcRegistrationError> {
@@ -292,7 +314,14 @@ async fn dispatch(
             );
         }
     };
-    let body = match axum::body::to_bytes(body, router.max_body_bytes).await {
+    let body = tokio::select! {
+        biased;
+        _ = context.expired() => return error_response(
+            StatusCode::GATEWAY_TIMEOUT, request_id, "DeadlineExceeded", "XRPC request body exceeded its time budget",
+        ),
+        body = axum::body::to_bytes(body, router.max_body_bytes) => body,
+    };
+    let body = match body {
         Ok(body) => body,
         Err(error) => {
             return error_response(
@@ -315,13 +344,18 @@ async fn dispatch(
         }
     };
     let call = handler.call(XrpcRequest {
-        context,
+        context: context.clone(),
         metadata: metadata.clone(),
         params,
         raw_query,
+        transport: parts
+            .extensions
+            .get::<crate::TransportContext>()
+            .cloned()
+            .unwrap_or(crate::TransportContext::Http),
     });
-    let call = match metadata.timeout {
-        Some(timeout) => match tokio::time::timeout(timeout, call).await {
+    let call = match context.remaining_budget() {
+        Some(remaining) => match tokio::time::timeout(remaining, call).await {
             Ok(result) => result,
             Err(_) => {
                 return error_response(
@@ -335,7 +369,11 @@ async fn dispatch(
         None => call.await,
     };
     match call {
-        Ok(output) => json_response(StatusCode::OK, request_id, output),
+        Ok(output) => {
+            let mut response = json_response(StatusCode::OK, request_id, output.output);
+            output.metadata.write_headers(response.headers_mut());
+            response
+        }
         Err(XrpcHandlerError::InvalidInput(message)) => error_response(
             StatusCode::BAD_REQUEST,
             request_id,
@@ -453,35 +491,21 @@ fn request_context(headers: &HeaderMap) -> Result<(RequestContext, HttpMetadata)
             .parse()
             .map_err(|_| "x-request-id must be a UUID".to_owned())?;
     }
-    if let Some(value) = header_string(headers, TRACE_ID_HEADER)? {
-        context.trace_id = value
-            .parse()
-            .map_err(|_| "x-trace-id must be a UUID".to_owned())?;
+    context.trace = TraceContext::from_headers(
+        header_string(headers, TRACEPARENT_HEADER)?.as_deref(),
+        header_string(headers, "tracestate")?.as_deref(),
+    );
+    if let Some(value) = header_string(headers, TIMEOUT_HEADER)? {
+        let millis = value
+            .parse::<u64>()
+            .map_err(|_| "x-timeout-ms must be an unsigned integer".to_owned())?;
+        context = context.with_time_budget(Duration::from_millis(millis));
     }
-    if let Some(value) = header_string(headers, SPAN_ID_HEADER)? {
-        context.span_id = value
-            .parse()
-            .map_err(|_| "x-span-id must be a UUID".to_owned())?;
-    }
-    context.parent_span_id = header_string(headers, PARENT_SPAN_ID_HEADER)?
-        .map(|value| value.parse().map_err(|_| "x-parent-span-id must be a UUID"))
-        .transpose()?;
-    let timeout = header_string(headers, TIMEOUT_HEADER)?
-        .map(|value| {
-            value
-                .parse::<u64>()
-                .map(Duration::from_millis)
-                .map_err(|_| "x-timeout-ms must be an unsigned integer".to_owned())
-        })
-        .transpose()?;
     Ok((
         context,
         HttpMetadata {
             authorization: header_string(headers, AUTHORIZATION_HEADER)?,
             idempotency_key: header_string(headers, IDEMPOTENCY_KEY_HEADER)?,
-            traceparent: header_string(headers, TRACEPARENT_HEADER)?,
-            tracestate: header_string(headers, TRACESTATE_HEADER)?,
-            timeout,
         },
     ))
 }

@@ -17,11 +17,65 @@
 //! `Operation::Error` the service returned.
 
 use crate::context::{HttpMetadata, RequestContext};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use thiserror::Error;
+
+impl crate::ResponseMetadata {
+    pub(crate) fn write_headers(&self, headers: &mut HeaderMap) {
+        for (name, value) in [
+            ("etag", &self.etag),
+            ("location", &self.location),
+            ("cache-control", &self.cache_control),
+            ("retry-after", &self.retry_after),
+        ] {
+            if let Some(value) = value {
+                headers.insert(
+                    name,
+                    HeaderValue::from_str(value).expect("response metadata must be valid HTTP"),
+                );
+            }
+        }
+        for warning in &self.warnings {
+            headers.append(
+                "warning",
+                HeaderValue::from_str(warning).expect("warning must be valid HTTP"),
+            );
+        }
+    }
+
+    pub(crate) fn read_headers(headers: &HeaderMap) -> Result<Self, String> {
+        let text = |name: &str| {
+            headers
+                .get(name)
+                .map(|value| {
+                    value
+                        .to_str()
+                        .map(str::to_owned)
+                        .map_err(|error| error.to_string())
+                })
+                .transpose()
+        };
+        Ok(Self {
+            etag: text("etag")?,
+            location: text("location")?,
+            cache_control: text("cache-control")?,
+            retry_after: text("retry-after")?,
+            warnings: headers
+                .get_all("warning")
+                .iter()
+                .map(|value| {
+                    value
+                        .to_str()
+                        .map(str::to_owned)
+                        .map_err(|error| error.to_string())
+                })
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
 
 mod client;
 #[cfg(feature = "iroh-http")]
@@ -40,11 +94,7 @@ pub use router::{XrpcOperationHandler, XrpcRegistrationError, XrpcRouter};
 pub use serve::{serve, serve_with_connection_limit};
 
 const REQUEST_ID_HEADER: &str = "x-request-id";
-const TRACE_ID_HEADER: &str = "x-trace-id";
-const SPAN_ID_HEADER: &str = "x-span-id";
-const PARENT_SPAN_ID_HEADER: &str = "x-parent-span-id";
 const TRACEPARENT_HEADER: &str = "traceparent";
-const TRACESTATE_HEADER: &str = "tracestate";
 const AUTHORIZATION_HEADER: &str = "authorization";
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 const TIMEOUT_HEADER: &str = "x-timeout-ms";
@@ -67,6 +117,7 @@ pub struct XrpcRequest {
     /// The original query string is retained so typed handlers can apply
     /// serde's query decoding rules for numbers, booleans, and repeated keys.
     pub raw_query: Option<String>,
+    pub transport: crate::TransportContext,
 }
 
 /// Standard XRPC error body. Server handlers cannot accidentally emit a

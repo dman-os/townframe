@@ -39,6 +39,9 @@ serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded = "0.7"
 uuid = { version = "1", features = ["serde", "v7"] }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
+tracing-opentelemetry = "0.32"
 
 #
 # error and log
@@ -47,3 +50,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "tracing"] }
+tracing-subscriber.workspace = true

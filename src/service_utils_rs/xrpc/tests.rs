@@ -74,8 +74,6 @@ struct Output {
     request_id: uuid::Uuid,
     authorization: Option<String>,
     idempotency_key: Option<String>,
-    timeout_millis: Option<u64>,
-    traceparent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -157,8 +155,6 @@ async fn test_server() -> (
                     request_id: context.request_id,
                     authorization: metadata.authorization,
                     idempotency_key: metadata.idempotency_key,
-                    timeout_millis: metadata.timeout.map(|timeout| timeout.as_millis() as u64),
-                    traceparent: metadata.traceparent,
                 })
             },
         ))
@@ -181,8 +177,6 @@ async fn test_server() -> (
                     request_id: context.request_id,
                     authorization: metadata.authorization,
                     idempotency_key: metadata.idempotency_key,
-                    timeout_millis: metadata.timeout.map(|timeout| timeout.as_millis() as u64),
-                    traceparent: metadata.traceparent,
                 })
             },
         ))
@@ -222,9 +216,6 @@ async fn loopback_query_and_procedure_map_http_and_context() {
     let metadata = HttpMetadata {
         authorization: Some("Capability test".to_owned()),
         idempotency_key: Some("command-1".to_owned()),
-        timeout: Some(Duration::from_millis(25)),
-        traceparent: Some("00-trace-span-01".to_owned()),
-        ..HttpMetadata::default()
     };
     let query: Output = client
         .execute::<EchoParams, Output, TestError>(
@@ -241,8 +232,6 @@ async fn loopback_query_and_procedure_map_http_and_context() {
     assert_eq!(query.request_id, context.request_id);
     assert_eq!(query.authorization, metadata.authorization);
     assert_eq!(query.idempotency_key, metadata.idempotency_key);
-    assert_eq!(query.timeout_millis, Some(25));
-    assert_eq!(query.traceparent, metadata.traceparent);
     let numeric: NumericOutput = client
         .execute::<NumericParams, NumericOutput, TestError>(
             NUMERIC_QUERY_OPERATION,
@@ -1051,51 +1040,118 @@ async fn peer_disconnect_drops_blocked_body_and_recovers_capacity() {
     task.await.expect("server task join").expect("server task");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
+async fn body_deadline_drops_incomplete_upload_and_recovers_capacity() {
+    use futures::{StreamExt, stream};
+    use hyper::service::Service;
+    use hyper_util::service::TowerToHyperService;
+
+    let invoked = Arc::new(AtomicBool::new(false));
+    let body_dropped = Arc::new(AtomicBool::new(false));
+    let mut router = XrpcRouter::with_limits(1024, 1);
+    router.observe_body_drop(Arc::clone(&body_dropped));
+    let handler_invoked = Arc::clone(&invoked);
+    router
+        .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
+            handler_invoked.store(true, Ordering::Release);
+            async { Ok(json!({"value":"complete"})) }
+        }))
+        .unwrap();
+    let service = TowerToHyperService::new(router.into_router());
+    let (polled_sender, polled_receiver) = oneshot::channel();
+    let (dropped_sender, dropped_receiver) = oneshot::channel();
+    let body = stream::iter([Ok::<_, std::io::Error>(axum::body::Bytes::from_static(
+        b"{\"value\":",
+    ))])
+    .chain(stream::once(async move {
+        let _guard = StreamDrop(Some(dropped_sender));
+        polled_sender.send(()).unwrap();
+        std::future::pending::<Result<axum::body::Bytes, std::io::Error>>().await
+    }));
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/xrpc/{}", PROCEDURE_OPERATION.nsid))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(TIMEOUT_HEADER, "5000")
+        .body(axum::body::Body::from_stream(body))
+        .unwrap();
+    let response = tokio::spawn({
+        let service = service.clone();
+        async move { service.call(request).await.unwrap() }
+    });
+    polled_receiver.await.unwrap();
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let response = response.await.unwrap();
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    let error: TestError = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error.error, "DeadlineExceeded");
+    dropped_receiver.await.unwrap();
+    assert!(body_dropped.load(Ordering::Acquire));
+    assert!(!invoked.load(Ordering::Acquire));
+
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/xrpc/{}", PROCEDURE_OPERATION.nsid))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(r#"{"value":"recovery"}"#))
+        .unwrap();
+    assert_eq!(
+        service.call(request).await.unwrap().status(),
+        StatusCode::OK
+    );
+    assert!(invoked.load(Ordering::Acquire));
+}
+
+#[tokio::test(start_paused = true)]
 async fn handler_timeout_drops_guard_before_receipt() {
-    let completed = Arc::new(AtomicBool::new(false));
+    use hyper::service::Service;
+    use hyper_util::service::TowerToHyperService;
+
+    let active = Arc::new(AtomicBool::new(false));
     let started = Arc::new(Mutex::new(None));
     let (started_sender, started_receiver) = oneshot::channel();
     *started.lock().expect("started lock") = Some(started_sender);
-    let handler_completed = Arc::clone(&completed);
+    let handler_active = Arc::clone(&active);
     let handler_started = Arc::clone(&started);
     let mut router = XrpcRouter::new(1024);
     router
         .register(XrpcOperationHandler::new(PROCEDURE_OPERATION, move |_| {
-            let completed = Arc::clone(&handler_completed);
+            let active = Arc::clone(&handler_active);
             let started = Arc::clone(&handler_started);
             async move {
-                if let Some(sender) = started.lock().expect("started lock").take() {
-                    sender.send(()).expect("started receiver");
-                }
-                let _drop_flag = DropFlag(completed);
+                active.store(true, Ordering::Release);
+                let _drop_flag = DropFlag(active);
+                started
+                    .lock()
+                    .expect("started lock")
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .expect("started receiver");
                 std::future::pending::<Result<Value, XrpcHandlerError>>().await
             }
         }))
         .expect("procedure registration");
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let address = listener.local_addr().expect("listener address");
-    let (task, shutdown) = serve(listener, router.into_router())
-        .await
-        .expect("start server");
-    let response = reqwest::Client::new()
-        .post(format!(
-            "http://{address}/xrpc/{}",
-            PROCEDURE_OPERATION.nsid
-        ))
+    let service = TowerToHyperService::new(router.into_router());
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(format!("/xrpc/{}", PROCEDURE_OPERATION.nsid))
         .header(header::CONTENT_TYPE, "application/json")
-        .header(TIMEOUT_HEADER, "0")
-        .body(r#"{"value":"pending"}"#)
-        .send()
-        .await
-        .expect("timeout response");
+        .header(TIMEOUT_HEADER, "5000")
+        .body(axum::body::Body::from(r#"{"value":"pending"}"#))
+        .unwrap();
+    let response = tokio::spawn(async move { service.call(request).await.unwrap() });
     started_receiver.await.expect("handler started");
-    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-    assert!(!completed.load(Ordering::Acquire));
-    shutdown.send(()).expect("shutdown receiver");
-    task.await.expect("server task join").expect("server task");
+    assert!(active.load(Ordering::Acquire));
+    tokio::time::advance(Duration::from_secs(5)).await;
+    assert_eq!(
+        response.await.unwrap().status(),
+        StatusCode::GATEWAY_TIMEOUT
+    );
+    assert!(!active.load(Ordering::Acquire));
 }
 
 #[tokio::test]

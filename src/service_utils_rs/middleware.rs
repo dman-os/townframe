@@ -1,43 +1,19 @@
-//! Handlers and the middleware that wraps them, in tower's shape.
-//!
-//! [`Handler<P>`] is the service-side contract: one `impl Handler<GetDoc> for
-//! DocsService` per operation the service serves. The request type names the
-//! operation, so there is no per-service trait and no match over an
-//! operation enum.
-//!
-//! Middleware is a [`Layer`] that wraps a handler in another handler, exactly
-//! as `tower::Layer` wraps a `Service`. A layer is generic over `P`, so one
-//! `Trace` wraps every operation of a service without naming any of them. The
-//! stack is built once with [`ServiceBuilder`] and handed to a
-//! [`Host`](crate::Host); every transport then runs the same layers because
-//! they all reach the handler through that host.
-//!
-//! What a layer must *not* do is replace the host's own guarantees: context
-//! validation and request cancellation are enforced by the host before and
-//! around the stack, so a service cannot forget them.
-
 use crate::operation::{Envelope, Operation};
 use std::{future::Future, sync::Arc};
 
-/// Serves one operation. Implemented by a service for each request type it
-/// handles, and by every layer for every request type its inner handler
-/// handles.
-///
-/// The whole [`Envelope`] is passed, not just the params, so a layer can read
-/// the request context and HTTP metadata (auth headers, request id) without a
-/// side channel.
+/// Serves one operation, including its native envelope and response metadata.
 pub trait Handler<P: Operation>: Send + Sync + 'static {
     fn call(
         &self,
         request: Envelope<P>,
-    ) -> impl Future<Output = Result<P::Output, P::Error>> + Send;
+    ) -> impl Future<Output = Result<crate::ResponseEnvelope<P::Output>, P::Error>> + Send;
 }
 
 impl<P: Operation, H: Handler<P> + ?Sized> Handler<P> for Arc<H> {
     fn call(
         &self,
         request: Envelope<P>,
-    ) -> impl Future<Output = Result<P::Output, P::Error>> + Send {
+    ) -> impl Future<Output = Result<crate::ResponseEnvelope<P::Output>, P::Error>> + Send {
         H::call(self, request)
     }
 }
@@ -48,7 +24,6 @@ pub trait Layer<H> {
     fn layer(&self, inner: H) -> Self::Handler;
 }
 
-/// The layer that adds nothing. `ServiceBuilder::new()` starts here.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Identity;
 
@@ -59,8 +34,6 @@ impl<H> Layer<H> for Identity {
     }
 }
 
-/// Two layers composed. `Stack<Inner, Outer>` applies `Inner` first, so
-/// `Outer` ends up outermost at call time.
 #[derive(Debug, Clone, Copy)]
 pub struct Stack<Inner, Outer> {
     inner: Inner,
@@ -78,14 +51,6 @@ where
     }
 }
 
-/// Builds a middleware stack. Layers are applied in the order they are added:
-/// the first `.layer(..)` is closest to the handler and the last runs first.
-///
-/// ```ignore
-/// let handler = ServiceBuilder::new()
-///     .layer(Trace::new("docs"))
-///     .service(docs_service);
-/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceBuilder<L> {
     layer: L,
@@ -104,11 +69,11 @@ impl ServiceBuilder<Identity> {
 }
 
 impl<L> ServiceBuilder<L> {
-    pub fn layer<New>(self, layer: New) -> ServiceBuilder<Stack<L, New>> {
+    pub fn layer<New>(self, layer: New) -> ServiceBuilder<Stack<New, L>> {
         ServiceBuilder {
             layer: Stack {
-                inner: self.layer,
-                outer: layer,
+                inner: layer,
+                outer: self.layer,
             },
         }
     }
@@ -121,44 +86,61 @@ impl<L> ServiceBuilder<L> {
     }
 }
 
-/// Instruments every call with a `tracing` span carrying the operation's NSID
-/// and the request identity, so logs from any transport correlate.
-#[derive(Debug, Clone, Copy)]
-pub struct Trace {
-    target: &'static str,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ContextError, RequestContext, ResponseEnvelope, XrpcOperation};
+    use serde::{Deserialize, Serialize};
+    use std::sync::Mutex;
 
-impl Trace {
-    pub const fn new(target: &'static str) -> Self {
-        Self { target }
+    #[derive(Serialize, Deserialize)]
+    struct Query;
+
+    impl Operation for Query {
+        type Output = ();
+        type Error = ContextError;
+        const XRPC: XrpcOperation = XrpcOperation::query("org.example.middleware.test");
     }
-}
 
-impl<H> Layer<H> for Trace {
-    type Handler = Traced<H>;
-    fn layer(&self, inner: H) -> Traced<H> {
-        Traced {
-            inner,
-            target: self.target,
+    struct Record(&'static str, Arc<Mutex<Vec<&'static str>>>);
+    struct Wrapped<H>(Record, H);
+    struct Leaf(Arc<Mutex<Vec<&'static str>>>);
+
+    impl<H> Layer<H> for Record {
+        type Handler = Wrapped<H>;
+        fn layer(&self, inner: H) -> Self::Handler {
+            Wrapped(Record(self.0, Arc::clone(&self.1)), inner)
         }
     }
-}
 
-pub struct Traced<H> {
-    inner: H,
-    target: &'static str,
-}
+    impl<P: Operation, H: Handler<P>> Handler<P> for Wrapped<H> {
+        async fn call(
+            &self,
+            request: Envelope<P>,
+        ) -> Result<ResponseEnvelope<P::Output>, P::Error> {
+            self.0.1.lock().unwrap().push(self.0.0);
+            self.1.call(request).await
+        }
+    }
 
-impl<P: Operation, H: Handler<P>> Handler<P> for Traced<H> {
-    async fn call(&self, request: Envelope<P>) -> Result<P::Output, P::Error> {
-        use tracing::Instrument;
-        let span = tracing::info_span!(
-            "service.call",
-            target = self.target,
-            nsid = P::XRPC.nsid,
-            request_id = %request.context.request_id,
-            span_id = %request.context.span_id,
-        );
-        self.inner.call(request).instrument(span).await
+    impl Handler<Query> for Leaf {
+        async fn call(&self, _: Envelope<Query>) -> Result<ResponseEnvelope<()>, ContextError> {
+            self.0.lock().unwrap().push("handler");
+            Ok(().into())
+        }
+    }
+
+    #[tokio::test]
+    async fn first_layer_runs_outermost() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let handler = ServiceBuilder::new()
+            .layer(Record("outer", Arc::clone(&order)))
+            .layer(Record("inner", Arc::clone(&order)))
+            .service(Leaf(Arc::clone(&order)));
+        handler
+            .call(Envelope::new(RequestContext::root(), Query))
+            .await
+            .unwrap();
+        assert_eq!(*order.lock().unwrap(), ["outer", "inner", "handler"]);
     }
 }

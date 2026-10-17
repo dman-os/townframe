@@ -1,9 +1,8 @@
 //! Client side: encode an operation to HTTP, decode the response.
 
 use super::{
-    AUTHORIZATION_HEADER, DOMAIN_ERROR_FIELD, IDEMPOTENCY_KEY_HEADER, PARENT_SPAN_ID_HEADER,
-    REQUEST_ID_HEADER, SPAN_ID_HEADER, TIMEOUT_HEADER, TRACE_ID_HEADER, TRACEPARENT_HEADER,
-    TRACESTATE_HEADER, XrpcErrorEnvelope,
+    AUTHORIZATION_HEADER, DOMAIN_ERROR_FIELD, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
+    TIMEOUT_HEADER, TRACEPARENT_HEADER, XrpcErrorEnvelope,
 };
 use crate::{
     context::{HttpMetadata, RequestContext},
@@ -78,19 +77,16 @@ pub(super) fn encode_xrpc_request<P: Serialize>(
         HeaderValue::from_str(&context.request_id.to_string())
             .map_err(|error| error.to_string())?,
     );
-    headers.insert(
-        TRACE_ID_HEADER,
-        HeaderValue::from_str(&context.trace_id.to_string()).map_err(|error| error.to_string())?,
-    );
-    headers.insert(
-        SPAN_ID_HEADER,
-        HeaderValue::from_str(&context.span_id.to_string()).map_err(|error| error.to_string())?,
-    );
-    if let Some(value) = context.parent_span_id {
-        headers.insert(
-            PARENT_SPAN_ID_HEADER,
-            HeaderValue::from_str(&value.to_string()).map_err(|error| error.to_string())?,
-        );
+    for (name, value) in [
+        (TRACEPARENT_HEADER, context.trace.traceparent()),
+        ("tracestate", context.trace.tracestate()),
+    ] {
+        if let Some(value) = value {
+            headers.insert(
+                name,
+                HeaderValue::from_str(value).map_err(|error| error.to_string())?,
+            );
+        }
     }
     if let Some(value) = &metadata.authorization {
         headers.insert(
@@ -104,22 +100,10 @@ pub(super) fn encode_xrpc_request<P: Serialize>(
             HeaderValue::from_str(value).map_err(|error| error.to_string())?,
         );
     }
-    if let Some(value) = &metadata.traceparent {
-        headers.insert(
-            TRACEPARENT_HEADER,
-            HeaderValue::from_str(value).map_err(|error| error.to_string())?,
-        );
-    }
-    if let Some(value) = &metadata.tracestate {
-        headers.insert(
-            TRACESTATE_HEADER,
-            HeaderValue::from_str(value).map_err(|error| error.to_string())?,
-        );
-    }
-    if let Some(timeout) = metadata.timeout {
+    if let Some(remaining) = context.remaining_budget() {
         headers.insert(
             TIMEOUT_HEADER,
-            HeaderValue::from_str(&timeout.as_millis().to_string())
+            HeaderValue::from_str(&remaining.as_millis().to_string())
                 .map_err(|error| error.to_string())?,
         );
     }
@@ -193,6 +177,23 @@ impl XrpcClient {
         O: DeserializeOwned,
         E: DeserializeOwned,
     {
+        self.execute_with_metadata(operation, context, metadata, params)
+            .await
+            .map(|response| response.output)
+    }
+
+    pub async fn execute_with_metadata<P, O, E>(
+        &self,
+        operation: XrpcOperation,
+        context: RequestContext,
+        metadata: &HttpMetadata,
+        params: &P,
+    ) -> Result<crate::ResponseEnvelope<O>, XrpcClientError<E>>
+    where
+        P: Serialize,
+        O: DeserializeOwned,
+        E: DeserializeOwned,
+    {
         if operation.kind == XrpcKind::Subscription {
             return Err(XrpcClientError::Protocol {
                 message: "the unary HTTP adapter does not support subscriptions".to_owned(),
@@ -211,7 +212,7 @@ impl XrpcClient {
         }
         .headers(encoded.headers)
         .body(encoded.body);
-        if let Some(timeout) = metadata.timeout {
+        if let Some(timeout) = context.remaining_budget() {
             request = request.timeout(timeout);
         }
         let response = request
@@ -245,7 +246,7 @@ pub(super) fn decode_xrpc_response<O, E>(
     status: StatusCode,
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<O, XrpcClientError<E>>
+) -> Result<crate::ResponseEnvelope<O>, XrpcClientError<E>>
 where
     O: DeserializeOwned,
     E: DeserializeOwned,
@@ -262,10 +263,17 @@ where
             outcome_unknown: operation.kind == XrpcKind::Procedure,
         })?;
     if status.is_success() {
-        return serde_json::from_value(value).map_err(|error| XrpcClientError::Protocol {
+        let output = serde_json::from_value(value).map_err(|error| XrpcClientError::Protocol {
             message: format!("invalid XRPC success payload: {error}"),
             outcome_unknown: operation.kind == XrpcKind::Procedure,
-        });
+        })?;
+        let metadata = crate::ResponseMetadata::read_headers(headers).map_err(|message| {
+            XrpcClientError::Protocol {
+                message,
+                outcome_unknown: operation.kind == XrpcKind::Procedure,
+            }
+        })?;
+        return Ok(crate::ResponseEnvelope { output, metadata });
     }
     let envelope = match serde_json::from_value::<XrpcErrorEnvelope>(value.clone()) {
         Ok(envelope) => envelope,

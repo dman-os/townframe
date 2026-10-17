@@ -123,50 +123,67 @@ impl<Proto: Service> Client<Proto> {
     {
         self.call_with_metadata(Envelope::new(context, params))
             .await
+            .map(|response| response.output)
     }
 
     /// [`Client::call`] with explicit transport metadata.
     pub async fn call_with_metadata<P>(
         &self,
         request: Envelope<P>,
-    ) -> Result<P::Output, ClientError<P::Error>>
+    ) -> Result<crate::ResponseEnvelope<P::Output>, ClientError<P::Error>>
     where
         P: Unary,
         Proto: From<Envelope<P>>,
         Proto::Message: From<WithChannels<Envelope<P>, Proto>>,
         Envelope<P>: Channels<Proto, Tx = Reply<P>, Rx = NoReceiver>,
     {
-        match &self.transport {
-            Transport::Direct(host) => {
-                let (tx, rx) = oneshot::channel();
-                let message = Proto::Message::from(WithChannels::from((request, tx)));
-                Arc::clone(host).route_inline(message).await;
-                rx.await
-                    .map_err(|error| ClientError::transport(error, false))?
-                    .map_err(ClientError::Operation)
+        let context = request.context.clone();
+        context.validate()?;
+        let call = async {
+            match &self.transport {
+                Transport::Direct(host) => {
+                    let (tx, rx) = oneshot::channel();
+                    let message = Proto::Message::from(WithChannels::from((request, tx)));
+                    Arc::clone(host).route_inline(message).await;
+                    rx.await
+                        .map_err(|error| ClientError::transport(error, false))?
+                        .map_err(ClientError::Operation)
+                }
+                Transport::Irpc(client) => {
+                    let _scope = request.context.cancellation.begin_transport_request()?;
+                    client
+                        .rpc(request)
+                        .await
+                        .map_err(|error| {
+                            ClientError::transport(error, P::XRPC.kind.transport_outcome_unknown())
+                        })?
+                        .map_err(ClientError::Operation)
+                }
+                Transport::Xrpc(client) => {
+                    request.context.validate()?;
+                    let Envelope {
+                        context,
+                        metadata,
+                        params,
+                        ..
+                    } = request;
+                    client
+                        .execute_with_metadata::<P, P::Output, P::Error>(
+                            P::XRPC,
+                            context,
+                            &metadata,
+                            &params,
+                        )
+                        .await
+                        .map_err(ClientError::from)
+                }
             }
-            Transport::Irpc(client) => {
-                let _scope = request.context.cancellation.begin_transport_request()?;
-                client
-                    .rpc(request)
-                    .await
-                    .map_err(|error| {
-                        ClientError::transport(error, P::XRPC.kind.transport_outcome_unknown())
-                    })?
-                    .map_err(ClientError::Operation)
-            }
-            Transport::Xrpc(client) => {
-                request.context.validate()?;
-                let Envelope {
-                    context,
-                    metadata,
-                    params,
-                } = request;
-                client
-                    .execute::<P, P::Output, P::Error>(P::XRPC, context, &metadata, &params)
-                    .await
-                    .map_err(ClientError::from)
-            }
+        };
+        tokio::select! {
+            biased;
+            _ = context.cancellation.cancelled() => Err(crate::ContextError::Cancelled.into()),
+            _ = context.expired() => Err(crate::ContextError::DeadlineExceeded.into()),
+            result = call => result,
         }
     }
 
@@ -183,40 +200,47 @@ impl<Proto: Service> Client<Proto> {
     {
         self.subscribe_with_metadata(Envelope::new(context, params))
             .await
+            .map(|response| response.output)
     }
-
-    /// Opens a subscription. Establishment failures reported by the service
-    /// arrive as the first, terminal item of the stream on every transport;
-    /// `Err` here means the client itself could not send the request.
     pub async fn subscribe_with_metadata<P>(
         &self,
         request: Envelope<P>,
-    ) -> Result<ClientStream<P>, ClientError<P::Error>>
+    ) -> Result<crate::ResponseEnvelope<ClientStream<P>>, ClientError<P::Error>>
     where
         P: Subscription,
         Proto: From<Envelope<P>>,
         Proto::Message: From<WithChannels<Envelope<P>, Proto>>,
         Envelope<P>: Channels<Proto, Tx = EventReply<P>, Rx = NoReceiver>,
     {
-        match &self.transport {
-            Transport::Direct(host) => {
-                let (tx, rx) = mpsc::channel(self.event_buffer);
-                let message = Proto::Message::from(WithChannels::from((request, tx)));
-                Arc::clone(host).route_inline(message).await;
-                Ok(ClientStream::new(rx, None))
+        let context = request.context.clone();
+        context.validate()?;
+        let call = async {
+            match &self.transport {
+                Transport::Direct(host) => {
+                    let (tx, rx) = mpsc::channel(self.event_buffer);
+                    let message = Proto::Message::from(WithChannels::from((request, tx)));
+                    Arc::clone(host).route_inline(message).await;
+                    ClientStream::open(rx, None, context.clone()).await
+                }
+                Transport::Irpc(client) => {
+                    let scope = request.context.cancellation.begin_transport_request()?;
+                    let receiver = client
+                        .server_streaming(request, self.event_buffer)
+                        .await
+                        .map_err(|error| ClientError::transport(error, true))?;
+                    ClientStream::open(receiver, scope, context.clone()).await
+                }
+                Transport::Xrpc(_) => Err(ClientError::transport(
+                    "subscriptions are not supported by the unary HTTP transport",
+                    false,
+                )),
             }
-            Transport::Irpc(client) => {
-                let scope = request.context.cancellation.begin_transport_request()?;
-                let receiver = client
-                    .server_streaming(request, self.event_buffer)
-                    .await
-                    .map_err(|error| ClientError::transport(error, true))?;
-                Ok(ClientStream::new(receiver, scope))
-            }
-            Transport::Xrpc(_) => Err(ClientError::transport(
-                "subscriptions are not supported by the unary HTTP transport",
-                false,
-            )),
+        };
+        tokio::select! {
+            biased;
+            _ = context.cancellation.cancelled() => Err(crate::ContextError::Cancelled.into()),
+            _ = context.expired() => Err(crate::ContextError::DeadlineExceeded.into()),
+            result = call => result,
         }
     }
 }
@@ -260,39 +284,65 @@ pub struct ClientStream<P: Subscription> {
 }
 
 impl<P: Subscription> ClientStream<P> {
-    /// `scope` keeps the IRPC cancellation lease open for the life of the
-    /// stream so a caller can still cancel after the subscription was
-    /// established.
-    fn new(
-        receiver: mpsc::Receiver<Result<P::Event, P::Error>>,
+    async fn open(
+        mut receiver: mpsc::Receiver<Result<crate::EventFrame<P::Event>, P::Error>>,
         scope: Option<CancellationRequestGuard>,
-    ) -> Self {
+        context: RequestContext,
+    ) -> Result<crate::ResponseEnvelope<Self>, ClientError<P::Error>> {
+        let metadata = match receiver.recv().await {
+            Ok(Some(Ok(crate::EventFrame::Open(metadata)))) => metadata,
+            Ok(Some(Err(error))) => return Err(ClientError::Operation(error)),
+            Ok(Some(Ok(crate::EventFrame::Event(_) | crate::EventFrame::End))) => {
+                return Err(ClientError::transport(
+                    "subscription event preceded its response metadata",
+                    false,
+                ));
+            }
+            Ok(None) => {
+                return Err(ClientError::transport(
+                    "subscription closed before establishment",
+                    false,
+                ));
+            }
+            Err(error) => return Err(ClientError::transport(error, false)),
+        };
         struct State<R> {
             receiver: R,
-            terminal: bool,
+            context: RequestContext,
             _scope: Option<CancellationRequestGuard>,
         }
         let state = State {
             receiver,
-            terminal: false,
+            context,
             _scope: scope,
         };
-        let inner = futures::stream::unfold(state, |mut state| async move {
-            if state.terminal {
-                return None;
-            }
-            let item = match state.receiver.recv().await {
-                Ok(Some(Ok(event))) => Ok(event),
-                Ok(Some(Err(error))) => Err(ClientError::Operation(error)),
-                Ok(None) => return None,
-                Err(error) => Err(ClientError::transport(error, false)),
+        let inner = futures::stream::unfold(Some(state), |state| async move {
+            let mut state = state?;
+            let item = tokio::select! {
+                biased;
+                _ = state.context.cancellation.cancelled() => Err(crate::ContextError::Cancelled.into()),
+                _ = state.context.expired() => Err(crate::ContextError::DeadlineExceeded.into()),
+                received = state.receiver.recv() => match received {
+                    Ok(Some(Ok(crate::EventFrame::Event(event)))) => Ok(event),
+                    Ok(Some(Ok(crate::EventFrame::Open(_)))) => Err(ClientError::transport(
+                        "subscription sent response metadata twice",
+                        false,
+                    )),
+                    Ok(Some(Ok(crate::EventFrame::End))) => return None,
+                    Ok(Some(Err(error))) => Err(ClientError::Operation(error)),
+                    Ok(None) => Err(ClientError::transport("subscription closed without an end marker", false)),
+                    Err(error) => Err(ClientError::transport(error, false)),
+                },
             };
-            state.terminal = item.is_err();
-            Some((item, state))
+            let next = item.is_ok().then_some(state);
+            Some((item, next))
         });
-        Self {
-            inner: Box::pin(inner),
-        }
+        Ok(crate::ResponseEnvelope {
+            output: Self {
+                inner: Box::pin(inner),
+            },
+            metadata,
+        })
     }
 
     pub async fn recv(&mut self) -> Result<Option<P::Event>, ClientError<P::Error>> {
@@ -315,5 +365,122 @@ impl<P: Subscription> std::fmt::Debug for ClientStream<P> {
             .debug_struct("ClientStream")
             .field("nsid", &P::XRPC.nsid)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ContextError, EventFrame, ResponseMetadata,
+        sample::{SampleEvent, SubscribeEvents},
+    };
+
+    #[tokio::test]
+    async fn end_marker_distinguishes_completion_from_truncation() {
+        let event = SampleEvent {
+            source_revision: 1,
+            service_revision: 1,
+            value: "one".into(),
+        };
+        for ended in [true, false] {
+            let (sender, receiver) = mpsc::channel(3);
+            sender
+                .send(Ok(EventFrame::Open(ResponseMetadata::default())))
+                .await
+                .unwrap();
+            sender
+                .send(Ok(EventFrame::Event(event.clone())))
+                .await
+                .unwrap();
+            if ended {
+                sender.send(Ok(EventFrame::End)).await.unwrap();
+            }
+            drop(sender);
+            let mut stream =
+                ClientStream::<SubscribeEvents>::open(receiver, None, RequestContext::root())
+                    .await
+                    .unwrap()
+                    .output;
+            assert_eq!(stream.recv().await.unwrap(), Some(event.clone()));
+            if !ended {
+                assert_eq!(
+                    stream.recv().await,
+                    Err(ClientError::transport(
+                        "subscription closed without an end marker",
+                        false
+                    ))
+                );
+            }
+            assert_eq!(stream.recv().await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_establishment_and_duplicate_metadata_are_terminal() {
+        for first in [
+            EventFrame::End,
+            EventFrame::Open(ResponseMetadata::default()),
+        ] {
+            let (sender, receiver) = mpsc::channel(2);
+            sender.send(Ok(first.clone())).await.unwrap();
+            sender
+                .send(Ok(EventFrame::Open(ResponseMetadata::default())))
+                .await
+                .unwrap();
+            drop(sender);
+            let opened =
+                ClientStream::<SubscribeEvents>::open(receiver, None, RequestContext::root()).await;
+            match first {
+                EventFrame::End => assert_eq!(
+                    opened.unwrap_err(),
+                    ClientError::transport(
+                        "subscription event preceded its response metadata",
+                        false
+                    )
+                ),
+                EventFrame::Open(_) => {
+                    let mut stream = opened.unwrap().output;
+                    assert_eq!(
+                        stream.recv().await,
+                        Err(ClientError::transport(
+                            "subscription sent response metadata twice",
+                            false
+                        ))
+                    );
+                    assert_eq!(stream.recv().await.unwrap(), None);
+                }
+                EventFrame::Event(_) => unreachable!(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_preempts_buffered_events_and_is_terminal() {
+        let context = RequestContext::root();
+        let (sender, receiver) = mpsc::channel(2);
+        sender
+            .send(Ok(EventFrame::Open(ResponseMetadata::default())))
+            .await
+            .unwrap();
+        sender
+            .send(Ok(EventFrame::Event(SampleEvent {
+                source_revision: 1,
+                service_revision: 1,
+                value: "buffered".into(),
+            })))
+            .await
+            .unwrap();
+        let mut stream = ClientStream::<SubscribeEvents>::open(receiver, None, context.clone())
+            .await
+            .unwrap()
+            .output;
+        context.cancel();
+        assert_eq!(
+            stream.recv().await,
+            Err(ClientError::Operation(ContextError::Cancelled.into()))
+        );
+        sender.closed().await;
+        assert_eq!(stream.recv().await.unwrap(), None);
     }
 }

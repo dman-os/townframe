@@ -34,20 +34,10 @@ async fn query_and_procedure_agree_across_transports() {
         assert_eq!(read.snapshot, written.snapshot, "{name}");
         let observed = &read.observed_context;
         assert_eq!(
-            (
-                observed.request_id,
-                observed.trace_id,
-                observed.span_id,
-                observed.parent_span_id
-            ),
-            (
-                context.request_id,
-                context.trace_id,
-                context.span_id,
-                context.parent_span_id
-            ),
-            "{name}: request identity survives the hop"
+            observed.request_id, context.request_id,
+            "{name}: request id"
         );
+        assert_eq!(observed.trace, context.trace, "{name}: trace context");
         if name != "xrpc" {
             assert_eq!(
                 read.observed_context, context,
@@ -64,9 +54,6 @@ async fn metadata_reaches_the_handler_on_every_transport() {
     let metadata = HttpMetadata {
         authorization: Some("Bearer capability".into()),
         idempotency_key: Some("command-1".into()),
-        traceparent: Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".into()),
-        tracestate: Some("vendor=value".into()),
-        timeout: Some(Duration::from_secs(30)),
     };
     for (name, client) in stack.transports() {
         let read = client
@@ -77,7 +64,7 @@ async fn metadata_reaches_the_handler_on_every_transport() {
             ))
             .await
             .unwrap_or_else(|error| panic!("{name} query: {error:?}"));
-        assert_eq!(read.observed_metadata, metadata, "{name}");
+        assert_eq!(read.output.observed_metadata, metadata, "{name}");
     }
     stack.shutdown().await;
 }
@@ -164,7 +151,33 @@ async fn invalid_and_expired_contexts_are_rejected_before_the_handler_on_every_t
 }
 
 #[tokio::test]
-async fn subscription_establishment_errors_arrive_as_the_first_stream_item() {
+async fn an_in_flight_call_fails_at_its_deadline_on_every_transport() {
+    let stack = Stack::boot(4, 4).await;
+    let gate = stack.sample.service.block_projector();
+    for (name, client) in stack.transports() {
+        let budgeted = RequestContext::root().with_time_budget(Duration::from_millis(20));
+        let result = client
+            .call(
+                budgeted,
+                PutValue {
+                    value: "too slow".into(),
+                },
+            )
+            .await;
+        assert_eq!(
+            result,
+            Err(ClientError::Operation(SampleError::Context(
+                ContextError::DeadlineExceeded
+            ))),
+            "{name}"
+        );
+    }
+    drop(gate);
+    stack.shutdown().await;
+}
+
+#[tokio::test]
+async fn subscription_establishment_errors_are_returned_before_the_stream() {
     let stack = Stack::boot(4, 4).await;
     let mut invalid = RequestContext::root();
     invalid.request_id = uuid::Uuid::nil();
@@ -173,20 +186,16 @@ async fn subscription_establishment_errors_arrive_as_the_first_stream_item() {
     };
 
     for (name, client) in [("direct", &stack.direct), ("irpc", &stack.irpc)] {
-        let mut stream = client
-            .subscribe(invalid.clone(), params.clone())
-            .await
-            .unwrap_or_else(|error| panic!("{name} subscribe sends: {error:?}"));
+        let result = client.subscribe(invalid.clone(), params.clone()).await;
         assert!(
             matches!(
-                stream.recv().await,
+                result,
                 Err(ClientError::Operation(SampleError::Context(
                     ContextError::MissingRequestId
                 )))
             ),
             "{name}"
         );
-        assert!(matches!(stream.recv().await, Ok(None)), "{name} ends");
     }
 
     let unsupported = stack.xrpc.subscribe(RequestContext::root(), params).await;

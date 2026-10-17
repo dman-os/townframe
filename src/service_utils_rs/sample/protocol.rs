@@ -5,14 +5,9 @@
 //! talks to the sample over IRPC or HTTP needs exactly this module.
 
 use crate::{
-    ContextError, Dispatch, Envelope, EventReply, EventStream, Handler, Host, HttpMetadata,
-    Operation, Reply, RequestContext, Route, Subscription, XrpcOperation,
-    xrpc::{XrpcRegistrationError, XrpcRouter},
+    ContextError, EventStream, HttpMetadata, Operation, RequestContext, Subscription, XrpcOperation,
 };
-use futures::future::BoxFuture;
-use irpc::rpc_requests;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValueSnapshot {
@@ -113,45 +108,9 @@ impl Subscription for SubscribeEvents {
     type Event = SampleEvent;
 }
 
-/// The irpc protocol. Each variant wraps one request in an [`Envelope`] and
-/// names its reply channel through the request's [`Operation`] impl, so the
-/// output and error types are never repeated here.
-#[rpc_requests(message = SampleMessage)]
-#[derive(Debug, Serialize, Deserialize)]
-pub enum SampleProtocol {
-    #[rpc(tx = Reply<GetValue>)]
-    GetValue(Envelope<GetValue>),
-    #[rpc(tx = Reply<PutValue>)]
-    PutValue(Envelope<PutValue>),
-    #[rpc(tx = Reply<ReadState>)]
-    ReadState(Envelope<ReadState>),
-    #[rpc(tx = EventReply<SubscribeEvents>)]
-    SubscribeEvents(Envelope<SubscribeEvents>),
-}
-
-/// Any handler stack that serves all four operations can host this protocol.
-impl<H> Route<H> for SampleProtocol
-where
-    H: Handler<GetValue> + Handler<PutValue> + Handler<ReadState> + Handler<SubscribeEvents>,
-{
-    fn route(
-        host: Arc<Host<H>>,
-        dispatch: Dispatch,
-        message: SampleMessage,
-    ) -> BoxFuture<'static, ()> {
-        Box::pin(async move {
-            match message {
-                SampleMessage::GetValue(message) => host.unary(dispatch, message).await,
-                SampleMessage::PutValue(message) => host.unary(dispatch, message).await,
-                SampleMessage::ReadState(message) => host.unary(dispatch, message).await,
-                SampleMessage::SubscribeEvents(message) => host.stream(dispatch, message).await,
-            }
-        })
-    }
-
-    fn mount(router: &mut XrpcRouter, host: Arc<Host<H>>) -> Result<(), XrpcRegistrationError> {
-        router.mount::<GetValue, H>(Arc::clone(&host))?;
-        router.mount::<PutValue, H>(Arc::clone(&host))?;
-        router.mount::<ReadState, H>(host)
+crate::service_protocol! {
+    pub enum SampleProtocol => SampleMessage {
+        unary { GetValue(GetValue), PutValue(PutValue), ReadState(ReadState) }
+        stream { SubscribeEvents(SubscribeEvents) }
     }
 }

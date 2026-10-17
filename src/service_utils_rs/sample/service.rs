@@ -7,7 +7,7 @@ use super::protocol::{
 };
 use crate::{
     ContextError, Envelope, EventStream, Handler, Host, Layer, Operation, ServiceBuilder, Spawner,
-    StopToken, Trace, Traced,
+    StopToken,
 };
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{broadcast, watch};
@@ -68,7 +68,7 @@ impl SampleService {
             #[cfg(test)]
             projector_gate: Mutex::new(None),
         });
-        spawner.spawn(Arc::clone(&service).projector(source_rx));
+        let _task = spawner.spawn(Arc::clone(&service).projector(source_rx));
         (service, stop)
     }
 
@@ -182,19 +182,26 @@ impl SampleService {
 }
 
 impl Handler<GetValue> for SampleService {
-    async fn call(&self, request: Envelope<GetValue>) -> Result<GetValueOutput, SampleError> {
+    async fn call(
+        &self,
+        request: Envelope<GetValue>,
+    ) -> Result<crate::ResponseEnvelope<GetValueOutput>, SampleError> {
         #[cfg(test)]
         self.record_handler_task();
         Ok(GetValueOutput {
             snapshot: self.snapshot(),
             observed_context: request.context,
             observed_metadata: request.metadata,
-        })
+        }
+        .into())
     }
 }
 
 impl Handler<PutValue> for SampleService {
-    async fn call(&self, request: Envelope<PutValue>) -> Result<PutValueOutput, SampleError> {
+    async fn call(
+        &self,
+        request: Envelope<PutValue>,
+    ) -> Result<crate::ResponseEnvelope<PutValueOutput>, SampleError> {
         #[cfg(test)]
         self.record_handler_task();
         if request.params.value.is_empty() {
@@ -208,19 +215,24 @@ impl Handler<PutValue> for SampleService {
         self.wait_projected(revision).await?;
         Ok(PutValueOutput {
             snapshot: self.snapshot(),
-        })
+        }
+        .into())
     }
 }
 
 impl Handler<ReadState> for SampleService {
-    async fn call(&self, request: Envelope<ReadState>) -> Result<StatePage, SampleError> {
+    async fn call(
+        &self,
+        request: Envelope<ReadState>,
+    ) -> Result<crate::ResponseEnvelope<StatePage>, SampleError> {
         #[cfg(test)]
         self.record_handler_task();
         let snapshot = self.snapshot();
         Ok(StatePage {
             reset_required: request.params.after_source_revision > snapshot.source_revision,
             snapshot,
-        })
+        }
+        .into())
     }
 }
 
@@ -228,7 +240,7 @@ impl Handler<SubscribeEvents> for SampleService {
     async fn call(
         &self,
         request: Envelope<SubscribeEvents>,
-    ) -> Result<EventStream<SampleEvent, SampleError>, SampleError> {
+    ) -> Result<crate::ResponseEnvelope<EventStream<SampleEvent, SampleError>>, SampleError> {
         #[cfg(test)]
         self.record_handler_task();
         // Subscribe before reading so no interpretation lands between the
@@ -273,7 +285,8 @@ impl Handler<SubscribeEvents> for SampleService {
                 return Some((Ok(event), cursor));
             }
         });
-        Ok(Box::pin(stream))
+        let stream: EventStream<SampleEvent, SampleError> = Box::pin(stream);
+        Ok(stream.into())
     }
 }
 
@@ -321,7 +334,10 @@ pub struct Logged<H> {
 }
 
 impl<P: Operation, H: Handler<P>> Handler<P> for Logged<H> {
-    async fn call(&self, request: Envelope<P>) -> Result<P::Output, P::Error> {
+    async fn call(
+        &self,
+        request: Envelope<P>,
+    ) -> Result<crate::ResponseEnvelope<P::Output>, P::Error> {
         let nsid = P::XRPC.nsid;
         self.log.push(format!("{nsid}:start"));
         let result = self.inner.call(request).await;
@@ -332,7 +348,7 @@ impl<P: Operation, H: Handler<P>> Handler<P> for Logged<H> {
 
 /// The layered handler [`boot`] hosts. Naming it lets consumers write
 /// `Arc<Host<SampleHandler>>` and `Client::<SampleProtocol>::direct(host)`.
-pub type SampleHandler = Logged<Traced<Arc<SampleService>>>;
+pub type SampleHandler = Logged<Arc<SampleService>>;
 
 /// A booted sample: the implementation, the host that fronts it, and the log
 /// its layer writes.
@@ -349,7 +365,6 @@ pub fn boot(initial_value: impl Into<String>) -> (Sample, StopToken) {
     let (service, service_stop) = SampleService::boot(initial_value);
     let calls = CallLog::default();
     let handler = ServiceBuilder::new()
-        .layer(Trace::new("sample"))
         .layer(Log::new(calls.clone()))
         .service(Arc::clone(&service));
     let (host, host_stop) = Host::new(handler);
