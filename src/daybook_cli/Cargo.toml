@@ -24,7 +24,7 @@ oci-client = { version = "0.15.0", default-features = false, features = ["rustls
 url = { version = "2.5.7", features = ["serde"] }
 wash-runtime = { workspace = true }
 wash_plugin_sqlite.workspace = true
-sqlx_utils_rs.workspace = true
+sqlite_rs.workspace = true
 
 #
 # cli

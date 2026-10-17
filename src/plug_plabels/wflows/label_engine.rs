@@ -215,7 +215,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
     };
 
     req.sqlite_connection
-        .query_batch(
+        .execute_batch(
             r#"
             CREATE VIRTUAL TABLE IF NOT EXISTS image_label_prompt_vec
             USING vec0(embedding float[768]);
@@ -252,12 +252,17 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
             &[SqlValue::Text(config_facet_key.clone())],
         )
         .map_err(|err| JobErrorX::Terminal(ferr!("error loading label set cache version: {err:?}")))?;
-    let current_version_row = current_version_rows.first();
-    let current_version_id = current_version_row.and_then(|row| row_i64(row, "version_id"));
-    let current_heads_json = current_version_row.and_then(|row| row_text(row, "facet_heads_json"));
-    let current_schema_version = current_version_row.and_then(|row| row_i64(row, "schema_version"));
-    let current_model_tag = current_version_row.and_then(|row| row_text(row, "model_tag"));
-    let current_embedding_dim = current_version_row.and_then(|row| row_i64(row, "embedding_dim"));
+    let current_version_row = current_version_rows.rows.first();
+    let current_version_id =
+        current_version_row.and_then(|row| row_i64(&current_version_rows, row, "version_id"));
+    let current_heads_json = current_version_row
+        .and_then(|row| row_text(&current_version_rows, row, "facet_heads_json"));
+    let current_schema_version =
+        current_version_row.and_then(|row| row_i64(&current_version_rows, row, "schema_version"));
+    let current_model_tag =
+        current_version_row.and_then(|row| row_text(&current_version_rows, row, "model_tag"));
+    let current_embedding_dim =
+        current_version_row.and_then(|row| row_i64(&current_version_rows, row, "embedding_dim"));
     let config_schema_version = LABEL_SET_CACHE_SCHEMA_VERSION;
     let config_model_tag = NOMIC_TEXT_MODEL_ID.to_string();
     let config_embedding_dim = 768_i64;
@@ -268,8 +273,9 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         || current_embedding_dim != Some(config_embedding_dim);
 
     let active_version_id = if needs_rebuild {
-        req.sqlite_connection
-            .query(
+        let insert = req
+            .sqlite_connection
+            .execute(
                 "INSERT INTO image_label_label_set_versions (facet_key, facet_heads_json, schema_version, model_tag, embedding_dim, is_current) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
                 &[
                     SqlValue::Text(config_facet_key.clone()),
@@ -280,16 +286,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
                 ],
             )
             .map_err(|err| JobErrorX::Terminal(ferr!("error inserting label set version row: {err:?}")))?;
-        let version_rows = req
-            .sqlite_connection
-            .query("SELECT last_insert_rowid() AS rowid", &[])
-            .map_err(|err| {
-                JobErrorX::Terminal(ferr!("error loading label set version rowid: {err:?}"))
-            })?;
-        let version_id = version_rows
-            .first()
-            .and_then(|row| row_i64(row, "rowid"))
-            .ok_or_else(|| JobErrorX::Terminal(ferr!("missing label set version rowid")))?;
+        let version_id = insert.last_insert_rowid;
 
         let mut cache_rows = Vec::new();
         for label in &label_set.labels {
@@ -333,13 +330,13 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
                     embed_result.dimensions
                 )));
             }
-            if cache_row.row_kind == "label_prompt" {
-                if let Some(label) = &cache_row.label {
-                    prompt_vectors_by_label
-                        .entry(label.clone())
-                        .or_default()
-                        .push(embed_result.vector.clone());
-                }
+            if cache_row.row_kind == "label_prompt"
+                && let Some(label) = &cache_row.label
+            {
+                prompt_vectors_by_label
+                    .entry(label.clone())
+                    .or_default()
+                    .push(embed_result.vector.clone());
             }
             insert_cache_embedding_row(
                 req.sqlite_connection,
@@ -378,7 +375,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
             )?;
         }
         req.sqlite_connection
-            .query(
+            .execute(
                 "UPDATE image_label_label_set_versions SET is_current = 0 WHERE facet_key = ?1",
                 &[SqlValue::Text(config_facet_key.clone())],
             )
@@ -388,7 +385,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
                 ))
             })?;
         req.sqlite_connection
-            .query(
+            .execute(
                 "UPDATE image_label_label_set_versions SET is_current = 1 WHERE version_id = ?1",
                 &[SqlValue::Integer(version_id)],
             )
@@ -415,7 +412,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
             ],
         )
         .map_err(|err| JobErrorX::Terminal(ferr!("error loading scored label rows: {err:?}")))?;
-    if scored_rows.is_empty() {
+    if scored_rows.rows.is_empty() {
         write_no_hit_error(&req, "no-scored-rows", None, config_heads.as_deref())?;
         return Ok(());
     }
@@ -423,10 +420,10 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
     let mut by_label: std::collections::HashMap<String, LabelAgg> =
         std::collections::HashMap::new();
     let mut null_max = f64::NEG_INFINITY;
-    for row in &scored_rows {
-        let row_kind = row_text(row, "row_kind")
+    for row in &scored_rows.rows {
+        let row_kind = row_text(&scored_rows, row, "row_kind")
             .ok_or_else(|| JobErrorX::Terminal(ferr!("scored row missing row_kind")))?;
-        let score = row_real(row, "score")
+        let score = row_real(&scored_rows, row, "score")
             .ok_or_else(|| JobErrorX::Terminal(ferr!("scored row missing score")))?;
         if row_kind == "null_anchor" {
             if score > null_max {
@@ -434,7 +431,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
             }
             continue;
         }
-        let label = row_opt_text(row, "label")
+        let label = row_opt_text(&scored_rows, row, "label")
             .ok_or_else(|| JobErrorX::Terminal(ferr!("scored row missing label column")))?;
         let Some(label) = label else {
             continue;
@@ -451,7 +448,7 @@ pub fn apply_labeling(req: LabelRequest<'_>) -> Result<(), JobErrorX> {
         }
         if row_kind == "label_centroid" {
             agg.centroid_score = Some(score);
-            agg.centroid_rowid = row_i64(row, "rowid");
+            agg.centroid_rowid = row_i64(&scored_rows, row, "rowid");
             continue;
         }
         if row_kind == "label_prompt" {
@@ -645,10 +642,10 @@ fn write_no_hit_error(
 }
 
 fn with_heads_fragment(mut url: Url, heads: Option<&[String]>) -> Result<Url, JobErrorX> {
-    if let Some(heads) = heads {
-        if !heads.is_empty() {
-            url.set_fragment(Some(&heads.join("|")));
-        }
+    if let Some(heads) = heads
+        && !heads.is_empty()
+    {
+        url.set_fragment(Some(&heads.join("|")));
     }
     Ok(url)
 }
@@ -678,21 +675,15 @@ fn insert_cache_embedding_row(
     })?;
 
     let tx_result: Result<i64, JobErrorX> = (|| {
-        tx.query(
-            "INSERT INTO image_label_prompt_vec (embedding) VALUES (?1)",
-            &[SqlValue::Text(embedding_json)],
-        )
-        .map_err(|err| JobErrorX::Terminal(ferr!("error inserting vec cache row: {err:?}")))?;
+        let insert = tx
+            .execute(
+                "INSERT INTO image_label_prompt_vec (embedding) VALUES (?1)",
+                &[SqlValue::Text(embedding_json)],
+            )
+            .map_err(|err| JobErrorX::Terminal(ferr!("error inserting vec cache row: {err:?}")))?;
+        let rowid = insert.last_insert_rowid;
 
-        let rowid_rows = tx
-            .query("SELECT last_insert_rowid() AS rowid", &[])
-            .map_err(|err| JobErrorX::Terminal(ferr!("error reading cache vec rowid: {err:?}")))?;
-        let rowid = rowid_rows
-            .first()
-            .and_then(|r| row_i64(r, "rowid"))
-            .ok_or_else(|| JobErrorX::Terminal(ferr!("missing cache vec rowid")))?;
-
-        tx.query(
+        tx.execute(
             "INSERT INTO image_label_prompt_meta (rowid, label_set_version_id, row_kind, label, description, query_text, model_tag, active) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
             &[
                 SqlValue::Integer(rowid),
@@ -747,47 +738,37 @@ fn sqlite_vec_rowid_cosine_similarity(
                 "error computing sqlite-vec rowid cosine similarity: {err:?}"
             ))
         })?;
-    let Some(row) = rows.first() else {
+    let Some(row) = rows.rows.first() else {
         return Err(JobErrorX::Terminal(ferr!(
             "missing sqlite-vec rowid score row"
         )));
     };
-    row_real(row, "score")
+    row_real(&rows, row, "score")
         .ok_or_else(|| JobErrorX::Terminal(ferr!("missing sqlite-vec rowid score value")))
 }
 
 fn row_opt_text(
-    row: &crate::wit::townframe::sqlite::types::ResultRow,
+    set: &crate::wit::townframe::sqlite::types::ResultSet,
+    row: &[crate::wit::townframe::sqlite::types::SqlValue],
     name: &str,
 ) -> Option<Option<String>> {
-    row.iter().find_map(|entry| {
-        if entry.column_name != name {
-            return None;
-        }
-        match &entry.value {
-            crate::wit::townframe::sqlite::types::SqlValue::Text(value) => {
-                Some(Some(value.clone()))
-            }
-            crate::wit::townframe::sqlite::types::SqlValue::Null => Some(None),
-            _ => None,
-        }
-    })
+    match crate::wit_row_helpers::row_value_pub(set, row, name)? {
+        crate::wit::townframe::sqlite::types::SqlValue::Text(value) => Some(Some(value.clone())),
+        crate::wit::townframe::sqlite::types::SqlValue::Null => Some(None),
+        _ => None,
+    }
 }
 
-fn row_real(row: &crate::wit::townframe::sqlite::types::ResultRow, name: &str) -> Option<f64> {
-    row.iter().find_map(|entry| match &entry.value {
-        crate::wit::townframe::sqlite::types::SqlValue::Real(value)
-            if entry.column_name == name =>
-        {
-            Some(*value)
-        }
-        crate::wit::townframe::sqlite::types::SqlValue::Integer(value)
-            if entry.column_name == name =>
-        {
-            Some(*value as f64)
-        }
+fn row_real(
+    set: &crate::wit::townframe::sqlite::types::ResultSet,
+    row: &[crate::wit::townframe::sqlite::types::SqlValue],
+    name: &str,
+) -> Option<f64> {
+    match crate::wit_row_helpers::row_value_pub(set, row, name)? {
+        crate::wit::townframe::sqlite::types::SqlValue::Real(value) => Some(*value),
+        crate::wit::townframe::sqlite::types::SqlValue::Integer(value) => Some(*value as f64),
         _ => None,
-    })
+    }
 }
 
 fn embedding_vec_to_json(values: &[f32]) -> Res<String> {

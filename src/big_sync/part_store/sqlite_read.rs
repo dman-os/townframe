@@ -5,7 +5,7 @@ use big_sync_core::keyed_frontier::FrontierRevision;
 
 use super::sqlite_core::EVENT_REMOVED;
 use big_sync_core::{ObjKey, PartKey};
-use sqlx::{QueryBuilder, Row, Sqlite};
+use sqlite_rs::Sql;
 use std::collections::BTreeMap;
 
 /// Independent lower bounds for exact object and exact part routes.
@@ -70,11 +70,7 @@ fn part_blob(id: PartKey) -> Vec<u8> {
     id.as_bytes().to_vec()
 }
 
-fn push_selector_predicate(
-    query: &mut QueryBuilder<Sqlite>,
-    selector: &SqlitePartSelector,
-    scope_id: i64,
-) {
+fn push_selector_predicate(query: &mut Sql, selector: &SqlitePartSelector, scope_id: i64) {
     query.push(" AND (");
     if selector.all.is_some() {
         query.push("1");
@@ -88,17 +84,17 @@ fn push_selector_predicate(
         }
         first = false;
         query.push("(m.obj_ref IN (SELECT obj_ref FROM big_sync_objs WHERE scope_id = ");
-        query.push_bind(scope_id);
+        query.bind(scope_id);
         query.push(" AND obj_id = ");
-        query.push_bind(id_blob(obj_id.clone()));
+        query.bind(id_blob(obj_id.clone()));
         query.push(") AND m.txid > ");
-        query.push_bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
+        query.bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
         if selector.apply_tombstone_rule {
             // A membership deletion is a part-lane fact, so an object route never admits one:
             // the projection drops it either way, and not fetching it keeps the row budget
             // honest.
             query.push(" AND m.event_type != ");
-            query.push_bind(EVENT_REMOVED);
+            query.bind(EVENT_REMOVED);
         }
         query.push(")");
     }
@@ -108,20 +104,20 @@ fn push_selector_predicate(
         }
         first = false;
         query.push("(m.maybe_part_ref IN (SELECT part_ref FROM big_sync_parts WHERE scope_id = ");
-        query.push_bind(scope_id);
+        query.bind(scope_id);
         query.push(" AND part_id = ");
-        query.push_bind(part_blob(part_id.clone()));
+        query.bind(part_blob(part_id.clone()));
         query.push(") AND m.txid > ");
-        query.push_bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
+        query.bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
         if selector.apply_tombstone_rule {
             // ADR 012 decision 9: a removal belongs to a reader that could have seen the add,
             // and the requested cursor is the per-key bound this branch is already built from.
             // `added_at` is the membership row's own column, so the predicate rides the read
             // that fetches the row instead of a lookup per event.
             query.push(" AND (m.event_type != ");
-            query.push_bind(EVENT_REMOVED);
+            query.bind(EVENT_REMOVED);
             query.push(" OR m.added_at <= ");
-            query.push_bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
+            query.bind(i64::try_from(*lower_bound).expect("frontier revision fits SQLite"));
             query.push(")");
         }
         query.push(")");
@@ -147,7 +143,7 @@ where
     if selector.is_empty() || after >= through && exact_revision.is_none() {
         return Ok(Vec::new());
     }
-    let mut query = QueryBuilder::<Sqlite>::new(
+    let mut query = Sql::new(
         "SELECT m.obj_ref
              , m.maybe_part_ref
              , m.txid
@@ -160,14 +156,14 @@ where
      LEFT JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
          WHERE m.scope_id = ",
     );
-    query.push_bind(scope_id);
+    query.bind(scope_id);
     query.push(" AND m.txid > ");
-    query.push_bind(i64::try_from(after).expect("frontier revision fits SQLite"));
+    query.bind(i64::try_from(after).expect("frontier revision fits SQLite"));
     query.push(" AND m.txid <= ");
-    query.push_bind(i64::try_from(through).expect("frontier revision fits SQLite"));
+    query.bind(i64::try_from(through).expect("frontier revision fits SQLite"));
     if let Some(exact_revision) = exact_revision {
         query.push(" AND m.txid = ");
-        query.push_bind(i64::try_from(exact_revision).expect("frontier revision fits SQLite"));
+        query.bind(i64::try_from(exact_revision).expect("frontier revision fits SQLite"));
     }
     push_selector_predicate(&mut query, selector, scope_id);
     query.push(
@@ -177,22 +173,20 @@ where
     );
     if let Some(limit) = limit {
         query.push(" LIMIT ");
-        query.push_bind(i64::try_from(limit).expect("read limit fits SQLite"));
+        query.bind(i64::try_from(limit).expect("read limit fits SQLite"));
     }
-    let rows = query.build().fetch_all(source.read_pool()).await?;
+    let rows = query.query(source.database()).await?.rows;
     rows.into_iter()
         .map(|row| {
             Ok(SqliteFrontierRow {
-                obj_ref: row.try_get("obj_ref")?,
-                part_ref: row.try_get("maybe_part_ref")?,
-                revision: u64::try_from(row.try_get::<i64, _>("txid")?)
+                obj_ref: row.get("obj_ref")?,
+                part_ref: row.get("maybe_part_ref")?,
+                revision: u64::try_from(row.get::<i64>("txid")?)
                     .expect("SQLite frontier revision is non-negative"),
-                obj_id: ObjKey::new(row.try_get::<Vec<u8>, _>("obj_id")?),
-                part_id: row
-                    .try_get::<Option<Vec<u8>>, _>("part_id")?
-                    .map(PartKey::new),
-                event_type: row.try_get("event_type")?,
-                payload_json: row.try_get("payload_json")?,
+                obj_id: ObjKey::new(row.get::<Vec<u8>>("obj_id")?),
+                part_id: row.get::<Option<Vec<u8>>>("part_id")?.map(PartKey::new),
+                event_type: row.get("event_type")?,
+                payload_json: row.get("payload_json")?,
             })
         })
         .collect()
@@ -222,7 +216,7 @@ where
         return Ok((Vec::new(), through));
     }
 
-    let mut query = QueryBuilder::<Sqlite>::new(
+    let mut query = Sql::new(
         r#"SELECT m.txid
              , 64
                  + length(o.obj_id)
@@ -235,22 +229,22 @@ where
      LEFT JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
          WHERE m.scope_id = "#,
     );
-    query.push_bind(scope_id);
+    query.bind(scope_id);
     query.push(" AND m.txid > ");
-    query.push_bind(i64::try_from(after).expect("frontier revision fits SQLite"));
+    query.bind(i64::try_from(after).expect("frontier revision fits SQLite"));
     query.push(" AND m.txid <= ");
-    query.push_bind(i64::try_from(through).expect("frontier revision fits SQLite"));
+    query.bind(i64::try_from(through).expect("frontier revision fits SQLite"));
     push_selector_predicate(&mut query, selector, scope_id);
     query.push(" ORDER BY m.txid, m.obj_ref, m.maybe_part_ref LIMIT ");
-    query.push_bind(i64::try_from(max_entries).expect("read limit fits SQLite"));
+    query.bind(i64::try_from(max_entries).expect("read limit fits SQLite"));
 
-    let metadata = query.build().fetch_all(source.read_pool()).await?;
+    let metadata = query.query(source.database()).await?.rows;
     let mut cutoff = None;
     let mut bytes = 0usize;
     for row in metadata {
-        let revision = u64::try_from(row.try_get::<i64, _>("txid")?)
+        let revision = u64::try_from(row.get::<i64>("txid")?)
             .expect("SQLite frontier revision is non-negative");
-        let row_bytes = usize::try_from(row.try_get::<i64, _>("row_bytes")?)
+        let row_bytes = usize::try_from(row.get::<i64>("row_bytes")?)
             .expect("SQLite row byte cost is non-negative");
         bytes = bytes.saturating_add(row_bytes);
         cutoff = Some(revision);

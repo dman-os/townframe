@@ -11,6 +11,7 @@ async fn boot_connected_sync_pair()
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -258,6 +259,7 @@ async fn iroh_sync_single_doc_created_before_connect_replicates() -> Res<()> {
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -339,6 +341,7 @@ async fn iroh_sync_single_blob_created_before_connect_replicates() -> Res<()> {
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -479,6 +482,7 @@ async fn iroh_sync_single_doc_created_while_connected_replicates() -> Res<()> {
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -562,6 +566,7 @@ async fn iroh_sync_single_blob_created_while_connected_replicates() -> Res<()> {
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -1256,6 +1261,7 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -1274,6 +1280,7 @@ async fn clone_bootstrap_populates_all_globals_and_can_open() -> Res<()> {
     node_a.stop().await?;
 
     let cloned = RepoCtx::open(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_b_path,
         RepoOpenOptions::default(),
         "clone-device".to_string(),

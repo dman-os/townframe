@@ -7,7 +7,14 @@ mod interlude {
 
 use crate::interlude::*;
 use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
-use sqlx_utils_rs::SqlCtx;
+use sqlite_rs as sqlite_rs_alias;
+use sqlite_rs::Database;
+mod sqlite {
+    #[expect(dead_code)]
+    pub(crate) mod queries {
+        include!("sqlite/gen.rs");
+    }
+}
 use tracing::Instrument;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -233,7 +240,10 @@ impl BigRepo {
     ///
     /// The [`Config::scope_key`] isolates this instance's data from other
     /// BigRepo instances sharing the same SQLite database.
-    pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
+    pub async fn boot(
+        sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+        config: Config,
+    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
         #[cfg(test)]
         let keyhive_change_notifs = config.keyhive_change_notifs;
         let Config {
@@ -247,13 +257,13 @@ impl BigRepo {
             ..
         } = config;
         let sql = match &storage {
-            StorageConfig::Memory => SqlCtx::memory().await?,
+            StorageConfig::Memory => sqlite_runtime.ephemeral(&[])?,
             StorageConfig::Disk { path } => {
                 std::fs::create_dir_all(path).wrap_err_with(|| {
                     format!("failed creating BigRepo data directory: {}", path.display())
                 })?;
                 let db_path = path.join("big_repo.sqlite");
-                SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?
+                sqlite_runtime.database(db_path, &[], "_sqlite_rs_migrations")
             }
         };
         let store = SqliteBigRepoStore::new_with_config(
@@ -312,7 +322,7 @@ impl BigRepo {
     /// The SQLite context backing this BigRepo's storage. Consumers that need
     /// additional scopes in the same database (e.g. the blob partitions)
     /// construct their scoped store from this context.
-    pub fn sql_ctx(&self) -> SqlCtx {
+    pub fn database(&self) -> Database {
         self.sqlite_store.sql.clone()
     }
     #[cfg(feature = "test-support")]

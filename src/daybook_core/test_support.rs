@@ -228,16 +228,20 @@ pub async fn test_cx_with_options(
     let device_id = format!("test_{}", uuid::Uuid::new_v4().simple());
     let peer_id = crate::peer_id_from_label(&format!("test_{}", uuid::Uuid::new_v4().simple()));
 
+    let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
     // Initialize SharedBigRepo with memory storage
-    let (big_repo, acx_stop) = BigRepo::boot(big_repo::Config {
-        node_identity_seed: rand::random::<[u8; 32]>(),
-        storage: big_repo::StorageConfig::Memory,
-        scope_key: Arc::from("daybook-core-test"),
-        hidden_parts: Default::default(),
-        automerge_frontier_group_scope: Default::default(),
-        causal_checkpoint_group_scope: Default::default(),
-        group_part_group_scope: Default::default(),
-    })
+    let (big_repo, acx_stop) = BigRepo::boot(
+        Arc::clone(&sqlite_runtime),
+        big_repo::Config {
+            node_identity_seed: rand::random::<[u8; 32]>(),
+            storage: big_repo::StorageConfig::Memory,
+            scope_key: Arc::from("daybook-core-test"),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        },
+    )
     .await?;
     let part_store = big_repo.shared_part_store();
     let (_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
@@ -277,12 +281,16 @@ pub async fn test_cx_with_options(
     let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
     let temp_dir = tempfile::tempdir()?;
 
-    let blob_part_store = crate::repo::open_blob_part_store(big_repo.sql_ctx()).await?;
+    let blob_part_store = crate::repo::open_blob_part_store(big_repo.database()).await?;
     let blobs =
         crate::blobs::BlobsRepo::new(temp_dir.path().join("blobs"), local_user_path.clone())
             .await?;
     let (sqlite_local_state_repo, sqlite_local_state_stop) =
-        crate::local_state::SqliteLocalStateRepo::boot(temp_dir.path().join("local_state")).await?;
+        crate::local_state::SqliteLocalStateRepo::boot(
+            Arc::clone(&sqlite_runtime),
+            temp_dir.path().join("local_state"),
+        )
+        .await?;
 
     let (plugs_repo, plugs_stop) = PlugsRepo::load(
         Arc::clone(&big_repo),
@@ -292,7 +300,8 @@ pub async fn test_cx_with_options(
         Arc::clone(&sqlite_local_state_repo),
     )
     .await?;
-    let sql_ctx = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+    let sql_ctx =
+        crate::app::open_database(&sqlite_runtime, crate::app::SqlConfig::memory()).await?;
     let (config_repo, config_stop) = crate::config::ConfigRepo::load(
         Arc::clone(&big_repo),
         app_doc_id.clone(),
@@ -505,6 +514,7 @@ pub async fn test_cx_with_options(
             lock_guard,
             options: crate::repo::RepoOpenOptions::default(),
             sql: sql_ctx.clone(),
+            sqlite_runtime,
             sqlite_local_state_repo: Arc::clone(&sqlite_local_state_repo),
             sqlite_local_state_stop: std::sync::Mutex::new(None),
             part_store: Arc::clone(&part_store),
@@ -631,16 +641,13 @@ pub async fn import_and_enable_test_plug(test_cx: &DaybookTestContext) -> Res<()
     test_cx.rt.plugs_repo.enable_plug(&ref_url).await?;
     Ok(())
 }
-pub async fn boot_part_store(sqlite_url: &str) -> Res<(big_sync::Ctx, big_sync::StopToken)> {
-    let sql = sqlx_utils_rs::SqlCtx::url(sqlite_url).await?;
-
+pub async fn boot_part_store(
+    sql: Database,
+    scope_key: &str,
+) -> Res<(big_sync::Ctx, big_sync::StopToken)> {
     let store = Arc::new(
-        big_sync::SqlitePartStore::new(
-            sql,
-            sqlite_url.to_owned(),
-            big_sync_core::BuckId::MAX_LEVEL,
-        )
-        .await?,
+        big_sync::SqlitePartStore::new(sql, scope_key.to_owned(), big_sync_core::BuckId::MAX_LEVEL)
+            .await?,
     );
     let store: Arc<dyn big_sync::HostPartStore> = store as _;
     let (worker, stop) = big_sync::spawn_big_sync_worker_with_options(
@@ -659,15 +666,19 @@ pub async fn boot_repo() -> Res<(
     big_sync::Ctx,
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
-    let (repo, stop) = BigRepo::boot(big_repo::Config {
-        node_identity_seed: [7_u8; 32],
-        storage: big_repo::StorageConfig::Memory,
-        scope_key: Arc::from("daybook-core-test"),
-        hidden_parts: Default::default(),
-        automerge_frontier_group_scope: Default::default(),
-        causal_checkpoint_group_scope: Default::default(),
-        group_part_group_scope: Default::default(),
-    })
+    let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
+    let (repo, stop) = BigRepo::boot(
+        sqlite_runtime,
+        big_repo::Config {
+            node_identity_seed: [7_u8; 32],
+            storage: big_repo::StorageConfig::Memory,
+            scope_key: Arc::from("daybook-core-test"),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        },
+    )
     .await?;
     let part_store = repo.shared_part_store();
     let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
@@ -706,15 +717,19 @@ pub async fn boot_disk_repo(
     tokio::fs::create_dir_all(&path)
         .await
         .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
-    let (repo, stop) = BigRepo::boot(big_repo::Config {
-        node_identity_seed: [7_u8; 32],
-        storage: big_repo::StorageConfig::Disk { path },
-        scope_key: Arc::from("daybook-core-test"),
-        hidden_parts: Default::default(),
-        automerge_frontier_group_scope: Default::default(),
-        causal_checkpoint_group_scope: Default::default(),
-        group_part_group_scope: Default::default(),
-    })
+    let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
+    let (repo, stop) = BigRepo::boot(
+        sqlite_runtime,
+        big_repo::Config {
+            node_identity_seed: [7_u8; 32],
+            storage: big_repo::StorageConfig::Disk { path },
+            scope_key: Arc::from("daybook-core-test"),
+            hidden_parts: Default::default(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+        },
+    )
     .await?;
     let part_store = repo.shared_part_store();
     let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(

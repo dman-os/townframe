@@ -174,13 +174,13 @@ mod wasm_runtime {
             })?;
 
         sqlite_connection
-            .query_batch(
+            .execute_batch(
                 "CREATE TABLE IF NOT EXISTS capability_report_v2 (doc_id TEXT NOT NULL, test_name TEXT NOT NULL, summary_json TEXT NOT NULL, PRIMARY KEY (doc_id, test_name)) STRICT"
             )
             .map_err(|err| JobErrorX::Terminal(ferr!("error creating capability_report_v2 table: {err:?}")))?;
 
         sqlite_connection
-            .query(
+            .execute(
                 "INSERT OR REPLACE INTO capability_report_v2 (doc_id, test_name, summary_json) VALUES (?1, ?2, ?3)",
                 &[
                     SqlValue::Text(args.doc_id.clone()),
@@ -638,13 +638,13 @@ mod wasm_runtime {
             })?;
 
         sqlite_connection
-            .query_batch(
+            .execute_batch(
                 "CREATE TABLE IF NOT EXISTS capability_report (doc_id TEXT PRIMARY KEY, summary_json TEXT NOT NULL) STRICT"
             )
             .map_err(|err| JobErrorX::Terminal(ferr!("error creating capability_report table: {err:?}")))?;
 
         sqlite_connection
-            .query(
+            .execute(
                 "INSERT OR REPLACE INTO capability_report (doc_id, summary_json) VALUES (?1, ?2)",
                 &[
                     SqlValue::Text(args.doc_id.clone()),

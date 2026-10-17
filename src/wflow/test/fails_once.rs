@@ -48,7 +48,8 @@ async fn test_fails_once_sqlite() -> Res<()> {
     utils_rs::testing::setup_tracing_once();
 
     // Build Ctx with SQLite stores
-    let cx = crate::Ctx::init(None).await?;
+    let db = sqlite_rs::test_support::db(&[])?;
+    let cx = crate::Ctx::init(db.clone()).await?;
 
     // Build test context with SQLite stores
     let test_cx = WflowTestContext::builder()

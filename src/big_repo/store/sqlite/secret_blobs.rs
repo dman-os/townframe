@@ -77,23 +77,15 @@ impl SqliteBigRepoStore {
         kek_version: u64,
         algorithm: &str,
     ) -> Res<()> {
-        sqlx::query!(
-            "INSERT INTO big_repo_deks(
-                scope_id, dek_id, dek_version, wrapped_dek, kek_version, algorithm
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(scope_id, dek_id, dek_version) DO UPDATE SET
-                 wrapped_dek = excluded.wrapped_dek,
-                 kek_version = excluded.kek_version,
-                 algorithm = excluded.algorithm",
+        queries::save_dek(
+            &self.sql,
             self.scope().id(),
-            dek_id,
+            dek_id.to_owned(),
             i64::try_from(version).expect(ERROR_IMPOSSIBLE),
-            &wrapped_dek,
+            wrapped_dek,
             i64::try_from(kek_version).expect(ERROR_IMPOSSIBLE),
-            algorithm,
+            algorithm.to_owned(),
         )
-        .execute(&self.sql.write_pool)
         .await?;
         Ok(())
     }
@@ -105,15 +97,12 @@ impl SqliteBigRepoStore {
     /// unwrap + rotation GC will consume this.
     #[allow(dead_code)]
     pub(crate) async fn load_dek(&self, dek_id: &str, version: u64) -> Res<Option<DekRow>> {
-        let row = sqlx::query!(
-            "SELECT wrapped_dek, kek_version, algorithm
-               FROM big_repo_deks
-              WHERE scope_id = ?1 AND dek_id = ?2 AND dek_version = ?3",
+        let row = queries::load_dek(
+            &self.sql,
             self.scope().id(),
-            dek_id,
+            dek_id.to_owned(),
             i64::try_from(version).expect(ERROR_IMPOSSIBLE),
         )
-        .fetch_optional(&self.sql.read_pool)
         .await?;
         Ok(row.map(|row| DekRow {
             wrapped_dek: row.wrapped_dek,
@@ -132,52 +121,33 @@ impl SqliteBigRepoStore {
         ciphertext: Vec<u8>,
         nonce: Vec<u8>,
     ) -> Res<bool> {
-        let mut tx = self.sql.write_pool.begin().await?;
+        let tx = self.sql.begin_write().await?;
         let dek_version = i64::try_from(dek_version).expect(ERROR_IMPOSSIBLE);
-        let inserted = sqlx::query(
-            "INSERT INTO big_repo_secret_blobs
-                 (scope_id
-                , kind
-                , blob_id
-                , dek_id
-                , dek_version
-                , ciphertext
-                , nonce
-                 )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(scope_id, kind, blob_id) DO NOTHING",
+        let inserted = queries::insert_secret_blob(
+            &tx,
+            self.scope().id(),
+            kind.as_i64(),
+            blob_id.to_vec(),
+            dek_id.to_owned(),
+            dek_version,
+            ciphertext.clone(),
+            nonce.clone(),
         )
-        .bind(self.scope().id())
-        .bind(kind.as_i64())
-        .bind(blob_id)
-        .bind(dek_id)
-        .bind(dek_version)
-        .bind(&ciphertext)
-        .bind(&nonce)
-        .execute(&mut *tx)
         .await?
-        .rows_affected()
+        .rows_affected
             == 1;
 
         if !inserted {
-            sqlx::query(
-                "UPDATE big_repo_secret_blobs
-                    SET dek_id = ?1
-                      , dek_version = ?2
-                      , ciphertext = ?3
-                      , nonce = ?4
-                  WHERE scope_id = ?5
-                    AND kind = ?6
-                    AND blob_id = ?7",
+            queries::update_secret_blob(
+                &tx,
+                dek_id.to_owned(),
+                dek_version,
+                ciphertext,
+                nonce,
+                self.scope().id(),
+                kind.as_i64(),
+                blob_id.to_vec(),
             )
-            .bind(dek_id)
-            .bind(dek_version)
-            .bind(&ciphertext)
-            .bind(&nonce)
-            .bind(self.scope().id())
-            .bind(kind.as_i64())
-            .bind(blob_id)
-            .execute(&mut *tx)
             .await?;
         }
         tx.commit().await?;
@@ -190,15 +160,12 @@ impl SqliteBigRepoStore {
         kind: SecretBlobKind,
         blob_id: &[u8],
     ) -> Res<Option<SecretBlobRow>> {
-        let row = sqlx::query!(
-            "SELECT dek_id, dek_version, ciphertext, nonce
-               FROM big_repo_secret_blobs
-              WHERE scope_id = ?1 AND kind = ?2 AND blob_id = ?3",
+        let row = queries::load_secret_blob(
+            &self.sql,
             self.scope().id(),
             kind.as_i64(),
-            blob_id,
+            blob_id.to_vec(),
         )
-        .fetch_optional(&self.sql.read_pool)
         .await?;
         Ok(row.map(|row| SecretBlobRow {
             dek_id: row.dek_id,
@@ -210,29 +177,19 @@ impl SqliteBigRepoStore {
 
     /// All blob ids present for one kind (listing, dedup, GC scans).
     pub(crate) async fn list_secret_blob_ids(&self, kind: SecretBlobKind) -> Res<Vec<Vec<u8>>> {
-        let rows: Vec<Vec<u8>> = sqlx::query_scalar!(
-            "SELECT blob_id AS \"blob_id: Vec<u8>\"
-               FROM big_repo_secret_blobs
-              WHERE scope_id = ?1 AND kind = ?2
-              ORDER BY blob_id",
-            self.scope().id(),
-            kind.as_i64(),
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let rows =
+            queries::list_secret_blob_ids(&self.sql, self.scope().id(), kind.as_i64()).await?;
         Ok(rows)
     }
 
     /// Delete one encrypted secret blob.
     pub(crate) async fn delete_secret_blob(&self, kind: SecretBlobKind, blob_id: &[u8]) -> Res<()> {
-        sqlx::query!(
-            "DELETE FROM big_repo_secret_blobs
-              WHERE scope_id = ?1 AND kind = ?2 AND blob_id = ?3",
+        queries::delete_secret_blob(
+            &self.sql,
             self.scope().id(),
             kind.as_i64(),
-            blob_id,
+            blob_id.to_vec(),
         )
-        .execute(&self.sql.write_pool)
         .await?;
         Ok(())
     }

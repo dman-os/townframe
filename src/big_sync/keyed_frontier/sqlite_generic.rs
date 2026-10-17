@@ -1,10 +1,11 @@
 #![allow(clippy::disallowed_names)]
 use super::sqlite_read::{SqliteReadError, SqliteReadSource, open_sqlite_reader};
+use crate::sqlite::queries;
 use big_sync_core::keyed_frontier::{
     FrontierEntry, FrontierRevision, KeyedFrontier, KeyedFrontierError, KeyedFrontierReader,
     KeyedFrontierResult, KeyedFrontierTransaction, TransactionIsolation,
 };
-use sqlx::{Row, Sqlite, SqlitePool, Transaction};
+use sqlite_rs::{Database, Sql, Tx};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Notify;
 use utils_rs::prelude::async_trait;
@@ -54,8 +55,7 @@ fn row_byte_cost(row: &GenericRow) -> usize {
 
 #[derive(Clone)]
 pub struct SqliteKeyedFrontier<C: SqliteFrontierCodec> {
-    pub(crate) read_pool: SqlitePool,
-    pub(crate) write_pool: SqlitePool,
+    pub(crate) sql: Database,
     pub(crate) frontier_id: Arc<str>,
     pub(crate) changed: Arc<Notify>,
     pub(crate) codec: C,
@@ -63,60 +63,40 @@ pub struct SqliteKeyedFrontier<C: SqliteFrontierCodec> {
 
 impl<C: SqliteFrontierCodec> SqliteKeyedFrontier<C> {
     pub async fn new(
-        read_pool: SqlitePool,
-        write_pool: SqlitePool,
+        database: Database,
         frontier_id: impl Into<Arc<str>>,
         codec: C,
         changed: Arc<Notify>,
     ) -> KeyedFrontierResult<Self> {
         let frontier_id: Arc<str> = frontier_id.into();
-        sqlx::query("CREATE TABLE IF NOT EXISTS generic_frontier_meta (frontier_id TEXT PRIMARY KEY, revision INTEGER NOT NULL)")
-            .execute(&write_pool).await.map_err(backend)?;
-        sqlx::query(
-            "INSERT OR IGNORE INTO generic_frontier_meta (frontier_id, revision) VALUES (?, 0)",
-        )
-        .bind(frontier_id.as_ref())
-        .execute(&write_pool)
-        .await
-        .map_err(backend)?;
-        sqlx::query("CREATE TABLE IF NOT EXISTS generic_frontier_entries (frontier_id TEXT NOT NULL, namespace BLOB, key BLOB NOT NULL, revision INTEGER NOT NULL, value BLOB, PRIMARY KEY(frontier_id, key))")
-            .execute(&write_pool).await.map_err(backend)?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_generic_frontier_revision ON generic_frontier_entries (frontier_id, revision)")
-            .execute(&write_pool).await.map_err(backend)?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_generic_frontier_namespace_revision ON generic_frontier_entries (frontier_id, namespace, revision)")
-            .execute(&write_pool).await.map_err(backend)?;
+        database
+            .apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+            .await
+            .map_err(backend)?;
+        queries::frontier_init(&database, frontier_id.to_string())
+            .await
+            .map_err(backend)?;
         Ok(Self {
-            read_pool,
-            write_pool,
+            sql: database,
             frontier_id,
             changed,
             codec,
         })
     }
 
-    pub async fn begin(&self) -> KeyedFrontierResult<SqliteKeyedFrontierTransaction<'_, C>> {
-        let tx = self
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(backend)?;
+    pub async fn begin(&self) -> KeyedFrontierResult<SqliteKeyedFrontierTransaction<C>> {
+        let tx = self.sql.begin_write().await.map_err(backend)?;
         Ok(self.begin_with_context(tx))
     }
 
     pub async fn latest_revision(&self) -> KeyedFrontierResult<FrontierRevision> {
-        let revision: i64 =
-            sqlx::query_scalar("SELECT revision FROM generic_frontier_meta WHERE frontier_id = ?")
-                .bind(self.frontier_id.as_ref())
-                .fetch_one(&self.read_pool)
-                .await
-                .map_err(backend)?;
+        let revision = queries::frontier_revision(&self.sql, self.frontier_id.to_string())
+            .await
+            .map_err(backend)?;
         u64::try_from(revision).map_err(backend)
     }
 
-    pub fn begin_with_context<'a>(
-        &'a self,
-        transaction: Transaction<'a, Sqlite>,
-    ) -> SqliteKeyedFrontierTransaction<'a, C> {
+    pub fn begin_with_context(&self, transaction: Tx) -> SqliteKeyedFrontierTransaction<C> {
         SqliteKeyedFrontierTransaction {
             transaction: Some(transaction),
             frontier_id: Arc::clone(&self.frontier_id),
@@ -130,36 +110,29 @@ impl<C: SqliteFrontierCodec> SqliteKeyedFrontier<C> {
     /// Apply a mutation batch inside a caller-owned SQLite transaction. This
     /// is the projection adapter used when a keyed frontier and another
     /// durable state machine must commit as one unit.
-    pub async fn apply_in_context<'a>(
+    pub async fn apply_in_context(
         &self,
-        tx: &mut Transaction<'a, Sqlite>,
+        tx: &mut Tx,
         mutations: impl IntoIterator<Item = (C::Key, Option<C::Value>)>,
     ) -> KeyedFrontierResult<FrontierRevision> {
         let mutations: Vec<_> = mutations.into_iter().collect();
         let frontier_id = Arc::clone(&self.frontier_id);
-        let revision: i64 = sqlx::query_scalar(
-            "UPDATE generic_frontier_meta SET revision = revision + 1 WHERE frontier_id = ? RETURNING revision",
-        )
-        .bind(frontier_id.as_ref())
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(backend)?;
-        let revision = u64::try_from(revision).map_err(backend)?;
+        let revision = queries::frontier_next_revision(tx, frontier_id.to_string())
+            .await
+            .map_err(backend)?;
         for (key, value) in mutations {
-            let namespace = self.codec.namespace(&key);
-            let encoded_key = self.codec.encode_key(&key);
-            let encoded_value = value.map(|value| self.codec.encode_value(&value));
-            sqlx::query("INSERT INTO generic_frontier_entries (frontier_id, namespace, key, revision, value) VALUES (?, ?, ?, ?, ?) ON CONFLICT(frontier_id, key) DO UPDATE SET namespace = excluded.namespace, revision = excluded.revision, value = excluded.value")
-                .bind(frontier_id.as_ref())
-                .bind(namespace)
-                .bind(encoded_key)
-                .bind(i64::try_from(revision).map_err(backend)?)
-                .bind(encoded_value)
-                .execute(&mut **tx)
-                .await
-                .map_err(backend)?;
+            queries::frontier_upsert_entry(
+                tx,
+                frontier_id.to_string(),
+                self.codec.namespace(&key),
+                self.codec.encode_key(&key),
+                revision,
+                value.map(|value| self.codec.encode_value(&value)),
+            )
+            .await
+            .map_err(backend)?;
         }
-        Ok(revision)
+        u64::try_from(revision).map_err(backend)
     }
 
     /// Notify readers after a caller-owned transaction has committed.
@@ -173,8 +146,8 @@ impl<C: SqliteFrontierCodec> SqliteReadSource for SqliteKeyedFrontier<C> {
     type Row = GenericRow;
     type Key = C::Key;
     type Value = C::Value;
-    fn read_pool(&self) -> &SqlitePool {
-        &self.read_pool
+    fn database(&self) -> &Database {
+        &self.sql
     }
     fn changed(&self) -> &Notify {
         &self.changed
@@ -237,16 +210,12 @@ impl<C: SqliteFrontierCodec> SqliteReadSource for SqliteKeyedFrontier<C> {
             dyn std::future::Future<Output = Result<FrontierRevision, SqliteReadError>> + Send + '_,
         >,
     > {
-        let pool = self.read_pool.clone();
+        let database = self.sql.clone();
         let id = Arc::clone(&self.frontier_id);
         Box::pin(async move {
-            let v: i64 = sqlx::query_scalar(
-                "SELECT revision FROM generic_frontier_meta WHERE frontier_id = ?",
-            )
-            .bind(id.as_ref())
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| Box::new(e) as SqliteReadError)?;
+            let v = queries::frontier_revision(&database, id.to_string())
+                .await
+                .map_err(|e| Box::new(e) as SqliteReadError)?;
             Ok(u64::try_from(v).expect("revision non-negative"))
         })
     }
@@ -261,27 +230,27 @@ impl<C: SqliteFrontierCodec> SqliteReadSource for SqliteKeyedFrontier<C> {
         Box<dyn std::future::Future<Output = Result<Vec<GenericRow>, SqliteReadError>> + Send + 'a>,
     > {
         let id = Arc::clone(&self.frontier_id);
-        let pool = self.read_pool.clone();
+        let database = self.sql.clone();
         let codec = self.codec.clone();
         let selector = selector.clone();
         Box::pin(async move {
-            let mut q = sqlx::QueryBuilder::<Sqlite>::new(
+            let mut q = Sql::new(
                 "SELECT key, revision, value FROM generic_frontier_entries WHERE frontier_id = ",
             );
-            q.push_bind(id.as_ref());
+            q.bind(id.as_ref());
             q.push(" AND revision > ");
-            q.push_bind(i64::try_from(after).expect("revision fits SQLite"));
+            q.bind(i64::try_from(after).expect("revision fits SQLite"));
             q.push(" AND revision <= ");
-            q.push_bind(i64::try_from(through).expect("revision fits SQLite"));
+            q.bind(i64::try_from(through).expect("revision fits SQLite"));
             if let Some(r) = exact {
                 q.push(" AND revision = ");
-                q.push_bind(i64::try_from(r).expect("revision fits SQLite"));
+                q.bind(i64::try_from(r).expect("revision fits SQLite"));
             }
             match selector {
                 SqliteFrontierSelector::All { after: bound } => {
                     if bound > after {
                         q.push(" AND revision > ");
-                        q.push_bind(i64::try_from(bound).expect("revision fits SQLite"));
+                        q.bind(i64::try_from(bound).expect("revision fits SQLite"));
                     }
                 }
                 SqliteFrontierSelector::Keys(keys) => {
@@ -296,9 +265,9 @@ impl<C: SqliteFrontierCodec> SqliteReadSource for SqliteKeyedFrontier<C> {
                         }
                         first = false;
                         q.push("(key = ");
-                        q.push_bind(codec.encode_key(&k));
+                        q.bind(codec.encode_key(&k));
                         q.push(" AND revision > ");
-                        q.push_bind(i64::try_from(bound).expect("revision fits SQLite"));
+                        q.bind(i64::try_from(bound).expect("revision fits SQLite"));
                         q.push(")");
                     }
                     q.push(")");
@@ -315,9 +284,9 @@ impl<C: SqliteFrontierCodec> SqliteReadSource for SqliteKeyedFrontier<C> {
                         }
                         first = false;
                         q.push("(namespace = ");
-                        q.push_bind(namespace);
+                        q.bind(namespace);
                         q.push(" AND revision > ");
-                        q.push_bind(i64::try_from(bound).expect("revision fits SQLite"));
+                        q.bind(i64::try_from(bound).expect("revision fits SQLite"));
                         q.push(")");
                     }
                     q.push(")");
@@ -326,20 +295,20 @@ impl<C: SqliteFrontierCodec> SqliteReadSource for SqliteKeyedFrontier<C> {
             q.push(" ORDER BY revision, key");
             if let Some(n) = limit {
                 q.push(" LIMIT ");
-                q.push_bind(i64::try_from(n).expect("limit fits SQLite"));
+                q.bind(i64::try_from(n).expect("limit fits SQLite"));
             }
             let rows = q
-                .build()
-                .fetch_all(&pool)
+                .query(&database)
                 .await
-                .map_err(|e| Box::new(e) as SqliteReadError)?;
+                .map_err(|e| Box::new(e) as SqliteReadError)?
+                .rows;
             rows.into_iter()
                 .map(|r| {
                     Ok(GenericRow {
-                        key: r.try_get("key")?,
-                        revision: u64::try_from(r.try_get::<i64, _>("revision")?)
+                        key: r.get("key")?,
+                        revision: u64::try_from(r.get::<i64>("revision")?)
                             .expect("revision non-negative"),
-                        value: r.try_get("value").ok(),
+                        value: r.get("value")?,
                     })
                 })
                 .collect()
@@ -367,11 +336,11 @@ impl<C: SqliteFrontierCodec> SqliteReadSource for SqliteKeyedFrontier<C> {
 impl<C: SqliteFrontierCodec> KeyedFrontier<C::Key, C::Value> for SqliteKeyedFrontier<C> {
     type Selector = SqliteFrontierSelector<C::Key>;
     type Context<'a>
-        = Transaction<'a, Sqlite>
+        = Tx
     where
         Self: 'a;
     type Transaction<'a>
-        = SqliteKeyedFrontierTransaction<'a, C>
+        = SqliteKeyedFrontierTransaction<C>
     where
         Self: 'a;
     async fn begin<'a>(&'a self) -> KeyedFrontierResult<Self::Transaction<'a>> {
@@ -391,8 +360,8 @@ impl<C: SqliteFrontierCodec> KeyedFrontier<C::Key, C::Value> for SqliteKeyedFron
     }
 }
 
-pub struct SqliteKeyedFrontierTransaction<'a, C: SqliteFrontierCodec> {
-    transaction: Option<Transaction<'a, Sqlite>>,
+pub struct SqliteKeyedFrontierTransaction<C: SqliteFrontierCodec> {
+    transaction: Option<Tx>,
     frontier_id: Arc<str>,
     codec: C,
     changed: Arc<Notify>,
@@ -404,29 +373,26 @@ fn backend<E: std::error::Error + Send + Sync + 'static>(e: E) -> KeyedFrontierE
     KeyedFrontierError::Backend(Box::new(e))
 }
 
-impl<'a, C: SqliteFrontierCodec> SqliteKeyedFrontierTransaction<'a, C> {
-    fn tx(&mut self) -> KeyedFrontierResult<&mut Transaction<'a, Sqlite>> {
+impl<C: SqliteFrontierCodec> SqliteKeyedFrontierTransaction<C> {
+    fn tx(&mut self) -> KeyedFrontierResult<&mut Tx> {
         self.transaction
             .as_mut()
             .ok_or_else(|| backend(std::io::Error::other("sqlite frontier transaction missing")))
     }
     async fn current_revision(&mut self) -> KeyedFrontierResult<FrontierRevision> {
-        let frontier_id = Arc::clone(&self.frontier_id);
-        let v: i64 =
-            sqlx::query_scalar("SELECT revision FROM generic_frontier_meta WHERE frontier_id = ?")
-                .bind(frontier_id.as_ref())
-                .fetch_one(&mut **self.tx()?)
-                .await
-                .map_err(backend)?;
+        let frontier_id = self.frontier_id.to_string();
+        let v = queries::frontier_revision(self.tx()?, frontier_id)
+            .await
+            .map_err(backend)?;
         u64::try_from(v).map_err(backend)
     }
 }
 
 #[async_trait]
-impl<'a, C: SqliteFrontierCodec> KeyedFrontierTransaction<C::Key, C::Value>
-    for SqliteKeyedFrontierTransaction<'a, C>
+impl<C: SqliteFrontierCodec> KeyedFrontierTransaction<C::Key, C::Value>
+    for SqliteKeyedFrontierTransaction<C>
 {
-    type Context = Transaction<'a, Sqlite>;
+    type Context = Tx;
     fn context_mut(&mut self) -> &mut Self::Context {
         self.transaction
             .as_mut()
@@ -436,8 +402,10 @@ impl<'a, C: SqliteFrontierCodec> KeyedFrontierTransaction<C::Key, C::Value>
         if let Some(r) = self.reserved_revision {
             return Ok(r);
         }
-        let frontier_id = Arc::clone(&self.frontier_id);
-        let v: i64 = sqlx::query_scalar("UPDATE generic_frontier_meta SET revision = revision + 1 WHERE frontier_id = ? RETURNING revision").bind(frontier_id.as_ref()).fetch_one(&mut **self.tx()?).await.map_err(backend)?;
+        let frontier_id = self.frontier_id.to_string();
+        let v = queries::frontier_next_revision(self.tx()?, frontier_id)
+            .await
+            .map_err(backend)?;
         let r = u64::try_from(v).map_err(backend)?;
         self.reserved_revision = Some(r);
         Ok(r)
@@ -449,17 +417,12 @@ impl<'a, C: SqliteFrontierCodec> KeyedFrontierTransaction<C::Key, C::Value>
         if let Some(v) = self.staged.get(key) {
             return Ok(v.clone());
         }
-        let frontier_id = Arc::clone(&self.frontier_id);
+        let frontier_id = self.frontier_id.to_string();
         let encoded_key = self.codec.encode_key(key);
-        let raw: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT value FROM generic_frontier_entries WHERE frontier_id = ? AND key = ?",
-        )
-        .bind(frontier_id.as_ref())
-        .bind(encoded_key)
-        .fetch_optional(&mut **self.tx()?)
-        .await
-        .map_err(backend)?
-        .flatten();
+        let raw = queries::frontier_entry_value(self.tx()?, frontier_id, encoded_key)
+            .await
+            .map_err(backend)?
+            .flatten();
         raw.map(|v| {
             self.codec
                 .decode_value(&v)
@@ -485,20 +448,18 @@ impl<'a, C: SqliteFrontierCodec> KeyedFrontierTransaction<C::Key, C::Value>
         let frontier_id = Arc::clone(&self.frontier_id);
         let codec = self.codec.clone();
         let staged = std::mem::take(&mut self.staged);
+        let revision_i64 = i64::try_from(revision).map_err(backend)?;
         for (key, value) in staged {
-            let namespace = codec.namespace(&key);
-            let encoded_key = codec.encode_key(&key);
-            let encoded_value = value.map(|value| codec.encode_value(&value));
-            let tx = self.tx()?;
-            sqlx::query("INSERT INTO generic_frontier_entries (frontier_id, namespace, key, revision, value) VALUES (?, ?, ?, ?, ?) ON CONFLICT(frontier_id, key) DO UPDATE SET namespace = excluded.namespace, revision = excluded.revision, value = excluded.value")
-                .bind(frontier_id.as_ref())
-                .bind(namespace)
-                .bind(encoded_key)
-                .bind(i64::try_from(revision).map_err(backend)?)
-                .bind(encoded_value)
-                .execute(&mut **tx)
-                .await
-                .map_err(backend)?;
+            queries::frontier_upsert_entry(
+                self.tx()?,
+                frontier_id.to_string(),
+                codec.namespace(&key),
+                codec.encode_key(&key),
+                revision_i64,
+                value.map(|value| codec.encode_value(&value)),
+            )
+            .await
+            .map_err(backend)?;
         }
         self.transaction
             .take()
@@ -580,12 +541,10 @@ mod tests {
 
     #[tokio::test]
     async fn transaction_roundtrip_and_rollback() -> KeyedFrontierResult<()> {
-        let pool = SqlitePool::connect("sqlite::memory:")
-            .await
-            .map_err(backend)?;
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).expect("create sqlite database");
         let frontier =
-            SqliteKeyedFrontier::new(pool.clone(), pool, "test", Bytes, Arc::new(Notify::new()))
-                .await?;
+            SqliteKeyedFrontier::new(sql, "test", Bytes, Arc::new(Notify::new())).await?;
         let mut tx = frontier.begin().await?;
         tx.put("a".into(), "one".into()).await?;
         let revision = tx.commit().await?;
@@ -601,12 +560,10 @@ mod tests {
 
     #[tokio::test]
     async fn replay_boundary_precedes_live_entries() -> KeyedFrontierResult<()> {
-        let pool = SqlitePool::connect("sqlite::memory:")
-            .await
-            .map_err(backend)?;
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).expect("create sqlite database");
         let frontier =
-            SqliteKeyedFrontier::new(pool.clone(), pool, "replay", Bytes, Arc::new(Notify::new()))
-                .await?;
+            SqliteKeyedFrontier::new(sql, "replay", Bytes, Arc::new(Notify::new())).await?;
         let mut reader = frontier
             .open(SqliteFrontierSelector::All { after: 0 })
             .await?;
@@ -626,17 +583,10 @@ mod tests {
 
     #[tokio::test]
     async fn exact_key_and_empty_selectors_are_isolated() -> KeyedFrontierResult<()> {
-        let pool = SqlitePool::connect("sqlite::memory:")
-            .await
-            .map_err(backend)?;
-        let frontier = SqliteKeyedFrontier::new(
-            pool.clone(),
-            pool,
-            "selectors",
-            Bytes,
-            Arc::new(Notify::new()),
-        )
-        .await?;
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).expect("create sqlite database");
+        let frontier =
+            SqliteKeyedFrontier::new(sql, "selectors", Bytes, Arc::new(Notify::new())).await?;
         let mut tx = frontier.begin().await?;
         tx.put("a".into(), "A".into()).await?;
         tx.put("b".into(), "B".into()).await?;
@@ -668,17 +618,11 @@ mod tests {
 
     #[tokio::test]
     async fn namespace_selector_honors_lower_bound_and_empty() -> KeyedFrontierResult<()> {
-        let pool = SqlitePool::connect("sqlite::memory:")
-            .await
-            .map_err(backend)?;
-        let frontier = SqliteKeyedFrontier::new(
-            pool.clone(),
-            pool,
-            "namespaces",
-            Namespaced,
-            Arc::new(Notify::new()),
-        )
-        .await?;
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).expect("create sqlite database");
+        let frontier =
+            SqliteKeyedFrontier::new(sql, "namespaces", Namespaced, Arc::new(Notify::new()))
+                .await?;
         let mut tx = frontier.begin().await?;
         tx.put("a1".into(), "A".into()).await?;
         tx.put("b1".into(), "B".into()).await?;
@@ -715,35 +659,27 @@ mod tests {
 
     #[tokio::test]
     async fn caller_transaction_and_empty_progress_are_atomic() -> KeyedFrontierResult<()> {
-        let pool = SqlitePool::connect("sqlite::memory:")
-            .await
-            .map_err(backend)?;
-        let frontier = SqliteKeyedFrontier::new(
-            pool.clone(),
-            pool.clone(),
-            "atomic",
-            Bytes,
-            Arc::new(Notify::new()),
-        )
-        .await?;
-        sqlx::query("CREATE TABLE side (key TEXT PRIMARY KEY)")
-            .execute(&pool)
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).expect("create sqlite database");
+        let frontier =
+            SqliteKeyedFrontier::new(sql.clone(), "atomic", Bytes, Arc::new(Notify::new())).await?;
+        sql.execute("CREATE TABLE side (key TEXT PRIMARY KEY)", ())
             .await
             .map_err(backend)?;
         let mut tx = frontier.begin().await?;
         {
             let context = tx.context_mut();
-            sqlx::query("INSERT INTO side(key) VALUES ('ok')")
-                .execute(&mut **context)
+            context
+                .execute("INSERT INTO side(key) VALUES ('ok')", ())
                 .await
                 .map_err(backend)?;
         }
         tx.put("ok".into(), "value".into()).await?;
         tx.commit().await?;
         assert_eq!(
-            sqlx::query_scalar::<_, String>("SELECT key FROM side")
-                .fetch_one(&pool)
+            sql.query("SELECT key FROM side", ())
                 .await
+                .and_then(sqlite_rs::ResultSet::one::<String>)
                 .map_err(backend)?,
             "ok"
         );
@@ -776,13 +712,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn arbitrary_cursor_reads_do_not_advance_frontier() -> KeyedFrontierResult<()> {
-        let pool = SqlitePool::connect("sqlite::memory:")
-            .await
-            .map_err(backend)?;
+    async fn walker_state_and_frontier_settle_in_one_context() -> utils_rs::prelude::Res<()> {
+        use crate::delta_walker_state::SqliteDeltaWalkerStateRepo;
+        use big_sync_core::delta_walker_sparse_state::{
+            DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
+        };
+        use big_sync_core::delta_walker_state::{
+            DeltaWalkerStateRepo, DeltaWalkerStateTransaction,
+        };
+        use utils_rs::prelude::futures::FutureExt;
+
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[])?;
+        let changed = Arc::new(Notify::new());
         let frontier =
-            SqliteKeyedFrontier::new(pool.clone(), pool, "cursor", Bytes, Arc::new(Notify::new()))
+            SqliteKeyedFrontier::new(sql.clone(), "settlement", Bytes, Arc::clone(&changed))
                 .await?;
+        let repo = SqliteDeltaWalkerStateRepo::new(sql.clone(), "settlement", "consumer").await?;
+        let mut wakeup = Box::pin(changed.notified());
+        assert!(wakeup.as_mut().now_or_never().is_none());
+
+        let mut state = repo.begin_with_context(sql.begin_write().await?);
+        assert_eq!(
+            frontier
+                .apply_in_context(
+                    state.context_mut(),
+                    [("key".into(), Some("rollback".into()))]
+                )
+                .await?,
+            1
+        );
+        state.put(b"key".to_vec(), b"rollback".to_vec()).await?;
+        state.advance_from(0, 7).await?;
+        state.rollback().await?;
+        assert_eq!(frontier.latest_revision().await?, 0);
+        assert_eq!(repo.progress().await?.upstream_revision, 0);
+        assert_eq!(repo.get(b"key").await?, None);
+        assert!(wakeup.as_mut().now_or_never().is_none());
+
+        let mut state = repo.begin_with_context(sql.begin_write().await?);
+        assert_eq!(
+            frontier
+                .apply_in_context(
+                    state.context_mut(),
+                    [("key".into(), Some("dropped".into()))]
+                )
+                .await?,
+            1
+        );
+        state.advance_from(0, 7).await?;
+        drop(state);
+        let mut state = repo.begin_with_context(sql.begin_write().await?);
+        assert_eq!(state.progress().await?.upstream_revision, 0);
+        assert_eq!(
+            frontier
+                .apply_in_context(
+                    state.context_mut(),
+                    [("key".into(), Some("committed".into()))]
+                )
+                .await?,
+            1
+        );
+        state.put(b"key".to_vec(), b"committed".to_vec()).await?;
+        state.advance_from(0, 7).await?;
+        assert_eq!(frontier.latest_revision().await?, 0);
+        assert_eq!(repo.progress().await?.upstream_revision, 0);
+        assert_eq!(repo.get(b"key").await?, None);
+        assert!(wakeup.as_mut().now_or_never().is_none());
+        state.commit().await?;
+        assert!(wakeup.as_mut().now_or_never().is_none());
+        frontier.notify_changed();
+        wakeup.await;
+        assert_eq!(frontier.latest_revision().await?, 1);
+        assert_eq!(repo.progress().await?.upstream_revision, 7);
+        assert_eq!(repo.get(b"key").await?, Some(b"committed".to_vec()));
+        let mut tx = frontier.begin().await?;
+        assert_eq!(
+            tx.get(&"key".to_owned()).await?,
+            Some("committed".to_owned())
+        );
+        tx.rollback().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn arbitrary_cursor_reads_do_not_advance_frontier() -> KeyedFrontierResult<()> {
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).expect("create sqlite database");
+        let frontier =
+            SqliteKeyedFrontier::new(sql, "cursor", Bytes, Arc::new(Notify::new())).await?;
         let mut tx = frontier.begin().await?;
         tx.put("a".into(), "one".into()).await?;
         assert_eq!(tx.commit().await?, 1);
@@ -801,17 +819,10 @@ mod tests {
 
     #[tokio::test]
     async fn replacement_then_delete_keeps_other_keys_intact() -> KeyedFrontierResult<()> {
-        let pool = SqlitePool::connect("sqlite::memory:")
-            .await
-            .map_err(backend)?;
-        let frontier = SqliteKeyedFrontier::new(
-            pool.clone(),
-            pool,
-            "collapse",
-            Bytes,
-            Arc::new(Notify::new()),
-        )
-        .await?;
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).expect("create sqlite database");
+        let frontier =
+            SqliteKeyedFrontier::new(sql, "collapse", Bytes, Arc::new(Notify::new())).await?;
         let mut tx = frontier.begin().await?;
         tx.put("a".into(), "old".into()).await?;
         tx.put("b".into(), "keep".into()).await?;
@@ -837,12 +848,10 @@ mod tests {
     #[tokio::test]
     async fn a_byte_budget_bounds_the_page_and_always_takes_the_first_entry()
     -> KeyedFrontierResult<()> {
-        let pool = SqlitePool::connect("sqlite::memory:")
-            .await
-            .map_err(backend)?;
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).expect("create sqlite database");
         let frontier =
-            SqliteKeyedFrontier::new(pool.clone(), pool, "budget", Bytes, Arc::new(Notify::new()))
-                .await?;
+            SqliteKeyedFrontier::new(sql, "budget", Bytes, Arc::new(Notify::new())).await?;
         // One entry per revision, each with 100 bytes of payload. `row_byte_cost` charges 32
         // bytes of header plus the key and payload, so every entry costs 133 bytes.
         for key in ["a", "b", "c"] {

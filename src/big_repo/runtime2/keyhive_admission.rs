@@ -140,19 +140,21 @@ mod tests {
     use big_sync_core::revisioned_store::contract::{
         RevisionedStoreContractHarness, assert_revisioned_store_contract,
     };
-    use sqlx_utils_rs::SqlCtx;
+    use sqlite_rs::Database;
     use subduction_keyhive::storage::StorageHash;
     use utils_rs::prelude::async_trait;
 
     struct SqliteAdmissionHarness {
-        _sql: SqlCtx,
+        _sql: Database,
         store: SqliteBigRepoStore,
         source: Store,
     }
 
     impl SqliteAdmissionHarness {
         async fn new() -> Self {
-            let sql = SqlCtx::memory().await.expect("create sqlite database");
+            let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+                .ephemeral(&[])
+                .expect("create sqlite database");
             let store =
                 SqliteBigRepoStore::new(sql.clone(), "admission-contract", BuckId::MAX_LEVEL)
                     .await

@@ -78,45 +78,45 @@ mod wasm_runtime {
     }
 
     pub(crate) fn row_text(
-        row: &crate::wit::townframe::sqlite::types::ResultRow,
+        set: &crate::wit::townframe::sqlite::types::ResultSet,
+        row: &[crate::wit::townframe::sqlite::types::SqlValue],
         name: &str,
     ) -> Option<String> {
-        row.iter().find_map(|entry| match &entry.value {
-            crate::wit::townframe::sqlite::types::SqlValue::Text(value)
-                if entry.column_name == name =>
-            {
-                Some(value.clone())
-            }
+        row_value(set, row, name).and_then(|value| match value {
+            crate::wit::townframe::sqlite::types::SqlValue::Text(value) => Some(value.clone()),
             _ => None,
         })
     }
 
     pub(crate) fn row_i64(
-        row: &crate::wit::townframe::sqlite::types::ResultRow,
+        set: &crate::wit::townframe::sqlite::types::ResultSet,
+        row: &[crate::wit::townframe::sqlite::types::SqlValue],
         name: &str,
     ) -> Option<i64> {
-        row.iter().find_map(|entry| match &entry.value {
-            crate::wit::townframe::sqlite::types::SqlValue::Integer(value)
-                if entry.column_name == name =>
-            {
-                Some(*value)
-            }
+        row_value(set, row, name).and_then(|value| match value {
+            crate::wit::townframe::sqlite::types::SqlValue::Integer(value) => Some(*value),
             _ => None,
         })
     }
 
     pub(crate) fn row_blob(
-        row: &crate::wit::townframe::sqlite::types::ResultRow,
+        set: &crate::wit::townframe::sqlite::types::ResultSet,
+        row: &[crate::wit::townframe::sqlite::types::SqlValue],
         name: &str,
     ) -> Option<Vec<u8>> {
-        row.iter().find_map(|entry| match &entry.value {
-            crate::wit::townframe::sqlite::types::SqlValue::Blob(value)
-                if entry.column_name == name =>
-            {
-                Some(value.clone())
-            }
+        row_value(set, row, name).and_then(|value| match value {
+            crate::wit::townframe::sqlite::types::SqlValue::Blob(value) => Some(value.clone()),
             _ => None,
         })
+    }
+
+    pub(crate) fn row_value<'a>(
+        set: &'a crate::wit::townframe::sqlite::types::ResultSet,
+        row: &'a [crate::wit::townframe::sqlite::types::SqlValue],
+        name: &str,
+    ) -> Option<&'a crate::wit::townframe::sqlite::types::SqlValue> {
+        let idx = set.columns.iter().position(|column| column == name)?;
+        row.get(idx)
     }
 
     pub(crate) fn embedding_bytes_to_f32(bytes: &[u8]) -> Res<Vec<f32>> {
@@ -127,8 +127,11 @@ mod wasm_runtime {
             );
         }
         Ok(bytes
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .copied()
+            .map(f32::from_le_bytes)
             .collect())
     }
 
@@ -157,6 +160,11 @@ mod wasm_runtime {
 pub(crate) use wasm_runtime::{
     embedding_bytes_to_f32, row_blob, row_i64, row_text, tuple_list_get,
 };
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod wit_row_helpers {
+    pub(crate) use crate::wasm_runtime::row_value as row_value_pub;
+}
 
 pub fn plug_manifest() -> PlugManifest {
     use crate::types::{PlabelFacetTag, PseudoLabel, PseudoLabelCandidatesFacet, PseudoLabelError};

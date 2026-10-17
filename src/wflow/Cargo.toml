@@ -20,7 +20,6 @@ wflow_core = { workspace = true, features = ["test-harness"] }
 wflow_tokio.workspace = true
 wash_plugin_wflow.workspace = true
 utils_rs = { workspace = true, features = ["hash"] }
-sqlx_utils_rs.workspace = true
 
 #
 # encoding
@@ -38,7 +37,7 @@ futures.workspace = true
 
 #
 # db
-sqlx = { workspace = true, features = ["sqlite"] }
+sqlite_rs.workspace = true
 
 #
 # wasm

@@ -10,6 +10,7 @@ mod interlude {
 mod r#gen;
 mod keyhive_demo;
 mod keyhive_visibility;
+mod sql;
 
 use clap::builder::styling::AnsiColor;
 
@@ -33,6 +34,43 @@ async fn main_main() -> Res<()> {
     use clap::Parser;
     let args = Args::parse();
     match args.command {
+        Commands::SqlCheck { dirs, all } => {
+            let root = sql::workspace_root().await?;
+            let dirs = if all {
+                sql::discover_dirs(&root)?
+            } else {
+                dirs
+            };
+            sql::cli(sql::Mode::Check, &root, dirs).await?;
+        }
+        Commands::SqlMigrate {
+            dir,
+            database,
+            table,
+            status,
+            dry_run,
+        } => {
+            let root = sql::workspace_root().await?;
+            sql::migrate(&root, &dir, &database, table.as_deref(), status || dry_run)?;
+        }
+        Commands::SqlGen { check, dirs, all } => {
+            let root = sql::workspace_root().await?;
+            let dirs = if all {
+                sql::discover_dirs(&root)?
+            } else {
+                dirs
+            };
+            sql::cli(
+                if check {
+                    sql::Mode::GenCheck
+                } else {
+                    sql::Mode::Gen
+                },
+                &root,
+                dirs,
+            )
+            .await?;
+        }
         Commands::Gen {} => {
             r#gen::cli()?;
         }
@@ -148,9 +186,27 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
     let manifest: PlugManifest = serde_json::from_value(manifest_json.clone())
         .wrap_err("error parsing PlugManifest JSON")?;
 
-    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../")
-        .canonicalize()?;
+    #[derive(serde::Deserialize)]
+    struct CargoWorkspace {
+        workspace_root: PathBuf,
+        target_directory: PathBuf,
+    }
+
+    let output = tokio::process::Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(&plug_root)
+        .output()
+        .await?;
+    eyre::ensure!(
+        output.status.success(),
+        "failed reading Cargo workspace metadata for '{}': {}",
+        plug_root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let CargoWorkspace {
+        workspace_root,
+        target_directory,
+    } = serde_json::from_slice(&output.stdout)?;
     let out_root = out_root.unwrap_or_else(|| workspace_root.join("target/oci"));
     let artifact_root = out_root.join(manifest.id());
     let blobs_sha_root = artifact_root.join("blobs/sha256");
@@ -169,7 +225,7 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
             .iter()
             .any(|component_url| matches!(component_url.scheme(), "build"))
     });
-    let wasm_target_dir = workspace_root.join("target/wasm");
+    let wasm_target_dir = target_directory.join("wasm");
     if needs_wasm_build {
         build_plug_wasm_component(&workspace_root, &plug_root, &wasm_target_dir).await?;
     }
@@ -456,6 +512,37 @@ struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
+    /// Validate `sqlite/{migrations,queries}` for units by preparing
+    /// every query against a freshly migrated temporary database. A unit
+    /// is any directory below `src/` owning `sqlite/migrations/`.
+    SqlCheck {
+        #[arg(required_unless_present = "all")]
+        dirs: Vec<PathBuf>,
+        #[arg(long, conflicts_with = "dirs")]
+        all: bool,
+    },
+    /// Generate (or with `--check`, verify) `sqlite/gen.rs` for units.
+    SqlGen {
+        #[arg(long)]
+        check: bool,
+        #[arg(required_unless_present = "all")]
+        dirs: Vec<PathBuf>,
+        #[arg(long, conflicts_with = "dirs")]
+        all: bool,
+    },
+    /// Apply (or with `--status`/`--dry-run`, inspect) a unit's migrations
+    /// against a database file. The history table defaults to the unit's
+    /// derived `MIGRATION_TABLE`.
+    SqlMigrate {
+        dir: PathBuf,
+        database: PathBuf,
+        #[arg(long)]
+        table: Option<String>,
+        #[arg(long, conflicts_with = "dry_run")]
+        status: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
     KeyhiveDemo {},
     KeyhiveVisibility {},
     Play {},

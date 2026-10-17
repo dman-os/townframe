@@ -591,13 +591,13 @@ mod tests {
 
     struct SqliteContextProbe;
 
-    struct SqliteContextProbeTransaction<'a> {
-        transaction: Option<sqlx::Transaction<'a, sqlx::Sqlite>>,
+    struct SqliteContextProbeTransaction {
+        transaction: Option<sqlite_rs::Tx>,
     }
 
     #[async_trait]
-    impl<'a> KeyedFrontierTransaction<u64, u64> for SqliteContextProbeTransaction<'a> {
-        type Context = sqlx::Transaction<'a, sqlx::Sqlite>;
+    impl KeyedFrontierTransaction<u64, u64> for SqliteContextProbeTransaction {
+        type Context = sqlite_rs::Tx;
 
         fn isolation(&self) -> TransactionIsolation {
             TransactionIsolation::Serializable
@@ -651,8 +651,8 @@ mod tests {
     #[async_trait]
     impl KeyedFrontier<u64, u64> for SqliteContextProbe {
         type Selector = MemoryKeySelector<u64>;
-        type Context<'a> = sqlx::Transaction<'a, sqlx::Sqlite>;
-        type Transaction<'a> = SqliteContextProbeTransaction<'a>;
+        type Context<'a> = sqlite_rs::Tx;
+        type Transaction<'a> = SqliteContextProbeTransaction;
 
         async fn begin<'a>(&'a self) -> KeyedFrontierResult<Self::Transaction<'a>> {
             Err(KeyedFrontierError::Backend(Box::new(std::io::Error::new(
@@ -683,31 +683,28 @@ mod tests {
 
     #[tokio::test]
     async fn gat_context_round_trips_a_real_sqlite_transaction() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("create sqlite pool");
-        let transaction = pool.begin().await.expect("begin sqlite transaction");
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).expect("create sqlite database");
+        let transaction = sql.begin_write().await.expect("begin sqlite transaction");
         let probe = SqliteContextProbe;
         let mut transaction = probe
             .begin_with_context(transaction)
             .await
             .expect("adapt caller-owned sqlite transaction");
-        sqlx::query("CREATE TABLE context_probe (value INTEGER NOT NULL)")
-            .execute(&mut **transaction.context_mut())
+        transaction
+            .context_mut()
+            .execute("CREATE TABLE context_probe (value INTEGER NOT NULL)", ())
             .await
             .expect("use caller-owned sqlite transaction");
         transaction
             .rollback()
             .await
             .expect("rollback sqlite transaction");
-        let table_count: i64 = sqlx::query_scalar(
+        let table_count: i64 = sql.query(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'context_probe'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("verify rollback through pool");
+            (),
+        ).await.and_then(sqlite_rs::ResultSet::one)
+            .expect("verify rollback through database");
         assert_eq!(table_count, 0);
     }
 

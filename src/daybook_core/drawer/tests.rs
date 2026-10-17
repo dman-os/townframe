@@ -41,8 +41,9 @@ fn local_branch(name: &str) -> BranchPathBuf {
     BranchPathBuf::from(format!("/test-device/{name}"))
 }
 
-async fn new_meta_store_sql() -> Res<crate::app::SqlCtx> {
-    crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await
+async fn new_meta_store_sql() -> Res<Database> {
+    let runtime = sqlite_rs::SqliteRuntime::new(default());
+    crate::app::open_database(&runtime, crate::app::SqlConfig::memory()).await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4070,9 +4071,12 @@ async fn discarding_a_staged_add_is_idempotent_and_leaves_a_commit_intact() -> R
         node.repo.get_entry(&staged.doc_id).await?.is_none(),
         "a discarded staging doc must never register"
     );
-    let keys: Vec<String> = sqlx::query_scalar("SELECT idempotency_key FROM drawer_add_outbox")
-        .fetch_all(&node.repo.meta_store_sql().write_pool)
-        .await?;
+    let keys: Vec<String> = node
+        .repo
+        .meta_store_sql()
+        .query("SELECT idempotency_key FROM drawer_add_outbox", ())
+        .await?
+        .all()?;
     assert!(
         !keys.contains(&staged.idempotency_key),
         "the discard must delete its outbox row: {keys:?}"
@@ -4194,11 +4198,15 @@ async fn write_claim(
 use crate::drawer::StagedAdd;
 
 async fn outbox_state(node: &DrawerNode, key: &str) -> Res<String> {
-    let state: String =
-        sqlx::query_scalar("SELECT state FROM drawer_add_outbox WHERE idempotency_key = ?1")
-            .bind(key)
-            .fetch_one(&node.repo.meta_store_sql().write_pool)
-            .await?;
+    let state: String = node
+        .repo
+        .meta_store_sql()
+        .query(
+            "SELECT state FROM drawer_add_outbox WHERE idempotency_key = ?1",
+            (key,),
+        )
+        .await?
+        .one()?;
     Ok(state)
 }
 
@@ -4246,9 +4254,11 @@ async fn an_uncommitted_pending_add_is_abandoned_and_its_row_dropped() -> Res<()
         "the abandoned reservation must be gone"
     );
     let keys: Vec<String> = {
-        sqlx::query_scalar("SELECT idempotency_key FROM drawer_add_outbox")
-            .fetch_all(&node.repo.meta_store_sql().write_pool)
+        node.repo
+            .meta_store_sql()
+            .query("SELECT idempotency_key FROM drawer_add_outbox", ())
             .await?
+            .all()?
     };
     assert!(
         !keys.contains(&"uncommitted-key".to_string()),
@@ -4469,11 +4479,10 @@ async fn a_durable_entry_finishes_residuals_and_marks_done() -> Res<()> {
     node.repo.commit_temporary(&staged).await?;
     // Rewind the row to committed-staged: the crash window between the docs.map
     // commit and the done mark inside the batch loop.
-    sqlx::query(
+    node.repo.meta_store_sql().execute(
         "UPDATE drawer_add_outbox SET state = 'committed-staged', done_at = NULL WHERE idempotency_key = ?1",
+        (&staged.idempotency_key,),
     )
-    .bind(&staged.idempotency_key)
-    .execute(&node.repo.meta_store_sql().write_pool)
     .await?;
 
     let entry_before = node
@@ -4522,17 +4531,17 @@ async fn the_ttl_purge_takes_done_rows_only() -> Res<()> {
     )
     .await?;
     let week_ago = jiff::Timestamp::now().as_microsecond() - 8 * 24 * 3600 * 1_000_000;
-    sqlx::query("UPDATE drawer_add_outbox SET state = 'done', done_at = ?1 WHERE idempotency_key = 'old-done'")
-        .bind(week_ago)
-        .execute(&node.repo.meta_store_sql().write_pool)
+    node.repo.meta_store_sql().execute("UPDATE drawer_add_outbox SET state = 'done', done_at = ?1 WHERE idempotency_key = 'old-done'", (week_ago,))
         .await?;
 
     let purged = super::outbox::purge_done_rows(&node.repo.meta_store_sql).await?;
     assert_eq!(purged, 1, "the old done row must be purged");
     let keys: Vec<String> = {
-        sqlx::query_scalar("SELECT idempotency_key FROM drawer_add_outbox")
-            .fetch_all(&node.repo.meta_store_sql().write_pool)
+        node.repo
+            .meta_store_sql()
+            .query("SELECT idempotency_key FROM drawer_add_outbox", ())
             .await?
+            .all()?
     };
     assert_eq!(
         keys,
@@ -4566,9 +4575,11 @@ async fn the_key_retry_contract_holds_for_done_and_inflight_rows() -> Res<()> {
         "a done retry must not restore a document deleted after the original add"
     );
     let rows: i64 = {
-        sqlx::query_scalar("SELECT COUNT(*) FROM drawer_add_outbox")
-            .fetch_one(&node.repo.meta_store_sql().write_pool)
+        node.repo
+            .meta_store_sql()
+            .query("SELECT COUNT(*) FROM drawer_add_outbox", ())
             .await?
+            .one()?
     };
     assert_eq!(
         rows, 1,
@@ -4678,9 +4689,11 @@ async fn boot_disk_drawer_node(
     utils_rs::testing::setup_tracing_once();
     let (big_repo, big_sync_host, stop) =
         crate::test_support::boot_disk_repo(storage_path.join("big-repo")).await?;
-    let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::file(
-        storage_path.join("drawer-meta.sqlite"),
-    ))
+    let runtime = sqlite_rs::SqliteRuntime::new(default());
+    let sql = crate::app::open_database(
+        &runtime,
+        crate::app::SqlConfig::file(storage_path.join("drawer-meta.sqlite")),
+    )
     .await?;
 
     // A restart must reopen the *same* drawer document: the registration surface

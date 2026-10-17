@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lettre::AsyncTransport;
-use sqlx_utils_rs::SqlCtx;
 use wash_plugin_sqlite::SqlPlugin;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::engine::workload::WorkloadItem;
@@ -27,52 +26,32 @@ mod binds_auth {
 pub use binds_auth::townframe::api_utils::http_service;
 pub use binds_auth::townframe::api_utils::mail;
 
-fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
-    wasmtime::Error::msg(msg.to_string())
-}
-
 /// Host plugin for `townframe:api-utils/http-service`.
 ///
 /// Playground implementation, not config-driven yet: resolves a single sqlite
-/// connection from a hardcoded file path and hands it to the guest via
+/// connection from a file path supplied at boot and hands it to the guest via
 /// `get-args`, mirroring how the daybook runtime provides `facet-routine` args.
 pub struct ServicePlugin {
     sqlite_file_path: PathBuf,
-    sql: tokio::sync::RwLock<Option<SqlCtx>>,
-}
-
-impl Default for ServicePlugin {
-    fn default() -> Self {
-        Self::new()
-    }
+    _sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+    db: sqlite_rs::Database,
 }
 
 impl ServicePlugin {
     pub const ID: &str = "townframe:api-utils/http-service";
 
-    pub fn new() -> Self {
+    pub fn new(sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>, sqlite_file_path: PathBuf) -> Self {
+        sqlite_rs::init_sqlite_vec();
+        let db = sqlite_runtime.database(sqlite_file_path.clone(), &[], "_sqlite_rs_migrations");
         Self {
-            sqlite_file_path: std::env::temp_dir().join("townframe-auth.sqlite"),
-            sql: default(),
+            sqlite_file_path,
+            _sqlite_runtime: sqlite_runtime,
+            db,
         }
     }
 
     fn from_ctx(wcx: &SharedWashCtx) -> Arc<Self> {
         wcx.active_ctx.get_plugin::<Self>(Self::ID)
-    }
-
-    async fn sql_ctx(&self) -> Res<SqlCtx> {
-        if let Some(sql) = self.sql.read().await.clone() {
-            return Ok(sql);
-        }
-        let sqlite_url = format!("sqlite://{}", self.sqlite_file_path.display());
-        sqlx_utils_rs::init_sqlite_vec();
-        let sql = sqlx_utils_rs::SqlCtx::url(&sqlite_url)
-            .await
-            .wrap_err("error initializing auth sqlite ctx")?;
-        let mut slot = self.sql.write().await;
-        *slot = Some(sql.clone());
-        Ok(sql)
     }
 }
 
@@ -147,12 +126,12 @@ impl wash_runtime::plugin::HostPlugin for ServicePlugin {
 impl http_service::Host for SharedWashCtx {
     async fn get_args(&mut self) -> wasmtime::Result<http_service::ServiceArgs> {
         let plugin = ServicePlugin::from_ctx(self);
-        let sql = plugin.sql_ctx().await.map_err(wasmtime_err)?;
+        let db = plugin.db.clone();
         let handle = SqlPlugin::create_connection(
             self,
             wash_plugin_sqlite::SqliteConnectionToken {
                 sqlite_file_path: plugin.sqlite_file_path.to_string_lossy().to_string(),
-                sql,
+                db,
             },
         )?;
         Ok(http_service::ServiceArgs {

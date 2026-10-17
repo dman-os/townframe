@@ -8,6 +8,7 @@ use crate::keyed_frontier::open_sqlite_reader_with_byte_budget;
 #[cfg(test)]
 use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
 
+use crate::sqlite::queries;
 #[cfg(test)]
 use big_sync_core::ByteKey;
 use big_sync_core::keyed_frontier::{KeyedFrontier, KeyedFrontierTransaction};
@@ -24,11 +25,8 @@ use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey};
 use future_form::{FutureForm, Sendable};
 #[cfg(test)]
 use futures::future::BoxFuture;
-use sqlx::{QueryBuilder, Row};
-use sqlx_utils_rs::SqlCtx;
+use sqlite_rs::{Database, Sql};
 use tokio::sync::Notify;
-#[cfg(test)]
-use uuid::Uuid;
 
 use super::sqlite_core::encode_access;
 
@@ -48,17 +46,17 @@ pub struct SqlitePartStore {
 
 /// Open a durable revision reader over a set of targets against an existing BigSync SQLite
 /// schema, handing the caller what the log holds — tombstones included. Callers that own a
-/// different store facade can supply its read pool, scope, and commit wakeup. This is the
+/// different store facade can supply its database, scope, and commit wakeup. This is the
 /// pull consumer's read; a page takes [`open_sqlite_page_reader`], which applies the
 /// request-scoped tombstone predicate.
 pub async fn open_sqlite_revision_reader(
-    read_pool: sqlx::SqlitePool,
+    database: Database,
     scope_id: i64,
     changed: Arc<Notify>,
     reqs: SubPartsRequest,
 ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
     open_sqlite_reader(
-        read_pool,
+        database,
         scope_id,
         changed,
         reqs,
@@ -75,13 +73,13 @@ pub async fn open_sqlite_revision_reader(
 /// consumer's bound is where it starts streaming and then advances, so
 /// [`open_sqlite_revision_reader`] hands that reader the log whole.
 pub async fn open_sqlite_page_reader(
-    read_pool: sqlx::SqlitePool,
+    database: Database,
     scope_id: i64,
     changed: Arc<Notify>,
     reqs: SubPartsRequest,
 ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
     open_sqlite_reader(
-        read_pool,
+        database,
         scope_id,
         changed,
         reqs,
@@ -91,7 +89,7 @@ pub async fn open_sqlite_page_reader(
 }
 
 async fn open_sqlite_reader(
-    read_pool: sqlx::SqlitePool,
+    database: Database,
     scope_id: i64,
     changed: Arc<Notify>,
     reqs: SubPartsRequest,
@@ -138,7 +136,7 @@ async fn open_sqlite_reader(
             }
         }
     }
-    let frontier = SqlitePartFrontier::new(read_pool.clone(), read_pool, scope_id, changed);
+    let frontier = SqlitePartFrontier::new(database, scope_id, changed);
     let reader =
         open_sqlite_reader_with_byte_budget(frontier, selector, Some(REPLAY_READ_AHEAD_BYTES))
             .await?;
@@ -149,15 +147,15 @@ async fn open_sqlite_reader(
 
 /// Open a durable revision reader over every part and object in the scope,
 /// including parts created after this call. Callers that own a different store
-/// facade can supply its read pool, scope, and commit wakeup. `after` is the
+/// facade can supply its database, scope, and commit wakeup. `after` is the
 /// replay lower bound (a part-store frontier revision).
 pub async fn open_sqlite_revision_reader_all(
-    read_pool: sqlx::SqlitePool,
+    database: Database,
     scope_id: i64,
     changed: Arc<Notify>,
     after: CursorIndex,
 ) -> Res<Result<Box<dyn LocalPartRevisionReader>, ListPartsError>> {
-    let frontier = SqlitePartFrontier::new(read_pool.clone(), read_pool, scope_id, changed);
+    let frontier = SqlitePartFrontier::new(database, scope_id, changed);
     let reader = open_sqlite_reader_with_byte_budget(
         frontier,
         SqlitePartSelector {
@@ -211,25 +209,20 @@ impl SqlitePartStore {
 }
 
 impl SqlitePartStore {
-    pub async fn new(sql: SqlCtx, scope_key: impl Into<Arc<str>>, bucket_depth: u8) -> Res<Self> {
+    pub async fn new(sql: Database, scope_key: impl Into<Arc<str>>, bucket_depth: u8) -> Res<Self> {
         Self::new_with_config(sql, scope_key, bucket_depth, Default::default()).await
     }
 
     pub async fn new_with_config(
-        sql: SqlCtx,
+        sql: Database,
         scope_key: impl Into<Arc<str>>,
         bucket_depth: u8,
         config: super::HostPartStoreConfig,
     ) -> Res<Self> {
-        SqliteCore::init_schema(&sql.write_pool, bucket_depth).await?;
+        SqliteCore::init_schema(&sql, bucket_depth).await?;
         let core = SqliteCore::new(sql, scope_key, bucket_depth).await?;
         let changed = Arc::new(tokio::sync::Notify::new());
-        let frontier = SqlitePartFrontier::new(
-            core.sql.read_pool.clone(),
-            core.sql.write_pool.clone(),
-            core.scope_id,
-            changed,
-        );
+        let frontier = SqlitePartFrontier::new(core.sql.clone(), core.scope_id, changed);
 
         Ok(Self {
             core,
@@ -251,20 +244,20 @@ impl SqlitePartStore {
         if parts.is_empty() && objects.is_empty() {
             return Ok(Vec::new());
         }
-        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+        let mut query = Sql::new(
             "SELECT m.txid, o.obj_id, m.event_type, o.payload_json
              FROM big_sync_members m
              JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
              LEFT JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
              WHERE m.scope_id = ",
         );
-        query.push_bind(self.core.scope_id);
+        query.bind(self.core.scope_id);
         if let Some(txid) = exact_txid {
             query.push(" AND m.txid = ");
-            query.push_bind(i64::try_from(txid).expect(ERROR_IMPOSSIBLE));
+            query.bind(i64::try_from(txid).expect(ERROR_IMPOSSIBLE));
         } else {
             query.push(" AND m.txid > ");
-            query.push_bind(i64::try_from(lower_bound).expect(ERROR_IMPOSSIBLE));
+            query.bind(i64::try_from(lower_bound).expect(ERROR_IMPOSSIBLE));
         }
         query.push(" AND (");
         if parts.is_empty() {
@@ -272,26 +265,20 @@ impl SqlitePartStore {
         } else {
             query
                 .push("m.maybe_part_ref IN (SELECT part_ref FROM big_sync_parts WHERE scope_id = ");
-            query.push_bind(self.core.scope_id);
-            query.push(" AND part_id IN (");
-            let mut separated = query.separated(", ");
-            for part in parts {
-                separated.push_bind(Self::part_blob(part.clone()));
-            }
-            separated.push_unseparated("))");
+            query.bind(self.core.scope_id);
+            query.push(" AND part_id IN ");
+            query.bind_list(parts.iter().map(|part| Self::part_blob(part.clone())));
+            query.push(")");
         }
         query.push(" OR ");
         if objects.is_empty() {
             query.push("0");
         } else {
             query.push("m.obj_ref IN (SELECT obj_ref FROM big_sync_objs WHERE scope_id = ");
-            query.push_bind(self.core.scope_id);
-            query.push(" AND obj_id IN (");
-            let mut separated = query.separated(", ");
-            for obj in objects {
-                separated.push_bind(Self::obj_blob(obj.clone()));
-            }
-            separated.push_unseparated("))");
+            query.bind(self.core.scope_id);
+            query.push(" AND obj_id IN ");
+            query.bind_list(objects.iter().map(|obj| Self::obj_blob(obj.clone())));
+            query.push(")");
         }
         query.push(")");
         // The `added_at` predicate (ADR 012 decision 9): a tombstone at cursor `T` belongs in a
@@ -300,29 +287,29 @@ impl SqlitePartStore {
         // the page's row budget. A zero stamp is a row from before the column and stays
         // selectable. `lower_bound` is the reader's cursor in all three shapes of this query.
         query.push(" AND (m.event_type != ");
-        query.push_bind(EVENT_REMOVED);
+        query.bind(EVENT_REMOVED);
         query.push(" OR m.added_at <= ");
-        query.push_bind(i64::try_from(lower_bound).expect(ERROR_IMPOSSIBLE));
+        query.bind(i64::try_from(lower_bound).expect(ERROR_IMPOSSIBLE));
         query.push(")");
         query.push(" ORDER BY m.txid, m.obj_ref, m.maybe_part_ref");
         if let Some(limit) = limit {
             query.push(" LIMIT ");
-            query.push_bind(i64::from(limit));
+            query.bind(i64::from(limit));
         }
-        let rows = query.build().fetch_all(&self.core.sql.read_pool).await?;
+        let rows = query.query(&self.core.sql).await?.rows;
         rows.into_iter()
             .map(|row| {
                 let payload = row
-                    .try_get::<Option<String>, _>("payload_json")?
+                    .get::<Option<String>>("payload_json")?
                     .as_deref()
                     .filter(|str| !str.is_empty())
                     .map(|str| serde_json::from_str(str).wrap_err(ERROR_JSON))
                     .transpose()?
                     .unwrap_or(serde_json::Value::Null);
                 Ok(ReplayCandidate {
-                    txid: u64::try_from(row.try_get::<i64, _>("txid")?).expect(ERROR_IMPOSSIBLE),
-                    obj_id: Self::obj_from_blob(row.try_get("obj_id")?),
-                    event_type: row.try_get("event_type")?,
+                    txid: u64::try_from(row.get::<i64>("txid")?).expect(ERROR_IMPOSSIBLE),
+                    obj_id: Self::obj_from_blob(row.get("obj_id")?),
+                    event_type: row.get("event_type")?,
                     payload,
                 })
             })
@@ -390,10 +377,7 @@ impl SqlitePartStore {
 #[async_trait]
 impl HostPartStore for SqlitePartStore {
     async fn latest_revision(&self) -> Res<CursorIndex> {
-        let revision: i64 =
-            sqlx::query_scalar("SELECT value FROM big_sync_meta WHERE key = 'global_cursor'")
-                .fetch_one(&self.core.sql.read_pool)
-                .await?;
+        let revision = queries::global_cursor(&self.core.sql).await?;
         Ok(u64::try_from(revision)?)
     }
 
@@ -412,7 +396,7 @@ impl HostPartStore for SqlitePartStore {
             }));
         }
 
-        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+        let mut query = Sql::new(
             "SELECT p.part_id, p.latest_cursor, COALESCE(b.live_count, 0) AS member_count
              FROM big_sync_parts p
              LEFT JOIN big_sync_buckets b
@@ -422,19 +406,15 @@ impl HostPartStore for SqlitePartStore {
               AND b.buck_id = 0
              WHERE p.scope_id = ",
         );
-        query.push_bind(self.core.scope_id);
-        query.push(" AND p.part_id IN (");
-        let mut separated = query.separated(", ");
-        for part_id in &parts {
-            separated.push_bind(Self::part_blob(part_id.clone()));
-        }
-        separated.push_unseparated(")");
-        let rows = query.build().fetch_all(&self.core.sql.read_pool).await?;
+        query.bind(self.core.scope_id);
+        query.push(" AND p.part_id IN ");
+        query.bind_list(parts.iter().map(|part_id| Self::part_blob(part_id.clone())));
+        let rows = query.query(&self.core.sql).await?.rows;
 
         if rows.len() != parts.len() {
             let found: HashSet<PartKey> = rows
                 .iter()
-                .map(|row| Self::part_from_blob(row.try_get("part_id").expect(ERROR_IMPOSSIBLE)))
+                .map(|row| Self::part_from_blob(row.get("part_id").expect(ERROR_IMPOSSIBLE)))
                 .collect();
             let mut missing: Vec<_> = parts.difference(&found).cloned().collect();
             missing.sort();
@@ -445,9 +425,9 @@ impl HostPartStore for SqlitePartStore {
 
         let mut out = HashMap::with_capacity(rows.len());
         for row in rows {
-            let part_id = Self::part_from_blob(row.try_get("part_id")?);
-            let latest_cursor: i64 = row.try_get("latest_cursor")?;
-            let member_count: i64 = row.try_get("member_count")?;
+            let part_id = Self::part_from_blob(row.get("part_id")?);
+            let latest_cursor: i64 = row.get("latest_cursor")?;
+            let member_count: i64 = row.get("member_count")?;
             out.insert(
                 part_id,
                 PartSummary {
@@ -547,17 +527,9 @@ impl HostPartStore for SqlitePartStore {
     }
 
     async fn member_count(&self, part_id: PartKey) -> Res<u64> {
-        let member_count: Option<i64> = sqlx::query_scalar!(
-            "SELECT live_count
-             FROM big_sync_buckets
-             WHERE scope_id = ?1 AND part_ref = (
-                 SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?2
-             ) AND level = 0 AND buck_id = 0",
-            self.core.scope_id,
-            Self::part_blob(part_id)
-        )
-        .fetch_optional(&self.core.sql.read_pool)
-        .await?;
+        let member_count =
+            queries::member_count(&self.core.sql, self.core.scope_id, Self::part_blob(part_id))
+                .await?;
         Ok(member_count
             .map(|member_count| u64::try_from(member_count).expect(ERROR_IMPOSSIBLE))
             .unwrap_or_default())
@@ -577,36 +549,20 @@ impl HostPartStore for SqlitePartStore {
         let since = i64::try_from(since).expect(ERROR_IMPOSSIBLE);
         // A member row carries the cursor of its last transition, removal included,
         // so a removal counts as a relevant change.
-        let member_changes: i64 = sqlx::query_scalar!(
-            "SELECT COUNT(*)
-               FROM big_sync_members
-              WHERE scope_id = ?1
-                AND maybe_part_ref = ?2
-                AND txid > ?3",
-            self.core.scope_id,
-            part_ref,
-            since
-        )
-        .fetch_one(&self.core.sql.read_pool)
-        .await?;
+        let member_changes =
+            queries::member_changes(&self.core.sql, self.core.scope_id, part_ref, since).await?;
         // One row per (part, principal). A revocation deletes that row, so a
         // revocation does not count here. `None` is the local principal, which
         // access rows do not gate, so it has no access half.
         let access_changes: i64 = match principal {
             Some(principal) => {
-                sqlx::query_scalar!(
-                    "SELECT COUNT(*)
-                       FROM big_sync_syncable
-                      WHERE scope_id = ?1
-                        AND part_ref = ?2
-                        AND principal_id = ?3
-                        AND changed_at > ?4",
+                queries::access_changes(
+                    &self.core.sql,
                     self.core.scope_id,
                     part_ref,
                     Self::peer_blob(principal),
-                    since
+                    since,
                 )
-                .fetch_one(&self.core.sql.read_pool)
                 .await?
             }
             None => 0,
@@ -618,19 +574,10 @@ impl HostPartStore for SqlitePartStore {
     }
 
     async fn obj_payload(&self, obj_id: ObjKey) -> Res<Option<ObjPayload>> {
-        let row = sqlx::query!(
-            "SELECT payload_json
-                 FROM big_sync_objs
-                 WHERE scope_id = ?1 AND obj_id = ?2",
-            self.core.scope_id,
-            Self::obj_blob(obj_id)
-        )
-        .fetch_optional(&self.core.sql.read_pool)
-        .await?;
-        let Some(row) = row else {
-            return Ok(None);
-        };
-        let payload: Option<String> = row.payload_json;
+        let payload =
+            queries::obj_payload(&self.core.sql, self.core.scope_id, Self::obj_blob(obj_id))
+                .await?
+                .flatten();
         payload
             .as_deref()
             .filter(|payload| !payload.is_empty())
@@ -647,35 +594,11 @@ impl HostPartStore for SqlitePartStore {
         // nothing had changed would still advance the cursor space on every repeat write.
         let tx = frontier_tx.context_mut();
         let obj_ref = self.core.ensure_obj_ref(tx, obj_id.clone()).await?;
-        let old_payload_json: Option<String> = sqlx::query_scalar!(
-            "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
-            obj_ref
-        )
-        .fetch_optional(&mut **tx)
-        .await?
-        .flatten();
-        let live_parts = sqlx::query!(
-            "SELECT m.maybe_part_ref, p.part_id
-             FROM big_sync_members m
-             JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-             WHERE m.scope_id = ?1 AND m.obj_ref = ?2
-               AND m.maybe_part_ref > 0 AND m.event_type != ?3",
-            self.core.scope_id,
-            obj_ref,
-            EVENT_REMOVED
-        )
-        .fetch_all(&mut **tx)
-        .await?;
-        let pending_parts = sqlx::query!(
-            "SELECT p.part_ref, p.part_id
-             FROM big_sync_pending_members m
-             JOIN big_sync_parts p ON p.part_ref = m.part_ref
-             WHERE m.scope_id = ?1 AND m.obj_ref = ?2",
-            self.core.scope_id,
-            obj_ref
-        )
-        .fetch_all(&mut **tx)
-        .await?;
+        let old_payload_json: Option<String> =
+            queries::obj_payload_by_ref(tx, obj_ref).await?.flatten();
+        let live_parts =
+            queries::live_parts(tx, self.core.scope_id, obj_ref, EVENT_REMOVED).await?;
+        let pending_parts = queries::pending_parts(tx, self.core.scope_id, obj_ref).await?;
         let previously_present = old_payload_json
             .as_deref()
             .is_some_and(|stored| !stored.is_empty());
@@ -703,13 +626,7 @@ impl HostPartStore for SqlitePartStore {
         }
         let cursor = frontier_tx.revision().await?;
         let tx = frontier_tx.context_mut();
-        sqlx::query!(
-            "UPDATE big_sync_objs SET payload_json = ?1 WHERE obj_ref = ?2",
-            payload_json,
-            obj_ref
-        )
-        .execute(&mut **tx)
-        .await?;
+        queries::set_obj_payload(tx, payload_json, obj_ref).await?;
         for part in &live_parts {
             let old_state = MemberState::Live(old_payload.clone());
             self.core
@@ -745,15 +662,7 @@ impl HostPartStore for SqlitePartStore {
                     &MemberState::Live(payload.clone()),
                 )
                 .await?;
-            sqlx::query!(
-                "DELETE FROM big_sync_pending_members
-                 WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
-                self.core.scope_id,
-                obj_ref,
-                part_ref
-            )
-            .execute(&mut **tx)
-            .await?;
+            queries::delete_pending_member(tx, self.core.scope_id, obj_ref, part_ref).await?;
             events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor,
                 part_ids: vec![part_id],
@@ -812,43 +721,19 @@ impl HostPartStore for SqlitePartStore {
     }
 
     async fn obj_parts(&self, obj_id: ObjKey) -> Res<Vec<PartKey>> {
-        let rows = sqlx::query!(
-            "SELECT p.part_id
-             FROM big_sync_members m
-             JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-             WHERE m.scope_id = ?1 AND m.obj_ref = (
-                 SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
-             ) AND m.maybe_part_ref > 0 AND m.event_type != ?3
-             UNION
-             SELECT p.part_id
-             FROM big_sync_pending_members m
-             JOIN big_sync_parts p ON p.part_ref = m.part_ref
-             WHERE m.scope_id = ?1 AND m.obj_ref = (
-                 SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
-             )
-             ORDER BY part_id ASC",
+        let rows = queries::obj_parts(
+            &self.core.sql,
             self.core.scope_id,
             Self::obj_blob(obj_id),
-            EVENT_REMOVED
+            EVENT_REMOVED,
         )
-        .fetch_all(&self.core.sql.read_pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| Self::part_from_blob(row.part_id))
-            .collect())
+        Ok(rows.into_iter().map(Self::part_from_blob).collect())
     }
 
     async fn obj_exists(&self, obj_id: ObjKey) -> Res<bool> {
-        let exists: Option<i64> = sqlx::query_scalar!(
-            "SELECT 1
-             FROM big_sync_objs
-             WHERE scope_id = ?1 AND obj_id = ?2",
-            self.core.scope_id,
-            Self::obj_blob(obj_id)
-        )
-        .fetch_optional(&self.core.sql.read_pool)
-        .await?;
+        let exists =
+            queries::obj_exists(&self.core.sql, self.core.scope_id, Self::obj_blob(obj_id)).await?;
         Ok(exists.is_some())
     }
 
@@ -887,14 +772,11 @@ impl HostPartStore for SqlitePartStore {
         if req.limit_hint == 0 {
             return Ok(Ok(Vec::new()));
         }
-        let part_exists: Option<i64> = sqlx::query_scalar!(
-            "SELECT 1
-             FROM big_sync_parts
-             WHERE scope_id = ?1 AND part_id = ?2",
+        let part_exists = queries::part_exists(
+            &self.core.sql,
             self.core.scope_id,
-            Self::part_blob(req.part_id.clone())
+            Self::part_blob(req.part_id.clone()),
         )
-        .fetch_optional(&self.core.sql.read_pool)
         .await?;
         let Some(_) = part_exists else {
             return Ok(Err(ListPartsError::UnkownParts {
@@ -902,26 +784,26 @@ impl HostPartStore for SqlitePartStore {
             }));
         };
 
-        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+        let mut query = Sql::new(
             "SELECT buck_id, level, changed_at, live_count, dead_count, live_fp, dead_fp
              FROM big_sync_buckets
              WHERE scope_id = ",
         );
-        query.push_bind(self.core.scope_id);
+        query.bind(self.core.scope_id);
         query.push(" AND part_ref = (SELECT part_ref FROM big_sync_parts WHERE scope_id = ");
-        query.push_bind(self.core.scope_id);
+        query.bind(self.core.scope_id);
         query.push(" AND part_id = ");
-        query.push_bind(Self::part_blob(req.part_id));
+        query.bind(Self::part_blob(req.part_id));
         query.push(")");
         query.push(" AND level <= ");
-        query.push_bind(i64::from(req.to_level));
+        query.bind(i64::from(req.to_level));
         query.push(" AND buck_id >= ");
-        query.push_bind(Self::buck_i64(req.offset));
+        query.bind(Self::buck_i64(req.offset));
         query.push(" AND changed_at > ");
-        query.push_bind(i64::try_from(req.since).expect(ERROR_IMPOSSIBLE));
+        query.bind(i64::try_from(req.since).expect(ERROR_IMPOSSIBLE));
         query.push(" ORDER BY buck_id ASC LIMIT ");
-        query.push_bind(i64::from(req.limit_hint) + i64::from(BuckId::ARITY));
-        let rows = query.build().fetch_all(&self.core.sql.read_pool).await?;
+        query.bind(i64::from(req.limit_hint) + i64::from(BuckId::ARITY));
+        let rows = query.query(&self.core.sql).await?.rows;
 
         if rows.is_empty() {
             return Ok(Ok(Vec::new()));
@@ -930,21 +812,18 @@ impl HostPartStore for SqlitePartStore {
         let mut last_parent = None;
         for row in rows {
             let bucket = BucketSummary {
-                id: Self::buck_id(row.try_get::<i64, _>("buck_id")?),
+                id: Self::buck_id(row.get::<i64>("buck_id")?),
                 len: u32::try_from(
-                    u64::try_from(row.try_get::<i64, _>("live_count")?).expect(ERROR_IMPOSSIBLE)
-                        + u64::try_from(row.try_get::<i64, _>("dead_count")?)
-                            .expect(ERROR_IMPOSSIBLE),
+                    u64::try_from(row.get::<i64>("live_count")?).expect(ERROR_IMPOSSIBLE)
+                        + u64::try_from(row.get::<i64>("dead_count")?).expect(ERROR_IMPOSSIBLE),
                 )
                 .expect(ERROR_IMPOSSIBLE),
-                live_count: u32::try_from(row.try_get::<i64, _>("live_count")?)
-                    .expect(ERROR_IMPOSSIBLE),
+                live_count: u32::try_from(row.get::<i64>("live_count")?).expect(ERROR_IMPOSSIBLE),
                 fp: (
-                    Self::u64_from_db(row.try_get::<i64, _>("live_fp")?),
-                    Self::u64_from_db(row.try_get::<i64, _>("dead_fp")?),
+                    Self::u64_from_db(row.get::<i64>("live_fp")?),
+                    Self::u64_from_db(row.get::<i64>("dead_fp")?),
                 ),
-                changed_at: u64::try_from(row.try_get::<i64, _>("changed_at")?)
-                    .expect(ERROR_IMPOSSIBLE),
+                changed_at: u64::try_from(row.get::<i64>("changed_at")?).expect(ERROR_IMPOSSIBLE),
             };
             if out.len() < usize::try_from(req.limit_hint).expect(ERROR_IMPOSSIBLE) {
                 out.push(bucket);
@@ -979,14 +858,11 @@ impl HostPartStore for SqlitePartStore {
         if self.hidden_parts.contains(&req.part_id) {
             return Ok(Err(LeafBucketsError::UnkownPart));
         }
-        let part_exists: Option<i64> = sqlx::query_scalar!(
-            "SELECT 1
-             FROM big_sync_parts
-             WHERE scope_id = ?1 AND part_id = ?2",
+        let part_exists = queries::part_exists(
+            &self.core.sql,
             self.core.scope_id,
-            Self::part_blob(req.part_id.clone())
+            Self::part_blob(req.part_id.clone()),
         )
-        .fetch_optional(&self.core.sql.read_pool)
         .await?;
         if part_exists.is_none() {
             return Ok(Err(LeafBucketsError::UnkownPart));
@@ -1007,29 +883,28 @@ impl HostPartStore for SqlitePartStore {
             total_count: u32,
         }
 
-        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-            "WITH requested(req_ord, buck_id, lower_index, upper_index, after_id) AS (",
-        );
+        let mut query =
+            Sql::new("WITH requested(req_ord, buck_id, lower_index, upper_index, after_id) AS (");
         for (req_ord, buck_req) in req.buckets.iter().enumerate() {
             let (lower_index, upper_index) = super::bucket_index_bounds(buck_req.buck_id);
             if req_ord > 0 {
                 query.push(" UNION ALL ");
             }
             query.push("SELECT ");
-            query.push_bind(i64::try_from(req_ord).expect(ERROR_IMPOSSIBLE));
+            query.bind(i64::try_from(req_ord).expect(ERROR_IMPOSSIBLE));
             query.push(" AS req_ord, ");
-            query.push_bind(Self::buck_i64(buck_req.buck_id));
+            query.bind(Self::buck_i64(buck_req.buck_id));
             query.push(" AS buck_id, ");
-            query.push_bind(i64::from(lower_index));
+            query.bind(i64::from(lower_index));
             query.push(" AS lower_index, ");
             if let Some(upper_index) = upper_index {
-                query.push_bind(i64::from(upper_index));
+                query.bind(i64::from(upper_index));
             } else {
                 query.push("NULL");
             }
             query.push(" AS upper_index, ");
             if let Some(after) = &buck_req.after {
-                query.push_bind(Self::obj_blob(after.clone()));
+                query.bind(Self::obj_blob(after.clone()));
             } else {
                 query.push("NULL");
             }
@@ -1049,14 +924,14 @@ impl HostPartStore for SqlitePartStore {
                 JOIN big_sync_members m
                   ON m.scope_id = ",
         );
-        query.push_bind(self.core.scope_id);
+        query.bind(self.core.scope_id);
         query
             .push(" AND m.maybe_part_ref = (SELECT part_ref FROM big_sync_parts WHERE scope_id = ");
-        query.push_bind(self.core.scope_id);
+        query.bind(self.core.scope_id);
         query.push(" AND part_id = ");
-        query.push_bind(Self::part_blob(req.part_id));
+        query.bind(Self::part_blob(req.part_id));
         query.push(") JOIN big_sync_buckets s ON s.scope_id = m.scope_id AND s.part_ref = m.maybe_part_ref AND s.buck_id = r.buck_id AND s.changed_at > ");
-        query.push_bind(i64::try_from(req.since).expect(ERROR_IMPOSSIBLE));
+        query.bind(i64::try_from(req.since).expect(ERROR_IMPOSSIBLE));
         query.push(" AND o.buck_index >= r.lower_index");
         query.push(" AND (r.upper_index IS NULL OR o.buck_index < r.upper_index)");
         query.push(" AND (r.after_id IS NULL OR o.obj_id > r.after_id)");
@@ -1071,10 +946,10 @@ impl HostPartStore for SqlitePartStore {
         // `LeafBucketsRequest::limit_hint` is a hint, not a bound: zero means no
         // preference, so the smallest useful page is one entry. The memory store
         // reads it the same way, and the shared contract harness pins that.
-        query.push_bind(i64::from(req.limit_hint.max(1)));
+        query.bind(i64::from(req.limit_hint.max(1)));
         query.push(" ORDER BY req_ord, obj_id ASC");
 
-        let rows = query.build().fetch_all(&self.core.sql.read_pool).await?;
+        let rows = query.query(&self.core.sql).await?.rows;
         let mut pages: Vec<_> = req
             .buckets
             .iter()
@@ -1087,8 +962,7 @@ impl HostPartStore for SqlitePartStore {
             .collect();
         let mut budget_stopped: Option<usize> = None;
         for row in rows {
-            let req_ord =
-                usize::try_from(row.try_get::<i64, _>("req_ord")?).expect(ERROR_IMPOSSIBLE);
+            let req_ord = usize::try_from(row.get::<i64>("req_ord")?).expect(ERROR_IMPOSSIBLE);
             // The budget ends the page for the bucket it binds on. Because the page is
             // keyset-paginated (`obj_id > after_id`), resuming past a skipped row would
             // strand it, so the page stops here and every later row of the *same* bucket is
@@ -1100,9 +974,9 @@ impl HostPartStore for SqlitePartStore {
             }
             let page = pages.get_mut(req_ord).expect(ERROR_IMPOSSIBLE);
             page.total_count =
-                u32::try_from(row.try_get::<i64, _>("total_count")?).expect(ERROR_IMPOSSIBLE);
-            let obj_id = Self::obj_from_blob(row.try_get("obj_id")?);
-            let dead = row.try_get::<i64, _>("event_type")? == EVENT_REMOVED;
+                u32::try_from(row.get::<i64>("total_count")?).expect(ERROR_IMPOSSIBLE);
+            let obj_id = Self::obj_from_blob(row.get("obj_id")?);
+            let dead = row.get::<i64>("event_type")? == EVENT_REMOVED;
             // The page's cost is decided from the key alone — the fingerprint hashes the
             // payload without carrying it — so a row the page cannot hold costs no JSON parse.
             // The first entry is always taken, because a page with no entries reads as `done`
@@ -1123,7 +997,7 @@ impl HostPartStore for SqlitePartStore {
                     ),
                 )
             } else {
-                let payload_json: Option<String> = row.try_get("payload_json")?;
+                let payload_json: Option<String> = row.get("payload_json")?;
                 let payload = payload_json
                     .filter(|payload_json| !payload_json.is_empty())
                     .map(|payload_json| serde_json::from_str(&payload_json).wrap_err(ERROR_JSON))
@@ -1161,25 +1035,12 @@ impl HostPartStore for SqlitePartStore {
         let mut frontier_tx = self.frontier.begin().await?;
         let tx = frontier_tx.context_mut();
         let obj_ref = self.core.ensure_obj_ref(tx, obj_id.clone()).await?;
-        let payload_json: Option<String> = sqlx::query_scalar!(
-            "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
-            obj_ref
-        )
-        .fetch_optional(&mut **tx)
-        .await?
-        .flatten();
+        let payload_json: Option<String> =
+            queries::obj_payload_by_ref(tx, obj_ref).await?.flatten();
         let Some(payload_json) = payload_json.filter(|str| !str.is_empty()) else {
             for part_id in parts {
                 let part_ref = self.core.ensure_part_ref(&mut *tx, part_id).await?;
-                sqlx::query!(
-                    "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, obj_ref, part_ref)
-                     VALUES (?1, ?2, ?3)",
-                    self.core.scope_id,
-                    obj_ref,
-                    part_ref
-                )
-                .execute(&mut **tx)
-                .await?;
+                queries::insert_pending_member(tx, self.core.scope_id, obj_ref, part_ref).await?;
             }
             frontier_tx.commit().await?;
             return Ok(());
@@ -1207,10 +1068,7 @@ impl HostPartStore for SqlitePartStore {
                     &MemberState::Live(payload.clone()),
                 )
                 .await?;
-            sqlx::query!(
-                "DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
-                self.core.scope_id, obj_ref, part_ref
-            ).execute(&mut **tx).await?;
+            queries::delete_pending_member(tx, self.core.scope_id, obj_ref, part_ref).await?;
             events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor,
                 part_ids: vec![part_id],
@@ -1244,22 +1102,14 @@ impl HostPartStore for SqlitePartStore {
     async fn remove_obj_from_part(&self, obj_id: ObjKey, part_id: PartKey) -> Res<()> {
         let mut frontier_tx = self.frontier.begin().await?;
         let tx = frontier_tx.context_mut();
-        let obj_ref: Option<i64> = sqlx::query_scalar!(
-            "SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2",
-            self.core.scope_id,
-            Self::obj_blob(obj_id.clone())
-        )
-        .fetch_optional(&mut **tx)
-        .await?;
+        let obj_ref =
+            queries::find_obj_ref(tx, self.core.scope_id, Self::obj_blob(obj_id.clone())).await?;
         let Some(obj_ref) = obj_ref else {
             frontier_tx.commit().await?;
             return Ok(());
         };
         let part_ref = self.core.ensure_part_ref(&mut *tx, part_id.clone()).await?;
-        sqlx::query!(
-            "DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
-            self.core.scope_id, obj_ref, part_ref
-        ).execute(&mut **tx).await?;
+        queries::delete_pending_member(tx, self.core.scope_id, obj_ref, part_ref).await?;
         let old_state = self
             .core
             .load_member_state(&mut *tx, part_id.clone(), obj_id.clone())
@@ -1297,44 +1147,25 @@ impl HostPartStore for SqlitePartStore {
     async fn remove_obj_payload(&self, obj_id: ObjKey) -> Res<()> {
         let mut frontier_tx = self.frontier.begin().await?;
         let tx = frontier_tx.context_mut();
-        let obj_ref: Option<i64> = sqlx::query_scalar(
-            "SELECT obj_ref FROM big_sync_objs WHERE scope_id = ? AND obj_id = ?",
-        )
-        .bind(self.core.scope_id)
-        .bind(Self::obj_blob(obj_id.clone()))
-        .fetch_optional(&mut **tx)
-        .await?;
+        let obj_ref =
+            queries::find_obj_ref(tx, self.core.scope_id, Self::obj_blob(obj_id.clone())).await?;
         let Some(obj_ref) = obj_ref else {
             frontier_tx.commit().await?;
             return Ok(());
         };
-        let payload_json: Option<String> =
-            sqlx::query_scalar("SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?")
-                .bind(obj_ref)
-                .fetch_one(&mut **tx)
-                .await?;
+        let payload_json = queries::obj_payload_by_ref(tx, obj_ref).await?.flatten();
         if payload_json.filter(|payload| !payload.is_empty()).is_none() {
             // No payload, nothing to drop. A live membership implies a payload, so an object
             // without one has no membership this could clear either.
             frontier_tx.commit().await?;
             return Ok(());
         }
-        let live_parts = sqlx::query(
-            "SELECT p.part_id
-               FROM big_sync_members m
-               JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-              WHERE m.scope_id = ? AND m.obj_ref = ? AND m.maybe_part_ref > 0
-                AND m.event_type != ?",
-        )
-        .bind(self.core.scope_id)
-        .bind(obj_ref)
-        .bind(EVENT_REMOVED)
-        .fetch_all(&mut **tx)
-        .await?;
-        let mut live_part_ids = Vec::with_capacity(live_parts.len());
-        for row in live_parts {
-            live_part_ids.push(Self::part_from_blob(row.try_get("part_id")?));
-        }
+        let live_part_ids: Vec<PartKey> =
+            queries::live_parts(tx, self.core.scope_id, obj_ref, EVENT_REMOVED)
+                .await?
+                .into_iter()
+                .map(|row| Self::part_from_blob(row.part_id))
+                .collect();
         // One revision covers every removal: the parts move together, and the payload drop is
         // not a separate sync step.
         let cursor = if live_part_ids.is_empty() {
@@ -1378,10 +1209,7 @@ impl HostPartStore for SqlitePartStore {
         let object_key = PartFrontierKey::Object(obj_id);
         let has_object_lane_row = frontier_tx.get(&object_key).await?.is_some();
         let tx = frontier_tx.context_mut();
-        sqlx::query("UPDATE big_sync_objs SET payload_json = NULL WHERE obj_ref = ?")
-            .bind(obj_ref)
-            .execute(&mut **tx)
-            .await?;
+        queries::clear_obj_payload(tx, obj_ref).await?;
         if has_object_lane_row {
             frontier_tx.delete(object_key).await?;
         }
@@ -1390,16 +1218,16 @@ impl HostPartStore for SqlitePartStore {
     }
 
     async fn partless_objects(&self, limit: u32, after: Option<ObjKey>) -> Res<Vec<ObjKey>> {
-        let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+        let mut query = Sql::new(
             "SELECT o.obj_id
                FROM big_sync_objs o
               WHERE o.scope_id = ",
         );
-        query.push_bind(self.core.scope_id);
+        query.bind(self.core.scope_id);
         query.push(" AND o.payload_json IS NOT NULL AND o.payload_json != ''");
         if let Some(after) = after {
             query.push(" AND o.obj_id > ");
-            query.push_bind(Self::obj_blob(after));
+            query.bind(Self::obj_blob(after));
         }
         query.push(
             " AND NOT EXISTS (
@@ -1409,63 +1237,34 @@ impl HostPartStore for SqlitePartStore {
                       AND m.maybe_part_ref > 0
                       AND m.event_type != ",
         );
-        query.push_bind(EVENT_REMOVED);
+        query.bind(EVENT_REMOVED);
         query.push(") ORDER BY o.obj_id ASC LIMIT ");
-        query.push_bind(i64::from(limit));
-        let rows = query.build().fetch_all(&self.core.sql.read_pool).await?;
+        query.bind(i64::from(limit));
+        let rows = query.query(&self.core.sql).await?.rows;
         rows.into_iter()
-            .map(|row| Ok(Self::obj_from_blob(row.try_get("obj_id")?)))
+            .map(|row| Ok(Self::obj_from_blob(row.get("obj_id")?)))
             .collect()
     }
 
     async fn part_store_stats(&self) -> Res<PartStoreStats> {
-        let row = sqlx::query(
-            "SELECT
-                 (SELECT COUNT(*) FROM big_sync_objs
-                   WHERE scope_id = ?1 AND payload_json IS NOT NULL AND payload_json != '') AS payload_objects
-               , (SELECT COALESCE(SUM(LENGTH(CAST(payload_json AS BLOB))), 0) FROM big_sync_objs
-                   WHERE scope_id = ?1 AND payload_json IS NOT NULL AND payload_json != '') AS payload_bytes
-               , (SELECT COUNT(*) FROM big_sync_objs o
-                   WHERE o.scope_id = ?1 AND o.payload_json IS NOT NULL AND o.payload_json != ''
-                     AND NOT EXISTS (
-                         SELECT 1 FROM big_sync_members m
-                          WHERE m.scope_id = o.scope_id
-                            AND m.obj_ref = o.obj_ref
-                            AND m.maybe_part_ref > 0
-                            AND m.event_type != ?2)) AS partless_objects
-               , (SELECT COUNT(*) FROM big_sync_members
-                   WHERE scope_id = ?1 AND maybe_part_ref > 0 AND event_type != ?2) AS live_rows
-               , (SELECT COUNT(*) FROM big_sync_members
-                   WHERE scope_id = ?1 AND maybe_part_ref > 0 AND event_type = ?2) AS dead_rows",
-        )
-        .bind(self.core.scope_id)
-        .bind(EVENT_REMOVED)
-        .fetch_one(&self.core.sql.read_pool)
-        .await?;
+        let row =
+            queries::part_store_stats(&self.core.sql, self.core.scope_id, EVENT_REMOVED).await?;
         Ok(PartStoreStats {
-            payload_objects: u64::try_from(row.try_get::<i64, _>("payload_objects")?)
-                .expect(ERROR_IMPOSSIBLE),
-            payload_bytes: u64::try_from(row.try_get::<i64, _>("payload_bytes")?)
-                .expect(ERROR_IMPOSSIBLE),
-            partless_objects: u64::try_from(row.try_get::<i64, _>("partless_objects")?)
-                .expect(ERROR_IMPOSSIBLE),
-            live_rows: u64::try_from(row.try_get::<i64, _>("live_rows")?).expect(ERROR_IMPOSSIBLE),
-            dead_rows: u64::try_from(row.try_get::<i64, _>("dead_rows")?).expect(ERROR_IMPOSSIBLE),
+            payload_objects: u64::try_from(row.payload_objects).expect(ERROR_IMPOSSIBLE),
+            payload_bytes: u64::try_from(row.payload_bytes).expect(ERROR_IMPOSSIBLE),
+            partless_objects: u64::try_from(row.partless_objects).expect(ERROR_IMPOSSIBLE),
+            live_rows: u64::try_from(row.live_rows).expect(ERROR_IMPOSSIBLE),
+            dead_rows: u64::try_from(row.dead_rows).expect(ERROR_IMPOSSIBLE),
         })
     }
 
     async fn get_peer_part_cursor(&self, peer_id: PeerKey, part_id: PartKey) -> Res<CursorIndex> {
-        let cursor: Option<i64> = sqlx::query_scalar!(
-            "SELECT cursor
-             FROM big_sync_peer_cursors
-             WHERE scope_id = ?1 AND peer_id = ?2 AND part_ref = (
-                 SELECT part_ref FROM big_sync_parts WHERE scope_id = ?1 AND part_id = ?3
-             )",
+        let cursor = queries::peer_part_cursor(
+            &self.core.sql,
             self.core.scope_id,
             Self::peer_blob(peer_id),
-            Self::part_blob(part_id)
+            Self::part_blob(part_id),
         )
-        .fetch_optional(&self.core.sql.read_pool)
         .await?;
         Ok(cursor
             .map(|cursor| u64::try_from(cursor).expect(ERROR_IMPOSSIBLE))
@@ -1478,18 +1277,15 @@ impl HostPartStore for SqlitePartStore {
         part_id: PartKey,
         cursor: CursorIndex,
     ) -> Res<()> {
-        let mut tx = self.core.sql.write_pool.begin().await?;
+        let mut tx = self.core.sql.begin_write().await?;
         let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
-        sqlx::query!(
-            "INSERT INTO big_sync_peer_cursors(scope_id, peer_id, part_ref, cursor)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(scope_id, peer_id, part_ref) DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
+        queries::set_peer_part_cursor(
+            &tx,
             self.core.scope_id,
             Self::peer_blob(peer_id),
             part_ref,
-            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
+            i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
         )
-        .execute(&mut *tx)
         .await?;
         tx.commit().await?;
         Ok(())
@@ -1528,7 +1324,7 @@ impl HostPartStore for SqlitePartStore {
     }
 
     async fn ensure_part(&self, part_id: PartKey) -> Res<()> {
-        let mut tx = self.core.sql.write_pool.begin().await?;
+        let mut tx = self.core.sql.begin_write().await?;
         self.core.ensure_part_ref(&mut tx, part_id).await?;
         tx.commit().await?;
         Ok(())
@@ -1539,33 +1335,20 @@ impl HostPartStore for SqlitePartStore {
         part: PartKey,
         agents: HashMap<PeerKey, keyhive_core::access::Access>,
     ) -> Res<()> {
-        let mut tx = self
-            .core
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let mut tx = self.core.sql.begin_write().await?;
         let part_ref = self.core.ensure_part_ref(&mut tx, part).await?;
         let changed_at =
             i64::try_from(SqliteCore::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
-        sqlx::query!(
-            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2",
-            self.core.scope_id,
-            part_ref
-        )
-        .execute(&mut *tx)
-        .await?;
+        queries::delete_part_members(&tx, self.core.scope_id, part_ref).await?;
         for (principal, access) in &agents {
-            sqlx::query!(
-                "INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            queries::insert_part_member(
+                &tx,
                 self.core.scope_id,
                 part_ref,
                 Self::peer_blob(principal.clone()),
                 encode_access(access),
-                changed_at
+                changed_at,
             )
-            .execute(&mut *tx)
             .await?;
         }
         tx.commit().await?;
@@ -1578,49 +1361,38 @@ impl HostPartStore for SqlitePartStore {
         member: PeerKey,
         access: keyhive_core::access::Access,
     ) -> Res<()> {
-        let mut tx = self
-            .core
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let mut tx = self.core.sql.begin_write().await?;
         let part_ref = self.core.ensure_part_ref(&mut tx, part).await?;
         let changed_at =
             i64::try_from(SqliteCore::next_cursor(&mut tx).await?).expect(ERROR_IMPOSSIBLE);
-        sqlx::query!(
-            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
-            self.core.scope_id, part_ref, Self::peer_blob(member.clone())
-        ).execute(&mut *tx).await?;
-        sqlx::query!(
-            "INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+        queries::delete_part_member(
+            &tx,
+            self.core.scope_id,
+            part_ref,
+            Self::peer_blob(member.clone()),
+        )
+        .await?;
+        queries::insert_part_member(
+            &tx,
             self.core.scope_id,
             part_ref,
             Self::peer_blob(member),
             encode_access(&access),
-            changed_at
+            changed_at,
         )
-        .execute(&mut *tx)
         .await?;
         tx.commit().await?;
         Ok(())
     }
 
     async fn remove_part_member(&self, part: PartKey, member: PeerKey) -> Res<()> {
-        let mut tx = self
-            .core
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let tx = self.core.sql.begin_write().await?;
         let Some(part_ref) = self.core.find_part_ref(part).await? else {
             tx.commit().await?;
             return Ok(());
         };
-        sqlx::query!(
-            "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
-            self.core.scope_id, part_ref, Self::peer_blob(member)
-        ).execute(&mut *tx).await?;
+        queries::delete_part_member(&tx, self.core.scope_id, part_ref, Self::peer_blob(member))
+            .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1657,25 +1429,12 @@ async fn permitted_parts(
         // principal access. An event that named nothing usable still delivers when
         // the principal can read some part of it.
         PartScope::FromObject => {
-            let rows = sqlx::query!(
-                "SELECT p.part_id AS 'part_id: Vec<u8>', s.access_level
-                 FROM big_sync_members m
-                 JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-                 JOIN big_sync_syncable s ON s.part_ref = m.maybe_part_ref
-                 WHERE m.scope_id = ?1
-                   AND m.obj_ref = (
-                       SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
-                   )
-                   AND m.maybe_part_ref > 0
-                   AND m.event_type != 2
-                   AND s.scope_id = ?1
-                   AND s.principal_id = ?3
-                 ORDER BY p.part_id",
+            let rows = queries::permitted_obj_parts(
+                &core.sql,
                 core.scope_id,
                 SqliteCore::obj_blob(obj_id.clone()),
-                &peer_blob
+                peer_blob,
             )
-            .fetch_all(&core.sql.read_pool)
             .await?;
             let readable = rows
                 .into_iter()
@@ -1698,16 +1457,8 @@ async fn permitted_parts(
         let Some(part_ref) = core.find_part_ref(part_id.clone()).await? else {
             continue;
         };
-        let access_level: Option<i64> = sqlx::query_scalar!(
-            "SELECT access_level
-             FROM big_sync_syncable
-             WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
-            core.scope_id,
-            part_ref,
-            &peer_blob
-        )
-        .fetch_optional(&core.sql.read_pool)
-        .await?;
+        let access_level =
+            queries::access_level(&core.sql, core.scope_id, part_ref, peer_blob.clone()).await?;
         if access_level.is_some_and(is_fetch_access) {
             readable.push(part_id);
         }
@@ -1838,19 +1589,8 @@ impl big_sync_core::part_store::PartStore<Sendable> for SqlitePartStore {
 #[async_trait]
 impl ObservedStore for SqlitePartStore {
     async fn observed_snapshot(&self) -> Res<ObservedStoreSnapshot> {
-        let rows = sqlx::query!(
-            "SELECT objs.obj_id, parts.part_id, objs.payload_json
-             FROM big_sync_members members
-             JOIN big_sync_objs objs ON objs.obj_ref = members.obj_ref
-             JOIN big_sync_parts parts ON parts.part_ref = members.maybe_part_ref
-             WHERE members.scope_id = ?1 AND members.maybe_part_ref > 0
-               AND members.event_type != ?2
-             ORDER BY objs.obj_id ASC, parts.part_id ASC",
-            self.core.scope_id,
-            EVENT_REMOVED
-        )
-        .fetch_all(&self.core.sql.read_pool)
-        .await?;
+        let rows =
+            queries::observed_members(&self.core.sql, self.core.scope_id, EVENT_REMOVED).await?;
         let mut objs = std::collections::BTreeMap::new();
         for row in rows {
             let obj_id = Self::obj_from_blob(row.obj_id);
@@ -1870,15 +1610,7 @@ impl ObservedStore for SqlitePartStore {
             }
             entry.parts.insert(part_id);
         }
-        let cursors = sqlx::query!(
-            "SELECT peer_id, parts.part_id, cursor
-             FROM big_sync_peer_cursors
-             JOIN big_sync_parts parts ON parts.part_ref = big_sync_peer_cursors.part_ref
-             WHERE big_sync_peer_cursors.scope_id = ?1",
-            self.core.scope_id
-        )
-        .fetch_all(&self.core.sql.read_pool)
-        .await?;
+        let cursors = queries::observed_cursors(&self.core.sql, self.core.scope_id).await?;
         let mut peer_part_cursors = std::collections::BTreeMap::new();
         for row in cursors {
             peer_part_cursors.insert(
@@ -1926,15 +1658,67 @@ mod tests {
     use big_sync_core::part_store::contract;
     use big_sync_core::rpc::{ReplayPage, SubscriptionTarget, TargetVerdict};
 
-    async fn test_sql() -> Res<SqlCtx> {
-        let db_path = std::env::temp_dir().join(format!("big_sync-{}.sqlite", Uuid::new_v4()));
-        let sqlite_url = format!("sqlite://{}", db_path.display());
-        SqlCtx::url(&sqlite_url).await
+    async fn test_sql() -> Res<Database> {
+        let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+        runtime.ephemeral(&[])
     }
 
     async fn test_store(scope_key: &str) -> Res<SqlitePartStore> {
         let sql = test_sql().await?;
         SqlitePartStore::new(sql, scope_key, BuckId::MAX_LEVEL).await
+    }
+
+    #[tokio::test]
+    async fn sqlite_migrations_and_fingerprint_bitcasts_roundtrip() -> Res<()> {
+        let sql = test_sql().await?;
+        SqliteCore::init_schema(&sql, BuckId::MAX_LEVEL).await?;
+        SqliteCore::init_schema(&sql, BuckId::MAX_LEVEL).await?;
+        let status = sql
+            .migration_status_for(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+            .await?;
+        assert_eq!(
+            status
+                .iter()
+                .map(|(migration, state)| (migration.version, *state))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, sqlite_rs::MigrationState::Applied),
+                (2, sqlite_rs::MigrationState::Applied)
+            ]
+        );
+        let core = SqliteCore::new(sql.clone(), "bitcasts", BuckId::MAX_LEVEL).await?;
+        let part_id = test_part_id(1);
+        for live_fp in [0, 1, i64::MAX as u64, 1_u64 << 63, u64::MAX] {
+            let dead_fp = !live_fp;
+            let mut tx = sql.begin_write().await?;
+            let part_ref = core.ensure_part_ref(&mut tx, part_id.clone()).await?;
+            queries::upsert_bucket(
+                &tx,
+                core.scope_id,
+                part_ref,
+                0,
+                0,
+                7,
+                2,
+                3,
+                SqliteCore::db_from_u64(live_fp),
+                SqliteCore::db_from_u64(dead_fp),
+            )
+            .await?;
+            tx.commit().await?;
+            assert_eq!(
+                core.bucket_summary_for_path(part_id.clone(), BuckId::ROOT)
+                    .await?,
+                BucketSummary {
+                    id: BuckId::ROOT,
+                    len: 5,
+                    live_count: 2,
+                    fp: (live_fp, dead_fp),
+                    changed_at: 7,
+                }
+            );
+        }
+        Ok(())
     }
 
     /// A hidden part stays physically present but is invisible to remote part access

@@ -82,7 +82,7 @@ impl RepoAuthority {
 
 pub(crate) async fn ensure(
     big_repo: &SharedBigRepo,
-    sql: &SqlCtx,
+    sql: &Database,
     supplied_ids: Option<RepoAuthorityIds>,
 ) -> Res<RepoAuthority> {
     let (repo_agents, repo_agents_created) = ensure_group(
@@ -181,7 +181,7 @@ pub(crate) async fn ensure(
 
 async fn ensure_group(
     big_repo: &SharedBigRepo,
-    sql: &SqlCtx,
+    sql: &Database,
     key: &str,
     supplied_id: Option<[u8; 32]>,
 ) -> Res<(BigKeyhiveGroup, bool)> {
@@ -218,7 +218,7 @@ async fn ensure_group(
     Ok((group, true))
 }
 
-async fn load_group_id(sql: &SqlCtx, key: &str) -> Res<Option<[u8; 32]>> {
+async fn load_group_id(sql: &Database, key: &str) -> Res<Option<[u8; 32]>> {
     let Some(value) = crate::repo::globals::get_string_global(sql, key).await? else {
         return Ok(None);
     };
@@ -226,7 +226,7 @@ async fn load_group_id(sql: &SqlCtx, key: &str) -> Res<Option<[u8; 32]>> {
         format!("invalid authority group id stored at {key}")
     })?))
 }
-pub(crate) async fn persist_ids(sql: &SqlCtx, ids: RepoAuthorityIds) -> Res<()> {
+pub(crate) async fn persist_ids(sql: &Database, ids: RepoAuthorityIds) -> Res<()> {
     persist_group_id(sql, REPO_AGENTS_GROUP_KEY, ids.repo_agents).await?;
     persist_group_id(sql, CORE_DOCS_GROUP_KEY, ids.core_docs).await?;
     persist_group_id(sql, CONTENT_DOCS_GROUP_KEY, ids.content_docs).await?;
@@ -263,6 +263,6 @@ pub(crate) async fn grant_docs_admin(
     Ok(())
 }
 
-async fn persist_group_id(sql: &SqlCtx, key: &str, id: [u8; 32]) -> Res<()> {
+async fn persist_group_id(sql: &Database, key: &str, id: [u8; 32]) -> Res<()> {
     crate::repo::globals::upsert_string_global(sql, key, &serde_json::to_string(&id)?).await
 }
