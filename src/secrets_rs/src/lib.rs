@@ -8,6 +8,8 @@
 //! resources.
 
 use std::sync::Arc;
+#[cfg(feature = "test-support")]
+use std::sync::{Mutex, OnceLock};
 
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
@@ -36,6 +38,78 @@ pub enum SecretsError {
     /// AEAD encrypt/decrypt failed.
     #[error("crypto error: {0}")]
     Crypto(String),
+    #[cfg(feature = "test-support")]
+    #[error("injected secret-store fault: {0}")]
+    Injected(String),
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy)]
+enum TestFaultOperation {
+    Get,
+    Delete,
+}
+
+#[cfg(feature = "test-support")]
+struct TestFault {
+    operation: TestFaultOperation,
+    service: String,
+    skip: usize,
+}
+
+#[cfg(feature = "test-support")]
+fn test_faults() -> &'static Mutex<Vec<TestFault>> {
+    static FAULTS: OnceLock<Mutex<Vec<TestFault>>> = OnceLock::new();
+    FAULTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Test-only deterministic fault injection for authority provisioning cuts.
+#[cfg(feature = "test-support")]
+pub fn test_reset_faults() {
+    test_faults().lock().expect("test fault mutex").clear();
+}
+
+/// Fail a `get_secret` call after `skip` matching service reads.
+#[cfg(feature = "test-support")]
+pub fn test_fail_get_after(service: &str, skip: usize) {
+    test_faults()
+        .lock()
+        .expect("test fault mutex")
+        .push(TestFault {
+            operation: TestFaultOperation::Get,
+            service: service.to_owned(),
+            skip,
+        });
+}
+
+/// Fail the next matching secret deletion.
+#[cfg(feature = "test-support")]
+pub fn test_fail_next_delete(service: &str) {
+    test_faults()
+        .lock()
+        .expect("test fault mutex")
+        .push(TestFault {
+            operation: TestFaultOperation::Delete,
+            service: service.to_owned(),
+            skip: 0,
+        });
+}
+
+#[cfg(feature = "test-support")]
+fn take_test_fault(operation: TestFaultOperation, service: &str) -> bool {
+    let mut faults = test_faults().lock().expect("test fault mutex");
+    let Some(index) = faults.iter().position(|fault| {
+        std::mem::discriminant(&fault.operation) == std::mem::discriminant(&operation)
+            && fault.service == service
+    }) else {
+        return false;
+    };
+    if faults[index].skip != 0 {
+        faults[index].skip -= 1;
+        return false;
+    }
+    faults.remove(index);
+    true
 }
 
 /// Standalone storage for opaque byte secrets in an operating-system keyring.
@@ -145,6 +219,10 @@ impl SecretStore {
     ) -> Result<Option<Vec<u8>>, SecretsError> {
         validate_name(service)?;
         validate_name(name)?;
+        #[cfg(feature = "test-support")]
+        if take_test_fault(TestFaultOperation::Get, service) {
+            return Err(SecretsError::Injected(format!("get {service}/{name}")));
+        }
         let service = service.to_string();
         let name = name.to_string();
         let store = self.store();
@@ -176,6 +254,29 @@ impl SecretStore {
         tokio::task::spawn_blocking(move || {
             let entry = store.build(&service, &name, None)?;
             entry.set_password(&encoded).map_err(SecretsError::from)
+        })
+        .await
+        .expect(ERROR_TOKIO)
+    }
+
+    /// Delete a named opaque secret. This is used only to compensate a
+    /// failed authority publication after a newly created signer key.
+    pub async fn delete_secret(&self, service: &str, name: &str) -> Result<(), SecretsError> {
+        validate_name(service)?;
+        validate_name(name)?;
+        #[cfg(feature = "test-support")]
+        if take_test_fault(TestFaultOperation::Delete, service) {
+            return Err(SecretsError::Injected(format!("delete {service}/{name}")));
+        }
+        let service = service.to_string();
+        let name = name.to_string();
+        let store = self.store();
+        tokio::task::spawn_blocking(move || {
+            let entry = store.build(&service, &name, None)?;
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+                Err(error) => Err(SecretsError::from(error)),
+            }
         })
         .await
         .expect(ERROR_TOKIO)
@@ -383,5 +484,152 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, SecretsError::InvalidName(_)));
+    }
+}
+
+/// A named Ed25519 key whose private material remains inside [`SecretStore`].
+///
+/// Cloning this handle only clones access to the keyring entry. The private
+/// seed is loaded by this crate for the duration of a signing operation and is
+/// never returned by this API.
+#[derive(Clone)]
+pub struct SigningKeyHandle {
+    store: Arc<SecretStore>,
+    service: String,
+    name: String,
+    expected_public_key: Option<[u8; 32]>,
+}
+
+impl SigningKeyHandle {
+    /// Load a named key, creating it when the keyring entry does not exist.
+    pub async fn get_or_create(
+        store: Arc<SecretStore>,
+        service: &str,
+        name: &str,
+    ) -> Result<Self, SecretsError> {
+        let handle = Self {
+            store,
+            service: service.to_owned(),
+            name: name.to_owned(),
+            expected_public_key: None,
+        };
+        let seed = handle.store.get_or_create_secret(service, name, 32).await?;
+        if seed.len() != 32 {
+            return Err(SecretsError::Corrupt(format!(
+                "signing key {service}/{name} has {} bytes, expected 32",
+                seed.len()
+            )));
+        }
+        Ok(handle)
+    }
+
+    /// Open a named key without creating it. This is used when a persisted
+    /// public actor registry is being rehydrated after a restart.
+    pub async fn open(
+        store: Arc<SecretStore>,
+        service: &str,
+        name: &str,
+    ) -> Result<Self, SecretsError> {
+        let handle = Self {
+            store,
+            service: service.to_owned(),
+            name: name.to_owned(),
+            expected_public_key: None,
+        };
+        let seed = handle
+            .store
+            .get_secret(service, name)
+            .await?
+            .ok_or_else(|| SecretsError::Missing(format!("signing key {service}/{name}")))?;
+        if seed.len() != 32 {
+            return Err(SecretsError::Corrupt(format!(
+                "signing key {service}/{name} has {} bytes, expected 32",
+                seed.len()
+            )));
+        }
+        Ok(handle)
+    }
+
+    /// Bind this handle to one expected public identity. Authority callers use
+    /// the bound form so one seed read both proves identity and signs, avoiding
+    /// a fetch/check/fetch signing race if the keyring entry is replaced.
+    pub fn bind_public_key(mut self, expected_public_key: [u8; 32]) -> Self {
+        self.expected_public_key = Some(expected_public_key);
+        self
+    }
+
+    /// Return the public identity corresponding to this named key.
+    pub async fn public_key(&self) -> Result<[u8; 32], SecretsError> {
+        let seed = self.seed().await?;
+        Ok(ed25519_dalek::SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes())
+    }
+
+    /// Sign a caller-provided message without exposing the private key.
+    pub async fn sign(&self, message: &[u8]) -> Result<[u8; 64], SecretsError> {
+        use ed25519_dalek::Signer;
+
+        let seed = self.seed().await?;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        if let Some(expected) = self.expected_public_key
+            && signing_key.verifying_key().to_bytes() != expected
+        {
+            return Err(SecretsError::Corrupt(format!(
+                "signing key {}/{} no longer matches its bound public identity",
+                self.service, self.name
+            )));
+        }
+        Ok(signing_key.sign(message).to_bytes())
+    }
+
+    async fn seed(&self) -> Result<[u8; 32], SecretsError> {
+        let seed = self
+            .store
+            .get_secret(&self.service, &self.name)
+            .await?
+            .ok_or_else(|| {
+                SecretsError::Missing(format!("signing key {}/{}", self.service, self.name))
+            })?;
+        seed.try_into().map_err(|seed: Vec<u8>| {
+            SecretsError::Corrupt(format!(
+                "signing key {}/{} has {} bytes, expected 32",
+                self.service,
+                self.name,
+                seed.len()
+            ))
+        })
+    }
+}
+
+#[cfg(test)]
+mod signing_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn named_signer_returns_public_key_and_signature_only() {
+        let store = Arc::new(SecretStore::boot().await.expect("mock keyring"));
+        let signer = SigningKeyHandle::get_or_create(Arc::clone(&store), "authority", "node")
+            .await
+            .expect("signer");
+        let public = signer.public_key().await.expect("public key");
+        let signature = signer.sign(b"authority test").await.expect("signature");
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&public).expect("public key");
+        let signature = ed25519_dalek::Signature::from_bytes(&signature);
+        ed25519_dalek::Verifier::verify(&verifying, b"authority test", &signature)
+            .expect("signature verifies");
+        assert!(store.get_secret("authority", "node").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn named_signer_rejects_corrupt_key() {
+        let store = Arc::new(SecretStore::boot().await.expect("mock keyring"));
+        store
+            .set_secret("authority", "corrupt", &[1, 2, 3])
+            .await
+            .expect("store secret");
+        let result = SigningKeyHandle::get_or_create(store, "authority", "corrupt").await;
+        assert!(matches!(result, Err(SecretsError::Corrupt(_))));
     }
 }

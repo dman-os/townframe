@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "./src/am_utils_rs",
   "./src/api_utils_rs",
+  "./src/big_cabinet/",
   "./src/big_cabinet_core/",
   "./src/big_sync/",
   "./src/big_sync_core/",
