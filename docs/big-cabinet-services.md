@@ -23,9 +23,9 @@ Where things live:
 * [`operation.rs`](../src/service_utils_rs/operation.rs): the `Operation` trait a request type implements, `XrpcOperation`
   identity, `Envelope`, the `Reply`/`EventReply` channel aliases, and `ClientError`.
 * [`context.rs`](../src/service_utils_rs/context.rs): `RequestContext`, `HttpMetadata`, `ContextError`.
-* [`middleware.rs`](../src/service_utils_rs/middleware.rs): `Handler<P>`, tower-shaped `Layer`/`Stack`/`ServiceBuilder`, and the
-  built-in `Trace` layer.
-* [`host.rs`](../src/service_utils_rs/host.rs): `Host<H>` (validation, cancellation, dispatch) and the per-protocol `Route` trait.
+* [`middleware.rs`](../src/service_utils_rs/middleware.rs): `Handler<P>` and tower-shaped `Layer`/`Stack`/`ServiceBuilder`.
+* [`host.rs`](../src/service_utils_rs/host.rs): `Host<H>` (tracing, validation, cancellation, deadlines, dispatch), `Route`, and
+  the small `service_protocol!` routing declaration.
 * [`client.rs`](../src/service_utils_rs/client.rs): the one `Client<Proto>` and `ClientStream`.
 * [`admission.rs`](../src/service_utils_rs/admission.rs): bounded permits, activity counters, and cancellation transport for
   received requests.
@@ -39,7 +39,8 @@ Where things live:
 
 ## Declare a protocol
 
-There is no declaration macro. A protocol is three ordinary items, shown here from `sample/protocol.rs`.
+Request types implement ordinary traits; `service_protocol!` generates only the mechanical IRPC enum, native routing, and unary
+HTTP mounting from one operation table, as shown in `sample/protocol.rs`.
 
 **The request type names its operation.** Output, error, and XRPC identity hang off the params type, so no transport ever
 re-spells them:
@@ -60,48 +61,22 @@ impl Operation for PutValue {
 query-string input, procedures are `POST` with a JSON body). A subscription additionally implements `Subscription { type Event }`
 and its `Output` is the handler-side `EventStream<Event, Error>`.
 
-**The protocol enum is irpc's own derive.** Each variant wraps one request in an `Envelope` and names its reply channel through
-the request's `Operation` impl:
+**The routing declaration lists each request once.** It expands through irpc's own `rpc_requests` derive; output and error types
+come from `Operation`, and the generated `Route<H>` requires the handler traits for every listed request:
 
 ```rust
-#[rpc_requests(message = SampleMessage)]
-#[derive(Debug, Serialize, Deserialize)]
-pub enum SampleProtocol {
-    #[rpc(tx = Reply<GetValue>)]            GetValue(Envelope<GetValue>),
-    #[rpc(tx = Reply<PutValue>)]            PutValue(Envelope<PutValue>),
-    #[rpc(tx = Reply<ReadState>)]           ReadState(Envelope<ReadState>),
-    #[rpc(tx = EventReply<SubscribeEvents>)] SubscribeEvents(Envelope<SubscribeEvents>),
-}
-```
-
-**`Route` is the one hand-written match.** Its `where` clause is the honest statement of what a service must implement to host
-the protocol; `mount` lists the unary operations for the HTTP router:
-
-```rust
-impl<H> Route<H> for SampleProtocol
-where
-    H: Handler<GetValue> + Handler<PutValue> + Handler<ReadState> + Handler<SubscribeEvents>,
-{
-    fn route(host: Arc<Host<H>>, dispatch: Dispatch, message: SampleMessage) -> BoxFuture<'static, ()> {
-        Box::pin(async move {
-            match message {
-                SampleMessage::GetValue(m) => host.unary(dispatch, m).await,
-                SampleMessage::PutValue(m) => host.unary(dispatch, m).await,
-                SampleMessage::ReadState(m) => host.unary(dispatch, m).await,
-                SampleMessage::SubscribeEvents(m) => host.stream(dispatch, m).await,
-            }
-        })
-    }
-
-    fn mount(router: &mut XrpcRouter, host: Arc<Host<H>>) -> Result<(), XrpcRegistrationError> {
-        router.mount::<GetValue, H>(Arc::clone(&host))?;
-        router.mount::<PutValue, H>(Arc::clone(&host))?;
-        router.mount::<ReadState, H>(host)
+service_utils_rs::service_protocol! {
+    pub enum SampleProtocol => SampleMessage {
+        unary { GetValue(GetValue), PutValue(PutValue), ReadState(ReadState) }
+        stream { SubscribeEvents(SubscribeEvents) }
     }
 }
 ```
 
-Adding an operation means a new request type, a new variant, and a new match arm; the compiler reports every site that is missing.
+Adding an operation means a request type, its `Operation` impl, a handler impl, and one entry in the routing table.
+The declaration uses irpc's derive machinery; consumers depend on `serde` with derives, `irpc` with derives, and `tracing` as well as
+this crate. This crate may be renamed in the consumer's dependencies.
+Hand-written `rpc_requests` enums and `Route` implementations remain valid for protocols needing custom routing.
 Params, outputs, events, and errors are domain-owned types. Every service error type must implement `From<ContextError>` because
 the host, not the handler, rejects invalid, expired, or cancelled requests and reports that through the operation's own error.
 
@@ -112,25 +87,25 @@ context and HTTP metadata without a side channel:
 
 ```rust
 impl Handler<PutValue> for SampleService {
-    async fn call(&self, request: Envelope<PutValue>) -> Result<PutValueOutput, SampleError> { .. }
+    async fn call(&self, request: Envelope<PutValue>) -> Result<ResponseEnvelope<PutValueOutput>, SampleError> { .. }
 }
 ```
 
 Middleware is tower-shaped: a `Layer` wraps a handler in another handler, generic over `P`, so one layer applies to every
-operation without naming any of them. `ServiceBuilder` composes layers; the first `.layer(..)` is closest to the handler. The
-crate ships `Trace` (a `tracing` span per call with NSID and request identity); the sample adds a demonstration `Log` layer.
+operation without naming any of them. `ServiceBuilder` uses Tower ordering: the first `.layer(..)` runs outermost. The sample
+adds a demonstration `Log` layer; tracing belongs to the host and cannot be omitted from a transport.
 
 ```rust
 let handler = ServiceBuilder::new()
-    .layer(Trace::new("sample"))
     .layer(Log::new(calls.clone()))
     .service(Arc::clone(&service));
 let (host, host_stop) = Host::new(handler);
 ```
 
-`Host` enforces the two guarantees no transport may skip: the request context is validated before the stack runs, and the stack is
-raced against request cancellation and host shutdown. Those are not optional layers. Everything else (authorization, idempotency,
-tracing) is a layer.
+`Host` validates context before the stack runs and races execution against the same request deadline, request cancellation, and
+host shutdown. A real `service.call` tracing span covers handler execution and, for subscriptions, all stream polling and delivery.
+Authorization and idempotency policy remain layers. Trusted `Envelope::transport()` data is installed by the receiving adapter,
+not deserialized from client claims: direct, IRPC, HTTP, or the authenticated Iroh connection peer.
 
 ## Call a service
 
@@ -144,14 +119,19 @@ let mut events = client.subscribe(ctx.child(), SubscribeEvents { after_source_re
 while let Some(event) = events.recv().await? { .. }
 ```
 
-`call_with_metadata`/`subscribe_with_metadata` take an explicit `Envelope` when `HttpMetadata` (authorization, idempotency key,
-traceparent/tracestate, timeout) matters. Carrying metadata is not a claim that a service implements those semantics.
+`call_with_metadata`/`subscribe_with_metadata` take an explicit request `Envelope` and return `ResponseEnvelope<Output>` or
+`ResponseEnvelope<ClientStream<P>>`. `HttpMetadata` carries caller-supplied authorization and idempotency keys; tracing and deadlines
+belong only to `RequestContext`. `ResponseMetadata` carries ETag, Location, Retry-After, Cache-Control, and repeated Warning values
+outside domain payloads. HTTP and Iroh map those values to response headers; native subscriptions send establishment metadata before
+events. `call`/`subscribe` are output-only conveniences. Response metadata currently accompanies successful responses, not errors.
+Carrying metadata is not a claim that a service implements authorization, caching, or retry policy.
 
 `ClientError<E>` keeps transport failure distinct from a semantic `Operation(E)`. `Transport { outcome_unknown }` is `true` for a
 procedure or subscription whose response was lost, because the server may have committed before the loss; a query is safe to retry.
-Subscription establishment failures arrive as the first, terminal item of the `ClientStream` on every transport; `Err` from
-`subscribe` itself means the client could not send the request. The unary HTTP transport does not carry subscriptions and says so
-with a transport error.
+Subscription establishment failures return from `subscribe` itself, before a `ClientStream` is available. Errors after establishment
+are terminal stream items and immediately release the receiver and cancellation scope. Native streams send an explicit end marker on
+successful completion; a missing end marker is a transport failure, not successful EOF. The unary HTTP transport does not carry
+subscriptions and says so with a transport error.
 
 Over HTTP a typed domain error travels in the standard XRPC error envelope with status `DOMAIN_ERROR_STATUS` (400): `error` is the
 operation's declared error schema name, `message` is the error's `Debug`, and `operationError` (`DOMAIN_ERROR_FIELD`) is the
@@ -162,7 +142,7 @@ serialized error value the client decodes back into `E`.
 `IrpcAdapter::local(host, admission, queue)` returns an `irpc::Client` for `Client::irpc` plus a `StopToken`. The queue bounds
 waiting messages; `Admission::new(max_handlers, max_stream_pumps)` bounds unary work and subscription pumps independently. Unary
 admission obtains a permit before spawning, so a bounded queue is never drained into an unbounded set of parked tasks. A
-subscription that cannot obtain a pump permit receives `ContextError::StreamCapacityExceeded` as its first item. A pump ends on
+subscription that cannot obtain a pump permit fails establishment with `ContextError::StreamCapacityExceeded`. A pump ends on
 stream EOF, a terminal error, request cancellation, adapter stop, or the subscriber going away, and releases its permit on each path.
 
 ## Lifecycle
@@ -175,10 +155,16 @@ Work admitted by the IRPC adapter also observes the adapter's own stop, so stopp
 
 ## Context, clocks, and cancellation
 
-`RequestContext::root()` supplies request, trace, and span IDs; `child()` keeps request/trace identity and opens a child span.
-`with_command_id` and `with_time_budget` add optional propagation data. `Envelope::for_receiver()` rebuilds a receiver-local
-deadline from the serialized absolute Unix-millisecond boundary without resetting elapsed budget; the IRPC adapter applies it on
-admission. Wall-clock transport data and monotonic local waiting are deliberately distinct.
+`RequestContext::root()` allocates a request ID and captures the current tracing span's OpenTelemetry context. `child()` retains
+request identity and captures the current service span for a nested call; it does not invent span IDs. The SDK W3C propagator
+extracts and injects `traceparent`/`tracestate`, and the host uses the propagated context as the actual service span parent. An
+application installs its own `tracing-opentelemetry` subscriber to export traces; calls also work with ordinary tracing or no subscriber.
+
+`with_command_id` adds an optional command identity. `with_time_budget` narrows, never extends, the existing deadline. Local waits
+use a monotonic clock; IRPC serializes an absolute Unix-millisecond deadline, and HTTP sends the remaining budget as `x-timeout-ms`.
+`Envelope::for_receiver()` reconstructs a monotonic deadline only after serialization, without resetting an existing local deadline.
+Client queueing and waiting, HTTP body reading, host execution, IRPC admission, and stream polling/backpressure are all bounded by
+that request budget. Iroh request-stream EOF is a half-close, not cancellation; resetting the response stream cancels its handler.
 
 Cancellation is a one-shot state transition, not rollback: `cancel()` wakes the host's select, but a completed source write is not
 undone. Transport cancellation is bounded by `cancellation_channel(scope_capacity)`; admitted work is keyed by `(request_id, token)`

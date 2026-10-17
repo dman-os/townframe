@@ -14,6 +14,7 @@ use url::Url;
 
 mod irpc;
 mod parity;
+mod runtime;
 mod xrpc_wire;
 
 const IRPC_QUEUE: usize = 8;

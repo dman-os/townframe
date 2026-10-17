@@ -14,16 +14,15 @@
 //! * [`Operation`] is implemented on each request type and names its output,
 //!   error, and XRPC identity. The request value *is* the method: there is no
 //!   per-service client type and no generated method list.
-//! * The protocol enum is declared with irpc's own `#[rpc_requests]` derive
-//!   and wraps each request in an [`Envelope`]; see [`sample::protocol`].
+//! * [`service_protocol!`] declares the IRPC enum and routing table, wrapping
+//!   each request in an [`Envelope`]; see [`sample::protocol`].
 //! * [`Handler<P>`] is implemented by the service for each request type it
 //!   serves. Middleware wraps handlers tower-style with [`Layer`] and
 //!   [`ServiceBuilder`].
 //! * [`Host`] owns the layered handler and enforces what every transport must
-//!   share: context validation and request cancellation.
-//! * [`Route`] is the one hand-written per-protocol item: a match from the
-//!   protocol's message enum to `Host::unary`/`Host::stream`, plus the XRPC
-//!   mount list.
+//!   share: tracing, context validation, deadlines, and request cancellation.
+//! * [`Route`] binds native dispatch and HTTP mounting; the declaration macro
+//!   generates it, or protocols can implement it for custom routing.
 //! * Every long-lived component boots into an `(Arc<Self>, StopToken)` pair;
 //!   [`StopToken::stop`] cancels and then joins, in construction order reversed.
 //!
@@ -46,14 +45,16 @@ pub use admission::{
     CancellationTransport, TaskActivity, cancellation_channel,
 };
 pub use client::Client;
-pub use context::{ContextError, HttpMetadata, RequestContext};
+pub use context::{ContextError, HttpMetadata, RequestContext, TraceContext};
 pub use host::{Dispatch, Host, Route};
+pub use irpc as __irpc;
 pub use irpc_adapter::IrpcAdapter;
 pub use lifecycle::{Spawner, StopToken};
-pub use middleware::{Handler, Identity, Layer, ServiceBuilder, Stack, Trace, Traced};
+pub use middleware::{Handler, Identity, Layer, ServiceBuilder, Stack};
 pub use operation::{
-    ClientError, Envelope, EventReply, EventStream, HttpInput, HttpMethod, Operation, Reply,
-    ServiceError, Subscription, Unary, Wire, XrpcKind, XrpcOperation,
+    ClientError, Envelope, EventFrame, EventReply, EventStream, HttpInput, HttpMethod, Operation,
+    Reply, ResponseEnvelope, ResponseMetadata, ServiceError, Subscription, TransportContext, Unary,
+    Wire, XrpcKind, XrpcOperation,
 };
 pub use xrpc::{XrpcClient, XrpcRouter};
 

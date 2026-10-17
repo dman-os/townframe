@@ -151,6 +151,42 @@ pub trait Subscription:
 /// the terminal error that ends the stream.
 pub type EventStream<E, Err> = Pin<Box<dyn Stream<Item = Result<E, Err>> + Send + 'static>>;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum TransportContext {
+    #[default]
+    Unknown,
+    Direct,
+    Irpc,
+    Http,
+    Iroh {
+        peer: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseMetadata {
+    pub etag: Option<String>,
+    pub location: Option<String>,
+    pub retry_after: Option<String>,
+    pub cache_control: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResponseEnvelope<T> {
+    pub output: T,
+    pub metadata: ResponseMetadata,
+}
+
+impl<T> From<T> for ResponseEnvelope<T> {
+    fn from(output: T) -> Self {
+        Self {
+            output,
+            metadata: ResponseMetadata::default(),
+        }
+    }
+}
+
 /// The native request envelope carried by direct and IRPC transports. The HTTP
 /// adapter maps request headers into `context` and `metadata`, and the
 /// Lexicon input into `params`; nothing in `params` is transport metadata.
@@ -159,14 +195,21 @@ pub struct Envelope<P> {
     pub context: RequestContext,
     pub metadata: HttpMetadata,
     pub params: P,
+    #[serde(skip)]
+    pub(crate) transport: TransportContext,
 }
 
 impl<P> Envelope<P> {
+    pub fn transport(&self) -> &TransportContext {
+        &self.transport
+    }
+
     pub fn new(context: RequestContext, params: P) -> Self {
         Self {
             context,
             metadata: HttpMetadata::default(),
             params,
+            transport: TransportContext::Unknown,
         }
     }
 
@@ -175,6 +218,7 @@ impl<P> Envelope<P> {
             context,
             metadata,
             params,
+            transport: TransportContext::Unknown,
         }
     }
 
@@ -187,13 +231,22 @@ impl<P> Envelope<P> {
 
 /// The IRPC reply channel for a unary operation. A protocol variant for `P`
 /// is declared as `#[rpc(tx = Reply<P>)] P(Envelope<P>)`.
-pub type Reply<P> =
-    irpc::channel::oneshot::Sender<Result<<P as Operation>::Output, <P as Operation>::Error>>;
+pub type Reply<P> = irpc::channel::oneshot::Sender<
+    Result<ResponseEnvelope<<P as Operation>::Output>, <P as Operation>::Error>,
+>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventFrame<E> {
+    Open(ResponseMetadata),
+    Event(E),
+    End,
+}
 
 /// The IRPC reply channel for a subscription. A protocol variant for `P` is
 /// declared as `#[rpc(tx = EventReply<P>)] P(Envelope<P>)`.
-pub type EventReply<P> =
-    irpc::channel::mpsc::Sender<Result<<P as Subscription>::Event, <P as Operation>::Error>>;
+pub type EventReply<P> = irpc::channel::mpsc::Sender<
+    Result<EventFrame<<P as Subscription>::Event>, <P as Operation>::Error>,
+>;
 
 /// Errors at the typed client boundary keep transport failure distinct from a
 /// semantic operation error. A procedure transport failure is retry-unsafe

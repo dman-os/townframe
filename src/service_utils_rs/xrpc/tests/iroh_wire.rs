@@ -81,8 +81,6 @@ async fn iroh_http1_query_procedure_and_domain_error_use_shared_wire() {
                     request_id: RequestContext::root().request_id,
                     authorization: metadata.authorization,
                     idempotency_key: metadata.idempotency_key,
-                    timeout_millis: metadata.timeout.map(|value| value.as_millis() as u64),
-                    traceparent: metadata.traceparent,
                 })
             },
         ))
@@ -115,8 +113,6 @@ async fn iroh_http1_query_procedure_and_domain_error_use_shared_wire() {
                         request_id: RequestContext::root().request_id,
                         authorization: None,
                         idempotency_key: None,
-                        timeout_millis: None,
-                        traceparent: None,
                     })
                 }
             },
@@ -173,7 +169,6 @@ async fn iroh_http1_query_procedure_and_domain_error_use_shared_wire() {
             context.clone(),
             &HttpMetadata {
                 authorization: Some("Capability iroh".to_owned()),
-                timeout: Some(Duration::from_millis(500)),
                 ..HttpMetadata::default()
             },
             &EchoParams {
@@ -184,22 +179,19 @@ async fn iroh_http1_query_procedure_and_domain_error_use_shared_wire() {
         .expect("Iroh query");
     assert_eq!(query.value, "iroh-query");
     assert_eq!(query.authorization.as_deref(), Some("Capability iroh"));
-    assert_eq!(query.timeout_millis, Some(500));
     // Enter the handler before waiting for the server's declared
     // deadline.  Calling execute_inner bypasses the client's outer timer,
     // so this proves the server timeout boundary and its exact 504 mapping
-    // rather than whichever side won a nanosecond race.
-    let deadline_context = context.clone();
+    // rather than whichever side won a nanosecond race. The budget is part of
+    // the request context and travels as x-timeout-ms.
+    let deadline_context = context.clone().with_time_budget(Duration::from_millis(25));
     let deadline_client = client.clone();
     let deadline_request = tokio::spawn(async move {
         deadline_client
             .execute_inner::<EchoParams, Output, TestError>(
                 PROCEDURE_OPERATION,
                 deadline_context,
-                &HttpMetadata {
-                    timeout: Some(Duration::from_millis(25)),
-                    ..HttpMetadata::default()
-                },
+                &HttpMetadata::default(),
                 &EchoParams {
                     value: "pending".to_owned(),
                 },
@@ -272,8 +264,6 @@ async fn iroh_http1_chunked_request_limit_is_cumulative_across_wire_frames() {
                     request_id: RequestContext::root().request_id,
                     authorization: None,
                     idempotency_key: None,
-                    timeout_millis: None,
-                    traceparent: None,
                 })
             },
         ))
@@ -339,8 +329,6 @@ async fn iroh_http1_client_disconnect_drops_entered_handler() {
                             request_id: RequestContext::root().request_id,
                             authorization: None,
                             idempotency_key: None,
-                            timeout_millis: None,
-                            traceparent: None,
                         })
                     }
                 }
@@ -437,8 +425,6 @@ async fn iroh_http1_client_stream_cancel_drops_only_entered_handler() {
                             request_id: RequestContext::root().request_id,
                             authorization: None,
                             idempotency_key: None,
-                            timeout_millis: None,
-                            traceparent: None,
                         })
                     } else {
                         Ok(Output {
@@ -446,8 +432,6 @@ async fn iroh_http1_client_stream_cancel_drops_only_entered_handler() {
                             request_id: RequestContext::root().request_id,
                             authorization: None,
                             idempotency_key: None,
-                            timeout_millis: None,
-                            traceparent: None,
                         })
                     }
                 }
@@ -549,8 +533,6 @@ async fn iroh_http1_shutdown_reaps_pending_exchange() {
                             request_id: RequestContext::root().request_id,
                             authorization: None,
                             idempotency_key: None,
-                            timeout_millis: None,
-                            traceparent: None,
                         })
                     }
                 }

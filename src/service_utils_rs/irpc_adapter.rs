@@ -46,7 +46,7 @@ impl IrpcAdapter {
     {
         let (stop, spawner) = StopToken::new();
         let loop_spawner = spawner.clone();
-        spawner.spawn(async move {
+        let _task = spawner.spawn(async move {
             loop {
                 let message = tokio::select! {
                     message = receiver.recv() => match message {

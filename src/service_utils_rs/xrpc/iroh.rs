@@ -115,6 +115,7 @@ async fn serve_iroh_stream(
             // HTTP/1 is deliberately one exchange per QUIC bi-stream.  The
             // QUIC connection itself remains reusable and is owned by the client.
             .keep_alive(false)
+            .half_close(true)
             .serve_connection(io, hyper_util::service::TowerToHyperService::new(router)) => result,
         _ = stopped => Ok(()),
     }
@@ -133,6 +134,12 @@ impl iroh::protocol::ProtocolHandler for IrohXrpcProtocolHandler {
                     "Iroh connection admission is full",
                 ))
             })?;
+        let router = self
+            .router
+            .clone()
+            .layer(axum::Extension(crate::TransportContext::Iroh {
+                peer: connection.remote_id().to_string(),
+            }));
         let mut shutdown = self.shutdown_state.clone();
         let mut streams = JoinSet::new();
         let mut first_error = None;
@@ -222,7 +229,7 @@ impl iroh::protocol::ProtocolHandler for IrohXrpcProtocolHandler {
                             }
                         }
                     };
-                    let router = self.router.clone();
+                    let router = router.clone();
                     streams.spawn(async move {
                         let result = serve_iroh_stream(router, send, recv).await;
                         drop(permit);
@@ -419,8 +426,25 @@ impl IrohXrpcClient {
         O: DeserializeOwned,
         E: DeserializeOwned,
     {
+        self.execute_with_metadata(operation, context, metadata, params)
+            .await
+            .map(|response| response.output)
+    }
+
+    pub async fn execute_with_metadata<P, O, E>(
+        &self,
+        operation: XrpcOperation,
+        context: RequestContext,
+        metadata: &HttpMetadata,
+        params: &P,
+    ) -> Result<crate::ResponseEnvelope<O>, XrpcClientError<E>>
+    where
+        P: Serialize,
+        O: DeserializeOwned,
+        E: DeserializeOwned,
+    {
         let outcome_unknown = operation.kind == XrpcKind::Procedure;
-        if let Some(timeout) = metadata.timeout {
+        if let Some(timeout) = context.remaining_budget() {
             match tokio::time::timeout(
                 timeout,
                 self.execute_inner(operation, context, metadata, params),
@@ -445,7 +469,7 @@ impl IrohXrpcClient {
         context: RequestContext,
         metadata: &HttpMetadata,
         params: &P,
-    ) -> Result<O, XrpcClientError<E>>
+    ) -> Result<crate::ResponseEnvelope<O>, XrpcClientError<E>>
     where
         P: Serialize,
         O: DeserializeOwned,

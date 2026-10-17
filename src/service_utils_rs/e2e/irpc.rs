@@ -64,13 +64,12 @@ async fn stream_capacity_is_independent_from_unary_capacity_and_is_released() {
         .expect("unary capacity is untouched by the stream pump");
     assert_eq!(query.snapshot.value, "initial");
 
-    let mut second = stack
+    let second = stack
         .irpc
         .subscribe(RequestContext::root(), params.clone())
-        .await
-        .expect("second subscription request is sent");
+        .await;
     assert!(matches!(
-        second.recv().await,
+        second,
         Err(ClientError::Operation(SampleError::Context(
             ContextError::StreamCapacityExceeded { limit: 1 }
         )))
@@ -192,6 +191,55 @@ async fn adapter_stop_cancels_in_flight_work_and_joins_it() {
         .expect("HTTP server exit");
     stop.stop().await;
     drop(sample);
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_admission_does_not_run_the_waiting_handler() {
+    let (sample, stop) = crate::sample::boot("initial");
+    let _gate = sample.service.block_projector();
+    let admission = crate::Admission::new(1, 1);
+    let (client, adapter_stop) = crate::IrpcAdapter::local::<_, SampleProtocol>(
+        sample.host,
+        std::sync::Arc::clone(&admission),
+        2,
+    );
+    let context = RequestContext::root();
+    let first = tokio::spawn({
+        let client = client.clone();
+        let context = context.clone();
+        async move {
+            client
+                .rpc(crate::Envelope::new(
+                    context,
+                    PutValue {
+                        value: "first".into(),
+                    },
+                ))
+                .await
+        }
+    });
+    wait_for_activity(&admission, |activity| activity.active_count() == 1).await;
+    let response = client
+        .rpc(crate::Envelope::new(
+            RequestContext::root().with_time_budget(std::time::Duration::from_secs(5)),
+            PutValue {
+                value: "never admitted".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response,
+        Err(SampleError::Context(ContextError::DeadlineExceeded))
+    );
+    assert_eq!(sample.calls.entries().len(), 1);
+    context.cancel();
+    assert_eq!(
+        first.await.unwrap().unwrap(),
+        Err(SampleError::Context(ContextError::Cancelled))
+    );
+    adapter_stop.then(stop).stop().await;
+    assert_eq!(admission.activity().active_count(), 0);
 }
 
 #[tokio::test]
