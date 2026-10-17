@@ -4,13 +4,14 @@
 //! staged keys receive one global cursor on commit; the transaction itself is
 //! finalized before the notification callback is invoked.
 
+use crate::sqlite::queries;
 use big_sync_core::keyed_frontier::{
     FrontierRevision, KeyedFrontierError, KeyedFrontierResult, KeyedFrontierTransaction,
     TransactionIsolation,
 };
 use big_sync_core::rpc::PartEvent;
 use big_sync_core::{ObjKey, PartKey};
-use sqlx::{Row, Sqlite, Transaction};
+use sqlite_rs::Tx;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use utils_rs::prelude::{async_trait, serde_json};
@@ -29,16 +30,16 @@ fn invalid_event(message: &'static str) -> KeyedFrontierError {
     )))
 }
 
-pub(crate) struct SqliteFrontierWrite<'a> {
-    transaction: Option<Transaction<'a, Sqlite>>,
+pub(crate) struct SqliteFrontierWrite {
+    transaction: Option<Tx>,
     scope_id: i64,
     staged: BTreeMap<PartFrontierKey, Option<PartEvent>>,
     reserved_revision: Option<FrontierRevision>,
     notify: Notify,
 }
 
-impl<'a> SqliteFrontierWrite<'a> {
-    pub(crate) fn new(transaction: Transaction<'a, Sqlite>, scope_id: i64, notify: Notify) -> Self {
+impl SqliteFrontierWrite {
+    pub(crate) fn new(transaction: Tx, scope_id: i64, notify: Notify) -> Self {
         Self {
             transaction: Some(transaction),
             scope_id,
@@ -48,19 +49,16 @@ impl<'a> SqliteFrontierWrite<'a> {
         }
     }
 
-    fn transaction_mut(&mut self) -> &mut Transaction<'a, Sqlite> {
+    fn transaction_mut(&mut self) -> &mut Tx {
         self.transaction
             .as_mut()
             .expect("sqlite frontier transaction present")
     }
 
     async fn reserve_revision(&mut self) -> KeyedFrontierResult<FrontierRevision> {
-        let value: i64 = sqlx::query_scalar(
-            "UPDATE big_sync_meta SET value = value + 1 WHERE key = 'global_cursor' RETURNING value",
-        )
-        .fetch_one(&mut **self.transaction_mut())
-        .await
-        .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
+        let value = queries::next_id(self.transaction_mut(), "global_cursor".to_owned())
+            .await
+            .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         u64::try_from(value).map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
     }
 
@@ -74,64 +72,49 @@ impl<'a> SqliteFrontierWrite<'a> {
     }
 
     async fn current_revision(&mut self) -> KeyedFrontierResult<FrontierRevision> {
-        let value: i64 =
-            sqlx::query_scalar("SELECT value FROM big_sync_meta WHERE key = 'global_cursor'")
-                .fetch_one(&mut **self.transaction_mut())
-                .await
-                .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
+        let value = queries::global_cursor(self.transaction_mut())
+            .await
+            .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         u64::try_from(value).map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
     }
 
     async fn obj_ref(&mut self, obj_id: ObjKey) -> KeyedFrontierResult<i64> {
         let buck_index = i64::from(big_sync_core::BuckId::deepest_from_obj_key(&obj_id).index());
-        sqlx::query(
-            "INSERT OR IGNORE INTO big_sync_objs(scope_id, obj_id, buck_index) VALUES (?, ?, ?)",
+        let scope_id = self.scope_id;
+        queries::ensure_obj_ref(
+            self.transaction_mut(),
+            scope_id,
+            obj_id.as_bytes().to_vec(),
+            buck_index,
         )
-        .bind(self.scope_id)
-        .bind(obj_id.as_bytes().to_vec())
-        .bind(buck_index)
-        .execute(&mut **self.transaction_mut())
         .await
-        .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
-        sqlx::query_scalar("SELECT obj_ref FROM big_sync_objs WHERE scope_id = ? AND obj_id = ?")
-            .bind(self.scope_id)
-            .bind(obj_id.as_bytes().to_vec())
-            .fetch_one(&mut **self.transaction_mut())
-            .await
-            .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
+        .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
     }
 
     async fn part_ref(&mut self, part_id: PartKey) -> KeyedFrontierResult<i64> {
-        sqlx::query("INSERT OR IGNORE INTO big_sync_parts(scope_id, part_id) VALUES (?, ?)")
-            .bind(self.scope_id)
-            .bind(part_id.as_bytes().to_vec())
-            .execute(&mut **self.transaction_mut())
-            .await
-            .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
-        sqlx::query_scalar("SELECT part_ref FROM big_sync_parts WHERE scope_id = ? AND part_id = ?")
-            .bind(self.scope_id)
-            .bind(part_id.as_bytes().to_vec())
-            .fetch_one(&mut **self.transaction_mut())
-            .await
-            .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
+        let scope_id = self.scope_id;
+        queries::ensure_part_ref(
+            self.transaction_mut(),
+            scope_id,
+            part_id.as_bytes().to_vec(),
+        )
+        .await
+        .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))
     }
 
     async fn load_current(
         &mut self,
         key: &PartFrontierKey,
     ) -> KeyedFrontierResult<Option<PartEvent>> {
+        let scope_id = self.scope_id;
         let (obj_id, maybe_part_ref) = match key {
             PartFrontierKey::Object(obj_id) => (obj_id.clone(), 0),
             PartFrontierKey::Part { obj_id, part_id } => {
-                let part_ref = sqlx::query_scalar(
-                    "SELECT part_ref
-                       FROM big_sync_parts
-                      WHERE scope_id = ?
-                        AND part_id = ?",
+                let part_ref = queries::find_part_ref(
+                    self.transaction_mut(),
+                    scope_id,
+                    part_id.as_bytes().to_vec(),
                 )
-                .bind(self.scope_id)
-                .bind(part_id.as_bytes().to_vec())
-                .fetch_optional(&mut **self.transaction_mut())
                 .await
                 .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
                 let Some(part_ref) = part_ref else {
@@ -140,38 +123,25 @@ impl<'a> SqliteFrontierWrite<'a> {
                 (obj_id.clone(), part_ref)
             }
         };
-        let row = sqlx::query(
-            "SELECT m.event_type
-                 , m.txid
-                 , o.payload_json
-              FROM big_sync_members m
-              JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
-             WHERE m.scope_id = ?
-               AND m.obj_ref = (SELECT obj_ref FROM big_sync_objs WHERE scope_id = ? AND obj_id = ?)
-               AND m.maybe_part_ref = ?",
+        let row = queries::frontier_member(
+            self.transaction_mut(),
+            scope_id,
+            obj_id.as_bytes().to_vec(),
+            maybe_part_ref,
         )
-        .bind(self.scope_id)
-        .bind(self.scope_id)
-        .bind(obj_id.as_bytes().to_vec())
-        .bind(maybe_part_ref)
-        .fetch_optional(&mut **self.transaction_mut())
         .await
         .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
-        let Some(row) = row else {
+        let Some(queries::FrontierMemberRow {
+            event_type,
+            txid: cursor,
+            payload_json,
+        }) = row
+        else {
             return Ok(None);
         };
-        let event_type: i64 = row
-            .try_get("event_type")
-            .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
-        let cursor: i64 = row
-            .try_get("txid")
-            .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         if event_type == EVENT_REMOVED {
             return Ok(None);
         }
-        let payload_json: Option<String> = row
-            .try_get("payload_json")
-            .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         let Some(payload_json) = payload_json.filter(|payload| !payload.is_empty()) else {
             return Err(KeyedFrontierError::Backend(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -232,18 +202,13 @@ impl<'a> SqliteFrontierWrite<'a> {
             (_, None) => (EVENT_REMOVED, None),
             _ => return Err(invalid_event("invalid keyed-frontier event for key")),
         };
+        let scope_id = self.scope_id;
         if let Some(payload) = payload {
             let payload_json = serde_json::to_string(&payload)
                 .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
-            sqlx::query(
-                "UPDATE big_sync_objs SET payload_json = ? WHERE scope_id = ? AND obj_ref = ?",
-            )
-            .bind(payload_json)
-            .bind(self.scope_id)
-            .bind(obj_ref)
-            .execute(&mut **self.transaction_mut())
-            .await
-            .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
+            queries::set_obj_payload(self.transaction_mut(), payload_json, obj_ref)
+                .await
+                .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         }
         let maybe_part_ref = match part_id {
             Some(part_id) => self.part_ref(part_id).await?,
@@ -253,33 +218,20 @@ impl<'a> SqliteFrontierWrite<'a> {
         // insert and on the tombstone-to-present transition (a re-add), and preserved by a
         // present-to-present touch. A row that stays a tombstone keeps whatever stamp it had,
         // because the stamp is what tells a reader the removal is its business.
-        sqlx::query(
-            "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid, added_at)
-             VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
-                 event_type = excluded.event_type,
-                 txid = excluded.txid,
-                 added_at = CASE
-                     WHEN big_sync_members.event_type = ? THEN excluded.txid
-                     ELSE big_sync_members.added_at
-                 END",
+        let revision = i64::try_from(revision).expect("frontier revision fits sqlite integer");
+        queries::upsert_member_event(
+            self.transaction_mut(),
+            scope_id,
+            obj_ref,
+            maybe_part_ref,
+            event_type,
+            revision,
+            EVENT_REMOVED,
         )
-        .bind(self.scope_id)
-        .bind(obj_ref)
-        .bind(maybe_part_ref)
-        .bind(event_type)
-        .bind(i64::try_from(revision).expect("frontier revision fits sqlite integer"))
-        .bind(i64::try_from(revision).expect("frontier revision fits sqlite integer"))
-        .bind(EVENT_REMOVED)
-        .execute(&mut **self.transaction_mut())
         .await
         .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         if maybe_part_ref != 0 {
-            sqlx::query("UPDATE big_sync_parts SET latest_cursor = MAX(latest_cursor, ?) WHERE scope_id = ? AND part_ref = ?")
-                .bind(i64::try_from(revision).expect("frontier revision fits sqlite integer"))
-                .bind(self.scope_id)
-                .bind(maybe_part_ref)
-                .execute(&mut **self.transaction_mut())
+            queries::bump_part_cursor(self.transaction_mut(), revision, scope_id, maybe_part_ref)
                 .await
                 .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         }
@@ -288,8 +240,8 @@ impl<'a> SqliteFrontierWrite<'a> {
 }
 
 #[async_trait]
-impl<'a> KeyedFrontierTransaction<PartFrontierKey, PartEvent> for SqliteFrontierWrite<'a> {
-    type Context = Transaction<'a, Sqlite>;
+impl KeyedFrontierTransaction<PartFrontierKey, PartEvent> for SqliteFrontierWrite {
+    type Context = Tx;
 
     fn isolation(&self) -> TransactionIsolation {
         TransactionIsolation::Serializable

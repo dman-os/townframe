@@ -1,7 +1,6 @@
 use crate::interlude::*;
 
-use sqlx_utils_rs::SqlCtx;
-use std::path::PathBuf;
+use sqlite_rs::{Database, Sql};
 use tokio::sync::{mpsc, oneshot};
 use wflow_core::kvstore::*;
 
@@ -54,14 +53,7 @@ pub struct SqliteKvFactory {
 }
 
 impl SqliteKvFactory {
-    pub async fn boot(db_path: Option<PathBuf>) -> Res<Self> {
-        let sql = match db_path {
-            Some(db_path) => {
-                let sqlite_url = format!("sqlite://{}", db_path.display());
-                SqlCtx::url(&sqlite_url).await?
-            }
-            None => SqlCtx::memory().await?,
-        };
+    pub async fn boot(sql: Database) -> Res<Self> {
         // Use unbounded channel since the worker is single-threaded and processes messages sequentially
         let (tx, mut rx) = mpsc::unbounded_channel();
         let worker = SqliteKvWorker { sql };
@@ -89,6 +81,12 @@ impl SqliteKvFactory {
 }
 
 /// A SQLite-backed key-value store implementation.
+///
+/// Every store owns one table whose name is chosen by the caller at
+/// `open_store` time, so the SQL here is assembled with the [`Sql`] builder
+/// (`ident(table)`) instead of living in checked `sqlite/queries/*.sql` files:
+/// a query file names one fixed table and this crate has no fixed table to
+/// name. The schema is created per table in `handle_boot` for the same reason.
 #[derive(Clone)]
 pub struct SqliteKvStore {
     table_name: &'static str,
@@ -139,7 +137,7 @@ impl SqliteKvStore {
 }
 
 struct SqliteKvWorker {
-    sql: SqlCtx,
+    sql: Database,
 }
 
 impl SqliteKvWorker {
@@ -267,36 +265,29 @@ impl SqliteKvWorker {
     }
 
     async fn handle_boot(&self, table: &'static str) -> Res<()> {
-        // Sanitize table name
-        if !table
-            .chars()
-            .all(|chr| chr.is_alphanumeric() || chr == '_' || chr == '-')
-        {
-            return Err(ferr!("invalid table name: {}", table));
-        }
-
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            r#"
-                CREATE TABLE IF NOT EXISTS "{table}" (
-                    key     BLOB PRIMARY KEY,
-                    value   BLOB NOT NULL,
-                    version INTEGER NOT NULL
-                ) STRICT
-                "#
-        )))
-        .execute(&self.sql.write_pool)
-        .await
-        .wrap_err_with(|| format!("failed to create table: {}", table))?;
+        Sql::new("CREATE TABLE IF NOT EXISTS ")
+            .ident(table)
+            .push(
+                " (
+                    key     BLOB PRIMARY KEY
+                  , value   BLOB NOT NULL
+                  , version INTEGER NOT NULL
+                ) STRICT",
+            )
+            .execute(&self.sql)
+            .await
+            .wrap_err_with(|| format!("failed to create table: {table}"))?;
         Ok(())
     }
 
     async fn handle_get(&self, table: &'static str, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
-        let row = sqlx::query_scalar::<_, Vec<u8>>(sqlx::AssertSqlSafe(format!(
-            r#"SELECT value FROM "{table}" WHERE key = ?1"#
-        )))
-        .bind(key)
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
+        let row = Sql::new("SELECT value FROM ")
+            .ident(table)
+            .push(" WHERE key = ")
+            .bind(key)
+            .query(&self.sql)
+            .await?
+            .optional::<Vec<u8>>()?;
 
         Ok(row.map(|val| val.into_boxed_slice().into()))
     }
@@ -307,63 +298,67 @@ impl SqliteKvWorker {
         key: Arc<[u8]>,
         value: Arc<[u8]>,
     ) -> Res<Option<Arc<[u8]>>> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let tx = self.sql.begin_write().await?;
 
-        let old = sqlx::query_scalar::<_, Vec<u8>>(sqlx::AssertSqlSafe(format!(
-            r#"SELECT value FROM "{table}" WHERE key = ?1"#
-        )))
-        .bind(key.as_ref())
-        .fetch_optional(&mut *tx)
-        .await?;
+        let old = Sql::new("SELECT value FROM ")
+            .ident(table)
+            .push(" WHERE key = ")
+            .bind(key.as_ref())
+            .query(&tx)
+            .await?
+            .optional::<Vec<u8>>()?;
 
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            r#"
-            INSERT INTO "{table}"(key, value, version)
-            VALUES (?1, ?2, 1)
-            ON CONFLICT(key) DO UPDATE
-            SET value = excluded.value,
-                version = version + 1
-            "#
-        )))
-        .bind(key.as_ref())
-        .bind(value.as_ref())
-        .execute(&mut *tx)
-        .await?;
+        Sql::new("INSERT INTO ")
+            .ident(table)
+            .push(" (key, value, version) VALUES (")
+            .bind(key.as_ref())
+            .push(", ")
+            .bind(value.as_ref())
+            .push(
+                ", 1)
+                ON CONFLICT(key) DO UPDATE
+                SET value = excluded.value
+                  , version = version + 1",
+            )
+            .execute(&tx)
+            .await?;
 
         tx.commit().await?;
         Ok(old.map(|value| value.into_boxed_slice().into()))
     }
 
     async fn handle_del(&self, table: &'static str, key: &[u8]) -> Res<Option<Arc<[u8]>>> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let tx = self.sql.begin_write().await?;
 
-        let old = sqlx::query_scalar::<_, Vec<u8>>(sqlx::AssertSqlSafe(format!(
-            r#"SELECT value FROM "{table}" WHERE key = ?1"#
-        )))
-        .bind(key)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let old = Sql::new("SELECT value FROM ")
+            .ident(table)
+            .push(" WHERE key = ")
+            .bind(key)
+            .query(&tx)
+            .await?
+            .optional::<Vec<u8>>()?;
 
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            r#"DELETE FROM "{table}" WHERE key = ?1"#
-        )))
-        .bind(key)
-        .execute(&mut *tx)
-        .await?;
+        Sql::new("DELETE FROM ")
+            .ident(table)
+            .push(" WHERE key = ")
+            .bind(key)
+            .execute(&tx)
+            .await?;
 
         tx.commit().await?;
         Ok(old.map(|value| value.into_boxed_slice().into()))
     }
 
     async fn handle_increment(&self, table: &'static str, key: &[u8], delta: i64) -> Res<i64> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let tx = self.sql.begin_write().await?;
 
-        let current: Option<Vec<u8>> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            r#"SELECT value FROM "{table}" WHERE key = ?1"#
-        )))
-        .bind(key)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let current = Sql::new("SELECT value FROM ")
+            .ident(table)
+            .push(" WHERE key = ")
+            .bind(key)
+            .query(&tx)
+            .await?
+            .optional::<Vec<u8>>()?;
 
         let current_val = if let Some(bytes) = current {
             if bytes.len() != 8 {
@@ -382,19 +377,20 @@ impl SqliteKvWorker {
 
         let encoded = next.to_le_bytes();
 
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            r#"
-            INSERT INTO "{table}"(key, value, version)
-            VALUES (?1, ?2, 1)
-            ON CONFLICT(key) DO UPDATE
-            SET value = excluded.value,
-                version = version + 1
-            "#
-        )))
-        .bind(key)
-        .bind(&encoded[..])
-        .execute(&mut *tx)
-        .await?;
+        Sql::new("INSERT INTO ")
+            .ident(table)
+            .push(" (key, value, version) VALUES (")
+            .bind(key)
+            .push(", ")
+            .bind(&encoded[..])
+            .push(
+                ", 1)
+                ON CONFLICT(key) DO UPDATE
+                SET value = excluded.value
+                  , version = version + 1",
+            )
+            .execute(&tx)
+            .await?;
 
         tx.commit().await?;
         Ok(next)
@@ -405,19 +401,18 @@ impl SqliteKvWorker {
         table: &'static str,
         key: &[u8],
     ) -> Res<(Option<Arc<[u8]>>, i64)> {
-        let row = sqlx::query_as::<_, (Vec<u8>, i64)>(sqlx::AssertSqlSafe(format!(
-            r#"SELECT value, version FROM "{table}" WHERE key = ?1"#
-        )))
-        .bind(key)
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
+        let row = Sql::new("SELECT value, version FROM ")
+            .ident(table)
+            .push(" WHERE key = ")
+            .bind(key)
+            .query(&self.sql)
+            .await?
+            .optional::<(Vec<u8>, i64)>()?;
 
-        let snapshot_value = row
-            .as_ref()
-            .map(|(val, _)| -> Arc<[u8]> { val.clone().into() });
-        let snapshot_version = row.map(|(_, val)| val).unwrap_or(0);
-
-        Ok((snapshot_value, snapshot_version))
+        Ok(match row {
+            Some((value, version)) => (Some(value.into()), version),
+            None => (None, 0),
+        })
     }
 
     async fn handle_swap(
@@ -427,57 +422,42 @@ impl SqliteKvWorker {
         value: Arc<[u8]>,
         snapshot_version: i64,
     ) -> Res<Result<(), (Option<Arc<[u8]>>, i64)>> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let tx = self.sql.begin_write().await?;
 
         let result = if snapshot_version == 0 {
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                r#"
-                INSERT INTO "{table}"(key, value, version)
-                SELECT ?1, ?2, 1
-                WHERE NOT EXISTS (SELECT 1 FROM "{table}" WHERE key = ?1)
-                "#
-            )))
-            .bind(key.as_ref())
-            .bind(value.as_ref())
-            .execute(&mut *tx)
-            .await
+            Sql::new("INSERT INTO ")
+                .ident(table)
+                .push(" (key, value, version) SELECT ")
+                .bind(key.as_ref())
+                .push(", ")
+                .bind(value.as_ref())
+                .push(", 1 WHERE NOT EXISTS (SELECT 1 FROM ")
+                .ident(table)
+                .push(" WHERE key = ")
+                .bind(key.as_ref())
+                .push(")")
+                .execute(&tx)
+                .await?
         } else {
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                r#"
-                UPDATE "{table}"
-                SET value = ?2,
-                    version = version + 1
-                WHERE key = ?1 AND version = ?3
-                "#
-            )))
-            .bind(key.as_ref())
-            .bind(value.as_ref())
-            .bind(snapshot_version)
-            .execute(&mut *tx)
-            .await
+            Sql::new("UPDATE ")
+                .ident(table)
+                .push(" SET value = ")
+                .bind(value.as_ref())
+                .push(", version = version + 1 WHERE key = ")
+                .bind(key.as_ref())
+                .push(" AND version = ")
+                .bind(snapshot_version)
+                .execute(&tx)
+                .await?
         };
 
-        match result {
-            Ok(res) => {
-                if res.rows_affected() == 1 {
-                    tx.commit().await?;
-                    Ok(Ok(()))
-                } else {
-                    tx.rollback()
-                        .await
-                        .inspect_err(|err| error!("error on rollback: {err}"))
-                        .ok();
-                    let (new_val, new_ver) = self.handle_new_cas(table, &key).await?;
-                    Ok(Err((new_val, new_ver)))
-                }
-            }
-            Err(err) => {
-                tx.rollback()
-                    .await
-                    .inspect_err(|err| error!("error on rollback: {err}"))
-                    .ok();
-                Err(err.into())
-            }
+        if result.rows_affected == 1 {
+            tx.commit().await?;
+            Ok(Ok(()))
+        } else {
+            tx.rollback().await?;
+            let (new_val, new_ver) = self.handle_new_cas(table, &key).await?;
+            Ok(Err((new_val, new_ver)))
         }
     }
 }
@@ -557,10 +537,252 @@ mod tests {
 
     #[tokio::test]
     async fn test_sqlite_kvstore() -> Res<()> {
-        let factory = SqliteKvFactory::boot(None).await?;
+        let db = sqlite_rs::test_support::db(&[])?;
+        let factory = SqliteKvFactory::boot(db.clone()).await?;
         let store = factory.open_store("test_kv").await?;
         let store_dyn = Arc::new(store);
         test_kv_store_impl(Arc::clone(&store_dyn) as _).await?;
         test_kv_store_concurrency(store_dyn).await
+    }
+
+    #[tokio::test]
+    async fn old_values_and_quoted_tables() -> Res<()> {
+        let db = sqlite_rs::test_support::db(&[])?;
+        let factory = SqliteKvFactory::boot(db.clone()).await?;
+        let first = factory.open_store("test-kv").await?;
+        let second = factory.open_store("select").await?;
+        let reopened = factory.open_store("test-kv").await?;
+        drop(factory);
+
+        let key: Arc<[u8]> = b"'\0; DROP TABLE test_kv; --".as_slice().into();
+        let value: Arc<[u8]> = b"\0\xff'value".as_slice().into();
+        let empty: Arc<[u8]> = [].as_slice().into();
+        assert_eq!(first.del(&key).await?, None);
+        assert_eq!(first.set(Arc::clone(&key), Arc::clone(&value)).await?, None);
+        assert_eq!(second.get(&key).await?, None);
+        assert_eq!(reopened.get(&key).await?, Some(Arc::clone(&value)));
+        assert_eq!(
+            reopened.set(Arc::clone(&key), Arc::clone(&empty)).await?,
+            Some(value)
+        );
+        assert_eq!(first.del(&key).await?, Some(empty));
+        assert_eq!(reopened.get(&key).await?, None);
+        assert_eq!(reopened.del(&key).await?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn increment_errors_preserve_value_and_version() -> Res<()> {
+        let db = sqlite_rs::test_support::db(&[])?;
+        let factory = SqliteKvFactory::boot(db.clone()).await?;
+        let store = factory.open_store("test_kv").await?;
+        let key: Arc<[u8]> = b"counter".as_slice().into();
+        for (value, delta, expected_error) in [
+            (vec![1, 2, 3], 1, "value is not a i64: byte len 3 != 8"),
+            (
+                i64::MAX.to_le_bytes().to_vec(),
+                1,
+                "i64 overflow in increment",
+            ),
+            (
+                i64::MIN.to_le_bytes().to_vec(),
+                -1,
+                "i64 overflow in increment",
+            ),
+        ] {
+            assert_eq!(
+                store.set(Arc::clone(&key), value.as_slice().into()).await?,
+                None
+            );
+            let guard = store.new_cas(&key).await?;
+            let error = store.increment(&key, delta).await.unwrap_err();
+            assert_eq!(error.to_string(), expected_error);
+            assert_eq!(
+                db.query(
+                    "SELECT value, version FROM test_kv WHERE key = ?",
+                    (key.as_ref(),)
+                )
+                .await?
+                .one::<(Vec<u8>, i64)>()?,
+                (value, 1)
+            );
+            guard.swap(0_i64.to_le_bytes().as_slice().into()).await??;
+            assert_eq!(store.increment(&key, 1).await?, 1);
+            assert_eq!(
+                store.del(&key).await?,
+                Some(1_i64.to_le_bytes().as_slice().into())
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_writes_roll_back_changes_and_release_transaction() -> Res<()> {
+        let db = sqlite_rs::test_support::db(&[])?;
+        let factory = SqliteKvFactory::boot(db.clone()).await?;
+        let store = factory.open_store("test_kv").await?;
+        let key: Arc<[u8]> = b"counter".as_slice().into();
+        let value: Arc<[u8]> = 7_i64.to_le_bytes().as_slice().into();
+        assert_eq!(store.set(Arc::clone(&key), Arc::clone(&value)).await?, None);
+        db.execute_batch(
+            "CREATE TABLE audit (operation TEXT NOT NULL);
+             CREATE TRIGGER fail_insert AFTER INSERT ON test_kv BEGIN
+                 INSERT INTO audit VALUES ('insert');
+                 SELECT RAISE(FAIL, 'forced write failure');
+             END;
+             CREATE TRIGGER fail_update AFTER UPDATE ON test_kv BEGIN
+                 INSERT INTO audit VALUES ('update');
+                 SELECT RAISE(FAIL, 'forced write failure');
+             END;
+             CREATE TRIGGER fail_delete AFTER DELETE ON test_kv BEGIN
+                 INSERT INTO audit VALUES ('delete');
+                 SELECT RAISE(FAIL, 'forced write failure');
+             END;",
+        )
+        .await?;
+
+        #[derive(Debug)]
+        enum Operation {
+            Set,
+            Delete,
+            Increment,
+            SwapExisting,
+            SwapMissing,
+        }
+        for operation in [
+            Operation::Set,
+            Operation::Delete,
+            Operation::Increment,
+            Operation::SwapExisting,
+            Operation::SwapMissing,
+        ] {
+            let result = match operation {
+                Operation::Set => store
+                    .set(Arc::clone(&key), b"replacement".as_slice().into())
+                    .await
+                    .map(|_| ()),
+                Operation::Delete => store.del(&key).await.map(|_| ()),
+                Operation::Increment => store.increment(&key, 1).await.map(|_| ()),
+                Operation::SwapExisting => store
+                    .new_cas(&key)
+                    .await?
+                    .swap(b"replacement".as_slice().into())
+                    .await
+                    .map(|_| ()),
+                Operation::SwapMissing => store
+                    .new_cas(b"missing")
+                    .await?
+                    .swap(b"replacement".as_slice().into())
+                    .await
+                    .map(|_| ()),
+            };
+            let error = result.unwrap_err();
+            assert!(
+                error.to_string().contains("forced write failure"),
+                "{operation:?}: {error}"
+            );
+            let tx = db.begin_write().await?;
+            assert_eq!(
+                tx.query("SELECT key, value, version FROM test_kv", ())
+                    .await?
+                    .all::<(Vec<u8>, Vec<u8>, i64)>()?,
+                vec![(key.to_vec(), value.to_vec(), 1)],
+                "{operation:?}"
+            );
+            assert_eq!(
+                tx.query("SELECT count(*) FROM audit", ())
+                    .await?
+                    .one::<i64>()?,
+                0,
+                "{operation:?}"
+            );
+            tx.commit().await?;
+        }
+
+        db.execute_batch(
+            "DROP TRIGGER fail_insert; DROP TRIGGER fail_update; DROP TRIGGER fail_delete;",
+        )
+        .await?;
+        store
+            .new_cas(&key)
+            .await?
+            .swap(Arc::clone(&value))
+            .await??;
+        assert_eq!(store.increment(&key, 1).await?, 8);
+        assert_eq!(
+            store.del(&key).await?,
+            Some(8_i64.to_le_bytes().as_slice().into())
+        );
+        store
+            .new_cas(&key)
+            .await?
+            .swap(Arc::clone(&value))
+            .await??;
+        assert_eq!(store.get(&key).await?, Some(value));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shared_database_factories_serialize_increment_and_cas() -> Res<()> {
+        let db = sqlite_rs::test_support::db(&[])?;
+        let first_factory = SqliteKvFactory::boot(db.clone()).await?;
+        let second_factory = SqliteKvFactory::boot(db.clone()).await?;
+        let first = first_factory.open_store("test_kv").await?;
+        let second = second_factory.open_store("test_kv").await?;
+        drop(first_factory);
+        drop(second_factory);
+
+        let increment = |store: SqliteKvStore| async move {
+            for _ in 0..32 {
+                store.increment(b"counter", 1).await?;
+            }
+            eyre::Ok(())
+        };
+        tokio::try_join!(increment(first.clone()), increment(second.clone()))?;
+        assert_eq!(
+            first.get(b"counter").await?,
+            Some(64_i64.to_le_bytes().as_slice().into())
+        );
+        assert_eq!(
+            db.query(
+                "SELECT version FROM test_kv WHERE key = ?",
+                (b"counter".as_slice(),)
+            )
+            .await?
+            .one::<i64>()?,
+            64
+        );
+
+        let key: Arc<[u8]> = b"cas".as_slice().into();
+        for expected in [None, Some(b"winner".as_slice().into())] {
+            let first_guard = first.new_cas(&key).await?;
+            let second_guard = second.new_cas(&key).await?;
+            assert_eq!(first_guard.current(), expected);
+            assert_eq!(second_guard.current(), expected);
+            let (first_result, second_result) = tokio::try_join!(
+                first_guard.swap(b"winner".as_slice().into()),
+                second_guard.swap(b"winner".as_slice().into()),
+            )?;
+            let refreshed = match (first_result, second_result) {
+                (Ok(()), Err(CasError::CasFailed(guard)))
+                | (Err(CasError::CasFailed(guard)), Ok(())) => guard,
+                results => panic!("expected one CAS winner, got {results:?}"),
+            };
+            assert_eq!(refreshed.current(), Some(b"winner".as_slice().into()));
+            refreshed.swap(b"winner".as_slice().into()).await??;
+        }
+        let guard = first.new_cas(&key).await?;
+        assert_eq!(second.del(&key).await?, Some(b"winner".as_slice().into()));
+        let Err(CasError::CasFailed(refreshed)) = guard.swap(b"stale".as_slice().into()).await?
+        else {
+            panic!("expected CAS failure after deletion");
+        };
+        assert_eq!(refreshed.current(), None);
+        refreshed.swap(b"recreated".as_slice().into()).await??;
+        assert_eq!(
+            second.get(&key).await?,
+            Some(b"recreated".as_slice().into())
+        );
+        Ok(())
     }
 }

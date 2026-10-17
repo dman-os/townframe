@@ -26,15 +26,18 @@ use wash_runtime::{
 /// `btress_auth` component (which exports `wasi:http/incoming-handler`), and
 /// serves it on `0.0.0.0:8071`.
 ///
-/// Playground: the sqlite path is hardcoded inside [`ServicePlugin`] and the
+/// Playground: the sqlite path is supplied to [`ServicePlugin`] at boot and the
 /// component env vars are hardcoded below — not config-driven yet.
 pub async fn run() -> Res<ExitCode> {
-    run_inner()
+    let config = crate::lazy::config().await?;
+    run_inner(Arc::clone(&config.sqlite_runtime))
         .await
         .map_err(|err| eyre::eyre!(err.to_string()))
 }
 
-async fn run_inner() -> wash_runtime::wasmtime::anyhow::Result<ExitCode> {
+async fn run_inner(
+    sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+) -> wash_runtime::wasmtime::anyhow::Result<ExitCode> {
     // ---- btress_auth host (port 8071) ----
     let auth_engine = Engine::builder().with_pooling_allocator(true).build()?;
     let auth_http_handler = Ingress::new(DevRouter::default(), "0.0.0.0:8071".parse()?).await?;
@@ -43,7 +46,10 @@ async fn run_inner() -> wash_runtime::wasmtime::anyhow::Result<ExitCode> {
         .with_friendly_name("btress-auth-host")
         .with_http_handler(Arc::new(auth_http_handler))
         .with_plugin(Arc::new(SqlPlugin::new()))?
-        .with_plugin(Arc::new(ServicePlugin::new()))?
+        .with_plugin(Arc::new(ServicePlugin::new(
+            sqlite_runtime,
+            std::env::temp_dir().join("townframe-auth.sqlite"),
+        )))?
         .with_plugin(Arc::new(MailPlugin::new()))?
         .with_plugin(Arc::new(
             wash_runtime::plugin::wasi_logging::TracingLogger::default(),

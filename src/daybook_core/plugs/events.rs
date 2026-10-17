@@ -26,7 +26,6 @@ use big_sync_core::revisioned_store::{
 };
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use daybook_types::doc::{FacetKey, WellKnownFacetTag};
-use sqlx_utils_rs::SqlCtx;
 
 pub(crate) const PLUGS_CONFIG_CONSUMER_STATE_ID: &str = "@daybook/core/plugs-config-facet-set";
 
@@ -396,16 +395,11 @@ pub(crate) async fn spawn_plugs_config_consumer(
     facet_set_store: Arc<FacetSetRevisionStore>,
     drawer: Arc<DrawerRepo>,
     plugs_repo: Arc<PlugsRepo>,
-    sql: SqlCtx,
+    sql: Database,
     parent_cancel_token: CancellationToken,
 ) -> Res<crate::repos::RepoStopToken> {
-    let state = SqliteDeltaWalkerStateRepo::new(
-        sql.read_pool.clone(),
-        sql.write_pool.clone(),
-        PLUGS_CONFIG_CONSUMER_STATE_ID,
-        "facets",
-    )
-    .await?;
+    let state =
+        SqliteDeltaWalkerStateRepo::new(sql, PLUGS_CONFIG_CONSUMER_STATE_ID, "facets").await?;
     let event_store = Arc::new(PlugsConfigEventStore::new(
         facet_set_store,
         Arc::clone(&drawer),
@@ -525,17 +519,13 @@ async fn refresh_pending_manifest_wakes(
 pub(crate) async fn spawn_facet_set_plugs_manifest_consumer(
     facet_set_store: Arc<FacetSetRevisionStore>,
     plugs_repo: Arc<PlugsRepo>,
-    manifest_sql: SqlCtx,
+    manifest_sql: Database,
     parent_cancel_token: CancellationToken,
 ) -> Res<crate::repos::RepoStopToken> {
-    let state = SqliteDeltaWalkerStateRepo::new(
-        manifest_sql.read_pool.clone(),
-        manifest_sql.write_pool.clone(),
-        PLUG_MANIFEST_CONSUMER_STATE_ID,
-        "facets",
-    )
-    .await
-    .map_err(|error| ferr!("initializing Plugs manifest walker state: {error}"))?;
+    let state =
+        SqliteDeltaWalkerStateRepo::new(manifest_sql, PLUG_MANIFEST_CONSUMER_STATE_ID, "facets")
+            .await
+            .map_err(|error| ferr!("initializing Plugs manifest walker state: {error}"))?;
     let cancel_token = parent_cancel_token.child_token();
     let worker_cancel_token = cancel_token.clone();
     let worker_handle = tokio::spawn(async move {

@@ -6,6 +6,7 @@ use daybook_types::doc::{
 use tokio_util::sync::CancellationToken;
 
 use crate::blobs::pair_roots::{PairRoots, UnresolvedPair};
+use crate::blobs::sqlite::queries;
 use crate::drawer::{DrawerRepo, MaterializationWake};
 use crate::index::facet_delta::FacetDelta;
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
@@ -19,7 +20,7 @@ use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore as _};
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
 use daybook_types::doc::BranchId;
-use sqlx::{Row, Sqlite};
+use sqlite_rs::Sql;
 
 pub(crate) const BLOB_PIN_STATE_LOCAL_STATE_ID: &str = "@daybook/core/blob-pin-worker";
 
@@ -30,7 +31,7 @@ pub(crate) const BLOB_PIN_PLUG_EVENTS_STATE_ID: &str = "@daybook/core/blob-pin-p
 /// fields (not a positional tuple) keep the two spawn sites self-describing.
 pub(crate) struct BlobPinWorkerArgs {
     pub drawer_repo: Arc<DrawerRepo>,
-    pub sql: SqlCtx,
+    pub sql: Database,
     pub core_inventory_doc_id: DocumentId,
     pub docs_inventory_doc_id: DocumentId,
     pub encryption_inventory_doc_id: DocumentId,
@@ -165,7 +166,7 @@ async fn ensure_configured_inventory_branch(
 /// surface; observers read the inventory docs through the drawer.
 struct Ctx {
     drawer_repo: Arc<DrawerRepo>,
-    sql: SqlCtx,
+    sql: Database,
     core_inventory_doc_id: DocId,
     docs_inventory_doc_id: DocId,
     /// The encrypted-representation inventory: ciphertext pins only. Absent on
@@ -239,77 +240,8 @@ struct DocPins {
     cipher: HashMap<String, u64>,
 }
 impl Ctx {
-    async fn ensure_schema(sql: &SqlCtx) -> Res<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS blob_pin_doc_state (
-                doc_id TEXT NOT NULL,
-                branch_id TEXT NOT NULL,
-                blob_hash TEXT NOT NULL,
-                length_octets INTEGER NOT NULL,
-                PRIMARY KEY (doc_id, branch_id, blob_hash)
-            );
-            CREATE INDEX IF NOT EXISTS idx_blob_pin_doc_state_hash ON blob_pin_doc_state(blob_hash);
-
-            CREATE TABLE IF NOT EXISTS blob_pin_plug_state (
-                plug_id TEXT NOT NULL,
-                blob_hash TEXT NOT NULL,
-                length_octets INTEGER NOT NULL,
-                PRIMARY KEY (plug_id, blob_hash)
-            );
-            CREATE INDEX IF NOT EXISTS idx_blob_pin_plug_state_hash ON blob_pin_plug_state(blob_hash);
-
-            CREATE TABLE IF NOT EXISTS blob_pin_cipher_doc_state (
-                doc_id TEXT NOT NULL,
-                branch_id TEXT NOT NULL,
-                cipher_hash TEXT NOT NULL,
-                length_octets INTEGER NOT NULL,
-                PRIMARY KEY (doc_id, branch_id, cipher_hash)
-            );
-            CREATE INDEX IF NOT EXISTS idx_blob_pin_cipher_doc_state_hash ON blob_pin_cipher_doc_state(cipher_hash);
-            "#,
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
-        let has_branch_id_col: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM pragma_table_info('blob_pin_doc_state') WHERE name = 'branch_id'",
-        )
-        .fetch_optional(&sql.write_pool)
-        .await?;
-        if has_branch_id_col.is_none() {
-            let mut tx = sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            sqlx::query("ALTER TABLE blob_pin_doc_state RENAME TO blob_pin_doc_state_legacy")
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query(
-                r#"CREATE TABLE blob_pin_doc_state (
-                    doc_id TEXT NOT NULL
-                  , branch_id TEXT NOT NULL
-                  , blob_hash TEXT NOT NULL
-                  , length_octets INTEGER NOT NULL
-                  , PRIMARY KEY (doc_id, branch_id, blob_hash)
-                )"#,
-            )
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                r#"INSERT INTO blob_pin_doc_state(doc_id, branch_id, blob_hash, length_octets)
-                   SELECT doc_id
-                        , CASE WHEN branch_path = 'main' THEN doc_id ELSE branch_path END
-                        , blob_hash
-                        , length_octets
-                     FROM blob_pin_doc_state_legacy"#,
-            )
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query("DROP TABLE blob_pin_doc_state_legacy")
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-        }
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_blob_pin_doc_state_hash ON blob_pin_doc_state(blob_hash)")
-            .execute(&sql.write_pool)
+    async fn ensure_schema(sql: &Database) -> Res<()> {
+        sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
             .await?;
         Ok(())
     }
@@ -478,18 +410,14 @@ impl Ctx {
     }
 
     async fn desired_pins(&self) -> Res<HashMap<String, BlobPin>> {
-        let rows = sqlx::query(
-            "SELECT blob_hash, MAX(length_octets) AS length_octets
-               FROM blob_pin_doc_state
-              GROUP BY blob_hash",
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
         let mut pins = HashMap::new();
-        for row in rows {
-            let hash: String = row.try_get("blob_hash")?;
-            let length_octets = u64::try_from(row.try_get::<i64, _>("length_octets")?)?;
-            pins.insert(hash, BlobPin { length_octets });
+        for row in queries::desired_blob_pins(&self.sql).await? {
+            pins.insert(
+                row.blob_hash,
+                BlobPin {
+                    length_octets: u64::try_from(row.length_octets)?,
+                },
+            );
         }
         Ok(pins)
     }
@@ -497,18 +425,14 @@ impl Ctx {
     /// The encrypted representations the facets currently name, globally:
     /// the encryption inventory's desired set.
     async fn desired_cipher_pins(&self) -> Res<HashMap<String, BlobPin>> {
-        let rows = sqlx::query(
-            "SELECT cipher_hash, MAX(length_octets) AS length_octets
-               FROM blob_pin_cipher_doc_state
-              GROUP BY cipher_hash",
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
         let mut pins = HashMap::new();
-        for row in rows {
-            let hash: String = row.try_get("cipher_hash")?;
-            let length_octets = u64::try_from(row.try_get::<i64, _>("length_octets")?)?;
-            pins.insert(hash, BlobPin { length_octets });
+        for row in queries::desired_cipher_pins(&self.sql).await? {
+            pins.insert(
+                row.cipher_hash,
+                BlobPin {
+                    length_octets: u64::try_from(row.length_octets)?,
+                },
+            );
         }
         Ok(pins)
     }
@@ -777,19 +701,21 @@ impl Ctx {
         if branches.is_empty() {
             return Ok(());
         }
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let tx = self.sql.begin_write().await?;
         let mut newly_pinned = Vec::new();
         for branch in branches {
-            sqlx::query("DELETE FROM blob_pin_doc_state WHERE doc_id = ? AND branch_id = ?")
-                .bind(&branch.doc_id)
-                .bind(&branch.branch_id.0)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("DELETE FROM blob_pin_cipher_doc_state WHERE doc_id = ? AND branch_id = ?")
-                .bind(&branch.doc_id)
-                .bind(&branch.branch_id.0)
-                .execute(&mut *tx)
-                .await?;
+            queries::delete_branch_blob_pins(
+                &tx,
+                branch.doc_id.clone(),
+                branch.branch_id.0.clone(),
+            )
+            .await?;
+            queries::delete_branch_cipher_pins(
+                &tx,
+                branch.doc_id.clone(),
+                branch.branch_id.0.clone(),
+            )
+            .await?;
             let Some(pins) = &branch.pins else {
                 continue;
             };
@@ -800,25 +726,33 @@ impl Ctx {
                 if pins.is_empty() {
                     continue;
                 }
-                let mut query = sqlx::QueryBuilder::<Sqlite>::new(format!(
-                    "INSERT INTO {table}(doc_id, branch_id, {hash_column}, length_octets) "
-                ));
-                let rows = pins
-                    .iter()
-                    .map(|(hash, length)| Ok((hash.as_str(), i64::try_from(*length)?)))
-                    .collect::<Res<Vec<_>>>()?;
-                query.push_values(rows.iter(), |mut row, (hash, length)| {
-                    row.push_bind(&branch.doc_id)
-                        .push_bind(&branch.branch_id.0)
-                        .push_bind(hash)
-                        .push_bind(*length);
-                });
-                query.build().execute(&mut *tx).await?;
+                let mut query = Sql::new("INSERT INTO ");
+                query
+                    .ident(table)
+                    .push("(doc_id, branch_id, ")
+                    .ident(hash_column)
+                    .push(", length_octets) VALUES ");
+                for (index, (hash, length)) in pins.iter().enumerate() {
+                    if index != 0 {
+                        query.push(", ");
+                    }
+                    query
+                        .push("(")
+                        .bind(&branch.doc_id)
+                        .push(", ")
+                        .bind(&branch.branch_id.0)
+                        .push(", ")
+                        .bind(hash)
+                        .push(", ")
+                        .bind(i64::try_from(*length)?)
+                        .push(")");
+                }
+                query.execute(&tx).await?;
                 if hash_column == "cipher_hash" {
                     // Freshly written ciphertext pins retire their ledger rows: the
                     // pin state is now the durable record that keeps this pair (and
                     // its diff-driven release) visible.
-                    for (hash, _) in &rows {
+                    for hash in pins.keys() {
                         let hash: &str = hash;
                         let Some(blob_id) = crate::blobs::digest_str_to_blob_id_lenient(hash)
                         else {
@@ -846,13 +780,10 @@ impl Ctx {
     /// the caller computes pins from the manifest doc's Blob facets at the
     /// enabled heads instead of parsing manifest internals.
     async fn apply_plug_pins(&self, plug_id: &str, current_pins: HashMap<String, u64>) -> Res<()> {
-        let prev_hashes: HashSet<String> =
-            sqlx::query_scalar("SELECT blob_hash FROM blob_pin_plug_state WHERE plug_id = ?1")
-                .bind(plug_id)
-                .fetch_all(&self.sql.write_pool)
-                .await?
-                .into_iter()
-                .collect();
+        let prev_hashes: HashSet<String> = queries::plug_pin_hashes(&self.sql, plug_id.to_owned())
+            .await?
+            .into_iter()
+            .collect();
 
         let mut pins_to_set = Vec::new();
         for (hash, length_octets) in &current_pins {
@@ -867,23 +798,15 @@ impl Ctx {
             ));
         }
 
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("DELETE FROM blob_pin_plug_state WHERE plug_id = ?1")
-            .bind(plug_id)
-            .execute(&mut *tx)
-            .await?;
-
+        let tx = self.sql.begin_write().await?;
+        queries::delete_plug_pins(&tx, plug_id.to_owned()).await?;
         for (hash, length_octets) in &current_pins {
-            sqlx::query(
-                r#"
-                INSERT INTO blob_pin_plug_state (plug_id, blob_hash, length_octets)
-                VALUES (?1, ?2, ?3)
-                "#,
+            queries::insert_plug_pin(
+                &tx,
+                plug_id.to_owned(),
+                hash.clone(),
+                i64::try_from(*length_octets)?,
             )
-            .bind(plug_id)
-            .bind(hash)
-            .bind(*length_octets as i64)
-            .execute(&mut *tx)
             .await?;
         }
         tx.commit().await?;
@@ -891,12 +814,8 @@ impl Ctx {
         let mut pins_to_remove = Vec::new();
         for prev_hash in &prev_hashes {
             if !current_pins.contains_key(prev_hash) {
-                let remaining_count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM blob_pin_plug_state WHERE blob_hash = ?1",
-                )
-                .bind(prev_hash)
-                .fetch_one(&self.sql.write_pool)
-                .await?;
+                let remaining_count =
+                    queries::count_plug_pins_for_hash(&self.sql, prev_hash.clone()).await?;
 
                 if remaining_count == 0 {
                     pins_to_remove.push(FacetKey {
@@ -929,30 +848,20 @@ impl Ctx {
     /// Drop one plug's blob pins from the core inventory, evicting pins no
     /// other plug still references. Driven by `PlugsEvent::PlugDisabled`.
     async fn drop_plug_pins(&self, plug_id: &str) -> Res<()> {
-        let prev_hashes: Vec<String> =
-            sqlx::query_scalar("SELECT blob_hash FROM blob_pin_plug_state WHERE plug_id = ?1")
-                .bind(plug_id)
-                .fetch_all(&self.sql.write_pool)
-                .await?;
+        let prev_hashes = queries::plug_pin_hashes(&self.sql, plug_id.to_owned()).await?;
 
         if prev_hashes.is_empty() {
             return Ok(());
         }
 
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        sqlx::query("DELETE FROM blob_pin_plug_state WHERE plug_id = ?1")
-            .bind(plug_id)
-            .execute(&mut *tx)
-            .await?;
+        let tx = self.sql.begin_write().await?;
+        queries::delete_plug_pins(&tx, plug_id.to_owned()).await?;
         tx.commit().await?;
 
         let mut pins_to_remove = Vec::new();
         for hash in &prev_hashes {
-            let remaining_count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM blob_pin_plug_state WHERE blob_hash = ?1")
-                    .bind(hash)
-                    .fetch_one(&self.sql.write_pool)
-                    .await?;
+            let remaining_count =
+                queries::count_plug_pins_for_hash(&self.sql, hash.clone()).await?;
 
             if remaining_count == 0 {
                 pins_to_remove.push(FacetKey {
@@ -1125,8 +1034,7 @@ impl Worker {
         cancel_token: CancellationToken,
     ) -> Res<()> {
         let facet_state = SqliteDeltaWalkerStateRepo::new(
-            self.sql.read_pool.clone(),
-            self.sql.write_pool.clone(),
+            self.sql.clone(),
             BLOB_PIN_STATE_LOCAL_STATE_ID,
             "facets",
         )
@@ -1434,8 +1342,7 @@ impl Worker {
         cancel_token: CancellationToken,
     ) -> Res<()> {
         let state = SqliteDeltaWalkerStateRepo::new(
-            self.sql.read_pool.clone(),
-            self.sql.write_pool.clone(),
+            self.sql.clone(),
             BLOB_PIN_PLUG_EVENTS_STATE_ID,
             "plug-events",
         )
@@ -1612,14 +1519,10 @@ mod tests {
         }
     }
 
-    async fn facet_walker_progress(sql: &SqlCtx) -> Res<u64> {
-        let state = SqliteDeltaWalkerStateRepo::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
-            BLOB_PIN_STATE_LOCAL_STATE_ID,
-            "facets",
-        )
-        .await?;
+    async fn facet_walker_progress(sql: &Database) -> Res<u64> {
+        let state =
+            SqliteDeltaWalkerStateRepo::new(sql.clone(), BLOB_PIN_STATE_LOCAL_STATE_ID, "facets")
+                .await?;
         Ok(state.progress().await?.upstream_revision)
     }
 
@@ -2011,36 +1914,33 @@ mod tests {
 
     /// How many plugs still reference a blob, read from the plug-pin rows the
     /// teardown deletes and the `remaining_count` gate counts.
-    async fn plug_pin_rows(sql: &SqlCtx, plug_id: &str) -> Res<i64> {
-        Ok(sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM blob_pin_plug_state WHERE plug_id = ?1",
-        )
-        .bind(plug_id)
-        .fetch_one(&sql.write_pool)
-        .await?)
+    async fn plug_pin_rows(sql: &Database, plug_id: &str) -> Res<i64> {
+        Ok(queries::count_plug_pins(sql, plug_id.to_owned()).await?)
     }
 
     /// Every `(namespace, consumer_id)` pair that owns a delta-walker progress
     /// row in the daybook database.
-    async fn walker_progress_identities(sql: &SqlCtx) -> Res<Vec<(String, String)>> {
-        Ok(sqlx::query_as::<_, (String, String)>(
-            "SELECT namespace, consumer_id FROM delta_walker_progress",
-        )
-        .fetch_all(&sql.read_pool)
-        .await?)
+    async fn walker_progress_identities(sql: &Database) -> Res<Vec<(String, String)>> {
+        Ok(sql
+            .query(
+                "SELECT namespace, consumer_id FROM delta_walker_progress",
+                (),
+            )
+            .await?
+            .all()?)
     }
 
     /// The plug-events walker's own durable progress row, read straight from the
     /// table so the reader cannot create the row it is looking for.
-    async fn plug_events_progress_row(sql: &SqlCtx) -> Res<Option<u64>> {
-        Ok(sqlx::query_scalar::<_, i64>(
-            "SELECT upstream_revision FROM delta_walker_progress \
+    async fn plug_events_progress_row(sql: &Database) -> Res<Option<u64>> {
+        Ok(sql
+            .query(
+                "SELECT upstream_revision FROM delta_walker_progress \
               WHERE namespace = ?1 AND consumer_id = 'plug-events'",
-        )
-        .bind(BLOB_PIN_PLUG_EVENTS_STATE_ID)
-        .fetch_optional(&sql.read_pool)
-        .await?
-        .map(|progress| progress as u64))
+                (BLOB_PIN_PLUG_EVENTS_STATE_ID,),
+            )
+            .await?
+            .optional()?)
     }
 
     /// The plug teardown is refcounted: dropping one plug's rows must not evict a
@@ -2243,8 +2143,7 @@ mod tests {
             "a durable revision never moves backwards: was {consumed_before}, now {durable_row}"
         );
         let reopened = SqliteDeltaWalkerStateRepo::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
+            sql.clone(),
             BLOB_PIN_PLUG_EVENTS_STATE_ID,
             "plug-events",
         )

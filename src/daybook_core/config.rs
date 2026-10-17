@@ -121,7 +121,7 @@ pub struct ConfigRepo {
     plug_repo: Arc<PlugsRepo>,
     local_actor_id: ActorId,
     local_peer_id: PeerKey,
-    repo_sql: crate::app::SqlCtx,
+    repo_sql: Database,
     cancel_token: CancellationToken,
     sync_config_lock: tokio::sync::Mutex<()>,
     _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
@@ -200,7 +200,7 @@ impl ConfigRepo {
         app_doc_id: DocumentId,
         plug_repo: Arc<PlugsRepo>,
         local_user_path: daybook_types::doc::UserPathBuf,
-        repo_sql: crate::app::SqlCtx,
+        repo_sql: Database,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let registry = crate::repos::ListenersRegistry::new();
 
@@ -784,8 +784,13 @@ mod tests {
         let blobs_repo =
             crate::blobs::BlobsRepo::new(temp.path().join("blobs"), local_user_path.clone())
                 .await?;
+        let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
-            crate::local_state::SqliteLocalStateRepo::boot(temp.path().join("local_state")).await?;
+            crate::local_state::SqliteLocalStateRepo::boot(
+                Arc::clone(&sqlite_runtime),
+                temp.path().join("local_state"),
+            )
+            .await?;
         let (plugs_repo, plugs_stop) = crate::plugs::PlugsRepo::load(
             Arc::clone(&big_repo),
             Arc::clone(&blobs_repo),
@@ -794,7 +799,8 @@ mod tests {
             Arc::clone(&sqlite_local_state_repo),
         )
         .await?;
-        let sql_ctx = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+        let sql_ctx =
+            crate::app::open_database(&sqlite_runtime, crate::app::SqlConfig::memory()).await?;
         let (config_repo, config_stop) = ConfigRepo::load(
             Arc::clone(&big_repo),
             app_doc_id,

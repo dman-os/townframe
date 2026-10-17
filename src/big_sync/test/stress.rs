@@ -271,8 +271,8 @@ async fn boot_sqlite_node_at(
 ) -> Res<NodeHarness> {
     let peer_id = peer_id(peer_seed);
     let db_path = temp_dir.path().join("big_sync.sqlite");
-    let sqlite_url = format!("sqlite://{}", db_path.display());
-    let sql = sqlx_utils_rs::SqlCtx::url(&sqlite_url).await?;
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    let sql = runtime.database(db_path, &[], "_big_sync_runtime_migrations");
     let store = Arc::new(
         SqlitePartStore::new(
             sql,

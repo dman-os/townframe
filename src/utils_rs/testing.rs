@@ -11,18 +11,17 @@ pub fn setup_tracing_once() {
 }
 
 fn setup_tracing() -> Res<()> {
+    let default_filter = "info,cranelift_codegen=info,wasmtime_internal_cranelift=info,wasmtime=info,rustls=info,h2=info,hyper_util=info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_quinn_proto::connection=error,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn";
     #[cfg(not(target_arch = "wasm32"))]
     let filter = {
         // if std::env::var("RUST_BACKTRACE_TEST").is_err() {
         //     std::env::set_var("RUST_BACKTRACE", "1");
         // }
-        std::env::var("RUST_LOG_TEST").ok()
+        std::env::var("RUST_LOG_TEST").unwrap_or_else(|_| default_filter.to_owned())
     };
 
     #[cfg(target_arch = "wasm32")]
-    let filter: Option<String> = None;
-
-    let filter = filter.unwrap_or_else(|| "info,cranelift_codegen=info,wasmtime_internal_cranelift=info,wasmtime=info,rustls=info,h2=info,hyper_util=info,ort::logging=warn,netlink_packet_route::link::buffer_tool=error,iroh_quinn_proto::connection=error,subduction_core=warn,subduction_keyhive=warn,keyhive_core=warn,keyhive_crypto=warn,beekem=warn".into());
+    let filter = default_filter;
 
     // #[cfg(test)]
     // console_subscriber::init();

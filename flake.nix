@@ -243,6 +243,7 @@
 
           baseBuildInputs = with pkgs; [
             pkg-config
+            sqlite
             openssl
             dbus
             protobuf
@@ -259,7 +260,6 @@
             libarchive
             prek
             zizmor
-            sqlx-cli
           ];
 
           rustLintInputs = with pkgs; [

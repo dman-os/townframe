@@ -2,7 +2,9 @@ use crate::interlude::*;
 
 pub async fn run(source_url: String, destination: String) -> Res<ExitCode> {
     let destination = std::path::PathBuf::from(destination);
+    let config = crate::lazy::config().await?;
     let res = daybook_core::sync::clone_repo_init_from_url(
+        Arc::clone(&config.sqlite_runtime),
         &source_url,
         &destination,
         daybook_core::sync::CloneRepoInitOptions {

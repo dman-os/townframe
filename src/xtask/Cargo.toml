@@ -18,6 +18,9 @@ clap = { workspace = true, features = ["derive", "env"] }
 dotenv-flow.workspace = true
 
 utils_rs = { workspace = true, features = ["hash"] }
+sqlite_rs.workspace = true
+rusqlite = { version = "0.32", features = ["column_decltype"] }
+tempfile.workspace = true
 daybook_types = { workspace = true, features = ["schemars", "manifest"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "tracing", "process"] }
@@ -37,6 +40,7 @@ subduction_keyhive = { workspace = true, features = ["handler", "test-utils"] }
 
 # generator
 heck = "0.5.0"
+syn.workspace = true
 bon.workspace = true
 indenter = "0.3.4"
 

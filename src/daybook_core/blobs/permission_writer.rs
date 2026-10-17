@@ -226,10 +226,9 @@ pub(crate) async fn spawn_blob_inventory_permission_writer(
     // that log's database, because the retention floor is derived from those rows:
     // a state file elsewhere would make the floor unrepresentable and let the two
     // disagree across a crash with no ordering between them.
-    let sql = big_repo.sql_ctx();
+    let sql = big_repo.database();
     let state = SqliteDeltaWalkerStateRepo::new(
-        sql.read_pool.clone(),
-        sql.write_pool.clone(),
+        sql.clone(),
         BLOB_INVENTORY_PERMISSION_STATE_ID,
         "keyhive-access",
     )
@@ -578,7 +577,6 @@ mod tests {
     use automerge::transaction::Transactable as _;
     use big_sync::{ReadTarget, SqlitePartStore};
     use big_sync_core::BuckId;
-    use sqlx::Row as _;
     use std::time::Duration;
 
     // The harness observes the machine through the machine's own state identity: progress
@@ -594,7 +592,7 @@ mod tests {
     struct Harness {
         repo: SharedBigRepo,
         part_store: SharedPartStore,
-        store_sql: SqlCtx,
+        store_sql: Database,
         /// The scope `store_sql`'s sink rows belong to. `SharedPartStore` is a
         /// scope-erased trait object, and the rows `part_members_in` reads are keyed by
         /// `(scope, part_id)`, so the scope is resolved here and carried alongside.
@@ -610,7 +608,8 @@ mod tests {
                 utils_rs::testing::setup_tracing_once();
             });
             let (repo, _big_sync, teardown) = boot_repo().await?;
-            let store_sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+            let runtime = sqlite_rs::SqliteRuntime::new(default());
+            let store_sql = runtime.ephemeral(&[])?;
             let store_scope: Arc<str> = Arc::from("daybook-blobs-test");
             let part_store: SharedPartStore = Arc::new(
                 SqlitePartStore::new(
@@ -622,15 +621,12 @@ mod tests {
             );
             // The store above ensured the scope; resolve its id rather than reading it
             // back through the trait object, which has no scope.
-            let store_scope_id = big_sync::sqlite_core::SqliteCore::ensure_scope_id(
-                &store_sql.write_pool,
-                &store_scope,
-            )
-            .await?;
-            let sql = repo.sql_ctx();
+            let store_scope_id =
+                big_sync::sqlite_core::SqliteCore::ensure_scope_id(&store_sql, &store_scope)
+                    .await?;
+            let sql = repo.database();
             let state = SqliteDeltaWalkerStateRepo::new(
-                sql.read_pool.clone(),
-                sql.write_pool.clone(),
+                sql.clone(),
                 BLOB_INVENTORY_PERMISSION_STATE_ID,
                 "keyhive-access",
             )
@@ -774,18 +770,20 @@ mod tests {
     ///
     /// Returns the recorded floor.
     async fn prune_admitted_log(repo: &SharedBigRepo) -> Res<u64> {
-        let sql = repo.sql_ctx();
-        let head: i64 =
-            sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM big_repo_keyhive_admissions")
-                .fetch_one(&sql.read_pool)
-                .await?;
+        let sql = repo.database();
+        let head: i64 = sql
+            .query(
+                "SELECT COALESCE(MAX(seq), 0) FROM big_repo_keyhive_admissions",
+                (),
+            )
+            .await?
+            .one()?;
         assert!(head > 0, "the fixture needs admitted events to prune");
-        sqlx::query("DELETE FROM big_repo_keyhive_event_log")
-            .execute(&sql.write_pool)
+        sql.execute("DELETE FROM big_repo_keyhive_event_log", ())
             .await?;
         // The scope id is bound from the admissions table, so the fixture cannot
         // drift from the scope the store reads its floor out of.
-        sqlx::query(
+        sql.execute(
             "INSERT INTO big_repo_keyhive_archived_through(scope_id, seq) \
                  SELECT scope_id \
                       , MAX(seq) \
@@ -793,8 +791,8 @@ mod tests {
                   GROUP BY scope_id \
              ON CONFLICT(scope_id) DO UPDATE \
                      SET seq = MAX(seq, excluded.seq)",
+            (),
         )
-        .execute(&sql.write_pool)
         .await?;
         Ok(head as u64)
     }
@@ -813,14 +811,11 @@ mod tests {
     /// The admission consumers registered against a log, read from the log's own
     /// database — the rows `prune_admitted_events` takes its retention floor
     /// from.
-    async fn registered_readers(sql: &SqlCtx) -> Res<Vec<String>> {
-        Ok(
-            sqlx::query_scalar::<_, String>(
-                "SELECT reader FROM big_repo_keyhive_admission_readers",
-            )
-            .fetch_all(&sql.read_pool)
-            .await?,
-        )
+    async fn registered_readers(sql: &Database) -> Res<Vec<String>> {
+        Ok(sql
+            .query("SELECT reader FROM big_repo_keyhive_admission_readers", ())
+            .await?
+            .all()?)
     }
 
     /// One document's own closure, in the sink's key space: the type hop the boot
@@ -848,24 +843,25 @@ mod tests {
     /// test that reads the booted repository's own store asks the same question the
     /// same way.
     async fn part_members_in(
-        sql: &SqlCtx,
+        sql: &Database,
         scope_id: i64,
         part: &PartKey,
     ) -> Res<BTreeMap<PeerKey, Access>> {
-        let rows = sqlx::query(
-            "SELECT s.principal_id AS principal_id, s.access_level AS access_level
+        let rows = sql
+            .query(
+                "SELECT s.principal_id AS principal_id, s.access_level AS access_level
                FROM big_sync_syncable s
                JOIN big_sync_parts p ON p.part_ref = s.part_ref
               WHERE p.scope_id = ?1 AND p.part_id = ?2",
-        )
-        .bind(scope_id)
-        .bind(big_sync::sqlite_core::SqliteCore::part_blob(part.clone()))
-        .fetch_all(&sql.read_pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                let principal: Vec<u8> = row.get("principal_id");
-                let level: i64 = row.get("access_level");
+                (
+                    scope_id,
+                    big_sync::sqlite_core::SqliteCore::part_blob(part.clone()),
+                ),
+            )
+            .await?;
+        rows.all::<(Vec<u8>, i64)>()?
+            .into_iter()
+            .map(|(principal, level)| {
                 // A principal id is read back out of storage, so a width other than the 32
                 // bytes every fixed-width consumer takes is reported rather than assumed.
                 let principal =
@@ -892,7 +888,8 @@ mod tests {
     /// unscoped predicate answers with 400 rows; each scope must see its own twenty.
     #[tokio::test]
     async fn part_members_are_read_from_one_scope() -> Res<()> {
-        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+        let sql = runtime.ephemeral(&[])?;
         let part = PartKey::new([0x5E; 32]);
         let peer = |scope: u8, member: u8| {
             let mut bytes = [0u8; 32];
@@ -909,8 +906,7 @@ mod tests {
                     .await?,
             );
             let scope_id =
-                big_sync::sqlite_core::SqliteCore::ensure_scope_id(&sql.write_pool, &scope_key)
-                    .await?;
+                big_sync::sqlite_core::SqliteCore::ensure_scope_id(&sql, &scope_key).await?;
             // Every scope holds the same part name; only the scope tells the members apart.
             let expected: BTreeMap<PeerKey, Access> = (0..20u8)
                 .map(|member| (peer(scope, member), Access::Read))
@@ -1154,12 +1150,12 @@ mod tests {
         let test_cx = crate::test_support::test_cx("serving_inventory_part_permissions").await?;
         let rcx = Arc::clone(&test_cx.rt.rcx);
         // The blob part store is built on the repository's own sqlite ctx
-        // (`open_blob_part_store(big_repo.sql_ctx())`), and the access rows live there.
-        let store_sql = test_cx._acx.sql_ctx();
+        // (`open_blob_part_store(big_repo.database())`), and the access rows live there.
+        let store_sql = test_cx._acx.database();
         // That ctx is shared by every scope in the database, so the blob store's own
         // scope has to be named: `open_blob_part_store` built it under `BLOB_SCOPE_KEY`.
         let store_scope_id = big_sync::sqlite_core::SqliteCore::ensure_scope_id(
-            &store_sql.write_pool,
+            &store_sql,
             &Arc::from(crate::repo::BLOB_SCOPE_KEY),
         )
         .await?;
@@ -1221,8 +1217,9 @@ mod tests {
         let inventory_doc = harness.create_doc().await?;
         // Break the sink's own storage: `set_part_members` cannot commit, so the
         // machine must not ack the entry it could not apply.
-        sqlx::query("DROP TABLE big_sync_syncable")
-            .execute(&harness.store_sql.write_pool)
+        harness
+            .store_sql
+            .execute_batch("DROP TABLE big_sync_syncable")
             .await?;
 
         let stream = KeyhiveAccessRevisionStore::new(&harness.repo);
@@ -1271,7 +1268,7 @@ mod tests {
         let harness = Harness::new().await?;
         let inventory_doc = harness.create_doc().await?;
         let part = blob_inventory_part_id_from_doc_id(&inventory_doc.to_string());
-        let log_sql = harness.repo.sql_ctx();
+        let log_sql = harness.repo.database();
         let stream = KeyhiveAccessRevisionStore::<SqliteDeltaWalkerStateRepo>::new(&harness.repo);
         let head = stream.latest_revision().await?;
         assert!(head > 0, "the fixture needs admitted events");
@@ -1319,14 +1316,14 @@ mod tests {
         // The floor joins the registration to `delta_walker_progress` by the same
         // `(namespace, consumer_id)` pair, so the progress row has to be in the
         // database the registration is in.
-        let progress: i64 = sqlx::query_scalar(
-            "SELECT upstream_revision FROM delta_walker_progress \
+        let progress: i64 = log_sql
+            .query(
+                "SELECT upstream_revision FROM delta_walker_progress \
               WHERE namespace = ?1 AND consumer_id = ?2",
-        )
-        .bind(harness.state.namespace())
-        .bind(harness.state.consumer_id())
-        .fetch_one(&log_sql.read_pool)
-        .await?;
+                (harness.state.namespace(), harness.state.consumer_id()),
+            )
+            .await?
+            .one()?;
         assert_eq!(
             progress as u64,
             harness.durable_revision().await,

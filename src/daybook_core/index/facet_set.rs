@@ -2,6 +2,15 @@
 
 use crate::interlude::*;
 
+/// Tables of the facet-set index, kept in its own local-state database
+/// (`FACET_SET_LOCAL_STATE_ID`).
+pub(crate) mod sqlite {
+    pub(crate) mod queries {
+        include!("facet_set/sqlite/gen.rs");
+    }
+}
+use sqlite::queries;
+
 use crate::blobs::{BlobId, encryption_worker::plaintext_blob_id};
 use crate::drawer::{BranchIdentityResolution, DrawerRepo, ExactFacetValueHydration};
 use crate::index::doc_delta_store::{
@@ -24,7 +33,7 @@ use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskComplet
 use daybook_types::doc::{
     BranchId, ChangeHashSet, DocId, FacetKey, FacetTag, WellKnownFacet, WellKnownFacetTag,
 };
-use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
+use sqlite_rs::{Sql, Tx};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use tokio_util::sync::CancellationToken;
 
@@ -211,10 +220,9 @@ struct PreparedFacetSetProjection {
 }
 
 impl FacetSetRevisionStore {
-    async fn boot(sql: SqlCtx) -> Res<Self> {
+    async fn boot(sql: Database) -> Res<Self> {
         let frontier = SqliteKeyedFrontier::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
+            sql.clone(),
             "daybook-facet-set",
             FacetSetCodec,
             Arc::new(tokio::sync::Notify::new()),
@@ -222,8 +230,7 @@ impl FacetSetRevisionStore {
         .await
         .map_err(|error| ferr!("initializing facet-set frontier: {error}"))?;
         let input_state = big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
+            sql.clone(),
             "daybook-facet-set",
             "doc-delta-input",
         )
@@ -491,7 +498,7 @@ impl FacetSetRevisionStore {
     async fn apply_projection_in_context(
         &self,
         prepared: &PreparedFacetSetProjection,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Tx,
     ) -> Res<()> {
         let old_keys = load_route_keys(tx, &prepared.affected).await?;
         let mut mutations = Vec::new();
@@ -568,13 +575,13 @@ impl FacetSetRevisionStore {
 }
 
 async fn load_route_keys(
-    tx: &mut Transaction<'_, Sqlite>,
+    tx: &mut Tx,
     affected: &BTreeSet<(DocId, String)>,
 ) -> Res<BTreeSet<FacetRouteKey>> {
     if affected.is_empty() {
         return Ok(BTreeSet::new());
     }
-    let mut query = QueryBuilder::<Sqlite>::new(
+    let mut query = Sql::new(
         "SELECT document_id, branch_id, facet_tag, facet_id FROM facet_set_doc_facets WHERE (document_id, branch_id) IN (",
     );
     let mut first = true;
@@ -585,36 +592,32 @@ async fn load_route_keys(
         first = false;
         query
             .push("(")
-            .push_bind(document_id)
+            .bind(document_id)
             .push(", ")
-            .push_bind(branch_id)
+            .bind(branch_id)
             .push(")");
     }
     query.push(")");
     let mut keys = BTreeSet::new();
-    for row in query.build().fetch_all(&mut **tx).await? {
+    for row in query.query(tx).await?.rows {
         keys.insert(FacetRouteKey {
-            document_id: row.try_get("document_id")?,
-            branch_id: BranchId(row.try_get("branch_id")?),
+            document_id: row.get("document_id")?,
+            branch_id: BranchId(row.get("branch_id")?),
             facet_key: FacetKey {
-                tag: row.try_get::<String, _>("facet_tag")?.into(),
-                id: row.try_get("facet_id")?,
+                tag: row.get::<String>("facet_tag")?.into(),
+                id: row.get("facet_id")?,
             },
         });
     }
     Ok(keys)
 }
 
-async fn delete_routes(
-    tx: &mut Transaction<'_, Sqlite>,
-    affected: &BTreeSet<(DocId, String)>,
-) -> Res<()> {
+async fn delete_routes(tx: &mut Tx, affected: &BTreeSet<(DocId, String)>) -> Res<()> {
     if affected.is_empty() {
         return Ok(());
     }
-    let mut query = QueryBuilder::<Sqlite>::new(
-        "DELETE FROM facet_set_doc_facets WHERE (document_id, branch_id) IN (",
-    );
+    let mut query =
+        Sql::new("DELETE FROM facet_set_doc_facets WHERE (document_id, branch_id) IN (");
     let mut first = true;
     for (document_id, branch_id) in affected {
         if !first {
@@ -623,24 +626,21 @@ async fn delete_routes(
         first = false;
         query
             .push("(")
-            .push_bind(document_id)
+            .bind(document_id)
             .push(", ")
-            .push_bind(branch_id)
+            .bind(branch_id)
             .push(")");
     }
     query.push(")");
-    query.build().execute(&mut **tx).await?;
+    query.execute(tx).await?;
     Ok(())
 }
 
-async fn insert_routes(
-    tx: &mut Transaction<'_, Sqlite>,
-    desired: &BTreeMap<FacetRouteKey, FacetSnapshot>,
-) -> Res<()> {
+async fn insert_routes(tx: &mut Tx, desired: &BTreeMap<FacetRouteKey, FacetSnapshot>) -> Res<()> {
     if desired.is_empty() {
         return Ok(());
     }
-    let mut query = QueryBuilder::<Sqlite>::new(
+    let mut query = Sql::new(
         "INSERT INTO facet_set_doc_facets(document_id, branch_id, facet_tag, facet_id, facet_heads_json, actor_id_json, branch_heads_json) VALUES ",
     );
     let mut first = true;
@@ -651,35 +651,31 @@ async fn insert_routes(
         first = false;
         query
             .push("(")
-            .push_bind(&key.document_id)
+            .bind(&key.document_id)
             .push(", ")
-            .push_bind(&key.branch_id.0)
+            .bind(&key.branch_id.0)
             .push(", ")
-            .push_bind(key.facet_key.tag.to_string())
+            .bind(key.facet_key.tag.to_string())
             .push(", ")
-            .push_bind(&key.facet_key.id)
+            .bind(&key.facet_key.id)
             .push(", ")
-            .push_bind(serde_json::to_string(&snapshot.facet_heads)?)
+            .bind(serde_json::to_string(&snapshot.facet_heads)?)
             .push(", ")
-            .push_bind(serde_json::to_string(&snapshot.actor_id)?)
+            .bind(serde_json::to_string(&snapshot.actor_id)?)
             .push(", ")
-            .push_bind(serde_json::to_string(&snapshot.branch_heads)?)
+            .bind(serde_json::to_string(&snapshot.branch_heads)?)
             .push(")");
     }
-    query.build().execute(&mut **tx).await?;
+    query.execute(tx).await?;
     Ok(())
 }
 
-async fn delete_blob_digest_routes(
-    tx: &mut Transaction<'_, Sqlite>,
-    affected: &BTreeSet<(DocId, String)>,
-) -> Res<()> {
+async fn delete_blob_digest_routes(tx: &mut Tx, affected: &BTreeSet<(DocId, String)>) -> Res<()> {
     if affected.is_empty() {
         return Ok(());
     }
-    let mut query = QueryBuilder::<Sqlite>::new(
-        "DELETE FROM facet_set_doc_blob_facets WHERE (document_id, branch_id) IN (",
-    );
+    let mut query =
+        Sql::new("DELETE FROM facet_set_doc_blob_facets WHERE (document_id, branch_id) IN (");
     let mut first = true;
     for (document_id, branch_id) in affected {
         if !first {
@@ -688,18 +684,18 @@ async fn delete_blob_digest_routes(
         first = false;
         query
             .push("(")
-            .push_bind(document_id)
+            .bind(document_id)
             .push(", ")
-            .push_bind(branch_id)
+            .bind(branch_id)
             .push(")");
     }
     query.push(")");
-    query.build().execute(&mut **tx).await?;
+    query.execute(tx).await?;
     Ok(())
 }
 
 async fn insert_blob_digest_routes(
-    tx: &mut Transaction<'_, Sqlite>,
+    tx: &mut Tx,
     blob_digests: &BTreeMap<(DocId, String), BTreeSet<BlobId>>,
 ) -> Res<()> {
     if blob_digests.is_empty() {
@@ -708,7 +704,7 @@ async fn insert_blob_digest_routes(
     // The digest is stored in the bare multibase spelling (`BlobId`'s
     // `Display`): one canonical spelling per digest, whatever the facet
     // value's authored spelling was.
-    let mut query = QueryBuilder::<Sqlite>::new(
+    let mut query = Sql::new(
         "INSERT INTO facet_set_doc_blob_facets(document_id, branch_id, blob_digest) VALUES ",
     );
     let mut first = true;
@@ -720,15 +716,15 @@ async fn insert_blob_digest_routes(
             first = false;
             query
                 .push("(")
-                .push_bind(&row.0)
+                .bind(&row.0)
                 .push(", ")
-                .push_bind(&row.1)
+                .bind(&row.1)
                 .push(", ")
-                .push_bind(digest.to_string())
+                .bind(digest.to_string())
                 .push(")");
         }
     }
-    query.build().execute(&mut **tx).await?;
+    query.execute(tx).await?;
     Ok(())
 }
 
@@ -809,7 +805,7 @@ impl RevisionedStore for FacetSetRevisionStore {
 }
 
 pub struct DocFacetSetIndexRepo {
-    sql: SqlCtx,
+    sql: Database,
     pub(crate) revision_store: Arc<FacetSetRevisionStore>,
 }
 
@@ -1101,7 +1097,7 @@ impl DocFacetSetIndexRepo {
 
     /// SQLite context for direct queries over the facet-set projection
     /// (test and tooling access).
-    pub(crate) fn sql(&self) -> &SqlCtx {
+    pub(crate) fn sql(&self) -> &Database {
         &self.sql
     }
 
@@ -1118,7 +1114,7 @@ impl DocFacetSetIndexRepo {
         parent_cancel_token: CancellationToken,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let sql = sqlite_local_state_repo
-            .ensure_sqlite_ctx(FACET_SET_LOCAL_STATE_ID)
+            .ensure_sqlite_db(FACET_SET_LOCAL_STATE_ID)
             .await?;
         Self::init_schema(&sql).await?;
 
@@ -1151,99 +1147,25 @@ impl DocFacetSetIndexRepo {
         ))
     }
 
-    async fn init_schema(sql: &SqlCtx) -> Res<()> {
-        // The route table is the facet-set side of the FacetDelta current
-        // state: membership is keyed by the complete document/branch/tag/key
-        // identity, while heads and provenance remain typed JSON for exact
-        // head consumers.
-        let schema = "
-            CREATE TABLE IF NOT EXISTS facet_set_doc_facets (
-                document_id TEXT NOT NULL
-              , branch_id TEXT NOT NULL
-              , facet_tag TEXT NOT NULL
-              , facet_id TEXT NOT NULL
-              , facet_heads_json TEXT NOT NULL
-              , actor_id_json TEXT NOT NULL
-              , branch_heads_json TEXT NOT NULL
-              , PRIMARY KEY(document_id, branch_id, facet_tag, facet_id)
-            ) STRICT
-        ";
-        sqlx::query(schema).execute(&sql.write_pool).await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS facet_set_doc_facets_tag_id ON facet_set_doc_facets (facet_tag, facet_id)",
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_facet_set_doc_facets_route ON facet_set_doc_facets(facet_tag, facet_id, document_id, branch_id)",
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
-        // The presence-plane projection (ADR 003 §13): rows carry the
-        // plaintext digest the `Blob` facet VALUE names, not the facet key's
-        // id, which is `DEFAULT_FACET_ID` for every production-authored `Blob`
-        // facet. Projected alongside the route table in the streaming
-        // projection write; a store predating this table re-projects its rows
-        // on the next delta for the affected branch, like every other
-        // streamed facet-set state.
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS facet_set_doc_blob_facets (
-                document_id TEXT NOT NULL
-              , branch_id TEXT NOT NULL
-              , blob_digest TEXT NOT NULL
-              , PRIMARY KEY(document_id, branch_id, blob_digest)
-            ) STRICT
-            "#,
-        )
-        .execute(&sql.write_pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_facet_set_doc_blob_facets_digest ON facet_set_doc_blob_facets(blob_digest, document_id, branch_id)",
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
+    async fn init_schema(sql: &Database) -> Res<()> {
+        sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+            .await?;
         Ok(())
     }
 
     pub async fn list_tags_for_doc(&self, doc_id: &DocId) -> Res<Vec<String>> {
-        let tags: Vec<String> = sqlx::query_scalar(
-            r#"
-            SELECT DISTINCT facet_tag
-              FROM facet_set_doc_facets
-             WHERE document_id = ?1
-             ORDER BY facet_tag ASC
-            "#,
-        )
-        .bind(doc_id)
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        Ok(tags)
+        Ok(queries::tags_for_doc(&self.sql, doc_id.clone()).await?)
     }
 
     pub async fn list_docs_for_tag(&self, facet_tag: &str) -> Res<Vec<DocFacetTagMembership>> {
-        let rows = sqlx::query_as::<_, (String, String, String)>(
-            r#"
-            SELECT document_id, branch_id, branch_heads_json
-              FROM facet_set_doc_facets
-             WHERE facet_tag = ?1
-             GROUP BY document_id, branch_id, branch_heads_json
-             ORDER BY document_id ASC, branch_id ASC
-            "#,
-        )
-        .bind(facet_tag)
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let rows = queries::docs_for_tag(&self.sql, facet_tag.to_owned()).await?;
 
         rows.into_iter()
-            .map(|(doc_id, branch_id, branch_heads)| {
-                let head_strings: Vec<String> = serde_json::from_str(&branch_heads)?;
+            .map(|row| {
+                let head_strings: Vec<String> = serde_json::from_str(&row.branch_heads_json)?;
                 Ok(DocFacetTagMembership {
-                    doc_id,
-                    branch_id: BranchId(branch_id),
+                    doc_id: row.document_id,
+                    branch_id: BranchId(row.branch_id),
                     facet_tag: facet_tag.to_string(),
                     origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
                 })
@@ -1261,32 +1183,19 @@ impl DocFacetSetIndexRepo {
         &self,
         blob_digest: &BlobId,
     ) -> Res<Vec<DocFacetTagMembership>> {
-        let rows = sqlx::query_as::<_, (String, String, String)>(
-            r#"
-            SELECT bf.document_id
-                 , bf.branch_id
-                 , ff.branch_heads_json
-              FROM facet_set_doc_blob_facets AS bf
-              JOIN facet_set_doc_facets AS ff
-                ON ff.document_id = bf.document_id
-               AND ff.branch_id = bf.branch_id
-               AND ff.facet_tag = ?2
-             WHERE bf.blob_digest = ?1
-             GROUP BY bf.document_id, bf.branch_id, ff.branch_heads_json
-             ORDER BY bf.document_id ASC, bf.branch_id ASC
-            "#,
+        let rows = queries::docs_for_blob_digest(
+            &self.sql,
+            WellKnownFacetTag::Blob.as_str().to_owned(),
+            blob_digest.to_string(),
         )
-        .bind(blob_digest.to_string())
-        .bind(WellKnownFacetTag::Blob.as_str())
-        .fetch_all(&self.sql.read_pool)
         .await?;
 
         rows.into_iter()
-            .map(|(doc_id, branch_id, branch_heads)| {
-                let head_strings: Vec<String> = serde_json::from_str(&branch_heads)?;
+            .map(|row| {
+                let head_strings: Vec<String> = serde_json::from_str(&row.branch_heads_json)?;
                 Ok(DocFacetTagMembership {
-                    doc_id,
-                    branch_id: BranchId(branch_id),
+                    doc_id: row.document_id,
+                    branch_id: BranchId(row.branch_id),
                     facet_tag: WellKnownFacetTag::Blob.as_str().to_string(),
                     origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
                 })
@@ -1301,26 +1210,15 @@ impl DocFacetSetIndexRepo {
         &self,
         branch_id: &str,
     ) -> Res<Vec<DocFacetTagMembership>> {
-        let rows = sqlx::query_as::<_, (String, String, String, String)>(
-            r#"
-            SELECT document_id, branch_id, facet_tag, branch_heads_json
-              FROM facet_set_doc_facets
-             WHERE branch_id = ?1
-             GROUP BY document_id, branch_id, facet_tag, branch_heads_json
-             ORDER BY document_id ASC, branch_id ASC
-            "#,
-        )
-        .bind(branch_id)
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let rows = queries::docs_for_branch_id(&self.sql, branch_id.to_owned()).await?;
 
         rows.into_iter()
-            .map(|(doc_id, branch_id, facet_tag, branch_heads)| {
-                let head_strings: Vec<String> = serde_json::from_str(&branch_heads)?;
+            .map(|row| {
+                let head_strings: Vec<String> = serde_json::from_str(&row.branch_heads_json)?;
                 Ok(DocFacetTagMembership {
-                    doc_id,
-                    branch_id: BranchId(branch_id),
-                    facet_tag,
+                    doc_id: row.document_id,
+                    branch_id: BranchId(row.branch_id),
+                    facet_tag: row.facet_tag,
                     origin_heads: ChangeHashSet(am_utils_rs::parse_commit_heads(&head_strings)?),
                 })
             })
@@ -1328,19 +1226,7 @@ impl DocFacetSetIndexRepo {
     }
 
     pub async fn has_tag(&self, doc_id: &DocId, facet_tag: &str) -> Res<bool> {
-        let exists: Option<i64> = sqlx::query_scalar(
-            r#"
-            SELECT 1
-              FROM facet_set_doc_facets
-             WHERE document_id = ?1
-               AND facet_tag = ?2
-            LIMIT 1
-            "#,
-        )
-        .bind(doc_id)
-        .bind(facet_tag)
-        .fetch_optional(&self.sql.read_pool)
-        .await?;
+        let exists = queries::doc_has_tag(&self.sql, doc_id.clone(), facet_tag.to_owned()).await?;
         Ok(exists.is_some())
     }
 }
@@ -1352,6 +1238,136 @@ mod tests {
     use big_sync_core::revisioned_store::RevisionReadLimits;
     use daybook_types::doc::{AddDocArgs, BranchPathBuf, FacetKey, FacetRaw, WellKnownFacet};
     use std::collections::VecDeque;
+
+    #[tokio::test]
+    async fn projection_persistence_is_atomic_with_walker_checkpoint() -> Res<()> {
+        use crate::index::doc_delta_store::DocDeltaBranchState;
+        use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateRepo as _;
+
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+        let sql = runtime.ephemeral(&[])?;
+        DocFacetSetIndexRepo::init_schema(&sql).await?;
+        let store = Arc::new(FacetSetRevisionStore::boot(sql.clone()).await?);
+        let repo = DocFacetSetIndexRepo {
+            sql: sql.clone(),
+            revision_store: Arc::clone(&store),
+        };
+        let key = FacetRouteKey {
+            document_id: "doc".into(),
+            branch_id: BranchId("branch".into()),
+            facet_key: FacetKey::from(WellKnownFacetTag::Blob),
+        };
+        let heads = ChangeHashSet(Vec::new().into());
+        let snapshot = FacetSnapshot {
+            branch_heads: heads.clone(),
+            facet_heads: heads.clone(),
+            actor_id: automerge::ActorId::from(b"projection-test".as_slice()),
+        };
+        let blob = BlobId::new([7; 32]);
+        let branch = (key.document_id.clone(), key.branch_id.0.clone());
+        let prepared = PreparedFacetSetProjection {
+            desired: BTreeMap::from([(key.clone(), snapshot.clone())]),
+            affected: BTreeSet::from([branch.clone()]),
+            branch_heads: BTreeMap::from([(branch.clone(), Some(heads.clone()))]),
+            removed_local: BTreeSet::new(),
+            settled_current_heads: Some(heads.clone()),
+            blob_digests: BTreeMap::from([(branch, BTreeSet::from([blob.clone()]))]),
+        };
+        let delta = DocDelta {
+            branch_id: key.branch_id.clone(),
+            previous_heads: None,
+            current_heads: Some(heads.clone()),
+            previous_causal_epoch: None,
+            current_causal_epoch: Some([3; 32]),
+            epoch_only: false,
+        };
+        let memory = store.input_state();
+        {
+            let mut abandoned = begin_settlement(&memory, &delta).await?;
+            store
+                .apply_projection_in_context(&prepared, abandoned.context_mut())
+                .await?;
+            let keys = load_route_keys(abandoned.context_mut(), &prepared.affected).await?;
+            assert_eq!(keys, BTreeSet::from([key.clone()]));
+        }
+        sql.begin_write().await?.rollback().await?;
+        assert_eq!(store.latest_revision().await?, 0);
+        assert!(repo.list_tags_for_doc(&key.document_id).await?.is_empty());
+        assert!(repo.list_docs_for_blob_digest(&blob).await?.is_empty());
+        assert_eq!(memory.get(key.branch_id.0.as_bytes()).await?, None);
+
+        let mut settlement = begin_settlement(&memory, &delta).await?;
+        store
+            .apply_projection_in_context(&prepared, settlement.context_mut())
+            .await?;
+        assert!(repo.list_tags_for_doc(&key.document_id).await?.is_empty());
+        assert_eq!(memory.get(key.branch_id.0.as_bytes()).await?, None);
+        settlement.settle().await?;
+        store.notify_changed();
+        drop(repo);
+        drop(store);
+        drop(memory);
+
+        let reopened = Arc::new(FacetSetRevisionStore::boot(sql.clone()).await?);
+        let repo = DocFacetSetIndexRepo {
+            sql,
+            revision_store: Arc::clone(&reopened),
+        };
+        assert_eq!(
+            repo.list_tags_for_doc(&key.document_id).await?,
+            vec![WellKnownFacetTag::Blob.as_str()]
+        );
+        let memberships = repo
+            .list_docs_for_blob_digest(&blob)
+            .await?
+            .into_iter()
+            .map(|membership| {
+                (
+                    membership.doc_id,
+                    membership.branch_id,
+                    membership.facet_tag,
+                    membership.origin_heads,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            memberships,
+            vec![(
+                key.document_id.clone(),
+                key.branch_id.clone(),
+                WellKnownFacetTag::Blob.as_str().to_string(),
+                heads.clone()
+            )]
+        );
+        let bytes = reopened
+            .input_state()
+            .get(key.branch_id.0.as_bytes())
+            .await?
+            .expect("committed checkpoint");
+        assert_eq!(
+            serde_json::from_slice::<DocDeltaBranchState>(&bytes)?,
+            DocDeltaBranchState {
+                heads: Some(heads.clone()),
+                causal_epoch: delta.current_causal_epoch,
+            }
+        );
+        let revision = reopened.latest_revision().await?;
+        assert!(revision > 0);
+        let mut reader = reopened.open(FacetSetSelector::All, 0).await?;
+        assert_eq!(
+            reader.next(RevisionReadLimits::default()).await?,
+            RevisionRead::Entries {
+                revision,
+                entries: vec![FacetDelta {
+                    key,
+                    current: Some(snapshot),
+                    current_branch_heads: Some(heads),
+                    removed_local: false,
+                }],
+            }
+        );
+        Ok(())
+    }
 
     struct ScriptedFrontierReader {
         reads: VecDeque<

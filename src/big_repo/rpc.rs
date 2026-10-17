@@ -330,16 +330,19 @@ mod tests {
 
     #[tokio::test]
     async fn keyhive_change_stream_delivers_ready_and_local_change() -> Res<()> {
-        let (repo, repo_stop) = BigRepo::boot(Config {
-            node_identity_seed: [41; 32],
-            storage: StorageConfig::Memory,
-            scope_key: Arc::from("rpc-ready"),
-            hidden_parts: Default::default(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-            keyhive_change_notifs: true,
-        })
+        let (repo, repo_stop) = BigRepo::boot(
+            Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
+            Config {
+                node_identity_seed: [41; 32],
+                storage: StorageConfig::Memory,
+                scope_key: Arc::from("rpc-ready"),
+                hidden_parts: Default::default(),
+                automerge_frontier_group_scope: Default::default(),
+                causal_checkpoint_group_scope: Default::default(),
+                group_part_group_scope: Default::default(),
+                keyhive_change_notifs: true,
+            },
+        )
         .await?;
         let endpoint = test_endpoint().await?;
         let (rpc, rpc_stop) = spawn_repo_rpc(Arc::clone(&repo)).await?;
@@ -374,16 +377,19 @@ mod tests {
 
     #[tokio::test]
     async fn keyhive_change_stream_reconnects_after_client_disconnect() -> Res<()> {
-        let (repo, repo_stop) = BigRepo::boot(Config {
-            node_identity_seed: [42; 32],
-            storage: StorageConfig::Memory,
-            scope_key: Arc::from("rpc-reconnect"),
-            hidden_parts: Default::default(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-            keyhive_change_notifs: true,
-        })
+        let (repo, repo_stop) = BigRepo::boot(
+            Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
+            Config {
+                node_identity_seed: [42; 32],
+                storage: StorageConfig::Memory,
+                scope_key: Arc::from("rpc-reconnect"),
+                hidden_parts: Default::default(),
+                automerge_frontier_group_scope: Default::default(),
+                causal_checkpoint_group_scope: Default::default(),
+                group_part_group_scope: Default::default(),
+                keyhive_change_notifs: true,
+            },
+        )
         .await?;
         let endpoint = test_endpoint().await?;
         let (rpc, rpc_stop) = spawn_repo_rpc(Arc::clone(&repo)).await?;

@@ -17,6 +17,8 @@
   "main": "dist/component.js",
   "private": true,
   "scripts": {
+    "test": "node --experimental-transform-types --test src/wit-sqlite.test.mjs",
+    "typecheck": "tsc --noEmit",
     "build": "pnpm run build:ts && pnpm run build:component",
     "build:component": "jco componentize -w wit -o dist/btress_auth.wasm dist/component.js",
     "build:ts": "rolldown -c rolldown.config.mjs",

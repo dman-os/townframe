@@ -255,7 +255,6 @@ fn master_key_from_jwk(jwk: &Jwk, ct_hash: &Hash) -> Res<MasterKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::SqlCtx;
     use crate::blobs::encrypt::{
         CONTENT_ENCODING_AES128GCM, CipherBlobProvider, Padding, add_encrypted, get_decrypted,
     };
@@ -269,7 +268,8 @@ mod tests {
     /// the record only has to exist because every rooting path writes it before
     /// the tags it guards.
     async fn test_pair_roots() -> Res<PairRoots> {
-        PairRoots::boot(SqlCtx::memory().await?).await
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+        PairRoots::boot(runtime.ephemeral(&[])?).await
     }
 
     /// ADR 003 §3 makes the multihash spelling canonical for a facet digest.

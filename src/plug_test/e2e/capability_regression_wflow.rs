@@ -1,17 +1,15 @@
 use api_utils_rs::prelude::*;
 use daybook_types::doc::{AddDocArgs, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag};
-use sqlx_utils_rs::SqlCtx;
+use sqlite_rs::{Database, IntoParams};
 
 async fn open_plug_test_local_state(
     test_cx: &daybook_core::test_support::DaybookTestContext,
-) -> Res<SqlCtx> {
-    let sqlite_file_path = test_cx
+) -> Res<Database> {
+    test_cx
         .rt
         .sqlite_local_state_repo
-        .get_sqlite_file_path("@daybook/test/capability-report")
-        .await?;
-    let sqlite_url = format!("sqlite://{}", sqlite_file_path.display());
-    SqlCtx::url(&sqlite_url).await
+        .ensure_sqlite_db("@daybook/test/capability-report")
+        .await
 }
 
 async fn dispatch_and_wait(
@@ -78,32 +76,34 @@ async fn dispatch_and_wait(
     Ok(dispatch_id)
 }
 
-async fn fetch_capability_report(db: &SqlCtx, doc_id: &str) -> Res<serde_json::Value> {
-    let summary_json: String =
-        sqlx::query_scalar("SELECT summary_json FROM capability_report WHERE doc_id = ?1")
-            .bind(doc_id)
-            .fetch_one(&db.read_pool)
-            .await
-            .wrap_err_with(|| format!("no capability_report row for doc_id={doc_id}"))?;
+async fn fetch_capability_report(db: &Database, doc_id: &str) -> Res<serde_json::Value> {
+    let summary_json: String = db
+        .query(
+            "SELECT summary_json FROM capability_report WHERE doc_id = ?1",
+            (doc_id,).into_params(),
+        )
+        .await
+        .and_then(sqlite_rs::ResultSet::one)
+        .wrap_err_with(|| format!("no capability_report row for doc_id={doc_id}"))?;
 
     Ok(serde_json::from_str(&summary_json)?)
 }
 
 async fn fetch_capability_report_v2(
-    db: &SqlCtx,
+    db: &Database,
     doc_id: &str,
     test_name: &str,
 ) -> Res<serde_json::Value> {
-    let summary_json: String = sqlx::query_scalar(
-        "SELECT summary_json FROM capability_report_v2 WHERE doc_id = ?1 AND test_name = ?2",
-    )
-    .bind(doc_id)
-    .bind(test_name)
-    .fetch_one(&db.read_pool)
-    .await
-    .wrap_err_with(|| {
-        format!("no capability_report_v2 row for doc_id={doc_id} test_name={test_name}")
-    })?;
+    let summary_json: String = db
+        .query(
+            "SELECT summary_json FROM capability_report_v2 WHERE doc_id = ?1 AND test_name = ?2",
+            (doc_id, test_name).into_params(),
+        )
+        .await
+        .and_then(sqlite_rs::ResultSet::one)
+        .wrap_err_with(|| {
+            format!("no capability_report_v2 row for doc_id={doc_id} test_name={test_name}")
+        })?;
 
     Ok(serde_json::from_str(&summary_json)?)
 }

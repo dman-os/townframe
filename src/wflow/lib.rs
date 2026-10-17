@@ -19,7 +19,7 @@ pub use wflow_tokio;
 
 use crate::interlude::*;
 
-use std::path::PathBuf;
+use sqlite_rs::Database;
 use wash_runtime::*;
 use wflow_core::{r#gen::types::PartitionId, kvstore::KvStore};
 
@@ -34,8 +34,8 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    pub async fn init(db_path: Option<PathBuf>) -> Res<Self> {
-        let factory = SqliteKvFactory::boot(db_path).await?;
+    pub async fn init(db: Database) -> Res<Self> {
+        let factory = SqliteKvFactory::boot(db).await?;
         let metastore_kv = Arc::new(factory.open_store("wflow_metastore").await?);
         let logstore_kv = Arc::new(factory.open_store("wflow_logstore").await?);
         let snapstore_kv = Arc::new(factory.open_store("wflow_snapstore").await?);

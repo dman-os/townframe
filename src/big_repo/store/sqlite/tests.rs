@@ -16,17 +16,11 @@ use big_sync_core::rpc::{
 /// The reader id is derived from the walker identity, so a test that registers a
 /// consumer does it exactly the way the workers do.
 async fn retention_consumer(
-    sql: &SqlCtx,
+    sql: &Database,
     namespace: &str,
     consumer: &str,
 ) -> Res<(SqliteDeltaWalkerStateRepo, String)> {
-    let repo = SqliteDeltaWalkerStateRepo::new(
-        sql.read_pool.clone(),
-        sql.write_pool.clone(),
-        namespace,
-        consumer,
-    )
-    .await?;
+    let repo = SqliteDeltaWalkerStateRepo::new(sql.clone(), namespace, consumer).await?;
     let reader = repo.retention_reader_id();
     Ok((repo, reader))
 }
@@ -150,9 +144,68 @@ impl HostPartStoreContractHarness for SqliteBigRepoHarness {
     }
 }
 
+#[tokio::test]
+async fn sqlite_migrations_are_scope_independent_and_preserve_data() -> Res<()> {
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    let sql = runtime.ephemeral(&[])?;
+    let store = SqliteBigRepoStore::new(sql.clone(), "migration-a", BuckId::MAX_LEVEL).await?;
+    let hash = subduction_keyhive::storage::StorageHash::new([0x91; 32]);
+    store
+        .save_keyhive_event(hash, b"retained".to_vec(), None)
+        .await?;
+    drop(store);
+
+    let other = SqliteBigRepoStore::new(sql.clone(), "migration-b", BuckId::MAX_LEVEL).await?;
+    assert!(other.load_keyhive_events().await?.is_empty());
+    let reopened = SqliteBigRepoStore::new(sql.clone(), "migration-a", BuckId::MAX_LEVEL).await?;
+    assert_eq!(
+        reopened.load_keyhive_events().await?,
+        vec![(hash, b"retained".to_vec())]
+    );
+
+    let history: Vec<(i64, String)> = Sql::new("SELECT version, name FROM ")
+        .ident(queries::MIGRATION_TABLE)
+        .push(" ORDER BY version")
+        .query(&sql)
+        .await?
+        .all()?;
+    assert_eq!(
+        history,
+        vec![
+            (1, "001_init.sql".to_owned()),
+            (2, "002_big_repo_init.sql".to_owned()),
+            (3, "003_secret_blobs.sql".to_owned()),
+            (4, "004_single_consumer_watermark.sql".to_owned()),
+        ]
+    );
+
+    let mut changed = queries::MIGRATIONS.to_vec();
+    changed[0].sql = "SELECT 1;";
+    assert!(
+        sql.apply_migrations(queries::MIGRATION_TABLE, &changed)
+            .await
+            .is_err()
+    );
+    sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+        .await?;
+    assert_eq!(
+        reopened.load_keyhive_events().await?,
+        vec![(hash, b"retained".to_vec())]
+    );
+
+    let pre_migrated = runtime.ephemeral(&[])?;
+    pre_migrated
+        .apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+        .await?;
+    let initialized =
+        SqliteBigRepoStore::new(pre_migrated, "pre-migrated", BuckId::MAX_LEVEL).await?;
+    assert!(initialized.load_keyhive_events().await?.is_empty());
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sqlite_big_repo_host_part_store_contract() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-host-contract", BuckId::MAX_LEVEL).await?;
     host_part_store_contract::assert_host_part_store_contract(&SqliteBigRepoHarness { store }).await
@@ -160,7 +213,7 @@ async fn sqlite_big_repo_host_part_store_contract() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sqlite_big_repo_reader_bypasses_remote_policy_and_hidden_parts() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let part = PartKey(ByteKey::new([221; 32]));
     let obj = ObjKey(ByteKey::new([222; 32]));
     let store = SqliteBigRepoStore::new_with_config(
@@ -231,7 +284,7 @@ async fn sqlite_big_repo_reader_bypasses_remote_policy_and_hidden_parts() -> Res
 #[tokio::test]
 async fn revoked_peer_is_not_told_the_doc_left_the_part() -> Res<()> {
     let store = SqliteBigRepoStore::new(
-        SqlCtx::memory().await?,
+        sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?,
         "big-repo-sqlite-policy-removal",
         BuckId::MAX_LEVEL,
     )
@@ -349,7 +402,7 @@ async fn revoked_peer_is_not_told_the_doc_left_the_part() -> Res<()> {
 #[tokio::test]
 async fn revoked_fetch_access_delivers_no_notice() -> Res<()> {
     let store = SqliteBigRepoStore::new(
-        SqlCtx::memory().await?,
+        sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?,
         "big-repo-sqlite-revocation-notice",
         BuckId::MAX_LEVEL,
     )
@@ -454,7 +507,7 @@ async fn revoked_fetch_access_delivers_no_notice() -> Res<()> {
 #[tokio::test]
 async fn reconcile_grant_resurrects_denied_touch_on_live_subscription() -> Res<()> {
     let store = SqliteBigRepoStore::new(
-        SqlCtx::memory().await?,
+        sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?,
         "big-repo-sqlite-grant-resurrect",
         BuckId::MAX_LEVEL,
     )
@@ -575,7 +628,7 @@ async fn reconcile_grant_resurrects_denied_touch_on_live_subscription() -> Res<(
 #[tokio::test]
 async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
     let store = SqliteBigRepoStore::new(
-        SqlCtx::memory().await?,
+        sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?,
         "big-repo-sqlite-reconcile-grant",
         BuckId::MAX_LEVEL,
     )
@@ -714,7 +767,7 @@ async fn reconcile_grant_reemits_event_for_already_live_doc() -> Res<()> {
 #[tokio::test]
 async fn keyhive_membership_is_not_advertised_until_payload_is_available() -> Res<()> {
     let store = SqliteBigRepoStore::new(
-        SqlCtx::memory().await?,
+        sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?,
         "big-repo-sqlite-latent-membership",
         BuckId::MAX_LEVEL,
     )
@@ -789,7 +842,7 @@ async fn keyhive_membership_is_not_advertised_until_payload_is_available() -> Re
 #[tokio::test]
 async fn latent_membership_resurrects_removed_member_when_payload_returns() -> Res<()> {
     let store = SqliteBigRepoStore::new(
-        SqlCtx::memory().await?,
+        sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?,
         "big-repo-sqlite-latent-regrant",
         BuckId::MAX_LEVEL,
     )
@@ -928,7 +981,7 @@ async fn fresh_tree_heads(store: &SqliteBigRepoStore, tree: SedimentreeId) -> Re
 /// lands first and the parent covers it later.
 #[tokio::test(flavor = "multi_thread")]
 async fn parent_before_child_produces_single_durable_head() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-parent-child", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[12; 32]);
@@ -979,7 +1032,7 @@ async fn parent_before_child_produces_single_durable_head() -> Res<()> {
 /// intermediate frontier.
 #[tokio::test(flavor = "multi_thread")]
 async fn batch_produces_single_final_projection() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "big-repo-sqlite-batch", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[14; 32]);
     let tree = SedimentreeId::new([15; 32]);
@@ -1004,7 +1057,7 @@ async fn batch_produces_single_final_projection() -> Res<()> {
 /// constructing a Sedimentree from all durable rows.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_saves_converge_to_full_recompute() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-concurrent", BuckId::MAX_LEVEL).await?;
     let tree = SedimentreeId::new([16; 32]);
@@ -1031,7 +1084,7 @@ async fn concurrent_saves_converge_to_full_recompute() -> Res<()> {
 /// Fragment insertion changes heads identically to sedimentree_core.
 #[tokio::test(flavor = "multi_thread")]
 async fn fragment_insertion_matches_sedimentree_core() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-frag-insert", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[17; 32]);
@@ -1075,7 +1128,7 @@ async fn fragment_insertion_matches_sedimentree_core() -> Res<()> {
 /// coexist durably after the write transaction commits.
 #[tokio::test(flavor = "multi_thread")]
 async fn fragment_write_durably_prunes_covered_loose_history() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-durable-prune", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[41; 32]);
@@ -1091,13 +1144,11 @@ async fn fragment_write_durably_prunes_covered_loose_history() -> Res<()> {
 
     assert!(store.load_loose_commit_metas(tree).await?.is_empty());
     assert_eq!(store.load_fragment_metas(tree).await?.len(), 1);
-    let loose_index_rows = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM big_repo_causal_ciphertext_index
-            WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 0",
+    let loose_index_rows = queries::count_loose_ciphertexts(
+        &store.sql,
         store.scope_id,
-        SqliteBigRepoStore::tree_blob(tree)
+        SqliteBigRepoStore::tree_blob(tree),
     )
-    .fetch_one(&store.sql.read_pool)
     .await?;
     assert_eq!(loose_index_rows, 0);
     assert_eq!(payload_heads(&store, tree).await?, vec![commit_id(0)]);
@@ -1108,7 +1159,7 @@ async fn fragment_write_durably_prunes_covered_loose_history() -> Res<()> {
 /// learned from another schedule remains present across cache loss.
 #[tokio::test(flavor = "multi_thread")]
 async fn post_fragment_residue_survives_cache_eviction() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-pruned-residue", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[43; 32]);
@@ -1160,7 +1211,7 @@ async fn post_fragment_residue_survives_cache_eviction() -> Res<()> {
 /// rollback restores both the covered loose rows and the absent fragment.
 #[tokio::test(flavor = "multi_thread")]
 async fn rollback_restores_rows_speculatively_pruned_by_fragment() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-prune-rollback", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[45; 32]);
@@ -1178,7 +1229,7 @@ async fn rollback_restores_rows_speculatively_pruned_by_fragment() -> Res<()> {
     )
     .await?;
 
-    let mut tx = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = store.sql.begin_write().await?;
     let (_, guard) = store
         .mutate_tree_in_tx(
             &mut tx,
@@ -1201,7 +1252,7 @@ async fn rollback_restores_rows_speculatively_pruned_by_fragment() -> Res<()> {
 /// remain after canonical pruning.
 #[tokio::test(flavor = "multi_thread")]
 async fn fragment_deletion_rebuilds_and_reveals_covered_commits() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "big-repo-sqlite-frag-del", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[19; 32]);
     let tree = SedimentreeId::new([20; 32]);
@@ -1248,7 +1299,7 @@ async fn fragment_deletion_rebuilds_and_reveals_covered_commits() -> Res<()> {
 /// Loose commit deletion produces canonical heads.
 #[tokio::test(flavor = "multi_thread")]
 async fn loose_commit_deletion_produces_canonical_heads() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-commit-del", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[21; 32]);
@@ -1289,7 +1340,7 @@ async fn loose_commit_deletion_produces_canonical_heads() -> Res<()> {
 /// `delete_sedimentree_id` itself does not touch the payload row.
 #[tokio::test(flavor = "multi_thread")]
 async fn whole_tree_deletion_removes_cache_entry_and_registration() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "big-repo-sqlite-tree-del", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[23; 32]);
     let tree = SedimentreeId::new([24; 32]);
@@ -1322,7 +1373,7 @@ async fn whole_tree_deletion_removes_cache_entry_and_registration() -> Res<()> {
 /// Cache eviction followed by another write rehydrates correctly.
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_eviction_rehydrates_on_next_write() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let mut store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-evict", BuckId::MAX_LEVEL).await?;
     // Tiny cache: 3 metadata items ≈ one single-commit tree (cost 2) plus
@@ -1366,7 +1417,7 @@ async fn cache_eviction_rehydrates_on_next_write() -> Res<()> {
 /// must never evict itself before heads are captured and panic.
 #[tokio::test(flavor = "multi_thread")]
 async fn oversized_tree_does_not_panic_and_is_left_uncached() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let mut store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-oversized", BuckId::MAX_LEVEL).await?;
     // Capacity smaller than a single tree: a 3-commit batch has metadata
@@ -1402,7 +1453,7 @@ async fn oversized_tree_does_not_panic_and_is_left_uncached() -> Res<()> {
 /// entry for a deleted tree.
 #[tokio::test(flavor = "multi_thread")]
 async fn whole_tree_deletion_waits_for_writer_and_evicts() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "big-repo-sqlite-del-race", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[39; 32]);
     let tree = SedimentreeId::new([40; 32]);
@@ -1414,11 +1465,7 @@ async fn whole_tree_deletion_waits_for_writer_and_evicts() -> Res<()> {
     let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
     let writer_store = store.clone();
     let writer = tokio::spawn(async move {
-        let mut tx = writer_store
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let mut tx = writer_store.sql.begin_write().await?;
         writer_store.save_tree(&mut tx, tree).await?;
         if paused_tx.send(()).is_err() {
             warn_loc!(
@@ -1465,14 +1512,14 @@ async fn whole_tree_deletion_waits_for_writer_and_evicts() -> Res<()> {
 /// A forced SQL failure invalidates the speculative cache entry.
 #[tokio::test(flavor = "multi_thread")]
 async fn forced_sql_failure_invalidates_speculative_entry() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "big-repo-sqlite-sql-fail", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[28; 32]);
     let tree = SedimentreeId::new([29; 32]);
 
     // No save_tree: the commit insert violates the FK to
     // big_repo_subduction_trees, failing the transaction mid-mutation.
-    let mut tx = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = store.sql.begin_write().await?;
     let result = store
         .mutate_tree_in_tx(
             &mut tx,
@@ -1487,7 +1534,7 @@ async fn forced_sql_failure_invalidates_speculative_entry() -> Res<()> {
     assert!(!store.tree_cache.lock().unwrap().entries.contains_key(&tree));
 
     // A subsequent write (with the tree registered) rehydrates cleanly.
-    let mut tx = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = store.sql.begin_write().await?;
     store.save_tree(&mut tx, tree).await?;
     let (_, guard) = store
         .mutate_tree_in_tx(
@@ -1505,13 +1552,13 @@ async fn forced_sql_failure_invalidates_speculative_entry() -> Res<()> {
 /// A forced commit failure (rollback) invalidates the entry.
 #[tokio::test(flavor = "multi_thread")]
 async fn forced_commit_failure_invalidates_entry() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-commit-fail", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[30; 32]);
     let tree = SedimentreeId::new([31; 32]);
 
-    let mut tx = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+    let mut tx = store.sql.begin_write().await?;
     store.save_tree(&mut tx, tree).await?;
     let (_, guard) = store
         .mutate_tree_in_tx(
@@ -1531,7 +1578,7 @@ async fn forced_commit_failure_invalidates_entry() -> Res<()> {
 /// Cancellation during a write cannot leave speculative cache state.
 #[tokio::test(flavor = "multi_thread")]
 async fn cancellation_cannot_leave_speculative_state() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "big-repo-sqlite-cancel", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[32; 32]);
     let tree = SedimentreeId::new([33; 32]);
@@ -1539,11 +1586,7 @@ async fn cancellation_cannot_leave_speculative_state() -> Res<()> {
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let task_store = store.clone();
     let handle = tokio::spawn(async move {
-        let mut tx = task_store
-            .sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let mut tx = task_store.sql.begin_write().await?;
         task_store.save_tree(&mut tx, tree).await?;
         let (_, _guard) = task_store
             .mutate_tree_in_tx(
@@ -1579,7 +1622,7 @@ async fn cancellation_cannot_leave_speculative_state() -> Res<()> {
 /// Reopening the store with an empty cache produces the same heads.
 #[tokio::test(flavor = "multi_thread")]
 async fn reopen_with_empty_cache_produces_same_heads() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let signer = MemorySigner::from_bytes(&[34; 32]);
     let tree = SedimentreeId::new([35; 32]);
 
@@ -1629,7 +1672,7 @@ impl XorShift64 {
 /// insert, batch, fragment, and delete.
 #[tokio::test(flavor = "multi_thread")]
 async fn randomized_operation_sequences_match_sedimentree_core() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "big-repo-sqlite-random", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[36; 32]);
     let tree = SedimentreeId::new([37; 32]);
@@ -1734,7 +1777,7 @@ async fn randomized_operation_sequences_match_sedimentree_core() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sqlite_big_repo_subduction_roundtrip() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-subduction", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[9; 32]);
@@ -1751,7 +1794,7 @@ async fn sqlite_big_repo_subduction_roundtrip() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sqlite_big_repo_commit_updates_payload_atomically() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "big-repo-sqlite-atomic", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[10; 32]);
     let tree = SedimentreeId::new([11; 32]);
@@ -1780,7 +1823,7 @@ async fn sqlite_big_repo_commit_updates_payload_atomically() -> Res<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sqlite_big_repo_commit_rolls_back_when_payload_update_fails() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-atomic-failure", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::from_bytes(&[13; 32]);
@@ -1791,14 +1834,7 @@ async fn sqlite_big_repo_commit_rolls_back_when_payload_update_fails() -> Res<()
     HostPartStore::set_obj_payload(&store, obj_id.clone(), old_payload.clone()).await?;
     HostPartStore::add_obj_to_parts(&store, obj_id.clone(), vec![part_id.clone()]).await?;
 
-    sqlx::query!(
-        "CREATE TRIGGER fail_big_repo_payload_update
-            BEFORE UPDATE OF payload_json ON big_sync_objs
-            WHEN hex(NEW.obj_id) = '0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E'
-            BEGIN SELECT RAISE(ABORT, 'injected payload failure'); END",
-    )
-    .execute(&store.sql.write_pool)
-    .await?;
+    queries::fail_payload_update(&store.sql).await?;
 
     let commit = make_commit(&signer, tree, 1).await;
     assert!(
@@ -1820,7 +1856,7 @@ async fn sqlite_big_repo_commit_rolls_back_when_payload_update_fails() -> Res<()
 }
 #[tokio::test]
 async fn sqlite_big_repo_keyhive_events_are_ordered_and_deduplicated() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-event-order", BuckId::MAX_LEVEL).await?;
     let first = subduction_keyhive::storage::StorageHash::new([1; 32]);
     let second = subduction_keyhive::storage::StorageHash::new([2; 32]);
@@ -1844,7 +1880,7 @@ async fn sqlite_big_repo_keyhive_events_are_ordered_and_deduplicated() -> Res<()
 
 #[tokio::test]
 async fn sqlite_big_repo_keyhive_event_log_records_source() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-event-source", BuckId::MAX_LEVEL).await?;
     let hash = subduction_keyhive::storage::StorageHash::new([7; 32]);
     let source = subduction_keyhive::KeyhivePeerId::from_bytes([9; 32]);
@@ -1855,14 +1891,7 @@ async fn sqlite_big_repo_keyhive_event_log_records_source() -> Res<()> {
         .save_keyhive_event(hash, b"dup".to_vec(), None)
         .await?;
 
-    let rows = sqlx::query!(
-        "SELECT event_hash, source_id
-            FROM big_repo_keyhive_event_log
-            WHERE scope_id = ?1",
-        store.scope_id
-    )
-    .fetch_all(&store.sql.read_pool)
-    .await?;
+    let rows = queries::keyhive_event_sources(&store.sql, store.scope_id).await?;
     assert_eq!(rows.len(), 1, "duplicate hash must not add a row");
     let source_id = rows[0].source_id.clone();
     assert_eq!(source_id, Some(vec![9; 32]), "source must be recorded");
@@ -1871,7 +1900,7 @@ async fn sqlite_big_repo_keyhive_event_log_records_source() -> Res<()> {
 
 #[tokio::test]
 async fn sqlite_big_repo_unadmitted_keyhive_events_returns_only_diff_candidates() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-unadmitted-diff", BuckId::MAX_LEVEL).await?;
     let unadmitted = subduction_keyhive::storage::StorageHash::new([7; 32]);
     let admitted = subduction_keyhive::storage::StorageHash::new([8; 32]);
@@ -1899,7 +1928,7 @@ async fn sqlite_big_repo_keyhive_event_log_retains_everything() -> Res<()> {
     // The arrival log is keyhive's recovery source: `ingest_from_storage`
     // replays it wholesale and no snapshot-boundary marker exists, so no
     // row may ever be pruned. Workers consume the admission log instead.
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-event-retention", BuckId::MAX_LEVEL).await?;
     for n in 0..5u8 {
         store
@@ -1910,12 +1939,7 @@ async fn sqlite_big_repo_keyhive_event_log_retains_everything() -> Res<()> {
             )
             .await?;
     }
-    let count = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1",
-        store.scope_id
-    )
-    .fetch_one(&store.sql.read_pool)
-    .await?;
+    let count = queries::count_keyhive_events(&store.sql, store.scope_id).await?;
     assert_eq!(count, 5, "arrival log must never prune rows");
     assert_eq!(store.keyhive_event_log_cursor().await?, 5);
     Ok(())
@@ -1923,7 +1947,7 @@ async fn sqlite_big_repo_keyhive_event_log_retains_everything() -> Res<()> {
 
 #[tokio::test]
 async fn sqlite_big_repo_admission_log_appends_dedups_and_replays() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-admission", BuckId::MAX_LEVEL).await?;
     let first = subduction_keyhive::storage::StorageHash::new([1; 32]);
     let second = subduction_keyhive::storage::StorageHash::new([2; 32]);
@@ -1965,7 +1989,7 @@ async fn sqlite_big_repo_admission_log_appends_dedups_and_replays() -> Res<()> {
 
 #[tokio::test]
 async fn sqlite_big_repo_admission_log_sequences_cross_chunk_boundary() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "keyhive-admission-chunk-boundary", BuckId::MAX_LEVEL).await?;
     let mut hashes = Vec::new();
@@ -1991,7 +2015,7 @@ async fn sqlite_big_repo_admission_log_sequences_cross_chunk_boundary() -> Res<(
 
 #[tokio::test]
 async fn sqlite_big_repo_admission_fault_leaves_reconciliation_candidate() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-admission-fault", BuckId::MAX_LEVEL).await?;
     let hash = subduction_keyhive::storage::StorageHash::new([6; 32]);
     store
@@ -2012,7 +2036,7 @@ async fn sqlite_big_repo_admission_fault_leaves_reconciliation_candidate() -> Re
 
 #[tokio::test]
 async fn sqlite_big_repo_admission_log_fails_loud_on_unknown_hash() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "keyhive-admission-missing", BuckId::MAX_LEVEL).await?;
     let unknown = subduction_keyhive::storage::StorageHash::new([42; 32]);
@@ -2026,7 +2050,7 @@ async fn sqlite_big_repo_admission_log_fails_loud_on_unknown_hash() -> Res<()> {
 
 #[tokio::test]
 async fn sqlite_big_repo_keyhive_event_deletion_tombstones_until_readers_advance() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-event-tail", BuckId::MAX_LEVEL).await?;
     let hash = subduction_keyhive::storage::StorageHash::new([3; 32]);
     store
@@ -2049,7 +2073,7 @@ async fn sqlite_big_repo_keyhive_event_deletion_tombstones_until_readers_advance
 
 #[tokio::test]
 async fn sqlite_big_repo_prune_admitted_events_respects_reader_floor() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-prune", BuckId::MAX_LEVEL).await?;
     let first = subduction_keyhive::storage::StorageHash::new([4; 32]);
     let second = subduction_keyhive::storage::StorageHash::new([5; 32]);
@@ -2105,7 +2129,7 @@ async fn sqlite_big_repo_prune_admitted_events_respects_reader_floor() -> Res<()
 /// deleted, so the marker must read 0.
 #[tokio::test]
 async fn sqlite_big_repo_archived_marker_records_the_deletion_bound() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-archived-marker", BuckId::MAX_LEVEL).await?;
     // Admission order follows the hash bytes, so these land on seq 1, 2, 3 in
     // this order.
@@ -2189,7 +2213,7 @@ async fn sqlite_big_repo_archived_marker_records_the_deletion_bound() -> Res<()>
 
 #[tokio::test]
 async fn sqlite_big_repo_unstarted_registered_reader_pins_the_pruning_floor() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-prune-unstarted", BuckId::MAX_LEVEL).await?;
     let hash = subduction_keyhive::storage::StorageHash::new([6; 32]);
     store
@@ -2225,7 +2249,7 @@ async fn sqlite_big_repo_unstarted_registered_reader_pins_the_pruning_floor() ->
 
 #[tokio::test]
 async fn sqlite_big_repo_pruning_floor_follows_the_least_advanced_reader() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-prune-min", BuckId::MAX_LEVEL).await?;
     let events = [
         subduction_keyhive::storage::StorageHash::new([11; 32]),
@@ -2265,7 +2289,7 @@ async fn sqlite_big_repo_pruning_floor_follows_the_least_advanced_reader() -> Re
 
 #[tokio::test]
 async fn sqlite_big_repo_register_admission_consumers_writes_the_four_identities() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "register-admission-consumers", BuckId::MAX_LEVEL).await?;
     store.register_admission_consumers().await?;
@@ -2283,14 +2307,11 @@ async fn sqlite_big_repo_register_admission_consumers_writes_the_four_identities
     })
     .collect();
 
-    let registered: HashSet<String> = sqlx::query_scalar::<_, String>(
-        "SELECT reader FROM big_repo_keyhive_admission_readers WHERE scope_id = ?1",
-    )
-    .bind(store.scope().id())
-    .fetch_all(&store.sql.read_pool)
-    .await?
-    .into_iter()
-    .collect();
+    let registered: HashSet<String> =
+        queries::registered_admission_readers(&store.sql, store.scope().id())
+            .await?
+            .into_iter()
+            .collect();
 
     assert_eq!(
         registered, expected,
@@ -2307,7 +2328,7 @@ async fn sqlite_big_repo_register_admission_consumers_writes_the_four_identities
 #[tokio::test]
 async fn sqlite_big_repo_unstarted_registered_consumers_pin_the_floor_below_a_started_one()
 -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "register-admission-floor", BuckId::MAX_LEVEL).await?;
     let hash = subduction_keyhive::storage::StorageHash::new([21; 32]);
     store
@@ -2349,7 +2370,7 @@ async fn sqlite_big_repo_unstarted_registered_consumers_pin_the_floor_below_a_st
 
 #[tokio::test]
 async fn sqlite_big_repo_keyhive_events_are_scope_isolated() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let first_store =
         SqliteBigRepoStore::new(sql.clone(), "keyhive-scope-a", BuckId::MAX_LEVEL).await?;
     let second_store = SqliteBigRepoStore::new(sql, "keyhive-scope-b", BuckId::MAX_LEVEL).await?;
@@ -2375,8 +2396,11 @@ async fn sqlite_big_repo_keyhive_events_are_scope_isolated() -> Res<()> {
 async fn sqlite_big_repo_keyhive_events_survive_restart() -> Res<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("events.sqlite");
-    let url = format!("sqlite://{}", db_path.display());
-    let first = SqlCtx::url(&url).await?;
+    let first = sqlite_rs::SqliteRuntime::new(Default::default()).database(
+        &db_path,
+        &[],
+        "_sqlite_rs_migrations",
+    );
     let store = SqliteBigRepoStore::new(first, "keyhive-restart", BuckId::MAX_LEVEL).await?;
     let hash = subduction_keyhive::storage::StorageHash::new([5; 32]);
     store
@@ -2384,7 +2408,11 @@ async fn sqlite_big_repo_keyhive_events_survive_restart() -> Res<()> {
         .await?;
     drop(store);
 
-    let reopened = SqlCtx::url(&url).await?;
+    let reopened = sqlite_rs::SqliteRuntime::new(Default::default()).database(
+        &db_path,
+        &[],
+        "_sqlite_rs_migrations",
+    );
     let store = SqliteBigRepoStore::new(reopened, "keyhive-restart", BuckId::MAX_LEVEL).await?;
     assert_eq!(
         store.load_keyhive_events().await?,
@@ -2397,9 +2425,17 @@ async fn sqlite_big_repo_keyhive_events_survive_restart() -> Res<()> {
 async fn causal_checkpoint_walker_progress_survives_restart() -> Res<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("causal-checkpoint-progress.sqlite");
-    let url = format!("sqlite://{}", db_path.display());
     let scope = "causal-checkpoint-progress";
-    let store = SqliteBigRepoStore::new(SqlCtx::url(&url).await?, scope, BuckId::MAX_LEVEL).await?;
+    let store = SqliteBigRepoStore::new(
+        sqlite_rs::SqliteRuntime::new(Default::default()).database(
+            &db_path,
+            &[],
+            "_sqlite_rs_migrations",
+        ),
+        scope,
+        BuckId::MAX_LEVEL,
+    )
+    .await?;
     let (namespace, consumer_id) =
         crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT;
 
@@ -2421,8 +2457,16 @@ async fn causal_checkpoint_walker_progress_survives_restart() -> Res<()> {
     drop(walker);
     drop(store);
 
-    let reopened =
-        SqliteBigRepoStore::new(SqlCtx::url(&url).await?, scope, BuckId::MAX_LEVEL).await?;
+    let reopened = SqliteBigRepoStore::new(
+        sqlite_rs::SqliteRuntime::new(Default::default()).database(
+            &db_path,
+            &[],
+            "_sqlite_rs_migrations",
+        ),
+        scope,
+        BuckId::MAX_LEVEL,
+    )
+    .await?;
     assert_eq!(
         reopened
             .admission_consumer_progress(namespace, consumer_id)
@@ -2434,7 +2478,7 @@ async fn causal_checkpoint_walker_progress_survives_restart() -> Res<()> {
 
 #[tokio::test]
 async fn sqlite_big_repo_keyhive_duplicate_saves_are_safe_concurrently() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-concurrent", BuckId::MAX_LEVEL).await?;
     let hash = subduction_keyhive::storage::StorageHash::new([6; 32]);
     let left = store.clone();
@@ -2452,7 +2496,7 @@ async fn sqlite_big_repo_keyhive_duplicate_saves_are_safe_concurrently() -> Res<
 }
 #[tokio::test]
 async fn sqlite_big_repo_keyhive_archive_changes_do_not_prune_event_log() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "keyhive-archive", BuckId::MAX_LEVEL).await?;
     let archive_dir = tempfile::tempdir()?;
     let storage = crate::keyhive_storage::BigRepoKeyhiveStorage::fs(
@@ -2491,7 +2535,7 @@ async fn sqlite_big_repo_keyhive_archive_changes_do_not_prune_event_log() -> Res
 
 #[tokio::test]
 async fn reconcile_group_part_batch_adds_managed_parts() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "reconcile-add", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([1; 32]));
     let group_part = PartKey(ByteKey::new([2; 32]));
@@ -2526,7 +2570,7 @@ async fn reconcile_group_part_batch_adds_managed_parts() -> Res<()> {
 
 #[tokio::test]
 async fn reconcile_batch_assigns_unique_paginateable_part_cursors() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "reconcile-cursor-siblings", BuckId::MAX_LEVEL).await?;
     let part = PartKey(ByteKey::new([3; 32]));
@@ -2575,7 +2619,7 @@ async fn reconcile_batch_assigns_unique_paginateable_part_cursors() -> Res<()> {
 
 #[tokio::test]
 async fn reconcile_group_part_batch_removes_stale_managed_membership() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "reconcile-stale", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([10; 32]));
     let part_a = PartKey(ByteKey::new([11; 32]));
@@ -2635,7 +2679,7 @@ async fn reconcile_group_part_batch_removes_stale_managed_membership() -> Res<()
 
 #[tokio::test]
 async fn reconcile_group_part_batch_removes_seds_when_membership_drops() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "reconcile-global-drop", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([40; 32]));
     let group_part = PartKey(ByteKey::new([41; 32]));
@@ -2692,7 +2736,7 @@ async fn gossip_records_seds_membership_like_any_other_part() -> Res<()> {
     // What bounds the disclosure is decision 2's recipient filter on the sending side (a
     // peer only names `/seds` under a grant of it) plus the per-document pull policy, not
     // a write-path exemption for the reserved key.
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "gossip-seds-membership", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([7; 32]));
     let group_part = PartKey(ByteKey::new([8; 32]));
@@ -2724,7 +2768,7 @@ async fn gossip_records_seds_membership_like_any_other_part() -> Res<()> {
 
 #[tokio::test]
 async fn reconcile_group_part_batch_noop_leaves_membership_unchanged() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "reconcile-noop", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([50; 32]));
     let part = PartKey(ByteKey::new([51; 32]));
@@ -2760,7 +2804,7 @@ async fn reconcile_group_part_batch_noop_leaves_membership_unchanged() -> Res<()
 
 #[tokio::test]
 async fn reconcile_group_part_batch_empty_mutations_creates_no_membership() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "reconcile-empty", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([60; 32]));
     HostPartStore::set_obj_payload(&store, doc.clone(), serde_json::json!("live")).await?;
@@ -2780,7 +2824,7 @@ async fn reconcile_group_part_batch_empty_mutations_creates_no_membership() -> R
 
 #[tokio::test]
 async fn reconcile_group_part_batch_idempotent_duplicate_delivery() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "reconcile-idempotent", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([70; 32]));
     let part = PartKey(ByteKey::new([71; 32]));
@@ -2843,9 +2887,12 @@ async fn reconcile_group_part_batch_idempotent_duplicate_delivery() -> Res<()> {
 async fn reconcile_group_part_cursor_survives_store_restart() -> Res<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("reconcile-restart.sqlite");
-    let url = format!("sqlite://{}", db_path.display());
 
-    let first = SqlCtx::url(&url).await?;
+    let first = sqlite_rs::SqliteRuntime::new(Default::default()).database(
+        &db_path,
+        &[],
+        "_sqlite_rs_migrations",
+    );
     let store = SqliteBigRepoStore::new(first, "reconcile-restart", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([80; 32]));
     let part = PartKey(ByteKey::new([81; 32]));
@@ -2884,7 +2931,11 @@ async fn reconcile_group_part_cursor_survives_store_restart() -> Res<()> {
     drop(store);
 
     // Reopen the same database.
-    let reopened = SqlCtx::url(&url).await?;
+    let reopened = sqlite_rs::SqliteRuntime::new(Default::default()).database(
+        &db_path,
+        &[],
+        "_sqlite_rs_migrations",
+    );
     let store = SqliteBigRepoStore::new(reopened, "reconcile-restart", BuckId::MAX_LEVEL).await?;
 
     // The consumer's reconciled-through value must survive restart.
@@ -2905,7 +2956,7 @@ async fn reconcile_group_part_cursor_survives_store_restart() -> Res<()> {
 
 #[tokio::test]
 async fn reconcile_group_part_batch_rolls_back_on_syncable_write_failure() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "reconcile-syncable-fail", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([90; 32]));
     let part = PartKey(ByteKey::new([91; 32]));
@@ -2929,13 +2980,7 @@ async fn reconcile_group_part_batch_rolls_back_on_syncable_write_failure() -> Re
         .await?;
 
     // Inject failure on the syncable DELETE (which runs before member UPDATE).
-    sqlx::query!(
-        "CREATE TRIGGER fail_syncable_delete
-            BEFORE DELETE ON big_sync_syncable
-            BEGIN SELECT RAISE(ABORT, 'injected syncable failure'); END",
-    )
-    .execute(&store.sql.write_pool)
-    .await?;
+    queries::fail_syncable_delete(&store.sql).await?;
 
     let mutations = vec![GroupPartReconciliation {
         doc: doc.clone(),
@@ -2975,7 +3020,7 @@ async fn reconcile_group_part_batch_rolls_back_on_syncable_write_failure() -> Re
 
 #[tokio::test]
 async fn reconcile_group_part_batch_rolls_back_on_member_insert_failure() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "reconcile-member-insert-fail", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([100; 32]));
@@ -2986,13 +3031,7 @@ async fn reconcile_group_part_batch_rolls_back_on_member_insert_failure() -> Res
     store.ensure_part(part.clone()).await?;
 
     // Inject failure on member INSERT (runs during Live transition).
-    sqlx::query!(
-        "CREATE TRIGGER fail_member_insert
-            BEFORE INSERT ON big_sync_members
-            BEGIN SELECT RAISE(ABORT, 'injected member insert failure'); END",
-    )
-    .execute(&store.sql.write_pool)
-    .await?;
+    queries::fail_member_insert(&store.sql).await?;
 
     let mutations = vec![GroupPartReconciliation {
         doc: doc.clone(),
@@ -3025,15 +3064,11 @@ async fn reconcile_group_part_batch_rolls_back_on_member_insert_failure() -> Res
         "no part membership should survive member-insert rollback"
     );
     // The syncable write rolled back too — no agents persisted for this doc.
-    let agents_in_syncable: i64 = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM big_sync_syncable s
-         JOIN big_sync_members m ON m.maybe_part_ref = s.part_ref
-         JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
-         WHERE s.scope_id = ?1 AND o.obj_id = ?2",
+    let agents_in_syncable = queries::count_syncable_agents(
+        &store.sql,
         store.scope_id,
-        SqliteBigRepoStore::obj_blob(doc)
+        SqliteBigRepoStore::obj_blob(doc),
     )
-    .fetch_one(&store.sql.read_pool)
     .await?;
     assert_eq!(
         agents_in_syncable, 0,
@@ -3044,20 +3079,14 @@ async fn reconcile_group_part_batch_rolls_back_on_member_insert_failure() -> Res
 
 #[tokio::test]
 async fn reconcile_group_part_batch_rolls_back_on_bucket_write_failure() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "reconcile-bucket-fail", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([110; 32]));
     let part = PartKey(ByteKey::new([111; 32]));
     let peer = PeerKey(ByteKey::new([112; 32]));
     HostPartStore::set_obj_payload(&store, doc.clone(), serde_json::json!("live")).await?;
     store.ensure_part(part.clone()).await?;
-    sqlx::query!(
-        "CREATE TRIGGER fail_bucket_insert
-            BEFORE INSERT ON big_sync_buckets
-            BEGIN SELECT RAISE(ABORT, 'injected bucket failure'); END",
-    )
-    .execute(&store.sql.write_pool)
-    .await?;
+    queries::fail_bucket_insert(&store.sql).await?;
     let mutation = GroupPartReconciliation {
         doc: doc.clone(),
         agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
@@ -3083,20 +3112,14 @@ async fn reconcile_group_part_batch_rolls_back_on_bucket_write_failure() -> Res<
 
 #[tokio::test]
 async fn reconcile_group_part_batch_rolls_back_on_part_cursor_write_failure() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "reconcile-part-fail", BuckId::MAX_LEVEL).await?;
     let doc = ObjKey(ByteKey::new([120; 32]));
     let part = PartKey(ByteKey::new([121; 32]));
     let peer = PeerKey(ByteKey::new([122; 32]));
     HostPartStore::set_obj_payload(&store, doc.clone(), serde_json::json!("live")).await?;
     store.ensure_part(part.clone()).await?;
-    sqlx::query!(
-        "CREATE TRIGGER fail_part_cursor_update
-            BEFORE UPDATE OF latest_cursor ON big_sync_parts
-            BEGIN SELECT RAISE(ABORT, 'injected part cursor failure'); END",
-    )
-    .execute(&store.sql.write_pool)
-    .await?;
+    queries::fail_part_cursor_update(&store.sql).await?;
     let mutation = GroupPartReconciliation {
         doc: doc.clone(),
         agents: HashMap::from([(peer.clone(), keyhive_core::access::Access::Read)]),
@@ -3123,16 +3146,11 @@ async fn reconcile_group_part_batch_rolls_back_on_part_cursor_write_failure() ->
 /// The access rows on a part, as the principals they name. Rows are keyed by
 /// `(part_ref, principal_id)`, so this is the whole set for the part.
 async fn syncable_principals(store: &SqliteBigRepoStore, part: PartKey) -> Res<Vec<Vec<u8>>> {
-    // Runtime query: the test-only shape is not in the checked-in `.sqlx` cache.
-    let rows = sqlx::query_scalar(
-        "SELECT s.principal_id FROM big_sync_syncable s
-          JOIN big_sync_parts p ON p.part_ref = s.part_ref
-         WHERE s.scope_id = ?1 AND p.part_id = ?2
-         ORDER BY s.principal_id",
+    let rows = queries::syncable_principals(
+        &store.sql,
+        store.scope_id,
+        SqliteBigRepoStore::part_blob(part),
     )
-    .bind(store.scope_id)
-    .bind(SqliteBigRepoStore::part_blob(part))
-    .fetch_all(&store.sql.read_pool)
     .await?;
     Ok(rows)
 }
@@ -3145,7 +3163,7 @@ async fn syncable_principals(store: &SqliteBigRepoStore, part: PartKey) -> Res<V
 #[tokio::test]
 async fn reconcile_group_part_batch_does_not_revoke_a_foreign_parts_rows() -> Res<()> {
     let store = SqliteBigRepoStore::new(
-        SqlCtx::memory().await?,
+        sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?,
         "reconcile-foreign-part-rows",
         BuckId::MAX_LEVEL,
     )
@@ -3241,7 +3259,7 @@ async fn reconcile_group_part_batch_does_not_revoke_a_foreign_parts_rows() -> Re
 #[tokio::test]
 async fn reconcile_group_part_batch_keeps_seds_rows_when_the_doc_leaves_seds() -> Res<()> {
     let store = SqliteBigRepoStore::new(
-        SqlCtx::memory().await?,
+        sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?,
         "reconcile-seds-rows",
         BuckId::MAX_LEVEL,
     )
@@ -3313,7 +3331,7 @@ async fn reconcile_group_part_batch_keeps_seds_rows_when_the_doc_leaves_seds() -
 
 #[tokio::test]
 async fn tree_cache_guard_stale_drop_does_not_evict_newer_transaction_cache_entry() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store = SqliteBigRepoStore::new(sql, "guard-stale-drop", BuckId::MAX_LEVEL).await?;
     let signer = MemorySigner::generate();
     let tree_id = SedimentreeId::new([42; 32]);
@@ -3323,7 +3341,7 @@ async fn tree_cache_guard_stale_drop_does_not_evict_newer_transaction_cache_entr
 
     // Transaction 1: speculatively mutates the tree but is abandoned (simulating tx.commit failure or cancellation).
     let guard1 = {
-        let mut tx1 = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx1 = store.sql.begin_write().await?;
         store.save_tree(&mut tx1, tree_id).await?;
         let (_events1, guard1) = store
             .mutate_tree_in_tx(
@@ -3337,9 +3355,14 @@ async fn tree_cache_guard_stale_drop_does_not_evict_newer_transaction_cache_entr
         guard1
     };
 
-    // Transaction 2: starts immediately on another thread, mutates the same tree, and commits.
+    assert_eq!(
+        Storage::<Sendable>::save_batch(&store, tree_id, Vec::new(), Vec::new()).await?,
+        0
+    );
+
+    // Transaction 2: acquires the released writer slot, mutates the same tree, and commits.
     {
-        let mut tx2 = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx2 = store.sql.begin_write().await?;
         store.save_tree(&mut tx2, tree_id).await?;
         let (_events2, guard2) = store
             .mutate_tree_in_tx(
@@ -3351,6 +3374,10 @@ async fn tree_cache_guard_stale_drop_does_not_evict_newer_transaction_cache_entr
         tx2.commit().await?;
         guard2.disarm();
     }
+
+    let durable_heads = fresh_tree_heads(&store, tree_id).await?;
+    assert_eq!(durable_heads, vec![commit_id(2)]);
+    assert_eq!(payload_heads(&store, tree_id).await?, durable_heads);
 
     // Verify the tree entry is present in cache for transaction 2.
     assert!(
@@ -3367,9 +3394,12 @@ async fn tree_cache_guard_stale_drop_does_not_evict_newer_transaction_cache_entr
         "stale guard drop must not evict newer cache entry installed by transaction 2"
     );
 
+    assert_eq!(payload_heads(&store, tree_id).await?, durable_heads);
+    assert_eq!(fresh_tree_heads(&store, tree_id).await?, durable_heads);
+
     // Subsequent mutation should succeed cleanly against the active cached entry.
     {
-        let mut tx3 = store.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx3 = store.sql.begin_write().await?;
         store.save_tree(&mut tx3, tree_id).await?;
         let (_events3, guard3) = store
             .mutate_tree_in_tx(
@@ -3382,12 +3412,16 @@ async fn tree_cache_guard_stale_drop_does_not_evict_newer_transaction_cache_entr
         guard3.disarm();
     }
 
+    let durable_heads = fresh_tree_heads(&store, tree_id).await?;
+    assert_eq!(durable_heads, vec![commit_id(2), commit_id(3)]);
+    assert_eq!(payload_heads(&store, tree_id).await?, durable_heads);
+
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn secret_blob_and_dek_crud() -> Res<()> {
-    let sql = SqlCtx::memory().await?;
+    let sql = sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?;
     let store =
         SqliteBigRepoStore::new(sql, "big-repo-sqlite-secret-blobs", BuckId::MAX_LEVEL).await?;
 

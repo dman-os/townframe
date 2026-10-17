@@ -522,8 +522,9 @@ async fn pull_required_partitions_via_big_sync_worker(
 }
 
 // FIXME: move parts of this into a RepoCtx method
-#[tracing::instrument(skip(source_url, destination, options))]
+#[tracing::instrument(skip(sqlite_runtime, source_url, destination, options))]
 pub async fn clone_repo_init_from_url(
+    sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
     source_url: &str,
     destination: &std::path::Path,
     options: CloneRepoInitOptions,
@@ -561,9 +562,15 @@ pub async fn clone_repo_init_from_url(
         let local_secret = iroh::SecretKey::generate();
         let local_public = local_secret.public();
         let sqlite_path = staging.join("sqlite.db");
-        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::file(sqlite_path)).await?;
+        let sql =
+            crate::app::open_database(&sqlite_runtime, crate::app::SqlConfig::file(sqlite_path))
+                .await?;
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
-            crate::local_state::SqliteLocalStateRepo::boot(staging.join("local_state")).await?;
+            crate::local_state::SqliteLocalStateRepo::boot(
+                Arc::clone(&sqlite_runtime),
+                staging.join("local_state"),
+            )
+            .await?;
         let checkout_id = {
             let id = Uuid::new_v4();
             let id = utils_rs::hash::encode_base58_multibase(id);
@@ -571,17 +578,20 @@ pub async fn clone_repo_init_from_url(
         };
         let identity =
             crate::secrets::set_identity(&secret_store, &checkout_id, local_secret.clone()).await?;
-        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
-            node_identity_seed: identity.iroh_secret_key.to_bytes(),
-            storage: big_repo::StorageConfig::Disk {
-                path: staging.join("big_repo"),
+        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(
+            Arc::clone(&sqlite_runtime),
+            big_repo::Config {
+                node_identity_seed: identity.iroh_secret_key.to_bytes(),
+                storage: big_repo::StorageConfig::Disk {
+                    path: staging.join("big_repo"),
+                },
+                scope_key: Arc::from("daybook-core"),
+                hidden_parts: Default::default(),
+                automerge_frontier_group_scope: Default::default(),
+                causal_checkpoint_group_scope: Default::default(),
+                group_part_group_scope: Default::default(),
             },
-            scope_key: Arc::from("daybook-core"),
-            hidden_parts: Default::default(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-        })
+        )
         .await?;
         let provision = request_clone_provision_from_url(
             source_url,
@@ -647,9 +657,9 @@ pub async fn clone_repo_init_from_url(
         }
 
         let part_store = big_repo.shared_part_store();
-        let blob_part_store = crate::repo::open_blob_part_store(big_repo.sql_ctx()).await?;
+        let blob_part_store = crate::repo::open_blob_part_store(big_repo.database()).await?;
         let blob_presence_store =
-            crate::repo::open_blob_presence_part_store(big_repo.sql_ctx()).await?;
+            crate::repo::open_blob_presence_part_store(big_repo.database()).await?;
         let blobs_repo =
             crate::blobs::BlobsRepo::new(staging.join("blobs"), "clone-bootstrap".into()).await?;
 
@@ -696,6 +706,7 @@ pub async fn clone_repo_init_from_url(
             lock_guard,
             options: options.repo_options.clone(),
             sql: sql.clone(),
+            sqlite_runtime,
             sqlite_local_state_repo,
             sqlite_local_state_stop: std::sync::Mutex::new(Some(sqlite_local_state_stop)),
             part_store: Arc::clone(&part_store),

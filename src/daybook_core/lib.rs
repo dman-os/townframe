@@ -4,7 +4,7 @@
 
 #[expect(unused)]
 mod interlude {
-    pub use crate::app::SqlCtx;
+    pub use crate::app::Database;
     pub use crate::stores::{AmStore, VersionTag, Versioned};
 
     pub use daybook_types::doc::{BranchPath, BranchPathBuf, ChangeHashSet, UserPath, UserPathBuf};
@@ -27,6 +27,16 @@ mod interlude {
 }
 
 use crate::interlude::*;
+
+use sqlite_rs as sqlite_rs_alias;
+/// Repo-wide and app-wide key/value globals (`kvstore`). Both the app
+/// globals database and each repository database carry this unit as their
+/// primary migration list; see `app::open_database`.
+mod sqlite {
+    pub(crate) mod queries {
+        include!("sqlite/gen.rs");
+    }
+}
 
 pub(crate) mod authority;
 pub mod blobs;

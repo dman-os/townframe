@@ -1,6 +1,5 @@
 use crate::interlude::*;
 
-// pub use sqlx;
 pub use http::StatusCode;
 
 use std::borrow::Cow;

@@ -565,20 +565,20 @@ impl facet_routine::Host for SharedWashCtx {
                         "error resolving sqlite file path for {local_state_id}: {err}"
                     ))
                 })?;
-            let sql = dayook_plugin
+            let db = dayook_plugin
                 .sqlite_local_state_repo
-                .ensure_sqlite_ctx(&local_state_id)
+                .ensure_sqlite_db(&local_state_id)
                 .await
                 .map_err(|err| {
                     wasmtime_err(format!(
-                        "error initializing sqlite ctx for {local_state_id}: {err}"
+                        "error initializing sqlite db for {local_state_id}: {err}"
                     ))
                 })?;
             let handle = wash_plugin_sqlite::SqlPlugin::create_connection(
                 self,
                 wash_plugin_sqlite::SqliteConnectionToken {
                     sqlite_file_path: sqlite_file_path.to_string_lossy().to_string(),
-                    sql,
+                    db,
                 },
             )?;
             sqlite_connections.push((

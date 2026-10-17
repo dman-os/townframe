@@ -17,6 +17,8 @@
 
 use crate::interlude::*;
 
+use crate::drawer::sqlite::queries;
+
 use super::types::DocEntry;
 use daybook_types::doc::ChangeHashSet;
 
@@ -72,17 +74,16 @@ pub(crate) struct OutboxRow {
     pub temporary: bool,
 }
 
-/// The sqlx row shape of `drawer_add_outbox`'s columns.
-type OutboxDbRow = (
-    String,
-    Vec<u8>,
-    Vec<u8>,
-    Vec<u8>,
-    String,
-    bool,
-    i64,
-    Option<i64>,
-);
+/// The SQLite row shape of `drawer_add_outbox`'s columns, constructed by the
+/// generated outbox queries (`-- into:`).
+pub(crate) struct OutboxDbRow {
+    pub(crate) idempotency_key: String,
+    pub(crate) branch_doc_id: Vec<u8>,
+    pub(crate) entry: Vec<u8>,
+    pub(crate) staged_branch_heads: Vec<u8>,
+    pub(crate) state: String,
+    pub(crate) temporary: bool,
+}
 
 // ─── row encoding ──────────────────────────────────────────────────────────
 //
@@ -116,82 +117,45 @@ fn decode_heads(bytes: &[u8]) -> Res<ChangeHashSet> {
     Ok(ChangeHashSet(am_utils_rs::parse_commit_heads(&heads)?))
 }
 
-// ─── schema ────────────────────────────────────────────────────────────────
+// ─── row reads ─────────────────────────────────────────────────────────────
+//
+// `drawer_add_outbox` rows are the write-ahead reconciliation record for
+// document adds: durably inserted before `commit_id`, advanced to `done` only
+// when the `docs.map` entry is durable. Boot reconciliation replays rows that
+// are not `done`; the boot purge deletes strictly `done` rows past the TTL, so
+// a late retry after a purge re-executes as a fresh add under the same key.
+// The schema is `drawer/sqlite/migrations/`, applied by `meta::ensure_schema`.
 
-/// `drawer_add_outbox` rows are the write-ahead reconciliation record for
-/// document adds: durably inserted before `commit_id`, advanced to `done` only
-/// when the `docs.map` entry is durable. Boot reconciliation replays rows that
-/// are not `done`; the boot purge deletes strictly `done` rows past the TTL, so
-/// a late retry after a purge re-executes as a fresh add under the same key.
-pub(crate) async fn ensure_outbox_schema(sql: &SqlCtx) -> Res<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS drawer_add_outbox (
-            idempotency_key TEXT NOT NULL PRIMARY KEY,
-            branch_doc_id BLOB NOT NULL,
-            entry BLOB NOT NULL,
-            staged_branch_heads BLOB NOT NULL,
-            state TEXT NOT NULL CHECK (state IN ('pending-add', 'committed-staged', 'done')),
-            temporary INTEGER NOT NULL,
-            created_at INTEGER NOT NULL,
-            done_at INTEGER NULL
-        ) STRICT
-        "#,
-    )
-    .execute(&sql.write_pool)
-    .await?;
-    Ok(())
-}
-
-pub(crate) async fn get_row(sql: &SqlCtx, idempotency_key: &str) -> Res<Option<OutboxRow>> {
-    let row = sqlx::query_as::<_, OutboxDbRow>(
-        "SELECT idempotency_key, branch_doc_id, entry, staged_branch_heads, state, temporary, \
-              created_at, done_at FROM drawer_add_outbox WHERE idempotency_key = ?1",
-    )
-    .bind(idempotency_key)
-    .fetch_optional(&sql.write_pool)
-    .await?;
+pub(crate) async fn get_row(sql: &Database, idempotency_key: &str) -> Res<Option<OutboxRow>> {
+    let row = queries::outbox_row_by_key(sql, idempotency_key.to_owned()).await?;
     row.map(row_from_db).transpose()
 }
 
 pub(crate) async fn get_row_for_branch(
-    sql: &SqlCtx,
+    sql: &Database,
     branch_doc_id: &DocumentId,
 ) -> Res<Option<OutboxRow>> {
-    let row = sqlx::query_as::<_, OutboxDbRow>(
-        "SELECT idempotency_key, branch_doc_id, entry, staged_branch_heads, state, temporary, \
-              created_at, done_at FROM drawer_add_outbox WHERE branch_doc_id = ?1",
-    )
-    .bind(branch_doc_id.as_bytes())
-    .fetch_optional(&sql.write_pool)
-    .await?;
+    let row = queries::outbox_row_by_branch(sql, branch_doc_id.as_bytes().to_vec()).await?;
     row.map(row_from_db).transpose()
 }
 
 /// Every row that boot reconciliation still owes work for (`state != 'done'`).
-pub(crate) async fn list_pending_rows(sql: &SqlCtx) -> Res<Vec<OutboxRow>> {
-    let rows = sqlx::query_as::<_, OutboxDbRow>(
-        "SELECT idempotency_key, branch_doc_id, entry, staged_branch_heads, state, temporary, \
-              created_at, done_at FROM drawer_add_outbox WHERE state != 'done' ORDER BY created_at",
-    )
-    .fetch_all(&sql.write_pool)
-    .await?;
+pub(crate) async fn list_pending_rows(sql: &Database) -> Res<Vec<OutboxRow>> {
+    let rows = queries::outbox_pending_rows(sql).await?;
     rows.into_iter().map(row_from_db).collect()
 }
 
-fn row_from_db(
-    (key, branch_doc_id, entry, heads, state, temporary, _created_at, _done_at): OutboxDbRow,
-) -> Res<OutboxRow> {
+fn row_from_db(row: OutboxDbRow) -> Res<OutboxRow> {
     Ok(OutboxRow {
-        idempotency_key: key,
+        idempotency_key: row.idempotency_key,
         branch_doc_id: DocumentId::new(
-            TryInto::<[u8; 32]>::try_into(branch_doc_id)
+            TryInto::<[u8; 32]>::try_into(row.branch_doc_id)
                 .map_err(|err| ferr!("outbox branch doc id is not 32 bytes: {err:?}"))?,
         ),
-        entry: decode_entry(&entry)?,
-        staged_branch_heads: decode_heads(&heads)?,
-        state: OutboxState::from_db(&state),
-        temporary,
+        entry: decode_entry(&row.entry)?,
+        staged_branch_heads: decode_heads(&row.staged_branch_heads)?,
+        state: OutboxState::from_db(&row.state),
+        temporary: row.temporary,
     })
 }
 
@@ -202,27 +166,22 @@ fn row_from_db(
 /// raced against an in-flight key, and replaying a key twice must not produce
 /// a second row.
 pub(crate) async fn insert_pending(
-    sql: &SqlCtx,
+    sql: &Database,
     idempotency_key: &str,
     branch_doc_id: &DocumentId,
     entry: &DocEntry,
     staged_branch_heads: &ChangeHashSet,
     temporary: bool,
 ) -> Res<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO drawer_add_outbox (
-            idempotency_key, branch_doc_id, entry, staged_branch_heads, state, temporary, created_at
-        ) VALUES (?1, ?2, ?3, ?4, 'pending-add', ?5, ?6)
-        "#,
+    queries::outbox_insert_pending(
+        sql,
+        idempotency_key.to_owned(),
+        branch_doc_id.as_bytes().to_vec(),
+        encode_entry(entry)?,
+        encode_heads(staged_branch_heads)?,
+        temporary,
+        jiff::Timestamp::now().as_microsecond(),
     )
-    .bind(idempotency_key)
-    .bind(branch_doc_id.as_bytes())
-    .bind(encode_entry(entry)?)
-    .bind(encode_heads(staged_branch_heads)?)
-    .bind(temporary)
-    .bind(jiff::Timestamp::now().as_microsecond())
-    .execute(&sql.write_pool)
     .await
     .map_err(|err| {
         ferr!(
@@ -233,26 +192,25 @@ pub(crate) async fn insert_pending(
 }
 
 /// `commit_id` succeeded; the keyhive authority and sedimentree exist locally.
-pub(crate) async fn mark_committed_staged(sql: &SqlCtx, idempotency_key: &str) -> Res<()> {
+pub(crate) async fn mark_committed_staged(sql: &Database, idempotency_key: &str) -> Res<()> {
     set_state(sql, idempotency_key, OutboxState::CommittedStaged).await
 }
 
 /// The docs.map entry is durable (and the re-derivable residuals done).
-pub(crate) async fn mark_done(sql: &SqlCtx, idempotency_key: &str) -> Res<()> {
+pub(crate) async fn mark_done(sql: &Database, idempotency_key: &str) -> Res<()> {
     set_state(sql, idempotency_key, OutboxState::Done).await
 }
 
-async fn set_state(sql: &SqlCtx, idempotency_key: &str, state: OutboxState) -> Res<()> {
+async fn set_state(sql: &Database, idempotency_key: &str, state: OutboxState) -> Res<()> {
     let done_at = (state == OutboxState::Done).then(|| jiff::Timestamp::now().as_microsecond());
-    let updated = sqlx::query(
-        "UPDATE drawer_add_outbox SET state = ?1, done_at = ?2 WHERE idempotency_key = ?3",
+    let updated = queries::outbox_set_state(
+        sql,
+        state.as_str().to_owned(),
+        done_at,
+        idempotency_key.to_owned(),
     )
-    .bind(state.as_str())
-    .bind(done_at)
-    .bind(idempotency_key)
-    .execute(&sql.write_pool)
     .await?
-    .rows_affected();
+    .rows_affected;
     eyre::ensure!(
         updated == 1,
         "outbox row '{idempotency_key}' vanished mid-flight"
@@ -262,25 +220,16 @@ async fn set_state(sql: &SqlCtx, idempotency_key: &str, state: OutboxState) -> R
 
 /// Terminal removal for a discarded (or abandoned-resolved) add; used by the
 /// boot reconciliation's abandon branch and `discard_temporary`.
-pub(crate) async fn delete_row(sql: &SqlCtx, idempotency_key: &str) -> Res<()> {
-    sqlx::query("DELETE FROM drawer_add_outbox WHERE idempotency_key = ?1")
-        .bind(idempotency_key)
-        .execute(&sql.write_pool)
-        .await?;
+pub(crate) async fn delete_row(sql: &Database, idempotency_key: &str) -> Res<()> {
+    queries::outbox_delete(sql, idempotency_key.to_owned()).await?;
     Ok(())
 }
 
 /// Boot purge: strictly `done` rows past the TTL. Pending rows are never aged
 /// out — the boot loop or the caller's retry resolves them.
-pub(crate) async fn purge_done_rows(sql: &SqlCtx) -> Res<u64> {
+pub(crate) async fn purge_done_rows(sql: &Database) -> Res<u64> {
     let cutoff = (jiff::Timestamp::now().as_microsecond() - as_micros(DONE_TTL)).max(0);
-    let purged = sqlx::query(
-        "DELETE FROM drawer_add_outbox WHERE state = 'done' AND done_at IS NOT NULL AND done_at < ?1",
-    )
-    .bind(cutoff)
-    .execute(&sql.write_pool)
-    .await?
-    .rows_affected();
+    let purged = queries::outbox_purge_done(sql, cutoff).await?.rows_affected;
     Ok(purged)
 }
 
@@ -326,8 +275,58 @@ mod row_encoding_tests {
 
         let heads = ChangeHashSet(Arc::from([automerge::ChangeHash([0_u8; 32])]));
         let heads_back = decode_heads(&encode_heads(&heads)?)?;
-        assert_eq!(heads_back.0.len(), 1);
-        assert_eq!(heads_back.0[0], heads.0[0]);
+        assert_eq!(heads_back, heads);
+
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+        let sql = crate::app::open_database(&runtime, crate::app::SqlConfig::memory()).await?;
+        crate::drawer::meta::ensure_schema(&sql).await?;
+        let branch_doc_id = DocumentId::new([0_u8; 32]);
+        let temporary = true;
+        insert_pending(
+            &sql,
+            "round-trip",
+            &branch_doc_id,
+            &entry,
+            &heads,
+            temporary,
+        )
+        .await?;
+        let cloned = sql.clone();
+        drop(sql);
+        drop(runtime);
+        let row = get_row(&cloned, "round-trip").await?.expect("pending row");
+        assert_eq!(row.idempotency_key, "round-trip");
+        assert_eq!(row.branch_doc_id, branch_doc_id);
+        assert_eq!(row.entry.branches, entry.branches);
+        assert_eq!(row.entry.vtag.version, entry.vtag.version);
+        assert_eq!(row.entry.vtag.actor_id, entry.vtag.actor_id);
+        assert_eq!(
+            row.entry.previous_version_heads,
+            entry.previous_version_heads
+        );
+        assert_eq!(row.staged_branch_heads, heads);
+        assert_eq!(row.state, OutboxState::PendingAdd);
+        assert_eq!(row.temporary, temporary);
+        assert_eq!(list_pending_rows(&cloned).await?.len(), 1);
+        mark_committed_staged(&cloned, "round-trip").await?;
+        assert_eq!(
+            get_row_for_branch(&cloned, &branch_doc_id)
+                .await?
+                .expect("staged row")
+                .state,
+            OutboxState::CommittedStaged,
+        );
+        mark_done(&cloned, "round-trip").await?;
+        assert!(list_pending_rows(&cloned).await?.is_empty());
+        assert_eq!(
+            get_row(&cloned, "round-trip")
+                .await?
+                .expect("done row")
+                .state,
+            OutboxState::Done
+        );
+        delete_row(&cloned, "round-trip").await?;
+        assert!(get_row(&cloned, "round-trip").await?.is_none());
         eyre::Ok(())
     }
 }

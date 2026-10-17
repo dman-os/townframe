@@ -1,4 +1,5 @@
 use crate::interlude::*;
+use crate::rt::sqlite::queries;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +41,7 @@ pub struct InitRepo {
     app_am_handle: big_repo::BigDocHandle,
     store: crate::stores::AmStoreHandle<InitStore>,
     local_actor_id: ActorId,
-    repo_sql: SqlCtx,
+    repo_sql: Database,
     progress_repo: Arc<crate::progress::ProgressRepo>,
     startup_progress_task_id: Option<String>,
     running_dispatches: tokio::sync::RwLock<HashMap<String, String>>,
@@ -78,23 +79,16 @@ impl InitRepo {
         big_repo: SharedBigRepo,
         app_doc_id: DocumentId,
         local_user_path: daybook_types::doc::UserPathBuf,
-        repo_sql: SqlCtx,
+        repo_sql: Database,
         progress_repo: Arc<crate::progress::ProgressRepo>,
         startup_progress_task_id: Option<String>,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let local_user_path =
             daybook_types::doc::user_path::for_repo(local_user_path, "plugs-repo")?;
         let local_actor_id = daybook_types::doc::user_path::to_actor_id(&local_user_path);
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS init_per_node (
-                init_id TEXT PRIMARY KEY,
-                completed_at TEXT NOT NULL
-            ) STRICT
-            "#,
-        )
-        .execute(&repo_sql.write_pool)
-        .await?;
+        repo_sql
+            .apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+            .await?;
 
         let registry = crate::repos::ListenersRegistry::new();
 
@@ -293,13 +287,9 @@ impl InitRepo {
                     .await
             }
             daybook_types::manifest::InitRunMode::PerNode => {
-                let rec = sqlx::query_scalar::<_, String>(
-                    "SELECT init_id FROM init_per_node WHERE init_id = ?1",
-                )
-                .bind(init_id)
-                .fetch_optional(&self.repo_sql.write_pool)
-                .await?;
-                rec.is_some()
+                queries::init_done(&self.repo_sql, init_id.to_owned())
+                    .await?
+                    .is_some()
             }
             daybook_types::manifest::InitRunMode::PerBoot => {
                 self.per_boot_done.read().await.contains(init_id)
@@ -334,16 +324,11 @@ impl InitRepo {
                     .await?;
             }
             daybook_types::manifest::InitRunMode::PerNode => {
-                sqlx::query(
-                    r#"
-                    INSERT INTO init_per_node(init_id, completed_at)
-                    VALUES (?1, ?2)
-                    ON CONFLICT(init_id) DO UPDATE SET completed_at = excluded.completed_at
-                    "#,
+                queries::mark_init_done(
+                    &self.repo_sql,
+                    init_id.to_owned(),
+                    jiff::Timestamp::now().to_string(),
                 )
-                .bind(init_id)
-                .bind(jiff::Timestamp::now().to_string())
-                .execute(&self.repo_sql.write_pool)
                 .await?;
             }
             daybook_types::manifest::InitRunMode::PerBoot => {

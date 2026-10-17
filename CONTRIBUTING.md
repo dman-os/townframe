@@ -38,7 +38,7 @@ cargo x build-plug-oci --plug-root ./src/plug_test/
 - `./src/utils_rs/`: General purpose utilities.
   - `./src/api_utils_rs/`: Utilities for writing WASI APIs.
   - `./src/am_utils_rs/`: Automerge utilities.
-  - `./src/sqlx_utils_rs/`: Sqlx utilities.
+  - `./src/sqlite_rs/`: Shared SQLite runtime, typed queries, and embedded migrations.
 - `./src/wflow/`: Top level crate for wflow, a durable workflows impl.
   - `./src/wflow_core/`: Core types and logic.
   - `./src/wflow_tokio/`: Tokio implementation for the wflow engine.

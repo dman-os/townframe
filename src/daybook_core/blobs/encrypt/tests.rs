@@ -5,7 +5,6 @@ use super::codec::{
 use super::params::MAX_WIRE_RECORD_SIZE;
 use super::*;
 
-use crate::app::SqlCtx;
 use crate::blobs::pair_roots::PairRoots;
 use crate::interlude::eyre;
 
@@ -15,7 +14,8 @@ use iroh_blobs::{Hash, api::Store};
 /// the record only has to exist because every rooting path writes it before
 /// the tags it guards. Its own behaviour is covered where `PairRoots` is drained.
 async fn test_pair_roots() -> Res<PairRoots> {
-    PairRoots::boot(SqlCtx::memory().await?).await
+    let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
+    PairRoots::boot(runtime.ephemeral(&[])?).await
 }
 
 // The store's bao leaf size: the granularity its export path reads the

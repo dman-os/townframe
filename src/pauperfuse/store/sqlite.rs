@@ -1,67 +1,40 @@
 use crate::interlude::*;
+use crate::sqlite::queries as q;
 use crate::store::{PersistedObjectState, PersistedState, StateStore};
-use sqlx::Row;
-use sqlx_utils_rs::SqlCtx;
+use sqlite_rs::{Database, SqliteRuntime};
 
 pub struct SqliteStateStore {
-    sql: SqlCtx,
+    _runtime: Arc<SqliteRuntime>,
+    db: Database,
 }
 
 impl SqliteStateStore {
-    pub async fn open(path: &Path) -> Res<Self> {
+    pub async fn open(runtime: Arc<SqliteRuntime>, path: &Path) -> Res<Self> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let sqlite_url = format!("sqlite://{}", path.display());
-        let sql = SqlCtx::url(&sqlite_url).await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS pauperfuse_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT",
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS pauperfuse_object_state (\
-                doc_id TEXT PRIMARY KEY, \
-                relative_path TEXT NOT NULL, \
-                provider_hash TEXT, \
-                backend_hash TEXT\
-            ) STRICT",
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
-        Ok(Self { sql })
+        let db = runtime.database(path.to_path_buf(), q::MIGRATIONS, q::MIGRATION_TABLE);
+        Ok(Self {
+            _runtime: runtime,
+            db,
+        })
     }
 
     pub async fn load_state(&self) -> Res<PersistedState> {
         let provider_state_id = self.load_meta_u64("provider_state_id", 0).await?;
         let backend_state_id = self.load_meta_u64("backend_state_id", 0).await?;
-
+        let rows = q::list_objects(&self.db).await?;
         let mut objects = BTreeMap::new();
-        let rows = sqlx::query(
-            "SELECT doc_id, relative_path, provider_hash, backend_hash FROM pauperfuse_object_state",
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-
         for row in rows {
-            let doc_id: String = row.try_get("doc_id")?;
-            let relative_path: String = row.try_get("relative_path")?;
-            let provider_hash: Option<String> = row.try_get("provider_hash")?;
-            let backend_hash: Option<String> = row.try_get("backend_hash")?;
-
             objects.insert(
-                doc_id,
+                row.doc_id,
                 PersistedObjectState {
-                    relative_path: PathBuf::from(relative_path),
-                    provider_hash,
-                    backend_hash,
+                    relative_path: PathBuf::from(row.relative_path),
+                    provider_hash: row.provider_hash,
+                    backend_hash: row.backend_hash,
                 },
             );
         }
-
         Ok(PersistedState {
             provider_state_id,
             backend_state_id,
@@ -70,62 +43,36 @@ impl SqliteStateStore {
     }
 
     pub async fn save_state(&self, state: &PersistedState) -> Res<()> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-
-        sqlx::query(
-            "INSERT INTO pauperfuse_meta(key, value) VALUES (?1, ?2) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
-        .bind("provider_state_id")
-        .bind(state.provider_state_id.to_string())
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "INSERT INTO pauperfuse_meta(key, value) VALUES (?1, ?2) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
-        .bind("backend_state_id")
-        .bind(state.backend_state_id.to_string())
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query("DELETE FROM pauperfuse_object_state")
-            .execute(&mut *tx)
-            .await?;
-
-        for (doc_id, object_state) in &state.objects {
-            sqlx::query(
-                "INSERT INTO pauperfuse_object_state(doc_id, relative_path, provider_hash, backend_hash) \
-                 VALUES (?1, ?2, ?3, ?4)",
-            )
-            .bind(doc_id)
-            .bind(object_state.relative_path.to_string_lossy().to_string())
-            .bind(object_state.provider_hash.clone())
-            .bind(object_state.backend_hash.clone())
-            .execute(&mut *tx)
-            .await?;
+        let objects: Vec<(String, String, Option<String>, Option<String>)> = state
+            .objects
+            .iter()
+            .map(|(doc_id, object)| {
+                (
+                    doc_id.clone(),
+                    object.relative_path.to_string_lossy().into_owned(),
+                    object.provider_hash.clone(),
+                    object.backend_hash.clone(),
+                )
+            })
+            .collect();
+        let provider = state.provider_state_id.to_string();
+        let backend = state.backend_state_id.to_string();
+        let tx = self.db.begin_write().await?;
+        q::upsert_meta(&tx, "provider_state_id".to_string(), provider).await?;
+        q::upsert_meta(&tx, "backend_state_id".to_string(), backend).await?;
+        q::clear_objects(&tx).await?;
+        for (doc_id, path, provider_hash, backend_hash) in objects {
+            q::insert_object(&tx, doc_id, path, provider_hash, backend_hash).await?;
         }
-
         tx.commit().await?;
         Ok(())
     }
 
     async fn load_meta_u64(&self, key: &str, fallback: u64) -> Res<u64> {
-        let row = sqlx::query("SELECT value FROM pauperfuse_meta WHERE key = ?1")
-            .bind(key)
-            .fetch_optional(&self.sql.read_pool)
-            .await?;
-
-        let value = match row {
-            Some(row) => {
-                let text: String = row.try_get("value")?;
-                text.parse::<u64>()?
-            }
-            None => fallback,
-        };
-
-        Ok(value)
+        match q::get_meta(&self.db, key.to_string()).await? {
+            Some(text) => Ok(text.parse::<u64>()?),
+            None => Ok(fallback),
+        }
     }
 }
 
@@ -149,11 +96,11 @@ mod tests {
         let tmp_dir = tempfile::tempdir()?;
         let db_path = tmp_dir.path().join("pauperfuse.sqlite");
 
-        let store = SqliteStateStore::open(&db_path).await?;
+        let runtime = Arc::new(SqliteRuntime::new(default()));
+        let store = SqliteStateStore::open(Arc::clone(&runtime), &db_path).await?;
+        assert_eq!(runtime.open_connection_count(), 0);
         let loaded_empty = store.load_state().await?;
-        assert_eq!(loaded_empty.provider_state_id, 0);
-        assert_eq!(loaded_empty.backend_state_id, 0);
-        assert!(loaded_empty.objects.is_empty());
+        assert_eq!(loaded_empty, PersistedState::default());
 
         let mut objects = BTreeMap::new();
         objects.insert(
@@ -174,6 +121,10 @@ mod tests {
 
         let loaded = store.load_state().await?;
         assert_eq!(loaded, state);
+        assert!(runtime.open_connection_count() > 0);
+        drop(store);
+        let reopened = SqliteStateStore::open(runtime, &db_path).await?;
+        assert_eq!(reopened.load_state().await?, state);
 
         Ok(())
     }
