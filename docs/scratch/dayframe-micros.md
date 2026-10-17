@@ -169,9 +169,13 @@ same-host-tree requirement, so it is a fallback only, not the plan.
 Other agents may be working on `/home/asdf/repos/rust/dioxus` at the same time. The harness gives each
 turn a fresh townframe worktree, which prevents clashes on townframe but not on other repos. So:
 
-1. At the start of a turn that will edit dioxus code, check whether the harness moved us to a new
-   townframe worktree. If it did, create a **new** dioxus worktree; never reuse one from an earlier
-   turn.
+1. **Immediately before every dioxus edit** — not just at turn start — check whether the harness
+   moved us to a new townframe worktree (`pwd` / `git rev-parse --show-toplevel`). The harness can
+   rotate the worktree mid-turn. If it moved, create a **new** dioxus workspace named after the new
+   generation and repoint the `../dioxus` symlink; never keep editing one created under an earlier
+   generation. Turn 9 violated this: the workspace was created under `5-a`, the harness rotated to
+   `8-a`/`9-a` mid-turn, and edits continued in the stale workspace — which is how someone else's
+   uncommitted `mutation_buffer.rs` test module ended up in "my" working copy.
 2. Give it a unique location and a unique workspace name (the default name is the destination
    basename, which would collide between agents).
 3. Do all dioxus edits there. Commit in the worktree.
