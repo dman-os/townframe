@@ -1,6 +1,5 @@
 [workspace]
 resolver = "3"
-exclude = ["vendor/sledgehammer-bindgen-macro"]
 members = [
   "./src/am_utils_rs",
   "./src/api_utils_rs",
@@ -243,16 +242,13 @@ irpc-iroh = "0.17.0"
 
 #
 # gui
-dioxus = { version = "0.8.0-alpha.1" }
+dioxus = { version = "0.8.0-alpha.3" }
 dioxus-core = { path = "../dioxus/packages/core" }
 dioxus-html = { path = "../dioxus/packages/html" }
-dioxus-interpreter-js = { path = "../dioxus/packages/interpreter", features = ["sledgehammer"] }
 ui = { path = "./src/dayframe_dx/ui" }
 # xilem = { path = "../xilem/xilem/" }
 
 [patch.crates-io]
-# Binary-only Wasm guests must not generate a JS-channel flush method.
-sledgehammer_bindgen_macro = { path = "vendor/sledgehammer-bindgen-macro" }
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 dioxus = { path = "../dioxus/packages/dioxus" }

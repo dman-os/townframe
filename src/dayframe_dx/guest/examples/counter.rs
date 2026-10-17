@@ -1,14 +1,14 @@
-//! Wire probe using Dioxus's actual mutation encoder, not a Dayframe rendering language.
+//! Dioxus counter rendered through the typed presentation wire, not a Dayframe rendering language.
 #![cfg(target_arch = "wasm32")]
 use dayframe_guest::{
     bindings,
     presentation::{MountPoint, PresentationError, Surface},
     presentation_events::{self, Event, EventResponse},
+    wire::WireMutations,
 };
 use dioxus::prelude::*;
 use dioxus_core::{ElementId, RenderTargetId, VirtualDom};
 use dioxus_html::HtmlEvent;
-use dioxus_interpreter_js::MutationState;
 use serde_json::Value;
 use std::cell::RefCell;
 
@@ -24,9 +24,9 @@ fn counter() -> Element {
 
 struct Counter;
 thread_local! {
-    // Both the virtual DOM and its mutation encoder belong to this component incarnation.
+    // Both the virtual DOM and its wire writer belong to this component incarnation.
     static DOM: RefCell<Option<VirtualDom>> = const { RefCell::new(None) };
-    static EDITS: RefCell<MutationState> = RefCell::new(MutationState::default());
+    static EDITS: RefCell<WireMutations> = RefCell::new(WireMutations::default());
 }
 
 impl presentation_events::Guest for Counter {
@@ -34,11 +34,11 @@ impl presentation_events::Guest for Counter {
         let surface = placement.open()?;
         dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
         let mut dom = VirtualDom::new(counter);
-        let bytes = EDITS.with_borrow_mut(|edits| {
+        let batch = EDITS.with_borrow_mut(|edits| {
             dom.rebuild(edits);
-            edits.export_memory()
+            edits.take()
         });
-        surface.apply(&bytes)?;
+        surface.apply(&batch)?;
         DOM.with_borrow_mut(|slot| {
             assert!(
                 slot.replace(dom).is_none(),
@@ -70,10 +70,9 @@ impl presentation_events::Guest for Counter {
             );
             EDITS.with_borrow_mut(|edits| {
                 dom.render_immediate(edits);
-                let bytes = edits.export_memory();
-                if !bytes.is_empty() {
+                if !edits.is_empty() {
                     surface
-                        .apply(&bytes)
+                        .apply(&edits.take())
                         .expect("counter presentation commit failed");
                 }
             });

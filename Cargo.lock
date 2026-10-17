@@ -4156,7 +4156,6 @@ dependencies = [
  "dioxus",
  "dioxus-core",
  "dioxus-html",
- "dioxus-interpreter-js",
  "serde_json",
  "wasmtime",
  "wit-bindgen 0.60.0",
@@ -14802,6 +14801,8 @@ dependencies = [
 [[package]]
 name = "sledgehammer_bindgen_macro"
 version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb251b407f50028476a600541542b605bb864d35d9ee1de4f6cab45d88475e6d"
 dependencies = [
  "quote",
  "syn 2.0.119",

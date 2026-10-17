@@ -1,4 +1,8 @@
 //! Recording renderer probe: exercises the actual component ABI, not the Blitz renderer.
+//!
+//! The host replays each typed batch into a Rust `WriteMutations`. That is the same path the
+//! Blitz-backed native-dom writer takes, so what this test proves about ordering and content holds
+//! for the real renderer; only tree semantics differ.
 use std::{
     path::PathBuf,
     process::Command,
@@ -23,11 +27,115 @@ mod host_bindings {
     });
 }
 
+use dioxus_core::{BorrowedAttributeValue, ElementId, WriteMutations};
 use host_bindings::exports::townframe::dayframe::presentation_events::Event;
 use host_bindings::townframe::dayframe::presentation::{self, *};
 
+/// Replays one wire batch into any host `WriteMutations`, in order.
+fn replay(batch: &[Mutation], to: &mut impl WriteMutations) {
+    let element = |id: u32| ElementId::from_raw(id as usize);
+    for mutation in batch {
+        match mutation {
+            Mutation::PushId(id) => to.push_id(element(*id)),
+            Mutation::SetId(id) => to.set_id(element(*id)),
+            Mutation::Child(index) => to.child(*index as usize),
+            Mutation::Pop => to.pop(),
+            Mutation::CreateElement((tag, ns)) => to.create_element(tag, ns.as_deref()),
+            Mutation::CreateText(value) => to.create_text(value),
+            Mutation::CloneNode => to.clone(),
+            Mutation::AppendChildren(m) => to.append_children(*m as usize),
+            Mutation::ReplaceWith(m) => to.replace_with(*m as usize),
+            Mutation::InsertAfter(m) => to.insert_after(*m as usize),
+            Mutation::InsertBefore(m) => to.insert_before(*m as usize),
+            Mutation::SetAttribute((name, ns, value)) => {
+                let value = match value {
+                    AttributeValue::Text(text) => BorrowedAttributeValue::Text(text),
+                    AttributeValue::Float(float) => BorrowedAttributeValue::Float(*float),
+                    AttributeValue::Int(int) => BorrowedAttributeValue::Int(*int),
+                    AttributeValue::Boolean(bool) => BorrowedAttributeValue::Bool(*bool),
+                    AttributeValue::None => BorrowedAttributeValue::None,
+                };
+                to.set_attribute(name, ns.as_deref(), value);
+            }
+            Mutation::SetText(value) => to.set_text(value),
+            Mutation::AddEventListener(name) => to.add_event_listener(name),
+            Mutation::RemoveEventListener(name) => to.remove_event_listener(name),
+            Mutation::Remove => to.remove(),
+        }
+    }
+}
+
+/// A host writer that records the replayed operations as host-side `Mutation`s. The surface's
+/// view of the tree is exactly what the replay saw, independent of how the guest encoded it.
+#[derive(Default)]
+struct RecordingWriter(Vec<Mutation>);
+
+impl WriteMutations for RecordingWriter {
+    fn push_id(&mut self, id: ElementId) {
+        self.0.push(Mutation::PushId(id.raw() as u32));
+    }
+    fn set_id(&mut self, id: ElementId) {
+        self.0.push(Mutation::SetId(id.raw() as u32));
+    }
+    fn child(&mut self, index: usize) {
+        self.0.push(Mutation::Child(index as u32));
+    }
+    fn pop(&mut self) {
+        self.0.push(Mutation::Pop);
+    }
+    fn create_element(&mut self, tag: &str, ns: Option<&str>) {
+        self.0
+            .push(Mutation::CreateElement((tag.into(), ns.map(Into::into))));
+    }
+    fn create_text(&mut self, value: &str) {
+        self.0.push(Mutation::CreateText(value.into()));
+    }
+    fn clone(&mut self) {
+        self.0.push(Mutation::CloneNode);
+    }
+    fn append_children(&mut self, m: usize) {
+        self.0.push(Mutation::AppendChildren(m as u32));
+    }
+    fn replace_with(&mut self, m: usize) {
+        self.0.push(Mutation::ReplaceWith(m as u32));
+    }
+    fn insert_after(&mut self, m: usize) {
+        self.0.push(Mutation::InsertAfter(m as u32));
+    }
+    fn insert_before(&mut self, m: usize) {
+        self.0.push(Mutation::InsertBefore(m as u32));
+    }
+    fn set_attribute(&mut self, name: &str, ns: Option<&str>, value: BorrowedAttributeValue<'_>) {
+        let value = match value {
+            BorrowedAttributeValue::Text(text) => AttributeValue::Text(text.into()),
+            BorrowedAttributeValue::Float(float) => AttributeValue::Float(float),
+            BorrowedAttributeValue::Int(int) => AttributeValue::Int(int),
+            BorrowedAttributeValue::Bool(bool) => AttributeValue::Boolean(bool),
+            BorrowedAttributeValue::None => AttributeValue::None,
+            BorrowedAttributeValue::Any(_) => unreachable!("`Any` never crosses the wire"),
+        };
+        self.0.push(Mutation::SetAttribute((
+            name.into(),
+            ns.map(Into::into),
+            value,
+        )));
+    }
+    fn set_text(&mut self, value: &str) {
+        self.0.push(Mutation::SetText(value.into()));
+    }
+    fn add_event_listener(&mut self, name: &str) {
+        self.0.push(Mutation::AddEventListener(name.into()));
+    }
+    fn remove_event_listener(&mut self, name: &str) {
+        self.0.push(Mutation::RemoveEventListener(name.into()));
+    }
+    fn remove(&mut self) {
+        self.0.push(Mutation::Remove);
+    }
+}
+
 pub struct RecordedSurface {
-    batches: Vec<Vec<u8>>,
+    batches: Vec<Vec<Mutation>>,
     alive: Arc<AtomicBool>,
 }
 pub struct Placement {
@@ -62,14 +170,16 @@ impl presentation::HostSurface for RecordingHost {
     fn apply(
         &mut self,
         surface: Resource<RecordedSurface>,
-        edits: Vec<u8>,
+        edits: Vec<Mutation>,
     ) -> wasmtime::Result<Result<u64, PresentationError>> {
         let surface = self.table.get_mut(&surface)?;
         if !surface.alive.load(Ordering::Acquire) {
             return Ok(Err(PresentationError::Revoked));
         }
-        // This backend records wire traffic only. Tree validation belongs to the real renderer.
-        surface.batches.push(edits);
+        // Replay through a real `WriteMutations`, exactly as the Blitz adapter will.
+        let mut writer = RecordingWriter::default();
+        replay(&edits, &mut writer);
+        surface.batches.push(writer.0);
         Ok(Ok(surface.batches.len().try_into().unwrap()))
     }
     fn drop(&mut self, surface: Resource<RecordedSurface>) -> wasmtime::Result<()> {
@@ -125,17 +235,6 @@ fn counter_component() -> Vec<u8> {
     output.stdout
 }
 
-#[test]
-fn exported_partial_opcode_word_has_zeroed_padding() {
-    let mut edits = dioxus_interpreter_js::Interpreter::default();
-    edits.push_id(7);
-    let bytes: Vec<u8> = edits.export_memory().collect();
-    // In the pinned Dioxus interpreter, metadata word 6 points to the opcode stream.
-    // This is an encoding-specific regression: push-id + end leave two unused opcode slots.
-    let message_offset = u32::from_le_bytes(bytes[24..28].try_into().unwrap()) as usize;
-    assert_eq!(&bytes[message_offset..message_offset + 4], &[0, 19, 0, 0]);
-}
-
 fn click_event(revision: u64) -> Event {
     let html = dioxus_html::HtmlEvent {
         element: dioxus_core::ElementId::from_raw(1),
@@ -169,11 +268,12 @@ fn event_envelope_roundtrips_through_dioxus_without_a_second_payload_schema() {
     );
 }
 
-fn expected_counter_batches(event_count: u64) -> Vec<Vec<u8>> {
+/// The same counter rendered natively through a host `WriteMutations`. If the guest's batches
+/// match this, the wire preserved Dioxus's edit stream exactly across the address space.
+fn expected_counter_batches(event_count: u64) -> Vec<Vec<Mutation>> {
     use dioxus::prelude::*;
-    use dioxus_core::{ElementId, RenderTargetId, VirtualDom};
+    use dioxus_core::{RenderTargetId, VirtualDom};
     use dioxus_html::{EventData, SerializedHtmlEventConverter, SerializedMouseData};
-    use dioxus_interpreter_js::MutationState;
 
     fn counter() -> Element {
         let mut count = use_signal(|| 0_u64);
@@ -187,10 +287,10 @@ fn expected_counter_batches(event_count: u64) -> Vec<Vec<u8>> {
 
     dioxus_html::set_event_converter(Box::new(SerializedHtmlEventConverter));
     let mut dom = VirtualDom::new(counter);
-    let mut edits = MutationState::default();
     let mut batches = Vec::with_capacity(event_count as usize + 1);
-    dom.rebuild(&mut edits);
-    batches.push(edits.export_memory());
+    let mut writer = RecordingWriter::default();
+    dom.rebuild(&mut writer);
+    batches.push(std::mem::take(&mut writer.0));
     for _ in 0..event_count {
         let event = dioxus_core::Event::new(
             EventData::Mouse(SerializedMouseData::default()).into_any(),
@@ -202,10 +302,44 @@ fn expected_counter_batches(event_count: u64) -> Vec<Vec<u8>> {
             event,
             ElementId::from_raw(1),
         );
-        dom.render_immediate(&mut edits);
-        batches.push(edits.export_memory());
+        dom.render_immediate(&mut writer);
+        batches.push(std::mem::take(&mut writer.0));
     }
     batches
+}
+
+#[test]
+fn initial_batch_is_a_real_tree_not_an_opaque_blob() {
+    let batches = expected_counter_batches(1);
+    // The initial build creates a button carrying a click listener with a text child.
+    assert!(
+        batches[0]
+            .iter()
+            .any(|m| matches!(m, Mutation::CreateElement((tag, _)) if tag == "button"))
+    );
+    assert!(
+        batches[0]
+            .iter()
+            .any(|m| matches!(m, Mutation::AddEventListener(name) if name == "click"))
+    );
+    assert!(
+        batches[0]
+            .iter()
+            .any(|m| matches!(m, Mutation::CreateText(text) if text == "0"))
+    );
+    // A click only updates the text node; it does not rebuild the tree.
+    assert_eq!(
+        batches[1]
+            .iter()
+            .filter(|m| matches!(m, Mutation::CreateElement(_)))
+            .count(),
+        0
+    );
+    assert!(
+        batches[1]
+            .iter()
+            .any(|m| matches!(m, Mutation::SetText(text) if text == "1"))
+    );
 }
 
 #[test]

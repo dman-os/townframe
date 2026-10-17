@@ -2,26 +2,28 @@
 
 This is the first executable component-boundary experiment, **not a settled micro SDK**.
 `../app/wit/presentation.wit` supplies both guest and host bindings. Production dependencies
-include the locally patched Dioxus fork's Core, hooks, signals, HTML event types, and actual
-interpreter mutation writer, but not the application runtime, Blitz, or Wasmtime. Wasmtime is a
-test backend only.
+include the Dioxus fork's Core, hooks, signals and HTML event types, but not the application
+runtime, Blitz, or Wasmtime. Wasmtime is a test backend only.
 
 The counter example is a Wasm library. Its exported renderer entry point borrows an explicitly
 issued mount point, creates a surface, and returns ownership of that surface to the host.
 The host retains the placement. Event delivery borrows the surface back into the guest, where
 element identity and event name are dispatched through Dioxus's runtime. The guest callback updates
-a signal, Dioxus diffs the virtual tree, and its real `MutationState` writer commits the resulting
+a signal, Dioxus diffs the virtual tree, and the `wire::WireMutations` writer commits the resulting
 edit through the imported surface operation; no Rust callback, component, or reactive state crosses WIT.
 
 The in-crate test builds the example using Cargo's configured target directory, wraps it as a
-component, and actually instantiates it. The recording backend checks the complete edit trace,
+component, and actually instantiates it. The host replays every received batch through a Rust
+`WriteMutations` — the same path the Blitz-backed native-dom writer takes — and compares the
+result against a natively driven Dioxus virtual DOM rendering the same counter. That proves the
+wire preserves Dioxus's edit stream exactly across the address space. The tests also check
 independent guest state in two instances of the same component, and resource-scoped revocation.
 One test pins a failure with Wasmtime 47.0.3: after a guest traps, dispatch to its neighbour
 sharing the same store fails with `CannotEnterComponent`. A separate test proves that a
-neighbour in its own store continues operating after the first guest traps. It is **not** a renderer implementation and
-does not claim tree validation, native mounting, automatic incarnation cleanup, or async-loop
-integration. Revocation deliberately traps the probe's unrecoverable presentation callback;
-closing that failed incarnation belongs to the future runtime adapter.
+neighbour in its own store continues operating after the first guest traps. It is **not** a renderer
+implementation and does not claim tree validation, native mounting, automatic incarnation cleanup,
+or async-loop integration. Revocation deliberately traps the probe's unrecoverable presentation
+callback; closing that failed incarnation belongs to the future runtime adapter.
 
 Source-backed Web IDL/component/browser notes and their scoped implications are in
 [WEB_PLATFORM.md](WEB_PLATFORM.md). These are working notes, not full web-compatibility claims.
@@ -40,6 +42,22 @@ The example's component exports are compiled only for Wasm: their WIT-qualified 
 valid native shared-library export names. Native tests execute the actual Wasm component,
 not a native substitute for its guest code.
 
+## The wire
+
+`presentation.wit` carries a typed `list<mutation>`. Its variants mirror Dioxus Core's
+`WriteMutations` one-to-one (push/set id, child, pop, create element/text, clone, append,
+replace-with, insert after/before, set attribute, set text, add/remove listener, remove). This is
+a framework-neutral transport of the retained-tree stack machine, chosen so that a React or Vue
+adapter can target the same host writer later. It is deliberately **not** Dioxus's internal
+Sledgehammer byte stream: that encoding is macro-generated for the JS interpreter, has no Rust
+decoder, and changes with the pinned revision.
+
+Attribute values are `text | float | int | boolean | none`. Dioxus's `Any` attribute carries a
+process-local Rust object and is excluded; a guest adapter that reaches it is a bug and panics.
+
+Element ids are surface-local. The host writer owns the element-id → real-node mapping, so
+each surface starts from its granted root without any global lookup.
+
 ## Boundary findings so far
 
 - An initial mount operation is necessary. Mutation and event interfaces alone leave no way
@@ -48,22 +66,16 @@ not a native substitute for its guest code.
   merely to initialize a renderer would conflate placement lifetime with an entry-point call.
 - Synchronous callbacks can call imported presentation operations and return default-action
   decisions. Data waiting does not need to force presentation callbacks into an async queue.
-- Surface-local node identities need no global application lookup. Each surface initializes
-  Dioxus's interpreter with its granted root as node 0 and the initial stack entry.
-- Edits use Dioxus's actual binary encoding, not a second Dayframe mutation language. The Wasm
-  probe uses the lower-level interpreter encoder; native tests compare the entire stream against
-  the upstream `MutationState` / `WriteMutations` adapter. Opcode padding is explicitly tested.
-- The Dioxus fork now makes Subsecond's browser patch loader an explicit `web` feature. The
-  guest builds Core, hooks, signals, HTML event conversion, and the real virtual DOM for
+- The Dioxus fork makes Subsecond's browser patch loader an explicit `web` feature. The guest
+  builds Core, hooks, signals, HTML event conversion, and the real virtual DOM for
   `wasm32-unknown-unknown` without importing `wasm-bindgen`; normal Dioxus web builds retain the
   browser loader through the `dioxus/web` feature.
 - The event envelope follows Dioxus's element/name/bubbling convention, with its serialized HTML
   payload unchanged. The component installs `SerializedHtmlEventConverter`, dispatches through
-  Dioxus's runtime, and renders signal-driven updates. Native tests compare the complete actual
-  component stream with a separately driven Dioxus virtual DOM and still exercise revocation.
-- The local Sledgehammer macro patch is documented in `vendor/sledgehammer-bindgen-macro/PATCH.md`.
-  It enables non-web Wasm encoding and initializes exported opcode padding without changing
-  the operation format. Host and guest encoding versions must match the pinned Dioxus revision.
+  Dioxus's runtime, and renders signal-driven updates.
+- The fork exposes native-dom's `DioxusState::writer` and `MutationBuffer`, so the native host
+  adapter can replay a guest batch into the subtree under a granted Blitz node with the same
+  `WriteMutations` semantics upstream uses for its own virtual DOM.
 
 The first batch receipt describes a committed **logical tree**, not completed layout or paint.
 The native bridge must not hold a renderer/document borrow across guest dispatch: a callback

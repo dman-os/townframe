@@ -15,5 +15,7 @@ pub mod bindings {
 pub use bindings::exports::townframe::dayframe::presentation_events;
 pub use bindings::townframe::dayframe::presentation;
 
+pub mod wire;
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

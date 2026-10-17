@@ -12,12 +12,45 @@ interface presentation {
         invalid-batch(string),
     }
 
+    /// Attribute values that can cross an address space. Dioxus's `Any` attribute carries a
+    /// process-local Rust object and is deliberately absent: a guest adapter must reject it.
+    variant attribute-value {
+        text(string),
+        float(f64),
+        int(s64),
+        boolean(bool),
+        /// Removes the attribute.
+        none,
+    }
+
+    /// One operation of the retained-tree stack machine. The variants mirror Dioxus Core's
+    /// `WriteMutations` one-to-one so that any framework adapter (Dioxus, React, Vue, …) can
+    /// target the same host writer; this is a typed transport of that vocabulary, not a second
+    /// rendering language. The host replays a batch into its own tree writer in order.
+    variant mutation {
+        push-id(node-id),
+        set-id(node-id),
+        child(u32),
+        pop,
+        create-element(tuple<string, option<string>>),
+        create-text(string),
+        clone-node,
+        append-children(u32),
+        replace-with(u32),
+        insert-after(u32),
+        insert-before(u32),
+        set-attribute(tuple<string, option<string>, attribute-value>),
+        set-text(string),
+        add-event-listener(string),
+        remove-event-listener(string),
+        remove,
+    }
+
     resource surface {
-        /// Uses dioxus-interpreter-js MutationState's binary protocol from the repository's pinned
-        /// Dioxus revision (ada3b67). This is deliberately not a second Dayframe mutation language.
-        /// Host and guest must agree on that encoding when linking the presentation adapter.
-        /// The receipt describes the logical edit commit, not completion of layout or paint.
-        apply: func(edits: list<u8>) -> result<u64, presentation-error>;
+        /// Commits one ordered batch of edits against this surface's tree. A batch is applied
+        /// atomically with respect to other batches on the same surface. The receipt describes
+        /// the logical edit commit, not completion of layout or paint.
+        apply: func(edits: list<mutation>) -> result<u64, presentation-error>;
     }
 
     resource mount-point {
