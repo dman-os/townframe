@@ -2,6 +2,15 @@
 // alias is what makes the same expansion resolve inside the crate's own tests.
 extern crate self as big_cabinet_core;
 
+pub mod dmeta;
+pub mod reference;
+pub mod schema_compat;
+
+pub use reference::{
+    DocumentId, FACET_REFERENCE_SCHEME, FacetKey, FacetReference, FacetTag, ReferenceDocumentId,
+    ReferenceError, SELF_DOCUMENT,
+};
+
 #[cfg(feature = "schemars")]
 pub mod facet;
 
