@@ -12,6 +12,7 @@ pub mod features;
 pub mod host;
 pub mod micros;
 pub mod native;
+pub mod presentation;
 
 pub use backend::{
     ApplicationBackend, BackendError, BackendEvent, Command, CommandId, CommandOutcome,

@@ -263,6 +263,70 @@ impl TestHost {
             .attr(LocalName::from("click"))
             .is_some()
     }
+
+    /// Resolves a click targeting `target` in the Blitz document to `(surface_rep, Event)` by
+    /// walking ancestors for `data-dioxus-id` and matching the surface whose `DioxusState` owns
+    /// that `NodeId`. Releases all borrows of `BaseDocument` before returning so the caller can
+    /// invoke the guest (which re-entrantly calls `surface.apply` and mutates `BaseDocument`).
+    fn resolve_click(&self, target: NodeId) -> Option<(u32, Event)> {
+        use dioxus_html::{
+            EventData, SerializedMouseData,
+            geometry::{ClientPoint, Coordinates, ElementPoint, PagePoint, ScreenPoint},
+            input_data::{MouseButton, decode_mouse_button_set},
+             Modifiers,
+        };
+
+        let doc = self.doc.as_ref()?;
+        let mut current = Some(target);
+        let (rep, node_id, element_id) = loop {
+            let node_id = current?;
+            let node = doc.get_node(node_id)?;
+            if let Some(raw_id) = node
+                .attr(LocalName::from("data-dioxus-id"))
+                .and_then(|value| value.parse::<usize>().ok())
+            {
+                let element_id = ElementId::from_raw(raw_id);
+                if let Some((&rep, _)) = self
+                    .states
+                    .iter()
+                    .find(|(_, state)| state.try_element_to_node_id(element_id) == Some(node_id))
+                {
+                    break (rep, node_id, element_id);
+                }
+            }
+            current = node.parent;
+        };
+
+        let surface = self.table.get(&Resource::<Surface>::new_borrow(rep)).ok()?;
+        let revision = match surface.backend {
+            Backend::Blitz { revisions } => revisions,
+            Backend::Recording(_) => return None,
+        };
+        let node = doc.get_node(node_id)?;
+        let blitz = node.synthetic_click_event_data(Modifiers::empty());
+        let mouse = SerializedMouseData::new(
+            Some(MouseButton::Primary),
+            decode_mouse_button_set(blitz.buttons.bits() as u16),
+            Coordinates::new(
+                ScreenPoint::new(blitz.screen_x() as f64, blitz.screen_y() as f64),
+                ClientPoint::new(blitz.client_x() as f64, blitz.client_y() as f64),
+                ElementPoint::new(blitz.element_x() as f64, blitz.element_y() as f64),
+                PagePoint::new(blitz.page_x() as f64, blitz.page_y() as f64),
+            ),
+            blitz.mods,
+        );
+        let data_json = serde_json::to_string(&EventData::Mouse(mouse)).unwrap();
+        Some((
+            rep,
+            Event {
+                revision,
+                element: element_id.raw().try_into().unwrap(),
+                name: "click".into(),
+                bubbles: true,
+                data_json,
+            },
+        ))
+    }
 }
 
 impl presentation::Host for TestHost {}
@@ -325,7 +389,15 @@ impl presentation::HostSurface for TestHost {
         }
     }
     fn drop(&mut self, surface: Resource<Surface>) -> wasmtime::Result<()> {
-        self.states.remove(&surface.rep());
+        if let Some(state) = self.states.remove(&surface.rep())
+            && let Some(doc) = self.doc.as_mut()
+        {
+            let root = state.element_to_node_id(ElementId::ROOT);
+            let mut mutator = doc.mutate();
+            for child in mutator.child_ids(root) {
+                mutator.remove_and_drop_node(child);
+            }
+        }
         self.table.delete(surface)?;
         Ok(())
     }
@@ -695,6 +767,29 @@ impl BlitzRig {
     fn has_click_listener(&self, placement: &Resource<Placement>) -> bool {
         self.store.data().has_click_listener(placement)
     }
+
+    fn buttons(&self, placement: &Resource<Placement>) -> Vec<NodeId> {
+        self.store.data().buttons(placement)
+    }
+
+    /// Dispatches a click on `target` in the Blitz document by resolving the owning surface and
+    /// `data-dioxus-id` element, releasing the document borrow, and invoking the guest's
+    /// `presentation-events.dispatch` (which re-entrantly applies mutations into the document).
+    fn click(
+        &mut self,
+        guest: &host_bindings::PresentationClient,
+        target: NodeId,
+    ) -> wasmtime::Result<host_bindings::exports::townframe::dayframe::presentation_events::EventResponse>
+    {
+        let (rep, event) = self
+            .store
+            .data()
+            .resolve_click(target)
+            .expect("target node must belong to a mounted Blitz surface with a listener");
+        guest
+            .townframe_dayframe_presentation_events()
+            .call_dispatch(&mut self.store, Resource::new_borrow(rep), &event)
+    }
 }
 
 #[test]
@@ -703,22 +798,21 @@ fn blitz_backend_renders_a_guest_component_into_a_real_tree() -> wasmtime::Resul
     let guest = rig.spawn()?;
     let events = guest.townframe_dayframe_presentation_events();
     let placement = rig.grant();
-    let surface = events
+    let _surface = events
         .call_mount(&mut rig.store, Resource::new_borrow(placement.rep()))?
         .unwrap();
 
     // The initial batch built a real retained subtree with a registered listener, not a blob.
     assert_eq!(rig.counter_text(&placement), "0");
     assert!(rig.has_click_listener(&placement));
+    let button = rig.buttons(&placement)[0];
 
-    // Clicks update that same real node in place; the tree is not rebuilt.
-    for (revision, expected) in [(1, "1"), (2, "2")] {
-        events.call_dispatch(
-            &mut rig.store,
-            Resource::new_borrow(surface.rep()),
-            &click_event(revision),
-        )?;
+    // Real Blitz DOM clicks on the button node update that same node in place across re-entrant apply.
+    for expected in ["1", "2"] {
+        let response = rig.click(&guest, button)?;
+        assert!(!response.prevent_default && !response.stop_propagation);
         assert_eq!(rig.counter_text(&placement), expected);
+        assert_eq!(rig.buttons(&placement), vec![button]);
     }
     Ok(())
 }
@@ -733,31 +827,72 @@ fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::Result<
 
     let first_placement = rig.grant();
     let second_placement = rig.grant();
-    let first_surface = first_events
+    let _first_surface = first_events
         .call_mount(&mut rig.store, Resource::new_borrow(first_placement.rep()))?
         .unwrap();
-    let second_surface = second_events
+    let _second_surface = second_events
         .call_mount(&mut rig.store, Resource::new_borrow(second_placement.rep()))?
         .unwrap();
 
     assert_eq!(rig.counter_text(&first_placement), "0");
     assert_eq!(rig.counter_text(&second_placement), "0");
 
-    // Both guests address their button as element 1. Per-surface state must keep them apart.
+    let first_button = rig.buttons(&first_placement)[0];
+    let second_button = rig.buttons(&second_placement)[0];
+    assert_ne!(first_button, second_button);
+
+    // Both guests address their button as element 1 (`data-dioxus-id="1"`). Routing by Blitz NodeId
+    // and per-surface `DioxusState` keeps them apart.
     for _ in 0..2 {
-        first_events.call_dispatch(
-            &mut rig.store,
-            Resource::new_borrow(first_surface.rep()),
-            &click_event(1),
-        )?;
+        rig.click(&first, first_button)?;
     }
-    second_events.call_dispatch(
-        &mut rig.store,
-        Resource::new_borrow(second_surface.rep()),
-        &click_event(1),
-    )?;
+    rig.click(&second, second_button)?;
 
     assert_eq!(rig.counter_text(&first_placement), "2");
+    assert_eq!(rig.counter_text(&second_placement), "1");
+    Ok(())
+}
+
+#[test]
+fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_siblings()
+-> wasmtime::Result<()> {
+    let mut rig = BlitzRig::new()?;
+    let first = rig.spawn()?;
+    let second = rig.spawn()?;
+
+    let first_placement = rig.grant();
+    let second_placement = rig.grant();
+    let first_surface = first
+        .townframe_dayframe_presentation_events()
+        .call_mount(&mut rig.store, Resource::new_borrow(first_placement.rep()))?
+        .unwrap();
+    let _second_surface = second
+        .townframe_dayframe_presentation_events()
+        .call_mount(&mut rig.store, Resource::new_borrow(second_placement.rep()))?
+        .unwrap();
+
+    let first_button = rig.buttons(&first_placement)[0];
+    let first_text_child = rig
+        .store
+        .data()
+        .doc
+        .as_ref()
+        .unwrap()
+        .get_node(first_button)
+        .unwrap()
+        .children[0];
+    // Clicking the child text node inside the button bubbles up to the button's `data-dioxus-id`.
+    rig.click(&first, first_text_child)?;
+    assert_eq!(rig.counter_text(&first_placement), "1");
+
+    // Dropping the first surface removes its rendered nodes from the Blitz document while leaving
+    // the sibling surface intact and interactive.
+    presentation::HostSurface::drop(rig.store.data_mut(), first_surface)?;
+    assert!(rig.buttons(&first_placement).is_empty());
+    assert_eq!(rig.counter_text(&second_placement), "0");
+
+    let second_button = rig.buttons(&second_placement)[0];
+    rig.click(&second, second_button)?;
     assert_eq!(rig.counter_text(&second_placement), "1");
     Ok(())
 }
