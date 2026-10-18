@@ -2,7 +2,7 @@ use crate::{
     host::{AccessError, Host},
     micros::{
         MicroDescriptor, MicroFactory, MicroId, MicroProvision, MicroRegistry, MicroRegistryError,
-        Provision, ProvisionKind,
+        Provision,
     },
 };
 use std::collections::BTreeMap;
@@ -17,8 +17,7 @@ fn declaration() -> MicroProvision {
     MicroProvision {
         id: Facility::ID.into(),
         version: Facility::VERSION,
-        kind: ProvisionKind::Context,
-    }
+        }
 }
 
 fn provider(
@@ -126,7 +125,7 @@ fn declaration_does_not_satisfy_a_dependency_and_missing_bindings_do_not_activat
             "supplier",
             BTreeMap::new()
         ),
-        Err(MicroRegistryError::Access(AccessError::Denied))
+        Err(MicroRegistryError::MissingProvision(id)) if id == Facility::ID
     ));
     assert_eq!(
         registry.output::<Facility>("supplier"),

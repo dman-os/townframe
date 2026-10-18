@@ -375,7 +375,7 @@ pub(crate) struct Composition {
 }
 
 impl Composition {
-    pub fn reconcile(
+    pub async fn reconcile(
         &mut self,
         host: &Host,
         registry: &MicroRegistry,
@@ -458,12 +458,15 @@ impl Composition {
                 states.insert(name.clone(), InstanceState::Failed(failed.error.clone()));
                 continue;
             }
-            match registry.activate(
-                host,
-                &configuration.provider,
-                name.clone(),
-                configuration.bindings.clone(),
-            ) {
+            match registry
+                .activate_async(
+                    host,
+                    &configuration.provider,
+                    name.clone(),
+                    configuration.bindings.clone(),
+                )
+                .await
+            {
                 Ok(instance) => {
                     self.failed.remove(name);
                     assert!(

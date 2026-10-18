@@ -126,18 +126,9 @@ impl MicroId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ProvisionKind {
-    Surface,
-    Command,
-    Placement,
-    Context,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MicroProvision {
     pub id: String,
-    pub kind: ProvisionKind,
     pub version: u32,
 }
 
@@ -298,6 +289,8 @@ pub enum MicroRegistryError {
     UnknownProvider(String),
     #[error("invalid dependency binding for contract {0}")]
     InvalidBinding(String),
+    #[error("provider did not publish required provision {0}")]
+    MissingProvision(String),
     #[error(transparent)]
     Access(#[from] AccessError),
 }
@@ -337,6 +330,14 @@ struct PreparedActivation {
     provider: Rc<dyn MicroProvider>,
     descriptor: MicroDescriptor,
     dependencies: Vec<Instance>,
+}
+
+fn unpublished<'a>(descriptor: &'a MicroDescriptor, values: &PendingProvisions) -> Option<&'a str> {
+    descriptor
+        .provisions
+        .iter()
+        .find(|provision| !values.contains_key(&provision.id))
+        .map(|provision| provision.id.as_str())
 }
 
 impl MicroRegistry {
@@ -439,7 +440,9 @@ impl MicroRegistry {
         } = self.prepare_activation(provider, &bindings)?;
         let activation_host = host.clone();
         let live = self.live.clone();
-        host.activate(instance_name, move |instance| {
+        let missing = Arc::new(Mutex::new(None));
+        let missing_for_activation = missing.clone();
+        let activated = host.activate(instance_name, move |instance| {
             for supplier in &dependencies {
                 activation_host.bind_dependency(&instance, supplier);
             }
@@ -453,17 +456,20 @@ impl MicroRegistry {
                 pending: pending.clone(),
             })?;
             let values = pending.lock().unwrap().take().unwrap();
-            if !descriptor
-                .provisions
-                .iter()
-                .all(|provision| values.contains_key(&provision.id))
-            {
+            if let Some(id) = unpublished(&descriptor, &values) {
+                *missing_for_activation.lock().unwrap() = Some(id.to_owned());
                 return Err(AccessError::Denied);
             }
             live.commit(&activation_host, &instance, values, &descriptor)?;
             Ok(instance)
-        })
-        .map_err(MicroRegistryError::from)
+        });
+        match activated {
+            Ok(instance) => Ok(instance),
+            Err(error) => Err(missing.lock().unwrap().take().map_or_else(
+                || MicroRegistryError::Access(error),
+                MicroRegistryError::MissingProvision,
+            )),
+        }
     }
 
     pub async fn activate_async(
@@ -480,34 +486,40 @@ impl MicroRegistry {
         } = self.prepare_activation(provider, &bindings)?;
         let activation_host = host.clone();
         let live = self.live.clone();
-        host.activate_async(instance_name, move |instance| async move {
-            for supplier in &dependencies {
-                activation_host.bind_dependency(&instance, supplier);
-            }
-            let pending = Arc::new(Mutex::new(Some(BTreeMap::new())));
-            provider_impl
-                .activate_async(MicroActivation {
-                    host: activation_host.clone(),
-                    instance: instance.clone(),
-                    descriptor: descriptor.clone(),
-                    bindings,
-                    live: live.clone(),
-                    pending: pending.clone(),
-                })
-                .await?;
-            let values = pending.lock().unwrap().take().unwrap();
-            if !descriptor
-                .provisions
-                .iter()
-                .all(|provision| values.contains_key(&provision.id))
-            {
-                return Err(AccessError::Denied);
-            }
-            live.commit(&activation_host, &instance, values, &descriptor)?;
-            Ok(instance)
-        })
-        .await
-        .map_err(MicroRegistryError::from)
+        let missing = Arc::new(Mutex::new(None));
+        let missing_for_activation = missing.clone();
+        let activated = host
+            .activate_async(instance_name, move |instance| async move {
+                for supplier in &dependencies {
+                    activation_host.bind_dependency(&instance, supplier);
+                }
+                let pending = Arc::new(Mutex::new(Some(BTreeMap::new())));
+                provider_impl
+                    .activate_async(MicroActivation {
+                        host: activation_host.clone(),
+                        instance: instance.clone(),
+                        descriptor: descriptor.clone(),
+                        bindings,
+                        live: live.clone(),
+                        pending: pending.clone(),
+                    })
+                    .await?;
+                let values = pending.lock().unwrap().take().unwrap();
+                if let Some(id) = unpublished(&descriptor, &values) {
+                    *missing_for_activation.lock().unwrap() = Some(id.to_owned());
+                    return Err(AccessError::Denied);
+                }
+                live.commit(&activation_host, &instance, values, &descriptor)?;
+                Ok(instance)
+            })
+            .await;
+        match activated {
+            Ok(instance) => Ok(instance),
+            Err(error) => Err(missing.lock().unwrap().take().map_or_else(
+                || MicroRegistryError::Access(error),
+                MicroRegistryError::MissingProvision,
+            )),
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     host::AccessError,
-    micros::{MicroFactory, MicroProvision, Provision, ProvisionKind},
+    micros::{AsyncMicroFactory, MicroFactory, MicroProvision, Provision},
 };
 use std::sync::{Arc, Mutex};
 
@@ -26,8 +26,7 @@ impl Fixture {
         let activations = Arc::new(Mutex::new(Vec::new()));
         let declaration = MicroProvision {
             id: Facility::ID.into(),
-            kind: ProvisionKind::Context,
-            version: 1,
+                    version: 1,
         };
         // Deliberately register the consumer first. Registration and configured identity ordering
         // must not decide dependency order.
@@ -74,10 +73,22 @@ impl Fixture {
         }
     }
 
-    fn reconcile(&mut self) -> BTreeMap<String, InstanceState> {
-        self.composition
-            .reconcile(&self.host, &self.registry, &self.desired)
+    fn try_reconcile(
+        &mut self,
+    ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap()
+            .block_on(self.composition.reconcile(
+                &self.host,
+                &self.registry,
+                &self.desired,
+            ))
+    }
+
+    fn reconcile(&mut self) -> BTreeMap<String, InstanceState> {
+        self.try_reconcile().unwrap()
     }
 
     fn instance(&self, name: &str) -> Instance {
@@ -200,9 +211,7 @@ fn invalid_edits_are_rejected_before_live_instances_are_withdrawn() {
         .bindings
         .clear();
     assert_eq!(
-        fixture
-            .composition
-            .reconcile(&fixture.host, &fixture.registry, &fixture.desired),
+        fixture.try_reconcile(),
         Err(ConfigurationError::MissingBinding {
             instance: "a-dependent".into(),
             contract: Facility::ID.into()
@@ -224,9 +233,7 @@ fn invalid_edits_are_rejected_before_live_instances_are_withdrawn() {
         ),
     );
     assert_eq!(
-        fixture
-            .composition
-            .reconcile(&fixture.host, &fixture.registry, &fixture.desired),
+        fixture.try_reconcile(),
         Err(ConfigurationError::Cycle(vec![
             "a-dependent".into(),
             "z-source".into()
@@ -265,8 +272,7 @@ fn unavailable_implementations_remain_inspectable_and_activate_when_registered()
                 requirements: vec![],
                 provisions: vec![MicroProvision {
                     id: Facility::ID.into(),
-                    kind: ProvisionKind::Context,
-                    version: 1,
+                                    version: 1,
                 }],
             },
             |activation| {
@@ -291,8 +297,7 @@ fn failed_activations_are_not_retried_on_unrelated_edits_but_new_inputs_allow_re
                 version: 1,
                 requirements: vec![MicroProvision {
                     id: Facility::ID.into(),
-                    kind: ProvisionKind::Context,
-                    version: 1,
+                                    version: 1,
                 }],
                 provisions: vec![],
             },
@@ -341,8 +346,7 @@ fn unfulfilled_provider_outputs_fail_the_provider_and_block_consumers_without_re
                 requirements: vec![],
                 provisions: vec![MicroProvision {
                     id: Facility::ID.into(),
-                    kind: ProvisionKind::Context,
-                    version: 1,
+                                    version: 1,
                 }],
             },
             move |_| {
@@ -361,7 +365,7 @@ fn unfulfilled_provider_outputs_fail_the_provider_and_block_consumers_without_re
         ),
         (
             "z-source".into(),
-            InstanceState::Failed(MicroRegistryError::Access(AccessError::Denied)),
+            InstanceState::Failed(MicroRegistryError::MissingProvision(Facility::ID.into())),
         ),
         ("unrelated".into(), InstanceState::Active),
     ]);
@@ -393,4 +397,45 @@ fn clearing_configuration_withdraws_all_instances_and_their_provisions() {
         ));
     }
     assert_eq!(fixture.reconcile(), BTreeMap::new());
+}
+
+#[test]
+fn async_provider_activates_through_reconciliation() {
+    let mut fixture = Fixture::new();
+    fixture
+        .registry
+        .register(AsyncMicroFactory::new(
+            MicroDescriptor {
+                id: MicroId::new("async-source"),
+                version: 1,
+                requirements: vec![],
+                provisions: vec![MicroProvision {
+                    id: Facility::ID.into(),
+                    version: 1,
+                }],
+            },
+            |activation| async move {
+                tokio::task::yield_now().await;
+                activation.publish(Facility(activation.instance()));
+                Ok(())
+            },
+        ))
+        .unwrap();
+    fixture.desired.insert(
+        "async".into(),
+        configuration("async-source", BTreeMap::new()),
+    );
+    assert_eq!(
+        fixture.reconcile().get("async"),
+        Some(&InstanceState::Active)
+    );
+    assert!(
+        fixture
+            .registry
+            .output::<Facility>("async")
+            .unwrap()
+            .0
+            .check()
+            .is_ok()
+    );
 }

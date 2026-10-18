@@ -6,7 +6,7 @@ pub use dayframe_settings_contract as contract;
 use contract::{SettingsSection, SettingsSections};
 use dayframe_app::{
     host::{AccessError, CollectionReader, CollectionWriter, HostedCollection, Instance, RootMount},
-    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision, ProvisionKind},
+    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision},
     native::NativeComponents,
 };
 
@@ -71,13 +71,11 @@ pub fn provider(
                 MicroProvision {
                     id: SettingsSections::ID.into(),
                     version: 1,
-                    kind: ProvisionKind::Context,
-                },
+                                },
                 MicroProvision {
                     id: SettingsMicro::ID.into(),
                     version: 1,
-                    kind: ProvisionKind::Context,
-                },
+                                },
             ],
         },
         move |activation| {

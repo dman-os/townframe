@@ -10,6 +10,14 @@ use dayframe_app::{
 use dayframe_settings::SettingsMicro;
 use std::collections::BTreeMap;
 
+fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
 #[test]
 fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller() {
     let mut application = ApplicationRuntime::new();
@@ -66,7 +74,7 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
         ),
     ]);
     assert_eq!(
-        application.configure(&configuration).unwrap(),
+        block_on(application.configure(&configuration)).unwrap(),
         BTreeMap::from([
             ("first".into(), InstanceState::Active),
             ("second".into(), InstanceState::Active),
@@ -87,7 +95,7 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
     assert_eq!(second_settings.sections.snapshot().unwrap().len(), 1);
     configuration.get_mut("second").unwrap().enablement = Enablement::Disabled;
     assert_eq!(
-        application.configure(&configuration).unwrap(),
+        block_on(application.configure(&configuration)).unwrap(),
         BTreeMap::from([
             ("first".into(), InstanceState::Active),
             ("second".into(), InstanceState::Disabled),
@@ -108,7 +116,7 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
     assert_eq!(application.roots().snapshot().unwrap().len(), 1);
     configuration.get_mut("second").unwrap().enablement = Enablement::Enabled;
     assert_eq!(
-        application.configure(&configuration).unwrap(),
+        block_on(application.configure(&configuration)).unwrap(),
         BTreeMap::from([
             ("first".into(), InstanceState::Active),
             ("second".into(), InstanceState::Active),

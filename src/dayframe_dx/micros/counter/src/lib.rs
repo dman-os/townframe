@@ -2,7 +2,7 @@
 //! boundary.
 use dayframe_app::{
     host::{ComponentRef, Instance},
-    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision, ProvisionKind},
+    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision},
     native::NativeComponents,
     wasm::{WasmMicro, WasmPackage},
 };
@@ -92,13 +92,11 @@ pub fn provider_with_package(package: WasmPackage, native: NativeComponents) -> 
             requirements: vec![MicroProvision {
                 id: SettingsSections::ID.into(),
                 version: 1,
-                kind: ProvisionKind::Context,
-            }],
+                        }],
             provisions: vec![MicroProvision {
                 id: CounterMicro::ID.into(),
                 version: 1,
-                kind: ProvisionKind::Context,
-            }],
+                        }],
         },
         move |activation| {
             let instance = activation.instance();
@@ -130,6 +128,14 @@ mod tests {
     use dioxus_core::{RenderTargetId, VirtualDom};
     use dioxus_html::{EventData, SerializedMouseData};
     use std::collections::BTreeMap;
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
 
     #[derive(Clone, PartialEq)]
     struct MountProps {
@@ -178,7 +184,7 @@ mod tests {
                 },
             ),
         ]);
-        let states = app.configure(&config).unwrap();
+        let states = block_on(app.configure(&config)).unwrap();
         assert_eq!(states["settings"], InstanceState::Active);
         assert_eq!(states["counter"], InstanceState::Active);
 
@@ -228,18 +234,18 @@ mod tests {
         assert_eq!(first_counter.instance.check(), Err(AccessError::Revoked));
         assert!(settings_micro.sections.snapshot().unwrap().is_empty());
 
-        let states = app.configure(&config).unwrap();
+        let states = block_on(app.configure(&config)).unwrap();
         assert_eq!(states["counter"], InstanceState::Stopped);
 
         config.get_mut("counter").unwrap().enablement = Enablement::Disabled;
         assert_eq!(
-            app.configure(&config).unwrap()["counter"],
+            block_on(app.configure(&config)).unwrap()["counter"],
             InstanceState::Disabled
         );
 
         config.get_mut("counter").unwrap().enablement = Enablement::Enabled;
         assert_eq!(
-            app.configure(&config).unwrap()["counter"],
+            block_on(app.configure(&config)).unwrap()["counter"],
             InstanceState::Active
         );
         let second_counter = app.output::<CounterMicro>("counter").unwrap();

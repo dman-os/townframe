@@ -65,17 +65,24 @@ impl DesktopRuntime {
             ),
         ]);
         let configuration = MockConfiguration::with_locked(locked, dynamic);
-        let states = application
-            .set_configuration_source(configuration.clone())
-            .unwrap();
+        application.install_configuration_source(configuration.clone());
 
-        let mut runtime = Self {
+        Self {
             application,
             configuration,
             states: BTreeMap::new(),
-        };
-        runtime.apply_states(states);
-        runtime
+        }
+    }
+
+    #[cfg(test)]
+    fn apply_now(&mut self) -> Result<(), ConfigurationError> {
+        let states = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(self.application.reconcile_configuration())?;
+        self.apply_states(states);
+        Ok(())
     }
 
     fn apply_states(&mut self, states: BTreeMap<String, InstanceState>) {
@@ -109,10 +116,7 @@ impl DesktopRuntime {
         instance: &str,
         enablement: Enablement,
     ) -> Result<(), ConfigurationError> {
-        self.configuration.set_enablement(instance, enablement)?;
-        let states = self.application.reconcile_configuration()?;
-        self.apply_states(states);
-        Ok(())
+        self.configuration.set_enablement(instance, enablement)
     }
 }
 
@@ -256,9 +260,20 @@ mod tests {
     use dayframe_sample::{SampleConfig, SampleMicro};
     use dayframe_settings::SettingsMicro;
 
+    fn started() -> DesktopRuntime {
+        let mut runtime = DesktopRuntime::new();
+        runtime.apply_now().unwrap();
+        runtime
+    }
+
+    fn set_now(runtime: &mut DesktopRuntime, instance: &str, enablement: Enablement) {
+        runtime.set_enablement(instance, enablement).unwrap();
+        runtime.apply_now().unwrap();
+    }
+
     #[test]
     fn provider_registration_drives_native_and_wasm_settings_and_locked_boot_entries() {
-        let mut runtime = DesktopRuntime::new();
+        let mut runtime = started();
         assert_eq!(runtime.application.provider_descriptors().len(), 3);
         assert_eq!(runtime.application.roots().snapshot().unwrap().len(), 1);
         assert_eq!(
@@ -294,7 +309,7 @@ mod tests {
 
     #[test]
     fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_restarts_wasm() {
-        let mut runtime = DesktopRuntime::new();
+        let mut runtime = started();
         let first_sample = runtime.application.output::<SampleMicro>("sample").unwrap();
         let first_counter = runtime
             .application
@@ -315,12 +330,8 @@ mod tests {
         );
         first_sample.edit(changed.clone()).unwrap();
         runtime.application.host().mock_documents().settle(true);
-        runtime
-            .set_enablement("sample", Enablement::Disabled)
-            .unwrap();
-        runtime
-            .set_enablement("counter", Enablement::Disabled)
-            .unwrap();
+        set_now(&mut runtime, "sample", Enablement::Disabled);
+        set_now(&mut runtime, "counter", Enablement::Disabled);
         assert_eq!(runtime.states["sample"], InstanceState::Disabled);
         assert_eq!(runtime.states["counter"], InstanceState::Disabled);
         assert!(matches!(
@@ -345,12 +356,8 @@ mod tests {
             first_sample.watch().current().unwrap_err(),
             AccessError::Revoked
         );
-        runtime
-            .set_enablement("sample", Enablement::Enabled)
-            .unwrap();
-        runtime
-            .set_enablement("counter", Enablement::Enabled)
-            .unwrap();
+        set_now(&mut runtime, "sample", Enablement::Enabled);
+        set_now(&mut runtime, "counter", Enablement::Enabled);
         let second_sample = runtime.application.output::<SampleMicro>("sample").unwrap();
         let second_counter = runtime
             .application
@@ -378,7 +385,7 @@ mod tests {
 
     #[test]
     fn provider_withdrawal_closes_dependents_before_their_collection() {
-        let runtime = DesktopRuntime::new();
+        let runtime = started();
         let sample = runtime.application.output::<SampleMicro>("sample").unwrap();
         let counter = runtime
             .application

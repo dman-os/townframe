@@ -6,7 +6,7 @@ mod view;
 use dayframe_app::{
     documents::{DocumentRef, DocumentSnapshot, DocumentWatch, Facet, FacetRoute},
     host::{AccessError, ComponentRef, Host, Instance},
-    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision, ProvisionKind},
+    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision},
     native::NativeComponents,
 };
 use dayframe_settings_contract::{SettingsContribution, SettingsSection, SettingsSections};
@@ -119,13 +119,11 @@ pub fn provider(native: NativeComponents) -> MicroFactory {
             requirements: vec![MicroProvision {
                 id: SettingsSections::ID.into(),
                 version: 1,
-                kind: ProvisionKind::Context,
-            }],
+                        }],
             provisions: vec![MicroProvision {
                 id: SampleMicro::ID.into(),
                 version: 1,
-                kind: ProvisionKind::Context,
-            }],
+                        }],
         },
         move |activation| {
             let instance = activation.instance();

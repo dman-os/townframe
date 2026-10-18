@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     host::{AccessError, CloseReason},
     micros::composition::Enablement,
-    micros::{MicroFactory, MicroId, MicroProvision, Provision, ProvisionKind},
+    micros::{MicroFactory, MicroId, MicroProvision, Provision},
 };
 use std::sync::{Arc, Mutex};
 
@@ -21,7 +21,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    async fn new() -> Self {
         let mut runtime = ApplicationRuntime::new();
         let activations = Arc::new(Mutex::new(Vec::new()));
         let counted = activations.clone();
@@ -59,7 +59,7 @@ impl Fixture {
                 },
             ),
         ]);
-        runtime.configure(&desired).unwrap();
+        runtime.configure(&desired).await.unwrap();
         let reports = runtime.reports();
         Self {
             runtime,
@@ -99,8 +99,7 @@ fn declaration() -> MicroProvision {
     MicroProvision {
         id: Facility::ID.into(),
         version: 1,
-        kind: ProvisionKind::Context,
-    }
+        }
 }
 
 fn active() -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
@@ -114,7 +113,7 @@ fn active() -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
 async fn late_registration_activates_blocked_instances_without_manual_reconciliation() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let mut fixture = Fixture::new();
+            let mut fixture = Fixture::new().await;
             fixture.reports.borrow_and_update();
             let runtime = fixture.runtime.clone();
             let observation = tokio::task::spawn_local(async move { runtime.observe().await });
@@ -171,7 +170,7 @@ async fn late_registration_activates_blocked_instances_without_manual_reconcilia
 async fn registration_before_observer_first_poll_is_not_lost() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let mut fixture = Fixture::new();
+            let mut fixture = Fixture::new().await;
             fixture.register_supplier();
             let runtime = fixture.runtime.clone();
             let observation = tokio::task::spawn_local(async move { runtime.observe().await });
@@ -194,7 +193,7 @@ async fn registration_before_observer_first_poll_is_not_lost() {
 async fn independent_stop_withdraws_dependents_but_does_not_restart_the_provider() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let mut fixture = Fixture::new();
+            let mut fixture = Fixture::new().await;
             fixture.register_supplier();
             let runtime = fixture.runtime.clone();
             let observation = tokio::task::spawn_local(async move { runtime.observe().await });
@@ -247,9 +246,9 @@ async fn independent_stop_withdraws_dependents_but_does_not_restart_the_provider
                 ["supplier", "consumer"]
             );
             fixture.desired.get_mut("supplier").unwrap().enablement = Enablement::Disabled;
-            fixture.runtime.configure(&fixture.desired).unwrap();
+            fixture.runtime.configure(&fixture.desired).await.unwrap();
             fixture.desired.get_mut("supplier").unwrap().enablement = Enablement::Enabled;
-            fixture.runtime.configure(&fixture.desired).unwrap();
+            fixture.runtime.configure(&fixture.desired).await.unwrap();
             fixture
                 .reports
                 .wait_for(|report| report == &active())
@@ -271,7 +270,7 @@ async fn independent_stop_withdraws_dependents_but_does_not_restart_the_provider
 async fn newly_available_but_incompatible_provider_reports_error_and_observation_can_recover() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let mut fixture = Fixture::new();
+            let mut fixture = Fixture::new().await;
             fixture.reports.borrow_and_update();
             let runtime = fixture.runtime.clone();
             let observation = tokio::task::spawn_local(async move { runtime.observe().await });
@@ -317,7 +316,7 @@ async fn newly_available_but_incompatible_provider_reports_error_and_observation
                 ))
                 .unwrap();
             fixture.desired.get_mut("supplier").unwrap().provider = MicroId::new("replacement");
-            fixture.runtime.configure(&fixture.desired).unwrap();
+            fixture.runtime.configure(&fixture.desired).await.unwrap();
             fixture
                 .reports
                 .wait_for(|report| report == &active())
@@ -336,7 +335,7 @@ async fn newly_available_but_incompatible_provider_reports_error_and_observation
 #[tokio::test]
 async fn cancelling_an_observer_releases_ownership_for_a_replacement() {
     use std::{future::Future, task::Poll};
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let mut observer = Box::pin(fixture.runtime.observe());
     std::future::poll_fn(|context| {
         assert!(observer.as_mut().poll(context).is_pending());
@@ -358,7 +357,7 @@ async fn facet_and_static_configuration_sources_enforce_locked_entries_and_drive
 
     tokio::task::LocalSet::new()
         .run_until(async {
-            let mut fixture = Fixture::new();
+            let mut fixture = Fixture::new().await;
             fixture.register_supplier();
 
             let locked = BTreeMap::from([(
@@ -383,6 +382,7 @@ async fn facet_and_static_configuration_sources_enforce_locked_entries_and_drive
                 fixture
                     .runtime
                     .set_configuration_source(static_source)
+                    .await
                     .unwrap(),
                 BTreeMap::from([("supplier".into(), InstanceState::Active)])
             );
@@ -438,6 +438,7 @@ async fn facet_and_static_configuration_sources_enforce_locked_entries_and_drive
                 fixture
                     .runtime
                     .set_configuration_source(facet_source.clone())
+                    .await
                     .unwrap(),
                 BTreeMap::from([
                     ("consumer".into(), InstanceState::Active),
@@ -487,7 +488,7 @@ async fn facet_and_static_configuration_sources_enforce_locked_entries_and_drive
             host.mock_documents()
                 .external_change(route, Some(serde_json::to_value(tampered).unwrap()));
             assert_eq!(
-                fixture.runtime.reconcile_configuration().unwrap(),
+                fixture.runtime.reconcile_configuration().await.unwrap(),
                 BTreeMap::from([
                     ("consumer".into(), InstanceState::Active),
                     ("supplier".into(), InstanceState::Active),

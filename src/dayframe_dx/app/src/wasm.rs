@@ -7,7 +7,7 @@
 
 use crate::{
     host::{AccessError, ComponentRef, Instance},
-    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision, ProvisionKind},
+    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision},
     native::{NativeComponents, SurfaceSession, SurfaceWriter},
     presentation::{AttributeValue, Event, EventResponse, Mutation, PresentationError},
 };
@@ -366,8 +366,7 @@ pub fn provider(id: MicroId, package: WasmPackage, native: NativeComponents) -> 
             provisions: vec![MicroProvision {
                 id: WasmMicro::ID.into(),
                 version: 1,
-                kind: ProvisionKind::Context,
-            }],
+                        }],
         },
         move |activation| {
             let instance = activation.instance();
@@ -400,6 +399,14 @@ mod tests {
         process::Command,
         sync::LazyLock,
     };
+
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
 
     fn counter_package() -> WasmPackage {
         static BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| {
@@ -487,7 +494,7 @@ mod tests {
                 bindings: BTreeMap::new(),
             },
         )]);
-        let states = app.configure(&config).unwrap();
+        let states = block_on(app.configure(&config)).unwrap();
         assert_eq!(states["counter"], InstanceState::Active);
 
         let wasm_micro = app.output::<WasmMicro>("counter").unwrap();
@@ -538,8 +545,7 @@ mod tests {
                 provisions: vec![MicroProvision {
                     id: WasmMicro::ID.into(),
                     version: 1,
-                    kind: ProvisionKind::Context,
-                }],
+                                }],
             },
             move |activation| {
                 let instance = activation.instance();
@@ -561,7 +567,7 @@ mod tests {
                 bindings: BTreeMap::new(),
             },
         )]);
-        app.configure(&config).unwrap();
+        block_on(app.configure(&config)).unwrap();
 
         let reader = collection.reader(&root);
         let first_wasm = app.output::<WasmMicro>("counter").unwrap();
@@ -593,15 +599,15 @@ mod tests {
         assert_eq!(first_wasm.instance.check(), Err(AccessError::Revoked));
         assert!(reader.snapshot().unwrap().is_empty());
 
-        let states = app.configure(&config).unwrap();
+        let states = block_on(app.configure(&config)).unwrap();
         assert_eq!(states["counter"], InstanceState::Stopped);
 
         config.get_mut("counter").unwrap().enablement = Enablement::Disabled;
-        let states = app.configure(&config).unwrap();
+        let states = block_on(app.configure(&config)).unwrap();
         assert_eq!(states["counter"], InstanceState::Disabled);
 
         config.get_mut("counter").unwrap().enablement = Enablement::Enabled;
-        let states = app.configure(&config).unwrap();
+        let states = block_on(app.configure(&config)).unwrap();
         assert_eq!(states["counter"], InstanceState::Active);
         let second_wasm = app.output::<WasmMicro>("counter").unwrap();
         assert!(second_wasm.instance != first_wasm.instance);

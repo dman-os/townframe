@@ -348,9 +348,8 @@ To be fixed as the slices land, not all at once.
    `MicroRegistry::activate_async` added and tested.
 4. Two parallel data stacks: the older `backend.rs`/`data/` from ADR 014's accepted half, and the
    session's `documents.rs`. They should collapse into one node seam using the D6 vocabulary.
-5. `ProvisionKind` is speculative — only `Context` is ever constructed.
-6. A missing mandatory provision is reported as `AccessError::Denied`, which tells the operator
-   nothing.
+5. (Resolved, turn 11) `ProvisionKind` removed. It was never read; contract identity is the provision id and version.
+6. (Resolved, turn 11) A missing mandatory provision is `MicroRegistryError::MissingProvision(id)`, not `AccessError::Denied`.
 7. (Resolved, turn 8) Guest ships the typed `list<mutation>` wire; sledgehammer and its vendored
    patch are gone.
 8. (Resolved) `../dioxus` resolves through the shared symlink and WIT deps are fetched with
@@ -441,5 +440,12 @@ To be fixed as the slices land, not all at once.
     updated `desktop` to link `dayframe_settings`, `dayframe_sample`, and `dayframe_counter` and drive
     generic lifecycle controls via `ConfigurationSource` (65/65 nextest across all 7 dayframe crates +
     clippy `-D warnings` clean).
+- **Turn 11** — Wired composition through `MicroRegistry::activate_async` so an `AsyncMicroFactory`
+  actually starts from configuration reconciliation, not only from a direct registry call. The
+  composition lock is a `tokio::sync::Mutex` so activation can await without holding a `RefCell`
+  guard. Removed unread `ProvisionKind`. Missing mandatory provisions report
+  `MicroRegistryError::MissingProvision`. Desktop installs its configuration source and lets the
+  observer reconcile, so the UI thread does not block on activation. Verified: 59 nextest across
+  `dayframe_app`, settings/sample/counter crates, and `desktop`, plus clippy `-D warnings`.
 
 

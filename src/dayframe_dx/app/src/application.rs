@@ -26,7 +26,7 @@ pub struct ApplicationRuntime {
     native: NativeComponents,
     root_mounts: HostedCollection<RootMount>,
     providers: MicroRegistry,
-    composition: Rc<RefCell<Composition>>,
+    composition: Rc<tokio::sync::Mutex<Composition>>,
     source: Rc<RefCell<Option<Rc<dyn ConfigurationSource>>>>,
     source_changes: tokio::sync::watch::Sender<()>,
     desired: tokio::sync::watch::Sender<BTreeMap<String, ConfiguredMicro>>,
@@ -55,7 +55,7 @@ impl ApplicationRuntime {
             native,
             root_mounts,
             providers: MicroRegistry::default(),
-            composition: Rc::default(),
+            composition: Rc::new(tokio::sync::Mutex::new(Composition::default())),
             source: Rc::default(),
             source_changes: tokio::sync::watch::channel(()).0,
             desired: tokio::sync::watch::channel(BTreeMap::new()).0,
@@ -102,20 +102,24 @@ impl ApplicationRuntime {
         self.providers.descriptors().collect()
     }
 
+    /// Install a [`ConfigurationSource`] without reconciling. The observer applies it.
+    pub fn install_configuration_source(&self, source: impl ConfigurationSource + 'static) {
+        *self.source.borrow_mut() = Some(Rc::new(source));
+        self.source_changes.send_replace(());
+    }
+
     /// Install a [`ConfigurationSource`] and reconcile its initial desired composition.
-    pub fn set_configuration_source(
+    pub async fn set_configuration_source(
         &self,
         source: impl ConfigurationSource + 'static,
     ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
         let desired = source.current()?;
-        let states = self.configure(&desired)?;
-        *self.source.borrow_mut() = Some(Rc::new(source));
-        self.source_changes.send_replace(());
-        Ok(states)
+        self.install_configuration_source(source);
+        self.configure(&desired).await
     }
 
     /// Reconcile the current snapshot from the installed [`ConfigurationSource`].
-    pub fn reconcile_configuration(
+    pub async fn reconcile_configuration(
         &self,
     ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
         let desired = self
@@ -125,7 +129,7 @@ impl ApplicationRuntime {
             .map(|source| source.current())
             .transpose()?
             .unwrap_or_else(|| self.desired.borrow().clone());
-        self.configure(&desired)
+        self.configure(&desired).await
     }
 
     pub fn is_locked(&self, instance: &str) -> bool {
@@ -137,14 +141,16 @@ impl ApplicationRuntime {
 
     /// Apply a desired boot configuration projection. Malformed edits leave the live graph intact;
     /// absent implementations/dependencies and activation failures are explicit per-instance states.
-    pub fn configure(
+    pub async fn configure(
         &self,
         desired: &BTreeMap<String, ConfiguredMicro>,
     ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
-        let states =
-            self.composition
-                .borrow_mut()
-                .reconcile(&self.host, &self.providers, desired)?;
+        let states = self
+            .composition
+            .lock()
+            .await
+            .reconcile(&self.host, &self.providers, desired)
+            .await?;
         self.desired.send_if_modified(|current| {
             if current == desired {
                 return false;
@@ -230,10 +236,12 @@ impl ApplicationRuntime {
                 });
             }
             let desired = desired_changes.borrow_and_update().clone();
-            let report =
-                self.composition
-                    .borrow_mut()
-                    .reconcile(&self.host, &self.providers, &desired);
+            let report = self
+                .composition
+                .lock()
+                .await
+                .reconcile(&self.host, &self.providers, &desired)
+                .await;
             self.reports.send_modify(|current| *current = report);
             tokio::select! {
                 result = host_changes.changed() => result.unwrap(),
