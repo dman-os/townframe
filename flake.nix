@@ -423,7 +423,7 @@
                 ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.linuxHeaders}/include -idirafter ${pkgs.stdenv.cc.libc.dev}/include"
                 ''}
-                export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${self}/target/debug/:${
+                export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$PWD/target/debug/:${
                   pkgs.lib.makeLibraryPath (
                     pkgs.lib.map (packageValue: pkgs.lib.getLib packageValue) (
                       devShellBuildInputs ++ desktopRuntimeLibPackages
