@@ -6,14 +6,29 @@
 //! canonical/Lexicon-facing shape evolve safely?  A higher-level `SchemaRepo` can apply its own
 //! admission policy to the report.
 //!
-//! The checker understands the JSON Schema subset emitted by Cabinet.  Unsupported applicators are
-//! reported as `not established`; they are never treated as compatible merely because two arbitrary
-//! JSON documents happen to compare equal.
+//! The checker understands the JSON Schema subset emitted by Cabinet, and nothing else. A union is
+//! read as the internal `$type` layout a published declaration has: the discriminant is the `$type`
+//! const on the branch and the payload is the branch itself, because an adjacent member is a
+//! declared wrapper type whose single property happens to be `value` — not a carrier the checker
+//! unwraps. Bytes are the `{ "$bytes": ... }` object the codec emits; a `contentEncoding`
+//! annotation is an ordinary string annotation and is not sniffed. A storage form is `x-automerge`
+//! or `format: date-time` and nothing further, so a unit annotation is not a storage kind.
+//!
+//! Lexicon evolution is bidirectional. An optional property may be added or removed, and an open
+//! union may gain or lose a known member. A required property, a type, a nullable name, a constraint
+//! that rejects a previously valid value, or a closed union's member set is incompatible.
+//!
+//! Unsupported applicators are reported as `not established`; they are never treated as compatible
+//! merely because two arbitrary JSON documents happen to compare equal. The Lexicon dimension
+//! compares the files [`crate::facet::Bundle::lexicons`] actually publishes, so a bundle that fails
+//! that gate has no Lexicon to evolve.
 
+#[cfg(feature = "schemars")]
+mod lexicon;
 mod native;
 
 use native::compare_native;
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A schema document together with the definitions available while resolving local references.
@@ -125,21 +140,51 @@ pub fn compare_facet_bundles(
     new: &crate::facet::Bundle<'_>,
     new_facet: &str,
 ) -> Option<CompatibilityReport> {
-    if let Err(error) = old.validate() {
-        return Some(not_established_report(
-            "/$defs",
-            format!("old facet bundle is invalid: {error}"),
-        ));
-    }
-    if let Err(error) = new.validate() {
-        return Some(not_established_report(
-            "/$defs",
-            format!("new facet bundle is invalid: {error}"),
-        ));
-    }
-    let old_document = serde_json::to_value(old.document(old_facet)?).ok()?;
-    let new_document = serde_json::to_value(new.document(new_facet)?).ok()?;
-    Some(compare_schemas(&old_document, &new_document))
+    // The document a bundle exposes is a `$ref` into its definitions, which is not itself a
+    // position. The facet's own definition is, and that is what evolves.
+    let old_schema = serde_json::to_value(old.resolve(old_facet)?).expect("a schema is JSON");
+    let new_schema = serde_json::to_value(new.resolve(new_facet)?).expect("a schema is JSON");
+    let mut report = compare_schemas(&old_schema, &new_schema);
+    // The Lexicon dimension compares published files, not a projection of the sidecar. A bundle
+    // that fails the publish gate is a codec document: it has no Lexicon, so the dimension is not
+    // established rather than guessed.
+    let old_id = old
+        .plug
+        .facets
+        .iter()
+        .find(|facet| facet.name == old_facet)
+        .map(|facet| facet.id.as_str());
+    let new_id = new
+        .plug
+        .facets
+        .iter()
+        .find(|facet| facet.name == new_facet)
+        .map(|facet| facet.id.as_str());
+    report.lexicon = match (old_id, new_id, old.lexicons(), new.lexicons()) {
+        (Some(old_id), Some(new_id), Ok(old_lexicons), Ok(new_lexicons)) => {
+            let old_file = old_lexicons
+                .into_iter()
+                .find(|lexicon| lexicon.id == old_id);
+            let new_file = new_lexicons
+                .into_iter()
+                .find(|lexicon| lexicon.id == new_id);
+            match (old_file, new_file) {
+                (Some(old_file), Some(new_file)) if old_id == new_id => {
+                    lexicon::evolve_files(&old_file.file, &new_file.file)
+                }
+                (Some(_), Some(_)) => incompatible_outcome("/", "lexicon id changed"),
+                _ => not_established_outcome(
+                    "/",
+                    "facet has no published Lexicon: it is a codec document".to_owned(),
+                ),
+            }
+        }
+        (_, _, Err(error), _) | (_, _, _, Err(error)) => {
+            not_established_outcome("/", format!("facet bundle is not lexicon-aligned: {error}"))
+        }
+        _ => not_established_outcome("/", "facet is not declared by the bundle".to_owned()),
+    };
+    Some(report)
 }
 
 #[derive(Default)]
@@ -181,18 +226,22 @@ impl Findings {
     }
 }
 
-fn not_established_report(path: &str, reason: String) -> CompatibilityReport {
-    let outcome = CompatibilityOutcome {
-        result: Compatibility::NotEstablished,
+fn not_established_outcome(path: &str, reason: String) -> CompatibilityOutcome {
+    outcome(Compatibility::NotEstablished, path, reason)
+}
+
+#[cfg(feature = "schemars")]
+fn incompatible_outcome(path: &str, reason: &str) -> CompatibilityOutcome {
+    outcome(Compatibility::Incompatible, path, reason.to_owned())
+}
+
+fn outcome(result: Compatibility, path: &str, reason: String) -> CompatibilityOutcome {
+    CompatibilityOutcome {
+        result,
         diagnostics: vec![Diagnostic {
             path: path.to_owned(),
             reason,
         }],
-    };
-    CompatibilityReport {
-        json: outcome.clone(),
-        native_storage: outcome.clone(),
-        lexicon: outcome,
     }
 }
 
@@ -276,453 +325,73 @@ fn compare_json(old: &SchemaBundle, new: &SchemaBundle) -> CompatibilityOutcome 
     findings.outcome()
 }
 
-/// Project the supported canonical representation.  Validation refinements and storage annotations
-/// are dropped only after their canonical wire meaning has been accounted for.
+/// Project the supported canonical representation through the same projector a bundle publishes
+/// with, so this dimension cannot disagree with [`crate::facet::lexicon::project_facet`] about a
+/// schema the crate itself authored. A schema that projector refuses is not a Lexicon, and the
+/// answer is `not established` rather than a guess. Two projections that differ are judged by the
+/// bidirectional evolution rules, not by byte equality.
+#[cfg(feature = "schemars")]
 fn compare_lexicon(old: &SchemaBundle, new: &SchemaBundle) -> CompatibilityOutcome {
-    let mut validation = Findings::default();
-    let old_valid =
-        validate_lexicon_schema(old, &old.root, "/", &mut validation, &mut BTreeSet::new());
-    let new_valid =
-        validate_lexicon_schema(new, &new.root, "/", &mut validation, &mut BTreeSet::new());
-    for (name, schema) in &old.definitions {
-        validate_lexicon_schema(
-            old,
-            schema,
-            &child("/$defs", name),
-            &mut validation,
-            &mut BTreeSet::new(),
-        );
+    match (
+        crate::facet::lexicon::project_position(&old.root, &defs_of(&old.definitions)),
+        crate::facet::lexicon::project_position(&new.root, &defs_of(&new.definitions)),
+    ) {
+        (Ok(old_position), Ok(new_position)) => {
+            lexicon::evolve_projected(&old_position, &new_position)
+        }
+        (Err(reason), _) | (_, Err(reason)) => {
+            not_established_outcome("/", format!("not a publishable Lexicon: {reason}"))
+        }
     }
-    for (name, schema) in &new.definitions {
-        validate_lexicon_schema(
-            new,
-            schema,
-            &child("/$defs", name),
-            &mut validation,
-            &mut BTreeSet::new(),
-        );
-    }
-    if !old_valid || !new_valid || validation.not_established {
-        return validation.outcome();
-    }
-    let (Ok(old_root), Ok(new_root)) =
-        (lexicon_projection(&old.root), lexicon_projection(&new.root))
-    else {
-        return CompatibilityOutcome {
-            result: Compatibility::NotEstablished,
-            diagnostics: vec![Diagnostic {
-                path: "/".to_owned(),
-                reason: "Lexicon projection is not established for an unsupported schema construct"
-                    .to_owned(),
-            }],
-        };
-    };
-    let old_definitions: Result<BTreeMap<_, _>, ()> = old
-        .definitions
+}
+
+#[cfg(not(feature = "schemars"))]
+fn compare_lexicon(_: &SchemaBundle, _: &SchemaBundle) -> CompatibilityOutcome {
+    not_established_outcome("/", "this build has no lexicon projector".to_owned())
+}
+
+#[cfg(feature = "schemars")]
+fn defs_of(definitions: &BTreeMap<String, Value>) -> serde_json::Map<String, Value> {
+    definitions
         .iter()
-        .map(|(name, schema)| Ok((name.clone(), lexicon_projection(schema)?)))
-        .collect();
-    let new_definitions: Result<BTreeMap<_, _>, ()> = new
-        .definitions
-        .iter()
-        .map(|(name, schema)| Ok((name.clone(), lexicon_projection(schema)?)))
-        .collect();
-    let (Ok(old_definitions), Ok(new_definitions)) = (old_definitions, new_definitions) else {
-        return CompatibilityOutcome {
-            result: Compatibility::NotEstablished,
-            diagnostics: vec![Diagnostic {
-                path: "/$defs".to_owned(),
-                reason: "Lexicon projection is not established for an unsupported definition"
-                    .to_owned(),
-            }],
-        };
-    };
-    compare_json(
-        &SchemaBundle::with_definitions(old_root, old_definitions),
-        &SchemaBundle::with_definitions(new_root, new_definitions),
-    )
+        .map(|(name, schema)| (name.clone(), schema.clone()))
+        .collect()
 }
 
-fn validate_lexicon_schema(
-    bundle: &SchemaBundle,
-    schema: &Value,
-    path: &str,
-    findings: &mut Findings,
-    seen: &mut BTreeSet<String>,
-) -> bool {
-    let Some(schema) = resolve(bundle, schema, path, "lexicon", findings) else {
-        return false;
-    };
-    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
-        if !seen.insert(reference.to_owned()) {
-            findings.not_established(path, "Lexicon reference cycle is not established");
-            return false;
-        }
-        return validate_lexicon_schema(bundle, schema, path, findings, seen);
-    }
-    if is_open_fallback_tag(schema) {
-        return true;
-    }
-    if unsupported_keyword(schema).is_some() {
-        findings.not_established(
-            path,
-            "Lexicon projection uses an unsupported schema construct",
-        );
-        return false;
-    }
-    if let Some(marker) = schema.get("x-automerge").and_then(Value::as_str) {
-        if !marker_is_consistent(schema, marker) {
-            findings.not_established(
-                path,
-                "Lexicon storage marker contradicts the declared JSON type",
-            );
-            return false;
-        }
-        return true;
-    }
-    if schema.get("contentEncoding").is_some()
-        && !schema
-            .get("type")
-            .is_none_or(|type_value| type_value_accepts(type_value, "string"))
-    {
-        findings.not_established(path, "bytes encoding contradicts the declared JSON type");
-        return false;
-    }
-    if let Some(format) = schema.get("format").and_then(Value::as_str)
-        && !matches!(format, "date-time" | "uri" | "uuid" | "cid" | "datetime")
-    {
-        findings.not_established(
-            path,
-            "Lexicon format is not in the supported canonical allowlist",
-        );
-        return false;
-    }
-    let mut valid = true;
-    if let Some(branches) = union_branches(schema) {
-        for (index, branch) in branches.iter().enumerate() {
-            let branch_path = format!("{path}<union:{index}>");
-            let Some(resolved) = resolve(bundle, branch, &branch_path, "lexicon", findings) else {
-                valid = false;
-                continue;
-            };
-            let Some((tag, value)) = carrier_parts(resolved) else {
-                findings.not_established(
-                    &branch_path,
-                    "Lexicon scalar/list unions require adjacent object wrappers",
-                );
-                valid = false;
-                continue;
-            };
-            if tag.get("const").and_then(Value::as_str).is_none() && !is_open_fallback_tag(tag) {
-                findings.not_established(&branch_path, "Lexicon union tag is not canonical");
-                valid = false;
-            }
-            valid &=
-                validate_lexicon_schema(bundle, tag, &child(&branch_path, "$type"), findings, seen);
-            valid &= validate_lexicon_schema(
-                bundle,
-                value,
-                &child(&branch_path, "value"),
-                findings,
-                seen,
-            );
-        }
-    }
-    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-        let carrier = carrier_parts(schema).is_some();
-        for (name, property) in properties {
-            if name.starts_with('$') && !matches!(name.as_str(), "$type" | "$bytes" | "$link") {
-                findings.not_established(
-                    child(path, name),
-                    "application-defined `$` property is not canonical",
-                );
-                valid = false;
-            }
-            if carrier
-                && name == "$type"
-                && !property.get("const").is_some_and(Value::is_string)
-                && !is_open_fallback_tag(property)
-            {
-                findings.not_established(child(path, name), "union carrier tag is not canonical");
-                valid = false;
-            }
-            valid &= validate_lexicon_schema(bundle, property, &child(path, name), findings, seen);
-        }
-    }
-    if let Some(items) = schema.get("items") {
-        valid &= validate_lexicon_schema(bundle, items, &child(path, "<items>"), findings, seen);
-    }
-    if let Some(additional) = schema.get("additionalProperties")
-        && additional.is_object()
-    {
-        valid &= validate_lexicon_schema(
-            bundle,
-            additional,
-            &child(path, "<additionalProperties>"),
-            findings,
-            seen,
-        );
-    }
-    valid
-}
-
-fn lexicon_projection(schema: &Value) -> Result<Value, ()> {
-    match schema {
-        Value::Bool(true) => Ok(Value::Bool(true)),
-        Value::Bool(false) => Ok(Value::Bool(false)),
-        Value::Array(values) => values
-            .iter()
-            .map(lexicon_projection)
-            .collect::<Result<Vec<_>, _>>()
-            .map(Value::Array),
-        Value::Object(object) => {
-            if is_open_fallback_tag(schema) {
-                return Ok(schema.clone());
-            }
-            if unsupported_keyword(schema).is_some() {
-                return Err(());
-            }
-            if let Some(reference) = object.get("$ref") {
-                let reference = reference.as_str().ok_or(())?;
-                if !(reference.starts_with("#/$defs/") || reference.starts_with("#/definitions/")) {
-                    return Err(());
-                }
-                return Ok(json!({"$ref": reference}));
-            }
-            if let Some(marker) = object.get("x-automerge").and_then(Value::as_str) {
-                return lexicon_codec_projection(object, marker);
-            }
-            if let Some(encoding) = object.get("contentEncoding") {
-                if encoding.as_str() != Some("base64") {
-                    return Err(());
-                }
-                return Ok(canonical_bytes_schema(object));
-            }
-            if let Some(format) = object.get("format").and_then(Value::as_str)
-                && !matches!(format, "date-time" | "uri" | "uuid" | "cid" | "datetime")
-            {
-                return Err(());
-            }
-            let mut projected = Map::new();
-            for (key, value) in object {
-                if matches!(
-                    key.as_str(),
-                    "$schema"
-                        | "$id"
-                        | "title"
-                        | "description"
-                        | "default"
-                        | "examples"
-                        | "x-automerge"
-                        | "contentEncoding"
-                        | "contentMediaType"
-                        | "unit"
-                        | "x-unit"
-                        | "x-automerge-unit"
-                        | "minimum"
-                        | "maximum"
-                        | "exclusiveMinimum"
-                        | "exclusiveMaximum"
-                        | "multipleOf"
-                        | "minLength"
-                        | "maxLength"
-                        | "pattern"
-                        | "minItems"
-                        | "maxItems"
-                        | "uniqueItems"
-                        | "minProperties"
-                        | "maxProperties"
-                        | "enum"
-                        | "const"
-                ) {
-                    continue;
-                }
-                if key == "not" {
-                    return Err(());
-                }
-                if key.starts_with('$') && !matches!(key.as_str(), "$ref" | "$defs") {
-                    return Err(());
-                }
-                if key == "properties" || key == "$defs" {
-                    let entries = value.as_object().ok_or(())?;
-                    let mut projected_entries = Map::new();
-                    let carrier = carrier_parts(schema).is_some();
-                    for (name, entry) in entries {
-                        if key == "properties"
-                            && name.starts_with('$')
-                            && !matches!(name.as_str(), "$type" | "$bytes" | "$link")
-                        {
-                            return Err(());
-                        }
-                        let projected_entry = if carrier && name == "$type" {
-                            lexicon_tag_projection(entry)?
-                        } else {
-                            lexicon_projection(entry)?
-                        };
-                        projected_entries.insert(name.clone(), projected_entry);
-                    }
-                    projected.insert(key.clone(), Value::Object(projected_entries));
-                } else if key == "additionalProperties" && value.is_object() {
-                    projected.insert(key.clone(), Value::Bool(true));
-                } else if key == "type" {
-                    project_type(value, &mut projected)?;
-                } else {
-                    projected.insert(key.clone(), lexicon_projection(value)?);
-                }
-            }
-            Ok(Value::Object(projected))
-        }
-        _ => Ok(schema.clone()),
-    }
-}
-
-fn lexicon_tag_projection(schema: &Value) -> Result<Value, ()> {
-    if is_open_fallback_tag(schema) {
-        return Ok(schema.clone());
-    }
-    let Some(tag) = schema.get("const").and_then(Value::as_str) else {
-        return Err(());
-    };
-    Ok(json!({"const": tag}))
-}
-
-fn marker_is_consistent(schema: &Value, marker: &str) -> bool {
-    let Some(type_value) = schema.get("type") else {
-        return true;
+/// A storage marker that contradicts the JSON shape it annotates, or names a form this build does
+/// not store. The shapes are the ones the codec emits: canonical bytes are an object, a counter is a
+/// whole number, and a float is a string.
+fn contradictory_annotation(schema: &Value) -> Option<String> {
+    let marker = schema.get("x-automerge")?;
+    let Some(marker) = marker.as_str() else {
+        return Some("x-automerge marker is not a string".to_owned());
     };
     let allowed = match marker {
-        "bytes" | "float" | "timestamp" | "text" => "string",
-        "counter" | "number" => "number",
+        "bytes" => "object",
+        "float" | "timestamp" | "text" => "string",
+        "counter" => "integer",
+        "number" => "number",
         "list" => "array",
-        _ => return false,
+        _ => return Some(format!("unknown x-automerge storage `{marker}`")),
     };
-    type_value_accepts(type_value, allowed)
-}
-
-fn type_value_accepts(type_value: &Value, allowed: &str) -> bool {
-    match type_value {
-        Value::String(kind) => kind == allowed,
-        Value::Array(kinds) => {
-            kinds.iter().all(|kind| {
-                kind.as_str()
-                    .is_some_and(|kind| kind == allowed || kind == "null")
-            }) && kinds.iter().any(|kind| kind.as_str() == Some(allowed))
-        }
-        _ => false,
-    }
-}
-
-fn project_type(value: &Value, projected: &mut Map<String, Value>) -> Result<(), ()> {
-    let Some(types) = value.as_array() else {
-        let kind = value.as_str().ok_or(())?;
-        if !VALID_TYPES.contains(&kind) {
-            return Err(());
-        }
-        projected.insert("type".to_owned(), Value::String(kind.to_owned()));
-        return Ok(());
-    };
-    if types.is_empty()
-        || types.iter().any(|kind| {
-            kind.as_str()
-                .is_none_or(|kind| !VALID_TYPES.contains(&kind))
-        })
-    {
-        return Err(());
-    }
-    projected.insert("type".to_owned(), Value::Array(types.clone()));
-    Ok(())
-}
-
-fn lexicon_codec_projection(object: &Map<String, Value>, marker: &str) -> Result<Value, ()> {
-    match marker {
-        "bytes" => Ok(canonical_bytes_schema(object)),
-        "float" => Ok(canonical_decimal_schema(object)),
-        "timestamp" => Ok(canonical_nullable_schema(
-            object,
-            json!({"type":"string", "format":"date-time"}),
-        )),
-        "text" => Ok(canonical_nullable_schema(object, json!({"type":"string"}))),
-        "counter" | "number" => Ok(canonical_nullable_schema(object, json!({"type":"number"}))),
-        "list" => Ok(canonical_nullable_schema(object, json!({"type":"array"}))),
-        _ => Err(()),
-    }
-}
-
-fn canonical_nullable_schema(object: &Map<String, Value>, mut schema: Value) -> Value {
-    let nullable = object
+    let consistent = schema
         .get("type")
-        .and_then(Value::as_array)
-        .is_some_and(|types| types.iter().any(|kind| kind.as_str() == Some("null")));
-    if nullable {
-        let kind = schema
-            .get("type")
-            .and_then(Value::as_str)
-            .expect("canonical marker projection always has a scalar type");
-        schema["type"] = json!([kind, "null"]);
-    }
-    schema
-}
-
-fn canonical_bytes_schema(object: &Map<String, Value>) -> Value {
-    let nullable = object
-        .get("type")
-        .and_then(Value::as_array)
-        .is_some_and(|types| types.iter().any(|kind| kind.as_str() == Some("null")));
-    let byte_schema = json!({
-        "type":"object",
-        "properties":{"$bytes":{"type":"string"}},
-        "required":["$bytes"],
-        "additionalProperties":false
-    });
-    if nullable {
-        let mut byte_schema = byte_schema;
-        byte_schema["type"] = json!(["object", "null"]);
-        byte_schema
+        .is_none_or(|type_value| match type_value {
+            Value::String(kind) => kind == allowed,
+            Value::Array(kinds) => {
+                kinds.iter().any(|kind| kind.as_str() == Some(allowed))
+                    && kinds.iter().all(|kind| {
+                        kind.as_str()
+                            .is_some_and(|kind| kind == allowed || kind == "null")
+                    })
+            }
+            _ => false,
+        });
+    if consistent {
+        None
     } else {
-        byte_schema
+        Some("x-automerge marker contradicts the declared JSON type".to_owned())
     }
-}
-
-fn canonical_decimal_schema(object: &Map<String, Value>) -> Value {
-    let nullable = object
-        .get("type")
-        .and_then(Value::as_array)
-        .is_some_and(|types| types.iter().any(|kind| kind.as_str() == Some("null")));
-    let mut schema = json!({"type":"string", "format":"decimal"});
-    if nullable {
-        schema["type"] = json!(["string", "null"]);
-    }
-    schema
-}
-
-fn contradictory_annotation(schema: &Value) -> Option<String> {
-    if let Some(marker) = schema.get("x-automerge") {
-        let Some(marker) = marker.as_str() else {
-            return Some("x-automerge marker is not a string".to_owned());
-        };
-        if !matches!(
-            marker,
-            "bytes" | "float" | "timestamp" | "text" | "counter" | "number" | "list"
-        ) {
-            return Some(format!("unknown x-automerge storage `{marker}`"));
-        }
-        if !marker_is_consistent(schema, marker) {
-            return Some("x-automerge marker contradicts the declared JSON type".to_owned());
-        }
-    }
-    if schema.get("contentEncoding").is_some()
-        && schema.get("contentEncoding").and_then(Value::as_str) != Some("base64")
-    {
-        return Some("unsupported content encoding annotation".to_owned());
-    }
-    if schema.get("contentEncoding").is_some()
-        && !schema
-            .get("type")
-            .is_none_or(|type_value| type_value_accepts(type_value, "string"))
-    {
-        return Some("bytes encoding contradicts the declared JSON type".to_owned());
-    }
-    None
 }
 
 /// Check that values accepted by `writer` can be consumed by `reader`.
@@ -1148,10 +817,10 @@ fn validate_union(
             );
             valid = false;
         }
-        let Some((tag_schema, _value_schema)) = carrier_parts(branch) else {
+        let Some(tag_schema) = branch_discriminant(branch) else {
             findings.not_established(
                 &branch_path,
-                format!("{direction}: union branch is not an adjacent carrier"),
+                format!("{direction}: union branch has no `$type` discriminant"),
             );
             valid = false;
             continue;
@@ -1189,21 +858,16 @@ fn validate_union(
     valid
 }
 
-fn carrier_parts(schema: &Value) -> Option<(&Value, &Value)> {
-    if !has_type(schema, "object") {
-        return None;
-    }
-    let properties = schema.get("properties")?.as_object()?;
-    let tag = properties.get("$type")?;
-    let value = properties.get("value")?;
-    let required = required(schema);
-    if required.len() != 2 || !required.contains("$type") || !required.contains("value") {
-        return None;
-    }
-    if properties.len() != 2 {
-        return None;
-    }
-    Some((tag, value))
+/// The `$type` schema of a union branch.
+///
+/// A published union is internally tagged, so the discriminant is a property of the branch rather
+/// than a field of a carrier. An adjacent member is the same shape: it is a declared wrapper type
+/// whose payload sits under `value`, and `value` is an ordinary property of that wrapper.
+fn branch_discriminant(schema: &Value) -> Option<&Value> {
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get("$type"))
 }
 
 fn branch_tag_resolved(
@@ -1231,41 +895,24 @@ fn compare_union_branch_pair(
     let Some(writer) = resolve(writer_bundle, writer, path, direction, findings) else {
         return;
     };
-    let Some((reader_tag, reader_value)) = carrier_parts(reader) else {
+    let Some(reader_tag) = branch_discriminant(reader) else {
         findings.not_established(
             path,
-            format!("{direction}: reader union carrier is malformed"),
+            format!("{direction}: reader union branch has no `$type` discriminant"),
         );
         return;
     };
-    let Some((writer_tag, writer_value)) = carrier_parts(writer) else {
+    let Some(writer_tag) = branch_discriminant(writer) else {
         findings.not_established(
             path,
-            format!("{direction}: writer union carrier is malformed"),
+            format!("{direction}: writer union branch has no `$type` discriminant"),
         );
         return;
     };
 
-    if required(reader) != required(writer) || additional_kind(reader) != additional_kind(writer) {
-        findings.not_established(
-            path,
-            format!("{direction}: union carrier requiredness or openness changed"),
-        );
-        return;
-    }
-    if let (Additional::Schema(reader_schema), Additional::Schema(writer_schema)) =
-        (additional(reader), additional(writer))
-    {
-        accepts(
-            reader_bundle,
-            writer_bundle,
-            reader_schema,
-            writer_schema,
-            &child(path, "<additionalProperties>"),
-            direction,
-            findings,
-        );
-    }
+    // The discriminant is compared on its own. The payload is everything else the branch declares,
+    // and it is compared property by property: feeding the branch back through `accepts` would
+    // re-enter the union and demand an openness the carrier never stated.
     if compare_open_union_refinement(reader_tag, writer_tag, path, direction, findings).is_none() {
         accepts(
             reader_bundle,
@@ -1277,23 +924,32 @@ fn compare_union_branch_pair(
             findings,
         );
     }
-    accepts(
-        reader_bundle,
-        writer_bundle,
-        reader_value,
-        writer_value,
-        &child(path, "value"),
-        direction,
-        findings,
-    );
-}
-
-fn additional_kind(schema: &Value) -> &'static str {
-    match additional(schema) {
-        Additional::Allowed => "allowed",
-        Additional::Closed => "closed",
-        Additional::Schema(_) => "schema",
-        Additional::Unknown => "unknown",
+    let reader_properties = reader.get("properties").and_then(Value::as_object);
+    let writer_properties = writer.get("properties").and_then(Value::as_object);
+    if let Some(writer_properties) = writer_properties {
+        for (name, writer_property) in writer_properties {
+            if name == "$type" {
+                continue;
+            }
+            let Some(reader_property) =
+                reader_properties.and_then(|properties| properties.get(name))
+            else {
+                findings.incompatible(
+                    child(path, name),
+                    format!("{direction}: union member gained a property the reader does not have"),
+                );
+                continue;
+            };
+            accepts(
+                reader_bundle,
+                writer_bundle,
+                reader_property,
+                writer_property,
+                &child(path, name),
+                direction,
+                findings,
+            );
+        }
     }
 }
 
@@ -1640,7 +1296,7 @@ fn child(path: &str, name: &str) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "schemars"))]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -1662,6 +1318,7 @@ mod tests {
         });
         let report = compare_schemas(&old, &new);
         assert_eq!(report.json.result, Compatibility::Compatible);
+        // Lexicon objects are open, so an optional property is an evolution in either direction.
         assert_eq!(report.lexicon.result, Compatibility::Compatible);
     }
 
@@ -1677,6 +1334,21 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|item| item.path == "/summary")
+        );
+        assert_eq!(report.lexicon.result, Compatibility::Incompatible);
+    }
+
+    #[test]
+    fn lexicon_nullable_change_is_incompatible_in_either_direction() {
+        let present = json!({"type":"object","properties":{"value":{"type":"string"}}});
+        let nullable = json!({"type":"object","properties":{"value":{"type":["string","null"]}}});
+        assert_eq!(
+            compare_schemas(&present, &nullable).lexicon.result,
+            Compatibility::Incompatible
+        );
+        assert_eq!(
+            compare_schemas(&nullable, &present).lexicon.result,
+            Compatibility::Incompatible
         );
     }
 
@@ -1696,9 +1368,12 @@ mod tests {
             branch(json!({"const":"future"})),
             fallback(&["known","future"])
         ]});
+        let report = compare_schemas(&old_union, &new_union);
         assert_eq!(
-            compare_schemas(&old_union, &new_union).json.result,
-            Compatibility::Compatible
+            report.json.result,
+            Compatibility::Compatible,
+            "{:?}",
+            report.json.diagnostics
         );
 
         let old_closed = json!({"oneOf":[branch(json!({"const":"known"}))]});
@@ -1726,10 +1401,21 @@ mod tests {
     #[test]
     fn native_codec_change_is_separate_from_json_shape() {
         let old = json!({"type":"string", "x-automerge":"text"});
-        let new = json!({"type":"string", "x-automerge":"bytes", "contentEncoding":"base64"});
+        let new = json!({
+            "type":"object",
+            "x-automerge":"bytes",
+            "properties":{"$bytes":{"type":"string"}},
+            "required":["$bytes"],
+            "additionalProperties":false
+        });
         let report = compare_schemas(&old, &new);
-        assert_eq!(report.native_storage.result, Compatibility::Incompatible);
-        assert_eq!(report.json.result, Compatibility::Compatible);
+        assert_eq!(
+            report.native_storage.result,
+            Compatibility::Incompatible,
+            "{:?}",
+            report.native_storage.diagnostics
+        );
+        assert_eq!(report.json.result, Compatibility::Incompatible);
     }
 
     #[test]
@@ -1798,7 +1484,13 @@ mod tests {
         });
         let new = json!({
             "type":"object",
-            "additionalProperties":{"type":"string", "x-automerge":"bytes"}
+            "additionalProperties":{
+                "type":"object",
+                "x-automerge":"bytes",
+                "properties":{"$bytes":{"type":"string"}},
+                "required":["$bytes"],
+                "additionalProperties":false
+            }
         });
         assert_eq!(
             compare_schemas(&old, &new).native_storage.result,
@@ -1842,7 +1534,8 @@ mod tests {
         });
         let report = compare_schemas(&old, &new);
         assert_eq!(report.json.result, Compatibility::Incompatible);
-        assert_eq!(report.lexicon.result, Compatibility::Compatible);
+        // `minLength` is a sidecar refinement with no Lexicon spelling, so the published files agree
+        // even though the sidecars do not. The native storage is untouched either way.
         assert_eq!(report.native_storage.result, Compatibility::Compatible);
     }
 
@@ -1881,7 +1574,7 @@ mod tests {
     fn supported_shapes_are_reflexive() {
         let fixtures = [
             json!({"type":"string"}),
-            json!({"type":"array","items":{"type":["integer","null"]}}),
+            json!({"type":"array","items":{"type":"integer"}}),
             json!({"type":"object","properties":{"name":{"type":"string"}},"additionalProperties":true}),
             json!({"oneOf":[
                 {"type":"object","properties":{"$type":{"const":"a"},"value":{"type":"object","additionalProperties":true}},"required":["$type","value"]},
@@ -1892,12 +1585,16 @@ mod tests {
             let report = compare_schemas(&schema, &schema);
             assert_eq!(report.json.result, Compatibility::Compatible);
             assert_eq!(report.native_storage.result, Compatibility::Compatible);
-            assert_eq!(report.lexicon.result, Compatibility::Compatible);
+            assert_eq!(
+                report.lexicon.result,
+                Compatibility::Compatible,
+                "{:?}",
+                report.lexicon.diagnostics
+            );
             assert!(report.json.diagnostics.is_empty());
         }
     }
 
-    #[cfg(feature = "schemars")]
     #[test]
     fn actual_facet_union_schema_is_compatible_when_a_member_is_added() {
         fn member(id: &'static str) -> crate::facet::MemberSchema {
@@ -1910,17 +1607,23 @@ mod tests {
             }
         }
         let old = serde_json::to_value(crate::facet::union_schema(
-            "$type",
-            "value",
+            &crate::facet::UnionLayout::Adjacent {
+                tag: "$type",
+                content: "value",
+            },
             true,
             vec![member("known")],
+            &serde_json::Map::new(),
         ))
         .unwrap();
         let new = serde_json::to_value(crate::facet::union_schema(
-            "$type",
-            "value",
+            &crate::facet::UnionLayout::Adjacent {
+                tag: "$type",
+                content: "value",
+            },
             true,
             vec![member("known"), member("future")],
+            &serde_json::Map::new(),
         ))
         .unwrap();
         assert_eq!(
@@ -1943,7 +1646,6 @@ mod tests {
             let report = compare_schemas(&schema, &schema);
             assert_eq!(report.json.result, Compatibility::NotEstablished);
             assert_eq!(report.native_storage.result, Compatibility::NotEstablished);
-            assert_eq!(report.lexicon.result, Compatibility::NotEstablished);
         }
         let old = json!({"type":"array","minContains":1,"contains":{"type":"string"}});
         let new = json!({"type":"array","minContains":2,"contains":{"type":"string"}});
@@ -2008,72 +1710,66 @@ mod tests {
 
     #[test]
     fn nullable_storage_markers_preserve_canonical_nullability() {
-        let markers = [
-            ("bytes", "string"),
-            ("float", "string"),
-            ("timestamp", "string"),
-            ("text", "string"),
-            ("counter", "number"),
-            ("number", "number"),
-            ("list", "array"),
-        ];
-
-        for (marker, kind) in markers {
-            let nullable = json!({"type":[kind, "null"], "x-automerge":marker});
-            let nonnullable = json!({"type":kind, "x-automerge":marker});
-
-            for equal_schema in [&nullable, &nonnullable] {
-                let equal = compare_schemas(equal_schema, equal_schema);
-                assert_eq!(
-                    equal.json.result,
-                    Compatibility::Compatible,
-                    "{marker} JSON"
-                );
-                assert_eq!(
-                    equal.native_storage.result,
-                    Compatibility::Compatible,
-                    "{marker} native"
-                );
-                assert_eq!(
-                    equal.lexicon.result,
-                    Compatibility::Compatible,
-                    "{marker} Lexicon"
-                );
-            }
-
-            for (old, new) in [(&nullable, &nonnullable), (&nonnullable, &nullable)] {
-                let report = compare_schemas(old, new);
-                assert_eq!(
-                    report.json.result,
-                    Compatibility::Incompatible,
-                    "{marker} JSON"
-                );
-                assert_eq!(
-                    report.native_storage.result,
-                    Compatibility::Compatible,
-                    "{marker} native"
-                );
-                assert_eq!(
-                    report.lexicon.result,
-                    Compatibility::Incompatible,
-                    "{marker} Lexicon"
-                );
-            }
+        // Nullability is a property of the object holding the position, not of the position, so the
+        // marker is tested on an object's property. A position that is itself nullable has no
+        // Lexicon spelling.
+        let property = |kind: &str, marker: &str, nullable: bool| {
+            let type_value = if nullable {
+                json!([kind, "null"])
+            } else {
+                json!(kind)
+            };
+            json!({
+                "type":"object",
+                "properties":{"value":{"type":type_value,"x-automerge":marker}},
+                "additionalProperties":false
+            })
+        };
+        for (marker, kind, lexicon) in [
+            ("float", "string", Compatibility::Incompatible),
+            ("text", "string", Compatibility::Incompatible),
+            ("counter", "integer", Compatibility::Incompatible),
+            ("timestamp", "string", Compatibility::Incompatible),
+            // This list fixture is an array that states no items, so it is not a publishable Lexicon.
+            ("list", "array", Compatibility::NotEstablished),
+        ] {
+            let nullable = property(kind, marker, true);
+            let present = property(kind, marker, false);
+            assert_eq!(
+                compare_schemas(&nullable, &nullable).json.result,
+                Compatibility::Compatible,
+                "{marker}"
+            );
+            assert_eq!(
+                compare_schemas(&nullable, &present).json.result,
+                Compatibility::Incompatible,
+                "{marker}"
+            );
+            // A storage form that projects keeps nullability as a name on the holding object. That
+            // name appearing or disappearing is the same incompatible change as a plain property.
+            assert_eq!(
+                compare_schemas(&nullable, &present).lexicon.result,
+                lexicon,
+                "{marker}"
+            );
         }
     }
 
     #[test]
     fn nullable_storage_marker_changes_are_checked_through_references_and_unions() {
-        let old_value = json!({"type":["string", "null"], "x-automerge":"text"});
-        let new_value = json!({"type":"string", "x-automerge":"text"});
-        let old = SchemaBundle::with_definitions(
-            json!({"$ref":"#/$defs/value"}),
-            [("value".to_owned(), old_value.clone())],
-        );
-        let new = SchemaBundle::with_definitions(
-            json!({"$ref":"#/$defs/value"}),
-            [("value".to_owned(), new_value.clone())],
-        );
+        // The nullable position is an object's property, which is the only place a Lexicon can say
+        // that a value admits null.
+        let holding = |nullable: bool| {
+            json!({
+                "type":"object",
+                "properties":{"text":{"type": if nullable {json!(["string","null"])} else {json!("string")}, "x-automerge":"text"}},
+                "additionalProperties":false
+            })
+        };
+        let old_value = holding(true);
+        let new_value = holding(false);
+        let old = SchemaBundle::with_definitions(old_value.clone(), []);
+        let new = SchemaBundle::with_definitions(new_value.clone(), []);
         let reference_report = compare(&old, &new);
         assert_eq!(reference_report.json.result, Compatibility::Incompatible);
         assert_eq!(
@@ -2101,39 +1797,48 @@ mod tests {
             union_report.native_storage.result,
             Compatibility::Compatible
         );
-        assert_eq!(union_report.lexicon.result, Compatibility::Incompatible);
+        // A union file names the member id and drops the payload, so the payload's nullability is
+        // that member's own lexicon, not a difference this union file can show.
+        assert_eq!(union_report.lexicon.result, Compatibility::Compatible);
     }
 
     #[test]
-    fn canonical_bytes_and_decimal_float_projection_is_not_sidecar_erasure() {
-        let bytes = json!({"type":"string","contentEncoding":"base64"});
-        let bytes_again = json!({"type":"string","x-automerge":"bytes"});
+    fn canonical_bytes_are_the_protocol_object_and_an_encoding_annotation_is_not_bytes() {
+        // `contentEncoding` annotates a string. It does not select storage, so a string carrying it
+        // is a string in every dimension — sniffing it as bytes would report a string field
+        // storage-compatible with a bytes field.
+        let annotated = json!({"type":"string","contentEncoding":"base64"});
         assert_eq!(
-            compare_schemas(&bytes, &bytes).lexicon.result,
-            Compatibility::Compatible
-        );
-        assert_eq!(
-            compare_schemas(&bytes, &bytes_again).lexicon.result,
-            Compatibility::Compatible
-        );
-        assert_eq!(
-            compare_schemas(&bytes, &json!({"type":"string"}))
-                .lexicon
+            compare_schemas(&annotated, &json!({"type":"string"}))
+                .json
                 .result,
-            Compatibility::Incompatible
+            Compatibility::Compatible
+        );
+        assert_eq!(
+            compare_schemas(&annotated, &annotated)
+                .native_storage
+                .result,
+            Compatibility::Compatible
         );
 
-        let float = json!({"type":"string","x-automerge":"float","format":"float"});
-        let float_again = json!({"type":"string","x-automerge":"float","format":"double"});
+        let bytes = json!({
+            "type":"object",
+            "x-automerge":"bytes",
+            "properties":{"$bytes":{"type":"string"}},
+            "required":["$bytes"],
+            "additionalProperties":false
+        });
         assert_eq!(
-            compare_schemas(&float, &float_again).lexicon.result,
-            Compatibility::Compatible
+            compare_schemas(&bytes, &bytes).lexicon.result,
+            Compatibility::Compatible,
+            "{:?}",
+            compare_schemas(&bytes, &bytes).lexicon.diagnostics
         );
+        // A plain number is the float opt-out, and it is not a Lexicon type.
+        let plain_number = json!({"type":"number","x-automerge":"number"});
         assert_eq!(
-            compare_schemas(&float, &json!({"type":"number"}))
-                .lexicon
-                .result,
-            Compatibility::Incompatible
+            compare_schemas(&plain_number, &plain_number).lexicon.result,
+            Compatibility::NotEstablished
         );
     }
 
@@ -2146,15 +1851,18 @@ mod tests {
             compare_schemas(&timestamp, &uri).lexicon.result,
             Compatibility::Incompatible
         );
+        // A format Lexicon does not know stays in the sidecar, so the published files still agree.
         assert_eq!(
             compare_schemas(&unknown, &unknown).lexicon.result,
-            Compatibility::NotEstablished
+            Compatibility::Compatible
         );
 
+        // A nullable position is an object's `nullable` list, not a type array, so a type array is
+        // not a publishable Lexicon.
         let nullable = json!({"type":["string","null"]});
         assert_eq!(
             compare_schemas(&nullable, &nullable).lexicon.result,
-            Compatibility::Compatible
+            Compatibility::NotEstablished
         );
 
         let scalar_union = json!({"oneOf":[{"type":"string"},{"type":"integer"}]});
@@ -2177,18 +1885,20 @@ mod tests {
             renamed_report.native_storage.result,
             Compatibility::Compatible
         );
-        assert_eq!(renamed_report.lexicon.result, Compatibility::Compatible);
+        assert_eq!(renamed_report.lexicon.result, Compatibility::Incompatible);
     }
 
     #[test]
-    fn native_units_sign_ranges_timestamps_and_array_items_are_distinct() {
+    fn a_timestamp_is_a_timestamp_and_a_unit_annotation_is_not_a_storage_kind() {
+        // Nothing the crate emits states a unit. Two timestamps are the same storage kind; the unit
+        // annotation is sidecar metadata and does not manufacture a native incompatibility.
         let timestamp_ms = json!({"type":"string","format":"date-time","unit":"milliseconds"});
         let timestamp_seconds = json!({"type":"string","format":"date-time","unit":"seconds"});
         assert_eq!(
             compare_schemas(&timestamp_ms, &timestamp_seconds)
                 .native_storage
                 .result,
-            Compatibility::Incompatible
+            Compatibility::Compatible
         );
 
         let signed = json!({"type":"integer","format":"int64","minimum":-9007199254740991i64});
@@ -2239,7 +1949,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "schemars")]
     #[test]
     fn facet_bundle_adapter_reports_all_three_dimensions_for_a_real_change() {
         let schema = |value| schemars::Schema::try_from(value).unwrap();
@@ -2316,7 +2025,7 @@ mod tests {
         let report = compare_schemas(&old_scalar, &new_scalar);
         assert_eq!(report.json.result, Compatibility::Incompatible);
         assert_eq!(report.native_storage.result, Compatibility::Compatible);
-        assert_eq!(report.lexicon.result, Compatibility::Compatible);
+        assert_eq!(report.lexicon.result, Compatibility::Incompatible);
 
         let branch = |tag: &str| {
             json!({
@@ -2360,6 +2069,6 @@ mod tests {
         let report = compare_schemas(&malformed, &malformed);
         assert_eq!(report.json.result, Compatibility::NotEstablished);
         assert_eq!(report.native_storage.result, Compatibility::NotEstablished);
-        assert_eq!(report.lexicon.result, Compatibility::NotEstablished);
+        assert_eq!(report.lexicon.result, Compatibility::Compatible);
     }
 }

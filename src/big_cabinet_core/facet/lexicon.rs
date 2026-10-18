@@ -57,6 +57,27 @@ pub fn project_facet(id: &str, document: &Value) -> Result<Value, String> {
     Ok(file)
 }
 
+/// Project one schema position, carrying the definitions it reaches.
+///
+/// [`project_facet`] refuses anything but an object, because a facet's `main` is one. A compatibility
+/// check is asked about arbitrary positions — a string, an array, a union — so it projects the
+/// position on its own and compares the results. The rules are the same; only the object requirement
+/// is absent.
+pub fn project_position(schema: &Value, definitions: &Map<String, Value>) -> Result<Value, String> {
+    let mut carried = BTreeMap::new();
+    let projected = position(schema, definitions, &mut carried, "$")?;
+    if carried.is_empty() {
+        return Ok(projected);
+    }
+    let mut out = Map::new();
+    out.insert("position".to_owned(), projected);
+    out.insert(
+        "$defs".to_owned(),
+        Value::Object(carried.into_iter().collect()),
+    );
+    Ok(Value::Object(out))
+}
+
 /// One schema position, projected. `carried` accumulates the local definitions the position
 /// reached, so a `$ref` is emitted as a reference and its target travels beside it.
 fn position(
@@ -210,7 +231,7 @@ fn marked(
             }
             Ok(Some(json!({ "type": "bytes" })))
         }
-        "float" | "text" => {
+        "float" | "text" | "timestamp" => {
             if !stated("string") {
                 return Err(here(
                     path,

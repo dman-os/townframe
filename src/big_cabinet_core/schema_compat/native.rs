@@ -214,28 +214,6 @@ fn native_kind(schema: &Value, path: &str, findings: &mut Findings) -> Option<St
         }
         return Some(format!("x-automerge:{marker}"));
     }
-    if schema
-        .get("contentEncoding")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value.eq_ignore_ascii_case("base64"))
-    {
-        return Some("bytes".to_owned());
-    }
-    for key in ["unit", "x-unit", "x-automerge-unit"] {
-        if schema.get(key).is_some_and(|unit| !unit.is_string()) {
-            findings.not_established(path, format!("native unit `{key}` is not a string"));
-            return None;
-        }
-    }
-    if let Some(unit) = ["unit", "x-unit", "x-automerge-unit"]
-        .into_iter()
-        .find_map(|key| schema.get(key).and_then(Value::as_str))
-    {
-        if schema.get("format").and_then(Value::as_str) == Some("date-time") {
-            return Some(format!("timestamp:{unit}"));
-        }
-        return Some(format!("unit:{unit}"));
-    }
     if schema.get("format").and_then(Value::as_str) == Some("date-time") {
         return Some("timestamp".to_owned());
     }

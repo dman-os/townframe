@@ -172,42 +172,6 @@ JSON scheman and thus lexicons allow unknown field by default and this should be
 Ensure that any interemediate decoding of the facets retain fields for any data that's expected to come back to the DocumentRepo lest the lack of the field reconcile into removal of the unkown field from the facet.
 This expectation also extends to unions, unkown unions shouldn't trip and and be preserved by any codec that expects to bring back data to the DocumentRepo.
 
-### Conflict model
-
-As documents are stored using CRDTs, conflicts don't naturally end up blocking progress like in git.
-Automerge resolves any concurrent writes using it's [merge rules](https://automerge.org/docs/reference/under-the-hood/merge-rules/) ensuring every node resolves to the same value deterministically.
-This value might still break semantics and schemas though and must be dealt with.
-
-Facets should be designed to allow conflicting writes to resolve gracefully where possible.
-Automerge does allow querying concurrently [overwritten writes](https://automerge.org/docs/reference/documents/conflicts/) but that API is intentionally not provided for now by the DocumentRepo.
-Instead, it's recommended to use the follwing tricks to allow good multi-writer stories.
-
-When creating new facets, prefer determinstic key-ids for facets if there's the possiblity that the same process runnning on another node might try to create the same facet.
-Every node writing to `/main` means that they will merge as expected.
-Facets need multiple instnaces on a doc? Use ids deterministically derived from the process that produces it.
-
-An illustrating example for this: a processor that creates a derived facet from another.
-Another node might run the same processor and in most cases, it doesn't make sense to have multiple derivations from the same source facet.
-Determinsitc ids like using the key-id of the source facets avoids that.
-Note that this concern also extends to facet internal maps that expects concurrent writers.
-
-An alternative approach to solve concurrent writes on the same map key is to use competing sets.
-Arrays that are cleared and then pushed into during writes.
-Under concurrent writes, the array will have two values under automerge merge rules.
-This is useful in instances where resolving concurrent creations needs to be manual.
-
-While Automerge happily resolves any concurrent writes under its rules, the results don't always make semantic case.
-Since Lexicons allow specifying extra validation rules care must be taken around schema design to ensure that
-For example, a maximum constraint on a counter is difficult to ensure under concurrent writes.
-DocumentRepo prevents writes that would break the schema and thus, relying on such brittle schema requires caution and try-catch around every write.
-
-It's also possible to have concurrent writes break under schema drift.
-For example, it's recommended that any facet that intends to be evolvable to allow unkown keys on maps.
-When new field is later added, if any facet was using that key to store unsanctioned and now incompatible values, this will result in a schema break.
-Concretely, new incoming writes might merge in incompatible fashion preventing more writes possibly.
-This is only avoidable by avoiding using unsanctioned keys.
-The recommendation to allow unkown keys in schemas is intended to improve evolvability and not for storing unsanctioned data.
-
 ### Drawers
 
 Sharing documents is done through their membership in [drawers](./drawer.md).
@@ -265,6 +229,47 @@ All other branches are replication candidates.
 If intending to share a single document and all it's branches, a single group drawer should be preferred as a unit of sharing.
 Non replicated document branches are excluded from such drawrers will not show up in the `branches` map of their origin document.
 
+### Conflict model
+
+As documents are stored using CRDTs, conflicts don't naturally end up blocking progress like in git.
+Automerge resolves any concurrent writes using it's [merge rules](https://automerge.org/docs/reference/under-the-hood/merge-rules/) ensuring every node resolves to the same value deterministically.
+This value might still break semantics and schemas though and must be dealt with.
+
+Facets should be designed to allow conflicting writes to resolve gracefully where possible.
+Automerge does allow querying concurrently [overwritten writes](https://automerge.org/docs/reference/documents/conflicts/) but that API is intentionally not provided for now by the DocumentRepo.
+Instead, it's recommended to use the follwing tricks to allow good multi-writer stories.
+
+When creating new facets, prefer determinstic key-ids for facets if there's the possiblity that the same process runnning on another node might try to create the same facet.
+Every node writing to `/main` means that they will merge as expected.
+Facets need multiple instnaces on a doc? Use ids deterministically derived from the process that produces it.
+
+An illustrating example for this: a processor that creates a derived facet from another.
+Another node might run the same processor and in most cases, it doesn't make sense to have multiple derivations from the same source facet.
+Determinsitc ids like using the key-id of the source facets avoids that.
+Note that this concern also extends to facet internal maps that expects concurrent writers.
+
+An alternative approach to solve concurrent writes on the same map key is to use competing sets.
+Arrays that are cleared and then pushed into during writes.
+Under concurrent writes, the array will have two values under automerge merge rules.
+This is useful in instances where resolving concurrent creations needs to be manual.
+
+While Automerge happily resolves any concurrent writes under its rules, the results don't always make semantic case.
+Since Lexicons allow specifying extra validation rules care must be taken around schema design to ensure that
+For example, a maximum constraint on a counter is difficult to ensure under concurrent writes.
+DocumentRepo prevents writes that would break the schema and thus, relying on such brittle schema requires caution and try-catch around every write.
+
+It's also possible to have concurrent writes break under schema drift.
+For example, it's recommended that any facet that intends to be evolvable to allow unkown keys on maps.
+When new field is later added, if any facet was using that key to store unsanctioned and now incompatible values, this will result in a schema break.
+Concretely, new incoming writes might merge in incompatible fashion preventing more writes possibly.
+This is only avoidable by avoiding using unsanctioned keys.
+The recommendation to allow unkown keys in schemas is intended to improve evolvability and not for storing unsanctioned data.
+
+
+Branches can be merged back to other branches that have the same origin doc.
+This introduces another hazard that must be avoided when designing facets: mutations done in the branch will be concurrently applied to the origin doc after merge.
+This means that fields that reflect branch speciifc information like the document id must be carefully designed lest after the merge, they conflict and break semantics.
+
 <!-- TODO: branches in urls -->
 ### Rust authorship
 
@@ -291,8 +296,6 @@ Every document carries document specific metadata in a dmeta facet that is manta
 ```js
 {
   "org.example.daybook.dmeta/main": {
-    // The id of the document
-    id: "zAyPkUKgPRFaLje8LNjK3CHCQEytgbhN2Xt35pLKpFHck",
     createdAt: "2026-10-13T14:30:15Z",
     updatedAt: ["2026-10-13T14:30:15Z"],
     actors: { 
@@ -309,43 +312,45 @@ Every document carries document specific metadata in a dmeta facet that is manta
       // concurrent creations could produce the same facet
       // so we assign UUIDs to identify them
       "aa113c83-7eaa-48ad-9f6a-b27edefaf7df": {
-        keyId: "org.example.daybook.branch/main",
+        key: "org.example.daybook.branch/main",
         createdAt: "2026-10-13T14:30:15Z",
       },
       "a025415c-461e-4e43-b5d3-4baf0935f7a4": {
-        keyId: "org.example.daybook.branch/main",
+        key: "org.example.daybook.branch/main",
         createdAt: "2026-10-13T14:31:42Z",
       },
     },
     facets: {
-      // everything in here is a competing set to detect concurrent writes
+      // a current competing set, not an audit log: a write replaces the entries it
+      // observed at its base heads, and concurrent writers can leave several
       "org.example.daybook.branch/main": {
-        uuids: ["aa113c83-7eaa-48ad-9f6a-b27edefaf7df"]
         updatedAt: ["2026-10-13T14:30:15Z"]
         // removed facets are tombstoned, optional
         deletedAt: ["2026-10-13T14:30:15Z"]
-        // every facet write produces signatures using the follwing inputs:
+        // every facet write produces a signature over the following, reconstructed
+        // from the change that introduced it rather than stored beside it:
         // - document id
         // - actor pubkey
         // - facet key
-        // - facet uuid
-        // - weather it was a write or removal
-        // - Blake3-256 CID of the resulting facet value after addition to the 
-        //   document including concurrent resolution
-        // - signatures found on the facet prior to the write
-        // the pubkey of actor that done the write is used to produce
-        // the sig
+        // - the smallest alias visible in the writing transaction
+        // - whether it was a write or a removal
+        // - the Blake3-256 CID of the value in its native storage form, read back
+        //   from the transaction after the write
+        // - the signature ids visible on the facet at the parent heads
         signatures: [
           { 
             actorPublicKey: "zAUKgPRFak3CHCQEeLjyP8LNj35pLKpFHcKytgbhN2Xtk",
             signature: "zCHCQEyAyPpLKpFHckkUKgPRN2je8LXt3FtgbaLNjK3h5",
-            // branches name the original document that the facet was
-            // last written under. required to allow signature validation since
-            // doc id is an input
-            // optional
-            originDocument: "zpLKpFHN2je8LXtEyAyCHCQckkUKgPRP3FtgbaLNjK3h5",
-            inheritedMessage?,
-            inheritedValue? 
+            // set only for a signature copied onto a branch at its creation, where the
+            // origin's history is not available to reconstruct the signed bytes from.
+            // the message is the exact bytes the actor signed; the value is present only
+            // when the copied value is not the signed one. both are the protocol bytes
+            // object, and neither is present on a signature authored on this document.
+            inherited: {
+              originDoc: "zpLKpFHN2je8LXtEyAyCHCQckkUKgPRP3FtgbaLNjK3h5",
+              message: { "$bytes": "..." },
+              value: { "$bytes": "..." }
+            }
           }
         ]
       }
