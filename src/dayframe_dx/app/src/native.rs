@@ -6,25 +6,35 @@ use crate::{
     },
 };
 use dioxus::prelude::*;
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::watch;
 
-type Renderer = Rc<dyn Fn(&Rc<Mount>) -> Element>;
+type Renderer = Rc<dyn Fn(&Arc<Mount>) -> Element>;
 
 /// Handle through which a mounted surface commits wire batches into its retained [`SurfaceTree`].
+///
+/// Because [`SurfaceTree`] excludes process-local `Any` attributes (D4), both the tree and its
+/// [`Mount`] lifetime handle are `Send + Sync`, allowing engine resource tables (such as Wasmtime's
+/// `ResourceTable`) to hold a [`SurfaceWriter`] directly without mixing `!Send` UI state into the
+/// engine store.
 #[derive(Clone)]
 pub struct SurfaceWriter {
-    mount: Rc<Mount>,
-    tree: Rc<RefCell<SurfaceTree>>,
+    mount: Arc<Mount>,
+    tree: Arc<Mutex<SurfaceTree>>,
     revisions: watch::Sender<u64>,
 }
 
 impl SurfaceWriter {
-    fn new(mount: Rc<Mount>) -> Self {
+    fn new(mount: Arc<Mount>) -> Self {
         let (revisions, _) = watch::channel(0);
         Self {
             mount,
-            tree: Rc::new(RefCell::new(SurfaceTree::new())),
+            tree: Arc::new(Mutex::new(SurfaceTree::new())),
             revisions,
         }
     }
@@ -34,23 +44,24 @@ impl SurfaceWriter {
     }
 
     pub fn revision(&self) -> u64 {
-        self.tree.borrow().revision()
+        self.tree.lock().unwrap().revision()
     }
 
     pub fn apply(&self, edits: &[Mutation]) -> Result<u64, PresentationError> {
         if !self.mount.is_live() {
             return Err(PresentationError::Revoked);
         }
-        let revision = self.tree.borrow_mut().apply(edits);
+        let revision = self.tree.lock().unwrap().apply(edits);
         self.revisions.send_replace(revision);
         Ok(revision)
     }
 
     pub fn withdraw(&self) {
-        let mut tree = self.tree.borrow_mut();
-        tree.clear();
-        let revision = tree.revision();
-        drop(tree);
+        let revision = {
+            let mut tree = self.tree.lock().unwrap();
+            tree.clear();
+            tree.revision()
+        };
         self.revisions.send_replace(revision);
     }
 }
@@ -89,7 +100,7 @@ impl Drop for SurfaceSession {
 }
 
 type SurfaceMountFn =
-    Rc<dyn Fn(Rc<Mount>, SurfaceWriter) -> Result<SurfaceSession, PresentationError>>;
+    Rc<dyn Fn(Arc<Mount>, SurfaceWriter) -> Result<SurfaceSession, PresentationError>>;
 
 #[derive(Clone)]
 struct SurfaceFactory(SurfaceMountFn);
@@ -101,11 +112,11 @@ impl PartialEq for SurfaceFactory {
 }
 
 #[derive(Clone)]
-struct SharedMount(Rc<Mount>);
+struct SharedMount(Arc<Mount>);
 
 impl PartialEq for SharedMount {
     fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -157,7 +168,7 @@ impl NativeComponents {
     pub fn publish_surface(
         &self,
         owner: &Instance,
-        mount_surface: impl Fn(Rc<Mount>, SurfaceWriter) -> Result<SurfaceSession, PresentationError>
+        mount_surface: impl Fn(Arc<Mount>, SurfaceWriter) -> Result<SurfaceSession, PresentationError>
         + 'static,
     ) -> Result<ComponentRef, AccessError> {
         self.recover_withdrawn();
@@ -229,7 +240,7 @@ fn MountedComponent(
     reference: ComponentRef,
 ) -> Element {
     let mount = use_hook(|| match components.host.mount(&owner, reference) {
-        Ok(mount) => Some(Rc::new(mount)),
+        Ok(mount) => Some(Arc::new(mount)),
         Err(AccessError::Revoked) => None,
         Err(AccessError::Denied) => panic!("native component mount crossed its granted host"),
     });
@@ -295,6 +306,6 @@ fn MountedSurface(mount: SharedMount, factory: SurfaceFactory) -> Element {
         rev.set(writer_for_event.revision());
         response
     });
-    let tree = writer.tree.borrow();
+    let tree = writer.tree.lock().unwrap();
     tree.render(&handler)
 }

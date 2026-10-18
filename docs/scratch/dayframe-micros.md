@@ -418,4 +418,20 @@ To be fixed as the slices land, not all at once.
   --all-features` clean (only the 5 pre-existing `ui` warnings), `clippy -p dioxus-native-dom
   --all-features` clean. Excluded and preserved an uncommitted `mutation_buffer.rs` test module in the
   dioxus workspace that is not ours.
+- **Turn 10 (Steps 1–4)** —
+  - Step 1: Extracted reusable `GuestDom` runtime helper in `dayframe_guest::lib` (owns single guest
+    `VirtualDom`, multi-surface `RenderTargetId` tracking, initial `rebuild`, event decoding via
+    `Runtime::handle_event` + `render_immediate`), and simplified `examples/counter.rs`. Added real
+    DOM hit-resolution (`TestHost::resolve_click` + `BlitzRig::click`) and subtree withdrawal on
+    surface drop in `dayframe_guest/tests.rs` (7/7 `dayframe_guest` nextest + clippy clean, `d45e0fc`).
+  - Step 2: Added engine-neutral `presentation` module in `dayframe_app` (`replay`, `SurfaceTree`
+    implementing `WriteMutations` and rendering into any host Dioxus `VirtualDom` with macro-generated
+    event listener bridges over `with_html_event_groups!`) and `NativeComponents::publish_surface` /
+    `SurfaceWriter` / `SurfaceSession` in `native.rs` (`d45e0fc`).
+  - Steps 3 & 4: Added `MicroProvider::activate_async`, `AsyncMicroFactory`, and
+    `MicroRegistry::activate_async` in `micros.rs`. Built `dayframe_app::wasm` (`WasmPackage`,
+    `WasmMicro`, `wasm::provider`) with Wasmtime `presentation-client` host bindings, per-incarnation
+    `Store` isolation, and automatic `instance.close()` + surface/Settings withdrawal on guest trap
+    or disablement (53/53 `dayframe_app` nextest + clippy `-D warnings` clean).
+
 

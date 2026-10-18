@@ -226,6 +226,12 @@ impl MicroActivation {
 pub trait MicroProvider {
     fn descriptor(&self) -> MicroDescriptor;
     fn activate(&self, context: MicroActivation) -> Result<(), AccessError>;
+    fn activate_async<'a>(
+        &'a self,
+        context: MicroActivation,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AccessError>> + 'a>> {
+        Box::pin(async move { self.activate(context) })
+    }
 }
 
 /// Native implementation adapter: declares requirements, binds capabilities, and publishes outputs.
@@ -252,6 +258,46 @@ impl MicroProvider for MicroFactory {
     }
 
     fn activate(&self, context: MicroActivation) -> Result<(), AccessError> {
+        (self.activate)(context)
+    }
+}
+
+type AsyncActivateFn =
+    Rc<dyn Fn(MicroActivation) -> Pin<Box<dyn Future<Output = Result<(), AccessError>>>>>;
+
+/// Asynchronous provider adapter whose activation runs inside [`Host::activate_async`].
+/// Dropping or failing the activation future rolls back all owned effects and provisions.
+pub struct AsyncMicroFactory {
+    descriptor: MicroDescriptor,
+    activate: AsyncActivateFn,
+}
+
+impl AsyncMicroFactory {
+    pub fn new<F, Fut>(descriptor: MicroDescriptor, activate: F) -> Self
+    where
+        F: Fn(MicroActivation) -> Fut + 'static,
+        Fut: Future<Output = Result<(), AccessError>> + 'static,
+    {
+        Self {
+            descriptor,
+            activate: Rc::new(move |context| Box::pin(activate(context))),
+        }
+    }
+}
+
+impl MicroProvider for AsyncMicroFactory {
+    fn descriptor(&self) -> MicroDescriptor {
+        self.descriptor.clone()
+    }
+
+    fn activate(&self, _context: MicroActivation) -> Result<(), AccessError> {
+        Err(AccessError::Denied)
+    }
+
+    fn activate_async<'a>(
+        &'a self,
+        context: MicroActivation,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AccessError>> + 'a>> {
         (self.activate)(context)
     }
 }
@@ -299,6 +345,12 @@ impl Clone for MicroRegistry {
     }
 }
 
+struct PreparedActivation {
+    provider: Rc<dyn MicroProvider>,
+    descriptor: MicroDescriptor,
+    dependencies: Vec<Instance>,
+}
+
 impl MicroRegistry {
     pub(crate) fn changes(&self) -> watch::Receiver<()> {
         self.changes.subscribe()
@@ -336,22 +388,17 @@ impl MicroRegistry {
             .into_iter()
     }
 
-    pub fn activate(
+    fn prepare_activation(
         &self,
-        host: &Host,
         provider: &MicroId,
-        instance_name: impl Into<String>,
-        bindings: BTreeMap<String, String>,
-    ) -> Result<Instance, MicroRegistryError> {
+        bindings: &BTreeMap<String, String>,
+    ) -> Result<PreparedActivation, MicroRegistryError> {
         let provider_impl = self
             .providers
             .borrow()
             .get(provider)
             .cloned()
             .ok_or_else(|| MicroRegistryError::UnknownProvider(provider.as_str().to_owned()))?;
-        let host = host.clone();
-        let activation_host = host.clone();
-        let live = self.live.clone();
         let descriptor = provider_impl.descriptor();
         assert_eq!(
             descriptor
@@ -377,12 +424,33 @@ impl MicroRegistry {
             let supplier = bindings
                 .get(&requirement.id)
                 .ok_or_else(|| MicroRegistryError::InvalidBinding(requirement.id.clone()))?;
-            let (owner, version) = live.provider(supplier, &requirement.id)?;
+            let (owner, version) = self.live.provider(supplier, &requirement.id)?;
             if version != requirement.version {
                 return Err(MicroRegistryError::InvalidBinding(requirement.id.clone()));
             }
             dependencies.push(owner);
         }
+        Ok(PreparedActivation {
+            provider: provider_impl,
+            descriptor,
+            dependencies,
+        })
+    }
+
+    pub fn activate(
+        &self,
+        host: &Host,
+        provider: &MicroId,
+        instance_name: impl Into<String>,
+        bindings: BTreeMap<String, String>,
+    ) -> Result<Instance, MicroRegistryError> {
+        let PreparedActivation {
+            provider: provider_impl,
+            descriptor,
+            dependencies,
+        } = self.prepare_activation(provider, &bindings)?;
+        let activation_host = host.clone();
+        let live = self.live.clone();
         host.activate(instance_name, move |instance| {
             for supplier in &dependencies {
                 activation_host.bind_dependency(&instance, supplier);
@@ -407,6 +475,50 @@ impl MicroRegistry {
             live.commit(&activation_host, &instance, values, &descriptor)?;
             Ok(instance)
         })
+        .map_err(MicroRegistryError::from)
+    }
+
+    pub async fn activate_async(
+        &self,
+        host: &Host,
+        provider: &MicroId,
+        instance_name: impl Into<String>,
+        bindings: BTreeMap<String, String>,
+    ) -> Result<Instance, MicroRegistryError> {
+        let PreparedActivation {
+            provider: provider_impl,
+            descriptor,
+            dependencies,
+        } = self.prepare_activation(provider, &bindings)?;
+        let activation_host = host.clone();
+        let live = self.live.clone();
+        host.activate_async(instance_name, move |instance| async move {
+            for supplier in &dependencies {
+                activation_host.bind_dependency(&instance, supplier);
+            }
+            let pending = Arc::new(Mutex::new(Some(BTreeMap::new())));
+            provider_impl
+                .activate_async(MicroActivation {
+                    host: activation_host.clone(),
+                    instance: instance.clone(),
+                    descriptor: descriptor.clone(),
+                    bindings,
+                    live: live.clone(),
+                    pending: pending.clone(),
+                })
+                .await?;
+            let values = pending.lock().unwrap().take().unwrap();
+            if !descriptor
+                .provisions
+                .iter()
+                .all(|provision| values.contains_key(&provision.id))
+            {
+                return Err(AccessError::Denied);
+            }
+            live.commit(&activation_host, &instance, values, &descriptor)?;
+            Ok(instance)
+        })
+        .await
         .map_err(MicroRegistryError::from)
     }
 }

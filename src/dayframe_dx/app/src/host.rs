@@ -392,6 +392,10 @@ impl Host {
 }
 
 impl Instance {
+    pub fn host(&self) -> &Host {
+        &self.host
+    }
+
     /// Terminal reason is published after this incarnation's recovery has completed.
     pub fn close_reason(&self) -> Option<CloseReason> {
         *self.ended.borrow()

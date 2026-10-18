@@ -13,6 +13,8 @@ pub mod host;
 pub mod micros;
 pub mod native;
 pub mod presentation;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod wasm;
 
 pub use backend::{
     ApplicationBackend, BackendError, BackendEvent, Command, CommandId, CommandOutcome,
