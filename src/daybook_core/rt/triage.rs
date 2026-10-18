@@ -733,8 +733,7 @@ pub(crate) async fn spawn_doc_processor_driver(
     parent_cancel_token: CancellationToken,
 ) -> Res<DocProcessorStopToken> {
     let facet_state = big_sync::SqliteDeltaWalkerStateRepo::new(
-        rt.rcx.sql.read_pool.clone(),
-        rt.rcx.sql.write_pool.clone(),
+        rt.rcx.sql.clone(),
         "@daybook/core/doc-processor",
         "facets",
     )

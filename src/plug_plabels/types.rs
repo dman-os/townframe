@@ -73,7 +73,7 @@ pub fn pseudo_label_candidates_key(id: &str) -> daybook_types::doc::FacetKey {
     }
 }
 
-#[expect(unused)]
+#[cfg(target_arch = "wasm32")]
 pub fn pseudo_label_error_key() -> daybook_types::doc::FacetKey {
     daybook_types::doc::FacetKey::from(daybook_types::doc::FacetTag::Any(
         PlabelFacetTag::PseudoLabelErrorFacet.as_str().into(),

@@ -5,6 +5,14 @@ mod interlude {
 }
 
 use crate::interlude::*;
+use sqlite_rs as sqlite_rs_alias;
+
+mod sqlite {
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub mod queries {
+        include!("sqlite/gen.rs");
+    }
+}
 
 pub mod backend;
 pub mod delta_walker_state;

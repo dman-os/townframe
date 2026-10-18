@@ -218,7 +218,7 @@ const MAIN_BRANCH: &str = "main";
 /// self-describing.
 pub(crate) struct BlobEncryptionWorkerArgs {
     pub drawer_repo: Arc<DrawerRepo>,
-    pub sql: SqlCtx,
+    pub sql: Database,
     pub blobs_repo: Arc<crate::blobs::BlobsRepo>,
     pub facet_set_store: Arc<FacetSetRevisionStore>,
     pub facet_index: Arc<DocFacetSetIndexRepo>,
@@ -270,7 +270,7 @@ pub(crate) struct EncryptionFeederArgs {
     /// blob-arrival plane.
     pub presence_store: SharedPartStore,
     pub facet_index: Arc<DocFacetSetIndexRepo>,
-    pub sql: SqlCtx,
+    pub sql: Database,
     pub trigger_tx: tokio::sync::mpsc::Sender<EncryptDocTrigger>,
     /// The worker machine's fault/attribution handle, shared with the feeder's
     /// presence line so `count_presence` lands on the same per-machine state.
@@ -314,8 +314,7 @@ pub(crate) async fn spawn_encryption_trigger_feeder(
         faults,
     } = args;
     let state_repo = big_sync::SqliteDeltaWalkerStateRepo::new(
-        sql.read_pool.clone(),
-        sql.write_pool.clone(),
+        sql.clone(),
         ENCRYPTION_WORKER_STATE_ID.to_string(),
         "presence-tail".to_string(),
     )
@@ -793,7 +792,7 @@ fn resolves_through(blob: &Blob, cipher_key: &FacetKey) -> bool {
 /// Shared state: one domain, one inventory, one provider.
 struct Ctx {
     drawer_repo: Arc<DrawerRepo>,
-    sql: SqlCtx,
+    sql: Database,
     pair_roots: PairRoots,
     store: iroh_blobs::api::Store,
     provider: Arc<CipherBlobProvider>,
@@ -1045,14 +1044,12 @@ impl Worker {
         // eligibility before or after either), so no boot pass over the
         // corpus precedes the machine. See the feeder's state-id comment and
         // ADR 003 §13.
-        let state = SqliteDeltaWalkerStateRepo::new(
-            self.sql.read_pool.clone(),
-            self.sql.write_pool.clone(),
-            ENCRYPTION_WORKER_STATE_ID,
-            "facets",
-        )
-        .await
-        .map_err(|error| ferr!("initializing blob-encryption FacetSet walker state: {error}"))?;
+        let state =
+            SqliteDeltaWalkerStateRepo::new(self.sql.clone(), ENCRYPTION_WORKER_STATE_ID, "facets")
+                .await
+                .map_err(|error| {
+                    ferr!("initializing blob-encryption FacetSet walker state: {error}")
+                })?;
         let durable = state.progress().await?.upstream_revision;
         let reader = facet_set_store
             .open(

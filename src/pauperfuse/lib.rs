@@ -1,4 +1,3 @@
-#![expect(unused)]
 /*!
 We need to do a lot more:
 - The livetree backend impl should live in pauperfuse
@@ -47,6 +46,16 @@ pub(crate) mod interlude {
 
 use interlude::*;
 pub mod store;
+
+/// Generated query functions live under `sqlite/gen.rs`; the alias lets
+/// the generated code name the runtime crate from any crate root.
+pub(crate) use sqlite_rs as sqlite_rs_alias;
+
+pub mod sqlite {
+    pub mod queries {
+        include!("sqlite/gen.rs");
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {

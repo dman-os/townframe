@@ -139,13 +139,8 @@ pub fn spawn_automerge_frontier_worker(
             // enumeration is frozen into the walker. The scope handle is
             // consulted live at event-processing and publish time.
             let identity = crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_AUTOMERGE_FRONTIER;
-            let admission_state = SqliteDeltaWalkerStateRepo::new(
-                store.sql.read_pool.clone(),
-                store.sql.write_pool.clone(),
-                identity.0,
-                identity.1,
-            )
-            .await?;
+            let admission_state =
+                SqliteDeltaWalkerStateRepo::new(store.sql.clone(), identity.0, identity.1).await?;
             let admission_source = keyhive_admission::Store {
                 store: store.clone(),
                 timer: Arc::clone(&timer),
@@ -172,8 +167,7 @@ pub fn spawn_automerge_frontier_worker(
                 store: Arc::clone(&big_sync_store),
             };
             let part_state = SqliteDeltaWalkerStateRepo::new(
-                store.sql.read_pool.clone(),
-                store.sql.write_pool.clone(),
+                store.sql.clone(),
                 "big_repo.automerge_frontier",
                 "part-revisions",
             )

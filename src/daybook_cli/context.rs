@@ -2,6 +2,7 @@ use crate::interlude::*;
 
 pub struct Config {
     pub cli_config: Arc<crate::config::CliConfig>,
+    pub sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
 }
 
 impl Config {
@@ -10,7 +11,11 @@ impl Config {
     }
 
     pub async fn new(cli_config: Arc<crate::config::CliConfig>) -> Res<Self> {
-        Ok(Self { cli_config })
+        let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
+        Ok(Self {
+            cli_config,
+            sqlite_runtime,
+        })
     }
 }
 
@@ -24,6 +29,7 @@ pub async fn open_repo_ctx(config: &Config, ensure_initialized: bool) -> Res<Sha
         && !daybook_core::repo::is_repo_initialized(&config.cli_config.repo_path).await?
     {
         daybook_core::repo::RepoCtx::init(
+            Arc::clone(&config.sqlite_runtime),
             &config.cli_config.repo_path,
             options,
             local_device_name.clone(),
@@ -31,8 +37,13 @@ pub async fn open_repo_ctx(config: &Config, ensure_initialized: bool) -> Res<Sha
         )
         .await?
     } else {
-        daybook_core::repo::RepoCtx::open(&config.cli_config.repo_path, options, local_device_name)
-            .await?
+        daybook_core::repo::RepoCtx::open(
+            Arc::clone(&config.sqlite_runtime),
+            &config.cli_config.repo_path,
+            options,
+            local_device_name,
+        )
+        .await?
     };
     Ok(rcx)
 }

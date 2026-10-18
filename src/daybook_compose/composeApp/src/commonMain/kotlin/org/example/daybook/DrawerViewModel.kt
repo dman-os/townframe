@@ -156,20 +156,36 @@ class DrawerViewModel(private val drawerRepo: DrawerRepoFfi) : ViewModel() {
     }
 
     private suspend fun applyRefreshIntent(intent: DrawerRefreshIntent) {
-        if (intent.refreshList) {
-            refreshDocIdsNow()
-        }
-
-        if (intent.refreshDocIds.isNotEmpty()) {
-            loadDocsInternal(intent.refreshDocIds.toList(), force = true)
-        }
-
-        if (intent.refreshSelectedDoc) {
-            _selectedDocId.value?.let { id ->
-                refreshSelectedDoc(id)
+        try {
+            if (intent.refreshList) {
+                refreshDocIdsNow()
             }
+
+            if (intent.refreshDocIds.isNotEmpty()) {
+                loadDocsInternal(intent.refreshDocIds.toList(), force = true)
+            }
+
+            if (intent.refreshSelectedDoc) {
+                _selectedDocId.value?.let { id ->
+                    refreshSelectedDoc(id)
+                }
+            }
+        } catch (e: IllegalStateException) {
+            // A destroyed repo throws uniffi's own guard rather than an
+            // `FfiException`: `check(ptr != 0L) { "... object has already been
+            // destroyed" }`. Teardown won the race against this debounced
+            // intent, so there is nothing left to refresh: make the runner
+            // terminal instead of letting the throw escape into
+            // `viewModelScope` and take the whole scope down with it. Any other
+            // `IllegalStateException` is a real bug and keeps propagating.
+            if (e.message?.contains("has already been destroyed") != true) {
+                rethrowRefreshFailure(e)
+            }
+            refreshRunner.cancel()
         }
     }
+
+    private fun rethrowRefreshFailure(error: IllegalStateException): Nothing = throw error
 
     private suspend fun refreshDocIdsNow() {
         val hadData = _docListState.value is DocListState.Data

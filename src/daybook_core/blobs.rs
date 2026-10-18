@@ -18,6 +18,16 @@ pub mod key_source;
 pub mod pair_roots;
 pub mod pin_worker;
 pub mod pins_part_worker;
+/// Repository-database tables owned by the blob pin worker and the pair-root
+/// ledger. The doc-blob-pins consumer keeps its own local-state unit under
+/// `pins_part_worker`.
+pub(crate) mod sqlite {
+    // `count_plug_pins` is a test probe.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) mod queries {
+        include!("blobs/sqlite/gen.rs");
+    }
+}
 pub mod sync;
 
 pub(crate) use encryption_worker::{BlobEncryptionWorkerArgs, spawn_blob_encryption_worker};

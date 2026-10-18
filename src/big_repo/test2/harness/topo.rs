@@ -29,7 +29,7 @@ use crate::{
     StorageConfig, WorkerGroupScope,
 };
 use big_sync::{HostPartStore, stress_support};
-use sqlx_utils_rs::SqlCtx;
+use sqlite_rs::SqliteRuntime;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::timeout;
 
@@ -162,13 +162,14 @@ impl Node {
         frontier_scope: WorkerGroupScope,
         keyhive_change_notifs: bool,
     ) -> crate::Res<Self> {
+        let sqlite_runtime = SqliteRuntime::new(Default::default());
         let sql = match &storage {
-            StorageConfig::Memory => SqlCtx::memory().await?,
+            StorageConfig::Memory => sqlite_runtime.ephemeral(&[])?,
             StorageConfig::Disk { path } => {
                 std::fs::create_dir_all(path)?;
                 let db_path = path.join("big_repo.sqlite");
                 ::tracing::info!(seed, label, path = %path.display(), "booted node with disk storage");
-                SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?
+                sqlite_runtime.database(db_path, &[], "_sqlite_rs_migrations")
             }
         };
         let store = Arc::new(

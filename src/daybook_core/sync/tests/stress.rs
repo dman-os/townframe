@@ -295,6 +295,7 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
     tokio::fs::create_dir_all(&paths[0]).await?;
     let device_name = "stress-test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &paths[0],
         RepoOpenOptions {
             sync_max_task_backoff: Some(Duration::from_millis(500)),
@@ -315,6 +316,7 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
             bootstrap_clone_repo_from_url_for_tests(&ticket, dst).await?;
 
             let ctx = RepoCtx::open(
+                Arc::new(sqlite_rs::SqliteRuntime::new(default())),
                 dst,
                 RepoOpenOptions {
                     sync_max_task_backoff: Some(Duration::from_millis(500)),

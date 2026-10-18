@@ -482,7 +482,7 @@ mod tests {
     use keyhive_crypto::signed::Signed;
     use keyhive_crypto::signer::memory::MemorySigner;
     use keyhive_crypto::verifiable::Verifiable;
-    use sqlx_utils_rs::SqlCtx;
+    use sqlite_rs::Database;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use subduction_keyhive::storage::StorageHash;
 
@@ -492,7 +492,7 @@ mod tests {
     /// every admission row is written by the test, so a replay is exact and no
     /// worker can react to a fixture.
     struct Harness {
-        _sql: SqlCtx,
+        _sql: Database,
         store: SqliteBigRepoStore,
         keyhive: BigKeyhiveHandle,
         local_agent: Identifier,
@@ -502,7 +502,9 @@ mod tests {
 
     impl Harness {
         async fn new() -> Self {
-            let sql = SqlCtx::memory().await.expect("create sqlite database");
+            let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+                .ephemeral(&[])
+                .expect("create sqlite database");
             let store =
                 SqliteBigRepoStore::new(sql.clone(), SCOPE, big_sync_core::BuckId::MAX_LEVEL)
                     .await
@@ -681,15 +683,10 @@ mod tests {
         }
     }
 
-    async fn state_repo(sql: &SqlCtx, consumer: &str) -> SqliteDeltaWalkerStateRepo {
-        SqliteDeltaWalkerStateRepo::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
-            "keyhive-access-test",
-            consumer,
-        )
-        .await
-        .expect("create delta walker state repo")
+    async fn state_repo(sql: &Database, consumer: &str) -> SqliteDeltaWalkerStateRepo {
+        SqliteDeltaWalkerStateRepo::new(sql.clone(), "keyhive-access-test", consumer)
+            .await
+            .expect("create delta walker state repo")
     }
 
     /// Advance a test walker's durable progress to `through`, the move the
@@ -731,7 +728,7 @@ mod tests {
         where
             Self: 'a;
         type Transaction<'a>
-            = SqliteDeltaWalkerStateTransaction<'a>
+            = SqliteDeltaWalkerStateTransaction
         where
             Self: 'a;
 

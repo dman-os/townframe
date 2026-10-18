@@ -4,7 +4,7 @@ use big_sync_core::keyed_frontier::{
     FrontierEntry, FrontierRead, FrontierReadLimits, FrontierRevision, KeyedFrontierError,
     KeyedFrontierReader, KeyedFrontierResult,
 };
-use sqlx::SqlitePool;
+use sqlite_rs::Database;
 use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::Notify;
@@ -21,7 +21,7 @@ pub(crate) trait SqliteReadSource: Clone + Send + Sync + 'static {
     type Key: Send + Sync + 'static;
     type Value: Send + Sync + 'static;
 
-    fn read_pool(&self) -> &SqlitePool;
+    fn database(&self) -> &Database;
     fn changed(&self) -> &Notify;
 
     /// Fetch a source page using a backend-specific conservative byte bound.

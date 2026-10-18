@@ -29,6 +29,13 @@ use wflow::{
 
 pub mod dispatch;
 pub mod init;
+/// Repository-database tables owned by the runtime: dispatch bookkeeping
+/// (`dispatch`) and per-node init completion (`init`).
+pub(crate) mod sqlite {
+    pub(crate) mod queries {
+        include!("rt/sqlite/gen.rs");
+    }
+}
 pub mod triage;
 pub mod wash_plugin;
 
@@ -339,7 +346,12 @@ impl Rt {
         )
         .await?;
 
-        let wcx = wflow::Ctx::init(Some(rcx.layout.repo_root.join("wflows.db"))).await?;
+        let wflow_db = rcx.sqlite_runtime.database(
+            rcx.layout.repo_root.join("wflows.db"),
+            &[],
+            "_sqlite_rs_migrations",
+        );
+        let wcx = wflow::Ctx::init(wflow_db).await?;
         Self::emit_startup_progress_status(
             &progress_repo,
             startup_progress_task_id.as_deref(),
@@ -598,7 +610,7 @@ impl Rt {
         rt.daybook_plugin.attach_rt(Arc::downgrade(&rt));
 
         let plugs_config_sql = sqlite_local_state_repo
-            .ensure_sqlite_ctx(crate::plugs::PLUGS_CONFIG_CONSUMER_STATE_ID)
+            .ensure_sqlite_db(crate::plugs::PLUGS_CONFIG_CONSUMER_STATE_ID)
             .await?;
         let plugs_config_consumer_stop = crate::plugs::spawn_plugs_config_consumer(
             rt.doc_facet_set_index_repo.revision_store(),
@@ -609,7 +621,7 @@ impl Rt {
         )
         .await?;
         let plugs_manifest_sql = sqlite_local_state_repo
-            .ensure_sqlite_ctx(crate::plugs::PLUG_MANIFEST_CONSUMER_STATE_ID)
+            .ensure_sqlite_db(crate::plugs::PLUG_MANIFEST_CONSUMER_STATE_ID)
             .await?;
         let plugs_manifest_consumer_stop = crate::plugs::spawn_facet_set_plugs_manifest_consumer(
             rt.doc_facet_set_index_repo.revision_store(),
@@ -2976,7 +2988,8 @@ mod tests {
 
     async fn make_partition_store()
     -> Res<(std::sync::Arc<dyn HostPartStore>, big_sync_core::PartKey)> {
-        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+        let sql = crate::app::open_database(&runtime, crate::app::SqlConfig::memory()).await?;
         let part_id = crate::part_id_from_label(PROCESSOR_RUNLOG_PARTITION_ID);
         let store =
             big_sync::SqlitePartStore::new(sql, "rt-test", big_sync_core::BuckId::MAX_LEVEL)
@@ -3030,6 +3043,7 @@ mod tests {
         let repo_root = temp_root.path().join("repo");
         tokio::fs::create_dir_all(&repo_root).await?;
         let rtx = crate::repo::RepoCtx::init(
+            Arc::new(sqlite_rs::SqliteRuntime::new(default())),
             &repo_root,
             crate::repo::RepoOpenOptions::default(),
             "derived-scope-test".into(),

@@ -1,5 +1,4 @@
 use super::*;
-use sqlx::{QueryBuilder, Row};
 
 /// The walker identities of the consumers that gate admission-log retention.
 ///
@@ -25,24 +24,13 @@ impl SqliteBigRepoStore {
     /// enumerating keyhive groups (a keyhive enumeration would miss parts
     /// for groups not yet in the hive and pays a graph walk).
     pub(crate) async fn list_parts(&self) -> Res<HashSet<PartKey>> {
-        let rows: Vec<Vec<u8>> = sqlx::query_scalar!(
-            "SELECT part_id AS 'part_id: Vec<u8>'
-             FROM big_sync_parts WHERE scope_id = ?",
-            self.scope().id()
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let rows = queries::list_parts(&self.sql, self.scope().id()).await?;
         Ok(rows.into_iter().map(Self::part_from_blob).collect())
     }
 
     #[cfg(test)]
     pub(crate) async fn keyhive_event_log_cursor(&self) -> Res<u64> {
-        let cursor: Option<i64> = sqlx::query_scalar!(
-            "SELECT MAX(seq) AS \"seq: i64\" FROM big_repo_keyhive_event_log WHERE scope_id = ?",
-            self.scope().id()
-        )
-        .fetch_one(&self.sql.read_pool)
-        .await?;
+        let cursor = queries::keyhive_event_log_cursor(&self.sql, self.scope().id()).await?;
         Ok(cursor.map(Self::u64_from_db).unwrap_or(0))
     }
 
@@ -52,30 +40,18 @@ impl SqliteBigRepoStore {
         data: Vec<u8>,
         source: Option<subduction_keyhive::KeyhivePeerId>,
     ) -> Result<bool, SqliteBigRepoStoreError> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let next_seq: i64 = sqlx::query_scalar!(
-            "SELECT COALESCE(MAX(seq), 0) + 1
-                 FROM big_repo_keyhive_event_log
-                WHERE scope_id = ?1",
-            self.scope().id()
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        let inserted = sqlx::query!(
-            "INSERT INTO big_repo_keyhive_event_log(
-                scope_id, seq, event_hash, event_bytes, source_id
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(scope_id, event_hash) DO NOTHING",
+        let tx = self.sql.begin_write().await?;
+        let next_seq = queries::next_keyhive_event_seq(&tx, self.scope().id()).await?;
+        let inserted = queries::save_keyhive_event(
+            &tx,
             self.scope().id(),
             next_seq,
-            hash.as_bytes().as_slice(),
-            &data,
-            source.map(|peer| peer.verifying_key().to_vec())
+            hash.as_bytes().to_vec(),
+            data,
+            source.map(|peer| peer.verifying_key().to_vec()),
         )
-        .execute(&mut *tx)
         .await?
-        .rows_affected()
+        .rows_affected
             > 0;
         // The event log is the durable WAL. Admission is recorded only after
         // projection effects are applied; archived rows are pruned using the
@@ -94,39 +70,17 @@ impl SqliteBigRepoStore {
     /// non-empty remainder points at an apply-side or ordering defect.
     pub(crate) async fn keyhive_event_ledger(&self) -> Res<KeyhiveEventLedger> {
         let scope = self.scope().id();
-        let counts = sqlx::query(
-            "SELECT
-                 (SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1) AS logged,
-                 (SELECT COUNT(*) FROM big_repo_keyhive_admissions WHERE scope_id = ?1) AS admitted,
-                 (SELECT COALESCE(MAX(seq), 0) FROM big_repo_keyhive_admissions WHERE scope_id = ?1) AS head",
-        )
-        .bind(scope)
-        .fetch_one(&self.sql.read_pool)
-        .await?;
+        let counts = queries::keyhive_event_counts(&self.sql, scope).await?;
         let mut ledger = KeyhiveEventLedger {
-            logged: counts.try_get::<i64, _>("logged")?.max(0) as u64,
-            admitted: counts.try_get::<i64, _>("admitted")?.max(0) as u64,
-            admission_head: counts.try_get::<i64, _>("head")?.max(0) as u64,
+            logged: counts.logged.max(0) as u64,
+            admitted: counts.admitted.max(0) as u64,
+            admission_head: counts.head.max(0) as u64,
             unapplied_by_source: BTreeMap::new(),
         };
-        let rows = sqlx::query(
-            "SELECT e.source_id AS source_id, COUNT(*) AS count
-               FROM big_repo_keyhive_event_log e
-              WHERE e.scope_id = ?1
-                AND NOT EXISTS (
-                    SELECT 1
-                      FROM big_repo_keyhive_admissions a
-                     WHERE a.scope_id = e.scope_id
-                       AND a.event_hash = e.event_hash
-                )
-              GROUP BY e.source_id",
-        )
-        .bind(scope)
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let rows = queries::unapplied_keyhive_event_counts(&self.sql, scope).await?;
         for row in rows {
-            let source: Option<Vec<u8>> = row.try_get("source_id")?;
-            let count: i64 = row.try_get("count")?;
+            let source = row.source_id;
+            let count = row.count;
             ledger
                 .unapplied_by_source
                 .insert(source, count.max(0) as u64);
@@ -145,27 +99,17 @@ impl SqliteBigRepoStore {
         hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         hashes.dedup_by(|left, right| left.as_bytes() == right.as_bytes());
         let source_id = source.map(|peer| peer.verifying_key().to_vec());
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let tx = self.sql.begin_write().await?;
 
         let mut known = HashSet::with_capacity(hashes.len());
         for chunk in hashes.chunks(400) {
             // Dynamic IN-list cardinality requires runtime SQL checking here.
-            // Dynamic IN-list cardinality requires runtime SQL checking here.
-            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-                "SELECT event_hash FROM big_repo_keyhive_event_log WHERE scope_id = ",
-            );
-            query
-                .push_bind(self.scope().id())
-                .push(" AND event_hash IN (");
-            for (index, hash) in chunk.iter().enumerate() {
-                if index != 0 {
-                    query.push(", ");
-                }
-                query.push_bind(hash.as_bytes().as_slice());
-            }
-            query.push(")");
-            for row in query.build().fetch_all(&mut *tx).await? {
-                known.insert(row.try_get::<Vec<u8>, _>("event_hash")?);
+            let mut query =
+                Sql::new("SELECT event_hash FROM big_repo_keyhive_event_log WHERE scope_id = ");
+            query.bind(self.scope().id()).push(" AND event_hash IN ");
+            query.bind_list(chunk.iter().map(|hash| hash.as_bytes().as_slice()));
+            for row in query.query(&tx).await?.rows {
+                known.insert(row.get::<Vec<u8>>("event_hash")?);
             }
         }
         if known.len() != hashes.len() {
@@ -181,41 +125,23 @@ impl SqliteBigRepoStore {
         let mut existing = HashSet::new();
         for chunk in hashes.chunks(400) {
             // Dynamic IN-list cardinality requires runtime SQL checking here.
-            // Dynamic IN-list cardinality requires runtime SQL checking here.
-            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
-                "SELECT event_hash FROM big_repo_keyhive_admissions WHERE scope_id = ",
-            );
-            query
-                .push_bind(self.scope().id())
-                .push(" AND event_hash IN (");
-            for (index, hash) in chunk.iter().enumerate() {
-                if index != 0 {
-                    query.push(", ");
-                }
-                query.push_bind(hash.as_bytes().as_slice());
-            }
-            query.push(")");
-            for row in query.build().fetch_all(&mut *tx).await? {
-                existing.insert(row.try_get::<Vec<u8>, _>("event_hash")?);
+            let mut query =
+                Sql::new("SELECT event_hash FROM big_repo_keyhive_admissions WHERE scope_id = ");
+            query.bind(self.scope().id()).push(" AND event_hash IN ");
+            query.bind_list(chunk.iter().map(|hash| hash.as_bytes().as_slice()));
+            for row in query.query(&tx).await?.rows {
+                existing.insert(row.get::<Vec<u8>>("event_hash")?);
             }
         }
         let missing: Vec<_> = hashes
             .into_iter()
             .filter(|hash| !existing.contains(hash.as_bytes().as_slice()))
             .collect();
-        let head: i64 = sqlx::query_scalar!(
-            "SELECT COALESCE(MAX(seq), 0) AS \"head!: i64\"
-               FROM big_repo_keyhive_admissions
-              WHERE scope_id = ?1",
-            self.scope().id()
-        )
-        .fetch_one(&mut *tx)
-        .await?;
+        let head = queries::admission_head(&tx, self.scope().id()).await?;
         let mut next_seq = head + 1;
         for chunk in missing.chunks(160) {
             // Dynamic IN-list cardinality requires runtime SQL checking here.
-            // Dynamic IN-list cardinality requires runtime SQL checking here.
-            let mut query = QueryBuilder::<sqlx::Sqlite>::new(
+            let mut query = Sql::new(
                 "INSERT INTO big_repo_keyhive_admissions(scope_id, seq, event_hash, source_id) VALUES ",
             );
             for (offset, hash) in chunk.iter().enumerate() {
@@ -224,17 +150,17 @@ impl SqliteBigRepoStore {
                 }
                 query
                     .push("(")
-                    .push_bind(self.scope().id())
+                    .bind(self.scope().id())
                     .push(", ")
-                    .push_bind(next_seq + i64::try_from(offset).expect(ERROR_IMPOSSIBLE))
+                    .bind(next_seq + i64::try_from(offset).expect(ERROR_IMPOSSIBLE))
                     .push(", ")
-                    .push_bind(hash.as_bytes().as_slice())
+                    .bind(hash.as_bytes().as_slice())
                     .push(", ")
-                    .push_bind(&source_id)
+                    .bind(source_id.as_deref())
                     .push(")");
             }
             query.push(" ON CONFLICT(scope_id, event_hash) DO NOTHING");
-            query.build().execute(&mut *tx).await?;
+            query.execute(&tx).await?;
             next_seq += i64::try_from(chunk.len()).expect(ERROR_IMPOSSIBLE);
         }
         tx.commit().await?;
@@ -257,11 +183,7 @@ impl SqliteBigRepoStore {
     }
 
     pub(crate) async fn admission_head(&self) -> Res<u64> {
-        let head: i64 = sqlx::query_scalar!("SELECT COALESCE(MAX(seq), 0) AS \"head!: i64\" FROM big_repo_keyhive_admissions WHERE scope_id = ?",
-            self.scope().id()
-        )
-            .fetch_one(&self.sql.read_pool)
-            .await?;
+        let head = queries::admission_head(&self.sql, self.scope().id()).await?;
         Ok(Self::u64_from_db(head))
     }
 
@@ -287,26 +209,16 @@ impl SqliteBigRepoStore {
     /// than replay a history it cannot be told about. Set by
     /// `prune_admitted_events`, which runs during maintenance.
     pub(crate) async fn archived_through(&self) -> Res<u64> {
-        let seq: i64 = sqlx::query_scalar!("SELECT COALESCE(MAX(seq), 0) AS \"seq!: i64\" FROM big_repo_keyhive_archived_through WHERE scope_id = ?",
-            self.scope().id()
-        )
-        .fetch_one(&self.sql.read_pool)
-        .await?;
+        let seq = queries::archived_through(&self.sql, self.scope().id()).await?;
         Ok(Self::u64_from_db(seq))
     }
 
     pub(crate) async fn set_archived_through(&self, seq: u64) -> Res<()> {
-        sqlx::query!(
-            "INSERT INTO big_repo_keyhive_archived_through(
-                 scope_id, seq
-             )
-             VALUES (?1, ?2)
-             ON CONFLICT(scope_id) DO UPDATE
-                 SET seq = MAX(seq, excluded.seq)",
+        queries::set_archived_through(
+            &self.sql,
             self.scope().id(),
-            i64::try_from(seq).expect(ERROR_IMPOSSIBLE)
+            i64::try_from(seq).expect(ERROR_IMPOSSIBLE),
         )
-        .execute(&self.sql.write_pool)
         .await?;
         Ok(())
     }
@@ -319,15 +231,8 @@ impl SqliteBigRepoStore {
     /// not started (no progress row) pins the floor at 0 until it does.
     /// Idempotent.
     pub(crate) async fn register_keyhive_admission_reader(&self, reader: &str) -> Res<()> {
-        sqlx::query!(
-            "INSERT INTO big_repo_keyhive_admission_readers(scope_id, reader)
-             VALUES (?1, ?2)
-             ON CONFLICT(scope_id, reader) DO NOTHING",
-            self.scope().id(),
-            reader
-        )
-        .execute(&self.sql.write_pool)
-        .await?;
+        queries::register_keyhive_admission_reader(&self.sql, self.scope().id(), reader.to_owned())
+            .await?;
         Ok(())
     }
 
@@ -375,14 +280,11 @@ impl SqliteBigRepoStore {
         namespace: &str,
         consumer_id: &str,
     ) -> Res<u64> {
-        let revision: i64 = sqlx::query_scalar!(
-            "SELECT COALESCE(MAX(upstream_revision), 0) AS \"revision!: i64\"
-               FROM delta_walker_progress
-              WHERE namespace = ?1 AND consumer_id = ?2",
-            namespace,
-            consumer_id
+        let revision = queries::admission_consumer_progress(
+            &self.sql,
+            namespace.to_owned(),
+            consumer_id.to_owned(),
         )
-        .fetch_one(&self.sql.read_pool)
         .await?;
         Ok(Self::u64_from_db(revision))
     }
@@ -397,25 +299,7 @@ impl SqliteBigRepoStore {
     /// `archived_through` rather than this prefix — the prefix can run ahead of
     /// every registered consumer's cursor while their rows are still in the log.
     async fn archived_admission_floor(&self) -> Res<u64> {
-        let floor: i64 = sqlx::query_scalar!(
-            "SELECT COALESCE(
-                       (SELECT MIN(a.seq)
-                          FROM big_repo_keyhive_admissions a
-                         WHERE a.scope_id = ?1
-                           AND NOT EXISTS (
-                               SELECT 1
-                                 FROM big_repo_keyhive_event_tombstones t
-                                WHERE t.scope_id = a.scope_id
-                                  AND t.event_hash = a.event_hash
-                           )),
-                       (SELECT COALESCE(MAX(seq), 0) + 1
-                          FROM big_repo_keyhive_admissions
-                         WHERE scope_id = ?1)
-                   ) - 1 AS \"floor!: i64\"",
-            self.scope().id()
-        )
-        .fetch_one(&self.sql.read_pool)
-        .await?;
+        let floor = queries::archived_admission_floor(&self.sql, self.scope().id()).await?;
         Ok(Self::u64_from_db(floor))
     }
 
@@ -432,17 +316,9 @@ impl SqliteBigRepoStore {
     /// to the tombstone prefix the reader floor may hold it below.
     pub(crate) async fn prune_admitted_events(&self) -> Res<u64> {
         let archive_floor = self.archived_admission_floor().await?;
-        let reader_floor = sqlx::query!(
-            "SELECT MIN(COALESCE(p.upstream_revision, 0)) AS \"reader_floor: i64\"
-               FROM big_repo_keyhive_admission_readers r
-               LEFT JOIN delta_walker_progress p
-                 ON (p.namespace || '/' || p.consumer_id) = r.reader
-              WHERE r.scope_id = ?1",
-            self.scope().id()
-        )
-        .fetch_one(&self.sql.read_pool)
-        .await?;
-        let reader_floor = reader_floor.reader_floor.unwrap_or_default();
+        let reader_floor = queries::admission_reader_floor(&self.sql, self.scope().id())
+            .await?
+            .unwrap_or_default();
         let watermark = archive_floor.min(Self::u64_from_db(reader_floor));
         if watermark == 0 {
             return Ok(0);
@@ -454,34 +330,20 @@ impl SqliteBigRepoStore {
         // below the very floor computed to stay under it, and make a consumer
         // clamping to the marker skip wake-ups that are still in the log.
         self.set_archived_through(watermark).await?;
-        let result = sqlx::query!(
-            "DELETE FROM big_repo_keyhive_event_log
-             WHERE scope_id = ?1
-               AND EXISTS (
-                   SELECT 1
-                     FROM big_repo_keyhive_admissions a
-                     JOIN big_repo_keyhive_event_tombstones t
-                       ON t.scope_id = a.scope_id AND t.event_hash = a.event_hash
-                    WHERE a.scope_id = big_repo_keyhive_event_log.scope_id
-                      AND a.event_hash = big_repo_keyhive_event_log.event_hash
-                      AND a.seq <= ?2
-               )",
+        let result = queries::prune_admitted_events(
+            &self.sql,
             self.scope().id(),
-            i64::try_from(watermark).expect(ERROR_IMPOSSIBLE)
+            i64::try_from(watermark).expect(ERROR_IMPOSSIBLE),
         )
-        .execute(&self.sql.write_pool)
         .await?;
-        Ok(result.rows_affected())
+        Ok(result.rows_affected)
     }
 
     pub(crate) async fn run_maintenance(&self) -> Res<u64> {
         let pruned = self.prune_admitted_events().await?;
-        // SQLite's compile-time SQLx macros cannot execute no-column PRAGMAs.
-        sqlx::query("PRAGMA optimize")
-            .execute(&self.sql.write_pool)
-            .await?;
-        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-            .execute(&self.sql.write_pool)
+        self.sql.execute("PRAGMA optimize", &[]).await?;
+        self.sql
+            .execute("PRAGMA wal_checkpoint(TRUNCATE)", &[])
             .await?;
         Ok(pruned)
     }
@@ -491,19 +353,12 @@ impl SqliteBigRepoStore {
         cursor: u64,
         limit: u32,
     ) -> Res<Vec<AdmissionEventRow>> {
-        let rows = sqlx::query!(
-            "SELECT a.seq, a.event_hash, a.source_id, e.event_bytes
-             FROM big_repo_keyhive_admissions a
-             JOIN big_repo_keyhive_event_log e
-               ON e.scope_id = a.scope_id AND e.event_hash = a.event_hash
-             WHERE a.scope_id = ?1 AND a.seq > ?2
-             ORDER BY a.seq
-             LIMIT ?3",
+        let rows = queries::admission_events_after(
+            &self.sql,
             self.scope().id(),
             i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-            i64::from(limit)
+            i64::from(limit),
         )
-        .fetch_all(&self.sql.read_pool)
         .await?;
         rows.into_iter()
             .map(|row| {
@@ -521,16 +376,7 @@ impl SqliteBigRepoStore {
         &self,
     ) -> Result<Vec<(subduction_keyhive::storage::StorageHash, Vec<u8>)>, SqliteBigRepoStoreError>
     {
-        let rows = sqlx::query_as!(
-            KeyhiveEventQueryRow,
-            "SELECT event_hash, event_bytes, source_id
-                 FROM big_repo_keyhive_event_log
-                WHERE scope_id = ?1
-                ORDER BY seq",
-            self.scope().id(),
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let rows = queries::load_keyhive_events(&self.sql, self.scope().id()).await?;
         rows.into_iter()
             .map(|row| {
                 let hash = Self::decode_id(row.event_hash)?;
@@ -548,22 +394,7 @@ impl SqliteBigRepoStore {
         Vec<([u8; 32], Vec<u8>, Option<subduction_keyhive::KeyhivePeerId>)>,
         SqliteBigRepoStoreError,
     > {
-        let rows = sqlx::query_as!(
-            KeyhiveEventQueryRow,
-            "SELECT l.event_hash, l.event_bytes, l.source_id
-                 FROM big_repo_keyhive_event_log l
-                WHERE l.scope_id = ?1
-                  AND NOT EXISTS (
-                        SELECT 1
-                          FROM big_repo_keyhive_admissions a
-                         WHERE a.scope_id = l.scope_id
-                           AND a.event_hash = l.event_hash
-                  )
-                ORDER BY l.seq",
-            self.scope().id(),
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let rows = queries::unadmitted_keyhive_events(&self.sql, self.scope().id()).await?;
         rows.into_iter()
             .map(|row| {
                 let hash = Self::decode_id(row.event_hash)?;
@@ -589,16 +420,7 @@ impl SqliteBigRepoStore {
         )>,
         SqliteBigRepoStoreError,
     > {
-        let rows = sqlx::query_as!(
-            KeyhiveEventQueryRow,
-            "SELECT e.event_hash, e.event_bytes, e.source_id
-                 FROM big_repo_keyhive_event_log e
-                WHERE e.scope_id = ?1
-                ORDER BY e.seq",
-            self.scope().id(),
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let rows = queries::load_keyhive_events(&self.sql, self.scope().id()).await?;
         rows.into_iter()
             .map(|row| {
                 let hash = Self::decode_id(row.event_hash)?;
@@ -622,16 +444,8 @@ impl SqliteBigRepoStore {
         &self,
         hash: subduction_keyhive::storage::StorageHash,
     ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query!(
-            "INSERT OR IGNORE INTO big_repo_keyhive_event_tombstones(
-                 scope_id, event_hash
-             )
-             VALUES (?1, ?2)",
-            self.scope().id(),
-            hash.as_bytes().as_slice()
-        )
-        .execute(&self.sql.write_pool)
-        .await?;
+        queries::delete_keyhive_event(&self.sql, self.scope().id(), hash.as_bytes().to_vec())
+            .await?;
         Ok(())
     }
 }

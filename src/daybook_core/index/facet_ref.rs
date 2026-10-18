@@ -1,5 +1,14 @@
 use crate::interlude::*;
 
+/// Tables of the facet-ref index, kept in its own local-state database
+/// (`FACET_REF_LOCAL_STATE_ID`).
+pub(crate) mod sqlite {
+    pub(crate) mod queries {
+        include!("facet_ref/sqlite/gen.rs");
+    }
+}
+use sqlite::queries;
+
 use crate::drawer::DrawerRepo;
 use crate::index::facet_delta::{FacetDelta, FacetRouteKey};
 use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
@@ -15,7 +24,7 @@ use daybook_types::doc::{ArcFacetRaw, ChangeHashSet, DocId, FacetKey, FacetRef};
 use daybook_types::manifest::{FacetReferenceKind, FacetReferenceManifest};
 use daybook_types::reference::select_json_path_values;
 use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
-use sqlx::{Sqlite, Transaction};
+use sqlite_rs::Tx;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use tokio_util::sync::CancellationToken;
 
@@ -34,7 +43,7 @@ pub struct DocFacetRefEdge {
 pub struct DocFacetRefIndexRepo {
     drawer_repo: Arc<DrawerRepo>,
     plugs_repo: Arc<PlugsRepo>,
-    sql: SqlCtx,
+    sql: Database,
     reference_specs: tokio::sync::RwLock<HashMap<String, Vec<FacetReferenceManifest>>>,
 }
 
@@ -68,7 +77,7 @@ impl DocFacetRefIndexRepo {
         parent_cancel_token: CancellationToken,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let sql = sqlite_local_state_repo
-            .ensure_sqlite_ctx(FACET_REF_LOCAL_STATE_ID)
+            .ensure_sqlite_db(FACET_REF_LOCAL_STATE_ID)
             .await?;
         Self::init_schema(&sql).await?;
 
@@ -102,35 +111,9 @@ impl DocFacetRefIndexRepo {
         ))
     }
 
-    async fn init_schema(sql: &SqlCtx) -> Res<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS facet_ref_edges (
-                origin_doc_id TEXT NOT NULL,
-                origin_facet_key TEXT NOT NULL,
-                target_doc_id TEXT NOT NULL,
-                target_facet_key TEXT NOT NULL,
-                reference_kind TEXT NOT NULL,
-                origin_heads TEXT NOT NULL,
-                PRIMARY KEY(origin_doc_id, origin_facet_key, target_doc_id, target_facet_key, reference_kind)
-            ) STRICT
-            "#,
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_facet_ref_edges_target ON facet_ref_edges(target_doc_id, target_facet_key)",
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_facet_ref_edges_origin ON facet_ref_edges(origin_doc_id, origin_facet_key)",
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
+    async fn init_schema(sql: &Database) -> Res<()> {
+        sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+            .await?;
         Ok(())
     }
 
@@ -173,9 +156,7 @@ impl DocFacetRefIndexRepo {
     }
 
     async fn reindex_all_docs(&self) -> Res<()> {
-        sqlx::query("DELETE FROM facet_ref_edges")
-            .execute(&self.sql.write_pool)
-            .await?;
+        queries::delete_all_edges(&self.sql).await?;
 
         let specs = self.reference_specs.read().await.clone();
         let reference_tags: HashSet<String> = specs.keys().cloned().collect();
@@ -231,7 +212,7 @@ impl DocFacetRefIndexRepo {
         heads: &ChangeHashSet,
         facets: &HashMap<FacetKey, ArcFacetRaw>,
     ) -> Res<()> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.sql.begin_write().await?;
         self.replace_outgoing_edges_in_tx(&mut tx, doc_id, heads, facets)
             .await?;
         tx.commit().await?;
@@ -240,7 +221,7 @@ impl DocFacetRefIndexRepo {
 
     async fn replace_outgoing_edges_in_tx(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Tx,
         doc_id: &DocId,
         heads: &ChangeHashSet,
         facets: &HashMap<FacetKey, ArcFacetRaw>,
@@ -249,10 +230,7 @@ impl DocFacetRefIndexRepo {
             serde_json::to_string(&am_utils_rs::serialize_commit_heads(&heads.0))
                 .expect(ERROR_JSON);
 
-        sqlx::query("DELETE FROM facet_ref_edges WHERE origin_doc_id = ?1")
-            .bind(doc_id)
-            .execute(&mut **tx)
-            .await?;
+        queries::delete_outgoing_edges(tx, doc_id.clone()).await?;
 
         let specs = self.reference_specs.read().await.clone();
         for (facet_key, facet_value) in facets {
@@ -264,27 +242,15 @@ impl DocFacetRefIndexRepo {
             for spec in tag_specs {
                 let references = extract_references(spec, facet_value.as_ref(), doc_id, facet_key)?;
                 for reference in references {
-                    sqlx::query(
-                        r#"
-                        INSERT INTO facet_ref_edges (
-                            origin_doc_id,
-                            origin_facet_key,
-                            target_doc_id,
-                            target_facet_key,
-                            reference_kind,
-                            origin_heads
-                        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                        ON CONFLICT(origin_doc_id, origin_facet_key, target_doc_id, target_facet_key, reference_kind)
-                        DO UPDATE SET origin_heads = excluded.origin_heads
-                        "#,
+                    queries::upsert_edge(
+                        tx,
+                        doc_id.clone(),
+                        facet_key.to_string(),
+                        reference.target_doc_id,
+                        reference.target_facet_key.to_string(),
+                        reference_kind_to_db_value(&spec.reference_kind()).to_owned(),
+                        serialized_heads.clone(),
                     )
-                    .bind(doc_id)
-                    .bind(facet_key.to_string())
-                    .bind(reference.target_doc_id)
-                    .bind(reference.target_facet_key.to_string())
-                    .bind(reference_kind_to_db_value(&spec.reference_kind()))
-                    .bind(&serialized_heads)
-                    .execute(&mut **tx)
                     .await?;
                 }
             }
@@ -294,25 +260,11 @@ impl DocFacetRefIndexRepo {
     }
 
     pub async fn list_outgoing(&self, doc_id: &DocId) -> Res<Vec<DocFacetRefEdge>> {
-        let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
-            r#"
-            SELECT
-                origin_doc_id,
-                origin_facet_key,
-                target_doc_id,
-                target_facet_key,
-                reference_kind,
-                origin_heads
-            FROM facet_ref_edges
-            WHERE origin_doc_id = ?1
-            ORDER BY origin_facet_key, target_doc_id, target_facet_key
-            "#,
-        )
-        .bind(doc_id)
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-
-        rows.into_iter().map(row_to_edge).collect()
+        queries::outgoing_edges(&self.sql, doc_id.clone())
+            .await?
+            .into_iter()
+            .map(row_to_edge)
+            .collect()
     }
 
     pub async fn list_incoming(
@@ -320,26 +272,15 @@ impl DocFacetRefIndexRepo {
         target_doc_id: &DocId,
         target_facet_key: &FacetKey,
     ) -> Res<Vec<DocFacetRefEdge>> {
-        let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
-            r#"
-            SELECT
-                origin_doc_id,
-                origin_facet_key,
-                target_doc_id,
-                target_facet_key,
-                reference_kind,
-                origin_heads
-            FROM facet_ref_edges
-            WHERE target_doc_id = ?1 AND target_facet_key = ?2
-            ORDER BY origin_doc_id, origin_facet_key
-            "#,
+        queries::incoming_edges(
+            &self.sql,
+            target_doc_id.clone(),
+            target_facet_key.to_string(),
         )
-        .bind(target_doc_id)
-        .bind(target_facet_key.to_string())
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-
-        rows.into_iter().map(row_to_edge).collect()
+        .await?
+        .into_iter()
+        .map(row_to_edge)
+        .collect()
     }
 }
 
@@ -638,8 +579,7 @@ impl DocFacetRefIndexRepo {
         cancel_token: CancellationToken,
     ) -> Res<()> {
         let facet_state = big_sync::SqliteDeltaWalkerStateRepo::new(
-            self.sql.read_pool.clone(),
-            self.sql.write_pool.clone(),
+            self.sql.clone(),
             FACET_REF_LOCAL_STATE_ID,
             "facets",
         )
@@ -744,19 +684,13 @@ impl DocFacetRefIndexRepo {
 
     async fn apply_facet_set_revision_in_tx(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Tx,
         prepared: &[FacetSetBranchPreparation],
     ) -> Res<()> {
         for preparation in prepared {
             match preparation {
                 FacetSetBranchPreparation::Tombstone { document_id } => {
-                    sqlx::query(
-                        "DELETE FROM facet_ref_edges WHERE origin_doc_id = ? OR target_doc_id = ?",
-                    )
-                    .bind(document_id)
-                    .bind(document_id)
-                    .execute(&mut **tx)
-                    .await?;
+                    queries::delete_doc_edges(tx, document_id.clone()).await?;
                 }
                 FacetSetBranchPreparation::Live {
                     document_id,
@@ -866,20 +800,29 @@ fn reference_kind_from_db_value(value: &str) -> Res<FacetReferenceKind> {
     }
 }
 
-fn row_to_edge(row: (String, String, String, String, String, String)) -> Res<DocFacetRefEdge> {
-    let (origin_doc_id, origin_facet_key, target_doc_id, target_facet_key, reference_kind, heads) =
-        row;
+/// One `facet_ref_edges` row as stored; constructed by the generated edge
+/// queries (`-- into:`).
+pub(crate) struct EdgeRow {
+    pub(crate) origin_doc_id: String,
+    pub(crate) origin_facet_key: String,
+    pub(crate) target_doc_id: String,
+    pub(crate) target_facet_key: String,
+    pub(crate) reference_kind: String,
+    pub(crate) origin_heads: String,
+}
+
+fn row_to_edge(row: EdgeRow) -> Res<DocFacetRefEdge> {
     let heads = am_utils_rs::parse_commit_heads(
-        &serde_json::from_str::<Vec<String>>(&heads).expect(ERROR_JSON),
+        &serde_json::from_str::<Vec<String>>(&row.origin_heads).expect(ERROR_JSON),
     )
     .expect(ERROR_JSON);
 
     Ok(DocFacetRefEdge {
-        origin_doc_id,
-        origin_facet_key: FacetKey::from(origin_facet_key),
-        target_doc_id,
-        target_facet_key: FacetKey::from(target_facet_key),
-        reference_kind: reference_kind_from_db_value(&reference_kind)?,
+        origin_doc_id: row.origin_doc_id,
+        origin_facet_key: FacetKey::from(row.origin_facet_key),
+        target_doc_id: row.target_doc_id,
+        target_facet_key: FacetKey::from(row.target_facet_key),
+        reference_kind: reference_kind_from_db_value(&row.reference_kind)?,
         origin_heads: ChangeHashSet(heads),
     })
 }

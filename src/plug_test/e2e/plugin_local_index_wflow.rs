@@ -1,7 +1,7 @@
 use crate::interlude::*;
 
 use daybook_types::doc::{AddDocArgs, FacetKey, WellKnownFacet, WellKnownFacetTag};
-use sqlx_utils_rs::SqlCtx;
+use sqlite_rs::{Database, IntoParams};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Res<()> {
@@ -81,23 +81,29 @@ async fn test_embedding_processor_indexes_into_plugin_local_sqlite_state() -> Re
         .wait_for_dispatch_end(&index_dispatch_id, std::time::Duration::from_secs(120))
         .await?;
 
-    let sqlite_file_path = test_context
+    let db: Database = test_context
         .rt
         .sqlite_local_state_repo
-        .get_sqlite_file_path("@daybook/test/doc-embedding-index")
+        .ensure_sqlite_db("@daybook/test/doc-embedding-index")
         .await?;
-    let sqlite_url = format!("sqlite://{}", sqlite_file_path.display());
-    let db = SqlCtx::url(&sqlite_url).await?;
 
+    // `doc_embedding_meta` is created by the guest (`wflows/index_embedding.rs`)
+    // with inline DDL over the WIT connection; guests cannot link `sqlite_rs`
+    // yet, so there is no `sqlite/` unit for this table and the probe stays
+    // inline. Once guests own a unit, this reads through its query files.
     let mut found_index_record = false;
     for _ in 0..120 {
-        let row_count_result = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM doc_embedding_meta WHERE doc_id = ?1 AND facet_key = ?2",
-        )
-        .bind(&doc_id)
-        .bind(FacetKey::from(WellKnownFacetTag::Embedding).to_string())
-        .fetch_one(&db.read_pool)
-        .await;
+        let row_count_result = db
+            .query(
+                "SELECT COUNT(*) FROM doc_embedding_meta WHERE doc_id = ?1 AND facet_key = ?2",
+                (
+                    &doc_id,
+                    FacetKey::from(WellKnownFacetTag::Embedding).to_string(),
+                )
+                    .into_params(),
+            )
+            .await
+            .and_then(sqlite_rs::ResultSet::one::<i64>);
 
         match row_count_result {
             Ok(row_count) if row_count > 0 => {

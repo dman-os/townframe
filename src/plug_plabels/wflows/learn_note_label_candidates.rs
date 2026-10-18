@@ -209,7 +209,7 @@ fn ensure_embedding_cache_schema(
     sqlite_connection: &crate::wit::townframe::sqlite::sqlite_connection::Connection,
 ) -> Result<(), JobErrorX> {
     sqlite_connection
-        .query_batch(
+        .execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS learned_label_text_embedding_cache (
                 query_text TEXT PRIMARY KEY,
@@ -250,18 +250,18 @@ fn get_or_compute_text_embedding(
             &[SqlValue::Text(query_text.to_string())],
         )
         .map_err(|err| JobErrorX::Terminal(ferr!("error querying learned label embedding cache: {err:?}")))?;
-    if let Some(row) = cache_rows.first() {
-        let model_tag = row_text(row, "model_tag").ok_or_else(|| {
+    if let Some(row) = cache_rows.rows.first() {
+        let model_tag = row_text(&cache_rows, row, "model_tag").ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
                 "malformed learned label embedding cache row: missing/invalid field 'model_tag'"
             ))
         })?;
-        let dim = row_i64(row, "dim").ok_or_else(|| {
+        let dim = row_i64(&cache_rows, row, "dim").ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
                 "malformed learned label embedding cache row: missing/invalid field 'dim'"
             ))
         })?;
-        let vector_bytes = row_blob(row, "vector").ok_or_else(|| {
+        let vector_bytes = row_blob(&cache_rows, row, "vector").ok_or_else(|| {
             JobErrorX::Terminal(ferr!(
                 "malformed learned label embedding cache row: missing/invalid field 'vector'"
             ))
@@ -294,7 +294,7 @@ fn get_or_compute_text_embedding(
     }
     let vector_bytes = daybook_types::doc::embedding_f32_slice_to_le_bytes(&embed_result.vector);
     sqlite_connection
-        .query(
+        .execute(
             "INSERT INTO learned_label_text_embedding_cache (query_text, model_tag, dim, vector) \
              VALUES (?1, ?2, ?3, ?4) \
              ON CONFLICT(query_text) DO UPDATE SET model_tag = excluded.model_tag, dim = excluded.dim, vector = excluded.vector",

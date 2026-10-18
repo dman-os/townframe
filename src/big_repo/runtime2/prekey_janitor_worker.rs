@@ -101,13 +101,7 @@ async fn run_prekey_janitor_tail(
     timer: std::sync::Arc<dyn crate::runtime2::Timer<future_form::Sendable>>,
 ) -> Res<()> {
     let identity = crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_PREKEY_JANITOR;
-    let state = SqliteDeltaWalkerStateRepo::new(
-        store.sql.read_pool.clone(),
-        store.sql.write_pool.clone(),
-        identity.0,
-        identity.1,
-    )
-    .await?;
+    let state = SqliteDeltaWalkerStateRepo::new(store.sql.clone(), identity.0, identity.1).await?;
     let source = keyhive_admission::Store {
         store: store.clone(),
         timer,

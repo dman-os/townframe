@@ -31,6 +31,7 @@ impl SqliteLocalStateRepoFfi {
     async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
         let (repo, stop_token) = fcx
             .do_on_rt(SqliteLocalStateRepo::boot(
+                Arc::clone(&fcx.rcx.sqlite_runtime),
                 fcx.rcx.layout.repo_root.join("local_state"),
             ))
             .await

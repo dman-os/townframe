@@ -53,13 +53,8 @@ pub fn spawn_group_part_worker(
     let run = Sendable::from_future(async move {
         let fut = async move {
             let identity = crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_GROUP_PART;
-            let state = SqliteDeltaWalkerStateRepo::new(
-                store.sql.read_pool.clone(),
-                store.sql.write_pool.clone(),
-                identity.0,
-                identity.1,
-            )
-            .await?;
+            let state =
+                SqliteDeltaWalkerStateRepo::new(store.sql.clone(), identity.0, identity.1).await?;
 
             // The walker's durable revision is the authority on what has been
             // reconciled: it advances only after every sink task for that prefix has
@@ -952,7 +947,6 @@ mod tests {
     use keyhive_core::principal::group::id::GroupId as KhGroupId;
     use keyhive_core::principal::identifier::Identifier;
     use keyhive_core::principal::membered::Membered;
-    use sqlx_utils_rs::SqlCtx;
     use std::collections::BTreeMap;
     use subduction_keyhive::storage::StorageHash;
 
@@ -1043,7 +1037,9 @@ mod tests {
     /// test timeout would be the only signal.
     #[tokio::test]
     async fn the_admission_read_waits_on_the_injected_timer_not_wall_clock() {
-        let sql = SqlCtx::memory().await.expect("create sqlite database");
+        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .expect("create sqlite database");
         let store = SqliteBigRepoStore::new(sql, "group-part-manual-time", BuckId::MAX_LEVEL)
             .await
             .expect("create sqlite big repo store");
