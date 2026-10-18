@@ -16,6 +16,8 @@ mod value;
 
 #[cfg(feature = "schemars")]
 mod codec;
+#[cfg(feature = "schemars")]
+mod lexicon;
 mod wire;
 
 #[cfg(all(test, feature = "schemars"))]
@@ -23,7 +25,9 @@ mod e2e;
 
 pub use member::{FacetMember, str_eq};
 pub use shape::{FacetShape, Openness, Shape, Tagging};
-pub use universe::{Bundle, Declaration, FacetDecl, TypeDecl, Universe, UniverseError};
+pub use universe::{
+    Bundle, Declaration, FacetDecl, Lexicon, LexiconError, TypeDecl, Universe, UniverseError,
+};
 pub use value::Extra;
 
 #[cfg(feature = "schemars")]
@@ -34,6 +38,6 @@ pub use codec::{
 #[cfg(feature = "schemars")]
 pub use shape::{ShapeError, ShapeFlag, check_shape};
 pub use wire::{
-    KnownString, Member, MemberSchema, UnknownMember, deserialize_known_str, deserialize_union,
-    open_string_schema, serialize_member, union_schema,
+    KnownString, Member, MemberSchema, UnionLayout, UnknownMember, deserialize_known_str,
+    deserialize_union, open_string_schema, serialize_member, union_schema,
 };

@@ -21,13 +21,18 @@
 //! claiming one tag, two definitions disagreeing about a name they both declare, and a reference
 //! that resolves in neither this plug nor a dependency.
 
-use crate::facet::{FacetMember, FacetShape, ShapeFlag, check_shape};
+use crate::facet::lexicon::project_facet;
+use crate::facet::{FacetMember, FacetShape, Shape, ShapeFlag, Tagging, check_shape};
 use schemars::{JsonSchema, Schema};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 
 /// A facet a plug declares: the tag a facet key carries, the name a definition refers to it by, its
 /// definition, and the decisions that declaration makes at a cost.
+///
+/// The Lexicon it publishes is not a field: it is projected from the definitions the whole bundle
+/// carries ([`Bundle::lexicons`]), because a reference a facet makes resolves against the plug and
+/// its dependencies and not against the declaration alone.
 #[derive(Debug, Clone)]
 pub struct FacetDecl {
     pub id: String,
@@ -52,18 +57,43 @@ pub struct Declaration {
 }
 
 impl Declaration {
-    /// Declares one facet type.
+    /// Declares one facet type, refusing a schema that is not lexicon-aligned.
     ///
     /// The id comes from the type, the definition is the schema `schemars` derived for it, and every
     /// other definition that schema reached is hoisted out to travel beside it. The shape the type
-    /// claims is checked against its definition here, which is the one place both are in hand.
+    /// claims is checked against its definition here, which is the one place both are in hand, and so
+    /// is the Lexicon the definition has to project to — refused here, at authoring time, rather than
+    /// at the publish that would carry it.
     pub fn of<T>() -> Result<Self, crate::facet::ShapeError>
     where
         T: FacetMember + FacetShape + JsonSchema,
     {
+        Self::declared::<T>(Publish::Yes)
+    }
+
+    /// The schema bundle without the lexicon gate.
+    ///
+    /// The codec's document is a `$ref` bundle a walk can store under. A type such as one with a
+    /// deliberate plain number is a legitimate codec position and is not canonical JSON, so it
+    /// assembles here and is refused by [`Bundle::lexicons`] rather than silently published.
+    pub fn assemble<T>() -> Result<Self, crate::facet::ShapeError>
+    where
+        T: FacetMember + FacetShape + JsonSchema,
+    {
+        Self::declared::<T>(Publish::No)
+    }
+
+    fn declared<T>(publish: Publish) -> Result<Self, crate::facet::ShapeError>
+    where
+        T: FacetMember + FacetShape + JsonSchema,
+    {
         let derived = schemars::schema_for!(T);
+        let document = serde_json::to_value(&derived).expect("a schema serializes");
         let schema = without_definitions(&derived);
         let flags = check_shape(T::ID, &schema, T::SHAPE)?;
+        if let Publish::Yes = publish {
+            check_aligned(T::ID, T::SHAPE, &document)?;
+        }
         Ok(Self {
             facet: FacetDecl {
                 id: T::ID.to_owned(),
@@ -74,6 +104,34 @@ impl Declaration {
             types: definitions(&derived),
         })
     }
+}
+
+/// Whether a declaration has to be publishable as a Lexicon, or only usable as a codec document.
+enum Publish {
+    Yes,
+    No,
+}
+
+/// The alignment gate: this declaration's schema has to project to a Lexicon file.
+///
+/// Adjacent and external unions are explicit departures from the internally tagged member a Lexicon
+/// union is, so they are refused here and stay representable in the sidecar only.
+fn check_aligned(id: &str, shape: Shape, document: &Value) -> Result<(), crate::facet::ShapeError> {
+    if let Shape::Union {
+        tagging: Tagging::Adjacently { .. } | Tagging::Externally,
+        ..
+    } = shape
+    {
+        return Err(crate::facet::ShapeError::NotLexiconAligned {
+            name: id.to_owned(),
+            reason: "only an internally tagged union is a lexicon union".to_owned(),
+        });
+    }
+    project_facet(id, document).map_err(|reason| crate::facet::ShapeError::NotLexiconAligned {
+        name: id.to_owned(),
+        reason,
+    })?;
+    Ok(())
 }
 
 /// Everything one plug declares.
@@ -210,11 +268,7 @@ impl<'a> Bundle<'a> {
     /// flat, because that is what lets two facets share one; a reader that just wants to check a
     /// value takes this instead of assembling `$defs` itself.
     pub fn document(&self, facet_name: &str) -> Option<Schema> {
-        let mut defs = Map::new();
-        for (name, schema, _owner) in self.definitions() {
-            defs.entry(name.to_owned())
-                .or_insert_with(|| serde_json::to_value(schema).expect("a schema is a JSON value"));
-        }
+        let defs = self.defs_in_scope();
         if !defs.contains_key(facet_name) {
             return None;
         }
@@ -230,6 +284,72 @@ impl<'a> Bundle<'a> {
         root.insert("$defs".to_owned(), Value::Object(defs));
         Schema::try_from(Value::Object(root)).ok()
     }
+
+    /// Every Lexicon file this bundle publishes, one per facet, in the order the plug declares them.
+    ///
+    /// Projected against the whole bundle rather than against one declaration, so a definition a
+    /// facet reaches resolves here the same way it does in [`Bundle::document`] — including one
+    /// carried by a dependency plug. This is the publish step, and it is where a declaration that
+    /// was [`assemble`d](Declaration::assemble) without the alignment gate is refused instead of
+    /// being handed to a peer that cannot read it.
+    pub fn lexicons(&self) -> Result<Vec<Lexicon>, LexiconError> {
+        let defs = Value::Object(self.defs_in_scope());
+        self.plug
+            .facets
+            .iter()
+            .map(|facet| {
+                // A declaration is checked against its own schema at authoring time, but the union
+                // tagging it settled on is only a decision recorded in `flags`: refuse to publish a
+                // facet whose union a consumer cannot read as an internal `$type` union.
+                if facet.flags.contains(&ShapeFlag::NonInternalTagging) {
+                    return Err(LexiconError::NotAligned {
+                        id: facet.id.clone(),
+                        reason: "only an internally tagged union is a lexicon union".to_owned(),
+                    });
+                }
+                let mut document =
+                    serde_json::to_value(&facet.schema).expect("a schema is a JSON value");
+                document
+                    .as_object_mut()
+                    .expect("a schema is an object")
+                    .insert("$defs".to_owned(), defs.clone());
+                let file = project_facet(&facet.id, &document).map_err(|reason| {
+                    LexiconError::NotAligned {
+                        id: facet.id.clone(),
+                        reason,
+                    }
+                })?;
+                Ok(Lexicon {
+                    id: facet.id.clone(),
+                    file,
+                })
+            })
+            .collect()
+    }
+
+    /// Every definition in scope, flattened, nearest plug first: the context a reference resolves in.
+    fn defs_in_scope(&self) -> Map<String, Value> {
+        let mut defs = Map::new();
+        for (name, schema, _owner) in self.definitions() {
+            defs.entry(name.to_owned())
+                .or_insert_with(|| serde_json::to_value(schema).expect("a schema is a JSON value"));
+        }
+        defs
+    }
+}
+
+/// One facet's published Lexicon: the NSID it is published under, and the file itself.
+#[derive(Debug, Clone)]
+pub struct Lexicon {
+    pub id: String,
+    pub file: Value,
+}
+
+/// A facet this bundle cannot publish a Lexicon for.
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum LexiconError {
+    /// {id} is not lexicon-aligned: {reason}
+    NotAligned { id: String, reason: String },
 }
 
 /// The declaration and the manifest do not agree, or the manifest does not stand on its own.

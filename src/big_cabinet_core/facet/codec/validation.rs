@@ -19,7 +19,7 @@ const NORMALIZATION_STEPS: usize = 1_000_000;
 /// Maximum authored schema/value nesting depth; exceeding it is a structured refusal, not a stack overflow.
 const NORMALIZATION_DEPTH: usize = 1024;
 
-type BranchValidators = HashMap<usize, Arc<jsonschema::Validator>>;
+type BranchValidators = HashMap<String, Arc<jsonschema::Validator>>;
 
 #[derive(Debug, Clone)]
 pub struct CompiledSchema {
@@ -133,79 +133,122 @@ fn enforce_value_resource_bound(value: &Value) -> Result<(), CodecError> {
 
 fn compile_branch_validators(document: &Value) -> Result<BranchValidators, CodecError> {
     let definitions = document.get("$defs").cloned();
-    let mut pending = vec![document];
     let mut validators = HashMap::new();
-    while let Some(schema) = pending.pop() {
+    for schema in schema_positions(document) {
         let Some(object) = schema.as_object() else {
-            if let Some(items) = schema.as_array() {
-                pending.extend(items);
-            }
             continue;
         };
-        for (keyword, value) in object {
-            if matches!(keyword.as_str(), "anyOf" | "oneOf") {
-                if let Some(branches) = value.as_array() {
-                    for branch in branches {
-                        let mut branch_document = branch.clone();
-                        if let (
-                            Some(Value::Object(root_definitions)),
-                            Value::Object(branch_object),
-                        ) = (definitions.as_ref(), &mut branch_document)
-                        {
-                            let branch_definitions = branch_object
-                                .entry("$defs")
-                                .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                            if let Value::Object(branch_definitions) = branch_definitions {
-                                for (name, definition) in root_definitions {
-                                    branch_definitions
-                                        .entry(name.clone())
-                                        .or_insert_with(|| definition.clone());
-                                }
-                            }
+        for keyword in ["anyOf", "oneOf"] {
+            let Some(branches) = object.get(keyword).and_then(Value::as_array) else {
+                continue;
+            };
+            for branch in branches {
+                // A branch is validated on its own, so the definitions it may reference have to
+                // travel with it: the root's `$defs`, without overwriting one the branch carries.
+                let mut branch_document = branch.clone();
+                if let (Some(Value::Object(root_definitions)), Value::Object(branch_object)) =
+                    (definitions.as_ref(), &mut branch_document)
+                {
+                    let branch_definitions = branch_object
+                        .entry("$defs")
+                        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                    if let Value::Object(branch_definitions) = branch_definitions {
+                        for (name, definition) in root_definitions {
+                            branch_definitions
+                                .entry(name.clone())
+                                .or_insert_with(|| definition.clone());
                         }
-                        let validator = jsonschema::options()
-                            .with_retriever(CarriedSchemaRetriever)
-                            .build(&branch_document)
-                            .map_err(|error| CodecError::InvalidSchema {
-                                message: error.to_string(),
-                            })?;
-                        validators.insert(branch as *const Value as usize, Arc::new(validator));
-                        pending.push(branch);
                     }
                 }
-            } else {
-                pending.push(value);
+                let validator = jsonschema::options()
+                    .with_retriever(CarriedSchemaRetriever)
+                    .build(&branch_document)
+                    .map_err(|error| CodecError::InvalidSchema {
+                        message: error.to_string(),
+                    })?;
+                let key = serde_json::to_string(branch).expect("a schema branch serializes");
+                validators.insert(key, Arc::new(validator));
             }
         }
     }
     Ok(validators)
 }
 
-fn reject_unsupported_schema_keywords(schema: &Value) -> Result<(), CodecError> {
-    match schema {
-        Value::Object(object) => {
-            if object.contains_key("prefixItems") || object.contains_key("allOf") {
-                return Err(CodecError::InvalidSchema {
-                    message: "the carried JSON Schema uses an unsupported composition keyword (`allOf` or `prefixItems`)".to_owned(),
-                });
-            }
-            if object.contains_key("anyOf") && object.contains_key("oneOf") {
-                return Err(CodecError::InvalidSchema {
-                    message: "the carried JSON Schema uses both `anyOf` and `oneOf` at one position, which this codec cannot dispatch without composing branch candidates".to_owned(),
-                });
-            }
-            for child in object.values() {
-                reject_unsupported_schema_keywords(child)?;
-            }
+fn reject_unsupported_schema_keywords(document: &Value) -> Result<(), CodecError> {
+    for schema in schema_positions(document) {
+        let Some(object) = schema.as_object() else {
+            continue;
+        };
+        if object.contains_key("prefixItems") || object.contains_key("allOf") {
+            return Err(CodecError::InvalidSchema {
+                message: "the carried JSON Schema uses an unsupported composition keyword (`allOf` or `prefixItems`)".to_owned(),
+            });
         }
-        Value::Array(items) => {
-            for item in items {
-                reject_unsupported_schema_keywords(item)?;
-            }
+        if object.contains_key("anyOf") && object.contains_key("oneOf") {
+            return Err(CodecError::InvalidSchema {
+                message: "the carried JSON Schema uses both `anyOf` and `oneOf` at one position, which this codec cannot dispatch without composing branch candidates".to_owned(),
+            });
         }
-        _ => {}
     }
     Ok(())
+}
+
+/// Every schema in a document, reached through schema positions only.
+///
+/// A keyword's value is either a schema or instance data, and the two must not be walked alike:
+/// `const`, `enum`, `default` and `examples` hold *values*, so a default that happens to contain a
+/// key named `allOf` states an author's data and is not a composition this codec refuses to walk.
+/// Reading data as schema rejects a legitimate literal, and reading it the other way round would
+/// miss a composition nested under one of these keys' siblings.
+fn schema_positions(document: &Value) -> Vec<&Value> {
+    /// One schema, whatever it applies to.
+    const SINGLE: [&str; 10] = [
+        "items",
+        "contains",
+        "not",
+        "if",
+        "then",
+        "else",
+        "propertyNames",
+        "unevaluatedItems",
+        "additionalProperties",
+        "unevaluatedProperties",
+    ];
+    /// A list of schemas.
+    const LIST: [&str; 4] = ["allOf", "anyOf", "oneOf", "prefixItems"];
+    /// A map of names to schemas.
+    const MAP: [&str; 5] = [
+        "$defs",
+        "definitions",
+        "properties",
+        "patternProperties",
+        "dependentSchemas",
+    ];
+
+    let mut found = Vec::new();
+    let mut pending = vec![document];
+    while let Some(schema) = pending.pop() {
+        found.push(schema);
+        let Some(object) = schema.as_object() else {
+            // A boolean schema has no positions inside it, and any other value got here as one.
+            continue;
+        };
+        for (keyword, value) in object {
+            let keyword = keyword.as_str();
+            if SINGLE.contains(&keyword) {
+                pending.push(value);
+            } else if LIST.contains(&keyword) {
+                if let Some(schemas) = value.as_array() {
+                    pending.extend(schemas);
+                }
+            } else if MAP.contains(&keyword)
+                && let Some(schemas) = value.as_object()
+            {
+                pending.extend(schemas.values());
+            }
+        }
+    }
+    found
 }
 
 enum NormalizationTask<'a> {
@@ -467,8 +510,9 @@ fn normalize_authoring(
                         continue;
                     };
                     let branch = &branches[branch_index];
+                    let key = serde_json::to_string(branch).expect("a schema branch serializes");
                     let validator = branch_validators
-                        .get(&(branch as *const Value as usize))
+                        .get(&key)
                         .expect("compiled branch validator");
                     if validator.is_valid(&candidate) {
                         if selected.is_some() {

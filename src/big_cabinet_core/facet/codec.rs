@@ -7,15 +7,16 @@
 //! merge. So the storage form is declared beside the JSON form, and reconciliation reads the
 //! declaration.
 //!
-//! Two of the five storage forms are standard JSON Schema keywords, and schemas already carry them
-//! without our help: `jiff::Timestamp` emits `format: "date-time"`, and a byte field emits
-//! `contentEncoding: "base64"`. The other three are `x-automerge`, because JSON Schema cannot
-//! describe a CRDT object, cannot say that a number is a *float*, and cannot state the non-finite
-//! values at all — so a float's declaration is its value's own type (`facet::Float64`/`Float32`,
-//! spelled as the decimal string it is), and a bare `f64` derives a plain number, which is the
-//! opt-out the Rust type itself states. Nothing opts in: a type declares its storage by what its
-//! `JsonSchema` says, so a foreign type whose schema states a storage form — `jiff::Timestamp`
-//! today, `chrono`'s or `bytes::Bytes` tomorrow — is stored correctly as soon as it does.
+//! One of the five storage forms is a standard JSON Schema keyword: `jiff::Timestamp` emits
+//! `format: "date-time"`. Bytes are not that. `contentEncoding` annotates a string; it does not
+//! select storage. Canonical bytes are the `{ "$bytes": "…" }` object, padded or not, and the
+//! sidecar marks that object with `x-automerge`. The other three forms are `x-automerge` as well,
+//! because JSON Schema cannot describe a CRDT object, cannot say that a number is a *float*, and
+//! cannot state the non-finite values at all — so a float's declaration is its value's own type
+//! (`facet::Float64`/`Float32`, spelled as the decimal string it is), and a bare `f64` derives a
+//! plain number, which is the opt-out the Rust type itself states. Nothing opts in: a type declares
+//! its storage by what its `JsonSchema` says, so a foreign type whose schema states a storage form
+//! — `jiff::Timestamp` today, `chrono`'s tomorrow — is stored correctly as soon as it does.
 //!
 //! A declaration is asserted rather than sniffed, so a value is checked against the declarations it
 //! will be stored under before anything is written ([`Stored::check`]); from then on it cannot fail
@@ -49,8 +50,6 @@ pub use walk::{Stored, hydrate_value};
 pub const KEYWORD: &str = "x-automerge";
 
 /// Where JSON Schema does state a storage form, and the value we read there.
-const CONTENT_ENCODING: &str = "contentEncoding";
-const BASE64: &str = "base64";
 const FORMAT: &str = "format";
 const DATE_TIME: &str = "date-time";
 const JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
@@ -120,13 +119,6 @@ impl Codec {
                 .ok_or_else(|| CodecError::Unknown {
                     stated: stated.to_owned(),
                 });
-        }
-        if schema
-            .get(CONTENT_ENCODING)
-            .and_then(Value::as_str)
-            .is_some_and(|stated| stated.eq_ignore_ascii_case(BASE64))
-        {
-            return Ok(Some(Codec::Bytes));
         }
         if schema.get(FORMAT).and_then(Value::as_str) == Some(DATE_TIME) {
             return Ok(Some(Codec::Timestamp));
@@ -386,6 +378,12 @@ pub enum CodecError {
     #[error("this position is stored as bytes, so it is a {{$bytes}} object, not {found}")]
     NotBytes { found: &'static str },
 
+    /// an object holds the protocol bytes key and not bytes it can read
+    #[error(
+        "`$bytes` is the canonical bytes object, and {stated} is not the base64 string it holds"
+    )]
+    NotBase64 { stated: Value },
+
     /// the position is declared as an instant, and the value is not an RFC 3339 string
     #[error("this position is stored as an instant, so it is an RFC 3339 string, not {stated}")]
     NotAnInstant { stated: String },
@@ -472,16 +470,6 @@ pub enum CodecError {
          guessing it back would hide a declaration the writer made"
     )]
     Undeclared { held: &'static str },
-
-    /// a known declaration meets native storage it would have to replace
-    #[error(
-        "this position is declared as {declared}, but the document holds {held} native storage \
-         there: the write would replace what the storage holds, so declare and migrate instead"
-    )]
-    Conflict {
-        declared: String,
-        held: &'static str,
-    },
 
     /// the checked delta a counter would need is outside the counter's range
     #[error(

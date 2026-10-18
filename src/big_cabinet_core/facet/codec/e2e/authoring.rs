@@ -128,7 +128,7 @@ fn a_storage_form_this_build_does_not_have_is_refused() {
     );
     assert_eq!(
         Codec::of(&json!({"contentEncoding": "base64"})).unwrap(),
-        Some(Codec::Bytes)
+        None
     );
     assert_eq!(
         Codec::of(&json!({"format": "date-time"})).unwrap(),
@@ -356,6 +356,38 @@ fn a_float_union_ref_normalizes_before_owned_write() {
         hydrate_value(&doc, &ROOT, "facet".into(), &compiled).unwrap(),
         json!("1.25")
     );
+}
+
+/// A keyword's value is either a schema or instance data. `const`, `enum`, `default` and `examples`
+/// hold values, so a literal that happens to contain a key named `allOf` or `$ref` is an author's
+/// data and must not be read as a composition or a reference: refusing it would reject a legitimate
+/// default, and walking it as schema would validate data as a document.
+#[test]
+fn literal_data_keys_are_not_read_as_schema_positions() {
+    // `const` holding an `allOf` object: the compile refusal below is keyed on a schema position,
+    // so compiling this document proves the literal was read as data. The stock validator enforces
+    // the const, so the accepted value carries it exactly.
+    let document = json!({
+        "type": "object",
+        "properties": {
+            "value": {
+                "const": {"allOf": [{"type": "string"}]},
+                "default": {"prefixItems": []},
+                "examples": [{"properties": {"Absent": {"type": "number"}}}]
+            }
+        },
+        "required": ["value"]
+    });
+    let compiled = CompiledSchema::compile(document).expect("a literal is data, not schema");
+    let value = json!({"value": {"allOf": [{"type": "string"}]}});
+    Stored::check(&compiled, value).expect("the value is what the literal states");
+
+    // `enum` literals are data the same way: a member holding a `$ref` key is one of the listed
+    // values, not a reference the compile would have to resolve.
+    let enumerated = json!({
+        "enum": [{"allOf": []}, {"$ref": "#/$defs/Absent"}]
+    });
+    CompiledSchema::compile(enumerated).expect("an enum literal is data, not schema");
 }
 
 #[test]
@@ -590,6 +622,13 @@ fn a_float_position_is_carried_as_the_string_the_convention_spells() {
     // the schema the type derives: a plain number, named as one.
     assert_eq!(facet["plain_number"]["type"], "number");
     assert_eq!(facet["plain_number"]["x-automerge"], "number");
+    assert!(
+        matches!(
+            Declaration::of::<Stored0>(),
+            Err(crate::facet::ShapeError::NotLexiconAligned { .. })
+        ),
+        "a plain number is not a lexicon type"
+    );
 }
 
 /// A float position accepts the number a typed writer hands it and reads back the decimal string
@@ -816,4 +855,56 @@ fn a_rust_type_deserializes_the_json_the_document_repo_emits() {
     assert_eq!(value.fraction, Float64(0.1));
     assert!(value.maybe.is_none());
     assert_eq!(value.plain_number, 2.5);
+}
+
+#[macros::facet(id = "org.example.nullable", closed)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct NullableCodecs {
+    bytes: Option<Bytes>,
+    counter: Option<Counter>,
+    text: Option<Text>,
+}
+
+#[test]
+fn optional_storage_forms_stay_nullable_and_round_trip() {
+    let universe = Universe::collect(vec![Declaration::of::<NullableCodecs>().unwrap()]);
+    let bundle = Bundle::new(&universe, Vec::new());
+    let document = serde_json::to_value(bundle.document("NullableCodecs").unwrap()).unwrap();
+    let props = &document["$defs"]["NullableCodecs"]["properties"];
+    assert_eq!(props["bytes"]["type"], json!(["object", "null"]));
+    assert_eq!(props["bytes"]["x-automerge"], "bytes");
+    assert_eq!(props["counter"]["type"], json!(["integer", "null"]));
+    assert_eq!(props["counter"]["x-automerge"], "counter");
+    assert_eq!(props["text"]["type"], json!(["string", "null"]));
+    assert_eq!(props["text"]["x-automerge"], "text");
+
+    let json = json!({
+        "bytes": {"$bytes": "AQID"},
+        "counter": 3,
+        "text": "hi",
+    });
+    let mut doc = AutoCommit::new();
+    let stored = Stored::check(&compiled(&document), json.clone()).unwrap();
+    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+    assert_eq!(
+        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
+        json
+    );
+    let (_, map) = doc.get(ROOT, "facet").unwrap().unwrap();
+    assert_eq!(shape(&doc.get(&map, "bytes").unwrap().unwrap().0), "bytes");
+    assert_eq!(
+        shape(&doc.get(&map, "counter").unwrap().unwrap().0),
+        "counter"
+    );
+    assert_eq!(shape(&doc.get(&map, "text").unwrap().unwrap().0), "text");
+
+    let absent = json!({"bytes": null, "counter": null, "text": null});
+    let mut doc = AutoCommit::new();
+    let stored = Stored::check(&compiled(&document), absent.clone()).unwrap();
+    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+    assert_eq!(
+        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
+        absent
+    );
 }

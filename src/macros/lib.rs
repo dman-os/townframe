@@ -23,11 +23,14 @@ fn facet_path() -> Path {
 /// `#[facet(closed)]` together with `#[serde(deny_unknown_fields)]`. Anything else is refused:
 /// `serde` drops a member it has nowhere to put, so the type and the schema would disagree.
 ///
-/// A union is **adjacently tagged** — `#[serde(tag = "$type", content = "value")]`. It is **open**
-/// when exactly one variant is marked `#[facet(other)]`, and then the macro writes the wire form and
-/// the schema, because a fallback that carries a payload is not expressible in serde attributes. A
-/// union that says `#[facet(closed)]` has no fallback, keeps its own derives, and is the plain serde
-/// case.
+/// A union is **internally tagged** by default — the member object carries `$type`, which is what a
+/// Lexicon union is. Adjacent tagging is explicit, `#[facet(tagging = "adjacent")]` with
+/// `#[serde(tag = "$type", content = "value")]`, and external tagging is
+/// `#[facet(tagging = "external")]`, which is recorded and flagged. It is **open** when exactly one
+/// variant is marked `#[facet(other)]`, and then the macro writes the wire form and the schema,
+/// because a fallback that carries a payload is not expressible in serde attributes. A union that
+/// says `#[facet(closed)]` has no fallback and keeps its serde derives; the macro still emits
+/// `JsonSchema`, because the enum encoding is not the contract.
 ///
 /// A vocabulary of *strings* rather than of named types is a different shape, so it is declared
 /// differently: `#[facet(open_string)]`, with `#[facet(other)]` on the one variant that carries a
@@ -81,10 +84,10 @@ impl Args {
                 args.open_string = true;
             } else if meta.path().is_ident("tagging") {
                 let value = meta_string(&meta)?;
-                if value != "adjacent" && value != "external" {
+                if value != "adjacent" && value != "external" && value != "internal" {
                     return Err(syn::Error::new_spanned(
                         &meta,
-                        "`tagging` is \"adjacent\" or \"external\"",
+                        "`tagging` is \"internal\", \"adjacent\" or \"external\"",
                     ));
                 }
                 args.tagging = Some(value);
@@ -238,12 +241,30 @@ fn lower_camel(name: &str) -> String {
     }
 }
 
+fn member_id(name: &syn::Ident, args: &Args) -> Option<String> {
+    match (&args.id, &args.prefix) {
+        (Some(id), _) => Some(id.clone()),
+        (None, Some(prefix)) => Some(format!("{prefix}{}", lower_camel(&name.to_string()))),
+        (None, None) => None,
+    }
+}
+
+fn last_type_ident(ty: &syn::Type) -> Option<&syn::Ident> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    path.path.segments.last().map(|segment| &segment.ident)
+}
+
+fn lexicon_attr(id: &str) -> syn::Attribute {
+    let lit = syn::LitStr::new(id, proc_macro2::Span::call_site());
+    syn::parse_quote!(#[schemars(extend("x-lexicon-id" = #lit))])
+}
+
 fn member_impl(name: &syn::Ident, args: &Args) -> proc_macro2::TokenStream {
     let facet = facet_path();
-    let id = match (&args.id, &args.prefix) {
-        (Some(id), _) => id.clone(),
-        (None, Some(prefix)) => format!("{prefix}{}", lower_camel(&name.to_string())),
-        (None, None) => return proc_macro2::TokenStream::new(),
+    let Some(id) = member_id(name, args) else {
+        return proc_macro2::TokenStream::new();
     };
     quote! {
         impl #facet::FacetMember for #name {
@@ -288,11 +309,26 @@ fn struct_shape(
 ) -> syn::Result<(syn::Ident, proc_macro2::TokenStream)> {
     let name = item.ident.clone();
     no_generics(&name, &item.generics)?;
+    if let Some(id) = member_id(&name, args) {
+        let derived = derived_traits(&item.attrs)?;
+        if derived.iter().any(|name| name == "JsonSchema") {
+            item.attrs.push(lexicon_attr(&id));
+        }
+    }
     facet_fields::check_field_facets(&item.fields)?;
     let serde = scan_serde(&item.attrs)?;
     let mut extras = 0usize;
     for field in item.fields.iter() {
-        extras += scan_serde(&field.attrs)?.flatten;
+        let field_serde = scan_serde(&field.attrs)?;
+        if field_serde.flatten > 0
+            && last_type_ident(&field.ty).is_none_or(|ident| ident != "Extra")
+        {
+            return Err(syn::Error::new_spanned(
+                field,
+                "the overflow field's last path segment is `Extra`",
+            ));
+        }
+        extras += field_serde.flatten;
     }
     let openness = if args.closed {
         if extras > 0 {
@@ -375,26 +411,7 @@ fn enum_shape(
     no_generics(&name, &item.generics)?;
     let serde = scan_serde(&item.attrs)?;
     serde.refuse_unexpected(&name, &["tag", "content"])?;
-
-    let externally_tagged = args.tagging.as_deref() == Some("external");
-    if !externally_tagged {
-        if serde.tag.is_none() {
-            return Err(syn::Error::new_spanned(
-                &name,
-                "a union is adjacently tagged: write `#[serde(tag = \"$type\", content = \
-                 \"value\")]`. To depart deliberately, name it with `#[facet(tagging = \
-                 \"external\")]` so it is recorded and flagged rather than inferred",
-            ));
-        }
-        if serde.content.is_none() {
-            return Err(syn::Error::new_spanned(
-                &name,
-                "a tag without a content key is internal tagging, which puts the tag inside the \
-                 payload and needs every payload to be open; write `#[serde(tag = \"$type\", \
-                 content = \"value\")]`",
-            ));
-        }
-    }
+    let layout = union_layout(&name, args, &serde)?;
 
     let mut members: Vec<MemberVariant> = Vec::new();
     let mut fallback: Option<(syn::Ident, syn::Type)> = None;
@@ -444,10 +461,10 @@ fn enum_shape(
     }
 
     let open = !args.closed;
-    if open && externally_tagged {
+    if open && matches!(layout, Layout::External) {
         return Err(syn::Error::new_spanned(
             &name,
-            "an open union is adjacently tagged: the codec dispatches on the discriminant key, and \
+            "an open union is internally tagged: the codec dispatches on the discriminant key, and \
              external tagging has none",
         ));
     }
@@ -465,13 +482,31 @@ fn enum_shape(
              has no fallback",
         ));
     }
+    if let Some((_, payload)) = &fallback
+        && last_type_ident(payload).is_none_or(|ident| ident != "UnknownMember")
+    {
+        return Err(syn::Error::new_spanned(
+            &name,
+            "the fallback variant's last path segment is `UnknownMember`",
+        ));
+    }
+    if matches!(layout, Layout::Internal) && serde.tag.is_none() && !open {
+        item.attrs.push(syn::parse_quote!(#[serde(tag = "$type")]));
+    }
 
-    let tagging = if externally_tagged {
-        quote!(#facet::Tagging::Externally)
-    } else {
-        let tag = serde.tag.as_deref().expect("checked above");
-        let content = serde.content.as_deref().expect("checked above");
-        quote!(#facet::Tagging::Adjacently { tag: #tag, content: #content })
+    let tagging = match layout {
+        Layout::Internal => quote!(#facet::Tagging::Internally { tag: "$type" }),
+        Layout::Adjacent => {
+            quote!(#facet::Tagging::Adjacently { tag: "$type", content: "value" })
+        }
+        Layout::External => quote!(#facet::Tagging::Externally),
+    };
+    let layout_tokens = match layout {
+        Layout::Internal => quote!(#facet::UnionLayout::Internal { tag: "$type" }),
+        Layout::Adjacent => {
+            quote!(#facet::UnionLayout::Adjacent { tag: "$type", content: "value" })
+        }
+        Layout::External => quote!(#facet::UnionLayout::External),
     };
     let openness = if open {
         quote!(#facet::Openness::Open)
@@ -486,17 +521,53 @@ fn enum_shape(
             };
         }
     };
+    let schema_members = members.iter().map(|member| {
+        let payload = &member.payload;
+        quote! {
+            #facet::MemberSchema {
+                id: <#payload as #facet::FacetMember>::ID,
+                schema: generator.subschema_for::<#payload>(),
+            },
+        }
+    });
+    let schema_impl = quote! {
+        impl ::schemars::JsonSchema for #name {
+            fn schema_name() -> ::std::borrow::Cow<'static, str> {
+                ::std::borrow::Cow::Borrowed(::core::stringify!(#name))
+            }
+
+            fn schema_id() -> ::std::borrow::Cow<'static, str> {
+                ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)).into()
+            }
+
+            /// A union is a position, never a named definition, so it is always inlined.
+            fn inline_schema() -> bool {
+                true
+            }
+
+            fn json_schema(generator: &mut ::schemars::SchemaGenerator) -> ::schemars::Schema {
+                let members = ::std::vec![#(#schema_members)*];
+                #facet::union_schema(&#layout_tokens, #open, members, generator.definitions())
+            }
+        }
+    };
 
     if !open {
-        // Everything here is serde's; the assert is only so a tag cannot drift from the id it names.
         let derived = derived_traits(&item.attrs)?;
-        for wanted in ["Serialize", "Deserialize", "JsonSchema"] {
+        for wanted in ["Serialize", "Deserialize"] {
             if !derived.iter().any(|name| name == wanted) {
                 return Err(syn::Error::new_spanned(
                     &name,
-                    format!("a closed union is the plain serde case: derive {wanted} as well"),
+                    format!("a closed union keeps its serde derives: derive {wanted} as well"),
                 ));
             }
+        }
+        if derived.iter().any(|name| name == "JsonSchema") {
+            return Err(syn::Error::new_spanned(
+                &name,
+                "a closed union's JsonSchema is emitted by the macro: remove it from \
+                 #[derive(...)]",
+            ));
         }
         let mut asserts = Vec::new();
         for member in &members {
@@ -517,7 +588,7 @@ fn enum_shape(
                 );
             });
         }
-        return Ok((name, quote! { #shape #(#asserts)* }));
+        return Ok((name, quote! { #shape #schema_impl #(#asserts)* }));
     }
 
     // An open union is the macro's to write: a fallback that keeps a member it does not know has no
@@ -535,8 +606,6 @@ fn enum_shape(
             ));
         }
     }
-    let tag = serde.tag.as_deref().expect("checked above");
-    let content = serde.content.as_deref().expect("checked above");
     let (fallback_ident, fallback_payload) = fallback.expect("checked above");
     // The keys have been read; leaving them would be an attribute nothing registers, and `schemars`
     // registers `serde` on whatever it derives elsewhere.
@@ -545,7 +614,7 @@ fn enum_shape(
     let serialize_arms = members.iter().map(|member| {
         let ident = &member.ident;
         quote! {
-            Self::#ident(payload) => #facet::serialize_member(serializer, #tag, #content, payload),
+            Self::#ident(payload) => #facet::serialize_member(serializer, &#layout_tokens, payload),
         }
     });
     let deserialize_members = members.iter().map(|member| {
@@ -554,15 +623,6 @@ fn enum_shape(
             #facet::Member {
                 id: <#payload as #facet::FacetMember>::ID,
                 read: |member| ::serde_json::from_value::<#payload>(member).map(Self::#ident),
-            },
-        }
-    });
-    let schema_members = members.iter().map(|member| {
-        let payload = &member.payload;
-        quote! {
-            #facet::MemberSchema {
-                id: <#payload as #facet::FacetMember>::ID,
-                schema: generator.subschema_for::<#payload>(),
             },
         }
     });
@@ -591,8 +651,7 @@ fn enum_shape(
                 {
                     #facet::deserialize_union(
                         deserializer,
-                        #tag,
-                        #content,
+                        &#layout_tokens,
                         &[#(#deserialize_members)*],
                         |member| {
                             ::serde_json::from_value::<#fallback_payload>(member)
@@ -602,26 +661,54 @@ fn enum_shape(
                 }
             }
 
-            impl ::schemars::JsonSchema for #name {
-                fn schema_name() -> ::std::borrow::Cow<'static, str> {
-                    ::std::borrow::Cow::Borrowed(::core::stringify!(#name))
-                }
-
-                fn schema_id() -> ::std::borrow::Cow<'static, str> {
-                    ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)).into()
-                }
-
-                /// A union is a position, never a named definition, so it is always inlined.
-                fn inline_schema() -> bool {
-                    true
-                }
-
-                fn json_schema(generator: &mut ::schemars::SchemaGenerator) -> ::schemars::Schema {
-                    #facet::union_schema(#tag, #content, #open, ::std::vec![#(#schema_members)*])
-                }
-            }
+            #schema_impl
         },
     ))
+}
+
+enum Layout {
+    Internal,
+    Adjacent,
+    External,
+}
+
+fn union_layout(name: &syn::Ident, args: &Args, serde: &Serde) -> syn::Result<Layout> {
+    match args.tagging.as_deref() {
+        Some("external") => {
+            if serde.tag.is_some() || serde.content.is_some() {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "external tagging has no tag or content key",
+                ));
+            }
+            Ok(Layout::External)
+        }
+        Some("adjacent") => {
+            if serde.tag.as_deref() != Some("$type") || serde.content.as_deref() != Some("value") {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "adjacent tagging is pinned: `#[serde(tag = \"$type\", content = \"value\")]`",
+                ));
+            }
+            Ok(Layout::Adjacent)
+        }
+        Some("internal") | None => {
+            if serde.content.is_some() {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "a content key is adjacent tagging: name it with `#[facet(tagging = \
+                     \"adjacent\")]` and pin the content key to \"value\"",
+                ));
+            }
+            if let Some(tag) = &serde.tag
+                && tag != "$type"
+            {
+                return Err(syn::Error::new_spanned(name, "the internal tag is `$type`"));
+            }
+            Ok(Layout::Internal)
+        }
+        Some(_) => unreachable!("parse rejects any other tagging"),
+    }
 }
 
 /// A known spelling of a string vocabulary, on the variant whose name states it.
