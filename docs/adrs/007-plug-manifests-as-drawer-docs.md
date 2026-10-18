@@ -50,8 +50,9 @@ fork/branch giving version recovery.
 ## Terminology
 
 * **Manifest doc** — a drawer doc carrying the plug-manifest facet.
-* **Plug ref** — a full reference to a manifest: `db+facet:///<doc_id>/<tag>/<id>`
-  plus branch and heads (see §3).
+* **Plug ref** — a facet address
+  `db+facet:/<doc-id>/<tag>/<key-id...>` plus explicit pinned doc heads
+  (see §3).
 * **Known plug** — a manifest doc the local facet-set index has catalogued.
 * **Enabled plug** — an entry in the plugs config facet: a pinned ref.
 * **Repo config doc** — the third core doc (with app doc and drawer doc) that
@@ -66,10 +67,13 @@ Two new well-known facets, shaped in `src/daybook_types/doc.rs` via the
 
 ```rust
 PlugManifest type (crate::manifest::PlugManifest),  // tag: org.example.daybook.plugManifest
+EnabledPlugRef struct {
+    pub facet_ref: Url,
+    pub ref_heads: ChangeHashSet,
+},
 PlugConfig  struct {
-    /// full ref: db+facet:///<doc-id>/org.example.daybook.plugManifest/main
-    ///            ?branch=<branch>&at=<head1>|<head2>
-    pub enabled: HashMap<String, Url>,
+    /// Address + exact doc heads; branches use their own doc IDs.
+    pub enabled: HashMap<String, EnabledPlugRef>,
     pub plug_config_doc_ids: HashMap<String, String>, // unchanged semantics (§6)
 },
 // tag: org.example.daybook.plugConfig
@@ -103,20 +107,26 @@ enablement map and the per-plug config-doc ids (today `plug_config_doc_ids` in
 local index). Writes to the plug config facet validate against the
 `plugConfig` facet manifest declared by `@daybook/core` like any other facet.
 
-### 3. Enablement: full refs, pinned heads, no auto-repin
+### 3. Enablement: facet address plus pinned heads, no auto-repin
 
-The enablement value for a plug is a **full ref**: doc id + branch + heads,
-serialized as the existing facet-ref URL form from `dict.md`
-(`db+facet:///self/...?at=hash1|hash2`) extended with a branch query param:
+The enablement value contains two separate facts:
 
-```text
-db+facet:///<doc-id>/org.example.daybook.plugManifest/main?branch=main&at=<head1>|<head2>
+```jsonc
+{
+  "facetRef": "db+facet:/zManifestDoc/org.example.daybook.plugManifest/main",
+  "refHeads": ["<head1>", "<head2>"]
+}
 ```
 
-(Note: `daybook_types::url::parse_facet_ref` ignores query params today; it
-gains `branch`/`at` parsing — the codebase otherwise pairs a URL with a
-separate `ref_heads` field, e.g. `ImageMetadata`, and the URL form is chosen
-here to make refs self-contained.)
+The authority-less URL identifies the facet. The sibling `refHeads` selects the exact
+version of the target doc. Enablement always captures explicit heads; it does not mean
+“whatever is current when loaded.” Heads are not query parameters and are not part of
+facet identity.
+
+There is no branch selector. Every branch is an ordinary doc with its own `DocumentId`,
+so enabling a manifest on a branch uses that branch doc ID in `facetRef`. The config must
+use a concrete doc ID rather than `self`, because the referenced manifest is not relative
+to the config doc.
 
 Consequences:
 
@@ -239,7 +249,7 @@ when they resolve, §6), instead of replaying the app-doc store.
   remains the out-of-band authoring channel for third-party tools; distribution
   thereafter happens through the hive, not the registry.
 * **`import_from_doc_id(doc_id, heads)`** — the new native path: read the
-  manifest facet at the given heads (`drawer::get_doc_with_facets_at_branch_heads`),
+  manifest facet at the given heads through DocumentsRepo at those exact heads,
   `validate_incoming_plug`, grant core-docs-group access
   (`grant_docs_admin(&core_docs, [doc_id])`) so the doc replicates in the core
   partition, and enable at those heads.
@@ -255,18 +265,17 @@ daybook plugs list                  # table of known plugs: id, version, status
                                     #   heads vs latest heads, config doc id
 daybook plugs show <plug-id|ref>    # full manifest summary + facets + refs
 daybook plugs enable <facet-ref|doc-id> [--heads H]   # validate, grant core-group
-                                    #   access, pin (default: current main
-                                    #   branch heads)
+                                    #   access, pin (default: current doc heads)
 daybook plugs disable <plug-id>     # remove from the enablement map (rejected
                                     #   for @daybook/core)
-daybook plugs update <plug-id>      # explicit re-pin to latest main-heads
+daybook plugs update <plug-id>      # explicit re-pin to latest doc heads
                                     #   (fails if re-validation fails)
 daybook plugs pending               # enabled entries whose doc/heads are not
                                     #   locally readable (config/manifest race,
                                     #   §6)
 daybook plugs import <target> [--no-enable] [--heads H]
                                     # one command, target resolved by shape:
-                                    #   db+facet://<doc>/<tag>/<id> or bare doc
+                                    #   db+facet:/<doc>/<tag>/<id...> or bare doc
                                     #     id → import from an existing doc
                                     #     (validate, grant core-group access,
                                     #     enable by default; --no-enable skips)
@@ -283,7 +292,7 @@ Notes:
 * `enable`/`disable`/`update` write the plugg config facet through the drawer
   (validated as any facet write); `disable` on `@daybook/core` is rejected by
   the config mutation (§3).
-* `import` disambiguates by shape: `db+facet://…` / bare doc id → doc
+* `import` disambiguates by shape: `db+facet:/…` / bare doc id → doc
   import; `oci://…` / local OCI layout path → authoring import. Ambiguous
   targets (a local path that could be a doc id) are resolved by explicit
   flags, not heuristics.
@@ -322,8 +331,8 @@ synced config facets and puts the plugg facet there.
 * One config rule exists: `@daybook/core` cannot be disabled (enforced in
   the plugg facet mutation, §3). Everything else — including core manifest
   updates — is ordinary; no runtime special cases.
-* URLs carry heads/branch; `daybook_types::url` needs `at`/`branch` parsing
-  that does not exist yet.
+* Facet URLs carry identity only; pinned enablement stores exact doc heads in
+  the sibling `refHeads` field.
 * No migration: existing repos keep their app-doc store (frozen) or are
   re-imported manually via OCI authoring.
 

@@ -1110,10 +1110,15 @@ version = "0.1.0"
 dependencies = [
  "automerge",
  "autosurgeon",
+ "big_sync_core",
+ "blake3",
+ "ciborium",
  "data-encoding",
  "displaydoc",
+ "ed25519-dalek 2.2.0",
  "indexmap 2.14.0",
  "jiff",
+ "json-canon",
  "jsonschema",
  "macros",
  "panproto-lens",
@@ -1127,6 +1132,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "unicode-properties",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -13208,9 +13216,9 @@ dependencies = [
 
 [[package]]
 name = "unicode-properties"
-version = "0.1.4"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+checksum = "e4259d9d4425d9f0661581b804cb85fe66a4c631cadd8f490d1c13a35d5d9291"
 
 [[package]]
 name = "unicode-segmentation"
