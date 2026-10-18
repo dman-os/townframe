@@ -7,8 +7,6 @@
 
 pub mod composition;
 mod provisions;
-pub mod sample;
-pub mod settings;
 pub use provisions::Provision;
 
 use std::{
@@ -19,16 +17,6 @@ use std::{
     rc::Rc,
     sync::{Arc, Mutex},
 };
-
-/// Register linked implementations, without selecting instances or binding dependencies.
-/// Platform-specific facilities are injected here; feature dependencies are resolved at activation.
-pub fn register_native(
-    runtime: &mut crate::application::ApplicationRuntime,
-) -> Result<(), MicroRegistryError> {
-    runtime.register_provider(settings::provider(runtime.native(), runtime.root_mounts()))?;
-    runtime.register_provider(sample::provider(runtime.native()))?;
-    Ok(())
-}
 
 use crate::host::{AccessError, Host, Instance};
 
@@ -125,7 +113,7 @@ impl Scope {
     }
 }
 /// Stable provider identity used by configuration and composition persistence.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub struct MicroId(String);
 
 impl MicroId {

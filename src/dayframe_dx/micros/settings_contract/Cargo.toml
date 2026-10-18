@@ -1,0 +1,7 @@
+[package]
+name = "dayframe_settings_contract"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dayframe_app = { path = "../../app" }

@@ -340,11 +340,12 @@ Recorded because they shape what a turn can attempt.
 
 To be fixed as the slices land, not all at once.
 
-1. `micros::register_native` registers every micro from the app crate (D1 deletes it).
-2. `desktop/src/composition.rs` still knows Sample: it seeds Sample's config document, imports
-   `SampleConfig`, and hosts the enable/disable plus mock-node controls (D1/D2 remove this).
-3. Activation is synchronous in `MicroProvider::activate` although day one agreed on async activation
-   and Wasm instantiation needs it. `Host::activate_async` exists but the registry never uses it.
+1. (Resolved, turn 10) `micros::register_native` deleted; concrete micros extracted into per-micro
+   crates (`dayframe_settings_contract`, `dayframe_settings`, `dayframe_sample`, `dayframe_counter`).
+2. (Resolved, turn 10) `desktop/src/composition.rs` no longer imports `SampleConfig` or hardcodes
+   Sample-only enable/disable controls; it consumes `ConfigurationSource` generically.
+3. (Resolved, turn 10) `MicroProvider::activate_async`, `AsyncMicroFactory`, and
+   `MicroRegistry::activate_async` added and tested.
 4. Two parallel data stacks: the older `backend.rs`/`data/` from ADR 014's accepted half, and the
    session's `documents.rs`. They should collapse into one node seam using the D6 vocabulary.
 5. `ProvisionKind` is speculative — only `Context` is ever constructed.
@@ -432,6 +433,13 @@ To be fixed as the slices land, not all at once.
     `MicroRegistry::activate_async` in `micros.rs`. Built `dayframe_app::wasm` (`WasmPackage`,
     `WasmMicro`, `wasm::provider`) with Wasmtime `presentation-client` host bindings, per-incarnation
     `Store` isolation, and automatic `instance.close()` + surface/Settings withdrawal on guest trap
-    or disablement (53/53 `dayframe_app` nextest + clippy `-D warnings` clean).
+    or disablement (53/53 `dayframe_app` nextest + clippy `-D warnings` clean, `c4ad751`).
+  - Steps 5 & 6: Implemented `ConfigurationSource` (`StaticConfiguration`, `MockConfiguration`,
+    `FacetConfiguration` with locked boot entry enforcement and `ApplicationRuntime` integration);
+    deleted `micros::register_native`; extracted `dayframe_settings_contract`, `dayframe_settings`,
+    `dayframe_sample`, and Wasm `dayframe_counter` into per-micro crates under `src/dayframe_dx/micros/`;
+    updated `desktop` to link `dayframe_settings`, `dayframe_sample`, and `dayframe_counter` and drive
+    generic lifecycle controls via `ConfigurationSource` (65/65 nextest across all 7 dayframe crates +
+    clippy `-D warnings` clean).
 
 

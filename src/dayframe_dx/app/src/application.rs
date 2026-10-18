@@ -7,7 +7,9 @@ use std::{
 
 use crate::{
     host::{CollectionReader, Host, HostStatus, HostedCollection, Instance, RootMount},
-    micros::composition::{Composition, ConfigurationError, ConfiguredMicro, InstanceState},
+    micros::composition::{
+        Composition, ConfigurationError, ConfigurationSource, ConfiguredMicro, InstanceState,
+    },
     micros::{MicroDescriptor, MicroProvider, MicroRegistry, MicroRegistryError},
     native::NativeComponents,
 };
@@ -25,6 +27,8 @@ pub struct ApplicationRuntime {
     root_mounts: HostedCollection<RootMount>,
     providers: MicroRegistry,
     composition: Rc<RefCell<Composition>>,
+    source: Rc<RefCell<Option<Rc<dyn ConfigurationSource>>>>,
+    source_changes: tokio::sync::watch::Sender<()>,
     desired: tokio::sync::watch::Sender<BTreeMap<String, ConfiguredMicro>>,
     reports:
         tokio::sync::watch::Sender<Result<BTreeMap<String, InstanceState>, ConfigurationError>>,
@@ -52,6 +56,8 @@ impl ApplicationRuntime {
             root_mounts,
             providers: MicroRegistry::default(),
             composition: Rc::default(),
+            source: Rc::default(),
+            source_changes: tokio::sync::watch::channel(()).0,
             desired: tokio::sync::watch::channel(BTreeMap::new()).0,
             reports: tokio::sync::watch::channel(Ok(BTreeMap::new())).0,
             observing: Rc::default(),
@@ -94,6 +100,39 @@ impl ApplicationRuntime {
 
     pub fn provider_descriptors(&self) -> Vec<MicroDescriptor> {
         self.providers.descriptors().collect()
+    }
+
+    /// Install a [`ConfigurationSource`] and reconcile its initial desired composition.
+    pub fn set_configuration_source(
+        &self,
+        source: impl ConfigurationSource + 'static,
+    ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
+        let desired = source.current()?;
+        let states = self.configure(&desired)?;
+        *self.source.borrow_mut() = Some(Rc::new(source));
+        self.source_changes.send_replace(());
+        Ok(states)
+    }
+
+    /// Reconcile the current snapshot from the installed [`ConfigurationSource`].
+    pub fn reconcile_configuration(
+        &self,
+    ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
+        let desired = self
+            .source
+            .borrow()
+            .as_ref()
+            .map(|source| source.current())
+            .transpose()?
+            .unwrap_or_else(|| self.desired.borrow().clone());
+        self.configure(&desired)
+    }
+
+    pub fn is_locked(&self, instance: &str) -> bool {
+        self.source
+            .borrow()
+            .as_ref()
+            .is_some_and(|source| source.is_locked(instance))
     }
 
     /// Apply a desired boot configuration projection. Malformed edits leave the live graph intact;
@@ -145,6 +184,12 @@ impl ApplicationRuntime {
         let mut host_changes = self.host.changes();
         let mut provider_changes = self.providers.changes();
         let mut desired_changes = self.desired.subscribe();
+        let mut source_changes = self.source_changes.subscribe();
+        let mut source_watch = self
+            .source
+            .borrow()
+            .as_ref()
+            .and_then(|source| source.subscribe().ok());
         loop {
             let status = *host_changes.borrow_and_update();
             match status {
@@ -173,6 +218,17 @@ impl ApplicationRuntime {
                 }
                 HostStatus::Running => {}
             }
+            if let Some(watch) = source_watch.as_mut()
+                && let Ok(next) = watch.current()
+            {
+                self.desired.send_if_modified(|current| {
+                    if *current == next {
+                        return false;
+                    }
+                    *current = next;
+                    true
+                });
+            }
             let desired = desired_changes.borrow_and_update().clone();
             let report =
                 self.composition
@@ -183,6 +239,24 @@ impl ApplicationRuntime {
                 result = host_changes.changed() => result.unwrap(),
                 result = provider_changes.changed() => result.unwrap(),
                 result = desired_changes.changed() => result.unwrap(),
+                result = source_changes.changed() => {
+                    result.unwrap();
+                    source_watch = self
+                        .source
+                        .borrow()
+                        .as_ref()
+                        .and_then(|source| source.subscribe().ok());
+                }
+                result = async {
+                    match source_watch.as_mut() {
+                        Some(watch) => watch.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if result.is_err() {
+                        source_watch = None;
+                    }
+                }
             }
         }
     }

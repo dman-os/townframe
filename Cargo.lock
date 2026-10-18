@@ -4154,6 +4154,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dayframe_counter"
+version = "0.1.0"
+dependencies = [
+ "dayframe_app",
+ "dayframe_settings",
+ "dayframe_settings_contract",
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "serde_json",
+]
+
+[[package]]
 name = "dayframe_guest"
 version = "0.1.0"
 dependencies = [
@@ -4165,6 +4178,35 @@ dependencies = [
  "serde_json",
  "wasmtime",
  "wit-bindgen 0.60.0",
+]
+
+[[package]]
+name = "dayframe_sample"
+version = "0.1.0"
+dependencies = [
+ "daybook_types",
+ "dayframe_app",
+ "dayframe_settings",
+ "dayframe_settings_contract",
+ "dioxus",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dayframe_settings"
+version = "0.1.0"
+dependencies = [
+ "dayframe_app",
+ "dayframe_settings_contract",
+ "dioxus",
+]
+
+[[package]]
+name = "dayframe_settings_contract"
+version = "0.1.0"
+dependencies = [
+ "dayframe_app",
 ]
 
 [[package]]
@@ -4424,6 +4466,9 @@ dependencies = [
  "anyrender_vello_hybrid 0.10.0",
  "daybook_types",
  "dayframe_app",
+ "dayframe_counter",
+ "dayframe_sample",
+ "dayframe_settings",
  "dioxus",
  "dioxus-native",
  "serde",

@@ -1,8 +1,6 @@
 //! Settings presentation consumes its own typed collection and host-mediated component mounts.
-use crate::{
-    micros::settings::SettingsMicro,
-    native::{ComponentMount, NativeComponents},
-};
+use crate::SettingsMicro;
+use dayframe_app::native::{ComponentMount, NativeComponents};
 use dioxus::prelude::*;
 
 #[derive(Props, Clone)]

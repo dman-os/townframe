@@ -1,20 +1,28 @@
 use super::*;
-use crate::{
+use dayframe_app::{
     application::ApplicationRuntime,
     documents::FacetRoute,
     micros::{
-        self, MicroId,
+        MicroId,
         composition::{ConfiguredMicro, Enablement, InstanceState},
-        settings::SettingsMicro,
     },
 };
+use dayframe_settings::SettingsMicro;
 use std::collections::BTreeMap;
 
 #[test]
 fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller() {
     let mut application = ApplicationRuntime::new();
     assert!(application.roots().snapshot().unwrap().is_empty());
-    micros::register_native(&mut application).unwrap();
+    application
+        .register_provider(dayframe_settings::provider(
+            application.native(),
+            application.root_mounts(),
+        ))
+        .unwrap();
+    application
+        .register_provider(provider(application.native()))
+        .unwrap();
     let host = application.host();
     host.mock_documents()
         .bind_config("sample".into(), "configuration".into(), "main".into());

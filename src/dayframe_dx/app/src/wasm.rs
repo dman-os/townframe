@@ -3,14 +3,11 @@
 //! Each activated micro [`Instance`] owns an isolated `wasmtime::Store` so a guest trap never
 //! taints sibling micros or a later re-enabled incarnation. If a guest traps during `mount` or
 //! `dispatch`, the adapter immediately withdraws the surface and closes the micro's [`Instance`],
-//! which revokes its [`ComponentRef`] and withdraws its [`SettingsSection`] from `SettingsSections`.
+//! which revokes its [`ComponentRef`] and any host collections bound to that instance.
 
 use crate::{
     host::{AccessError, ComponentRef, Instance},
-    micros::{
-        MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision, ProvisionKind,
-        settings::contract::{SettingsContribution, SettingsSection, SettingsSections},
-    },
+    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision, ProvisionKind},
     native::{NativeComponents, SurfaceSession, SurfaceWriter},
     presentation::{AttributeValue, Event, EventResponse, Mutation, PresentationError},
 };
@@ -209,9 +206,7 @@ impl Provision for WasmMicro {
 impl WasmMicro {
     pub fn activate(
         instance: Instance,
-        title: impl Into<String>,
         package: &WasmPackage,
-        settings: &SettingsContribution,
         native: &NativeComponents,
     ) -> Result<Self, AccessError> {
         let incarnation = Arc::new(Mutex::new(Some(package.instantiate()?)));
@@ -339,11 +334,6 @@ impl WasmMicro {
             ))
         })?;
 
-        settings.insert(SettingsSection {
-            title: title.into(),
-            detail,
-        })?;
-
         Ok(Self {
             instance,
             detail,
@@ -351,9 +341,13 @@ impl WasmMicro {
         })
     }
 
+    pub fn surface(&self) -> ComponentRef {
+        self.detail
+    }
+
     /// Revokes this incarnation's surface capability handles without closing the instance first,
     /// allowing tests to verify that a subsequent guest `surface.apply` sees `Revoked`, traps, and
-    /// triggers automatic instance closure and Settings withdrawal.
+    /// triggers automatic instance closure and collection withdrawal.
     pub fn revoke_surfaces(&self) {
         self.revoked.store(true, Ordering::Release);
     }
@@ -363,22 +357,12 @@ impl WasmMicro {
     }
 }
 
-pub fn provider(
-    id: MicroId,
-    title: impl Into<String>,
-    package: WasmPackage,
-    native: NativeComponents,
-) -> MicroFactory {
-    let title = title.into();
+pub fn provider(id: MicroId, package: WasmPackage, native: NativeComponents) -> MicroFactory {
     MicroFactory::new(
         MicroDescriptor {
             id,
             version: 1,
-            requirements: vec![MicroProvision {
-                id: SettingsSections::ID.into(),
-                version: 1,
-                kind: ProvisionKind::Context,
-            }],
+            requirements: vec![],
             provisions: vec![MicroProvision {
                 id: WasmMicro::ID.into(),
                 version: 1,
@@ -387,15 +371,7 @@ pub fn provider(
         },
         move |activation| {
             let instance = activation.instance();
-            let sections = activation.require::<SettingsSections>()?;
-            let settings = sections.bind(&instance)?;
-            let micro = WasmMicro::activate(
-                instance,
-                title.clone(),
-                &package,
-                &settings,
-                &native,
-            )?;
+            let micro = WasmMicro::activate(instance, &package, &native)?;
             activation.publish(micro);
             Ok(())
         },
@@ -407,11 +383,10 @@ mod tests {
     use super::*;
     use crate::{
         application::ApplicationRuntime,
-        host::Host,
+        host::{HostedCollection, Host},
         micros::{
             AsyncMicroFactory, MicroRegistry,
             composition::{ConfiguredMicro, Enablement, InstanceState},
-            settings::{self, SettingsMicro},
         },
         native::ComponentMount,
         presentation::SurfaceTree,
@@ -495,52 +470,34 @@ mod tests {
     }
 
     #[test]
-    fn wasm_provider_contributes_live_settings_section_and_updates_on_click() {
+    fn wasm_provider_mounts_surface_and_updates_on_click() {
         let mut app = ApplicationRuntime::new();
-        app.register_provider(settings::provider(app.native(), app.root_mounts()))
-            .unwrap();
         app.register_provider(provider(
             MicroId::new("dayframe.wasm.counter"),
-            "Wasm counter",
             counter_package(),
             app.native(),
         ))
         .unwrap();
 
-        let config = BTreeMap::from([
-            (
-                "settings".into(),
-                ConfiguredMicro {
-                    provider: MicroId::new("dayframe.settings"),
-                    enablement: Enablement::Enabled,
-                    bindings: BTreeMap::new(),
-                },
-            ),
-            (
-                "counter".into(),
-                ConfiguredMicro {
-                    provider: MicroId::new("dayframe.wasm.counter"),
-                    enablement: Enablement::Enabled,
-                    bindings: BTreeMap::from([(SettingsSections::ID.into(), "settings".into())]),
-                },
-            ),
-        ]);
+        let config = BTreeMap::from([(
+            "counter".into(),
+            ConfiguredMicro {
+                provider: MicroId::new("dayframe.wasm.counter"),
+                enablement: Enablement::Enabled,
+                bindings: BTreeMap::new(),
+            },
+        )]);
         let states = app.configure(&config).unwrap();
-        assert_eq!(states["settings"], InstanceState::Active);
         assert_eq!(states["counter"], InstanceState::Active);
 
-        let settings_micro = app.output::<SettingsMicro>("settings").unwrap();
-        let sections = settings_micro.sections.snapshot().unwrap();
-        assert_eq!(sections.len(), 1);
-        let section = sections.values().next().unwrap().clone();
-        assert_eq!(section.title, "Wasm counter");
+        let wasm_micro = app.output::<WasmMicro>("counter").unwrap();
 
         let mut host_dom = VirtualDom::new_with_props(
             mount_host_app,
             MountProps {
                 components: app.native(),
-                owner: settings_micro.instance.clone(),
-                reference: section.detail,
+                owner: app.root(),
+                reference: wasm_micro.surface(),
             },
         );
         let mut host_tree = SurfaceTree::new();
@@ -564,57 +521,64 @@ mod tests {
     }
 
     #[test]
-    fn wasm_guest_trap_or_disablement_closes_instance_and_withdraws_settings_section() {
+    fn wasm_guest_trap_or_disablement_closes_instance_and_withdraws_owned_entries() {
         let mut app = ApplicationRuntime::new();
-        app.register_provider(settings::provider(app.native(), app.root_mounts()))
-            .unwrap();
-        app.register_provider(provider(
-            MicroId::new("dayframe.wasm.counter"),
-            "Wasm counter",
-            counter_package(),
-            app.native(),
+        let host = app.host();
+        let root = app.root();
+        let collection = HostedCollection::<ComponentRef>::new(&host, &root);
+        let collection_for_provider = collection.clone();
+        let package = counter_package();
+        let native = app.native();
+
+        app.register_provider(MicroFactory::new(
+            MicroDescriptor {
+                id: MicroId::new("dayframe.wasm.counter"),
+                version: 1,
+                requirements: vec![],
+                provisions: vec![MicroProvision {
+                    id: WasmMicro::ID.into(),
+                    version: 1,
+                    kind: ProvisionKind::Context,
+                }],
+            },
+            move |activation| {
+                let instance = activation.instance();
+                let micro = WasmMicro::activate(instance.clone(), &package, &native)?;
+                collection_for_provider
+                    .writer(&instance)
+                    .insert(micro.surface())?;
+                activation.publish(micro);
+                Ok(())
+            },
         ))
         .unwrap();
 
-        let mut config = BTreeMap::from([
-            (
-                "settings".into(),
-                ConfiguredMicro {
-                    provider: MicroId::new("dayframe.settings"),
-                    enablement: Enablement::Enabled,
-                    bindings: BTreeMap::new(),
-                },
-            ),
-            (
-                "counter".into(),
-                ConfiguredMicro {
-                    provider: MicroId::new("dayframe.wasm.counter"),
-                    enablement: Enablement::Enabled,
-                    bindings: BTreeMap::from([(SettingsSections::ID.into(), "settings".into())]),
-                },
-            ),
-        ]);
+        let mut config = BTreeMap::from([(
+            "counter".into(),
+            ConfiguredMicro {
+                provider: MicroId::new("dayframe.wasm.counter"),
+                enablement: Enablement::Enabled,
+                bindings: BTreeMap::new(),
+            },
+        )]);
         app.configure(&config).unwrap();
 
-        let settings_micro = app.output::<SettingsMicro>("settings").unwrap();
+        let reader = collection.reader(&root);
         let first_wasm = app.output::<WasmMicro>("counter").unwrap();
-        assert_eq!(settings_micro.sections.snapshot().unwrap().len(), 1);
+        assert_eq!(reader.snapshot().unwrap().len(), 1);
 
         let mut host_dom = VirtualDom::new_with_props(
             mount_host_app,
             MountProps {
                 components: app.native(),
-                owner: settings_micro.instance.clone(),
-                reference: first_wasm.detail,
+                owner: root.clone(),
+                reference: first_wasm.surface(),
             },
         );
         let mut host_tree = SurfaceTree::new();
         host_dom.rebuild(&mut host_tree);
         assert_eq!(host_tree.text_content(), "0");
 
-        // Revoke the surface capability and dispatch a click so the guest's `surface.apply` sees
-        // `Revoked` and traps. The host adapter must catch the trap, withdraw the surface, and
-        // close the micro instance (which automatically withdraws its SettingsSection).
         first_wasm.revoke_surfaces();
         let click = dioxus_core::Event::new(
             EventData::Mouse(SerializedMouseData::default()).into_any(),
@@ -627,13 +591,11 @@ mod tests {
             dioxus_core::ElementId::from_raw(3),
         );
         assert_eq!(first_wasm.instance.check(), Err(AccessError::Revoked));
-        assert!(settings_micro.sections.snapshot().unwrap().is_empty());
+        assert!(reader.snapshot().unwrap().is_empty());
 
-        // Reconciling with the same configuration sees the self-closed/trapped instance as Stopped.
         let states = app.configure(&config).unwrap();
         assert_eq!(states["counter"], InstanceState::Stopped);
 
-        // Disabling and re-enabling spawns a fresh incarnation with a fresh Wasmtime Store.
         config.get_mut("counter").unwrap().enablement = Enablement::Disabled;
         let states = app.configure(&config).unwrap();
         assert_eq!(states["counter"], InstanceState::Disabled);
@@ -643,7 +605,7 @@ mod tests {
         assert_eq!(states["counter"], InstanceState::Active);
         let second_wasm = app.output::<WasmMicro>("counter").unwrap();
         assert!(second_wasm.instance != first_wasm.instance);
-        assert_eq!(settings_micro.sections.snapshot().unwrap().len(), 1);
+        assert_eq!(reader.snapshot().unwrap().len(), 1);
 
         app.host().close();
     }

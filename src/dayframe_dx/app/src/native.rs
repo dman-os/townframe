@@ -133,7 +133,7 @@ impl PartialEq for NativeComponents {
 impl NativeComponents {
     /// A renderer may capture this factory, never the registry itself: otherwise publishing
     /// a layout that mounts other content would create a registry → renderer → registry cycle.
-    pub(crate) fn weak_context(&self) -> impl Fn() -> Self + 'static {
+    pub fn weak_context(&self) -> impl Fn() -> Self + 'static {
         let registry = Rc::downgrade(&self.renderers);
         let host = self.host.clone();
         move || Self {

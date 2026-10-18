@@ -1,24 +1,21 @@
-//! Desktop composition: provider registration, configured instances, and desktop-only controls.
+//! Desktop composition: explicit provider linkage, configuration source, and lifecycle controls.
 use dayframe_app::{
     application::ApplicationRuntime,
-    documents::FacetRoute,
     micros::{
-        self,
-        composition::{ConfiguredMicro, Enablement, InstanceState},
         MicroId,
+        composition::{
+            ConfigurationError, ConfigurationSource, ConfiguredMicro, Enablement, InstanceState,
+            MockConfiguration,
+        },
     },
-    native::{use_component_recovery, ComponentMount},
+    native::{ComponentMount, use_component_recovery},
 };
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
 
-use dayframe_app::micros::sample::{SampleConfig, CONFIG_KEY, CONFIG_TAG};
-
 struct DesktopRuntime {
     application: ApplicationRuntime,
-    // Mock projection of owner configuration, not a separate persistence or permissions store.
-    configuration: BTreeMap<String, ConfiguredMicro>,
-
+    configuration: MockConfiguration,
     states: BTreeMap<String, InstanceState>,
 }
 
@@ -26,27 +23,30 @@ impl DesktopRuntime {
     fn new() -> Self {
         let mut application = ApplicationRuntime::new();
         let host = application.host();
-        host.mock_documents()
-            .bind_config("sample".into(), "sample-config".into(), "main".into());
-        host.mock_documents().seed(
-            sample_route(),
-            serde_json::to_value(SampleConfig {
-                enabled: true,
-                greeting: "Hello from a micro".into(),
-            })
-            .unwrap(),
-        );
+        dayframe_sample::bind_mock_defaults(&host);
 
-        micros::register_native(&mut application).unwrap();
-        let configuration = BTreeMap::from([
-            (
-                "settings".into(),
-                ConfiguredMicro {
-                    provider: MicroId::new("dayframe.settings"),
-                    enablement: Enablement::Enabled,
-                    bindings: BTreeMap::new(),
-                },
-            ),
+        application
+            .register_provider(dayframe_settings::provider(
+                application.native(),
+                application.root_mounts(),
+            ))
+            .unwrap();
+        application
+            .register_provider(dayframe_sample::provider(application.native()))
+            .unwrap();
+        application
+            .register_provider(dayframe_counter::provider(application.native()))
+            .unwrap();
+
+        let locked = BTreeMap::from([(
+            "settings".into(),
+            ConfiguredMicro {
+                provider: MicroId::new("dayframe.settings"),
+                enablement: Enablement::Enabled,
+                bindings: BTreeMap::new(),
+            },
+        )]);
+        let dynamic = BTreeMap::from([
             (
                 "sample".into(),
                 ConfiguredMicro {
@@ -55,56 +55,64 @@ impl DesktopRuntime {
                     bindings: BTreeMap::from([("settings.sections".into(), "settings".into())]),
                 },
             ),
+            (
+                "counter".into(),
+                ConfiguredMicro {
+                    provider: MicroId::new(dayframe_counter::ID),
+                    enablement: Enablement::Enabled,
+                    bindings: BTreeMap::from([("settings.sections".into(), "settings".into())]),
+                },
+            ),
         ]);
+        let configuration = MockConfiguration::with_locked(locked, dynamic);
+        let states = application
+            .set_configuration_source(configuration.clone())
+            .unwrap();
 
         let mut runtime = Self {
             application,
             configuration,
-
             states: BTreeMap::new(),
         };
-        runtime.apply_configuration();
+        runtime.apply_states(states);
         runtime
     }
 
-    fn apply_configuration(&mut self) {
-        let states = self.application.configure(&self.configuration).unwrap();
-        self.apply_states(states);
-    }
-
     fn apply_states(&mut self, states: BTreeMap<String, InstanceState>) {
-        // Activation failures are unexpected for these linked demo providers and mock grants.
+        // Activation failures are unexpected for these linked providers and mock grants.
         // Do not conceal one behind an empty panel. Blocked/stopped states are legitimate lifecycle states.
         assert!(
             !states
                 .values()
                 .any(|state| matches!(state, InstanceState::Failed(_))),
-            "demo micro activation failed: {states:?}"
+            "micro activation failed: {states:?}"
         );
         self.states = states;
     }
 
-    fn sample_enabled(&self) -> bool {
-        self.configuration["sample"].enablement == Enablement::Enabled
+    fn desired(&self) -> BTreeMap<String, ConfiguredMicro> {
+        self.configuration.current().unwrap()
     }
 
-    fn enable_sample(&mut self) {
-        self.configuration.get_mut("sample").unwrap().enablement = Enablement::Enabled;
-        self.apply_configuration();
+    fn is_enabled(&self, instance: &str) -> bool {
+        self.desired()
+            .get(instance)
+            .is_some_and(|entry| entry.enablement == Enablement::Enabled)
     }
 
-    fn disable_sample(&mut self) {
-        self.configuration.get_mut("sample").unwrap().enablement = Enablement::Disabled;
-        self.apply_configuration();
+    fn is_locked(&self, instance: &str) -> bool {
+        self.application.is_locked(instance)
     }
-}
 
-fn sample_route() -> FacetRoute {
-    FacetRoute {
-        document: "sample-config".into(),
-        branch: "main".into(),
-        tag: CONFIG_TAG.into(),
-        key_id: CONFIG_KEY.into(),
+    fn set_enablement(
+        &mut self,
+        instance: &str,
+        enablement: Enablement,
+    ) -> Result<(), ConfigurationError> {
+        self.configuration.set_enablement(instance, enablement)?;
+        let states = self.application.reconcile_configuration()?;
+        self.apply_states(states);
+        Ok(())
     }
 }
 
@@ -127,7 +135,7 @@ pub fn Application() -> Element {
                 let states = reports
                     .borrow_and_update()
                     .clone()
-                    .expect("invalid demo micro configuration");
+                    .expect("invalid micro configuration");
                 runtime.write().apply_states(states);
                 if reports.changed().await.is_err() {
                     break;
@@ -150,6 +158,8 @@ pub fn Application() -> Element {
             }
         }
     });
+
+    let configured_names: Vec<String> = runtime.read().desired().into_keys().collect();
 
     rsx! {
         section { class: "flex flex-col gap-6 rounded-lg border border-border bg-surface p-6 text-foreground",
@@ -175,19 +185,50 @@ pub fn Application() -> Element {
             }
             details { class: "rounded-md border border-border p-4",
                 summary { "Mock node and micro lifecycle controls" }
-                p { role: "status", {format!("Sample runtime: {:?}", runtime.read().states["sample"])} }
-                div { class: "mt-4 flex flex-wrap gap-2",
-                    button {
-                        class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                        "aria-label": if runtime.read().sample_enabled() { "Disable sample micro" } else { "Enable sample micro" },
-                        onclick: move |_| {
-                            if runtime.read().sample_enabled() {
-                                runtime.write().disable_sample();
+                for name in &configured_names {
+                    p {
+                        key: "status-{name}",
+                        role: "status",
+                        {
+                            let state = runtime.read().states.get(name).cloned();
+                            let locked = runtime.read().is_locked(name);
+                            if locked {
+                                format!("{name} runtime (locked): {state:?}")
                             } else {
-                                runtime.write().enable_sample();
+                                format!("{name} runtime: {state:?}")
                             }
-                        },
-                        if runtime.read().sample_enabled() { "Disable sample micro" } else { "Enable sample micro" }
+                        }
+                    }
+                }
+                div { class: "mt-4 flex flex-wrap gap-2",
+                    for name in configured_names {
+                        if !runtime.read().is_locked(&name) {
+                            {
+                                let target = name.clone();
+                                let enabled = runtime.read().is_enabled(&name);
+                                let label = if enabled {
+                                    format!("Disable {name} micro")
+                                } else {
+                                    format!("Enable {name} micro")
+                                };
+                                rsx! {
+                                    button {
+                                        key: "toggle-{name}",
+                                        class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
+                                        "aria-label": "{label}",
+                                        onclick: move |_| {
+                                            let next = if runtime.read().is_enabled(&target) {
+                                                Enablement::Disabled
+                                            } else {
+                                                Enablement::Enabled
+                                            };
+                                            runtime.write().set_enablement(&target, next).unwrap();
+                                        },
+                                        "{label}"
+                                    }
+                                }
+                            }
+                        }
                     }
                     button {
                         class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
@@ -201,18 +242,6 @@ pub fn Application() -> Element {
                         onclick: move |_| runtime.read().application.host().mock_documents().settle(false),
                         "Reject and roll back"
                     }
-                    button {
-                        class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                        "aria-label": "Simulate node update",
-                        onclick: move |_| runtime.read().application.host().mock_documents().external_change(
-                            sample_route(),
-                            Some(serde_json::to_value(SampleConfig {
-                                enabled: true,
-                                greeting: "Changed on the node".into(),
-                            }).unwrap()),
-                        ),
-                        "Simulate node update"
-                    }
                 }
             }
         }
@@ -222,26 +251,37 @@ pub fn Application() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dayframe_app::micros::sample::SampleMicro;
-
     use dayframe_app::host::AccessError;
+    use dayframe_counter::CounterMicro;
+    use dayframe_sample::{SampleConfig, SampleMicro};
+    use dayframe_settings::SettingsMicro;
+
     #[test]
-    fn provider_registration_drives_settings_and_document_access() {
-        let runtime = DesktopRuntime::new();
-        assert_eq!(runtime.application.provider_descriptors().len(), 2);
+    fn provider_registration_drives_native_and_wasm_settings_and_locked_boot_entries() {
+        let mut runtime = DesktopRuntime::new();
+        assert_eq!(runtime.application.provider_descriptors().len(), 3);
         assert_eq!(runtime.application.roots().snapshot().unwrap().len(), 1);
-        let sample = runtime.application.output::<SampleMicro>("sample").unwrap();
         assert_eq!(
-            runtime
-                .application
-                .output::<micros::settings::SettingsMicro>("settings")
-                .unwrap()
-                .sections
-                .snapshot()
-                .unwrap()
-                .len(),
-            1
+            runtime.set_enablement("settings", Enablement::Disabled),
+            Err(ConfigurationError::LockedInstance("settings".into()))
         );
+        let sample = runtime.application.output::<SampleMicro>("sample").unwrap();
+        let counter = runtime
+            .application
+            .output::<CounterMicro>("counter")
+            .unwrap();
+        assert!(counter.instance.check().is_ok());
+        let sections = runtime
+            .application
+            .output::<SettingsMicro>("settings")
+            .unwrap()
+            .sections
+            .snapshot()
+            .unwrap();
+        assert_eq!(sections.len(), 2);
+        let titles: Vec<_> = sections.values().map(|s| s.title.as_str()).collect();
+        assert!(titles.contains(&"Sample micro"));
+        assert!(titles.contains(&"Counter (Wasm)"));
         assert_eq!(
             sample.decode(&sample.watch().current().unwrap()).unwrap(),
             SampleConfig {
@@ -253,49 +293,85 @@ mod tests {
     }
 
     #[test]
-    fn disabling_and_reenabling_a_configured_instance_reuses_durable_config() {
+    fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_restarts_wasm() {
         let mut runtime = DesktopRuntime::new();
-        let first = runtime.application.output::<SampleMicro>("sample").unwrap();
+        let first_sample = runtime.application.output::<SampleMicro>("sample").unwrap();
+        let first_counter = runtime
+            .application
+            .output::<CounterMicro>("counter")
+            .unwrap();
         let changed = SampleConfig {
             enabled: false,
             greeting: "Edited".into(),
         };
-        first.edit(changed.clone()).unwrap();
+        first_sample.edit(changed.clone()).unwrap();
         runtime.application.host().mock_documents().settle(false);
         assert_eq!(
-            first.decode(&first.watch().current().unwrap()),
+            first_sample.decode(&first_sample.watch().current().unwrap()),
             Some(SampleConfig {
                 enabled: true,
                 greeting: "Hello from a micro".into(),
             })
         );
-        first.edit(changed.clone()).unwrap();
+        first_sample.edit(changed.clone()).unwrap();
         runtime.application.host().mock_documents().settle(true);
-        runtime.disable_sample();
+        runtime
+            .set_enablement("sample", Enablement::Disabled)
+            .unwrap();
+        runtime
+            .set_enablement("counter", Enablement::Disabled)
+            .unwrap();
         assert_eq!(runtime.states["sample"], InstanceState::Disabled);
+        assert_eq!(runtime.states["counter"], InstanceState::Disabled);
         assert!(matches!(
             runtime.application.output::<SampleMicro>("sample"),
             Err(AccessError::Revoked)
         ));
-        assert_eq!(
-            runtime.configuration["sample"].enablement,
-            Enablement::Disabled
+        assert!(matches!(
+            runtime.application.output::<CounterMicro>("counter"),
+            Err(AccessError::Revoked)
+        ));
+        assert!(
+            runtime
+                .application
+                .output::<SettingsMicro>("settings")
+                .unwrap()
+                .sections
+                .snapshot()
+                .unwrap()
+                .is_empty()
         );
-        assert!(runtime
-            .application
-            .output::<micros::settings::SettingsMicro>("settings")
-            .unwrap()
-            .sections
-            .snapshot()
-            .unwrap()
-            .is_empty());
-        assert_eq!(first.watch().current().unwrap_err(), AccessError::Revoked);
-        runtime.enable_sample();
-        let second = runtime.application.output::<SampleMicro>("sample").unwrap();
-        assert!(first.instance != second.instance);
         assert_eq!(
-            second.decode(&second.watch().current().unwrap()),
+            first_sample.watch().current().unwrap_err(),
+            AccessError::Revoked
+        );
+        runtime
+            .set_enablement("sample", Enablement::Enabled)
+            .unwrap();
+        runtime
+            .set_enablement("counter", Enablement::Enabled)
+            .unwrap();
+        let second_sample = runtime.application.output::<SampleMicro>("sample").unwrap();
+        let second_counter = runtime
+            .application
+            .output::<CounterMicro>("counter")
+            .unwrap();
+        assert!(first_sample.instance != second_sample.instance);
+        assert!(first_counter.instance != second_counter.instance);
+        assert_eq!(
+            second_sample.decode(&second_sample.watch().current().unwrap()),
             Some(changed)
+        );
+        assert_eq!(
+            runtime
+                .application
+                .output::<SettingsMicro>("settings")
+                .unwrap()
+                .sections
+                .snapshot()
+                .unwrap()
+                .len(),
+            2
         );
         runtime.application.host().close();
     }
@@ -304,27 +380,31 @@ mod tests {
     fn provider_withdrawal_closes_dependents_before_their_collection() {
         let runtime = DesktopRuntime::new();
         let sample = runtime.application.output::<SampleMicro>("sample").unwrap();
+        let counter = runtime
+            .application
+            .output::<CounterMicro>("counter")
+            .unwrap();
         let mut updates = sample.watch().subscribe().unwrap();
-        let mount = runtime
+        let settings_instance = runtime
+            .application
+            .output::<SettingsMicro>("settings")
+            .unwrap()
+            .instance;
+        let sample_mount = runtime
             .application
             .host()
-            .mount(
-                &runtime
-                    .application
-                    .output::<micros::settings::SettingsMicro>("settings")
-                    .unwrap()
-                    .instance,
-                sample.detail(),
-            )
+            .mount(&settings_instance, sample.detail())
             .unwrap();
-        runtime
+        let counter_mount = runtime
             .application
-            .output::<micros::settings::SettingsMicro>("settings")
-            .unwrap()
-            .instance
-            .close();
+            .host()
+            .mount(&settings_instance, counter.detail())
+            .unwrap();
+        settings_instance.close();
         assert_eq!(sample.instance.check(), Err(AccessError::Revoked));
-        assert!(!mount.is_live());
+        assert_eq!(counter.instance.check(), Err(AccessError::Revoked));
+        assert!(!sample_mount.is_live());
+        assert!(!counter_mount.is_live());
         assert!(runtime.application.roots().snapshot().unwrap().is_empty());
         assert!(updates.borrow_and_update().revoked);
         assert!(updates.borrow().facets.is_empty());

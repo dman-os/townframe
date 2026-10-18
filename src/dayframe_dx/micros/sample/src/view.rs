@@ -1,6 +1,6 @@
 //! Contributor-owned native presentation; Settings mounts it without reading its document.
 use super::SampleConfig;
-use crate::documents::Facet;
+use dayframe_app::documents::Facet;
 use dioxus::prelude::*;
 
 #[component]

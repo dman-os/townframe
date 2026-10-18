@@ -2,9 +2,13 @@
 mod view;
 pub use view::SettingsView;
 
-pub mod contract;
-use crate::host::{CollectionReader, CollectionWriter, HostedCollection, Instance, RootMount};
+pub use dayframe_settings_contract as contract;
 use contract::{SettingsSection, SettingsSections};
+use dayframe_app::{
+    host::{AccessError, CollectionReader, CollectionWriter, HostedCollection, Instance, RootMount},
+    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision, ProvisionKind},
+    native::NativeComponents,
+};
 
 #[derive(Clone)]
 pub struct SettingsMicro {
@@ -23,8 +27,8 @@ pub struct SettingsContext {
 impl SettingsMicro {
     pub fn activate(
         context: SettingsContext,
-        native: &crate::native::NativeComponents,
-    ) -> Result<Self, crate::host::AccessError> {
+        native: &NativeComponents,
+    ) -> Result<Self, AccessError> {
         let micro = Self {
             sections: context.sections.reader(&context.instance),
             instance: context.instance,
@@ -36,7 +40,6 @@ impl SettingsMicro {
             use dioxus::prelude::*;
             rsx! { SettingsView { micro: presentation.clone(), components: components() } }
         })?;
-        // Both the typed collection and root content must be published before activation succeeds.
         context.roots.insert(RootMount {
             title: "Settings".into(),
             content: root,
@@ -46,23 +49,19 @@ impl SettingsMicro {
 
     /// Publish the contribution facility separately from this micro's presentation controller.
     pub fn sections_output(&self) -> SettingsSections {
-        SettingsSections {
-            collection: self.collection.clone(),
-            provider: self.instance.clone(),
-        }
+        SettingsSections::new(self.collection.clone(), self.instance.clone())
     }
 }
 
-impl super::Provision for SettingsMicro {
+impl Provision for SettingsMicro {
     const ID: &'static str = "settings.controller";
 }
 
 /// Native adapter owns Settings' context construction; composition only supplies host facilities.
 pub fn provider(
-    native: crate::native::NativeComponents,
+    native: NativeComponents,
     roots: HostedCollection<RootMount>,
-) -> super::MicroFactory {
-    use super::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision, ProvisionKind};
+) -> MicroFactory {
     MicroFactory::new(
         MicroDescriptor {
             id: MicroId::new("dayframe.settings"),

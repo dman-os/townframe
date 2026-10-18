@@ -347,3 +347,155 @@ async fn cancelling_an_observer_releases_ownership_for_a_replacement() {
     fixture.runtime.host().close();
     fixture.runtime.observe().await;
 }
+
+#[tokio::test]
+async fn facet_and_static_configuration_sources_enforce_locked_entries_and_drive_observation() {
+    use crate::{
+        documents::{DocumentGrant, FacetRoute},
+        micros::composition::{FacetConfiguration, MockConfiguration, StaticConfiguration},
+    };
+    use daybook_types::manifest::RoutineFacetAccess;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut fixture = Fixture::new();
+            fixture.register_supplier();
+
+            let locked = BTreeMap::from([(
+                "supplier".into(),
+                ConfiguredMicro {
+                    provider: MicroId::new("supplier"),
+                    enablement: Enablement::Enabled,
+                    bindings: BTreeMap::new(),
+                },
+            )]);
+            let dynamic = BTreeMap::from([(
+                "consumer".into(),
+                ConfiguredMicro {
+                    provider: MicroId::new("consumer"),
+                    enablement: Enablement::Enabled,
+                    bindings: BTreeMap::from([(Facility::ID.into(), "supplier".into())]),
+                },
+            )]);
+
+            let static_source = StaticConfiguration::new(locked.clone());
+            assert_eq!(
+                fixture
+                    .runtime
+                    .set_configuration_source(static_source)
+                    .unwrap(),
+                BTreeMap::from([("supplier".into(), InstanceState::Active)])
+            );
+            assert!(fixture.runtime.is_locked("supplier"));
+            assert!(!fixture.runtime.is_locked("consumer"));
+
+            let mock_source = MockConfiguration::with_locked(locked.clone(), dynamic.clone());
+            assert_eq!(
+                mock_source.set_enablement("supplier", Enablement::Disabled),
+                Err(ConfigurationError::LockedInstance("supplier".into()))
+            );
+
+            let host = fixture.runtime.host();
+            let route = FacetRoute {
+                document: "composition-doc".into(),
+                branch: "main".into(),
+                tag: "org.dayframe.composition".into(),
+                key_id: "main".into(),
+            };
+            host.mock_documents().seed(
+                route.clone(),
+                serde_json::to_value(&dynamic).unwrap(),
+            );
+            let access = host
+                .grant_documents(
+                    &fixture.runtime.root(),
+                    vec![DocumentGrant {
+                        document: route.document.clone(),
+                        branch: route.branch.clone(),
+                        facets: vec![RoutineFacetAccess {
+                            tag: route.tag.clone().into(),
+                            key_id: Some(route.key_id.clone()),
+                            read: true,
+                            write: true,
+                            ..Default::default()
+                        }],
+                    }],
+                )
+                .unwrap();
+            let doc = access
+                .document(route.document.clone(), route.branch.clone())
+                .unwrap();
+            let facet = doc
+                .facet::<BTreeMap<String, ConfiguredMicro>>(route.tag.clone(), route.key_id.clone())
+                .unwrap();
+            let facet_source = FacetConfiguration::new(facet, locked);
+
+            assert_eq!(
+                facet_source.set_enablement("supplier", Enablement::Disabled),
+                Err(ConfigurationError::LockedInstance("supplier".into()))
+            );
+            assert_eq!(
+                fixture
+                    .runtime
+                    .set_configuration_source(facet_source.clone())
+                    .unwrap(),
+                BTreeMap::from([
+                    ("consumer".into(), InstanceState::Active),
+                    ("supplier".into(), InstanceState::Active),
+                ])
+            );
+            assert!(fixture.runtime.is_locked("supplier"));
+            assert!(!fixture.runtime.is_locked("consumer"));
+
+            let runtime = fixture.runtime.clone();
+            let observation = tokio::task::spawn_local(async move { runtime.observe().await });
+            fixture
+                .reports
+                .wait_for(|report| report == &active())
+                .await
+                .unwrap();
+
+            facet_source
+                .set_enablement("consumer", Enablement::Disabled)
+                .unwrap();
+            let disabled = Ok(BTreeMap::from([
+                ("consumer".into(), InstanceState::Disabled),
+                ("supplier".into(), InstanceState::Active),
+            ]));
+            fixture
+                .reports
+                .wait_for(|report| report == &disabled)
+                .await
+                .unwrap();
+
+            host.mock_documents().settle(false);
+            fixture
+                .reports
+                .wait_for(|report| report == &active())
+                .await
+                .unwrap();
+
+            let mut tampered = dynamic;
+            tampered.insert(
+                "supplier".into(),
+                ConfiguredMicro {
+                    provider: MicroId::new("supplier"),
+                    enablement: Enablement::Disabled,
+                    bindings: BTreeMap::new(),
+                },
+            );
+            host.mock_documents()
+                .external_change(route, Some(serde_json::to_value(tampered).unwrap()));
+            assert_eq!(
+                fixture.runtime.reconcile_configuration().unwrap(),
+                BTreeMap::from([
+                    ("consumer".into(), InstanceState::Active),
+                    ("supplier".into(), InstanceState::Active),
+                ])
+            );
+
+            fixture.runtime.host().close();
+            observation.await.unwrap();
+        })
+        .await;
+}

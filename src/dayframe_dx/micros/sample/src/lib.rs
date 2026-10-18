@@ -1,14 +1,15 @@
-//! A configurable contributor micro used by the desktop composition.
+//! A configurable contributor micro used by Dayframe compositions.
 #[cfg(test)]
 mod tests;
 mod view;
 
-use crate::{
-    documents::{DocumentRef, DocumentSnapshot, DocumentWatch, Facet},
-    host::{AccessError, ComponentRef, Instance},
-    micros::settings::contract::{SettingsContribution, SettingsSection},
+use dayframe_app::{
+    documents::{DocumentRef, DocumentSnapshot, DocumentWatch, Facet, FacetRoute},
+    host::{AccessError, ComponentRef, Host, Instance},
+    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision, ProvisionKind},
     native::NativeComponents,
 };
+use dayframe_settings_contract::{SettingsContribution, SettingsSection, SettingsSections};
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -85,15 +86,32 @@ impl SampleMicro {
     }
 }
 
-impl super::Provision for SampleMicro {
+impl Provision for SampleMicro {
     const ID: &'static str = "sample.controller";
+}
+
+/// Bind and seed the mock configuration document for `sample` on a host's mock document service.
+pub fn bind_mock_defaults(host: &Host) {
+    host.mock_documents()
+        .bind_config("sample".into(), "sample-config".into(), "main".into());
+    host.mock_documents().seed(
+        FacetRoute {
+            document: "sample-config".into(),
+            branch: "main".into(),
+            tag: CONFIG_TAG.into(),
+            key_id: CONFIG_KEY.into(),
+        },
+        serde_json::to_value(SampleConfig {
+            enabled: true,
+            greeting: "Hello from a micro".into(),
+        })
+        .unwrap(),
+    );
 }
 
 /// Native adapter resolves declared dependencies and grants this micro's manifest-shaped access.
 /// The feature itself still receives only SampleContext, never the registry or privileged host.
-pub fn provider(native: NativeComponents) -> super::MicroFactory {
-    use super::settings::contract::SettingsSections;
-    use super::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision, ProvisionKind};
+pub fn provider(native: NativeComponents) -> MicroFactory {
     MicroFactory::new(
         MicroDescriptor {
             id: MicroId::new("dayframe.sample"),
