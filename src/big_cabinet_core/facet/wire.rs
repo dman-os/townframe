@@ -4,35 +4,65 @@
 //! shapes `serde` cannot express, so this is what the declaration macro's impls call. The storage
 //! codec — how a value sits in a document — is [`super::codec`].
 //!
-//! A closed union needs none of this — `#[serde(tag = …, content = …)]` derives the wire form and
-//! `schemars` derives the schema. An open union has a fallback that keeps a member this build does
-//! not know about, and no serde attribute expresses that: `#[serde(other)]` has to be a unit
-//! variant, so it catches the discriminant and then cannot read the payload. The declaration macro
-//! writes the three impls, and everything below is what they call.
+//! Internal tagging is the authored default: the member object carries `$type`, and the payload
+//! fields sit beside it. Adjacent tagging is the explicit wrapper `{"$type", "value"}`. A closed
+//! union's serde derive writes the wire form; the macro still emits the schema, because `schemars`
+//! enum encoding is not the contract. An open union has a fallback that keeps a member this build
+//! does not know about, and no serde attribute expresses that.
 
 use crate::facet::{Extra, FacetMember};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::de::Error as _;
-use serde::ser::SerializeMap;
+use serde::ser::{Error as _, SerializeMap};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::borrow::Cow;
 
-/// Writes one declared member: `{"<tag>": <P as FacetMember>::ID, "<content>": <payload>}`.
+/// Where a union member's discriminant sits, as the macro writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnionLayout {
+    /// `{"$type": "<member id>", ...payload fields}`
+    Internal { tag: &'static str },
+    /// `{"$type": "<member id>", "value": <payload>}`
+    Adjacent {
+        tag: &'static str,
+        content: &'static str,
+    },
+    /// `{"<member id>": <payload>}`
+    External,
+}
+
+/// Writes one declared member in the layout the union stated.
 pub fn serialize_member<S, P>(
     serializer: S,
-    tag: &'static str,
-    content: &'static str,
+    layout: &UnionLayout,
     payload: &P,
 ) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
     P: Serialize + FacetMember,
 {
-    let mut member = serializer.serialize_map(Some(2))?;
-    member.serialize_entry(tag, P::ID)?;
-    member.serialize_entry(content, payload)?;
-    member.end()
+    match *layout {
+        UnionLayout::Adjacent { tag, content } => {
+            let mut member = serializer.serialize_map(Some(2))?;
+            member.serialize_entry(tag, P::ID)?;
+            member.serialize_entry(content, payload)?;
+            member.end()
+        }
+        UnionLayout::Internal { tag } => {
+            let mut value = serde_json::to_value(payload).map_err(S::Error::custom)?;
+            let object = value.as_object_mut().ok_or_else(|| {
+                S::Error::custom("an internally tagged member serializes as an object")
+            })?;
+            object.insert(tag.to_owned(), Value::from(P::ID));
+            value.serialize(serializer)
+        }
+        UnionLayout::External => {
+            let mut member = serializer.serialize_map(Some(1))?;
+            member.serialize_entry(P::ID, payload)?;
+            member.end()
+        }
+    }
 }
 
 /// One declared member: the id it is tagged with, and how to read its payload.
@@ -45,11 +75,11 @@ pub struct Member<T> {
 ///
 /// An unrecognized discriminant goes to `fallback`, which keeps the member whole. A recognized
 /// discriminant whose payload is malformed is an error and never falls back, so a member cannot
-/// silently become an unknown one.
+/// silently become an unknown one. Internal tagging strips the discriminant before the payload is
+/// read, so an overflow field does not capture `$type` and `deny_unknown_fields` still holds.
 pub fn deserialize_union<'de, D, T>(
     deserializer: D,
-    tag: &'static str,
-    content: &'static str,
+    layout: &UnionLayout,
     members: &[Member<T>],
     fallback: fn(Value) -> Result<T, serde_json::Error>,
 ) -> Result<T, D::Error>
@@ -57,22 +87,54 @@ where
     D: Deserializer<'de>,
 {
     let member = Value::deserialize(deserializer)?;
-    let object = member.as_object().ok_or_else(|| {
-        D::Error::custom(format!(
-            "a union member is an object with a {tag} discriminant"
-        ))
-    })?;
-    let id = object.get(tag).and_then(Value::as_str).ok_or_else(|| {
-        D::Error::custom(format!("a union member needs a string {tag} discriminant"))
-    })?;
-    let Some(declared) = members.iter().find(|declared| declared.id == id) else {
-        return fallback(member).map_err(D::Error::custom);
-    };
-    let payload = object
-        .get(content)
-        .cloned()
-        .ok_or_else(|| D::Error::custom(format!("union member {id} needs a {content} payload")))?;
-    (declared.read)(payload).map_err(D::Error::custom)
+    match *layout {
+        UnionLayout::External => {
+            let object = member.as_object().ok_or_else(|| {
+                D::Error::custom("an externally tagged member is an object of one key")
+            })?;
+            let Some((id, payload)) = object.iter().next() else {
+                return Err(D::Error::custom(
+                    "an externally tagged member names its payload",
+                ));
+            };
+            if object.len() != 1 {
+                return Err(D::Error::custom(
+                    "an externally tagged member is an object of one key",
+                ));
+            }
+            let Some(declared) = members.iter().find(|declared| declared.id == id) else {
+                return fallback(member).map_err(D::Error::custom);
+            };
+            (declared.read)(payload.clone()).map_err(D::Error::custom)
+        }
+        UnionLayout::Internal { tag } | UnionLayout::Adjacent { tag, .. } => {
+            let object = member.as_object().ok_or_else(|| {
+                D::Error::custom(format!(
+                    "a union member is an object with a {tag} discriminant"
+                ))
+            })?;
+            let id = object.get(tag).and_then(Value::as_str).ok_or_else(|| {
+                D::Error::custom(format!("a union member needs a string {tag} discriminant"))
+            })?;
+            let Some(declared) = members.iter().find(|declared| declared.id == id) else {
+                return fallback(member).map_err(D::Error::custom);
+            };
+            let payload = match *layout {
+                UnionLayout::Adjacent { content, .. } => {
+                    object.get(content).cloned().ok_or_else(|| {
+                        D::Error::custom(format!("union member {id} needs a {content} payload"))
+                    })?
+                }
+                UnionLayout::Internal { tag } => {
+                    let mut payload = object.clone();
+                    payload.remove(tag);
+                    Value::Object(payload)
+                }
+                UnionLayout::External => unreachable!("matched above"),
+            };
+            (declared.read)(payload).map_err(D::Error::custom)
+        }
+    }
 }
 
 /// A union member this build has no declaration for, kept whole so a round trip is lossless.
@@ -129,35 +191,131 @@ pub struct MemberSchema {
 
 /// Builds the `oneOf` a union emits: one branch per declared member, plus, for an open union, a
 /// fallback that excludes known discriminants so each member matches exactly one branch.
+///
+/// An internal branch is the payload's own schema with the discriminant added — its properties
+/// inlined beside `$type`, and a member `$ref` resolved first so that inlining does not hide the
+/// payload behind an `allOf` the codec refuses. Adjacent tagging keeps the payload under the pinned
+/// content key instead, which is the wrapper a payload that is not an object needs.
 pub fn union_schema(
-    tag: &'static str,
-    content: &'static str,
+    layout: &UnionLayout,
     open: bool,
     members: Vec<MemberSchema>,
+    definitions: &Map<String, Value>,
 ) -> Schema {
     let mut branches: Vec<Value> = Vec::with_capacity(members.len() + 1);
     let known: Vec<_> = members.iter().map(|member| member.id).collect();
     for member in members {
-        branches.push(adjacent_branch(
-            tag,
-            content,
-            serde_json::json!({ "const": member.id }),
-            Value::from(member.schema),
-        ));
+        let payload = Value::from(member.schema);
+        branches.push(match *layout {
+            UnionLayout::Internal { tag } => internal_branch(tag, member.id, &payload, definitions),
+            UnionLayout::Adjacent { tag, content } => adjacent_branch(
+                tag,
+                content,
+                serde_json::json!({ "const": member.id }),
+                payload,
+            ),
+            UnionLayout::External => external_branch(member.id, payload),
+        });
     }
     if open {
-        // Every member carries a payload — a marker member carries an empty object — so the branch
-        // requires one and leaves it unconstrained.
-        branches.push(adjacent_branch(
-            tag,
-            content,
-            serde_json::json!({ "type": "string", "not": { "enum": known } }),
-            Value::Bool(true),
-        ));
+        branches.push(match *layout {
+            UnionLayout::Internal { tag } => internal_fallback(tag, &known),
+            UnionLayout::Adjacent { tag, content } => adjacent_branch(
+                tag,
+                content,
+                serde_json::json!({ "type": "string", "not": { "enum": known } }),
+                Value::Bool(true),
+            ),
+            UnionLayout::External => {
+                let mut branch = Map::new();
+                branch.insert("type".to_owned(), Value::from("object"));
+                branch.insert("additionalProperties".to_owned(), Value::Bool(true));
+                Value::Object(branch)
+            }
+        });
     }
-    let mut root = serde_json::Map::new();
+    let mut root = Map::new();
     root.insert("oneOf".to_owned(), Value::Array(branches));
     Schema::try_from(Value::Object(root)).expect("a union schema is a valid JSON Schema")
+}
+
+fn internal_branch(
+    tag: &str,
+    id: &str,
+    payload: &Value,
+    definitions: &Map<String, Value>,
+) -> Value {
+    let payload = resolve_def(payload, definitions);
+    // The payload's own schema is the branch, with the discriminant added: copying only the keys we
+    // thought of would silently drop every other constraint the member states — its property count,
+    // its description — and the branch would then admit a value the member never did.
+    let mut branch = payload
+        .as_object()
+        .unwrap_or_else(|| {
+            panic!(
+                "an internally tagged member's payload is an object, and {id} projects {payload}"
+            )
+        })
+        .clone();
+    // The definitions belong to the document this union is inlined into, not to one branch; a
+    // nested reference inside the payload resolves against the document's own.
+    for keyword in ["$defs", "$schema", "$id"] {
+        branch.remove(keyword);
+    }
+    branch.insert("type".to_owned(), Value::from("object"));
+    let mut properties = branch
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if properties
+        .insert(tag.to_owned(), serde_json::json!({ "const": id }))
+        .is_some()
+    {
+        panic!(
+            "the member {id} declares a `{tag}` field of its own, which is the discriminant the \
+             union writes: rename it, or the two would be one key with two meanings"
+        );
+    }
+    branch.insert("properties".to_owned(), Value::Object(properties));
+    let mut required = branch
+        .get("required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if !required.iter().any(|name| name == tag) {
+        required.insert(0, Value::from(tag));
+    }
+    branch.insert("required".to_owned(), Value::Array(required));
+    Value::Object(branch)
+}
+
+fn internal_fallback(tag: &str, known: &[&str]) -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            tag: {"type": "string", "not": {"enum": known}}
+        },
+        "required": [tag],
+        "additionalProperties": true
+    })
+}
+
+fn resolve_def(schema: &Value, definitions: &Map<String, Value>) -> Value {
+    let mut current = schema.clone();
+    for _ in 0..8 {
+        let Some(reference) = current.get("$ref").and_then(Value::as_str) else {
+            return current;
+        };
+        let Some(name) = reference.strip_prefix("#/$defs/") else {
+            return current;
+        };
+        let Some(resolved) = definitions.get(name) else {
+            return current;
+        };
+        current = resolved.clone();
+    }
+    current
 }
 
 fn adjacent_branch(tag: &str, content: &str, discriminant: Value, payload: Value) -> Value {
@@ -168,6 +326,17 @@ fn adjacent_branch(tag: &str, content: &str, discriminant: Value, payload: Value
     branch.insert("type".to_owned(), Value::from("object"));
     branch.insert("properties".to_owned(), Value::Object(properties));
     branch.insert("required".to_owned(), serde_json::json!([tag, content]));
+    Value::Object(branch)
+}
+
+fn external_branch(id: &str, payload: Value) -> Value {
+    let mut properties = Map::new();
+    properties.insert(id.to_owned(), payload);
+    let mut branch = Map::new();
+    branch.insert("type".to_owned(), Value::from("object"));
+    branch.insert("properties".to_owned(), Value::Object(properties));
+    branch.insert("required".to_owned(), serde_json::json!([id]));
+    branch.insert("additionalProperties".to_owned(), Value::Bool(false));
     Value::Object(branch)
 }
 
@@ -200,4 +369,63 @@ pub fn open_string_schema(known: &'static [&'static str]) -> Schema {
     root.insert("type".to_owned(), Value::from("string"));
     root.insert("knownValues".to_owned(), serde_json::json!(known));
     Schema::try_from(Value::Object(root)).expect("a string vocabulary is a valid JSON Schema")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The branch is the payload's own schema with the discriminant added: copying only the keys
+    /// the builder knows would drop every other constraint the member states, and the union would
+    /// then admit a value the member never did.
+    #[test]
+    fn an_internal_branch_is_the_payload_schema_with_the_discriminant_added() {
+        let payload = json!({
+            "type": "object",
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
+            "minProperties": 2,
+            "description": "a member",
+            "$defs": {"Unused": {"type": "null"}},
+            "$schema": "https://json-schema.org/draft/2020-12/schema"
+        });
+        let branch = internal_branch("$type", "org.example.member", &payload, &Map::new());
+        assert_eq!(
+            branch,
+            json!({
+                "type": "object",
+                "properties": {
+                    "$type": {"const": "org.example.member"},
+                    "text": {"type": "string"}
+                },
+                "required": ["$type", "text"],
+                "minProperties": 2,
+                "description": "a member"
+            }),
+            "the payload's own constraints travel and its document keys do not"
+        );
+    }
+
+    /// A member that resolves through a `$ref` is inlined before the discriminant is added, so the
+    /// payload never hides behind an `allOf` the codec refuses.
+    #[test]
+    fn an_internal_branch_resolves_a_referenced_payload_first() {
+        let mut definitions = Map::new();
+        definitions.insert(
+            "Member".to_owned(),
+            json!({"type": "object", "properties": {"text": {"type": "string"}}}),
+        );
+        let branch = internal_branch(
+            "$type",
+            "org.example.member",
+            &json!({"$ref": "#/$defs/Member"}),
+            &definitions,
+        );
+        assert_eq!(branch["properties"]["text"], json!({"type": "string"}));
+        assert_eq!(
+            branch["properties"]["$type"],
+            json!({"const": "org.example.member"})
+        );
+    }
 }

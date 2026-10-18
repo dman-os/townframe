@@ -1,6 +1,6 @@
 # ADR 016: Facet schema language, conventions, and Automerge codecs
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Related:** ADR 007 (doc and branch identity), ADR 014 (drawers), ADR 015 (document format and facet
 writes — §2 codec declarations, §4 claim canonicalization, §6 verification).
@@ -78,12 +78,20 @@ The canonical rules include:
   JSON-number input and normalize it;
 - inline bytes emitted only as `{"$bytes":"..."}`;
 - protocol-defined `$type`, `$bytes`, and `$link`, while application-defined `$` keys are
-  rejected in the normal canonical path;
-- `unknown` as the broad object-oriented escape hatch, with optional sidecar constraints
-  for typed maps;
+  rejected — recursively, at every depth, including inside a position no schema describes, and
+  at both the codec's edge and the Lexicon projection;
+- `unknown` as the broad object-oriented escape hatch: Lexicon has no map type, so a typed
+  dynamic map projects as `unknown` and the sidecar's `additionalProperties` narrows it. The
+  narrowing has a floor — the sidecar may say less than Lexicon, never admit a value the
+  canonical data model does not have — so the value type is projected for its alignment and
+  then dropped;
+- an undeclared fractional number is *accepted* at a position no schema describes and stored as
+  the `F64` it is. It is not canonical JSON and it is never emitted: a declared float position
+  writes the decimal string. Be liberal in what arrives, canonical in what leaves;
 - open vocabularies represented by `knownValues` and open unions preserving unknown
   tagged members;
-- explicit adjacent or internal union layouts rather than runtime shape guessing.
+- internal `$type` tagging as the only published union layout. Adjacent and external tagging are
+  representable in the sidecar and refused at both the declaration and the publish (§5).
 
 Rust-authored types do not serialize alternative spellings. Foreign base64, key mappings,
 renaming, or wrapping belong to an explicitly selected adapter outside ordinary facet
@@ -160,26 +168,23 @@ unions unrepresentable rather than merely forbidden.
 local name, so the same member carries the same tag at every site and the variant identifier never
 reaches the wire. The id is declared, and it is the only thing that makes a type usable as a member.
 
-**Adjacent tagging is the convention**: `{"$type": "<member id>", "value": <payload>}`. Chosen over
-the alternatives for five reasons, in order of weight:
+**Internal tagging is the convention**: `{"$type": "<member id>", ...payload fields}`. Off-the-shelf
+lexicon members already carry `$type` on the object, so that is the layout a published declaration
+aligns to. The discriminant is always the `$type` const on the inlined branch. There is no `value`
+key. Adjacent tagging is the explicit wrapper for a payload that is not an object, pinned as
+`{"$type": "<member id>", "value": <payload>}`. External tagging is recorded and flagged, and it is
+not lexicon-aligned. A published declaration refuses a union that is not internal.
 
-1. **It is the only shape that works for every payload.** The discriminant is a sibling key, so a
-   member's payload may be an object, an array or a scalar. Internal tagging requires the tag to be
-   a member of the payload object and therefore requires every payload to be an object; external
-   tagging needs no content key but has no fixed discriminant name.
-2. **It leaves the payload type untouched, so closed payloads work.** Internal tagging forces every
-   payload to be open, since the tag is one of its members.
-3. **It has no tag-key collision when a payload is itself a union**, whereas internal tagging does:
-   the inner discriminant would compete with the outer one. This is the reason this repository's
-   earlier prototype had to strip the tag before dispatching to the payload.
-4. **It converts to an internally tagged system by flattening** — `{"$type": t, "value": {…}}` to
-   `{"$type": t, …}` — which is what interop with AT Proto requires (§11).
-5. **`$type` outside the payload is what makes an open union round-trip**, since the fallback keeps
-   the whole member object including its discriminant.
+The earlier case for adjacent tagging — every payload shape, a closed payload left untouched, no
+tag-key collision, a flatten into AT Proto, and `$type` outside the payload — is why adjacent stays
+representable. It is not the default. Internal deserialize strips `$type` before the payload is
+read, so a closed payload's `deny_unknown_fields` still holds and an open payload's `Extra` does
+not capture the discriminant.
 
 **An open union has a fallback member; a closed union does not and says so.** The fallback holds the
 member object verbatim, so a round trip through a node that does not know the type is lossless, and
-a peer that does know it still gets its data. Under adjacent tagging the member object is an object,
+a peer that does know it still gets its data. The fallback schema is `$type` as a string whose
+`not.enum` excludes the known ids, with no const. Under internal tagging that object is the member,
 so the fallback payload is `UnknownMember`, a newtype over the same `IndexMap` under a name that
 says what it is and an `id(tag)` that reads the discriminant back. It is not a bare `Extra` because
 the *meaning* is the point: an overflow field and a member nobody declares are different things, and
@@ -210,9 +215,10 @@ both of them read, so there is no shape for the macro to check.
 
 ## 6. What serde can and cannot express, measured
 
-For a **closed** union, `serde`'s and `schemars`' derives do the whole job: `#[serde(tag = "$type",
-content = "value")]` with an explicit rename per variant, and the emitted `oneOf` has a `$type`
-const in every branch and no catch-all. Nothing is hand-written.
+For a **closed** union, serde still derives `Serialize` and `Deserialize`. The macro injects
+`#[serde(tag = "$type")]` when the author did not, and it emits `JsonSchema` itself: schemars' enum
+encoding is not the contract. The emitted `oneOf` inlines each payload's properties beside a `$type`
+const. Nothing is a `value` wrapper.
 
 For an **open** union, no serde attribute expresses the fallback, and this was measured rather than
 reasoned about:
@@ -332,7 +338,9 @@ decimal changes the value, and a reformatter may too. So the rule is:
 
 That is a convention on our vocabulary, not a language restriction, and it is now real: a float
 position spells the decimal string when its value's type is `facet::Float32` or `Float64` (§9), and
-a bare `f32`/`f64` field is the opt-out — the plain number, stated by the Rust type itself.
+a bare `f32`/`f64` field is the opt-out — the plain number, stated by the Rust type itself. A plain
+number is not canonical JSON, so a facet that carries one is a codec document rather than a
+publishable declaration: it assembles for the walk and is refused by the Lexicon gates (§10).
 
 ## 9. How a value is stored is the field's type
 
@@ -359,12 +367,14 @@ What replaces it is a bounded vocabulary of storage forms, declared at the posit
 | a string | a collaborative text | `x-automerge: "text"` |
 | a decimal string | a float | `x-automerge: "float"`, which `facet::Float32`/`Float64` emit |
 
-The timestamp row uses JSON Schema's standard `format: "date-time"`. Canonical bytes use the
-ATProto `$bytes` object rather than a plain base64 string; `facet::Bytes` supplies the matching
-Lexicon, serde, and sidecar storage declaration. Counter and Text merge behavior, and the float
-storage convention, use `x-automerge` because neither Lexicon nor ordinary JSON Schema describes
-those native semantics. A bare `f64` derives a plain number only through the explicit authoring
-opt-out described above.
+The timestamp row uses JSON Schema's standard `format: "date-time"` — the one standard keyword the
+vocabulary uses. Canonical bytes are the `{"$bytes": "…"}` object and nothing else: `contentEncoding`
+is an annotation, and the codec never sniffs a plain base64 string into bytes, because a reader that
+trusted the sniff would store a string the writer meant as a blob. `facet::Bytes` supplies the
+matching Lexicon, serde, and sidecar storage declaration. Counter and Text merge behavior, and the
+float storage convention, use `x-automerge` because neither Lexicon nor ordinary JSON Schema
+describes those native semantics. A bare `f64` derives a plain number only through the explicit
+authoring opt-out described above.
 
 A type declares the complete representation it owns. No registry guesses from a field name, and
 neither `chrono` nor an arbitrary bytes type gains native storage merely because its JSON happens to
@@ -566,12 +576,24 @@ together; an `id_prefix` that does not end in the separator; and a generic facet
 **At the plug level**, where the two artifacts meet. Two checks live here, and they are different
 kinds of check:
 
-- `check_shape`, per declaration, run from `FacetDecl::of::<T>()` where the type and its schema are
+- `check_shape`, per declaration, run from `Declaration::of::<T>()` where the type and its schema are
   both in hand — it needs the shape the *type* claims, and only the compiler can supply that. A
   disagreement is an error; a flag is a value.
 - `Universe::validate`, over the plug's declarations and its dependencies, which catches what no
   single declaration can see: two facets claiming one key tag, two declarations disagreeing about a
   name they both reach, and a reference to a type nothing in the plug or its dependencies declares.
+
+**The Lexicon gates are the third kind: a projection that either produces the published file or
+refuses the declaration.** A declaration meant for publishing — `Declaration::of` — is projected at
+authoring time, and a union that is not internally tagged is refused there on its declared shape.
+A codec document — `Declaration::assemble`, for a type carrying a deliberate plain number — skips
+that gate and is refused at the publish instead: `Bundle::lexicons()` projects every facet against
+the definitions the whole bundle carries, and refuses a facet that does not project or carries the
+`NonInternalTagging` flag. The Lexicon file is not stored on the declaration, because a reference a
+facet makes resolves against the plug and its dependencies and not against the declaration alone.
+Nothing outside this crate reads the files yet, so the projection guards itself: every file it emits
+is checked against the Lexicon grammar — allowed keys per type, local references that resolve, no
+`#main`, a closed union with members — before it is returned.
 
 **At the edge, per value**, in `Stored::check`, which is §9's "asserted rather than sniffed" given a
 place to happen. A manifest's declarations can be checked without a value, but a storage declaration
@@ -628,11 +650,17 @@ Canonical facet JSON is already compatible with the ATProto data model; interope
 second stringified representation at the boundary. A facet Lexicon supplies the broad representation,
 while its sidecar JSON Schema adds storage annotations and supported refinements. `$bytes`, `$type`,
 and `$link` retain their protocol meanings. Application-defined `$` keys are refused in the normal
-canonical path.
+canonical path, and recursively inside content no schema describes — refusing them is what leaves the
+spelling free to be relaxed later, and accepting them would spend it.
 
-Imported/internal ATProto object unions and our explicit adjacent wrapper layout can both be declared.
-Scalar or list union payloads need object wrappers when represented in Lexicon. Runtime code follows
-the declaration and discriminant rather than guessing a layout. Lexicon references use one optional
+Imported ATProto object unions and our internal layout are the same shape: the member object carries
+`$type`, and the branch inlines that member's properties. The discriminant is the `$type` const.
+There is no `value` key on an internal branch. Adjacent tagging (`$type` plus a pinned `value`) is
+an explicit wrapper, not the lexicon carrier, and a published declaration does not align it.
+`lexicon_projection` and `carrier_parts` must not assume an adjacent `$type`+`value` wrapper; that
+assumption in the outlined `schema_compat.rs` reads a key an internal branch does not have. Scalar
+or list union payloads need object wrappers when represented in Lexicon. Runtime code follows the
+declaration and discriminant rather than guessing a layout. Lexicon references use one optional
 `#definition` fragment; `main` is referenced without `#main`.
 
 Rust-authored facets emit only the canonical spelling. A foreign schema that needs renaming,
@@ -694,8 +722,9 @@ order (ADR 015 §2).
 2. ~~The member id, the codec keyword, and the shape of the published artifact.~~ Settled: `id` or
    `id_prefix` on the type, validation at the plug level, definitions hoisted into the manifest flat
    and resolved in a `Bundle`, a stock validator served the assembled document. And the codec is now
-   built rather than planned: the vocabulary is two standard keywords plus `x-automerge`
-   for the shapes JSON Schema cannot describe, a value is checked into a `Stored` before anything is
+   built rather than planned: the vocabulary is one standard keyword (`format`, for the timestamp)
+   plus `x-automerge` for the shapes JSON Schema cannot describe, a value is checked into a `Stored`
+   before anything is
    written, and a timestamp is stored in the milliseconds the format defines (§9). The float has
    since joined it, declared by its value's types (`facet::Float32`/`Float64`) with a bare `f64` the
    opt-out the Rust type states, and an earlier draft's *re-spelling layer* — a walk that converted
@@ -718,7 +747,12 @@ order (ADR 015 §2).
    vocabulary and how those tags are declared once rather than twice.
 6. Test vectors for the conformance work. Already in place: a codec round trip in both directions for
    every storage form, the schema-decides-not-the-field-name pair, the accept-and-reject pairs of §4
-   and §10, and a schema of ours validated by an independent implementation. The float's are there
+   and §10, and a schema of ours validated by an independent implementation. The Lexicon projection
+   is pinned too: the typed map that projects as `unknown` and whose value type is still checked,
+   carried local references and recursive definitions, the union whose member payloads are projected
+   even though the union only names them, the grammar check on every emitted file, and both gates —
+   a declaration refused at authoring and an assembled codec document refused at the publish. The
+   float's are there
    too: the decimal-string projection with the point kept and the width stated, the non-finite
    values by their names, the canonicalizing encoder that destroys the opt-out's numbers and cannot
    touch the convention's strings, and the refusals for a spelling that does not parse. Still

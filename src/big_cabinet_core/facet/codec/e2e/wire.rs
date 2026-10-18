@@ -18,7 +18,6 @@ struct TextMember {
 
 #[macros::facet]
 #[derive(Debug)]
-#[serde(tag = "kind", content = "payload")]
 enum StorageUnion {
     Bytes(BytesMember),
     Text(TextMember),
@@ -28,7 +27,6 @@ enum StorageUnion {
 
 #[macros::facet]
 #[derive(Debug)]
-#[serde(tag = "kind", content = "payload")]
 enum ReversedStorageUnion {
     Text(TextMember),
     Bytes(BytesMember),
@@ -37,8 +35,7 @@ enum ReversedStorageUnion {
 }
 
 #[macros::facet(closed)]
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", content = "payload")]
+#[derive(Debug, Serialize, Deserialize)]
 enum ClosedStorageUnion {
     #[serde(rename = "org.example.bytesMember")]
     Bytes(BytesMember),
@@ -67,11 +64,11 @@ fn tagged_union_codecs_follow_the_discriminant_not_branch_order() {
         let validator = jsonschema::validator_for(&document).unwrap();
         for (json, expected) in [
             (
-                json!({"kind": "org.example.bytesMember", "payload": {"data": {"$bytes": "AQID"}}}),
+                json!({"$type": "org.example.bytesMember", "data": {"$bytes": "AQID"}}),
                 "bytes",
             ),
             (
-                json!({"kind": "org.example.textMember", "payload": {"data": "hello"}}),
+                json!({"$type": "org.example.textMember", "data": "hello"}),
                 "text",
             ),
         ] {
@@ -84,8 +81,7 @@ fn tagged_union_codecs_follow_the_discriminant_not_branch_order() {
                 json
             );
             let (_, member) = doc.get(ROOT, "facet").unwrap().unwrap();
-            let (_, payload) = doc.get(member, "payload").unwrap().unwrap();
-            let (native, _) = doc.get(payload, "data").unwrap().unwrap();
+            let (native, _) = doc.get(member, "data").unwrap().unwrap();
             assert_eq!(shape(&native), expected);
         }
     }
@@ -101,8 +97,8 @@ fn tagged_union_unknown_members_and_optional_null_keep_their_json() {
         let document = serde_json::to_value(schema).unwrap();
         for json in [
             Value::Null,
-            json!({"kind": "org.example.future", "payload": {"data": "not base64", "nested": [null, 1]}, "extra": true}),
-            json!({"kind": "org.example.textMember", "payload": {"data": "hello"}}),
+            json!({"$type": "org.example.future", "data": "not base64", "nested": [null, 1], "extra": true}),
+            json!({"$type": "org.example.textMember", "data": "hello"}),
         ] {
             let mut doc = AutoCommit::new();
             let checked = Stored::check(&compiled(&document), json.clone())
@@ -124,21 +120,22 @@ fn malformed_tagged_union_members_do_not_use_another_members_codec() {
     ] {
         let document = serde_json::to_value(schema).unwrap();
         let validator = jsonschema::validator_for(&document).unwrap();
-        let malformed = json!({"kind": "org.example.bytesMember", "payload": {"data": {"$bytes": "not base64"}}});
+        let malformed =
+            json!({"$type": "org.example.bytesMember", "data": {"$bytes": "not base64"}});
         // contentEncoding is an annotation to the validator; the codec must still refuse this.
         assert!(validator.is_valid(&malformed));
         assert!(Stored::check(&compiled(&document), malformed).is_err());
         for malformed in [
-            json!({"kind": "org.example.bytesMember", "payload": {}}),
-            json!({"kind": "org.example.textMember", "payload": 1}),
-            json!({"kind": 1, "payload": {"data": "hello"}}),
-            json!({"payload": {"data": "hello"}}),
+            json!({"$type": "org.example.bytesMember", "data": {}}),
+            json!({"$type": "org.example.textMember", "data": 1}),
+            json!({"$type": 1, "data": "hello"}),
+            json!({"data": "hello"}),
         ] {
             assert!(!validator.is_valid(&malformed), "{malformed}");
         }
         for malformed in [
-            json!({"kind": 1, "payload": {"data": "hello"}}),
-            json!({"payload": {"data": "hello"}}),
+            json!({"$type": 1, "data": "hello"}),
+            json!({"data": "hello"}),
         ] {
             assert!(Stored::check(&compiled(&document), malformed).is_err());
         }
@@ -164,6 +161,89 @@ fn canonical_bytes_use_the_protocol_object_and_reject_plain_base64() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn schema_less_canonical_bytes_are_stored_as_bytes() {
+    let document = json!({"type": "object", "additionalProperties": true});
+    let json = json!({"blob": {"$bytes": "AQID"}});
+    let mut doc = AutoCommit::new();
+    let checked = Stored::check(&compiled(&document), json.clone()).unwrap();
+    reconcile_json(&mut doc, &ROOT, facet(), &document, checked.into_value()).unwrap();
+    let (_, map) = doc.get(ROOT, "facet").unwrap().unwrap();
+    let (native, _) = doc.get(map, "blob").unwrap().unwrap();
+    assert_eq!(shape(&native), "bytes");
+    assert_eq!(
+        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
+        json
+    );
+}
+
+/// An undeclared position is opaque to the storage walk but not to the data model: the rules that
+/// keep a document readable without a schema — reserved `$` keys, the integer range, well-formed
+/// `$bytes` — reach inside it recursively. The one deliberate acceptance is a fractional number,
+/// which is stored as the `F64` it is rather than refused: a field nobody described is not stricter
+/// than a field somebody did.
+#[test]
+fn undeclared_positions_follow_the_canonical_rules_recursively() {
+    let document = json!({"type": "object", "additionalProperties": true});
+    let compiled = compiled(&document);
+    let refused = |value: Value, expected: &str| {
+        let error = Stored::check(&compiled, value.clone())
+            .expect_err("a canonical rule reaches undeclared content");
+        assert!(error.to_string().contains(expected), "{error}");
+    };
+    refused(
+        json!({"outer": {"inner": {"$application": true}}}),
+        "$application",
+    );
+    refused(json!({"list": [{"$bytes": "not base64!"}]}), "$bytes");
+    refused(json!({"deep": [1, 9_007_199_254_740_993u64]}), "integer");
+    refused(json!({"$private": 1}), "$private");
+    for accepted in [
+        json!({"fraction": 1.5}),
+        json!({"nested": [{"deeper": -0.5}, "text", null, true]}),
+        json!({"blob": {"$bytes": "AQID"}}),
+        json!({"integer": 9_007_199_254_740_991i64}),
+    ] {
+        Stored::check(&compiled, accepted.clone())
+            .unwrap_or_else(|error| panic!("{accepted} is canonical: {error}"));
+    }
+}
+
+/// A union branch is published whole: the `$type` const and `required` are added to the payload's
+/// own schema, so a constraint the payload states — here the object it has to be — survives into
+/// the branch rather than being replaced by it. The branch itself is built by
+/// [`crate::facet::wire`]'s own tests; this is the codec honouring what it built.
+#[test]
+fn a_union_branch_keeps_its_payloads_own_constraints() {
+    let document = json!({
+        "oneOf": [{
+            "type": "object",
+            "properties": {
+                "$type": {"const": "org.example.member"},
+                "text": {"type": "string"}
+            },
+            "required": ["$type"],
+            "minProperties": 2
+        }]
+    });
+    let compiled = CompiledSchema::compile(document.clone()).unwrap();
+    let bare = json!({"$type": "org.example.member"});
+    // The bare discriminant is the value a branch that dropped `minProperties` would accept: the
+    // same document without the constraint takes it, and with it, it is refused.
+    let unconstrained = {
+        let mut document = document.clone();
+        document["oneOf"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("minProperties");
+        CompiledSchema::compile(document).unwrap()
+    };
+    Stored::check(&unconstrained, bare.clone()).expect("without the constraint it is accepted");
+    Stored::check(&compiled, bare).expect_err("minProperties did not survive into the branch");
+    let full = json!({"$type": "org.example.member", "text": "hello"});
+    Stored::check(&compiled, full.clone()).unwrap_or_else(|error| panic!("{full}: {error}"));
 }
 
 #[test]

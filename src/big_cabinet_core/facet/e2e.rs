@@ -24,7 +24,6 @@ struct Photo {
 /// The macro writes all three impls, so the derive list holds nothing it owns.
 #[macros::facet]
 #[derive(Debug, Clone, PartialEq)]
-#[serde(tag = "$type", content = "value")]
 enum OpenAttachment {
     Note(Note),
     Photo(Photo),
@@ -33,8 +32,7 @@ enum OpenAttachment {
 }
 
 #[macros::facet(closed)]
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "$type", content = "value")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum ClosedAttachment {
     #[serde(rename = "org.example.daybook.note")]
     Note(Note),
@@ -78,10 +76,7 @@ fn the_macro_reports_what_it_saw() {
         OpenAttachment::SHAPE,
         Shape::Union {
             openness: Openness::Open,
-            tagging: Tagging::Adjacently {
-                tag: "$type",
-                content: "value"
-            },
+            tagging: Tagging::Internally { tag: "$type" },
         }
     );
     assert_eq!(
@@ -94,10 +89,7 @@ fn the_macro_reports_what_it_saw() {
         ClosedAttachment::SHAPE,
         Shape::Union {
             openness: Openness::Closed,
-            tagging: Tagging::Adjacently {
-                tag: "$type",
-                content: "value"
-            },
+            tagging: Tagging::Internally { tag: "$type" },
         }
     );
 }
@@ -118,7 +110,7 @@ fn a_declared_member_round_trips() {
         content: "hi".into(),
         extra: Extra::new(),
     });
-    let wire = json!({"$type": "org.example.daybook.note", "value": {"content": "hi"}});
+    let wire = json!({"$type": "org.example.daybook.note", "content": "hi"});
     assert_eq!(serde_json::to_value(&member).unwrap(), wire);
     let decoded = serde_json::from_value::<OpenAttachment>(wire).unwrap();
     assert_eq!(decoded, member);
@@ -130,7 +122,7 @@ fn a_declared_member_round_trips() {
 fn an_undeclared_member_round_trips_unchanged() {
     let wire = json!({
         "$type": "org.example.future",
-        "value": {"nested": [1, {"deep": null}]},
+        "nested": [1, {"deep": null}],
         "extra": "kept"
     });
     let decoded = serde_json::from_value::<OpenAttachment>(wire.clone()).unwrap();
@@ -146,7 +138,7 @@ fn an_undeclared_member_round_trips_unchanged() {
 fn a_declared_member_with_a_bad_payload_is_an_error() {
     let err = serde_json::from_value::<OpenAttachment>(json!({
         "$type": "org.example.daybook.note",
-        "value": 7
+        "content": 7
     }))
     .unwrap_err();
     assert!(err.to_string().contains("invalid type"), "{err}");
@@ -185,17 +177,16 @@ fn an_open_union_schema_accepts_each_discriminant_exactly_once() {
     let schema = serde_json::to_value(schema_for!(OpenAttachment)).unwrap();
     let validator = jsonschema::validator_for(&schema).unwrap();
     for member in [
-        json!({"$type": Note::ID, "value": {"content": "hello"}}),
-        json!({"$type": Photo::ID, "value": {"url": "https://example.com"}}),
-        json!({"$type": "org.example.future", "value": {"nested": [1, null]}, "extra": true}),
+        json!({"$type": Note::ID, "content": "hello"}),
+        json!({"$type": Photo::ID, "url": "https://example.com"}),
+        json!({"$type": "org.example.future", "nested": [1, null], "extra": true}),
     ] {
         assert!(validator.is_valid(&member), "{member}");
     }
     for malformed in [
-        json!({"$type": Photo::ID, "value": {"content": "not a photo"}}),
-        json!({"$type": Note::ID, "value": 7}),
-        json!({"$type": "org.example.future"}),
-        json!({"$type": 7, "value": {}}),
+        json!({"$type": Photo::ID, "content": "not a photo"}),
+        json!({"$type": Note::ID, "content": 7}),
+        json!({"$type": 7}),
         json!(7),
     ] {
         assert!(!validator.is_valid(&malformed), "{malformed}");
@@ -486,5 +477,106 @@ fn a_spelling_is_derived_or_stated_and_never_rewritten() {
     assert_eq!(
         serde_json::from_value::<Derived>(json!("org.example.custom")).unwrap(),
         Derived::Explicit
+    );
+}
+
+/// A facet that carries a deliberate plain number: the codec reads it fine, so it assembles, and
+/// only the publish refuses it.
+#[macros::facet(id = "org.example.loose")]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct Loose {
+    #[schemars(extend("x-automerge" = "number"))]
+    plain: f64,
+    #[serde(flatten)]
+    extra: Extra,
+}
+
+/// An adjacent union is representable in the sidecar and is not a Lexicon union, so it assembles
+/// and is refused at both gates rather than published in a layout a peer cannot read.
+#[macros::facet(
+    closed,
+    tagging = "adjacent",
+    id = "org.example.daybook.wrappedAttachment"
+)]
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "$type", content = "value")]
+enum WrappedAttachment {
+    #[serde(rename = "org.example.daybook.note")]
+    Note(Note),
+    #[serde(rename = "org.example.daybook.photo")]
+    Photo(Photo),
+}
+
+/// The Lexicon is projected from what the whole bundle carries, not stored on the declaration: a
+/// reference a facet makes resolves against the plug and its dependencies, the same way
+/// [`Bundle::document`] resolves it.
+#[test]
+fn an_aligned_declaration_publishes_a_lexicon_file() {
+    let universe = Universe::collect(vec![Declaration::of::<Nested>().unwrap()]);
+    let bundle = Bundle::new(&universe, Vec::new());
+    let published = bundle.lexicons().unwrap();
+    assert_eq!(published.len(), 1);
+    let lexicon = &published[0];
+    assert_eq!(lexicon.id, "org.example.daybook.nested");
+    assert_eq!(lexicon.file["lexicon"], json!(1));
+    assert_eq!(lexicon.file["id"], json!("org.example.daybook.nested"));
+    // The member it reaches travels beside it and is referenced locally, and the open object's
+    // unnamed members are the `unknown` the sidecar states the rest of.
+    assert_eq!(
+        lexicon.file["defs"]["main"]["properties"]["inner"],
+        json!({"type": "ref", "ref": "#Photo"})
+    );
+    assert_eq!(lexicon.file["defs"]["Photo"]["type"], json!("object"));
+    // An open object is the same Lexicon object as a closed one; openness is the sidecar's
+    // `additionalProperties`, which Lexicon does not state and a Lexicon-only peer reads as open.
+    assert_eq!(lexicon.file["defs"]["main"]["type"], json!("object"));
+}
+
+/// The publish is the gate an assembled declaration never passed: a plain number is a legitimate
+/// codec position and not canonical JSON, so it is refused here rather than handed to a peer.
+#[test]
+fn an_assembled_codec_document_is_refused_at_the_publish() {
+    let universe = Universe::collect(vec![Declaration::assemble::<Loose>().unwrap()]);
+    let err = Bundle::new(&universe, Vec::new()).lexicons().unwrap_err();
+    assert!(
+        matches!(&err, LexiconError::NotAligned { id, reason }
+            if id == "org.example.loose" && reason.contains("plain `number`")),
+        "{err}"
+    );
+    // The same facet assembles for the codec, which is the point of the split.
+    assert!(Declaration::assemble::<Loose>().is_ok());
+    // And a declaration meant for publishing is refused at authoring time, not at the publish.
+    let err = Declaration::of::<Loose>().unwrap_err();
+    assert!(
+        matches!(&err, ShapeError::NotLexiconAligned { reason, .. } if reason.contains("plain `number`")),
+        "{err}"
+    );
+}
+
+/// Adjacent tagging departs from the internally tagged member a Lexicon union is, so the shape
+/// check accepts it — flagged — and both gates refuse it: `Declaration::of` on the union's own
+/// layout, and `Bundle::lexicons` on the flag the assembled declaration carries.
+#[test]
+fn a_non_internal_union_is_refused_by_both_gates() {
+    let err = Declaration::of::<WrappedAttachment>().unwrap_err();
+    assert!(
+        matches!(&err, ShapeError::NotLexiconAligned { reason, .. }
+            if reason.contains("internally tagged")),
+        "{err}"
+    );
+
+    let declaration = Declaration::assemble::<WrappedAttachment>().unwrap();
+    assert!(
+        declaration
+            .facet
+            .flags
+            .contains(&ShapeFlag::NonInternalTagging)
+    );
+    let universe = Universe::collect(vec![declaration]);
+    let err = Bundle::new(&universe, Vec::new()).lexicons().unwrap_err();
+    assert!(
+        matches!(&err, LexiconError::NotAligned { reason, .. }
+            if reason.contains("internally tagged")),
+        "{err}"
     );
 }

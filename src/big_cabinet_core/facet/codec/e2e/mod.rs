@@ -41,7 +41,7 @@ struct Stored0 {
 
 /// The document a value of [`Stored0`] is written under, assembled the way a peer would take it.
 fn document() -> Value {
-    let universe = Universe::collect(vec![Declaration::of::<Stored0>().unwrap()]);
+    let universe = Universe::collect(vec![Declaration::assemble::<Stored0>().unwrap()]);
     let bundle = Bundle::new(&universe, Vec::new());
     serde_json::to_value(bundle.document("Stored0").unwrap()).unwrap()
 }

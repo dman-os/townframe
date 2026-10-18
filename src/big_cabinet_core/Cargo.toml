@@ -14,67 +14,23 @@ crate-type = ["rlib"]
 [features]
 default = ["manifest"]
 schemars = ["dep:schemars"]
-manifest = ["dep:garde", "dep:semver", "schemars"]
+manifest = ["schemars"]
 
 [dependencies]
-#
-# internal
-api_utils_rs = { workspace = true, default-features = false }
-utils_rs = { workspace = true, default-features = false }
-am_utils_rs = { workspace = true }
-
-#
-# encoding
 serde.workspace = true
 serde_json.workspace = true
-serde_with.workspace = true
 data-encoding.workspace = true
-# An instant is stored as seconds and written as RFC 3339, and jiff is what a schema in this tree
+# An instant is stored as milliseconds and written as RFC 3339, and jiff is what a schema in this tree
 # states one with.
 jiff = { version = "0.2", features = ["serde"] }
 # `facet::Extra` keeps the field order a peer sent; `serde_json::Map` is a `BTreeMap` here.
 indexmap = { version = "2", features = ["serde"] }
-schemars = { version = "1.2", features = [
-    "uuid1",
-    "semver1",
-    "url2",
-    "jiff02",
-    "indexmap2",
-], optional = true }
-
-#
-# error
+schemars = { version = "1.2", features = ["jiff02", "indexmap2"], optional = true }
 thiserror.workspace = true
 jsonschema = { version = "0.42.0", default-features = false }
 displaydoc.workspace = true
-
-#
-# ds
-garde = { workspace = true, optional = true }
-semver = { workspace = true, optional = true }
-url.workspace = true
-
-#
-# automerge
 autosurgeon = { workspace = true, features = ["uuid"] }
 automerge = { workspace = true }
-
-#
-# ffi
-uniffi = { workspace = true, optional = true }
-uuid.workspace = true
-
-#
-# macros
-pastey.workspace = true
-structstruck.workspace = true
-
-#
-# os
-addr.workspace = true
-blake3.workspace = true
-camino.workspace = true
-jsonpath-rust = "1.0.4"
 
 [dev-dependencies]
 # The declaration macro the facet tests exercise.

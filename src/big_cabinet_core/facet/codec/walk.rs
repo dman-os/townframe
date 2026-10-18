@@ -20,6 +20,70 @@ fn protocol_key(key: &str) -> bool {
     matches!(key, "$type" | "$bytes" | "$link")
 }
 
+/// What the canonical data model requires of content no schema describes, at every depth.
+///
+/// An undeclared position is opaque to the *storage* walk — there is no declaration to follow, so
+/// what a peer put there is kept as it is — but it is not opaque to the data model. The rules that
+/// keep a document readable without a schema reach inside it too: the reserved `$` keys, the integer
+/// range a JSON consumer can hold, and a `$bytes` object that has to hold bytes rather than claim
+/// to.
+///
+/// What is deliberately not refused here is a fractional number. Accepting one is the liberal half
+/// of the convention: a float arriving from a foreign author is stored as the `F64` it is, and only
+/// a position *declared* a float emits the decimal string the convention spells. Refusing an
+/// undeclared one would make a field nobody described stricter than a field somebody did.
+fn canonical(value: &Value, path: &Path<'_>) -> Result<(), CodecError> {
+    match value {
+        Value::Number(number) => {
+            let outside = number
+                .as_i64()
+                .is_some_and(|integer| !js_safe_integer(i128::from(integer)))
+                || number
+                    .as_u64()
+                    .is_some_and(|integer| integer > JS_SAFE_INTEGER_MAX as u64);
+            if outside {
+                return Err(at(
+                    path,
+                    CodecError::NotAJsonInteger {
+                        stated: number.to_string(),
+                    },
+                ));
+            }
+            Ok(())
+        }
+        Value::Object(members) => {
+            // The canonical bytes object is the one `$` shape an undeclared position may hold, and
+            // holding it is what makes it that rather than an application's use of a reserved key.
+            if members.len() == 1 && members.contains_key("$bytes") {
+                if bytes_value(value).is_none() {
+                    return Err(at(
+                        path,
+                        CodecError::NotBase64 {
+                            stated: members["$bytes"].clone(),
+                        },
+                    ));
+                }
+                return Ok(());
+            }
+            for (key, member) in members {
+                if key.starts_with('$') && !protocol_key(key) {
+                    return Err(at(
+                        &Path::key(path, key),
+                        CodecError::ReservedKey { key: key.clone() },
+                    ));
+                }
+                canonical(member, &Path::key(path, key))?;
+            }
+            Ok(())
+        }
+        Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .try_for_each(|(index, item)| canonical(item, &Path::index(path, index))),
+        _ => Ok(()),
+    }
+}
+
 /// A value checked against the declarations — and, when it was checked against a transaction's
 /// base view, against the native storage — of the document it is going into.
 ///
@@ -507,23 +571,10 @@ impl<'a> Position<'a> {
             )
             .map_err(|err| at(path, err))?
         else {
-            if let Value::Object(members) = value {
-                if members.len() == 1
-                    && members.contains_key("$bytes")
-                    && bytes_value(value).is_some()
-                {
-                    return Ok(());
-                }
-                if let Some(key) = members.keys().find(|key| key.starts_with('$')) {
-                    return Err(at(
-                        &Path::key(path, key),
-                        CodecError::ReservedKey {
-                            key: key.to_owned(),
-                        },
-                    ));
-                }
-            }
-            return Ok(());
+            // Nothing declares this position, which is not the same as nothing checking it: an
+            // unknown member a peer wrote is still a value in this document, and the data model
+            // reaches every depth of it.
+            return canonical(value, path);
         };
         if type_mentions(schema, "integer")
             && let Value::Number(number) = value
@@ -624,6 +675,11 @@ impl<'a> Position<'a> {
             if !(value.is_null() && claimed) {
                 return codec.write(value, &mut reconciler);
             }
+        }
+        if schema.is_none()
+            && let Some(stated) = bytes_value(value)
+        {
+            return reconciler.bytes(stated);
         }
         match value {
             Value::Null => reconciler.none(),

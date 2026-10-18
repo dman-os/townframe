@@ -17,12 +17,14 @@ pub enum Openness {
 
 /// Where a union's discriminant sits relative to its payload.
 ///
-/// There is no `Internally`, deliberately: it puts the discriminant inside the payload, which
-/// requires every payload to be an object and collides with a payload that is itself a tagged
-/// union. It is a shape we convert *to*, never one we author.
+/// Internal tagging is the authored default: the member object already carries `$type`, which is
+/// what a Lexicon union is. Adjacent tagging is the explicit wrapper around a payload that is not
+/// itself that object. The tag key is `$type` either way; adjacent content is `value`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tagging {
-    /// `{"<tag>": "<member id>", "<content>": <payload>}`
+    /// `{"$type": "<member id>", ...payload fields}`
+    Internally { tag: &'static str },
+    /// `{"$type": "<member id>", "value": <payload>}`
     Adjacently {
         tag: &'static str,
         content: &'static str,
@@ -62,8 +64,8 @@ pub enum ShapeFlag {
     ClosedObject,
     /// an unrecognized member key is an error at every reader, including a newer one
     ClosedUnion,
-    /// the union departs from adjacent tagging, so a consumer has to be told how to read it
-    NonAdjacentTagging,
+    /// the union departs from internal `$type` tagging, so a consumer has to be told how to read it
+    NonInternalTagging,
 }
 
 /// The declaration and the schema do not say the same thing.
@@ -84,8 +86,10 @@ pub enum ShapeError {
     },
     /// {name}: the schema is neither a `oneOf` nor an `anyOf`, so it is not a union
     NotAUnion { name: String },
-    /// {name}: branch {index} of the union is not an adjacent tag and payload pair
-    NotAdjacent { name: String, index: usize },
+    /// {name}: branch {index} does not match the declared tagging
+    NotTagged { name: String, index: usize },
+    /// {name}: the schema is not lexicon-aligned: {reason}
+    NotLexiconAligned { name: String, reason: String },
     /// {name}: declared {declared:?} but {fallbacks} branch(es) accept any discriminant
     FallbackDisagrees {
         name: String,
@@ -220,25 +224,47 @@ fn check_union(
     // reader has never heard of, so its presence is how the schema states openness.
     let mut fallbacks = 0usize;
     for (index, branch) in branches.iter().enumerate() {
+        let not_tagged = || ShapeError::NotTagged {
+            name: name.into(),
+            index,
+        };
+        let required = branch.get("required").and_then(serde_json::Value::as_array);
+        let declares =
+            |key: &str| required.is_some_and(|names| names.iter().any(|name| name == key));
         match tagging {
-            Tagging::Adjacently { tag, content } => {
-                let not_adjacent = || ShapeError::NotAdjacent {
-                    name: name.into(),
-                    index,
-                };
+            Tagging::Internally { tag } => {
                 let properties = branch
                     .get("properties")
                     .and_then(serde_json::Value::as_object)
-                    .ok_or_else(not_adjacent)?;
-                let required = branch.get("required").and_then(serde_json::Value::as_array);
-                let declares =
-                    |key: &str| required.is_some_and(|names| names.iter().any(|name| name == key));
+                    .ok_or_else(not_tagged)?;
+                let Some(discriminant) = properties.get(tag) else {
+                    return Err(not_tagged());
+                };
+                if !declares(tag) {
+                    return Err(not_tagged());
+                }
+                // The payload is inlined. A branch with no `$type` const is the fallback.
+                if discriminant.get("const").is_none() {
+                    fallbacks += 1;
+                }
+            }
+            Tagging::Adjacently { tag, content } => {
+                let properties = branch
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                    .ok_or_else(not_tagged)?;
                 if !properties.contains_key(tag)
                     || !properties.contains_key(content)
                     || !declares(tag)
                     || !declares(content)
                 {
-                    return Err(not_adjacent());
+                    return Err(not_tagged());
+                }
+                if properties
+                    .get(tag)
+                    .is_none_or(|discriminant| discriminant.get("const").is_none())
+                {
+                    fallbacks += 1;
                 }
             }
             Tagging::Externally => {
@@ -252,25 +278,9 @@ fn check_union(
                     continue;
                 };
                 if properties.len() != 1 {
-                    return Err(ShapeError::NotAdjacent {
-                        name: name.into(),
-                        index,
-                    });
+                    return Err(not_tagged());
                 }
             }
-        }
-        let discriminants = branch
-            .get("properties")
-            .and_then(serde_json::Value::as_object)
-            .map(|properties| {
-                properties
-                    .values()
-                    .filter(|schema| schema.get("const").is_some())
-                    .count()
-            })
-            .unwrap_or(0);
-        if discriminants == 0 {
-            fallbacks += 1;
         }
     }
 
@@ -286,8 +296,8 @@ fn check_union(
     if !declared_open {
         flags.push(ShapeFlag::ClosedUnion);
     }
-    if matches!(tagging, Tagging::Externally) {
-        flags.push(ShapeFlag::NonAdjacentTagging);
+    if !matches!(tagging, Tagging::Internally { .. }) {
+        flags.push(ShapeFlag::NonInternalTagging);
     }
     Ok(flags)
 }

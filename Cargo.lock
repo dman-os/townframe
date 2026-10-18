@@ -1108,19 +1108,12 @@ dependencies = [
 name = "big_cabinet_core"
 version = "0.1.0"
 dependencies = [
- "addr",
- "am_utils_rs",
- "api_utils_rs",
  "automerge",
  "autosurgeon",
- "blake3",
- "camino",
  "data-encoding",
  "displaydoc",
- "garde",
  "indexmap 2.14.0",
  "jiff",
- "jsonpath-rust",
  "jsonschema",
  "macros",
  "panproto-lens",
@@ -1128,20 +1121,12 @@ dependencies = [
  "panproto-protocols",
  "panproto-schema",
  "panproto-vcs",
- "pastey 0.1.1",
  "schemars 1.2.2",
- "semver",
  "serde",
  "serde_json",
- "serde_with",
- "structstruck",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "uniffi",
- "url",
- "utils_rs",
- "uuid",
 ]
 
 [[package]]
