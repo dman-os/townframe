@@ -13,11 +13,12 @@ crate-type = ["rlib"]
 
 [features]
 default = ["manifest"]
-schemars = ["dep:schemars"]
-manifest = ["schemars"]
+schemars = ["dep:schemars", "dep:macros"]
+manifest = []
 
 [dependencies]
 big_sync_core = { workspace = true, default-features = false }
+utils_rs = { workspace = true, features = ["hash"] }
 serde.workspace = true
 serde_json.workspace = true
 data-encoding.workspace = true
@@ -38,12 +39,11 @@ automerge = { workspace = true }
 uuid.workspace = true
 blake3.workspace = true
 ed25519-dalek.workspace = true
+macros = { path = "../macros", optional = true }
 
 [dev-dependencies]
 # Independent CBOR fixture decoding for the normative claim-wire tests.
 ciborium = "0.2.2"
-# The declaration macro the facet tests exercise.
-macros = { path = "../macros" }
 panproto-lens = "=0.74.4"
 panproto-mig = "=0.74.4"
 panproto-protocols = "=0.74.4"

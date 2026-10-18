@@ -170,16 +170,23 @@ reaches the wire. The id is declared, and it is the only thing that makes a type
 
 **Internal tagging is the convention**: `{"$type": "<member id>", ...payload fields}`. Off-the-shelf
 lexicon members already carry `$type` on the object, so that is the layout a published declaration
-aligns to. The discriminant is always the `$type` const on the inlined branch. There is no `value`
-key. Adjacent tagging is the explicit wrapper for a payload that is not an object, pinned as
-`{"$type": "<member id>", "value": <payload>}`. External tagging is recorded and flagged, and it is
-not lexicon-aligned. A published declaration refuses a union that is not internal.
+aligns to. The discriminant is always the `$type` const on the inlined branch.
 
-The earlier case for adjacent tagging — every payload shape, a closed payload left untouched, no
-tag-key collision, a flatten into AT Proto, and `$type` outside the payload — is why adjacent stays
-representable. It is not the default. Internal deserialize strips `$type` before the payload is
-read, so a closed payload's `deny_unknown_fields` still holds and an open payload's `Extra` does
-not capture the discriminant.
+A payload that is not an object cannot carry a discriminant, so it publishes as a **declared wrapper
+type**: an ordinary named member whose single property is `value`, internally tagged like any other
+member. `{"$type": "<member id>", "value": <payload>}` is that wrapper, not a second union layout and
+not a carrier a reader unwraps. The wrapper's id is the member's id; the payload keeps its own. This
+is what makes a Rust enum with a non-object variant publishable, and it is why the union itself stays
+internal — the macro rejects a union that is not, and the panic in the internal-branch builder is an
+authoring mistake rather than a missing feature.
+
+External tagging is recorded and flagged, and it is not lexicon-aligned. A published declaration
+refuses a union that is not internal.
+
+The earlier case for the wrapper — every payload shape, a closed payload left untouched, no tag-key
+collision, and `$type` outside the payload — is why it stays. It is not a separate convention.
+Internal deserialize strips `$type` before the payload is read, so a closed payload's
+`deny_unknown_fields` still holds and an open payload's `Extra` does not capture the discriminant.
 
 **An open union has a fallback member; a closed union does not and says so.** The fallback holds the
 member object verbatim, so a round trip through a node that does not know the type is lossless, and
@@ -655,13 +662,15 @@ spelling free to be relaxed later, and accepting them would spend it.
 
 Imported ATProto object unions and our internal layout are the same shape: the member object carries
 `$type`, and the branch inlines that member's properties. The discriminant is the `$type` const.
-There is no `value` key on an internal branch. Adjacent tagging (`$type` plus a pinned `value`) is
-an explicit wrapper, not the lexicon carrier, and a published declaration does not align it.
-`lexicon_projection` and `carrier_parts` must not assume an adjacent `$type`+`value` wrapper; that
-assumption in the outlined `schema_compat.rs` reads a key an internal branch does not have. Scalar
-or list union payloads need object wrappers when represented in Lexicon. Runtime code follows the
-declaration and discriminant rather than guessing a layout. Lexicon references use one optional
-`#definition` fragment; `main` is referenced without `#main`.
+There is no separate carrier and no `value` key on an internal branch. A non-object member publishes
+as a declared wrapper type whose one property is `value`, and that wrapper is itself an internal
+branch — so a reader never unwraps a carrier, it reads a member. A published declaration does not
+align an externally tagged union. `lexicon_projection` reads the discriminant from the branch and the
+payload as the branch minus `$type`; it must not assume an adjacent `$type`+`value` wrapper, which is
+a key an internal branch does not have. Scalar or list union payloads need the wrapper when
+represented in Lexicon. Runtime code follows the declaration and discriminant rather than guessing a
+layout. Lexicon references use one optional `#definition` fragment; `main` is referenced without
+`#main`.
 
 Rust-authored facets emit only the canonical spelling. A foreign schema that needs renaming,
 wrapping, plain base64, or incompatible `$` keys uses an explicit embedder-selected adapter. Ordinary

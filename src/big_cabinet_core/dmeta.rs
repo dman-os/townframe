@@ -1,21 +1,37 @@
 //! Document metadata and signed facet-claim primitives.
 //!
-//! This module deliberately does not know about Automerge or authority storage.  A repository
-//! reconstructs an ordinary claim from its introducing change; this module owns the stable bytes
-//! that are signed, the compact metadata carried by dmeta, and the distinction between missing
-//! evidence and proven forgery.
+//! This module deliberately does not know about Automerge or authority storage. A repository
+//! reconstructs an ordinary claim from the state at the change that introduced its signature; this
+//! module owns the stable bytes that are signed, the compact metadata carried by dmeta, and the
+//! distinction between missing evidence and proven forgery.
+//!
+//! Dmeta is an ordinary facet — `org.example.daybook.dmeta/main` — and the document repository is
+//! the only writer of it. Its shape is the one in `docs/wiki/docs.md`: aliases live in one forward
+//! index, identities are multibase text, and branch relationships are not duplicated here. A branch
+//! is a weak link recorded by the branch facets (ADR 007); dmeta signs those facets, it does not
+//! restate them.
+//!
+//! A claim authenticates the value in its **native storage form**, not its canonical JSON. The
+//! JSON spelling of a stored value is a function of the installed declaration — a float leaves as a
+//! decimal string, a counter as a whole number, bytes as `{ "$bytes": "…" }` — so a signature over
+//! JSON could not be checked on a node that has not installed the facet's schema. The native value
+//! is self-describing, so verification needs no schema at all: an absent schema leaves the facet
+//! uninterpreted, never unverifiable. [`encode_native`] is that encoding. The claim type only ever
+//! holds the resulting CID; the repository is what reads the value back out of the transaction and
+//! passes those bytes here.
 
+mod native;
 mod verification;
 
-use blake3::Hasher;
 use jiff::Timestamp;
+pub use native::{FiniteF64, NativeValue, encode_native};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use uuid::Uuid;
 pub use verification::{
-    Evidence, SignedFacetClaim, VerificationState, document_verification, verification_state,
+    Evidence, SignatureChecks, SignedFacetClaim, VerificationState, document_verification,
+    fold_checks,
 };
 
 use crate::reference::FacetKey;
@@ -30,103 +46,114 @@ const CID_LENGTH: usize = 36;
 pub use big_sync_core::ObjKey as DocumentId;
 
 /// Identity allocated before initial content is persisted and publication begins.
+///
+/// The document's own id is not a field of [`Dmeta`]: the enclosing document already knows it, and
+/// a field inside the facet would be copied verbatim onto a branch, where it would name the origin
+/// rather than the branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentIdentity {
     pub id: DocumentId,
     pub created_at: Timestamp,
 }
 
-/// A weak branch relationship.  Neither endpoint has to be available to interpret this fact.
+/// An actor as dmeta records it: a public key, the node-signed attribution that binds the node to
+/// that key, and when the binding was made.
+///
+/// The delegation is opaque here. Its shape is the capability token, which belongs to the authority
+/// repository, and dmeta records authorship rather than the actor's current grants — so this module
+/// carries the bytes and never interprets them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BranchOrigin {
-    pub document_id: DocumentId,
-    #[serde(default)]
-    pub heads: Vec<Vec<u8>>,
-}
-
-/// A branch relationship recorded on the source document.  Branches remain ordinary documents.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreatedBranch {
-    pub document_id: DocumentId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ActorMetadata {
     pub actor_url: String,
-    #[serde(default)]
-    pub delegation: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Bytes>,
     pub created_at: Timestamp,
 }
 
-/// The compact provenance facet.  Maps are ordered so snapshots and derived evidence are stable.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One alias assigned to a facet slot, and when it was assigned.
+///
+/// `key` is the whole facet key, tag and instance together. Concurrent creators of the same slot
+/// each record an alias, and the record is the durable evidence of that concurrency after Automerge
+/// no longer exposes the original conflict. The alias selects nothing: a facet's content is the
+/// merged value at its key, not a value chosen by UUID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct FacetAlias {
+    pub key: FacetKey,
+    pub created_at: Timestamp,
+}
+
+/// The compact provenance facet. Maps are ordered so snapshots and derived evidence are stable.
+///
+/// There is one index of aliases, `facet_uuids`, keyed by the alias. A per-facet reverse list would
+/// be a second copy of the same facts, and the two copies are exactly what a merge can pull apart.
+/// The chosen alias for a signature — the lexicographically smallest one visible in the writing
+/// transaction — is derived from this index by the repository, which holds the reverse lookup.
+#[cfg_attr(feature = "schemars", macros::facet(id = "org.example.daybook.dmeta"))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Dmeta {
-    pub id: DocumentId,
     pub created_at: Timestamp,
     #[serde(default)]
     pub updated_at: Vec<Timestamp>,
     #[serde(default)]
-    pub actors: BTreeMap<String, ActorMetadata>,
+    pub actors: BTreeMap<MultibaseKey, ActorMetadata>,
     #[serde(default)]
-    pub facet_uuids: BTreeMap<Uuid, String>,
+    #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<String, FacetAlias>"))]
+    pub facet_uuids: BTreeMap<Uuid, FacetAlias>,
     #[serde(default)]
-    pub facets: BTreeMap<String, FacetMetadata>,
-    /// Present only for a branch document; this is a weak link, not an authority parent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_from: Option<BranchOrigin>,
-    /// Facts on the source document.  Merging a branch does not remove them.
-    #[serde(default)]
-    pub created_branches: Vec<CreatedBranch>,
+    pub facets: BTreeMap<FacetKey, FacetMetadata>,
+    /// Members a newer dmeta wrote that this declaration does not name. An open facet keeps them,
+    /// so a reader that has not been taught a new field does not delete it on the way back.
+    #[serde(flatten)]
+    pub extra: crate::facet::Extra,
 }
 
 impl Dmeta {
-    pub fn new(identity: DocumentIdentity) -> Self {
+    pub fn new(created_at: Timestamp) -> Self {
         Self {
-            id: identity.id,
-            created_at: identity.created_at,
+            created_at,
             updated_at: Vec::new(),
             actors: BTreeMap::new(),
             facet_uuids: BTreeMap::new(),
             facets: BTreeMap::new(),
-            created_from: None,
-            created_branches: Vec::new(),
+            extra: crate::facet::Extra::new(),
         }
     }
 
-    /// Record an alias without selecting content.  Multiple aliases are durable evidence of
-    /// concurrent creation even after Automerge no longer exposes the original conflict.
-    pub fn record_facet_uuid(&mut self, uuid: Uuid, key: impl Into<String>) {
-        self.facet_uuids.insert(uuid, key.into());
+    /// Record an alias without selecting content. Multiple aliases for one key are durable evidence
+    /// of concurrent creation even after the conflict that produced them is no longer visible.
+    pub fn record_facet_alias(&mut self, uuid: Uuid, alias: FacetAlias) {
+        self.facet_uuids.insert(uuid, alias);
     }
 
-    /// The lexicographically smallest alias visible in this writing transaction.
-    pub fn selected_facet_uuid(&self, key: &str) -> Option<Uuid> {
-        self.facet_uuids
-            .iter()
-            .filter(|(_, value)| value.as_str() == key)
-            .map(|(uuid, _)| *uuid)
-            .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()))
-    }
-
-    pub fn has_concurrent_creation(&self, key: &str) -> bool {
+    /// Whether more than one creator independently opened this slot.
+    pub fn has_concurrent_creation(&self, key: &FacetKey) -> bool {
         self.facet_uuids
             .values()
-            .filter(|value| value.as_str() == key)
+            .filter(|alias| &alias.key == key)
             .count()
             > 1
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// What dmeta records about one facet slot.
+///
+/// `signatures` is a **current competing set**, not an append-only audit index: a write replaces
+/// the entries it observed at its base heads with its own, and concurrent writers can leave several.
+/// The list is the shape of that set because a signature has no identity independent of its own
+/// bytes — keying a map on a hash of the entry would store the derivation beside its inputs. Which
+/// entries a write replaces is decided by the repository against the heads it wrote from; this type
+/// only holds the result. Timestamps help display history. They are not signed, and they establish
+/// neither identity nor authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FacetMetadata {
-    pub created_at: Timestamp,
-    #[serde(default)]
-    pub uuids: Vec<Uuid>,
     #[serde(default)]
     pub updated_at: Vec<Timestamp>,
     #[serde(default)]
@@ -135,48 +162,46 @@ pub struct FacetMetadata {
     pub signatures: Vec<FacetSignature>,
 }
 
-impl FacetMetadata {
-    /// Select the smallest alias visible at the transaction frontier.
-    pub fn selected_uuid(&self) -> Option<Uuid> {
-        self.uuids
-            .iter()
-            .copied()
-            .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()))
-    }
-
-    pub fn has_concurrent_creation(&self) -> bool {
-        self.uuids.len() > 1
-    }
-}
-
-/// Evidence copied when a branch retains a source signature but not its Automerge history.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A signature a branch retained from its origin, where the origin's history is not available to
+/// reconstruct the signed bytes from.
+///
+/// An ordinary signature stores nothing but the actor and the signature bytes: the message is
+/// rebuilt from the state at the change that introduced it. A branch is a different document and
+/// carries none of that history, so the bytes have to travel with it. `message` is the exact
+/// domain-prefixed message the actor signed, and it is authenticated by the signature — a fork
+/// that substitutes other bytes fails verification rather than being trusted. `value` is present
+/// only when the value the branch copied is not the value that was signed, which happens when a
+/// concurrent write landed on the origin before the branch was taken; it is the canonical native
+/// bytes of that signed value, so its CID can be checked without presenting the signature as
+/// covering the merged result.
+///
+/// What the witness cannot prove on its own is that the actor was authorized on the origin at the
+/// frontier where the signature was made. That frontier lives on the origin document, and an origin
+/// that is unavailable leaves the witness pending rather than forged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
 pub struct InheritedWitness {
-    pub origin_document: DocumentId,
-    pub message: Vec<u8>,
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub origin_doc: DocumentId,
+    pub message: Bytes,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value: Option<Value>,
+    pub value: Option<Bytes>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One entry in a facet's competing set of signatures.
+///
+/// `inherited` is set only for a signature copied onto a branch at its creation. A signature
+/// authored on the branch itself has none: its message is reconstructed from the branch's own
+/// history, and its origin is the branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FacetSignature {
-    pub actor_public_key: Vec<u8>,
-    pub signature: Vec<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "originDoc")]
-    pub origin_doc: Option<DocumentId>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "inheritedMessage"
-    )]
-    pub inherited_message: Option<Vec<u8>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "inheritedValue"
-    )]
-    pub inherited_value: Option<Value>,
+    pub actor_public_key: MultibaseKey,
+    pub signature: MultibaseSignature,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited: Option<InheritedWitness>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +211,11 @@ pub enum ClaimOperation {
 }
 
 /// The logical fields authenticated by a facet signature.
+///
+/// `value_cid` is a CIDv1 (`raw` codec, BLAKE3-256) over the canonical encoding of the value in its
+/// **native storage form**, read back from the transaction after the content mutation. It is absent
+/// only for a removal. The encoding itself belongs to the repository; this type only ever holds the
+/// resulting CID, so it cannot drift from the bytes that were stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FacetClaim {
@@ -193,18 +223,289 @@ pub struct FacetClaim {
     pub facet_key: FacetKey,
     pub chosen_uuid: Uuid,
     pub operation: ClaimOperation,
-    /// A CIDv1 raw/BLAKE3-256 byte string; absent only for Remove.
-    pub value_cid: Option<Vec<u8>>,
+    pub value_cid: Option<Cid>,
     #[serde(default)]
-    pub predecessors: Vec<Vec<u8>>,
+    pub predecessors: Vec<Cid>,
+}
+
+/// A CIDv1 with the `raw` codec and a BLAKE3-256 multihash: four header bytes and the 32-byte digest.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Cid([u8; CID_LENGTH]);
+
+impl Cid {
+    pub fn as_bytes(&self) -> &[u8; CID_LENGTH] {
+        &self.0
+    }
+
+    fn from_digest(digest: [u8; 32]) -> Self {
+        let mut bytes = [0; CID_LENGTH];
+        bytes[..4].copy_from_slice(&CID_VERSION_RAW_BLAKE3);
+        bytes[4..].copy_from_slice(&digest);
+        Self(bytes)
+    }
+}
+
+impl Serialize for Cid {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Cid {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Cid;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a CIDv1 raw/BLAKE3-256 byte string")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Cid, E> {
+                Cid::try_from(bytes).map_err(E::custom)
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Cid, A::Error> {
+                let mut bytes = [0; CID_LENGTH];
+                for (index, slot) in bytes.iter_mut().enumerate() {
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(index, &"a 36 byte CID"))?;
+                }
+                if seq.next_element::<u8>()?.is_some() {
+                    return Err(serde::de::Error::invalid_length(
+                        CID_LENGTH + 1,
+                        &"a 36 byte CID",
+                    ));
+                }
+                Cid::try_from(bytes.as_slice()).map_err(serde::de::Error::custom)
+            }
+        }
+        deserializer.deserialize_bytes(Visitor)
+    }
+}
+
+impl TryFrom<&[u8]> for Cid {
+    type Error = DmetaError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        if bytes.len() != CID_LENGTH || bytes[..4] != CID_VERSION_RAW_BLAKE3 {
+            return Err(DmetaError::MalformedClaim(
+                "a CID is a CIDv1 raw/BLAKE3-256",
+            ));
+        }
+        let mut cid = [0; CID_LENGTH];
+        cid.copy_from_slice(bytes);
+        Ok(Self(cid))
+    }
+}
+
+/// An Ed25519 public key as dmeta stores it: base58btc under the multibase `z` prefix, the same text
+/// form a document id has. A key is an identity, and an identity in this system is text rather than
+/// an array of numbers.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MultibaseKey([u8; 32]);
+
+impl MultibaseKey {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl TryFrom<&[u8]> for MultibaseKey {
+    type Error = DmetaError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        let bytes: [u8; 32] = bytes.try_into().map_err(|_| DmetaError::InvalidPublicKey)?;
+        Ok(Self(bytes))
+    }
+}
+
+impl std::fmt::Display for MultibaseKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&utils_rs::hash::encode_base58_multibase(self.0))
+    }
+}
+
+impl FromStr for MultibaseKey {
+    type Err = DmetaError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let bytes = utils_rs::hash::decode_base58_multibase(value)
+            .map_err(|_| DmetaError::InvalidPublicKey)?;
+        Self::try_from(bytes.as_slice())
+    }
+}
+
+impl Serialize for MultibaseKey {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for MultibaseKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for MultibaseKey {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "MultibaseKey".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::MultibaseKey").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string" })
+    }
+}
+
+/// An Ed25519 signature, in the same multibase text form as the key that produced it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MultibaseSignature([u8; 64]);
+
+impl MultibaseSignature {
+    pub fn as_bytes(&self) -> &[u8; 64] {
+        &self.0
+    }
+}
+
+impl TryFrom<&[u8]> for MultibaseSignature {
+    type Error = DmetaError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        let bytes: [u8; 64] = bytes.try_into().map_err(|_| DmetaError::InvalidSignature)?;
+        Ok(Self(bytes))
+    }
+}
+
+impl std::fmt::Display for MultibaseSignature {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&utils_rs::hash::encode_base58_multibase(self.0))
+    }
+}
+
+impl FromStr for MultibaseSignature {
+    type Err = DmetaError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let bytes = utils_rs::hash::decode_base58_multibase(value)
+            .map_err(|_| DmetaError::InvalidSignature)?;
+        Self::try_from(bytes.as_slice())
+    }
+}
+
+impl Serialize for MultibaseSignature {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for MultibaseSignature {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for MultibaseSignature {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "MultibaseSignature".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::MultibaseSignature").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string" })
+    }
+}
+
+/// Opaque bytes carried inside dmeta: a delegation, or the message and value a branch inherited.
+///
+/// These are not identities, so they are not multibase text. They are the protocol bytes object,
+/// which is what makes the facet publishable: an array of numbers is not a Lexicon type.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Bytes(Vec<u8>);
+
+impl Bytes {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for Bytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl Serialize for Bytes {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut object = serializer.serialize_map(Some(1))?;
+        object.serialize_entry("$bytes", &data_encoding::BASE64.encode(&self.0))?;
+        object.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Bytes {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let Some(stated) = value.get("$bytes").and_then(serde_json::Value::as_str) else {
+            return Err(serde::de::Error::custom(
+                "bytes need a $bytes base64 string",
+            ));
+        };
+        if value.as_object().is_none_or(|object| object.len() != 1) {
+            return Err(serde::de::Error::custom(
+                "bytes only contain the $bytes member",
+            ));
+        }
+        Ok(Self(decode_base64(stated).ok_or_else(|| {
+            serde::de::Error::custom(format!("`{stated}` is not base64"))
+        })?))
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Bytes {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "DmetaBytes".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::Bytes").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        crate::facet::codec_schema(
+            crate::facet::Codec::Bytes,
+            schemars::json_schema!({
+                "type": "object",
+                "properties": {
+                    "$bytes": {"type": "string", "contentEncoding": "base64"}
+                },
+                "required": ["$bytes"],
+                "additionalProperties": false
+            }),
+        )
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum DmetaError {
-    #[error("JCS cannot encode the facet value: {0}")]
-    CanonicalJson(#[from] serde_json::Error),
-    #[error("facet value contains a non-finite JSON number")]
-    NonFiniteNumber,
     #[error("claim predecessor IDs must be CID bytes")]
     InvalidPredecessor,
     #[error("claim operation and value CID disagree")]
@@ -215,17 +516,6 @@ pub enum DmetaError {
     InvalidPublicKey,
     #[error("invalid Ed25519 signature")]
     InvalidSignature,
-}
-
-/// Canonical RFC 8785 bytes of a JSON value.
-pub fn canonical_json(value: &Value) -> Result<Vec<u8>, DmetaError> {
-    reject_non_finite(value)?;
-    Ok(json_canon::to_vec(value)?)
-}
-
-/// CIDv1 (`raw` codec, BLAKE3-256 multihash) of canonical JSON bytes.
-pub fn value_cid(value: &Value) -> Result<Vec<u8>, DmetaError> {
-    Ok(cid_bytes(&canonical_json(value)?))
 }
 
 impl FacetClaim {
@@ -244,19 +534,15 @@ impl FacetClaim {
             u8::from(matches!(self.operation, ClaimOperation::Remove)) as u64,
         );
         match &self.value_cid {
-            Some(cid) if is_cid(cid) => cbor_bytes(&mut out, cid),
-            Some(_) => return Err(DmetaError::InvalidClaim),
+            Some(cid) => cbor_bytes(&mut out, cid.as_bytes()),
             None => out.push(0xf6),
         }
         let mut predecessors = self.predecessors.clone();
         predecessors.sort();
         predecessors.dedup();
-        if predecessors.iter().any(|id| !is_cid(id)) {
-            return Err(DmetaError::InvalidPredecessor);
-        }
         cbor_array(&mut out, predecessors.len() as u64);
-        for predecessor in predecessors {
-            cbor_bytes(&mut out, &predecessor);
+        for predecessor in &predecessors {
+            cbor_bytes(&mut out, predecessor.as_bytes());
         }
         Ok(out)
     }
@@ -269,9 +555,9 @@ impl FacetClaim {
 
     /// Decode the exact deterministic-CBOR field array used by the v1 claim wire.
     ///
-    /// This is deliberately stricter than a general CBOR decoder: all six fields have
-    /// fixed types, arrays are definite, integers use their shortest representation,
-    /// predecessor CIDs are strictly sorted and unique, and no trailing bytes survive.
+    /// This is deliberately stricter than a general CBOR decoder: all six fields have fixed types,
+    /// arrays are definite, integers use their shortest representation, predecessor CIDs are
+    /// strictly sorted and unique, and no trailing bytes survive.
     pub fn from_cbor_fields(bytes: &[u8]) -> Result<Self, DmetaError> {
         let mut cursor = 0;
         let (major, length) = read_cbor_head_strict(bytes, &mut cursor)?;
@@ -303,13 +589,9 @@ impl FacetClaim {
             cursor += 1;
             None
         } else {
-            let value = read_cbor_bytes_strict(bytes, &mut cursor)?;
-            if !is_cid(&value) {
-                return Err(DmetaError::MalformedClaim(
-                    "value must be a CIDv1 raw/BLAKE3-256",
-                ));
-            }
-            Some(value)
+            Some(Cid::try_from(
+                read_cbor_bytes_strict(bytes, &mut cursor)?.as_slice(),
+            )?)
         };
         if matches!(operation, ClaimOperation::Set) != value_cid.is_some() {
             return Err(DmetaError::InvalidClaim);
@@ -319,11 +601,11 @@ impl FacetClaim {
         if predecessor_major != 4 {
             return Err(DmetaError::MalformedClaim("predecessors must be an array"));
         }
-        // Every predecessor needs at least a one-byte CBOR bytes head and one complete
-        // 36-byte CID. Bound the count by the actual input before converting to usize or
-        // reserving, so hostile counts cannot request an unbounded allocation.
+        // Every predecessor needs at least a one-byte CBOR bytes head and one complete 36-byte CID.
+        // Bound the count by the actual input before converting to usize or reserving, so a hostile
+        // count cannot request an unbounded allocation.
         let remaining = bytes.len().saturating_sub(cursor);
-        let minimum_predecessor_encoding = 1_u64 + CID_LENGTH as u64;
+        let minimum_predecessor_encoding = 1 + CID_LENGTH as u64;
         if predecessor_count > remaining as u64 / minimum_predecessor_encoding {
             return Err(DmetaError::MalformedClaim(
                 "predecessor count exceeds input budget",
@@ -331,12 +613,8 @@ impl FacetClaim {
         }
         let mut predecessors = Vec::with_capacity(predecessor_count as usize);
         for _ in 0..predecessor_count {
-            let predecessor = read_cbor_bytes_strict(bytes, &mut cursor)?;
-            if !is_cid(&predecessor) {
-                return Err(DmetaError::MalformedClaim(
-                    "predecessor must be a CIDv1 raw/BLAKE3-256",
-                ));
-            }
+            let predecessor =
+                Cid::try_from(read_cbor_bytes_strict(bytes, &mut cursor)?.as_slice())?;
             if predecessors.last().is_some_and(|last| last >= &predecessor) {
                 return Err(DmetaError::MalformedClaim(
                     "predecessors must be sorted and unique",
@@ -370,35 +648,13 @@ impl FacetClaim {
     }
 }
 
-fn reject_non_finite(value: &Value) -> Result<(), DmetaError> {
-    match value {
-        Value::Array(values) => values.iter().try_for_each(reject_non_finite),
-        Value::Object(values) => values.values().try_for_each(reject_non_finite),
-        Value::Number(number)
-            if !number.is_i64() && !number.is_u64() && number.as_f64().is_none() =>
-        {
-            Err(DmetaError::NonFiniteNumber)
-        }
-        _ => Ok(()),
-    }
-}
-
-fn cid_bytes(data: &[u8]) -> Vec<u8> {
-    let mut cid = CID_VERSION_RAW_BLAKE3.to_vec();
-    let mut hasher = Hasher::new();
-    hasher.update(data);
-    cid.extend(hasher.finalize().as_bytes());
-    cid
-}
-
-fn cbor_value_cid(message: &[u8]) -> Option<Option<Vec<u8>>> {
-    FacetClaim::from_signing_bytes(message)
-        .ok()
-        .map(|claim| claim.value_cid)
-}
-
-fn is_cid(value: &[u8]) -> bool {
-    value.len() == CID_LENGTH && value[..4] == CID_VERSION_RAW_BLAKE3
+/// The CIDv1 (`raw` codec, BLAKE3-256) of an arbitrary byte string.
+///
+/// This is the one hashing primitive the claim wire needs. The bytes it is given for a value CID are
+/// the canonical native encoding of the facet value, which the repository produces; the bytes for a
+/// signature id are the domain-separated claim material below.
+pub fn cid_of(bytes: &[u8]) -> Cid {
+    Cid::from_digest(*blake3::hash(bytes).as_bytes())
 }
 
 fn read_cbor_head_strict(bytes: &[u8], cursor: &mut usize) -> Result<(u8, u64), DmetaError> {
@@ -525,11 +781,20 @@ fn cbor_uint(out: &mut Vec<u8>, value: u64) {
     cbor_head(out, 0, value);
 }
 
+/// Padded or unpadded base64, since the protocol bytes object accepts both.
+fn decode_base64(stated: &str) -> Option<Vec<u8>> {
+    data_encoding::BASE64
+        .decode(stated.as_bytes())
+        .or_else(|_| data_encoding::BASE64_NOPAD.decode(stated.as_bytes()))
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "schemars")]
+    use crate::facet::FacetShape;
     use ed25519_dalek::{Signer, SigningKey};
-    use serde_json::json;
 
     use crate::{FacetReference, ReferenceDocumentId, ReferenceError};
 
@@ -537,55 +802,92 @@ mod tests {
         FacetKey::from_str(value).unwrap()
     }
 
-    #[test]
-    fn aliases_select_smallest_and_retain_concurrency() {
-        let timestamp = Timestamp::from_second(0).unwrap();
-        let mut dmeta = Dmeta::new(DocumentIdentity {
-            id: DocumentId::new(b"doc"),
-            created_at: timestamp,
-        });
-        let key = "org.example.note/main";
-        let high = Uuid::from_u128(2);
-        let low = Uuid::from_u128(1);
-        dmeta.record_facet_uuid(high, key);
-        dmeta.record_facet_uuid(low, key);
-        assert_eq!(dmeta.selected_facet_uuid(key), Some(low));
-        assert!(dmeta.has_concurrent_creation(key));
+    fn cid_with(byte: u8) -> Cid {
+        cid_of(&[byte; 32])
     }
 
     #[test]
-    fn canonical_json_and_value_cid_vector_is_stable() {
-        let value = json!({"b": 2, "a": 1});
-        assert_eq!(canonical_json(&value).unwrap(), br#"{"a":1,"b":2}"#);
-        let numeric = json!({"exp": 1e-7, "safe": 9007199254740991_i64});
-        assert_eq!(
-            canonical_json(&numeric).unwrap(),
-            br#"{"exp":1e-7,"safe":9007199254740991}"#
+    fn aliases_retain_concurrency_without_a_reverse_index() {
+        let timestamp = Timestamp::from_second(0).unwrap();
+        let mut dmeta = Dmeta::new(timestamp);
+        let key = facet_key("org.example.note/main");
+        dmeta.record_facet_alias(
+            Uuid::from_u128(2),
+            FacetAlias {
+                key: key.clone(),
+                created_at: timestamp,
+            },
         );
-        let safe_edges = json!({"low": -9007199254740991_i64, "high": 9007199254740991_i64});
-        assert_eq!(
-            canonical_json(&safe_edges).unwrap(),
-            br#"{"high":9007199254740991,"low":-9007199254740991}"#
+        dmeta.record_facet_alias(
+            Uuid::from_u128(1),
+            FacetAlias {
+                key: key.clone(),
+                created_at: Timestamp::from_second(1).unwrap(),
+            },
         );
-        let outside_edges = json!({"low": -9007199254740992_i64, "high": 9007199254740992_i64});
-        assert!(canonical_json(&outside_edges).is_err());
-        let finite_spellings = json!({"decimal": 1.25, "lower": 1e-6, "upper": 1e21, "zero": -0.0});
+        assert!(dmeta.has_concurrent_creation(&key));
+        assert!(!dmeta.has_concurrent_creation(&facet_key("org.example.note/other")));
+        // The chosen alias is the smallest one visible, and it falls out of the index order.
+        let chosen = dmeta
+            .facet_uuids
+            .iter()
+            .filter(|(_, alias)| alias.key == key)
+            .map(|(uuid, _)| *uuid)
+            .min()
+            .unwrap();
+        assert_eq!(chosen, Uuid::from_u128(1));
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn dmeta_publishes_as_an_ordinary_facet() {
+        let declaration =
+            crate::facet::Declaration::of::<Dmeta>().expect("dmeta is lexicon-aligned");
+        assert_eq!(declaration.facet.id, DMETA_FACET_TAG);
         assert_eq!(
-            canonical_json(&finite_spellings).unwrap(),
-            br#"{"decimal":1.25,"lower":0.000001,"upper":1e+21,"zero":0}"#
+            Dmeta::SHAPE,
+            crate::facet::Shape::Object {
+                openness: crate::facet::Openness::Open
+            }
         );
-        // serde_json rejects non-finite JSON tokens before a Value can be constructed;
-        // do not fabricate an impossible NaN/Infinity Value just to exercise this boundary.
-        assert!(serde_json::from_str::<Value>("NaN").is_err());
-        assert!(serde_json::from_str::<Value>("Infinity").is_err());
+        let universe = crate::facet::Universe::collect(vec![declaration]);
+        let published = crate::facet::Bundle::new(&universe, Vec::new())
+            .lexicons()
+            .expect("an aligned declaration publishes");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].file["id"], DMETA_FACET_TAG);
+        assert_eq!(published[0].file["defs"]["main"]["type"], "object");
+    }
+
+    #[test]
+    fn an_actor_key_and_a_signature_round_trip_as_multibase_text() {
+        let key = MultibaseKey::try_from([7; 32].as_slice()).unwrap();
+        let text = key.to_string();
+        assert!(text.starts_with('z'));
+        assert_eq!(text.parse::<MultibaseKey>().unwrap(), key);
         assert_eq!(
-            value_cid(&value).unwrap(),
-            vec![
-                0x01, 0x55, 0x1e, 0x20, 0x8e, 0x80, 0x43, 0x9b, 0x77, 0xac, 0x62, 0xd4, 0x19, 0x44,
-                0x99, 0xed, 0xd4, 0x66, 0x84, 0xc4, 0x79, 0xda, 0x3a, 0xa1, 0xac, 0x80, 0xdd, 0x55,
-                0x11, 0x46, 0x8e, 0xfa, 0xe0, 0x49, 0x16, 0x6e,
-            ]
+            serde_json::from_str::<MultibaseKey>(&serde_json::to_string(&key).unwrap()).unwrap(),
+            key
         );
+        // A truncated or over-long spelling is refused rather than decoded into a different key.
+        assert!(text[..text.len() - 1].parse::<MultibaseKey>().is_err());
+
+        let signature = MultibaseSignature::try_from([9; 64].as_slice()).unwrap();
+        let signature_text = signature.to_string();
+        assert_eq!(
+            signature_text.parse::<MultibaseSignature>().unwrap(),
+            signature
+        );
+    }
+
+    #[test]
+    fn carried_bytes_are_the_protocol_object_not_an_array_of_numbers() {
+        let bytes = Bytes::from(vec![1, 2, 3, 255]);
+        let json = serde_json::to_value(&bytes).unwrap();
+        assert_eq!(json, serde_json::json!({"$bytes": "AQID/w=="}));
+        assert_eq!(serde_json::from_value::<Bytes>(json).unwrap(), bytes);
+        // An array of numbers is what `Vec<u8>` would have produced, and it is not bytes.
+        assert!(serde_json::from_value::<Bytes>(serde_json::json!([1, 2, 3, 255])).is_err());
     }
 
     #[test]
@@ -595,7 +897,7 @@ mod tests {
             facet_key: facet_key("org.example.note/main"),
             chosen_uuid: Uuid::from_u128(1),
             operation: ClaimOperation::Set,
-            value_cid: Some(value_cid(&json!({"b": 2, "a": 1})).unwrap()),
+            value_cid: Some(cid_of(br#"{"a":1,"b":2}"#)),
             predecessors: vec![],
         };
         let expected_cbor = [
@@ -625,11 +927,7 @@ mod tests {
         assert_eq!(fields[3], ciborium::Value::Integer(0.into()));
         assert_eq!(
             fields[4],
-            ciborium::Value::Bytes(vec![
-                0x01, 0x55, 0x1e, 0x20, 0x8e, 0x80, 0x43, 0x9b, 0x77, 0xac, 0x62, 0xd4, 0x19, 0x44,
-                0x99, 0xed, 0xd4, 0x66, 0x84, 0xc4, 0x79, 0xda, 0x3a, 0xa1, 0xac, 0x80, 0xdd, 0x55,
-                0x11, 0x46, 0x8e, 0xfa, 0xe0, 0x49, 0x16, 0x6e,
-            ])
+            ciborium::Value::Bytes(claim.value_cid.as_ref().unwrap().as_bytes().to_vec())
         );
         assert_eq!(fields[5], ciborium::Value::Array(Vec::new()));
         let key = SigningKey::from_bytes(&[7; 32]);
@@ -654,96 +952,133 @@ mod tests {
             facet_key: facet_key("org.example.note/main"),
             chosen_uuid: Uuid::from_u128(1),
             operation: ClaimOperation::Set,
-            value_cid: Some(value_cid(&json!({"b": 2, "a": 1})).unwrap()),
+            value_cid: Some(cid_of(br#"{"a":1,"b":2}"#)),
             predecessors: vec![],
         };
         let message = claim.signing_bytes().unwrap();
         let signed = SignedFacetClaim::from_signature(
             claim.clone(),
-            key.verifying_key().to_bytes().to_vec(),
-            key.sign(&message).to_bytes().to_vec(),
+            MultibaseKey::try_from(key.verifying_key().to_bytes().as_slice()).unwrap(),
+            MultibaseSignature::try_from(key.sign(&message).to_bytes().as_slice()).unwrap(),
         )
         .unwrap();
         signed.verify().unwrap();
-        assert_eq!(signed.signature_id().unwrap().len(), 36);
+        assert_eq!(signed.signature_id().unwrap().as_bytes().len(), CID_LENGTH);
         let mut forged = signed.clone();
         forged.claim.facet_key = facet_key("org.example.note/mainx");
         assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
     }
 
     #[test]
-    fn inherited_witness_verification_is_pending_or_accepted_not_optimistic() {
+    fn an_inherited_witness_verifies_against_its_own_bytes() {
         let key = SigningKey::from_bytes(&[9; 32]);
-        let value = json!({"answer": 42});
+        let signed_value = Bytes::from(b"native-value".to_vec());
         let claim = FacetClaim {
             origin_document: DocumentId::new(b"origin"),
             facet_key: facet_key("org.example.note/main"),
             chosen_uuid: Uuid::from_u128(4),
             operation: ClaimOperation::Set,
-            value_cid: Some(value_cid(&value).unwrap()),
+            value_cid: Some(cid_of(signed_value.as_slice())),
             predecessors: Vec::new(),
         };
         let message = claim.signing_bytes().unwrap();
-        let signature = key.sign(&message).to_bytes().to_vec();
-        let signed = SignedFacetClaim::from_signature(
-            claim.clone(),
-            key.verifying_key().to_bytes().to_vec(),
-            signature.clone(),
-        )
-        .unwrap();
         let entry = FacetSignature {
-            actor_public_key: signed.actor_public_key.clone(),
-            signature: signed.signature.clone(),
-            origin_doc: Some(DocumentId::new(b"origin")),
-            inherited_message: Some(claim.signing_bytes().unwrap()),
-            inherited_value: Some(value.clone()),
+            actor_public_key: MultibaseKey::try_from(key.verifying_key().to_bytes().as_slice())
+                .unwrap(),
+            signature: MultibaseSignature::try_from(key.sign(&message).to_bytes().as_slice())
+                .unwrap(),
+            inherited: Some(InheritedWitness {
+                origin_doc: DocumentId::new(b"origin"),
+                message: Bytes::from(message),
+                value: Some(signed_value.clone()),
+            }),
         };
+        // The branch copied exactly the signed value, so no witness value is required.
         assert_eq!(
-            entry.verify_inherited_for(&claim, None),
+            entry.verify_inherited(&claim, Some(signed_value.as_slice())),
             VerificationState::Accepted
         );
+        // The branch copied a different value, and the witness carries the one that was signed.
         assert_eq!(
-            entry.verify_inherited_for(&claim, Some(&json!({"answer": 43}))),
+            entry.verify_inherited(&claim, Some(b"merged-value")),
             VerificationState::Accepted
         );
+        // A witness value that is not the signed one is a forgery, not a disagreement.
         let mut forged = entry.clone();
-        forged.inherited_value = Some(json!({"answer": 43}));
+        forged.inherited.as_mut().unwrap().value = Some(Bytes::from(b"other-value".to_vec()));
         assert_eq!(
-            forged.verify_inherited_for(&claim, None),
+            forged.verify_inherited(&claim, None),
             VerificationState::ProvenForgery
         );
-        let remove_claim = FacetClaim {
-            origin_document: claim.origin_document.clone(),
-            facet_key: claim.facet_key.clone(),
-            chosen_uuid: claim.chosen_uuid,
+        // A removal signs no value, so a witness that carries one is a forgery.
+        let remove = FacetClaim {
             operation: ClaimOperation::Remove,
             value_cid: None,
             predecessors: Vec::new(),
+            ..claim.clone()
         };
-        let remove_message = remove_claim.signing_bytes().unwrap();
+        let remove_message = remove.signing_bytes().unwrap();
         let remove_witness = FacetSignature {
-            actor_public_key: key.verifying_key().to_bytes().to_vec(),
-            signature: key.sign(&remove_message).to_bytes().to_vec(),
-            origin_doc: Some(remove_claim.origin_document.clone()),
-            inherited_message: Some(remove_message),
-            inherited_value: Some(value.clone()),
+            actor_public_key: entry.actor_public_key.clone(),
+            signature: MultibaseSignature::try_from(
+                key.sign(&remove_message).to_bytes().as_slice(),
+            )
+            .unwrap(),
+            inherited: Some(InheritedWitness {
+                origin_doc: remove.origin_document.clone(),
+                message: Bytes::from(remove_message),
+                value: Some(signed_value),
+            }),
         };
         assert_eq!(
-            remove_witness.verify_inherited_for(&remove_claim, None),
+            remove_witness.verify_inherited(&remove, None),
             VerificationState::ProvenForgery
         );
+        // No carried message means the signature cannot be reconstructed here: pending, not forged.
         let mut pending = entry;
-        pending.inherited_message = None;
+        pending.inherited = None;
         assert_eq!(
-            pending.verify_inherited_for(&claim, None),
+            pending.verify_inherited(&claim, None),
             VerificationState::Pending
         );
     }
 
     #[test]
-    fn missing_evidence_is_not_forgery_and_closure_is_conservative() {
+    fn missing_evidence_is_not_forgery_and_a_rejected_predecessor_cannot_be_laundered() {
+        let present = SignatureChecks {
+            message: Evidence::Present,
+            delegation: Evidence::Present,
+            value: Evidence::Present,
+            authority: Evidence::Present,
+        };
         assert_eq!(
-            verification_state(Evidence::Missing),
+            fold_checks(
+                SignatureChecks {
+                    delegation: Evidence::Missing,
+                    ..present
+                },
+                []
+            ),
+            VerificationState::Pending
+        );
+        assert_eq!(
+            fold_checks(
+                SignatureChecks {
+                    authority: Evidence::Invalid,
+                    ..present
+                },
+                []
+            ),
+            VerificationState::ProvenForgery
+        );
+        assert_eq!(fold_checks(present, []), VerificationState::Accepted);
+        // A successor whose own checks pass still cannot accept a forged or pending predecessor.
+        assert_eq!(
+            fold_checks(present, [VerificationState::ProvenForgery]),
+            VerificationState::ProvenForgery
+        );
+        assert_eq!(
+            fold_checks(present, [VerificationState::Pending]),
             VerificationState::Pending
         );
         assert_eq!(
@@ -757,32 +1092,42 @@ mod tests {
     }
 
     #[test]
-    fn independent_openssl_ed25519_claim_fixture_is_accepted() {
+    fn an_independently_produced_ed25519_signature_is_accepted() {
+        // The signature bytes below were produced by OpenSSL over this claim's signing bytes with
+        // the seed [7; 32], so the check does not depend on ed25519-dalek agreeing with itself.
         let claim = FacetClaim {
             origin_document: DocumentId::new(b"doc"),
             facet_key: facet_key("org.example.note/main"),
             chosen_uuid: Uuid::from_u128(1),
             operation: ClaimOperation::Set,
-            value_cid: Some(value_cid(&json!({"b": 2, "a": 1})).unwrap()),
+            value_cid: Some(cid_of(br#"{"a":1,"b":2}"#)),
             predecessors: vec![],
         };
-        let actor_public_key = vec![
-            0xea, 0x4a, 0x6c, 0x63, 0xe2, 0x9c, 0x52, 0x0a, 0xbe, 0xf5, 0x50, 0x7b, 0x13, 0x2e,
-            0xc5, 0xf9, 0x95, 0x47, 0x76, 0xae, 0xbe, 0xbe, 0x7b, 0x92, 0x42, 0x1e, 0xea, 0x69,
-            0x14, 0x46, 0xd2, 0x2c,
-        ];
-        let signature = vec![
-            0x48, 0xb7, 0xb4, 0xdd, 0x7b, 0x4a, 0xea, 0x80, 0xa0, 0x3f, 0x13, 0xeb, 0x7f, 0x5c,
-            0xe8, 0x5b, 0x8f, 0x85, 0x74, 0x45, 0xfc, 0xa8, 0x70, 0x8a, 0xd0, 0x5a, 0x81, 0xd0,
-            0x17, 0x7c, 0x18, 0x41, 0xb9, 0x58, 0x3d, 0x6d, 0xa5, 0x10, 0x78, 0x49, 0x9c, 0xad,
-            0xc6, 0x30, 0xfc, 0xd8, 0x2c, 0x3c, 0x89, 0x86, 0x8f, 0x7b, 0x73, 0x8f, 0x94, 0xd4,
-            0xd9, 0xb8, 0x1b, 0x4e, 0x5c, 0x5b, 0xfe, 0x0b,
-        ];
+        let actor_public_key = MultibaseKey::try_from(
+            [
+                0xea, 0x4a, 0x6c, 0x63, 0xe2, 0x9c, 0x52, 0x0a, 0xbe, 0xf5, 0x50, 0x7b, 0x13, 0x2e,
+                0xc5, 0xf9, 0x95, 0x47, 0x76, 0xae, 0xbe, 0xbe, 0x7b, 0x92, 0x42, 0x1e, 0xea, 0x69,
+                0x14, 0x46, 0xd2, 0x2c,
+            ]
+            .as_slice(),
+        )
+        .unwrap();
+        let signature = MultibaseSignature::try_from(
+            [
+                0x48, 0xb7, 0xb4, 0xdd, 0x7b, 0x4a, 0xea, 0x80, 0xa0, 0x3f, 0x13, 0xeb, 0x7f, 0x5c,
+                0xe8, 0x5b, 0x8f, 0x85, 0x74, 0x45, 0xfc, 0xa8, 0x70, 0x8a, 0xd0, 0x5a, 0x81, 0xd0,
+                0x17, 0x7c, 0x18, 0x41, 0xb9, 0x58, 0x3d, 0x6d, 0xa5, 0x10, 0x78, 0x49, 0x9c, 0xad,
+                0xc6, 0x30, 0xfc, 0xd8, 0x2c, 0x3c, 0x89, 0x86, 0x8f, 0x7b, 0x73, 0x8f, 0x94, 0xd4,
+                0xd9, 0xb8, 0x1b, 0x4e, 0x5c, 0x5b, 0xfe, 0x0b,
+            ]
+            .as_slice(),
+        )
+        .unwrap();
         let signed = SignedFacetClaim::from_signature(claim, actor_public_key, signature).unwrap();
         signed.verify().unwrap();
         assert_eq!(
-            signed.signature_id().unwrap(),
-            vec![
+            signed.signature_id().unwrap().as_bytes(),
+            &[
                 0x01, 0x55, 0x1e, 0x20, 0xec, 0x57, 0x2f, 0x95, 0x11, 0x9a, 0xa6, 0x1b, 0xbe, 0xca,
                 0x0d, 0xcd, 0x46, 0xd9, 0x66, 0xe5, 0x46, 0x66, 0xf6, 0x84, 0xdd, 0xf4, 0xe1, 0x54,
                 0x8a, 0xe6, 0xbc, 0x48, 0x4b, 0x4f, 0x33, 0x86,
@@ -791,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn hostile_predecessor_count_is_refused_before_allocation() {
+    fn a_hostile_predecessor_count_is_refused_before_allocation() {
         let claim = FacetClaim {
             origin_document: DocumentId::new(b"doc"),
             facet_key: facet_key("org.example.note/main"),
@@ -816,13 +1161,13 @@ mod tests {
     }
 
     #[test]
-    fn strict_claim_decoder_rejects_malformed_noncanonical_and_trailing_bytes() {
+    fn the_decoder_rejects_malformed_noncanonical_and_trailing_bytes() {
         let claim = FacetClaim {
             origin_document: DocumentId::new(b"origin"),
             facet_key: facet_key("org.example.note/main"),
             chosen_uuid: Uuid::from_u128(7),
             operation: ClaimOperation::Set,
-            value_cid: Some(value_cid(&json!({"score": 1.5})).unwrap()),
+            value_cid: Some(cid_of(b"signed-native-bytes")),
             predecessors: vec![],
         };
         let fields = claim.cbor_fields().unwrap();
@@ -849,18 +1194,16 @@ mod tests {
     }
 
     #[test]
-    fn inherited_claim_binds_source_context_not_destination_branch() {
+    fn an_inherited_claim_binds_the_source_context_not_the_branch() {
         let key = SigningKey::from_bytes(&[11; 32]);
-        let mut predecessor_a = CID_VERSION_RAW_BLAKE3.to_vec();
-        predecessor_a.extend([1; 32]);
-        let mut predecessor_b = CID_VERSION_RAW_BLAKE3.to_vec();
-        predecessor_b.extend([2; 32]);
+        let predecessor_a = cid_with(1);
+        let predecessor_b = cid_with(2);
         let source_claim = FacetClaim {
             origin_document: DocumentId::new(b"origin-a"),
             facet_key: facet_key("org.example.note/main"),
             chosen_uuid: Uuid::from_u128(9),
             operation: ClaimOperation::Set,
-            value_cid: Some(value_cid(&json!({"answer": 42})).unwrap()),
+            value_cid: Some(cid_of(b"the signed value")),
             predecessors: vec![
                 predecessor_b.clone(),
                 predecessor_a.clone(),
@@ -869,50 +1212,56 @@ mod tests {
         };
         let message = source_claim.signing_bytes().unwrap();
         let witness = FacetSignature {
-            actor_public_key: key.verifying_key().to_bytes().to_vec(),
-            signature: key.sign(&message).to_bytes().to_vec(),
-            origin_doc: Some(source_claim.origin_document.clone()),
-            inherited_message: Some(message),
-            inherited_value: Some(json!({"answer": 42})),
+            actor_public_key: MultibaseKey::try_from(key.verifying_key().to_bytes().as_slice())
+                .unwrap(),
+            signature: MultibaseSignature::try_from(key.sign(&message).to_bytes().as_slice())
+                .unwrap(),
+            inherited: Some(InheritedWitness {
+                origin_doc: source_claim.origin_document.clone(),
+                message: Bytes::from(message),
+                value: Some(Bytes::from(b"the signed value".to_vec())),
+            }),
         };
         assert_eq!(
-            witness.verify_inherited_for(&source_claim, None),
+            witness.verify_inherited(&source_claim, None),
             VerificationState::Accepted
         );
-        let mut normalized_expected = source_claim.clone();
-        normalized_expected.predecessors = vec![predecessor_a.clone(), predecessor_b.clone()];
+        // The witness's predecessors were sorted and deduplicated before signing, so the normalized
+        // form is the same claim.
+        let mut normalized = source_claim.clone();
+        normalized.predecessors = vec![predecessor_a.clone(), predecessor_b.clone()];
         assert_eq!(
-            witness.verify_inherited_for(&normalized_expected, None),
+            witness.verify_inherited(&normalized, None),
             VerificationState::Accepted
         );
-        let mut wrong_frontier = normalized_expected.clone();
+        let mut wrong_frontier = normalized.clone();
         wrong_frontier.predecessors = vec![predecessor_a.clone()];
         assert_eq!(
-            witness.verify_inherited_for(&wrong_frontier, None),
+            witness.verify_inherited(&wrong_frontier, None),
             VerificationState::ProvenForgery
         );
         let mut wrong_facet = source_claim.clone();
         wrong_facet.facet_key = facet_key("org.example.note/wrong");
         assert_eq!(
-            witness.verify_inherited_for(&wrong_facet, None),
+            witness.verify_inherited(&wrong_facet, None),
             VerificationState::ProvenForgery
         );
         let mut wrong_uuid = source_claim.clone();
         wrong_uuid.chosen_uuid = Uuid::from_u128(10);
         assert_eq!(
-            witness.verify_inherited_for(&wrong_uuid, None),
+            witness.verify_inherited(&wrong_uuid, None),
             VerificationState::ProvenForgery
         );
         let mut wrong_origin = source_claim;
         wrong_origin.origin_document = DocumentId::new(b"branch-b");
         assert_eq!(
-            witness.verify_inherited_for(&wrong_origin, None),
+            witness.verify_inherited(&wrong_origin, None),
             VerificationState::ProvenForgery
         );
     }
 
     #[test]
-    fn facet_key_bytes_slashes_and_uri_transport_round_trip_without_second_identity() {
+    fn a_facet_key_with_slashes_and_non_utf8_survives_the_claim_and_the_uri() {
         let key = FacetKey::new("org.example.note", b"main/bytes/\x80".to_vec()).unwrap();
         let claim = FacetClaim {
             origin_document: DocumentId::new(b"doc"),
@@ -936,11 +1285,9 @@ mod tests {
     }
 
     #[test]
-    fn cbor_predecessors_are_sorted_and_deduplicated() {
-        let mut first = CID_VERSION_RAW_BLAKE3.to_vec();
-        first.extend([1; 32]);
-        let mut second = CID_VERSION_RAW_BLAKE3.to_vec();
-        second.extend([2; 32]);
+    fn predecessors_are_sorted_and_deduplicated_before_signing() {
+        let first = cid_with(1);
+        let second = cid_with(2);
         let claim = FacetClaim {
             origin_document: DocumentId::new(b"d"),
             facet_key: facet_key("org.example.test/main"),
@@ -950,15 +1297,7 @@ mod tests {
             predecessors: vec![second.clone(), first.clone(), second.clone()],
         };
         let bytes = claim.cbor_fields().unwrap();
-        assert!(
-            bytes
-                .windows(CID_LENGTH)
-                .any(|window| window == first.as_slice())
-        );
-        assert!(
-            bytes
-                .windows(CID_LENGTH)
-                .any(|window| window == second.as_slice())
-        );
+        let decoded = FacetClaim::from_cbor_fields(&bytes).unwrap();
+        assert_eq!(decoded.predecessors, vec![first, second]);
     }
 }

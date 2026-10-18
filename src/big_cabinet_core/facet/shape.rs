@@ -57,8 +57,8 @@ pub trait FacetShape {
 }
 
 /// A decision worth surfacing rather than a mistake worth refusing.
-#[cfg(feature = "schemars")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "schemars")]
 pub enum ShapeFlag {
     /// a closed object can never gain a member compatibly
     ClosedObject,
@@ -69,8 +69,8 @@ pub enum ShapeFlag {
 }
 
 /// The declaration and the schema do not say the same thing.
-#[cfg(feature = "schemars")]
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
+#[cfg(feature = "schemars")]
 pub enum ShapeError {
     /// {name}: the schema is not an object
     NotAnObject { name: String },

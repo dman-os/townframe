@@ -92,7 +92,9 @@ impl<'de> Deserialize<'de> for FacetTag {
 /// The identifier is bytes rather than a `String`: dpath-like names may contain
 /// `/`, and arbitrary non-UTF-8 bytes are represented by reversible Go
 /// string-literal escapes in the reference grammar.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// `Ord` is by the canonical spelling, the same order the claim wire sorts by, so a `BTreeMap`
+/// keyed on a facet key agrees with the bytes a signature covers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FacetKey {
     tag: FacetTag,
     id: Vec<u8>,
@@ -159,6 +161,21 @@ impl<'de> Deserialize<'de> for FacetKey {
     {
         let value = String::deserialize(deserializer)?;
         value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for FacetKey {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "FacetKey".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::FacetKey").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "string" })
     }
 }
 
