@@ -1,257 +1,120 @@
-//! Actor capabilities for Cabinet operations.
+//! Actor identities, capabilities, grants, and signing for Cabinet.
 //!
-//! Capability tokens authorize coarse Cabinet operations for an actor. They do
-//! not replace BigRepo/Keyhive's node-level authority decision. Current
-//! authorization state is owned by a SQLite store so independent repo handles
-//! and processes observe issuance and revocation without stale in-memory state.
+//! Four independent parts (ADR 017): a capability table (caps say what can be
+//! done, not who holds them), an actor registry (persistent subsystem
+//! identities with node-signed attribution certificates), a generic grant
+//! ledger (opaque subject/object/access rows), and a signer that signs as the
+//! actor a cap chain roots at. Domain services name objects and decide
+//! containment; this module never interprets an object string.
 
 use std::{path::Path, sync::Arc};
 
-use big_cabinet_core::dmeta::{FacetClaim, SignedFacetClaim};
-use big_sync_core::ObjKey;
-use ed25519_dalek::{Signature as DalekSignature, Verifier, VerifyingKey};
+use big_cabinet_core::dmeta::{Bytes, FacetClaim, MultibaseKey, SignedFacetClaim, Uuid7};
 use rand::RngCore;
 use secrets_rs::{SecretStore, SecretsError, SigningKeyHandle};
-use serde::{Deserialize, Serialize};
-use sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqlitePoolOptions};
 use thiserror::Error;
 
-mod token;
+mod actor;
+mod cap;
+mod ledger;
+mod provisioning;
+mod signer;
+mod store;
 
-pub use token::{CapabilityToken, Grant};
+#[cfg(test)]
+mod tests;
+
+use actor::ActorRecord;
+use store::AuthorityStateStore;
 
 pub type ActorPublicKey = [u8; 32];
-/// The hosting document identity for a drawer. This is the actual BigRepo/Core
-/// `DocumentId`, whose byte string is intentionally variable length.
-pub type DrawerId = ObjKey;
-pub type TokenId = [u8; 16];
-pub type Signature = Vec<u8>;
+pub type CapId = [u8; 16];
 
-const TOKEN_VERSION: u8 = 1;
 const NODE_SERVICE: &str = "big_cabinet.authority";
 const NODE_KEY: &str = "node";
 const OPERATOR_KEY: &str = "operator";
+const OPERATOR_PATH: &str = "operator";
 
-#[cfg(test)]
-mod provisioning_test_faults {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio::sync::Notify;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Rights(u32);
 
-    static FAIL_ACTOR_PUBLICATION: AtomicBool = AtomicBool::new(false);
-    static FORCE_ACTOR_COMMIT_UNKNOWN: AtomicBool = AtomicBool::new(false);
-    static FAIL_ROOT_INSTALL: AtomicBool = AtomicBool::new(false);
-    static FAIL_ACTOR_INTENT_BIND: AtomicBool = AtomicBool::new(false);
-    static FAIL_ACTOR_INTENT_REMOVAL: AtomicBool = AtomicBool::new(false);
-    static CLEANUP_PRE_DELETE_BARRIER_ACTIVE: AtomicBool = AtomicBool::new(false);
-    static CLEANUP_PRE_DELETE_REACHED: AtomicBool = AtomicBool::new(false);
-    static CLEANUP_PRE_DELETE_RELEASED: AtomicBool = AtomicBool::new(false);
-    static CLEANUP_PRE_DELETE_NOTIFY: Notify = Notify::const_new();
-    static CLEANUP_PRE_RELEASE_NOTIFY: Notify = Notify::const_new();
-    static SERIALIZED_BEGIN_PROBE_ACTIVE: AtomicBool = AtomicBool::new(false);
-    static SERIALIZED_BEGIN_PROBE_REACHED: AtomicBool = AtomicBool::new(false);
-    static SERIALIZED_BEGIN_PROBE_NOTIFY: Notify = Notify::const_new();
-    static CLEANUP_DELETE_BARRIER_ACTIVE: AtomicBool = AtomicBool::new(false);
-    static CLEANUP_DELETE_REACHED: AtomicBool = AtomicBool::new(false);
-    static CLEANUP_DELETE_RELEASED: AtomicBool = AtomicBool::new(false);
-    static CLEANUP_DELETE_NOTIFY: Notify = Notify::const_new();
-    static CLEANUP_RELEASE_NOTIFY: Notify = Notify::const_new();
-    static ACTOR_PUBLICATION_BARRIER_ACTIVE: AtomicBool = AtomicBool::new(false);
-    static ACTOR_PUBLICATION_REACHED: AtomicBool = AtomicBool::new(false);
-    static ACTOR_PUBLICATION_RELEASED: AtomicBool = AtomicBool::new(false);
-    static ACTOR_PUBLICATION_NOTIFY: Notify = Notify::const_new();
-    static ACTOR_RELEASE_NOTIFY: Notify = Notify::const_new();
+impl Rights {
+    pub const USE: Self = Self(1);
+    pub const NARROW: Self = Self(2);
+    pub const MINT_CHILD: Self = Self(4);
+    pub const DELEGATE: Self = Self(8);
 
-    pub fn fail_actor_publication() {
-        FAIL_ACTOR_PUBLICATION.store(true, Ordering::Release);
+    pub fn all() -> Self {
+        Self(Self::USE.0 | Self::NARROW.0 | Self::MINT_CHILD.0 | Self::DELEGATE.0)
     }
-
-    pub fn fail_root_install() {
-        FAIL_ROOT_INSTALL.store(true, Ordering::Release);
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
     }
-
-    pub fn fail_actor_intent_binding() {
-        FAIL_ACTOR_INTENT_BIND.store(true, Ordering::Release);
+    pub fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
     }
-
-    pub fn take_actor_intent_binding_failure() -> bool {
-        FAIL_ACTOR_INTENT_BIND.swap(false, Ordering::AcqRel)
+    fn is_subset_of(self, other: Self) -> bool {
+        other.contains(self)
     }
-
-    pub fn take_root_install_failure() -> bool {
-        FAIL_ROOT_INSTALL.swap(false, Ordering::AcqRel)
+    fn bits_i64(self) -> i64 {
+        i64::from(self.0)
     }
-
-    pub fn take_actor_publication_failure() -> bool {
-        FAIL_ACTOR_PUBLICATION.swap(false, Ordering::AcqRel)
-    }
-
-    pub fn force_actor_commit_unknown() {
-        FORCE_ACTOR_COMMIT_UNKNOWN.store(true, Ordering::Release);
-    }
-
-    pub fn take_actor_commit_unknown() -> bool {
-        FORCE_ACTOR_COMMIT_UNKNOWN.swap(false, Ordering::AcqRel)
-    }
-
-    pub fn fail_actor_intent_removal() {
-        FAIL_ACTOR_INTENT_REMOVAL.store(true, Ordering::Release);
-    }
-
-    pub fn take_actor_intent_removal_failure() -> bool {
-        FAIL_ACTOR_INTENT_REMOVAL.swap(false, Ordering::AcqRel)
-    }
-
-    pub fn arm_cleanup_pre_delete_barrier() {
-        CLEANUP_PRE_DELETE_BARRIER_ACTIVE.store(true, Ordering::Release);
-        CLEANUP_PRE_DELETE_REACHED.store(false, Ordering::Release);
-        CLEANUP_PRE_DELETE_RELEASED.store(false, Ordering::Release);
-    }
-
-    pub async fn before_cleanup_delete() {
-        if !CLEANUP_PRE_DELETE_BARRIER_ACTIVE.load(Ordering::Acquire) {
-            return;
-        }
-        CLEANUP_PRE_DELETE_REACHED.store(true, Ordering::Release);
-        CLEANUP_PRE_DELETE_NOTIFY.notify_waiters();
-        while !CLEANUP_PRE_DELETE_RELEASED.load(Ordering::Acquire) {
-            CLEANUP_PRE_RELEASE_NOTIFY.notified().await;
-        }
-    }
-
-    pub async fn wait_cleanup_pre_delete_barrier() {
-        while !CLEANUP_PRE_DELETE_REACHED.load(Ordering::Acquire) {
-            CLEANUP_PRE_DELETE_NOTIFY.notified().await;
-        }
-    }
-
-    pub fn release_cleanup_pre_delete_barrier() {
-        CLEANUP_PRE_DELETE_BARRIER_ACTIVE.store(false, Ordering::Release);
-        CLEANUP_PRE_DELETE_RELEASED.store(true, Ordering::Release);
-        CLEANUP_PRE_RELEASE_NOTIFY.notify_waiters();
-    }
-
-    pub fn arm_serialized_begin_probe() {
-        SERIALIZED_BEGIN_PROBE_ACTIVE.store(true, Ordering::Release);
-        SERIALIZED_BEGIN_PROBE_REACHED.store(false, Ordering::Release);
-    }
-
-    pub async fn wait_serialized_begin_probe() {
-        while !SERIALIZED_BEGIN_PROBE_REACHED.load(Ordering::Acquire) {
-            SERIALIZED_BEGIN_PROBE_NOTIFY.notified().await;
-        }
-    }
-
-    pub fn notify_serialized_begin_probe() {
-        if SERIALIZED_BEGIN_PROBE_ACTIVE.swap(false, Ordering::AcqRel) {
-            SERIALIZED_BEGIN_PROBE_REACHED.store(true, Ordering::Release);
-            SERIALIZED_BEGIN_PROBE_NOTIFY.notify_waiters();
-        }
-    }
-
-    pub fn arm_cleanup_delete_barrier() {
-        CLEANUP_DELETE_BARRIER_ACTIVE.store(true, Ordering::Release);
-        CLEANUP_DELETE_REACHED.store(false, Ordering::Release);
-        CLEANUP_DELETE_RELEASED.store(false, Ordering::Release);
-    }
-
-    pub async fn wait_cleanup_delete_barrier() {
-        while !CLEANUP_DELETE_REACHED.load(Ordering::Acquire) {
-            CLEANUP_DELETE_NOTIFY.notified().await;
-        }
-    }
-
-    pub async fn after_cleanup_delete() {
-        if !CLEANUP_DELETE_BARRIER_ACTIVE.load(Ordering::Acquire) {
-            return;
-        }
-        CLEANUP_DELETE_REACHED.store(true, Ordering::Release);
-        CLEANUP_DELETE_NOTIFY.notify_waiters();
-        while !CLEANUP_DELETE_RELEASED.load(Ordering::Acquire) {
-            CLEANUP_RELEASE_NOTIFY.notified().await;
-        }
-    }
-
-    pub fn release_cleanup_delete_barrier() {
-        CLEANUP_DELETE_BARRIER_ACTIVE.store(false, Ordering::Release);
-        CLEANUP_DELETE_RELEASED.store(true, Ordering::Release);
-        CLEANUP_RELEASE_NOTIFY.notify_waiters();
-    }
-
-    pub fn arm_actor_publication_barrier() {
-        ACTOR_PUBLICATION_BARRIER_ACTIVE.store(true, Ordering::Release);
-        ACTOR_PUBLICATION_REACHED.store(false, Ordering::Release);
-        ACTOR_PUBLICATION_RELEASED.store(false, Ordering::Release);
-    }
-
-    pub async fn wait_actor_publication_barrier() {
-        while !ACTOR_PUBLICATION_REACHED.load(Ordering::Acquire) {
-            ACTOR_PUBLICATION_NOTIFY.notified().await;
-        }
-    }
-
-    pub async fn before_actor_publication() {
-        if !ACTOR_PUBLICATION_BARRIER_ACTIVE.load(Ordering::Acquire) {
-            return;
-        }
-        ACTOR_PUBLICATION_REACHED.store(true, Ordering::Release);
-        ACTOR_PUBLICATION_NOTIFY.notify_waiters();
-        while !ACTOR_PUBLICATION_RELEASED.load(Ordering::Acquire) {
-            ACTOR_RELEASE_NOTIFY.notified().await;
-        }
-    }
-
-    pub fn release_actor_publication_barrier() {
-        ACTOR_PUBLICATION_BARRIER_ACTIVE.store(false, Ordering::Release);
-        ACTOR_PUBLICATION_RELEASED.store(true, Ordering::Release);
-        ACTOR_RELEASE_NOTIFY.notify_waiters();
+    fn from_bits(bits: u32) -> Self {
+        Self(bits)
     }
 }
 
-/// A facet mutation presented at the actor-signing boundary.
-///
-/// `claim` is the actual Core logical claim: its six fields are canonicalized by
-/// `FacetClaim::signing_bytes`. `operation` is the current capability context;
-/// it is checked against the live authority registry before signing, but is not
-/// part of the actor signature. The claim itself supplies the authenticated
-/// mutation operation and target (document, facet key, UUID, value, and
-/// predecessors), so there is no second caller-selected target to drift from.
-/// Actor attribution proves the historical facet claim, not a current capability
-/// or a node delegation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ActorClaim {
-    pub operation: Grant,
-    pub claim: FacetClaim,
+impl std::ops::BitOr for Rights {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
 }
 
-impl ActorClaim {
-    fn validate(&self) -> Result<(), AuthorityError> {
-        if !matches!(self.operation, Grant::WriteDrawer(_)) {
-            return Err(AuthorityError::Unauthorized);
-        }
-        // Validate the actual Core mutation, including Set/Remove and its CID,
-        // before opening the secret handle. This prevents the authority boundary
-        // from signing a malformed or ambiguous mutation context.
-        self.claim.signing_bytes()?;
-        Ok(())
-    }
+#[derive(Clone, Debug)]
+pub(super) struct CapRecord {
+    object: String,
+    rights: Rights,
+    parent: Option<CapId>,
+    root_actor: Option<ActorPublicKey>,
+    retracted: bool,
+}
+
+/// A subsystem actor as issued by the registry.
+#[derive(Clone, Debug)]
+pub struct Actor {
+    pub uuid: Uuid7,
+    pub url: String,
+    pub public_key: ActorPublicKey,
+    /// Node-signed attribution certificate bytes for dmeta `ActorMetadata.delegation`.
+    pub certificate: Bytes,
+    pub cap: CapId,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VerifiedCap {
+    pub cap: CapId,
+    pub root_actor: Option<ActorPublicKey>,
+}
+
+pub(super) struct ActorProvisionIntent {
+    intent_id: [u8; 16],
+    key_name: String,
+    public_key: Option<ActorPublicKey>,
+    preexisting: bool,
+    cleanup_pending: bool,
 }
 
 #[derive(Debug, Error)]
 pub enum AuthorityError {
-    #[error("authority token is invalid, unknown, revoked, or has been tampered with")]
-    InvalidToken,
+    #[error("capability is invalid, unknown, retracted, or has been tampered with")]
+    InvalidCap,
     #[error("capability does not authorize this operation")]
     Unauthorized,
-    #[error("a delegated grant is not an attenuation of its parent")]
+    #[error("a minted capability is not an attenuation of its parent")]
     Escalation,
-    #[error("non-operator actors may only delegate through an explicit drawer delegation")]
-    LateralDelegation,
-    #[error("only the operator root capability may perform this operation")]
-    OperatorOnly,
-    #[error("the operator and node identities are reserved and cannot be delegated")]
-    ReservedIdentity,
-    #[error("an actor cannot delegate to itself")]
-    SelfDelegation,
+    #[error("actor path does not extend the minting subsystem's path")]
+    InvalidActorPath,
     #[error("actor has no signing key registered with AuthorityRepo")]
     ActorSignerMissing,
     #[error("persisted authority state is corrupt: {0}")]
@@ -266,673 +129,24 @@ pub enum AuthorityError {
     CommitUnknown(String),
     #[error("actor provisioning requires reconciliation for {key_name}: {reason}")]
     ProvisioningUnresolved { key_name: String, reason: String },
-    #[error("capability encoding failed: {0}")]
-    Encoding(#[from] serde_json::Error),
     #[error("facet claim is invalid: {0}")]
     FacetClaim(#[from] big_cabinet_core::dmeta::DmetaError),
+    #[error("attribution certificate is invalid: {0}")]
+    Attribution(#[from] big_cabinet_core::dmeta::AttributionError),
 }
 
-#[derive(Clone)]
-struct AuthorityStateStore {
-    pool: SqlitePool,
+fn fixed_bytes<const N: usize>(bytes: Vec<u8>) -> Result<[u8; N], AuthorityError> {
+    bytes.try_into().map_err(|_| {
+        AuthorityError::StateCorrupt(format!("authority key has wrong width; expected {N} bytes"))
+    })
 }
 
-struct ActorProvisionIntent {
-    intent_id: [u8; 16],
-    key_name: String,
-    public_key: Option<ActorPublicKey>,
-    preexisting: bool,
-    cleanup_pending: bool,
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-impl AuthorityStateStore {
-    async fn boot(path: impl AsRef<Path>) -> Result<Self, AuthorityError> {
-        let path = path.as_ref();
-        if path != Path::new(":memory:")
-            && let Some(parent) = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true);
-        let pool = SqlitePoolOptions::new()
-            .max_connections(4)
-            .connect_with(options)
-            .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS authority_lock (
-                 lock_id INTEGER PRIMARY KEY CHECK (lock_id = 1)
-               , lock_nonce INTEGER NOT NULL
-             )",
-        )
-        .execute(&pool)
-        .await?;
-        sqlx::query("INSERT OR IGNORE INTO authority_lock (lock_id, lock_nonce) VALUES (1, 0)")
-            .execute(&pool)
-            .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS authority_root (
-                 root_id INTEGER PRIMARY KEY CHECK (root_id = 1)
-               , token_json BLOB NOT NULL
-             )",
-        )
-        .execute(&pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS authority_actors (
-                 public_key BLOB PRIMARY KEY
-               , key_name TEXT NOT NULL UNIQUE
-             )",
-        )
-        .execute(&pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS authority_actor_intents (
-                 intent_id BLOB PRIMARY KEY
-               , key_name TEXT NOT NULL UNIQUE
-               , public_key BLOB
-               , preexisting INTEGER NOT NULL CHECK (preexisting IN (0, 1))
-               , cleanup_pending INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_pending IN (0, 1))
-             )",
-        )
-        .execute(&pool)
-        .await?;
-        // Schema migration itself participates in the same SQLite write
-        // reservation as authority operations. Two old-schema owners can
-        // therefore not both observe a missing column and race ALTER TABLE.
-        let mut schema_transaction = pool.begin().await?;
-        sqlx::query("UPDATE authority_lock SET lock_nonce = lock_nonce + 1 WHERE lock_id = 1")
-            .execute(&mut *schema_transaction)
-            .await?;
-        let actor_intent_columns = sqlx::query("PRAGMA table_info(authority_actor_intents)")
-            .fetch_all(&mut *schema_transaction)
-            .await?;
-        if !actor_intent_columns.iter().any(|row| {
-            row.try_get::<String, _>("name")
-                .is_ok_and(|name| name == "cleanup_pending")
-        }) {
-            sqlx::query(
-                "ALTER TABLE authority_actor_intents
-                 ADD COLUMN cleanup_pending INTEGER NOT NULL DEFAULT 0
-                    CHECK (cleanup_pending IN (0, 1))",
-            )
-            .execute(&mut *schema_transaction)
-            .await?;
-        }
-        if let Err(error) = schema_transaction.commit().await {
-            return Err(AuthorityError::CommitUnknown(format!(
-                "authority intent schema migration commit outcome is unknown: {error}"
-            )));
-        }
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS authority_boot_intents (
-                 key_name TEXT PRIMARY KEY
-               , public_key BLOB
-               , preexisting INTEGER NOT NULL CHECK (preexisting IN (0, 1))
-             )",
-        )
-        .execute(&pool)
-        .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS authority_tokens (
-                 token_id BLOB PRIMARY KEY
-               , subject BLOB NOT NULL
-               , parent_id BLOB
-               , root INTEGER NOT NULL
-               , token_json BLOB NOT NULL
-               , payload_digest BLOB NOT NULL
-             )",
-        )
-        .execute(&pool)
-        .await?;
-        // Subject uniqueness is an active-policy rule because a revoked actor
-        // may be reissued a fresh capability. The serialized delegate
-        // transaction enforces that rule without an index that cannot see the
-        // separate revocation table.
-        sqlx::query("DROP INDEX IF EXISTS authority_tokens_subject")
-            .execute(&pool)
-            .await?;
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS authority_revocations (
-                 token_id BLOB PRIMARY KEY
-             )",
-        )
-        .execute(&pool)
-        .await?;
-        Ok(Self { pool })
-    }
-
-    async fn begin_serialized(&self) -> Result<Transaction<'_, Sqlite>, AuthorityError> {
-        #[cfg(test)]
-        provisioning_test_faults::notify_serialized_begin_probe();
-        let mut transaction = self.pool.begin().await?;
-        // The first write takes SQLite's database-wide write reservation. Every
-        // current issuance/signing/revocation operation holds it until commit,
-        // establishing one cross-process linearization point.
-        sqlx::query("UPDATE authority_lock SET lock_nonce = lock_nonce + 1 WHERE lock_id = 1")
-            .execute(&mut *transaction)
-            .await?;
-        Ok(transaction)
-    }
-
-    async fn root_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-    ) -> Result<Option<CapabilityToken>, AuthorityError> {
-        let row = sqlx::query("SELECT token_json FROM authority_root WHERE root_id = 1")
-            .fetch_optional(&mut **transaction)
-            .await?;
-        row.map(|row| {
-            let bytes: Vec<u8> = row.try_get("token_json")?;
-            serde_json::from_slice(&bytes)
-                .map_err(|error| AuthorityError::StateCorrupt(error.to_string()))
-        })
-        .transpose()
-    }
-
-    async fn install_root_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        candidate: &CapabilityToken,
-    ) -> Result<CapabilityToken, AuthorityError> {
-        #[cfg(test)]
-        if provisioning_test_faults::take_root_install_failure() {
-            return Err(AuthorityError::Storage(sqlx::Error::Protocol(
-                "injected root publication failure".into(),
-            )));
-        }
-        let bytes = serde_json::to_vec(candidate)?;
-        sqlx::query(
-            "INSERT OR IGNORE INTO authority_root (root_id, token_json)
-             VALUES (1, ?1)",
-        )
-        .bind(bytes)
-        .execute(&mut **transaction)
-        .await?;
-        let row = sqlx::query("SELECT token_json FROM authority_root WHERE root_id = 1")
-            .fetch_one(&mut **transaction)
-            .await?;
-        let bytes: Vec<u8> = row.try_get("token_json")?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| AuthorityError::StateCorrupt(error.to_string()))
-    }
-
-    async fn actor_key_name_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        public_key: &ActorPublicKey,
-    ) -> Result<Option<String>, AuthorityError> {
-        let row = sqlx::query("SELECT key_name FROM authority_actors WHERE public_key = ?1")
-            .bind(public_key.as_slice())
-            .fetch_optional(&mut **transaction)
-            .await?;
-        row.map(|row| row.try_get("key_name"))
-            .transpose()
-            .map_err(Into::into)
-    }
-
-    async fn create_boot_intents(
-        &self,
-        node_preexisting: bool,
-        operator_preexisting: bool,
-    ) -> Result<(), AuthorityError> {
-        let mut transaction = self.begin_serialized().await?;
-        for (key_name, preexisting) in [
-            (NODE_KEY, node_preexisting),
-            (OPERATOR_KEY, operator_preexisting),
-        ] {
-            sqlx::query(
-                "INSERT OR IGNORE INTO authority_boot_intents
-                 (key_name, public_key, preexisting) VALUES (?1, NULL, ?2)",
-            )
-            .bind(key_name)
-            .bind(i64::from(preexisting))
-            .execute(&mut *transaction)
-            .await?;
-        }
-        if let Err(error) = transaction.commit().await {
-            return Err(AuthorityError::CommitUnknown(format!(
-                "boot provisioning intent commit outcome is unknown: {error}"
-            )));
-        }
-        Ok(())
-    }
-
-    async fn insert_boot_intent_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        key_name: &str,
-        preexisting: bool,
-    ) -> Result<(), AuthorityError> {
-        sqlx::query(
-            "INSERT OR IGNORE INTO authority_boot_intents
-             (key_name, public_key, preexisting) VALUES (?1, NULL, ?2)",
-        )
-        .bind(key_name)
-        .bind(i64::from(preexisting))
-        .execute(&mut **transaction)
-        .await?;
-        Ok(())
-    }
-
-    async fn boot_intent_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        key_name: &str,
-    ) -> Result<Option<(Option<ActorPublicKey>, bool)>, AuthorityError> {
-        let row = sqlx::query(
-            "SELECT public_key, preexisting FROM authority_boot_intents
-              WHERE key_name = ?1",
-        )
-        .bind(key_name)
-        .fetch_optional(&mut **transaction)
-        .await?;
-        row.map(|row| {
-            let public_key = row
-                .try_get::<Option<Vec<u8>>, _>("public_key")?
-                .map(fixed_bytes)
-                .transpose()?;
-            let preexisting: i64 = row.try_get("preexisting")?;
-            if preexisting != 0 && preexisting != 1 {
-                return Err(AuthorityError::StateCorrupt(
-                    "boot provisioning intent has invalid preexisting flag".into(),
-                ));
-            }
-            Ok((public_key, preexisting != 0))
-        })
-        .transpose()
-    }
-
-    async fn reconcile_boot_intents(
-        &self,
-        store: &Arc<SecretStore>,
-        transaction: &mut Transaction<'_, Sqlite>,
-    ) -> Result<(), AuthorityError> {
-        for key_name in [NODE_KEY, OPERATOR_KEY] {
-            let Some((expected, _preexisting)) =
-                Self::boot_intent_tx(transaction, key_name).await?
-            else {
-                continue;
-            };
-            let signer =
-                match SigningKeyHandle::open(Arc::clone(store), NODE_SERVICE, key_name).await {
-                    Ok(signer) => signer,
-                    Err(SecretsError::Missing(_)) => {
-                        // Absence is not proof that the creator stopped. Retain
-                        // the durable intent for a live or future owner.
-                        continue;
-                    }
-                    Err(error) => {
-                        return Err(AuthorityError::ProvisioningUnresolved {
-                            key_name: key_name.into(),
-                            reason: format!("boot key read outcome is unknown: {error}"),
-                        });
-                    }
-                };
-            let public_key = signer.public_key().await.map_err(|error| {
-                AuthorityError::ProvisioningUnresolved {
-                    key_name: key_name.into(),
-                    reason: format!("boot public-key read outcome is unknown: {error}"),
-                }
-            })?;
-            if expected.is_some_and(|expected| expected != public_key) {
-                return Err(AuthorityError::ProvisioningUnresolved {
-                    key_name: key_name.into(),
-                    reason: "boot key disagrees with durable intent".into(),
-                });
-            }
-            // A fixed identity is canonical and may be adopted by the next
-            // serialized boot after exact public-key reading; no key is deleted.
-            sqlx::query("DELETE FROM authority_boot_intents WHERE key_name = ?1")
-                .bind(key_name)
-                .execute(&mut **transaction)
-                .await
-                .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                    key_name: key_name.into(),
-                    reason: format!("boot intent reconciliation is unresolved: {error}"),
-                })?;
-        }
-        Ok(())
-    }
-
-    async fn bind_boot_intent_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        key_name: &str,
-        public_key: &ActorPublicKey,
-    ) -> Result<(), AuthorityError> {
-        let affected = sqlx::query(
-            "UPDATE authority_boot_intents SET public_key = ?1
-              WHERE key_name = ?2 AND public_key IS NULL",
-        )
-        .bind(public_key.as_slice())
-        .bind(key_name)
-        .execute(&mut **transaction)
-        .await?
-        .rows_affected();
-        if affected != 1 {
-            return Err(AuthorityError::StateCorrupt(
-                "boot intent disappeared or was rebound".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn create_actor_intent(
-        &self,
-        key_name: &str,
-        preexisting: bool,
-    ) -> Result<[u8; 16], AuthorityError> {
-        let mut intent_id = [0_u8; 16];
-        rand::rng().fill_bytes(&mut intent_id);
-        let mut transaction = self.begin_serialized().await?;
-        sqlx::query(
-            "INSERT INTO authority_actor_intents
-             (intent_id, key_name, public_key, preexisting, cleanup_pending)
-             VALUES (?1, ?2, NULL, ?3, 0)",
-        )
-        .bind(intent_id.as_slice())
-        .bind(key_name)
-        .bind(i64::from(preexisting))
-        .execute(&mut *transaction)
-        .await?;
-        if let Err(error) = transaction.commit().await {
-            return Err(AuthorityError::CommitUnknown(format!(
-                "actor provisioning intent commit outcome is unknown for {key_name}: {error}"
-            )));
-        }
-        Ok(intent_id)
-    }
-
-    async fn actor_intent_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        intent_id: &[u8; 16],
-        key_name: &str,
-    ) -> Result<Option<ActorProvisionIntent>, AuthorityError> {
-        let row = sqlx::query(
-            "SELECT intent_id, key_name, public_key, preexisting, cleanup_pending
-               FROM authority_actor_intents
-              WHERE intent_id = ?1 AND key_name = ?2",
-        )
-        .bind(intent_id.as_slice())
-        .bind(key_name)
-        .fetch_optional(&mut **transaction)
-        .await?;
-        row.map(|row| {
-            let public_key = row
-                .try_get::<Option<Vec<u8>>, _>("public_key")?
-                .map(fixed_bytes)
-                .transpose()?;
-            let preexisting: i64 = row.try_get("preexisting")?;
-            if preexisting != 0 && preexisting != 1 {
-                return Err(AuthorityError::StateCorrupt(
-                    "actor provisioning intent has invalid preexisting flag".into(),
-                ));
-            }
-            let cleanup_pending: i64 = row.try_get("cleanup_pending")?;
-            if cleanup_pending != 0 && cleanup_pending != 1 {
-                return Err(AuthorityError::StateCorrupt(
-                    "actor provisioning intent has invalid cleanup phase".into(),
-                ));
-            }
-            Ok(ActorProvisionIntent {
-                intent_id: fixed_bytes(row.try_get("intent_id")?)?,
-                key_name: row.try_get("key_name")?,
-                public_key,
-                preexisting: preexisting != 0,
-                cleanup_pending: cleanup_pending != 0,
-            })
-        })
-        .transpose()
-    }
-
-    async fn actor_intents_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-    ) -> Result<Vec<ActorProvisionIntent>, AuthorityError> {
-        let rows = sqlx::query(
-            "SELECT intent_id, key_name, public_key, preexisting, cleanup_pending
-               FROM authority_actor_intents ORDER BY key_name",
-        )
-        .fetch_all(&mut **transaction)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                let public_key = row
-                    .try_get::<Option<Vec<u8>>, _>("public_key")?
-                    .map(fixed_bytes)
-                    .transpose()?;
-                let preexisting: i64 = row.try_get("preexisting")?;
-                if preexisting != 0 && preexisting != 1 {
-                    return Err(AuthorityError::StateCorrupt(
-                        "actor provisioning intent has invalid preexisting flag".into(),
-                    ));
-                }
-                let cleanup_pending: i64 = row.try_get("cleanup_pending")?;
-                if cleanup_pending != 0 && cleanup_pending != 1 {
-                    return Err(AuthorityError::StateCorrupt(
-                        "actor provisioning intent has invalid cleanup phase".into(),
-                    ));
-                }
-                Ok(ActorProvisionIntent {
-                    intent_id: fixed_bytes(row.try_get("intent_id")?)?,
-                    key_name: row.try_get("key_name")?,
-                    public_key,
-                    preexisting: preexisting != 0,
-                    cleanup_pending: cleanup_pending != 0,
-                })
-            })
-            .collect()
-    }
-
-    async fn set_actor_intent_public_key_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        intent: &ActorProvisionIntent,
-        public_key: &ActorPublicKey,
-    ) -> Result<(), AuthorityError> {
-        #[cfg(test)]
-        if provisioning_test_faults::take_actor_intent_binding_failure() {
-            return Err(AuthorityError::Storage(sqlx::Error::Protocol(
-                "injected actor intent binding failure".into(),
-            )));
-        }
-        let affected = sqlx::query(
-            "UPDATE authority_actor_intents SET public_key = ?1
-              WHERE intent_id = ?2 AND key_name = ?3 AND public_key IS NULL",
-        )
-        .bind(public_key.as_slice())
-        .bind(intent.intent_id.as_slice())
-        .bind(&intent.key_name)
-        .execute(&mut **transaction)
-        .await?
-        .rows_affected();
-        if affected != 1 {
-            return Err(AuthorityError::StateCorrupt(
-                "actor provisioning intent changed before public-key binding".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn mark_actor_cleanup_pending_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        intent: &ActorProvisionIntent,
-        public_key: &ActorPublicKey,
-    ) -> Result<(), AuthorityError> {
-        let affected = sqlx::query(
-            "UPDATE authority_actor_intents
-                SET public_key = ?1, cleanup_pending = 1
-              WHERE intent_id = ?2 AND key_name = ?3
-                AND cleanup_pending = 0
-                AND (public_key IS NULL OR public_key = ?1)",
-        )
-        .bind(public_key.as_slice())
-        .bind(intent.intent_id.as_slice())
-        .bind(&intent.key_name)
-        .execute(&mut **transaction)
-        .await?
-        .rows_affected();
-        if affected != 1 {
-            return Err(AuthorityError::StateCorrupt(
-                "actor intent could not enter durable cleanup phase".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn insert_actor_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        public_key: &ActorPublicKey,
-        key_name: &str,
-    ) -> Result<(), AuthorityError> {
-        #[cfg(test)]
-        if provisioning_test_faults::take_actor_publication_failure() {
-            return Err(AuthorityError::Storage(sqlx::Error::Protocol(
-                "injected actor publication failure".into(),
-            )));
-        }
-        sqlx::query(
-            "INSERT INTO authority_actors (public_key, key_name)
-             VALUES (?1, ?2)",
-        )
-        .bind(public_key.as_slice())
-        .bind(key_name)
-        .execute(&mut **transaction)
-        .await?;
-        Ok(())
-    }
-
-    async fn actor_binding_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        key_name: &str,
-    ) -> Result<Option<ActorPublicKey>, AuthorityError> {
-        let row = sqlx::query("SELECT public_key FROM authority_actors WHERE key_name = ?1")
-            .bind(key_name)
-            .fetch_optional(&mut **transaction)
-            .await?;
-        row.map(|row| fixed_bytes(row.try_get("public_key")?))
-            .transpose()
-    }
-
-    async fn remove_actor_intent_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        intent: &ActorProvisionIntent,
-    ) -> Result<(), AuthorityError> {
-        #[cfg(test)]
-        if provisioning_test_faults::take_actor_intent_removal_failure() {
-            return Err(AuthorityError::Storage(sqlx::Error::Protocol(
-                "injected actor intent removal failure".into(),
-            )));
-        }
-        sqlx::query(
-            "DELETE FROM authority_actor_intents
-              WHERE intent_id = ?1 AND key_name = ?2",
-        )
-        .bind(intent.intent_id.as_slice())
-        .bind(&intent.key_name)
-        .execute(&mut **transaction)
-        .await?;
-        Ok(())
-    }
-
-    async fn insert_token_tx(
-        &self,
-        transaction: &mut Transaction<'_, Sqlite>,
-        token: &CapabilityToken,
-    ) -> Result<(), AuthorityError> {
-        let token_json = serde_json::to_vec(token)?;
-        let payload_digest = token_digest(token)?;
-        sqlx::query(
-            "INSERT OR IGNORE INTO authority_tokens
-             (token_id, subject, parent_id, root, token_json, payload_digest)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .bind(token.token_id.as_slice())
-        .bind(token.subject.as_slice())
-        .bind(token.parent.map(|parent| parent.to_vec()))
-        .bind(i64::from(token.root))
-        .bind(&token_json)
-        .bind(payload_digest.as_slice())
-        .execute(&mut **transaction)
-        .await?;
-        let Some(row) = sqlx::query(
-            "SELECT subject, parent_id, root, token_json, payload_digest
-             FROM authority_tokens WHERE token_id = ?1",
-        )
-        .bind(token.token_id.as_slice())
-        .fetch_optional(&mut **transaction)
-        .await?
-        else {
-            return Err(AuthorityError::StateCorrupt(
-                "authority token insert disappeared".into(),
-            ));
-        };
-        let subject = fixed_bytes::<32>(row.try_get("subject")?)?;
-        let parent = optional_fixed_bytes::<16>(row.try_get("parent_id")?)?;
-        let root: i64 = row.try_get("root")?;
-        let stored_json: Vec<u8> = row.try_get("token_json")?;
-        let stored_digest: Vec<u8> = row.try_get("payload_digest")?;
-        if subject != token.subject
-            || parent != token.parent
-            || (root != 0) != token.root
-            || stored_json != token_json
-            || stored_digest != payload_digest
-        {
-            return Err(AuthorityError::StateCorrupt(
-                "authority token ID collision or immutable issuance mismatch".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    async fn token_record_tx(
-        transaction: &mut Transaction<'_, Sqlite>,
-        token_id: &TokenId,
-    ) -> Result<Option<(ActorPublicKey, Option<TokenId>, bool)>, AuthorityError> {
-        let row = sqlx::query(
-            "SELECT subject, parent_id, root FROM authority_tokens
-             WHERE token_id = ?1",
-        )
-        .bind(token_id.as_slice())
-        .fetch_optional(&mut **transaction)
-        .await?;
-        row.map(|row| {
-            let subject = fixed_bytes::<32>(row.try_get("subject")?)?;
-            let parent = optional_fixed_bytes::<16>(row.try_get("parent_id")?)?;
-            let root: i64 = row.try_get("root")?;
-            Ok((subject, parent, root != 0))
-        })
-        .transpose()
-    }
-
-    async fn token_is_exact(&self, token: &CapabilityToken) -> Result<bool, AuthorityError> {
-        let row = sqlx::query(
-            "SELECT token_json, payload_digest FROM authority_tokens WHERE token_id = ?1",
-        )
-        .bind(token.token_id.as_slice())
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some(row) = row else {
-            return Ok(false);
-        };
-        let stored_json: Vec<u8> = row.try_get("token_json")?;
-        let stored_digest: Vec<u8> = row.try_get("payload_digest")?;
-        Ok(stored_json == serde_json::to_vec(token)?
-            && stored_digest.as_slice() == token_digest(token)?.as_slice())
-    }
-
-    async fn is_revoked(&self, token_id: &TokenId) -> Result<bool, AuthorityError> {
-        Ok(
-            sqlx::query("SELECT 1 FROM authority_revocations WHERE token_id = ?1")
-                .bind(token_id.as_slice())
-                .fetch_optional(&self.pool)
-                .await?
-                .is_some(),
-        )
-    }
-}
-
-/// The Cabinet actor/capability boundary.
-///
-/// The SQLite state path is the authority owner boundary. Every current
-/// verification queries that store rather than trusting a process-local cache;
-/// private signing keys remain named handles inside `secrets_rs`.
+/// The Cabinet actor/capability boundary. The SQLite path is the owner
+/// boundary; private keys remain named handles inside `secrets_rs`.
 #[derive(Clone)]
 pub struct AuthorityRepo {
     store: Arc<SecretStore>,
@@ -940,234 +154,17 @@ pub struct AuthorityRepo {
     node_signer: SigningKeyHandle,
     node_public_key: ActorPublicKey,
     operator_public_key: ActorPublicKey,
-    root_token_id: TokenId,
+    operator_uuid: Uuid7,
+    root_cap: CapId,
 }
 
 impl AuthorityRepo {
-    async fn reconcile_cleanup_intent(
-        store: &Arc<SecretStore>,
-        transaction: &mut Transaction<'_, Sqlite>,
-        intent: &ActorProvisionIntent,
-    ) -> Result<(), AuthorityError> {
-        let Some(expected) = intent.public_key else {
-            return Err(AuthorityError::ProvisioningUnresolved {
-                key_name: intent.key_name.clone(),
-                reason: "cleanup phase has no exact public-key binding".into(),
-            });
-        };
-        if let Some(binding) = AuthorityStateStore::actor_binding_tx(transaction, &intent.key_name)
-            .await
-            .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                key_name: intent.key_name.clone(),
-                reason: format!("cleanup registry recheck is unresolved: {error}"),
-            })?
-        {
-            if binding != expected {
-                return Err(AuthorityError::ProvisioningUnresolved {
-                    key_name: intent.key_name.clone(),
-                    reason: "cleanup phase found a conflicting registry public key".into(),
-                });
-            }
-            AuthorityStateStore::remove_actor_intent_tx(transaction, intent)
-                .await
-                .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                    key_name: intent.key_name.clone(),
-                    reason: format!("cleanup intent removal is unresolved: {error}"),
-                })?;
-            return Ok(());
-        }
-        let signer =
-            match SigningKeyHandle::open(Arc::clone(store), NODE_SERVICE, &intent.key_name).await {
-                Ok(signer) => signer,
-                Err(SecretsError::Missing(_)) => {
-                    AuthorityStateStore::remove_actor_intent_tx(transaction, intent)
-                        .await
-                        .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                            key_name: intent.key_name.clone(),
-                            reason: format!("cleanup intent removal is unresolved: {error}"),
-                        })?;
-                    return Ok(());
-                }
-                Err(error) => {
-                    return Err(AuthorityError::ProvisioningUnresolved {
-                        key_name: intent.key_name.clone(),
-                        reason: format!("cleanup key read outcome is unknown: {error}"),
-                    });
-                }
-            };
-        let actual =
-            signer
-                .public_key()
-                .await
-                .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                    key_name: intent.key_name.clone(),
-                    reason: format!("cleanup public-key read outcome is unknown: {error}"),
-                })?;
-        if actual != expected {
-            return Err(AuthorityError::ProvisioningUnresolved {
-                key_name: intent.key_name.clone(),
-                reason: "cleanup keyring public key disagrees with exact intent".into(),
-            });
-        }
-        #[cfg(test)]
-        provisioning_test_faults::before_cleanup_delete().await;
-        store
-            .delete_secret(NODE_SERVICE, &intent.key_name)
-            .await
-            .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                key_name: intent.key_name.clone(),
-                reason: format!("cleanup deletion outcome is unresolved: {error}"),
-            })?;
-        #[cfg(test)]
-        provisioning_test_faults::after_cleanup_delete().await;
-        AuthorityStateStore::remove_actor_intent_tx(transaction, intent)
-            .await
-            .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                key_name: intent.key_name.clone(),
-                reason: format!("cleanup intent removal is unresolved: {error}"),
-            })
-    }
-
-    async fn reconcile_actor_intents(
-        store: &Arc<SecretStore>,
-        transaction: &mut Transaction<'_, Sqlite>,
-    ) -> Result<(), AuthorityError> {
-        for intent in AuthorityStateStore::actor_intents_tx(transaction).await? {
-            if intent.cleanup_pending {
-                Self::reconcile_cleanup_intent(store, transaction, &intent).await?;
-                continue;
-            }
-            let binding =
-                AuthorityStateStore::actor_binding_tx(transaction, &intent.key_name).await?;
-            if let Some(binding) = binding {
-                if intent
-                    .public_key
-                    .is_some_and(|expected| expected != binding)
-                {
-                    return Err(AuthorityError::ProvisioningUnresolved {
-                        key_name: intent.key_name,
-                        reason: "registry public key disagrees with provisioning intent".into(),
-                    });
-                }
-                let signer =
-                    match SigningKeyHandle::open(Arc::clone(store), NODE_SERVICE, &intent.key_name)
-                        .await
-                    {
-                        Ok(signer) => signer,
-                        Err(error) => {
-                            return Err(AuthorityError::ProvisioningUnresolved {
-                                key_name: intent.key_name,
-                                reason: format!("registered signer cannot be opened: {error}"),
-                            });
-                        }
-                    };
-                let actual = signer.public_key().await.map_err(|error| {
-                    AuthorityError::ProvisioningUnresolved {
-                        key_name: intent.key_name.clone(),
-                        reason: format!(
-                            "registered signer public-key read outcome is unknown: {error}"
-                        ),
-                    }
-                })?;
-                if actual != binding {
-                    return Err(AuthorityError::ProvisioningUnresolved {
-                        key_name: intent.key_name,
-                        reason: "registered signer public key changed".into(),
-                    });
-                }
-                AuthorityStateStore::remove_actor_intent_tx(transaction, &intent)
-                    .await
-                    .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                        key_name: intent.key_name.clone(),
-                        reason: format!("actor intent removal is unresolved: {error}"),
-                    })?;
-                continue;
-            }
-            let signer =
-                match SigningKeyHandle::open(Arc::clone(store), NODE_SERVICE, &intent.key_name)
-                    .await
-                {
-                    Ok(signer) => signer,
-                    Err(SecretsError::Missing(_)) => continue,
-                    Err(error) => {
-                        return Err(AuthorityError::ProvisioningUnresolved {
-                            key_name: intent.key_name,
-                            reason: format!("key ownership/read outcome is unknown: {error}"),
-                        });
-                    }
-                };
-            let public_key = signer.public_key().await.map_err(|error| {
-                AuthorityError::ProvisioningUnresolved {
-                    key_name: intent.key_name.clone(),
-                    reason: format!("public-key read outcome is unknown: {error}"),
-                }
-            })?;
-            if intent.preexisting {
-                return Err(AuthorityError::ProvisioningUnresolved {
-                    key_name: intent.key_name,
-                    reason: "pre-existing key has no exact actor registry binding".into(),
-                });
-            }
-            if intent
-                .public_key
-                .is_some_and(|expected| expected != public_key)
-            {
-                return Err(AuthorityError::ProvisioningUnresolved {
-                    key_name: intent.key_name,
-                    reason: "keyring public key disagrees with provisioning intent".into(),
-                });
-            }
-            if intent.public_key.is_none() {
-                AuthorityStateStore::set_actor_intent_public_key_tx(
-                    transaction,
-                    &intent,
-                    &public_key,
-                )
-                .await
-                .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                    key_name: intent.key_name.clone(),
-                    reason: format!("recovered actor intent binding is unresolved: {error}"),
-                })?;
-            }
-            AuthorityStateStore::insert_actor_tx(transaction, &public_key, &intent.key_name)
-                .await
-                .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                    key_name: intent.key_name.clone(),
-                    reason: format!("actor registry publication is unresolved: {error}"),
-                })?;
-            AuthorityStateStore::remove_actor_intent_tx(transaction, &intent)
-                .await
-                .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                    key_name: intent.key_name.clone(),
-                    reason: format!("actor intent removal is unresolved: {error}"),
-                })?;
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    async fn reconcile_pending(&self) -> Result<(), AuthorityError> {
-        let mut transaction = self.state.begin_serialized().await?;
-        Self::reconcile_actor_intents(&self.store, &mut transaction).await?;
-        if let Err(error) = transaction.commit().await {
-            return Err(AuthorityError::CommitUnknown(format!(
-                "pending actor reconciliation commit outcome is unknown: {error}"
-            )));
-        }
-        Ok(())
-    }
-
-    /// Boot against a durable authority state path and return the stable
-    /// operator root capability. Multiple handles/processes may open the same
-    /// path; current authorization is read from the shared SQLite owner.
+    /// Boot against a durable state path; returns the repo and the operator root cap ("is operator").
     pub async fn boot(
         store: Arc<SecretStore>,
         state_path: impl AsRef<Path>,
-    ) -> Result<(Self, CapabilityToken), AuthorityError> {
+    ) -> Result<(Self, CapId), AuthorityError> {
         let state = AuthorityStateStore::boot(state_path).await?;
-        // First reconcile only durable work from earlier owners. This lock is
-        // committed before preparing this boot's own intents, so a creator that
-        // loses the prepare/reacquisition race must revalidate before key use.
         let mut reconciliation = state.begin_serialized().await?;
         Self::reconcile_actor_intents(&store, &mut reconciliation).await?;
         state
@@ -1301,50 +298,70 @@ impl AuthorityRepo {
                 reason: format!("operator boot intent binding is unresolved: {error}"),
             })?;
         }
-        let root = if let Some(root) =
-            AuthorityStateStore::root_tx(&mut bootstrap)
-                .await
-                .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                    key_name: NODE_KEY.into(),
-                    reason: format!("root read outcome is unresolved: {error}"),
-                })? {
-            validate_root(&root, &node_public_key, &operator_public_key)?;
-            root
+        let operator_signer = operator_signer.bind_public_key(operator_public_key);
+
+        // Operator actor record + root cap, created on first boot.
+        let existing =
+            AuthorityStateStore::actor_by_key_tx(&mut bootstrap, &operator_public_key).await?;
+        let _existing_is_none = existing.is_none();
+        let prior_root = AuthorityStateStore::root_cap_tx(&mut bootstrap).await?;
+        let (operator_uuid, root_cap) = if let Some(record) = existing
+            && let Some(uuid_text) = record.uuid.clone()
+            && let Some((cap_id, stored_uuid)) = prior_root
+            && stored_uuid == uuid_text
+        {
+            let uuid = uuid_text
+                .parse::<uuid::Uuid>()
+                .map_err(|_| AuthorityError::StateCorrupt("operator uuid".into()))?;
+            (Uuid7::try_from(uuid)?, cap_id)
         } else {
-            let candidate = sign_token(
+            let operator_uuid = Uuid7::new();
+            let url = actor::actor_url(&node_public_key, OPERATOR_PATH);
+            let cert = actor::issue_certificate(
                 &node_signer,
-                node_public_key,
-                operator_public_key,
-                root_grants(),
-                None,
-                true,
+                &node_public_key,
+                operator_uuid,
+                &operator_public_key,
+                &url,
             )
             .await?;
-            let root = AuthorityStateStore::install_root_tx(&mut bootstrap, &candidate)
-                .await
-                .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                    key_name: NODE_KEY.into(),
-                    reason: format!("root publication is unresolved: {error}"),
-                })?;
-            validate_root(&root, &node_public_key, &operator_public_key)?;
-            root
+            {
+                let _aff = sqlx::query(
+                    "INSERT OR IGNORE INTO authority_actors (public_key, key_name) VALUES (?1, ?2)",
+                )
+                .bind(operator_public_key.as_slice())
+                .bind(OPERATOR_KEY)
+                .execute(&mut *bootstrap)
+                .await?;
+            }
+            AuthorityStateStore::set_actor_binding_tx(
+                &mut bootstrap,
+                &operator_public_key,
+                &operator_uuid.to_string(),
+                &url,
+                None,
+                cert.as_slice(),
+            )
+            .await?;
+            let root_cap = cap::new_cap_id();
+            AuthorityStateStore::insert_cap_tx(
+                &mut bootstrap,
+                &root_cap,
+                "is operator",
+                Rights::all(),
+                None,
+                Some(&operator_public_key),
+            )
+            .await?;
+            AuthorityStateStore::install_root_cap_tx(
+                &mut bootstrap,
+                &root_cap,
+                &operator_uuid.to_string(),
+            )
+            .await?;
+            (operator_uuid, root_cap)
         };
-        if AuthorityStateStore::token_record_tx(&mut bootstrap, &root.token_id)
-            .await
-            .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                key_name: NODE_KEY.into(),
-                reason: format!("root token read outcome is unresolved: {error}"),
-            })?
-            .is_none()
-        {
-            state
-                .insert_token_tx(&mut bootstrap, &root)
-                .await
-                .map_err(|error| AuthorityError::ProvisioningUnresolved {
-                    key_name: NODE_KEY.into(),
-                    reason: format!("root token publication is unresolved: {error}"),
-                })?;
-        }
+        let _unused = operator_signer;
         sqlx::query("DELETE FROM authority_boot_intents WHERE key_name IN (?1, ?2)")
             .bind(NODE_KEY)
             .bind(OPERATOR_KEY)
@@ -1356,8 +373,7 @@ impl AuthorityRepo {
             })?;
         if let Err(error) = bootstrap.commit().await {
             return Err(AuthorityError::CommitUnknown(format!(
-                "boot initialization for root {}: {error}",
-                hex(&root.token_id)
+                "boot initialization: {error}"
             )));
         }
         let repo = Self {
@@ -1366,9 +382,10 @@ impl AuthorityRepo {
             node_signer,
             node_public_key,
             operator_public_key,
-            root_token_id: root.token_id,
+            operator_uuid,
+            root_cap,
         };
-        Ok((repo, root))
+        Ok((repo, root_cap))
     }
 
     pub fn node_public_key(&self) -> ActorPublicKey {
@@ -1379,13 +396,103 @@ impl AuthorityRepo {
         self.operator_public_key
     }
 
-    /// Create and durably register an actor key. The private key remains in
-    /// `secrets_rs`; only its public identity crosses this API.
-    ///
-    /// The caller owns cancellation. A durable provisioning intent is published
-    /// before key creation, and unfinished intents are reconciled by the next
-    /// serialized owner without deleting another live creator's key.
-    pub async fn create_actor(&self) -> Result<ActorPublicKey, AuthorityError> {
+    pub fn operator_uuid(&self) -> Uuid7 {
+        self.operator_uuid
+    }
+
+    pub fn root_cap(&self) -> CapId {
+        self.root_cap
+    }
+
+    /// Create a persistent subsystem actor under `parent`. Caller supplies the
+    /// child path (e.g. `rt/plugs/ocr` under `rt`); the registry enforces that
+    /// it extends the parent actor's path. Returns the actor binding and its
+    /// "is subsystem" cap.
+    pub async fn create_actor(
+        &self,
+        parent: &CapId,
+        child_path: &str,
+    ) -> Result<Actor, AuthorityError> {
+        let mut transaction = self.state.begin_serialized().await?;
+        let parent_record = cap::verify_chain(&mut transaction, parent).await?;
+        if !parent_record.rights.contains(Rights::MINT_CHILD) {
+            return Err(AuthorityError::Unauthorized);
+        }
+        let Some(parent_key) = cap::effective_root_actor(&mut transaction, parent).await? else {
+            return Err(AuthorityError::Unauthorized);
+        };
+        let parent_actor = AuthorityStateStore::actor_by_key_tx(&mut transaction, &parent_key)
+            .await?
+            .ok_or(AuthorityError::ActorSignerMissing)?;
+        let parent_path = parent_actor
+            .url
+            .as_deref()
+            .and_then(|url| {
+                url.split_once("://").map(|(_, rest)| {
+                    rest.split_once('/')
+                        .map(|(_, path)| path.to_owned())
+                        .unwrap_or_default()
+                })
+            })
+            .unwrap_or_default();
+        // Operator path is the root prefix; subsystem paths live beneath it only
+        // when minted by the operator itself. Other subsystems extend their own.
+        let effective_parent = if parent_actor.key_name == OPERATOR_KEY {
+            String::new()
+        } else {
+            parent_path
+        };
+        actor::check_child_path(&effective_parent, child_path)?;
+        transaction.rollback().await?;
+
+        let public_key = self.provision_actor_key().await?;
+        let actor_uuid = Uuid7::new();
+        let url = actor::actor_url(&self.node_public_key, child_path.trim_matches('/'));
+        let certificate = actor::issue_certificate(
+            &self.node_signer,
+            &self.node_public_key,
+            actor_uuid,
+            &public_key,
+            &url,
+        )
+        .await?;
+
+        let mut transaction = self.state.begin_serialized().await?;
+        let object = format!("is subsystem {}", child_path.trim_matches('/'));
+        let cap_id = cap::new_cap_id();
+        AuthorityStateStore::set_actor_binding_tx(
+            &mut transaction,
+            &public_key,
+            &actor_uuid.to_string(),
+            &url,
+            parent_actor.uuid.as_deref(),
+            certificate.as_slice(),
+        )
+        .await?;
+        AuthorityStateStore::insert_cap_tx(
+            &mut transaction,
+            &cap_id,
+            &object,
+            Rights::USE | Rights::NARROW | Rights::MINT_CHILD,
+            Some(parent),
+            Some(&public_key),
+        )
+        .await?;
+        if let Err(error) = transaction.commit().await {
+            return Err(AuthorityError::CommitUnknown(format!(
+                "actor creation commit: {error}"
+            )));
+        }
+        Ok(Actor {
+            uuid: actor_uuid,
+            url,
+            public_key,
+            certificate,
+            cap: cap_id,
+        })
+    }
+
+    async fn provision_actor_key(&self) -> Result<ActorPublicKey, AuthorityError> {
         let mut name_bytes = [0_u8; 16];
         rand::rng().fill_bytes(&mut name_bytes);
         let key_name = format!("actor-{}", hex(&name_bytes));
@@ -1482,7 +589,7 @@ impl AuthorityRepo {
             })?;
         }
         #[cfg(test)]
-        provisioning_test_faults::before_actor_publication().await;
+        provisioning::provisioning_test_faults::before_actor_publication().await;
         if let Some(binding) =
             AuthorityStateStore::actor_binding_tx(&mut transaction, &key_name).await?
         {
@@ -1624,7 +731,7 @@ impl AuthorityRepo {
                 }
             }
             #[cfg(test)]
-            provisioning_test_faults::before_cleanup_delete().await;
+            provisioning::provisioning_test_faults::before_cleanup_delete().await;
             self.store
                 .delete_secret(NODE_SERVICE, &key_name)
                 .await
@@ -1633,7 +740,7 @@ impl AuthorityRepo {
                     reason: format!("exact-key cleanup failed: {error}"),
                 })?;
             #[cfg(test)]
-            provisioning_test_faults::after_cleanup_delete().await;
+            provisioning::provisioning_test_faults::after_cleanup_delete().await;
             AuthorityStateStore::remove_actor_intent_tx(&mut finish, &current)
                 .await
                 .map_err(|error| AuthorityError::ProvisioningUnresolved {
@@ -1655,7 +762,7 @@ impl AuthorityRepo {
             })?;
         let commit = transaction.commit().await;
         #[cfg(test)]
-        if provisioning_test_faults::take_actor_commit_unknown() {
+        if provisioning::provisioning_test_faults::take_actor_commit_unknown() {
             return match commit {
                 Ok(()) => Err(AuthorityError::CommitUnknown(format!(
                     "injected actor {key_name} publication commit outcome is unknown"
@@ -1673,2027 +780,207 @@ impl AuthorityRepo {
         }
     }
 
-    /// Verify a token for a new operation, including current revocation and
-    /// its persisted ancestor chain. This never reloads the whole state.
-    pub async fn verify(&self, token: &CapabilityToken) -> Result<(), AuthorityError> {
+    /// Mint a child cap. The domain decides that `object` is narrower than the
+    /// parent's object; this only enforces the mechanic: parent allows minting
+    /// or narrowing, and rights only shrink.
+    pub async fn mint(
+        &self,
+        parent: &CapId,
+        object: &str,
+        rights: Rights,
+    ) -> Result<CapId, AuthorityError> {
+        let mut transaction = self.state.begin_serialized().await?;
+        let parent_record = cap::verify_chain(&mut transaction, parent).await?;
+        if !parent_record
+            .rights
+            .intersects(Rights::MINT_CHILD | Rights::NARROW)
+        {
+            return Err(AuthorityError::Unauthorized);
+        }
+        cap::check_subset(rights, parent_record.rights)?;
+        let root_actor = cap::effective_root_actor(&mut transaction, parent).await?;
+        let cap_id = cap::new_cap_id();
+        AuthorityStateStore::insert_cap_tx(
+            &mut transaction,
+            &cap_id,
+            object,
+            rights,
+            Some(parent),
+            root_actor.as_ref(),
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| AuthorityError::CommitUnknown(format!("mint commit: {error}")))?;
+        Ok(cap_id)
+    }
+
+    /// Check a presented cap against the table: issued here, unretracted, and
+    /// every chain step narrowed or held.
+    pub async fn verify_issued(&self, cap_id: &CapId) -> Result<VerifiedCap, AuthorityError> {
         let mut transaction = self.state.pool.begin().await?;
-        let result = self.verify_in(&mut transaction, token).await;
+        let result = async {
+            let record = cap::verify_chain(&mut transaction, cap_id).await?;
+            let root_actor = cap::effective_root_actor(&mut transaction, cap_id).await?;
+            let _unused = record;
+            Ok::<_, AuthorityError>(VerifiedCap {
+                cap: *cap_id,
+                root_actor,
+            })
+        }
+        .await;
         transaction.rollback().await?;
         result
     }
 
-    async fn verify_in(
-        &self,
-        transaction: &mut Transaction<'_, Sqlite>,
-        token: &CapabilityToken,
-    ) -> Result<(), AuthorityError> {
-        token.verify(&self.node_public_key)?;
-        let rows = sqlx::query(
-            "WITH RECURSIVE chain(depth, token_id, path, cycle) AS (
-                 SELECT 0, token_id, ',' || hex(token_id) || ',', 0
-                   FROM authority_tokens WHERE token_id = ?1
-                 UNION ALL
-                 SELECT chain.depth + 1
-                      , authority_tokens.parent_id
-                      , chain.path || hex(authority_tokens.parent_id) || ','
-                      , CASE WHEN instr(chain.path, ',' || hex(authority_tokens.parent_id) || ',') > 0
-                             THEN 1 ELSE 0 END
-                   FROM chain
-                   JOIN authority_tokens ON authority_tokens.token_id = chain.token_id
-                  WHERE authority_tokens.parent_id IS NOT NULL
-                    AND chain.cycle = 0
-             )
-             SELECT chain.depth, chain.token_id, chain.cycle
-                  , authority_tokens.subject
-                  , authority_tokens.parent_id
-                  , authority_tokens.root
-                  , authority_revocations.token_id AS revoked
-                  , authority_tokens.token_json
-                  , authority_tokens.payload_digest
-               FROM chain
-               JOIN authority_tokens ON authority_tokens.token_id = chain.token_id
-               LEFT JOIN authority_revocations
-                 ON authority_revocations.token_id = chain.token_id
-              ORDER BY chain.depth",
-        )
-        .bind(token.token_id.as_slice())
-        .fetch_all(&mut **transaction)
-        .await?;
-        if rows.is_empty() {
-            return Err(AuthorityError::InvalidToken);
-        }
-        let supplied_json = serde_json::to_vec(token)?;
-        let supplied_digest = token_digest(token)?;
-        let mut ids = Vec::with_capacity(rows.len());
-        let mut parents = Vec::with_capacity(rows.len());
-        for (index, row) in rows.iter().enumerate() {
-            let id = fixed_bytes::<16>(row.try_get("token_id")?)?;
-            let cycle: i64 = row.try_get("cycle")?;
-            if cycle != 0 || row.try_get::<Option<Vec<u8>>, _>("revoked")?.is_some() {
-                return Err(AuthorityError::InvalidToken);
-            }
-            let sql_subject = fixed_bytes::<32>(row.try_get("subject")?)?;
-            let sql_parent = optional_fixed_bytes::<16>(row.try_get("parent_id")?)?;
-            let sql_root: i64 = row.try_get("root")?;
-            if sql_root != 0 && sql_root != 1 {
-                return Err(AuthorityError::StateCorrupt(
-                    "authority token root flag is not boolean".into(),
-                ));
-            }
-            let stored_json: Vec<u8> = row.try_get("token_json")?;
-            let stored_digest: Vec<u8> = row.try_get("payload_digest")?;
-            let persisted: CapabilityToken =
-                serde_json::from_slice(&stored_json).map_err(|error| {
-                    AuthorityError::StateCorrupt(format!(
-                        "persisted authority token is invalid: {error}"
-                    ))
-                })?;
-            // SQL parent/subject/root columns are denormalized indexes, not
-            // authority. Authenticate the immutable token JSON for every row
-            // before trusting those columns to describe the chain.
-            if persisted.token_id != id
-                || persisted.subject != sql_subject
-                || persisted.parent != sql_parent
-                || persisted.root != (sql_root != 0)
-                || stored_digest.as_slice() != token_digest(&persisted)?.as_slice()
-                || persisted.verify(&self.node_public_key).is_err()
-            {
-                return Err(AuthorityError::StateCorrupt(
-                    "persisted authority token disagrees with authenticated issuance".into(),
-                ));
-            }
-            if index == 0
-                && (id != token.token_id
-                    || stored_json != supplied_json
-                    || stored_digest != supplied_digest)
-            {
-                return Err(AuthorityError::InvalidToken);
-            }
-            ids.push(id);
-            parents.push(sql_parent);
-        }
-        for (index, parent) in parents.iter().enumerate() {
-            if let Some(parent) = *parent {
-                if ids.get(index + 1).copied() != Some(parent) {
-                    return Err(AuthorityError::InvalidToken);
-                }
-            } else if index + 1 != ids.len() {
-                return Err(AuthorityError::InvalidToken);
-            }
-        }
+    pub async fn retract(&self, cap_id: &CapId) -> Result<(), AuthorityError> {
+        let mut transaction = self.state.begin_serialized().await?;
+        AuthorityStateStore::retract_cap_tx(&mut transaction, cap_id).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| AuthorityError::CommitUnknown(format!("retract commit: {error}")))?;
         Ok(())
     }
 
-    /// Issue an explicitly downward capability to a registered actor.
-    pub async fn delegate(
-        &self,
-        parent: &CapabilityToken,
-        subject: ActorPublicKey,
-        grants: Vec<Grant>,
-    ) -> Result<CapabilityToken, AuthorityError> {
-        let mut transaction = self.state.begin_serialized().await?;
-        self.verify_in(&mut transaction, parent).await?;
-        if subject == self.node_public_key || subject == self.operator_public_key {
-            return Err(AuthorityError::ReservedIdentity);
-        }
-        if subject == parent.subject {
-            return Err(AuthorityError::SelfDelegation);
-        }
-        let Some(key_name) =
-            AuthorityStateStore::actor_key_name_tx(&mut transaction, &subject).await?
-        else {
-            return Err(AuthorityError::ActorSignerMissing);
-        };
-        let operator = self.is_operator_root(parent);
-        if !operator
-            && sqlx::query(
-                "SELECT 1
-                   FROM authority_tokens
-                   LEFT JOIN authority_revocations
-                     ON authority_revocations.token_id = authority_tokens.token_id
-                  WHERE authority_tokens.subject = ?1
-                    AND authority_revocations.token_id IS NULL
-                  LIMIT 1",
-            )
-            .bind(subject.as_slice())
-            .fetch_optional(&mut *transaction)
-            .await?
-            .is_some()
-        {
-            return Err(AuthorityError::LateralDelegation);
-        }
-        if !operator {
-            for grant in &grants {
-                if !parent.grants.iter().any(|owned| owned == grant) {
-                    return Err(AuthorityError::Escalation);
-                }
-                let drawer = grant.drawer();
-                let delegated = parent.grants.iter().any(|owned| {
-                    matches!(owned, Grant::Delegate { drawer: owned_drawer, grants } if owned_drawer == drawer && grants.iter().any(|allowed| allowed == grant))
-                });
-                if !delegated {
-                    return Err(AuthorityError::LateralDelegation);
-                }
-            }
-        }
-        let signer =
-            SigningKeyHandle::open(Arc::clone(&self.store), NODE_SERVICE, &key_name).await?;
-        if signer.public_key().await? != subject {
-            return Err(AuthorityError::StateCorrupt(
-                "actor registry signer changed identity".into(),
-            ));
-        }
-        let token = sign_token(
-            &self.node_signer,
-            self.node_public_key,
-            subject,
-            grants,
-            Some(parent.token_id),
-            false,
-        )
-        .await?;
-        self.state.insert_token_tx(&mut transaction, &token).await?;
-        match transaction.commit().await {
-            Ok(()) => Ok(token),
-            Err(error) => match self.state.token_is_exact(&token).await {
-                Ok(true) => Ok(token),
-                Ok(false) => Err(AuthorityError::Storage(error)),
-                Err(recheck) => Err(AuthorityError::CommitUnknown(format!(
-                    "token {} issuance commit failed ({error}); registry recheck failed: {recheck}",
-                    hex(&token.token_id)
-                ))),
-            },
-        }
-    }
-
-    /// Check whether a current capability authorizes one Cabinet operation.
-    /// All current operation callers must use this SQLite-backed boundary.
-    pub async fn authorize(
-        &self,
-        token: &CapabilityToken,
-        operation: &Grant,
-    ) -> Result<(), AuthorityError> {
-        // Authorization is a coherent read snapshot; it must not update the
-        // global write-lock row. Mutating/signing operations use the serialized
-        // boundary separately.
+    /// Did the registry mint this subsystem cap, and which actor does it root at?
+    pub async fn actor_of(&self, cap_id: &CapId) -> Result<Option<Actor>, AuthorityError> {
         let mut transaction = self.state.pool.begin().await?;
-        let result = self.authorize_in(&mut transaction, token, operation).await;
+        let result = async {
+            let record = cap::verify_chain(&mut transaction, cap_id).await?;
+            if !record.object.starts_with("is subsystem ") && record.object != "is operator" {
+                return Ok(None);
+            }
+            let Some(key) = cap::effective_root_actor(&mut transaction, cap_id).await? else {
+                return Ok(None);
+            };
+            let Some(actor) = AuthorityStateStore::actor_by_key_tx(&mut transaction, &key).await?
+            else {
+                return Ok(None);
+            };
+            actor_to_public(actor, *cap_id)
+        }
+        .await;
         transaction.rollback().await?;
         result
     }
 
-    async fn authorize_in(
-        &self,
-        transaction: &mut Transaction<'_, Sqlite>,
-        token: &CapabilityToken,
-        operation: &Grant,
-    ) -> Result<(), AuthorityError> {
-        self.verify_in(transaction, token).await?;
-        if self.is_operator_root(token) || token.grants.iter().any(|grant| grant == operation) {
-            Ok(())
-        } else {
-            Err(AuthorityError::Unauthorized)
+    pub async fn actor_by_uuid(&self, uuid: Uuid7) -> Result<Option<Actor>, AuthorityError> {
+        let mut transaction = self.state.pool.begin().await?;
+        let result = async {
+            let Some(actor) =
+                AuthorityStateStore::actor_by_uuid_tx(&mut transaction, &uuid.to_string()).await?
+            else {
+                return Ok(None);
+            };
+            // Cap is looked up by root_actor match.
+            let cap_id = find_actor_cap(&mut transaction, &actor.public_key).await?;
+            actor_to_public(actor, cap_id.unwrap_or([0; 16]))
         }
+        .await;
+        transaction.rollback().await?;
+        result
     }
 
-    /// Revoke one capability and all capabilities descended from it. This is
-    /// local capability invalidation; it does not rewrite historical claims or
-    /// mutate drawer/document/Keyhive state.
-    pub async fn revoke(
+    pub async fn grant(
         &self,
-        operator: &CapabilityToken,
-        token_id: TokenId,
+        subject: &str,
+        object: &str,
+        access: &str,
     ) -> Result<(), AuthorityError> {
         let mut transaction = self.state.begin_serialized().await?;
-        self.require_operator_root_in(&mut transaction, operator)
-            .await?;
-        if token_id == self.root_token_id {
-            return Err(AuthorityError::Unauthorized);
-        }
-        if sqlx::query("SELECT 1 FROM authority_tokens WHERE token_id = ?1")
-            .bind(token_id.as_slice())
-            .fetch_optional(&mut *transaction)
-            .await?
-            .is_none()
-        {
-            return Err(AuthorityError::InvalidToken);
-        }
-        sqlx::query("INSERT OR IGNORE INTO authority_revocations (token_id) VALUES (?1)")
-            .bind(token_id.as_slice())
-            .execute(&mut *transaction)
-            .await?;
-        match transaction.commit().await {
-            Ok(()) => Ok(()),
-            Err(error) => match self.state.is_revoked(&token_id).await {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(AuthorityError::Storage(error)),
-                Err(recheck) => Err(AuthorityError::CommitUnknown(format!(
-                    "revocation {} commit failed ({error}); state recheck failed: {recheck}",
-                    hex(&token_id)
-                ))),
-            },
-        }
+        ledger::grant(&mut transaction, subject, object, access).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| AuthorityError::CommitUnknown(format!("grant commit: {error}")))?;
+        Ok(())
     }
 
-    /// Sign an actor-authored Core facet claim after checking current
-    /// capability state and the registered subject key. Only the exact Core
-    /// domain-prefixed deterministic-CBOR claim bytes are signed; capability
-    /// and node provenance remain separate artifacts.
-    pub async fn sign_actor_claim(
+    pub async fn revoke_grant(
         &self,
-        token: &CapabilityToken,
-        claim: &ActorClaim,
+        subject: &str,
+        object: &str,
+        access: &str,
+    ) -> Result<(), AuthorityError> {
+        let mut transaction = self.state.begin_serialized().await?;
+        ledger::revoke(&mut transaction, subject, object, access).await?;
+        transaction.commit().await.map_err(|error| {
+            AuthorityError::CommitUnknown(format!("revoke grant commit: {error}"))
+        })?;
+        Ok(())
+    }
+
+    pub async fn has_grant(
+        &self,
+        subject: &str,
+        object: &str,
+        access: &str,
+    ) -> Result<bool, AuthorityError> {
+        let mut transaction = self.state.pool.begin().await?;
+        let result = ledger::has(&mut transaction, subject, object, access).await;
+        transaction.rollback().await?;
+        result
+    }
+
+    /// Sign a v2 facet claim as the actor the cap chain roots at. Which drawer
+    /// authorizes the claim's document is DocumentsRepo's check, done before
+    /// this call; here we only bind the claim's actor UUID to the root actor.
+    pub async fn sign_as(
+        &self,
+        cap_id: &CapId,
+        claim: &FacetClaim,
     ) -> Result<SignedFacetClaim, AuthorityError> {
-        claim.validate()?;
         let mut transaction = self.state.begin_serialized().await?;
-        self.authorize_in(&mut transaction, token, &claim.operation)
-            .await?;
-        let Some(key_name) =
-            AuthorityStateStore::actor_key_name_tx(&mut transaction, &token.subject).await?
-        else {
-            return Err(AuthorityError::ActorSignerMissing);
-        };
-        let signer = SigningKeyHandle::open(Arc::clone(&self.store), NODE_SERVICE, &key_name)
-            .await?
-            .bind_public_key(token.subject);
-        let message = claim.claim.signing_bytes()?;
-        let signature = signer.sign(&message).await?.to_vec();
-        let signed = SignedFacetClaim::from_signature(
-            claim.claim.clone(),
-            token.subject.to_vec(),
-            signature,
-        )?;
-        match transaction.commit().await {
-            Ok(()) => Ok(signed),
-            Err(error) => Err(AuthorityError::CommitUnknown(format!(
-                "actor claim signing transaction outcome is unknown: {error}"
-            ))),
-        }
+        let signed = signer::sign_as_in(self, &mut transaction, cap_id, claim).await?;
+        transaction.rollback().await?;
+        Ok(signed)
     }
 
-    /// Verify the historical actor signature without consulting current capability
-    /// state. This preserves legitimate claims after capability revocation.
-    /// The current subject binding is still checked: the signed Core claim must
-    /// identify exactly the subject authenticated by the node-signed token.
-    pub fn verify_actor_claim(
-        &self,
-        token: &CapabilityToken,
-        claim: &ActorClaim,
-        signed: &SignedFacetClaim,
-    ) -> Result<(), AuthorityError> {
-        claim.validate()?;
-        token.verify(&self.node_public_key)?;
-        if signed.actor_public_key.as_slice() != token.subject.as_slice()
-            || signed.claim != claim.claim
-        {
-            return Err(AuthorityError::InvalidToken);
-        }
-        signed.verify().map_err(|_| AuthorityError::InvalidToken)
+    /// Verify a historical claim's actor signature without consulting current
+    /// grant or cap state. The signed key must be the actor key named.
+    pub fn verify_claim(&self, signed: &SignedFacetClaim) -> Result<(), AuthorityError> {
+        signed.verify()?;
+        Ok(())
     }
 
-    fn is_operator_root(&self, token: &CapabilityToken) -> bool {
-        token.subject == self.operator_public_key
-            && token.parent.is_none()
-            && token.root
-            && token.token_id == self.root_token_id
-    }
-
-    async fn require_operator_root_in(
-        &self,
-        transaction: &mut Transaction<'_, Sqlite>,
-        token: &CapabilityToken,
-    ) -> Result<(), AuthorityError> {
-        self.verify_in(transaction, token).await?;
-        if self.is_operator_root(token) {
-            Ok(())
-        } else {
-            Err(AuthorityError::OperatorOnly)
-        }
+    pub fn node_issuer(&self) -> MultibaseKey {
+        MultibaseKey::try_from(self.node_public_key.as_slice()).expect("node key is 32 bytes")
     }
 }
 
-async fn sign_token(
-    signer: &SigningKeyHandle,
-    issuer: ActorPublicKey,
-    subject: ActorPublicKey,
-    grants: Vec<Grant>,
-    parent: Option<TokenId>,
-    root: bool,
-) -> Result<CapabilityToken, AuthorityError> {
-    let mut token_id = [0_u8; 16];
-    rand::rng().fill_bytes(&mut token_id);
-    let mut token = CapabilityToken {
-        version: TOKEN_VERSION,
-        token_id,
-        subject,
-        grants,
-        parent,
-        issuer,
-        root,
-        signature: Vec::new(),
+fn actor_to_public(record: ActorRecord, cap_id: CapId) -> Result<Option<Actor>, AuthorityError> {
+    let (Some(uuid_text), Some(url), Some(cert)) = (
+        record.uuid.clone(),
+        record.url.clone(),
+        record.certificate.clone(),
+    ) else {
+        return Ok(None);
     };
-    token.signature = signer.sign(&token.payload()?).await?.to_vec();
-    Ok(token)
+    let uuid = uuid_text
+        .parse::<uuid::Uuid>()
+        .map_err(|_| AuthorityError::StateCorrupt("actor uuid".into()))?;
+    Ok(Some(Actor {
+        uuid: Uuid7::try_from(uuid)?,
+        url,
+        public_key: record.public_key,
+        certificate: Bytes::from(cert),
+        cap: cap_id,
+    }))
 }
 
-fn token_digest(token: &CapabilityToken) -> Result<[u8; 32], AuthorityError> {
-    Ok(*blake3::hash(&token.payload()?).as_bytes())
-}
-
-fn validate_root(
-    root: &CapabilityToken,
-    node_public_key: &ActorPublicKey,
-    operator_public_key: &ActorPublicKey,
-) -> Result<(), AuthorityError> {
-    root.verify(node_public_key)?;
-    if !root.root
-        || root.subject != *operator_public_key
-        || root.parent.is_some()
-        || root.issuer != *node_public_key
-    {
-        return Err(AuthorityError::StateCorrupt(
-            "persisted authority root has invalid provenance".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn root_grants() -> Vec<Grant> {
-    vec![
-        Grant::ReadDrawer(DrawerId::new([0; 32])),
-        Grant::WriteDrawer(DrawerId::new([0; 32])),
-        Grant::ManageDrawer(DrawerId::new([0; 32])),
-        Grant::CreateDocument(DrawerId::new([0; 32])),
-        Grant::RemoveDocumentFromDrawer(DrawerId::new([0; 32])),
-        Grant::AddChildDrawer(DrawerId::new([0; 32])),
-        Grant::Delegate {
-            drawer: DrawerId::new([0; 32]),
-            grants: Vec::new(),
-        },
-    ]
-}
-
-fn verify_signature(
-    key: &VerifyingKey,
-    message: &[u8],
-    signature: &Signature,
-) -> Result<(), AuthorityError> {
-    let signature: [u8; 64] = signature
-        .as_slice()
-        .try_into()
-        .map_err(|_| AuthorityError::InvalidToken)?;
-    key.verify(message, &DalekSignature::from_bytes(&signature))
-        .map_err(|_| AuthorityError::InvalidToken)
-}
-
-fn fixed_bytes<const N: usize>(bytes: Vec<u8>) -> Result<[u8; N], AuthorityError> {
-    bytes.try_into().map_err(|_| {
-        AuthorityError::StateCorrupt(format!("authority key has wrong width; expected {N} bytes"))
-    })
-}
-
-fn optional_fixed_bytes<const N: usize>(
-    bytes: Option<Vec<u8>>,
-) -> Result<Option<[u8; N]>, AuthorityError> {
-    bytes.map(fixed_bytes).transpose()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::{fmt::Write as _, path::PathBuf, sync::Arc};
-    use tempfile::TempDir;
-    use tokio::sync::Barrier;
-
-    fn drawer_id(byte: u8) -> DrawerId {
-        DrawerId::new([byte; 32])
-    }
-
-    fn facet_claim(seed: u128) -> FacetClaim {
-        FacetClaim {
-            origin_document: big_cabinet_core::DocumentId::new(b"mutation-document"),
-            facet_key: big_cabinet_core::FacetKey::from_text("org.example.note", "main")
-                .expect("facet key"),
-            chosen_uuid: uuid::Uuid::from_u128(seed),
-            operation: big_cabinet_core::dmeta::ClaimOperation::Set,
-            value_cid: Some({
-                let mut cid = vec![0x01, 0x55, 0x1e, 0x20];
-                cid.extend([seed as u8; 32]);
-                cid
-            }),
-            predecessors: Vec::new(),
-        }
-    }
-
-    async fn store_and_path() -> (Arc<SecretStore>, TempDir, PathBuf) {
-        let keyring = keyring_core::mock::Store::new().expect("mock keyring")
-            as Arc<keyring_core::CredentialStore>;
-        let store = Arc::new(
-            SecretStore::boot_with_store(keyring)
-                .await
-                .expect("mock keyring"),
-        );
-        let directory = tempfile::tempdir().expect("authority state directory");
-        let path = directory.path().join("authority.sqlite");
-        (store, directory, path)
-    }
-
-    #[tokio::test]
-    async fn stable_exported_root_authorizes_across_reopen() {
-        let (store, _directory, path) = store_and_path().await;
-        let (_repo, root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        let (reopened, reopened_root) = AuthorityRepo::boot(store, &path)
-            .await
-            .expect("authority reopen");
-        assert_eq!(root, reopened_root);
-        assert_eq!(root.token_id, reopened_root.token_id);
-        reopened
-            .authorize(&root, &Grant::ReadDrawer(drawer_id(99)))
-            .await
-            .expect("current root authorization");
-        let race_path = path.with_file_name("authority-race.sqlite");
-        let (left, right) = tokio::join!(
-            AuthorityRepo::boot(Arc::clone(&reopened.store), &race_path),
-            AuthorityRepo::boot(Arc::clone(&reopened.store), &race_path),
-        );
-        let (_, left_root) = left.expect("left concurrent boot");
-        let (_, right_root) = right.expect("right concurrent boot");
-        assert_eq!(left_root, right_root);
-    }
-
-    #[tokio::test]
-    async fn parallel_boots_share_one_initialized_identity_and_root() {
-        let (store, _directory, path) = store_and_path().await;
-        let barrier = Arc::new(Barrier::new(8));
-        let mut boots = Vec::new();
-        for _ in 0..8 {
-            let barrier = Arc::clone(&barrier);
-            let store = Arc::clone(&store);
-            let path = path.clone();
-            boots.push(tokio::spawn(async move {
-                barrier.wait().await;
-                AuthorityRepo::boot(store, path).await
-            }));
-        }
-        let mut roots = Vec::new();
-        for boot in boots {
-            let (_repo, root) = boot
-                .await
-                .expect("parallel boot task")
-                .expect("parallel boot");
-            roots.push(root);
-        }
-        assert!(roots.windows(2).all(|roots| roots[0] == roots[1]));
-    }
-
-    #[tokio::test]
-    async fn authorize_uses_a_read_snapshot_without_advancing_write_lock() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(store, path)
-            .await
-            .expect("authority boot");
-        let before: i64 = sqlx::query("SELECT lock_nonce FROM authority_lock WHERE lock_id = 1")
-            .fetch_one(&repo.state.pool)
-            .await
-            .expect("lock row")
-            .try_get("lock_nonce")
-            .expect("lock nonce");
-        repo.authorize(&root, &Grant::ReadDrawer(drawer_id(99)))
-            .await
-            .expect("current authorization");
-        let after: i64 = sqlx::query("SELECT lock_nonce FROM authority_lock WHERE lock_id = 1")
-            .fetch_one(&repo.state.pool)
-            .await
-            .expect("lock row")
-            .try_get("lock_nonce")
-            .expect("lock nonce");
-        assert_eq!(before, after);
-    }
-
-    #[tokio::test]
-    async fn root_provenance_and_reserved_targets_are_enforced() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(store, path)
-            .await
-            .expect("authority boot");
-        let actor = repo.create_actor().await.expect("actor");
-        assert!(matches!(
-            repo.delegate(&root, repo.operator_public_key(), vec![])
-                .await,
-            Err(AuthorityError::ReservedIdentity)
-        ));
-        let child = repo
-            .delegate(&root, actor, vec![Grant::ReadDrawer(drawer_id(99))])
-            .await
-            .expect("child");
-        assert!(matches!(
-            repo.authorize(&child, &Grant::ReadDrawer(drawer_id(7)))
-                .await,
-            Err(AuthorityError::Unauthorized)
-        ));
-        assert!(matches!(
-            repo.delegate(&child, repo.operator_public_key(), vec![])
-                .await,
-            Err(AuthorityError::ReservedIdentity)
-        ));
-    }
-
-    #[test]
-    fn drawer_identity_uses_real_variable_width_document_keys() {
-        let short = DrawerId::new((0_u8..31).collect::<Vec<_>>());
-        let full = DrawerId::new((0_u8..32).collect::<Vec<_>>());
-        let grants = vec![
-            Grant::ReadDrawer(short.clone()),
-            Grant::WriteDrawer(full.clone()),
-        ];
-
-        let bytes = serde_json::to_vec(&grants).expect("token grants wire encoding");
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&bytes).expect("token grants JSON"),
-            serde_json::json!([
-                { "ReadDrawer": (0_u8..31).collect::<Vec<_>>() },
-                { "WriteDrawer": (0_u8..32).collect::<Vec<_>>() },
-            ])
-        );
-        let decoded: Vec<Grant> =
-            serde_json::from_slice(&bytes).expect("token grants wire decoding");
-        assert_eq!(decoded, grants);
-        assert_eq!(short.as_bytes().len(), 31);
-        assert_eq!(full.as_bytes().len(), 32);
-    }
-
-    #[test]
-    fn old_v1_drawer_byte_array_fixture_is_lossless() {
-        // This literal is the v1 derived-serde representation, independent of
-        // ObjKey's human-readable base58 representation.
-        let old_wire = br#"{"ReadDrawer":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]}"#;
-        let grant: Grant = serde_json::from_slice(old_wire).expect("old v1 drawer grant");
-        assert_eq!(
-            serde_json::to_vec(&grant).expect("old v1 re-encoding"),
-            old_wire
-        );
-        let Grant::ReadDrawer(drawer) = grant else {
-            panic!("old fixture changed grant variant");
-        };
-        assert_eq!(drawer.as_bytes(), (0_u8..32).collect::<Vec<_>>());
-    }
-
-    // Captured from the pre-ObjKey v1 DTO shape. This is intentionally a
-    // literal unsigned payload, not bytes regenerated by the current codec.
-    const LEGACY_V1_PAYLOAD: &[u8] = br#"{"version":1,"token_id":[17,17,17,17,17,17,17,17,17,17,17,17,17,17,17,17],"subject":[34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34,34],"grants":[{"ReadDrawer":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]},{"WriteDrawer":[32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63]},{"ManageDrawer":[64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95]},{"CreateDocument":[96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127]},{"RemoveDocumentFromDrawer":[128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159]},{"AddChildDrawer":[160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191]},{"Delegate":{"drawer":[192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223],"grants":[{"ReadDrawer":[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31]},{"WriteDrawer":[32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63]},{"ManageDrawer":[64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95]},{"CreateDocument":[96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127]},{"RemoveDocumentFromDrawer":[128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159]},{"AddChildDrawer":[160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191]}]}}],"parent":null,"issuer":[215,90,152,1,130,177,10,183,213,75,254,211,201,100,7,58,14,225,114,243,218,166,35,37,175,2,26,104,247,7,81,26],"root":false}"#;
-
-    #[tokio::test]
-    async fn captured_legacy_full_token_row_reopens_without_current_insertion() {
-        // RFC 8032's deterministic seed/public key pair makes the legacy row
-        // reproducible while keeping private material behind SecretStore.
-        let node_seed = [
-            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
-            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
-            0x1c, 0xae, 0x7f, 0x60,
-        ];
-        let (store, _directory, path) = store_and_path().await;
-        store
-            .set_secret(NODE_SERVICE, NODE_KEY, &node_seed)
-            .await
-            .expect("install deterministic fixture node key");
-        let (repo, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        assert_eq!(
-            repo.node_public_key(),
-            [
-                0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64,
-                0x07, 0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68,
-                0xf7, 0x07, 0x51, 0x1a,
-            ]
-        );
-
-        // Sign the captured old payload directly through the existing secret
-        // boundary. The current CapabilityToken serializer is not involved
-        // before the legacy JSON and digest are persisted below.
-        let signer = SigningKeyHandle::open(Arc::clone(&store), NODE_SERVICE, NODE_KEY)
-            .await
-            .expect("open fixture signer");
-        let signature = signer
-            .sign(LEGACY_V1_PAYLOAD)
-            .await
-            .expect("sign captured old payload");
-        let payload_text = std::str::from_utf8(LEGACY_V1_PAYLOAD).expect("legacy payload UTF-8");
-        let mut token_text = String::with_capacity(payload_text.len() + 300);
-        token_text.push_str(
-            payload_text
-                .strip_suffix('}')
-                .expect("legacy payload object"),
-        );
-        token_text.push_str(",\"signature\":[");
-        for (index, byte) in signature.iter().enumerate() {
-            if index != 0 {
-                token_text.push(',');
-            }
-            write!(&mut token_text, "{byte}").expect("signature fixture formatting");
-        }
-        token_text.push_str("]}");
-        let token_json = token_text.into_bytes();
-        let expected_digest = *blake3::hash(LEGACY_V1_PAYLOAD).as_bytes();
-        let token: CapabilityToken =
-            serde_json::from_slice(&token_json).expect("decode captured legacy token");
-        assert_eq!(token.grants.len(), 7);
-        assert!(
-            matches!(token.grants.last(), Some(Grant::Delegate { grants, .. }) if grants.len() == 6)
-        );
-
-        // This is the legacy insertion boundary: bind captured bytes and its
-        // captured-payload digest directly, never through insert_token_tx.
-        sqlx::query(
-            "INSERT INTO authority_tokens
-                 (token_id, subject, parent_id, root, token_json, payload_digest)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .bind(token.token_id.as_slice())
-        .bind(token.subject.as_slice())
-        .bind(Option::<Vec<u8>>::None)
-        .bind(0_i64)
-        .bind(&token_json)
-        .bind(expected_digest.as_slice())
-        .execute(&repo.state.pool)
-        .await
-        .expect("insert captured legacy token row");
-
-        token
-            .verify(&repo.node_public_key())
-            .expect("legacy signature");
-        assert_eq!(
-            token_digest(&token).expect("legacy digest"),
-            expected_digest
-        );
-        for operation in &token.grants {
-            repo.authorize(&token, operation)
-                .await
-                .expect("legacy grant authorization");
-        }
-        assert!(matches!(
-            repo.authorize(&token, &Grant::ReadDrawer(DrawerId::new(vec![0; 31])))
-                .await,
-            Err(AuthorityError::Unauthorized)
-        ));
-
-        let (reopened, _root) = AuthorityRepo::boot(store, &path)
-            .await
-            .expect("reopen captured legacy row");
-        reopened
-            .verify(&token)
-            .await
-            .expect("reopened legacy token");
-        reopened
-            .authorize(&token, &token.grants[5])
-            .await
-            .expect("reopened legacy grant authorization");
-        let stored_json: Vec<u8> =
-            sqlx::query("SELECT token_json FROM authority_tokens WHERE token_id = ?1")
-                .bind(token.token_id.as_slice())
-                .fetch_one(&reopened.state.pool)
-                .await
-                .expect("reopened legacy row")
-                .try_get("token_json")
-                .expect("legacy JSON bytes");
-        assert_eq!(stored_json, token_json);
-    }
-
-    #[tokio::test]
-    async fn persisted_v1_token_json_and_digest_survive_reopen() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        let actor = repo.create_actor().await.expect("actor");
-        let drawer = DrawerId::new((0_u8..32).collect::<Vec<_>>());
-        let token = repo
-            .delegate(&root, actor, vec![Grant::ReadDrawer(drawer.clone())])
-            .await
-            .expect("v1 capability");
-        let row = sqlx::query(
-            "SELECT token_json, payload_digest FROM authority_tokens WHERE token_id = ?1",
-        )
-        .bind(token.token_id.as_slice())
-        .fetch_one(&repo.state.pool)
-        .await
-        .expect("persisted token");
-        let token_json: Vec<u8> = row.try_get("token_json").expect("token JSON");
-        let payload_digest: Vec<u8> = row.try_get("payload_digest").expect("payload digest");
-        assert_eq!(
-            token_json,
-            serde_json::to_vec(&token).expect("token export")
-        );
-        assert_eq!(payload_digest, token_digest(&token).expect("token digest"));
-        token.verify(&repo.node_public_key()).expect("v1 signature");
-
-        let (reopened, _root) = AuthorityRepo::boot(store, &path)
-            .await
-            .expect("authority reopen");
-        reopened.verify(&token).await.expect("reopened v1 token");
-        reopened
-            .authorize(&token, &Grant::ReadDrawer(drawer))
-            .await
-            .expect("reopened drawer authorization");
-    }
-
-    #[tokio::test]
-    async fn token_round_trip_and_context_tampering_are_refused() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(store, path)
-            .await
-            .expect("authority boot");
-        let bytes = serde_json::to_vec(&root).expect("serialize token");
-        let received: CapabilityToken = serde_json::from_slice(&bytes).expect("deserialize token");
-        received
-            .verify(&repo.node_public_key())
-            .expect("portable signature");
-        let mut tampered = received.clone();
-        tampered.subject = [8; 32];
-        assert!(matches!(
-            repo.verify(&tampered).await,
-            Err(AuthorityError::InvalidToken)
-        ));
-        let mut tampered = received;
-        tampered.signature[0] ^= 1;
-        assert!(matches!(
-            repo.verify(&tampered).await,
-            Err(AuthorityError::InvalidToken)
-        ));
-    }
-
-    #[tokio::test]
-    async fn delegation_is_downward_and_rejects_escalation_lateral_and_self() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(store, path)
-            .await
-            .expect("authority boot");
-        let actor_a = repo.create_actor().await.expect("actor a");
-        let actor_b = repo.create_actor().await.expect("actor b");
-        let drawer = drawer_id(7);
-        let read = Grant::ReadDrawer(drawer.clone());
-        let delegation = Grant::Delegate {
-            drawer: drawer.clone(),
-            grants: vec![read.clone()],
-        };
-        let parent = repo
-            .delegate(&root, actor_a, vec![read.clone(), delegation])
-            .await
-            .expect("parent capability");
-        let child = repo
-            .delegate(&parent, actor_b, vec![read.clone()])
-            .await
-            .expect("attenuated child");
-        repo.authorize(&child, &read)
-            .await
-            .expect("read remains allowed");
-        assert!(matches!(
-            repo.delegate(&parent, actor_b, vec![Grant::WriteDrawer(drawer)])
-                .await,
-            Err(AuthorityError::LateralDelegation)
-        ));
-        assert!(matches!(
-            repo.delegate(&parent, actor_a, vec![read]).await,
-            Err(AuthorityError::SelfDelegation)
-        ));
-    }
-
-    #[tokio::test]
-    async fn actor_claim_context_is_bound_and_historical_verification_survives_revoke() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        let actor = repo.create_actor().await.expect("actor");
-        let operation = Grant::WriteDrawer(drawer_id(3));
-        let token = repo
-            .delegate(&root, actor, vec![operation.clone()])
-            .await
-            .expect("capability");
-        let claim = ActorClaim {
-            operation: operation.clone(),
-            claim: facet_claim(1),
-        };
-        let signed = repo
-            .sign_actor_claim(&token, &claim)
-            .await
-            .expect("actor signature");
-        repo.verify_actor_claim(&token, &claim, &signed)
-            .expect("claim context");
-        let message = claim.claim.signing_bytes().expect("canonical claim bytes");
-        assert!(message.starts_with(b"daybook.facet-claim.v1\0"));
-        let signature_bytes: [u8; 64] = signed
-            .signature
-            .as_slice()
-            .try_into()
-            .expect("signature width");
-        VerifyingKey::from_bytes(&actor)
-            .expect("actor public key")
-            .verify(&message, &DalekSignature::from_bytes(&signature_bytes))
-            .expect("independent Core verification");
-        let mut tampered_claim = claim.clone();
-        tampered_claim.claim.origin_document = big_cabinet_core::DocumentId::new(b"other-document");
-        assert!(matches!(
-            repo.verify_actor_claim(&token, &tampered_claim, &signed),
-            Err(AuthorityError::InvalidToken)
-        ));
-        let mut tampered_claim = claim.clone();
-        tampered_claim.claim.facet_key =
-            big_cabinet_core::FacetKey::from_text("org.example.other", "main").expect("facet key");
-        assert!(matches!(
-            repo.verify_actor_claim(&token, &tampered_claim, &signed),
-            Err(AuthorityError::InvalidToken)
-        ));
-        let mut tampered_claim = claim.clone();
-        tampered_claim.claim.chosen_uuid = uuid::Uuid::from_u128(2);
-        assert!(matches!(
-            repo.verify_actor_claim(&token, &tampered_claim, &signed),
-            Err(AuthorityError::InvalidToken)
-        ));
-        let mut tampered_claim = claim.clone();
-        tampered_claim.claim.operation = big_cabinet_core::dmeta::ClaimOperation::Remove;
-        tampered_claim.claim.value_cid = None;
-        assert!(matches!(
-            repo.verify_actor_claim(&token, &tampered_claim, &signed),
-            Err(AuthorityError::InvalidToken)
-        ));
-        let mut tampered_claim = claim.clone();
-        tampered_claim.claim.value_cid = Some({
-            let mut cid = vec![0x01, 0x55, 0x1e, 0x20];
-            cid.extend([0xaa; 32]);
-            cid
-        });
-        assert!(matches!(
-            repo.verify_actor_claim(&token, &tampered_claim, &signed),
-            Err(AuthorityError::InvalidToken)
-        ));
-        let mut tampered_claim = claim.clone();
-        tampered_claim.claim.predecessors = vec![{
-            let mut cid = vec![0x01, 0x55, 0x1e, 0x20];
-            cid.extend([0xbb; 32]);
-            cid
-        }];
-        assert!(matches!(
-            repo.verify_actor_claim(&token, &tampered_claim, &signed),
-            Err(AuthorityError::InvalidToken)
-        ));
-        let wrong_operation = ActorClaim {
-            operation: Grant::ManageDrawer(drawer_id(3)),
-            claim: claim.claim.clone(),
-        };
-        assert!(matches!(
-            repo.sign_actor_claim(&token, &wrong_operation).await,
-            Err(AuthorityError::Unauthorized)
-        ));
-        let wrong_drawer = ActorClaim {
-            operation: Grant::WriteDrawer(drawer_id(4)),
-            claim: claim.claim.clone(),
-        };
-        assert!(matches!(
-            repo.sign_actor_claim(&token, &wrong_drawer).await,
-            Err(AuthorityError::Unauthorized)
-        ));
-        let mut wrong_subject = signed.clone();
-        wrong_subject.actor_public_key = vec![8; 32];
-        assert!(matches!(
-            repo.verify_actor_claim(&token, &claim, &wrong_subject),
-            Err(AuthorityError::InvalidToken)
-        ));
-        let mut tampered_signature = signed.clone();
-        tampered_signature.signature[0] ^= 1;
-        assert!(matches!(
-            repo.verify_actor_claim(&token, &claim, &tampered_signature),
-            Err(AuthorityError::InvalidToken)
-        ));
-
-        let other_actor = repo.create_actor().await.expect("other actor");
-        let other_token = repo
-            .delegate(&root, other_actor, vec![operation.clone()])
-            .await
-            .expect("other capability");
-        assert!(matches!(
-            repo.verify_actor_claim(&other_token, &claim, &signed),
-            Err(AuthorityError::InvalidToken)
-        ));
-        repo.revoke(&root, token.token_id).await.expect("revoke");
-        assert!(matches!(
-            repo.authorize(&token, &claim.operation).await,
-            Err(AuthorityError::InvalidToken)
-        ));
-        repo.verify_actor_claim(&token, &claim, &signed)
-            .expect("historical claim remains verifiable");
-        let (reopened, new_root) = AuthorityRepo::boot(store, &path)
-            .await
-            .expect("reopen authority");
-        assert!(matches!(
-            reopened.authorize(&token, &claim.operation).await,
-            Err(AuthorityError::InvalidToken)
-        ));
-        reopened
-            .delegate(&new_root, actor, vec![claim.operation])
-            .await
-            .expect("actor registry survives reboot");
-    }
-
-    #[tokio::test]
-    async fn revoking_parent_invalidates_descendants_and_fresh_handles_see_updates() {
-        let (store, _directory, path) = store_and_path().await;
-        let (first, root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        let (second, second_root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("second authority boot");
-        let actor_a = first.create_actor().await.expect("actor a");
-        let actor_b = first.create_actor().await.expect("actor b");
-        let drawer = drawer_id(12);
-        let read = Grant::ReadDrawer(drawer.clone());
-        let parent = first
-            .delegate(
-                &root,
-                actor_a,
-                vec![
-                    read.clone(),
-                    Grant::Delegate {
-                        drawer: drawer.clone(),
-                        grants: vec![read.clone()],
-                    },
-                ],
-            )
-            .await
-            .expect("parent capability");
-        let child = second
-            .delegate(&second_root, actor_b, vec![read.clone()])
-            .await
-            .expect("independent child");
-        first
-            .authorize(&child, &read)
-            .await
-            .expect("first handle sees second issuance");
-        second
-            .revoke(&second_root, child.token_id)
-            .await
-            .expect("revoke");
-        assert!(matches!(
-            first.authorize(&child, &read).await,
-            Err(AuthorityError::InvalidToken)
-        ));
-        let replacement = first
-            .delegate(&parent, actor_b, vec![read.clone()])
-            .await
-            .expect("revoked actor capability may be reissued");
-        first
-            .authorize(&replacement, &read)
-            .await
-            .expect("replacement capability is current");
-    }
-
-    #[tokio::test]
-    async fn corrupted_denormalized_token_state_fails_closed() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(store, path)
-            .await
-            .expect("authority boot");
-        let actor = repo.create_actor().await.expect("actor");
-        let operation = Grant::ReadDrawer(drawer_id(61));
-        let token = repo
-            .delegate(&root, actor, vec![operation.clone()])
-            .await
-            .expect("token");
-        sqlx::query("UPDATE authority_tokens SET subject = ?1 WHERE token_id = ?2")
-            .bind([7_u8; 32].as_slice())
-            .bind(token.token_id.as_slice())
-            .execute(&repo.state.pool)
-            .await
-            .expect("corrupt subject index");
-        assert!(matches!(
-            repo.authorize(&token, &operation).await,
-            Err(AuthorityError::StateCorrupt(_))
-        ));
-
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(store, path)
-            .await
-            .expect("authority boot");
-        let actor = repo.create_actor().await.expect("actor");
-        let token = repo
-            .delegate(&root, actor, vec![operation.clone()])
-            .await
-            .expect("token");
-        sqlx::query("UPDATE authority_tokens SET parent_id = ?1 WHERE token_id = ?2")
-            .bind([3_u8; 16].as_slice())
-            .bind(token.token_id.as_slice())
-            .execute(&repo.state.pool)
-            .await
-            .expect("corrupt parent index");
-        assert!(matches!(
-            repo.verify(&token).await,
-            Err(AuthorityError::StateCorrupt(_))
-        ));
-
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(store, path)
-            .await
-            .expect("authority boot");
-        let actor = repo.create_actor().await.expect("actor");
-        let token = repo
-            .delegate(&root, actor, vec![operation])
-            .await
-            .expect("token");
-        sqlx::query("UPDATE authority_tokens SET root = 2 WHERE token_id = ?1")
-            .bind(token.token_id.as_slice())
-            .execute(&repo.state.pool)
-            .await
-            .expect("corrupt root index");
-        assert!(matches!(
-            repo.verify(&token).await,
-            Err(AuthorityError::StateCorrupt(_))
-        ));
-
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(store, path)
-            .await
-            .expect("authority boot");
-        let parent_actor = repo.create_actor().await.expect("parent actor");
-        let child_actor = repo.create_actor().await.expect("child actor");
-        let drawer = drawer_id(62);
-        let read = Grant::ReadDrawer(drawer.clone());
-        let parent = repo
-            .delegate(
-                &root,
-                parent_actor,
-                vec![
-                    read.clone(),
-                    Grant::Delegate {
-                        drawer: drawer.clone(),
-                        grants: vec![read.clone()],
-                    },
-                ],
-            )
-            .await
-            .expect("parent token");
-        let child = repo
-            .delegate(&parent, child_actor, vec![read])
-            .await
-            .expect("child token");
-        let mut persisted: serde_json::Value = serde_json::from_slice(
-            &sqlx::query("SELECT token_json FROM authority_tokens WHERE token_id = ?1")
-                .bind(parent.token_id.as_slice())
-                .fetch_one(&repo.state.pool)
-                .await
-                .expect("parent row")
-                .try_get::<Vec<u8>, _>("token_json")
-                .expect("parent JSON"),
-        )
-        .expect("parent JSON value");
-        persisted["subject"] = serde_json::Value::Array(
-            [9_u8; 32]
-                .into_iter()
-                .map(serde_json::Value::from)
-                .collect(),
-        );
-        sqlx::query("UPDATE authority_tokens SET token_json = ?1 WHERE token_id = ?2")
-            .bind(serde_json::to_vec(&persisted).expect("altered JSON"))
-            .bind(parent.token_id.as_slice())
-            .execute(&repo.state.pool)
-            .await
-            .expect("corrupt authenticated parent");
-        assert!(matches!(
-            repo.verify(&child).await,
-            Err(AuthorityError::StateCorrupt(_))
-        ));
-    }
-
-    #[tokio::test]
-    async fn failed_operations_do_not_publish_authority_state() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(store, path)
-            .await
-            .expect("authority boot");
-        assert!(matches!(
-            repo.delegate(&root, [44; 32], vec![Grant::ReadDrawer(drawer_id(1))])
-                .await,
-            Err(AuthorityError::ActorSignerMissing)
-        ));
-        assert!(matches!(
-            repo.revoke(&root, [55; 16]).await,
-            Err(AuthorityError::InvalidToken)
-        ));
-        repo.authorize(&root, &Grant::ReadDrawer(drawer_id(77)))
-            .await
-            .expect("failed mutations did not alter root state");
-    }
-
-    #[tokio::test]
-    async fn concurrent_issuance_is_transactional() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(store, path)
-            .await
-            .expect("authority boot");
-        let actor_a = repo.create_actor().await.expect("actor a");
-        let actor_b = repo.create_actor().await.expect("actor b");
-        let left = repo.delegate(&root, actor_a, vec![Grant::ReadDrawer(drawer_id(1))]);
-        let right = repo.delegate(&root, actor_b, vec![Grant::ReadDrawer(drawer_id(2))]);
-        let (left, right) = tokio::join!(left, right);
-        let left = left.expect("left issuance");
-        let right = right.expect("right issuance");
-        repo.authorize(&left, &Grant::ReadDrawer(drawer_id(1)))
-            .await
-            .expect("left current authorization");
-        repo.authorize(&right, &Grant::ReadDrawer(drawer_id(2)))
-            .await
-            .expect("right current authorization");
-    }
-
-    #[tokio::test]
-    async fn nonoperator_same_subject_delegation_is_serialized() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(store, path)
-            .await
-            .expect("authority boot");
-        let parent_actor = repo.create_actor().await.expect("parent actor");
-        let target_actor = repo.create_actor().await.expect("target actor");
-        let drawer = drawer_id(42);
-        let read = Grant::ReadDrawer(drawer.clone());
-        let parent = repo
-            .delegate(
-                &root,
-                parent_actor,
-                vec![
-                    read.clone(),
-                    Grant::Delegate {
-                        drawer: drawer.clone(),
-                        grants: vec![read.clone()],
-                    },
-                ],
-            )
-            .await
-            .expect("parent capability");
-        let left = repo.delegate(&parent, target_actor, vec![read.clone()]);
-        let right = repo.delegate(&parent, target_actor, vec![read]);
-        let (left, right) = tokio::join!(left, right);
-        assert_eq!(left.is_ok() as u8 + right.is_ok() as u8, 1);
-        assert!(matches!(
-            left.or(right),
-            Ok(_) | Err(AuthorityError::LateralDelegation)
-        ));
-    }
-
-    #[tokio::test]
-    async fn signing_rechecks_registered_actor_and_node_public_keys() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        let actor = repo.create_actor().await.expect("actor");
-        let operation = Grant::WriteDrawer(drawer_id(11));
-        let token = repo
-            .delegate(&root, actor, vec![operation.clone()])
-            .await
-            .expect("capability");
-        let key_name: String =
-            sqlx::query("SELECT key_name FROM authority_actors WHERE public_key = ?1")
-                .bind(actor.as_slice())
-                .fetch_one(&repo.state.pool)
-                .await
-                .expect("actor registry")
-                .try_get("key_name")
-                .expect("key name");
-        store
-            .set_secret(NODE_SERVICE, &key_name, &[8; 32])
-            .await
-            .expect("replace actor key");
-        let claim = ActorClaim {
-            operation,
-            claim: facet_claim(2),
-        };
-        assert!(matches!(
-            repo.sign_actor_claim(&token, &claim).await,
-            Err(AuthorityError::Secrets(SecretsError::Corrupt(_)))
-        ));
-    }
-
-    #[tokio::test]
-    async fn provisioning_public_key_read_failure_leaves_recoverable_intent() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        secrets_rs::test_reset_faults();
-        // create_actor performs three service reads before the post-creation
-        // public_key read: preflight, reacquisition, and get_or_create.
-        secrets_rs::test_fail_get_after(NODE_SERVICE, 3);
-        let error = repo
-            .create_actor()
-            .await
-            .expect_err("injected public-key read");
-        assert!(matches!(
-            error,
-            AuthorityError::ProvisioningUnresolved { .. }
-        ));
-        secrets_rs::test_reset_faults();
-
-        let row = sqlx::query(
-            "SELECT key_name, public_key FROM authority_actor_intents
-              WHERE key_name LIKE 'actor-%'",
-        )
-        .fetch_one(&repo.state.pool)
-        .await
-        .expect("durable actor intent");
-        let key_name: String = row.try_get("key_name").expect("intent key name");
-        let public_key: Option<Vec<u8>> = row.try_get("public_key").expect("intent public key");
-        assert!(
-            public_key.is_none(),
-            "transaction rollback keeps intent unbound"
-        );
-        let seed = store
-            .get_secret(NODE_SERVICE, &key_name)
-            .await
-            .expect("seed read")
-            .expect("seed persisted before public-key fault");
-        assert_eq!(seed.len(), 32);
-
-        let (reopened, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("reopen reconciles actor intent");
-        let registry =
-            sqlx::query("SELECT public_key, key_name FROM authority_actors WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_one(&reopened.state.pool)
-                .await
-                .expect("recovered actor registry");
-        let registered: Vec<u8> = registry.try_get("public_key").expect("registered key");
-        assert_eq!(registered.len(), 32);
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actor_intents WHERE key_name = ?1",)
-                .bind(&key_name)
-                .fetch_optional(&reopened.state.pool)
-                .await
-                .expect("intent lookup")
-                .is_none()
-        );
-        assert_eq!(
-            store
-                .get_secret(NODE_SERVICE, &key_name)
-                .await
-                .expect("recovered seed read")
-                .expect("recovered seed"),
-            seed
-        );
-    }
-
-    #[tokio::test]
-    async fn actor_publication_and_cleanup_faults_are_typed_and_durable() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        secrets_rs::test_reset_faults();
-        provisioning_test_faults::fail_actor_publication();
-        secrets_rs::test_fail_next_delete(NODE_SERVICE);
-        let error = repo
-            .create_actor()
-            .await
-            .expect_err("injected publication failure");
-        assert!(matches!(
-            error,
-            AuthorityError::ProvisioningUnresolved { .. }
-        ));
-        secrets_rs::test_reset_faults();
-
-        let row = sqlx::query(
-            "SELECT key_name, public_key, cleanup_pending FROM authority_actor_intents
-              WHERE key_name LIKE 'actor-%'",
-        )
-        .fetch_one(&repo.state.pool)
-        .await
-        .expect("pending intent after failed cleanup");
-        let key_name: String = row.try_get("key_name").expect("intent key name");
-        assert!(
-            row.try_get::<Option<Vec<u8>>, _>("public_key")
-                .expect("intent key")
-                .is_some()
-        );
-        assert_eq!(
-            row.try_get::<i64, _>("cleanup_pending")
-                .expect("cleanup phase"),
-            1
-        );
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actors WHERE key_name = ?1",)
-                .bind(&key_name)
-                .fetch_optional(&repo.state.pool)
-                .await
-                .expect("registry lookup")
-                .is_none()
-        );
-        assert!(
-            store
-                .get_secret(NODE_SERVICE, &key_name)
-                .await
-                .expect("seed lookup")
-                .is_some()
-        );
-
-        let (reopened, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("reopen reconciles pending publication");
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actors WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&reopened.state.pool)
-                .await
-                .expect("recovered registry lookup")
-                .is_none()
-        );
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actor_intents WHERE key_name = ?1",)
-                .bind(&key_name)
-                .fetch_optional(&reopened.state.pool)
-                .await
-                .expect("recovered intent lookup")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn cancelled_creator_recovers_after_sqlite_reopen() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        provisioning_test_faults::arm_actor_publication_barrier();
-        let task_repo = repo.clone();
-        let task = tokio::spawn(async move { task_repo.create_actor().await });
-        provisioning_test_faults::wait_actor_publication_barrier().await;
-        task.abort();
-        assert!(task.await.expect_err("creator task abort").is_cancelled());
-        provisioning_test_faults::release_actor_publication_barrier();
-
-        let row = sqlx::query(
-            "SELECT key_name, public_key FROM authority_actor_intents
-              WHERE key_name LIKE 'actor-%'",
-        )
-        .fetch_one(&repo.state.pool)
-        .await
-        .expect("intent survives caller cancellation");
-        let key_name: String = row.try_get("key_name").expect("intent key name");
-        assert!(
-            row.try_get::<Option<Vec<u8>>, _>("public_key")
-                .expect("intent public key")
-                .is_none()
-        );
-        assert!(
-            store
-                .get_secret(NODE_SERVICE, &key_name)
-                .await
-                .expect("cancelled seed lookup")
-                .is_some()
-        );
-
-        let (reopened, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("independent boot recovers cancelled creator");
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actors WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&reopened.state.pool)
-                .await
-                .expect("recovered actor lookup")
-                .is_some()
-        );
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actor_intents WHERE key_name = ?1",)
-                .bind(&key_name)
-                .fetch_optional(&reopened.state.pool)
-                .await
-                .expect("recovered intent lookup")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn boot_and_creator_owners_share_the_serialized_boundary() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        provisioning_test_faults::arm_actor_publication_barrier();
-        let creator_repo = repo.clone();
-        let creator = tokio::spawn(async move { creator_repo.create_actor().await });
-        provisioning_test_faults::wait_actor_publication_barrier().await;
-        let boot_store = Arc::clone(&store);
-        let boot_path = path.clone();
-        let boot = tokio::spawn(async move { AuthorityRepo::boot(boot_store, boot_path).await });
-        provisioning_test_faults::release_actor_publication_barrier();
-        let actor = creator
-            .await
-            .expect("creator owner task")
-            .expect("creator owner");
-        let (_reopened, root) = boot.await.expect("boot owner task").expect("boot owner");
-        assert_ne!(actor, [0; 32]);
-        assert!(root.root);
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actors WHERE public_key = ?1")
-                .bind(actor.as_slice())
-                .fetch_optional(&repo.state.pool)
-                .await
-                .expect("serialized actor lookup")
-                .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn competing_boot_is_blocked_before_cleanup_delete_and_wins_after_release() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        let (contender_repo, _contender_root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("contender pre-boot");
-        provisioning_test_faults::fail_actor_publication();
-        provisioning_test_faults::arm_cleanup_pre_delete_barrier();
-        let creator_repo = repo.clone();
-        let creator = tokio::spawn(async move { creator_repo.create_actor().await });
-        provisioning_test_faults::wait_cleanup_pre_delete_barrier().await;
-        let intent = sqlx::query(
-            "SELECT key_name, cleanup_pending FROM authority_actor_intents
-               WHERE key_name LIKE 'actor-%'",
-        )
-        .fetch_one(&repo.state.pool)
-        .await
-        .expect("pre-delete cleanup intent");
-        let key_name: String = intent.try_get("key_name").expect("intent key name");
-        assert_eq!(
-            intent.try_get::<i64, _>("cleanup_pending").expect("phase"),
-            1
-        );
-        assert!(
-            store
-                .get_secret(NODE_SERVICE, &key_name)
-                .await
-                .expect("pre-delete seed")
-                .is_some()
-        );
-
-        provisioning_test_faults::arm_serialized_begin_probe();
-        let contender = tokio::spawn(async move { contender_repo.reconcile_pending().await });
-        provisioning_test_faults::wait_serialized_begin_probe().await;
-        provisioning_test_faults::release_cleanup_pre_delete_barrier();
-        let creator_error = creator
-            .await
-            .expect("creator task")
-            .expect_err("publication fault remains the creator outcome");
-        assert!(matches!(creator_error, AuthorityError::Storage(_)));
-        contender
-            .await
-            .expect("contender task")
-            .expect("contender wins after creator finish");
-        assert!(
-            store
-                .get_secret(NODE_SERVICE, &key_name)
-                .await
-                .expect("post-cleanup seed")
-                .is_none()
-        );
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actor_intents WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&repo.state.pool)
-                .await
-                .expect("post-cleanup intent")
-                .is_none()
-        );
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actors WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&repo.state.pool)
-                .await
-                .expect("post-cleanup registry")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn post_delete_cancellation_reconciles_durable_cleanup_phase() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        let (contender_repo, _contender_root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("contender pre-boot");
-        provisioning_test_faults::fail_actor_publication();
-        provisioning_test_faults::arm_cleanup_delete_barrier();
-        let task_repo = repo.clone();
-        let task = tokio::spawn(async move { task_repo.create_actor().await });
-        provisioning_test_faults::wait_cleanup_delete_barrier().await;
-        provisioning_test_faults::arm_serialized_begin_probe();
-        let contender = tokio::spawn(async move { contender_repo.reconcile_pending().await });
-        provisioning_test_faults::wait_serialized_begin_probe().await;
-        let row = sqlx::query(
-            "SELECT key_name, public_key, cleanup_pending
-               FROM authority_actor_intents WHERE key_name LIKE 'actor-%'",
-        )
-        .fetch_one(&repo.state.pool)
-        .await
-        .expect("durable cleanup intent while contender is blocked");
-        let key_name: String = row.try_get("key_name").expect("cleanup key name");
-        let public_key: Vec<u8> = row.try_get("public_key").expect("cleanup public key");
-        assert_eq!(public_key.len(), 32);
-        assert_eq!(
-            row.try_get::<i64, _>("cleanup_pending")
-                .expect("cleanup phase"),
-            1
-        );
-        assert!(
-            store
-                .get_secret(NODE_SERVICE, &key_name)
-                .await
-                .expect("deleted seed lookup")
-                .is_none()
-        );
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actors WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&repo.state.pool)
-                .await
-                .expect("published registry lookup")
-                .is_none()
-        );
-        task.abort();
-        assert!(
-            task.await
-                .expect_err("post-delete creator abort")
-                .is_cancelled()
-        );
-        provisioning_test_faults::release_cleanup_delete_barrier();
-        contender
-            .await
-            .expect("contender task")
-            .expect("contender reconciliation after creator cancellation");
-
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actor_intents WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&repo.state.pool)
-                .await
-                .expect("contender cleanup intent lookup")
-                .is_none()
-        );
-        let (reopened, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("reopen completes deleted cleanup phase");
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actor_intents WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&reopened.state.pool)
-                .await
-                .expect("cleanup intent removal lookup")
-                .is_none()
-        );
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actors WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&reopened.state.pool)
-                .await
-                .expect("cleanup registry lookup")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn post_delete_sql_removal_failure_reopens_to_recoverable_phase() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        provisioning_test_faults::fail_actor_publication();
-        provisioning_test_faults::fail_actor_intent_removal();
-        let error = repo
-            .create_actor()
-            .await
-            .expect_err("cleanup SQL removal failure");
-        assert!(matches!(
-            error,
-            AuthorityError::ProvisioningUnresolved { .. }
-        ));
-        let row = sqlx::query(
-            "SELECT key_name, public_key, cleanup_pending
-               FROM authority_actor_intents WHERE key_name LIKE 'actor-%'",
-        )
-        .fetch_one(&repo.state.pool)
-        .await
-        .expect("cleanup phase survives removal failure");
-        let key_name: String = row.try_get("key_name").expect("cleanup key name");
-        assert_eq!(row.try_get::<i64, _>("cleanup_pending").expect("phase"), 1);
-        assert_eq!(
-            row.try_get::<Vec<u8>, _>("public_key")
-                .expect("cleanup public key")
-                .len(),
-            32
-        );
-        assert!(
-            store
-                .get_secret(NODE_SERVICE, &key_name)
-                .await
-                .expect("deleted seed lookup")
-                .is_none()
-        );
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actors WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&repo.state.pool)
-                .await
-                .expect("registry lookup")
-                .is_none()
-        );
-
-        let (reopened, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("reopen reconciles post-delete SQL failure");
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actor_intents WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&reopened.state.pool)
-                .await
-                .expect("reopened intent lookup")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn foreign_preexisting_signer_is_never_deleted() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        let key_name = "actor-foreign";
-        store
-            .set_secret(NODE_SERVICE, key_name, &[31; 32])
-            .await
-            .expect("foreign seed");
-        sqlx::query(
-            "INSERT INTO authority_actor_intents
-             (intent_id, key_name, public_key, preexisting)
-             VALUES (?1, ?2, NULL, 1)",
-        )
-        .bind([41_u8; 16].as_slice())
-        .bind(key_name)
-        .execute(&repo.state.pool)
-        .await
-        .expect("foreign intent");
-        let error = match AuthorityRepo::boot(Arc::clone(&store), &path).await {
-            Ok(_) => panic!("foreign preexisting signer is unresolved"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error,
-            AuthorityError::ProvisioningUnresolved { .. }
-        ));
-        assert!(
-            store
-                .get_secret(NODE_SERVICE, key_name)
-                .await
-                .expect("foreign seed lookup")
-                .is_some()
-        );
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actor_intents WHERE key_name = ?1",)
-                .bind(key_name)
-                .fetch_optional(&repo.state.pool)
-                .await
-                .expect("foreign intent lookup")
-                .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn ambiguous_successful_publication_preserves_exact_seed() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        provisioning_test_faults::force_actor_commit_unknown();
-        let error = repo
-            .create_actor()
-            .await
-            .expect_err("injected ambiguous commit");
-        assert!(matches!(error, AuthorityError::CommitUnknown(_)));
-        let row = sqlx::query(
-            "SELECT public_key, key_name FROM authority_actors ORDER BY key_name DESC LIMIT 1",
-        )
-        .fetch_one(&repo.state.pool)
-        .await
-        .expect("published actor row after ambiguous commit");
-        let public_key: Vec<u8> = row.try_get("public_key").expect("published public key");
-        let key_name: String = row.try_get("key_name").expect("published key name");
-        assert_eq!(public_key.len(), 32);
-        assert!(
-            store
-                .get_secret(NODE_SERVICE, &key_name)
-                .await
-                .expect("published seed lookup")
-                .is_some()
-        );
-        let (reopened, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("reopen after ambiguous commit");
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actors WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&reopened.state.pool)
-                .await
-                .expect("published row survives reopen")
-                .is_some()
-        );
-        assert!(
-            store
-                .get_secret(NODE_SERVICE, &key_name)
-                .await
-                .expect("exact seed survives reopen")
-                .is_some()
-        );
-    }
-
-    #[tokio::test]
-    async fn revocation_serializes_against_delegate_and_actor_signing() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        let parent_actor = repo.create_actor().await.expect("parent actor");
-        let target_actor = repo.create_actor().await.expect("target actor");
-        let drawer = drawer_id(13);
-        let read = Grant::ReadDrawer(drawer.clone());
-        let parent = repo
-            .delegate(
-                &root,
-                parent_actor,
-                vec![
-                    read.clone(),
-                    Grant::Delegate {
-                        drawer: drawer.clone(),
-                        grants: vec![read.clone()],
-                    },
-                ],
-            )
-            .await
-            .expect("parent capability");
-        let delegate = repo.delegate(&parent, target_actor, vec![read.clone()]);
-        let revoke = repo.revoke(&root, parent.token_id);
-        let (child, revoked) = tokio::join!(delegate, revoke);
-        revoked.expect("parent revoke");
-        if let Ok(child) = child {
-            assert!(matches!(
-                repo.authorize(&child, &read).await,
-                Err(AuthorityError::InvalidToken)
-            ));
-        }
-
-        let signing_actor = repo.create_actor().await.expect("signing actor");
-        let operation = Grant::WriteDrawer(drawer_id(14));
-        let signing_token = repo
-            .delegate(&root, signing_actor, vec![operation.clone()])
-            .await
-            .expect("signing capability");
-        let claim = ActorClaim {
-            operation: operation.clone(),
-            claim: facet_claim(3),
-        };
-        let sign = repo.sign_actor_claim(&signing_token, &claim);
-        let revoke = repo.revoke(&root, signing_token.token_id);
-        let (signature, revoked) = tokio::join!(sign, revoke);
-        revoked.expect("signing capability revoke");
-        if let Ok(signed) = signature {
-            repo.verify_actor_claim(&signing_token, &claim, &signed)
-                .expect("historical signature");
-            assert!(matches!(
-                repo.authorize(&signing_token, &claim.operation).await,
-                Err(AuthorityError::InvalidToken)
-            ));
-        }
-    }
-
-    #[tokio::test]
-    async fn concurrent_old_schema_opens_serialize_cleanup_column_migration() {
-        let (store, _directory, path) = store_and_path().await;
-        let old_options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(&path)
-            .create_if_missing(true);
-        let old_pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(old_options)
-            .await
-            .expect("old schema pool");
-        sqlx::query(
-            "CREATE TABLE authority_lock (
-                 lock_id INTEGER PRIMARY KEY CHECK (lock_id = 1)
-               , lock_nonce INTEGER NOT NULL
-             )",
-        )
-        .execute(&old_pool)
-        .await
-        .expect("old lock table");
-        sqlx::query("INSERT INTO authority_lock (lock_id, lock_nonce) VALUES (1, 0)")
-            .execute(&old_pool)
-            .await
-            .expect("old lock row");
-        sqlx::query(
-            "CREATE TABLE authority_actor_intents (
-                 intent_id BLOB PRIMARY KEY
-               , key_name TEXT NOT NULL UNIQUE
-               , public_key BLOB
-               , preexisting INTEGER NOT NULL CHECK (preexisting IN (0, 1))
-             )",
-        )
-        .execute(&old_pool)
-        .await
-        .expect("old actor intent table");
-        old_pool.close().await;
-
-        let barrier = Arc::new(Barrier::new(2));
-        let left_store = Arc::clone(&store);
-        let left_path = path.clone();
-        let left_barrier = Arc::clone(&barrier);
-        let left = tokio::spawn(async move {
-            left_barrier.wait().await;
-            AuthorityRepo::boot(left_store, left_path).await
-        });
-        let right_store = Arc::clone(&store);
-        let right_path = path.clone();
-        let right_barrier = Arc::clone(&barrier);
-        let right = tokio::spawn(async move {
-            right_barrier.wait().await;
-            AuthorityRepo::boot(right_store, right_path).await
-        });
-        let (_, left_root) = left.await.expect("left open").expect("left boot");
-        let (right_repo, right_root) = right.await.expect("right open").expect("right boot");
-        assert_eq!(left_root, right_root);
-        let columns = sqlx::query("PRAGMA table_info(authority_actor_intents)")
-            .fetch_all(&right_repo.state.pool)
-            .await
-            .expect("migrated schema columns");
-        assert_eq!(
-            columns
-                .iter()
-                .filter(|row| row
-                    .try_get::<String, _>("name")
-                    .is_ok_and(|name| name == "cleanup_pending"))
-                .count(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn unbound_actor_intent_sql_failure_reopens_and_recovers() {
-        let (store, _directory, path) = store_and_path().await;
-        let (repo, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("authority boot");
-        provisioning_test_faults::fail_actor_intent_binding();
-        let error = repo
-            .create_actor()
-            .await
-            .expect_err("injected intent binding SQL failure");
-        assert!(matches!(
-            error,
-            AuthorityError::ProvisioningUnresolved { .. }
-        ));
-        let row = sqlx::query(
-            "SELECT key_name, public_key FROM authority_actor_intents
-               WHERE key_name LIKE 'actor-%'",
-        )
-        .fetch_one(&repo.state.pool)
-        .await
-        .expect("unbound actor intent");
-        let key_name: String = row.try_get("key_name").expect("intent key name");
-        assert!(
-            row.try_get::<Option<Vec<u8>>, _>("public_key")
-                .expect("intent public key")
-                .is_none()
-        );
-        assert!(
-            store
-                .get_secret(NODE_SERVICE, &key_name)
-                .await
-                .expect("persisted actor seed")
-                .is_some()
-        );
-        provisioning_test_faults::fail_actor_intent_binding();
-        let recovery_error = match AuthorityRepo::boot(Arc::clone(&store), &path).await {
-            Ok(_) => panic!("injected recovery intent binding failure must be unresolved"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            recovery_error,
-            AuthorityError::ProvisioningUnresolved { key_name: failed_key, reason }
-                if failed_key == key_name
-                    && reason.contains("recovered actor intent binding is unresolved")
-        ));
-        let unbound_public_key: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT public_key FROM authority_actor_intents WHERE key_name = ?1",
-        )
-        .bind(&key_name)
-        .fetch_one(&repo.state.pool)
-        .await
-        .expect("recovery failure preserves the unbound intent");
-        assert!(unbound_public_key.is_none());
-        let (reopened, _root) = AuthorityRepo::boot(Arc::clone(&store), &path)
-            .await
-            .expect("reopen recovers unbound intent");
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actors WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&reopened.state.pool)
-                .await
-                .expect("recovered actor registry")
-                .is_some()
-        );
-        assert!(
-            sqlx::query("SELECT 1 FROM authority_actor_intents WHERE key_name = ?1")
-                .bind(&key_name)
-                .fetch_optional(&reopened.state.pool)
-                .await
-                .expect("recovered intent")
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn root_sql_failure_is_typed_and_boot_intents_remain_recoverable() {
-        let (store, _directory, path) = store_and_path().await;
-        provisioning_test_faults::fail_root_install();
-        let error = match AuthorityRepo::boot(Arc::clone(&store), &path).await {
-            Ok(_) => panic!("injected root SQL failure must be unresolved"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error,
-            AuthorityError::ProvisioningUnresolved { .. }
-        ));
-        secrets_rs::test_reset_faults();
-        let state = AuthorityStateStore::boot(&path)
-            .await
-            .expect("state reopen");
-        let intent_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM authority_boot_intents WHERE key_name IN (?1, ?2)",
-        )
-        .bind(NODE_KEY)
-        .bind(OPERATOR_KEY)
-        .fetch_one(&state.pool)
-        .await
-        .expect("durable boot intents");
-        assert_eq!(intent_count, 2);
-        let (_repo, _root) = AuthorityRepo::boot(store, &path)
-            .await
-            .expect("boot intent recovery");
-    }
+async fn find_actor_cap(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    public_key: &ActorPublicKey,
+) -> Result<Option<CapId>, AuthorityError> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        "SELECT cap_id FROM authority_caps WHERE root_actor = ?1 AND object LIKE 'is subsystem %' ORDER BY rowid LIMIT 1",
+    )
+    .bind(public_key.as_slice())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    row.map(|row| fixed_bytes(row.try_get("cap_id")?))
+        .transpose()
 }

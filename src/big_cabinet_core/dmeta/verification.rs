@@ -4,9 +4,9 @@ use super::{
     SignatureBytes, Uuid7, cid_of, encode_native,
 };
 use crate::FacetKey;
-use std::collections::BTreeMap;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,7 +55,10 @@ impl SignedFacetClaim {
             (_, _, FacetValue::Missing) => Evidence::Missing,
             (ClaimOperation::Remove, None, FacetValue::Removed) => Evidence::Present,
             (ClaimOperation::Set, Some(cid), FacetValue::Present(value))
-                if cid_of(&encode_native(value)) == *cid => Evidence::Present,
+                if cid_of(&encode_native(value)) == *cid =>
+            {
+                Evidence::Present
+            }
             _ => Evidence::Invalid,
         }
     }
@@ -89,13 +92,15 @@ impl Dmeta {
                 return VerificationState::Rejected;
             }
             let attribution = match (actor.delegation.as_ref(), issuers.get(&entry.actor_uuid)) {
-                (Some(certificate), Some(issuer)) => match Attribution::verify(
-                    certificate, issuer, entry.actor_uuid, actor,
-                ) {
-                    Ok(_) => Evidence::Present,
-                    Err(AttributionError::Unsupported(_) | AttributionError::ResourceLimit) => Evidence::Missing,
-                    Err(_) => Evidence::Invalid,
-                },
+                (Some(certificate), Some(issuer)) => {
+                    match Attribution::verify(certificate, issuer, entry.actor_uuid, actor) {
+                        Ok(_) => Evidence::Present,
+                        Err(AttributionError::Unsupported(_) | AttributionError::ResourceLimit) => {
+                            Evidence::Missing
+                        }
+                        Err(_) => Evidence::Invalid,
+                    }
+                }
                 _ => Evidence::Missing,
             };
             fold_checks(SignatureChecks {
@@ -116,7 +121,10 @@ impl FacetSignature {
         if self.message.is_some() && self.inherited.is_some() {
             return Err(DmetaError::WrongContext);
         }
-        let carried = self.message.as_ref().or_else(|| self.inherited.as_ref().map(|w| &w.message));
+        let carried = self
+            .message
+            .as_ref()
+            .or_else(|| self.inherited.as_ref().map(|witness| &witness.message));
         let claim = match (carried, reconstructed) {
             (Some(bytes), _) => FacetClaim::from_signing_bytes(bytes.as_slice())?,
             (None, Some(claim)) => claim.clone(),
@@ -196,7 +204,9 @@ pub fn fold_checks(checks: SignatureChecks) -> VerificationState {
     }
 }
 
-pub fn facet_verification(states: impl IntoIterator<Item = VerificationState>) -> VerificationState {
+pub fn facet_verification(
+    states: impl IntoIterator<Item = VerificationState>,
+) -> VerificationState {
     let mut pending = false;
     let mut rejected = false;
     for state in states {

@@ -112,7 +112,7 @@ Additionally, we only use a single group for the document collections in all cas
 While some usecases might require drawers with different partitions that have different access control, this usecase is satisfied by the Child multi-drawer relationships and not as a drawer arch.
 We want to stick a simple and small set of well known drawer architectures.
 
-It should also be possible to have a single document drawer or a single group drawer to transform/grow into the more complex architectures.
+A single-doc drawer cannot grow in place into the more complex architectures (ADR 014): forming a collection creates a new drawer metadata doc with a new DrawerId, and the original doc stays a single-doc drawer independently.
 
 ### Location
 

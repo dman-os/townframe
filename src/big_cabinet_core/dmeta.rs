@@ -76,7 +76,11 @@ impl Uuid7 {
     }
 
     pub fn unix_millis(&self) -> u64 {
-        let (seconds, nanos) = self.0.get_timestamp().expect("a UUIDv7 carries a timestamp").to_unix();
+        let (seconds, nanos) = self
+            .0
+            .get_timestamp()
+            .expect("a UUIDv7 carries a timestamp")
+            .to_unix();
         seconds * 1000 + u64::from(nanos) / 1_000_000
     }
 }
@@ -106,7 +110,9 @@ impl std::fmt::Display for Uuid7 {
 
 impl<'de> Deserialize<'de> for Uuid7 {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Uuid::deserialize(deserializer)?.try_into().map_err(serde::de::Error::custom)
+        Uuid::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -422,7 +428,6 @@ impl schemars::JsonSchema for MultibaseKey {
     }
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SignatureBytes([u8; 64]);
 
@@ -625,11 +630,15 @@ impl FacetClaim {
         let facet_key = FacetKey::from_str(&facet_key_text)
             .map_err(|_| DmetaError::MalformedClaim("invalid facet key"))?;
         let uuid_bytes = read_cbor_bytes_strict(bytes, &mut cursor)?;
-        let chosen_uuid = Uuid7::try_from(Uuid::from_slice(&uuid_bytes)
-            .map_err(|_| DmetaError::MalformedClaim("chosen UUID must be 16 bytes"))?)?;
+        let chosen_uuid = Uuid7::try_from(
+            Uuid::from_slice(&uuid_bytes)
+                .map_err(|_| DmetaError::MalformedClaim("chosen UUID must be 16 bytes"))?,
+        )?;
         let actor_bytes = read_cbor_bytes_strict(bytes, &mut cursor)?;
-        let actor_uuid = Uuid7::try_from(Uuid::from_slice(&actor_bytes)
-            .map_err(|_| DmetaError::MalformedClaim("actor UUID must be 16 bytes"))?)?;
+        let actor_uuid = Uuid7::try_from(
+            Uuid::from_slice(&actor_bytes)
+                .map_err(|_| DmetaError::MalformedClaim("actor UUID must be 16 bytes"))?,
+        )?;
         let (operation_major, operation_value) = read_cbor_head_strict(bytes, &mut cursor)?;
         if operation_major != 0 || operation_value > 1 {
             return Err(DmetaError::MalformedClaim("operation must be 0 or 1"));
