@@ -1,90 +1,86 @@
-use super::{AuthorityError, CapId, CapRecord, Rights};
-use sqlx::{Sqlite, Transaction};
+use super::AuthorityError;
+use super::protocol::{CapId, Rights};
+use super::store::{self, CapRow};
+use big_cabinet_core::dmeta::Uuid7;
+use sqlx::SqliteConnection;
 
-pub(super) fn new_cap_id() -> CapId {
-    let mut id = [0_u8; 16];
-    rand::RngCore::fill_bytes(&mut rand::rng(), &mut id);
-    id
+const MAX_CHAIN_DEPTH: usize = 64;
+
+pub(super) struct Chain {
+    pub(super) cap: CapRow,
+    pub(super) ancestors: Vec<CapId>,
 }
 
-pub(super) async fn verify_chain(
-    transaction: &mut Transaction<'_, Sqlite>,
-    cap_id: &CapId,
-) -> Result<CapRecord, AuthorityError> {
-    let mut current = *cap_id;
-    let mut seen = Vec::new();
-    loop {
-        if seen.contains(&current) {
-            return Err(AuthorityError::InvalidCap);
-        }
-        seen.push(current);
-        if seen.len() > 64 {
-            return Err(AuthorityError::InvalidCap);
-        }
-        let Some(record) = super::store::AuthorityStateStore::cap_tx(transaction, &current).await?
-        else {
-            return Err(AuthorityError::InvalidCap);
-        };
-        if record.retracted {
-            return Err(AuthorityError::InvalidCap);
-        }
-        match record.parent {
-            None => break,
-            Some(parent) => {
-                let Some(parent_record) =
-                    super::store::AuthorityStateStore::cap_tx(transaction, &parent).await?
-                else {
-                    return Err(AuthorityError::InvalidCap);
-                };
-                if parent_record.retracted || !record.rights.is_subset_of(parent_record.rights) {
-                    return Err(AuthorityError::InvalidCap);
-                }
-                // root_actor must be preserved down the chain when set at an ancestor.
-                if record.root_actor.is_none() && parent_record.root_actor.is_some() {
-                    // Inherited root is fine; effective root is resolved by walking.
-                }
-                current = parent;
-            }
+impl Chain {
+    pub(super) fn require(&self, right: Rights) -> Result<(), AuthorityError> {
+        if self.cap.rights.contains(right) {
+            Ok(())
+        } else {
+            Err(AuthorityError::Unauthorized)
         }
     }
-    // Return the requested cap's record (re-read for clarity).
-    super::store::AuthorityStateStore::cap_tx(transaction, cap_id)
-        .await?
-        .ok_or(AuthorityError::InvalidCap)
-}
 
-pub(super) async fn effective_root_actor(
-    transaction: &mut Transaction<'_, Sqlite>,
-    cap_id: &CapId,
-) -> Result<Option<[u8; 32]>, AuthorityError> {
-    let mut current = *cap_id;
-    let mut seen = Vec::new();
-    loop {
-        if seen.contains(&current) || seen.len() > 64 {
-            return Err(AuthorityError::InvalidCap);
+    pub(super) fn bound(&self, rights: Rights) -> Result<(), AuthorityError> {
+        if rights.is_subset_of(self.cap.rights) {
+            Ok(())
+        } else {
+            Err(AuthorityError::Escalation)
         }
-        seen.push(current);
-        let Some(record) = super::store::AuthorityStateStore::cap_tx(transaction, &current).await?
-        else {
-            return Err(AuthorityError::InvalidCap);
-        };
-        if record.retracted {
-            return Err(AuthorityError::InvalidCap);
+    }
+
+    pub(super) fn child(
+        &self,
+        object: String,
+        rights: Rights,
+        issuer: Uuid7,
+    ) -> Result<CapRow, AuthorityError> {
+        self.bound(rights)?;
+        if self.ancestors.len() + 1 >= MAX_CHAIN_DEPTH {
+            return Err(AuthorityError::Escalation);
         }
-        if let Some(root) = record.root_actor {
-            return Ok(Some(root));
-        }
-        match record.parent {
-            Some(parent) => current = parent,
-            None => return Ok(None),
-        }
+        Ok(CapRow {
+            id: CapId::new_random(),
+            object,
+            rights,
+            parent: Some(self.cap.id),
+            issuer,
+            retracted: false,
+        })
     }
 }
 
-pub(super) fn check_subset(child: Rights, parent: Rights) -> Result<(), AuthorityError> {
-    if child.is_subset_of(parent) {
+pub(super) async fn walk(
+    conn: &mut SqliteConnection,
+    cap: &CapId,
+) -> Result<Chain, AuthorityError> {
+    let mut rows = store::chain(conn, cap, MAX_CHAIN_DEPTH).await?;
+    let complete = rows.last().is_some_and(|root| root.parent.is_none());
+    if !complete || rows.iter().any(|row| row.retracted) {
+        return Err(AuthorityError::InvalidCapability);
+    }
+    let ancestors = rows.iter().skip(1).map(|row| row.id).collect();
+    rows.truncate(1);
+    Ok(Chain {
+        cap: rows.pop().expect("a complete chain has the presented row"),
+        ancestors,
+    })
+}
+
+pub(super) fn may_retract(target: &Chain, via: &CapId) -> Result<(), AuthorityError> {
+    if target.cap.id == *via || target.ancestors.contains(via) {
         Ok(())
     } else {
-        Err(AuthorityError::Escalation)
+        Err(AuthorityError::Unauthorized)
     }
+}
+
+pub(super) async fn descends_from(
+    conn: &mut SqliteConnection,
+    cap: &CapId,
+    ancestor: &CapId,
+) -> Result<bool, AuthorityError> {
+    Ok(store::chain(conn, cap, MAX_CHAIN_DEPTH)
+        .await?
+        .iter()
+        .any(|row| row.id == *ancestor))
 }

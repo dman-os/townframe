@@ -127,7 +127,7 @@ DocumentsRepo requires two ordinary drawers supplied by the embedder:
 
 They use the same model and remain local because they are not granted to other nodes.
 Creating a doc always names a target drawer and also enters it into the applicable local
-drawers. AuthorityRepo does not create or own these drawers.
+drawers. The authority service does not create or own these drawers.
 
 ## Common operations
 
@@ -147,14 +147,17 @@ interrupted work remains inspectable and retryable.
 
 ## Actors and capabilities
 
-Actors are public-key identities authorized through signed capability tokens. The
-operator has full drawer authority and can explicitly delegate narrower drawer grants to
-other actors or processes, including across an address-space boundary. Delegation is not
-implicit in actor names or paths, and a non-operator cannot create a lateral sibling
-grant.
+Actors are persistent subsystem identities authorized through capabilities
+(ADR 017). The operator holds every right and opens the other actors. Delegation is
+not implicit in actor names or paths: an object capability is named by DrawerRepo from
+its own actor capability, a holder can only drop rights from it, and a child's rights
+can only shrink. Durable drawer grants are rows in DrawerRepo's ledger namespace keyed
+by subject actor and object (`write drawer D`), so revoking one never rewrites a
+document.
 
-Private actor and node keys remain behind AuthorityRepo/`secrets_rs`. Callers request a
-signature rather than receiving a private key. Actor capability answers whether Cabinet
+Private actor and node keys remain behind the authority service, sealed under a
+`secrets_rs` keyring key. Callers request a signature rather than receiving a private
+key. Actor capability answers whether Cabinet
 may perform an operation for that actor; BigRepo/Keyhive independently enforces whether
 the node can perform it.
 

@@ -29,7 +29,7 @@ use autosurgeon::{HydrateError, Reconciler};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::ser::{Error as SerError, SerializeMap};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::borrow::Cow;
 use std::num::FpCategory;
 
@@ -53,6 +53,86 @@ pub const KEYWORD: &str = "x-automerge";
 const FORMAT: &str = "format";
 const DATE_TIME: &str = "date-time";
 const JS_SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
+
+/// The schema an object member is declared by: the property it is named as, the typed catch-all
+/// `additionalProperties` states for the members a record does not name, or the value schema of a
+/// [`keyed_map`].
+///
+/// A position whose `patternProperties` is not a keyed map has no declaration for its pattern
+/// members, which is why the codec refuses to compile one rather than storing them as plain JSON.
+pub(super) fn declared_member<'a>(schema: &'a Value, key: &str) -> Option<&'a Value> {
+    schema
+        .get("properties")
+        .and_then(|properties| properties.get(key))
+        .or_else(|| {
+            schema
+                .get("additionalProperties")
+                .filter(|stated| stated.is_object())
+        })
+        .or_else(|| {
+            schema.as_object().and_then(|object| {
+                keyed_map(object).expect("a compiled schema's `patternProperties` is a keyed map")
+            })
+        })
+}
+
+/// A dynamic map whose keys one pattern states, and the schema every one of its values is declared
+/// by. `BTreeMap<Uuid7, V>` derives one: the key type's `pattern` becomes the map's only
+/// `patternProperties` entry, closed by `additionalProperties: false`.
+///
+/// JSON Schema dispatches a `patternProperties` member by matching its key against each pattern.
+/// The storage walk and the Lexicon projection read a member's declaration without running a
+/// pattern, and they can only do that where matching decides nothing: exactly one pattern, anchored
+/// at both ends so it states the whole key rather than a part of it, `additionalProperties: false`
+/// so that no key falls outside it, and no named properties beside it so that a member is a map
+/// entry and never also a record field. Every member then has the one value schema, and the
+/// validator — which does run the pattern — refuses a key outside it before the walk reads a value.
+///
+/// `Ok(None)` is a position without `patternProperties`. Any other use of it is an error, because
+/// reading past it would store or publish its members under a declaration they do not have.
+pub(super) fn keyed_map(object: &Map<String, Value>) -> Result<Option<&Value>, &'static str> {
+    let Some(patterns) = object.get("patternProperties") else {
+        return Ok(None);
+    };
+    let Some((pattern, values)) = patterns
+        .as_object()
+        .filter(|patterns| patterns.len() == 1)
+        .and_then(|patterns| patterns.iter().next())
+    else {
+        return Err(
+            "`patternProperties` states other than exactly one key pattern, so a member's \
+             declaration would depend on which pattern its key matches",
+        );
+    };
+    if !pattern.starts_with('^') || !pattern.ends_with('$') || pattern.ends_with("\\$") {
+        return Err(
+            "the `patternProperties` key pattern is not anchored at both ends, so it constrains \
+             a part of each key rather than the key",
+        );
+    }
+    if object.get("additionalProperties") != Some(&Value::Bool(false))
+        || object.contains_key("unevaluatedProperties")
+    {
+        return Err(
+            "`patternProperties` is not closed by `additionalProperties: false` alone, so a key \
+             outside its pattern would be governed by another declaration",
+        );
+    }
+    if object
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_some_and(|properties| !properties.is_empty())
+    {
+        return Err(
+            "`patternProperties` sits beside named properties, so one member could be both a \
+             record field and a map entry",
+        );
+    }
+    if !values.is_object() {
+        return Err("the `patternProperties` value schema is not a schema object");
+    }
+    Ok(Some(values))
+}
 
 /// A shape whose storage in a document is not its JSON form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

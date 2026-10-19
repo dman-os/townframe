@@ -498,6 +498,92 @@ fn undeclared_bytes_and_an_instant_round_trip_in_their_raw_spellings() {
     assert_eq!(projected["when"], json!("1970-01-01T00:00:00Z"));
 }
 
+/// A keyed map — `BTreeMap<Uuid7, V>` derives one — declares every value by its one value schema,
+/// so the storage forms there are written and read like anywhere else: bytes land as bytes, an
+/// authored float is normalized to its decimal string, and a key outside the pattern is refused
+/// before anything is written.
+#[test]
+fn a_keyed_map_stores_each_value_under_its_value_schema() {
+    let document = json!({
+        "type": "object",
+        "$defs": {},
+        "properties": {"entries": {
+            "type": "object",
+            "patternProperties": {"^[a-z]+$": {
+                "type": "object",
+                "properties": {
+                    "blob": {
+                        "type": "object",
+                        "x-automerge": "bytes",
+                        "properties": {"$bytes": {"type": "string", "contentEncoding": "base64"}},
+                        "required": ["$bytes"],
+                        "additionalProperties": false
+                    },
+                    "ratio": {"type": "string", "x-automerge": "float", "format": "double"}
+                },
+                "required": ["blob", "ratio"],
+                "additionalProperties": false
+            }},
+            "additionalProperties": false
+        }},
+        "required": ["entries"],
+        "additionalProperties": false
+    });
+    let mut doc = Automerge::new();
+    let mut tx = doc.transaction();
+    reconcile_json(
+        &mut tx,
+        &ROOT,
+        facet(),
+        &document,
+        json!({"entries": {"one": {"blob": {"$bytes": "AQI="}, "ratio": 1.25}}}),
+    )
+    .unwrap();
+    tx.commit();
+
+    let (_, facet_map) = doc.get(ROOT, "facet").unwrap().unwrap();
+    let (_, entries) = doc.get(&facet_map, "entries").unwrap().unwrap();
+    let (_, one) = doc.get(&entries, "one").unwrap().unwrap();
+    let (blob, _) = doc.get(&one, "blob").unwrap().unwrap();
+    assert_eq!(shape(&blob), "bytes", "{blob:?}");
+    let (ratio, _) = doc.get(&one, "ratio").unwrap().unwrap();
+    assert_eq!(shape(&ratio), "f64", "{ratio:?}");
+    assert_eq!(
+        hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap(),
+        json!({"entries": {"one": {"blob": {"$bytes": "AQI="}, "ratio": "1.25"}}})
+    );
+
+    let mut tx = doc.transaction();
+    let refusal = reconcile_json(
+        &mut tx,
+        &ROOT,
+        facet(),
+        &document,
+        json!({"entries": {"One": {"blob": {"$bytes": "AQI="}, "ratio": "1.25"}}}),
+    )
+    .unwrap_err();
+    assert_eq!(tx.pending_ops(), 0, "{refusal}");
+}
+
+/// A `patternProperties` whose members need a pattern match to find their declaration would be
+/// stored as plain JSON, so it is refused when the schema is compiled rather than when a write
+/// happens to reach one.
+#[test]
+fn a_pattern_map_that_is_not_keyed_does_not_compile() {
+    let string = json!({"type": "string"});
+    for schema in [
+        json!({"type": "object", "patternProperties": {"^a$": string, "^b$": string}, "additionalProperties": false}),
+        json!({"type": "object", "patternProperties": {"a": string}, "additionalProperties": false}),
+        json!({"type": "object", "patternProperties": {"^a$": string}}),
+        json!({"type": "object", "properties": {"nested": {"type": "object", "patternProperties": {"^a$": string}, "properties": {"b": string}, "additionalProperties": false}}}),
+    ] {
+        let refusal = crate::facet::codec::CompiledSchema::compile(schema.clone())
+            .expect_err("refused")
+            .to_string();
+        assert!(refusal.contains("keyed map"), "{schema}: {refusal}");
+    }
+}
+
 /// The declaration a position makes is one spelling for one concept — a storage form, an ordinary
 /// kind, or genuinely nothing — and `scalar_checked` must classify by THAT, not by "no number kind
 /// was declared". A kind the schema states wins over the specialized native value underneath,

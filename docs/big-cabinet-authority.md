@@ -1,108 +1,207 @@
 # Big Cabinet Authority
 
-This guide describes the **current AuthorityRepo primitives** — actor
-identities, capabilities, a generic grant ledger, and secret-backed signing,
-as specified in [ADR 017](../docs/adrs/017-authority-actors-capabilities-and-grants.md).
-It is not a document, drawer, branch, membership, or Daybook-migration guide.
-Drawer and document contracts are [ADR 014](../docs/adrs/014-cabinet-drawers-and-selective-mirroring.md)
+This guide describes the **authority service**: actor identities, capabilities,
+a generic grant ledger, and secret-backed signing. The model is specified in
+[ADR 017](../docs/adrs/017-authority-actors-capabilities-and-grants.md). It is
+not a document, drawer, branch, membership, or Daybook-migration guide; those
+contracts are [ADR 014](../docs/adrs/014-cabinet-drawers-and-selective-mirroring.md)
 and [ADR 015](../docs/adrs/015-documents-repo-and-facet-writes.md).
 
-## The four parts
+Authority is a `service_utils_rs` service. It is declared once as
+`AuthorityProtocol` and every consumer reaches it through a
+`Client<AuthorityProtocol>`, so the same hosted handler runs for an in-process
+caller, another process on the node, and an XRPC caller. Nothing outside the
+service can touch its state.
 
-`AuthorityRepo` owns four parts that stay independent inside it:
+Every ocap is an opaque UUIDv4 handle, including `is actor` handles. There is no
+actor-capability type: AuthorityActors remembers which exact handles it issued
+for which actors in its own issuance index. “Actor capability” below is shorthand
+for a handle recognized by that index, not a protocol variant. Names and ancestry
+cannot forge an association; ordinary attenuation does not copy it.
 
-- **Capability table.** A `CapId` names a row `{ object, rights, parent,
-  root_actor }`. `object` is an opaque string named by the minting domain
-  (`doc:<id>`, `drawer:<id>`, `branch-of:<id>`, `is subsystem <path>`);
-  `rights` is a set over a generic vocabulary (`Use`, `Narrow`, `MintChild`,
-  `Delegate`). Minting a child requires the parent to allow it and the child's
-  rights to be a subset; whether one object is narrower than another is the
-  minting domain's decision, made before the mint call. Caps are table rows,
-  not signed tokens — the table is the check.
-- **Actor registry.** An actor is a persistent subsystem: a `Uuid7`, an actor
-  URL, its Ed25519 public key, and a node-signed attribution certificate
-  binding them. The subsystem's cap is rooted at that actor.
-- **Grant ledger.** Opaque rows of `(subject, object, access)`. The only query
-  is exact match; containment (doc in drawer, child drawer) is resolved by the
-  caller first. Deleting a row revokes. This is the only persistent
-  authorization state.
-- **Signer.** `sign_as(cap, claim)` walks the chain to the root actor and signs
-  a dmeta v2 facet claim with that actor's key. A cap with no root actor cannot
-  sign.
-
-## Boot, subsystems, and minting
-
-`AuthorityRepo::boot(store, path)` opens the durable SQLite state, reconciles
-any unfinished actor provisioning, and returns the repo plus the operator root
-cap. From it:
+## Booting
 
 ```rust
-use std::{path::Path, sync::Arc};
-
-use big_cabinet::AuthorityRepo;
+use big_cabinet::{Authority, boot};
 use secrets_rs::SecretStore;
+use service_utils_rs::StopToken;
+use sqlx_utils_rs::SqlCtx;
 
 pub async fn boot_authority(
-    state_path: impl AsRef<Path>,
-) -> Result<(AuthorityRepo, big_cabinet::CapId), Box<dyn std::error::Error>> {
-    let store = Arc::new(SecretStore::boot().await?);
-    let (authority, root) = AuthorityRepo::boot(store, state_path).await?;
-    Ok((authority, root))
+    sql: SqlCtx,
+) -> Result<(Authority, StopToken), Box<dyn std::error::Error>> {
+    let secrets = SecretStore::boot().await?;
+    Ok(boot(&secrets, sql).await?)
 }
 ```
 
-A subsystem is created with `create_actor(&root, "<child/path>")`. The caller
-supplies the child path; the full actor URL is `db+actor://<node>/<path>`, and
-the registry rejects a path that does not extend the minting subsystem's own
-path. The returned `Actor` carries the `Uuid7`, the URL, the public key, the
-node-signed attribution certificate for the binding (the bytes dmeta stores as
-`ActorMetadata.delegation`), and the subsystem cap.
+`Authority` carries the service, the `Host` that fronts it, the client its
+consumers use, the operator root capability, and `node_issuer` — the key a
+verifier must expect on this node's attribution certificates. The returned token
+stops the host (joining in-flight calls) before the service. The root capability
+is the same on every boot.
 
-Grants and caps then compose in the domain services, not here. A domain
-service given an "is subsystem X" cap asks the registry who X is
-(`actor_of`), asks the ledger whether that actor may act on an object the
-service named, and mints its own cap parented to its own subsystem cap.
-`AuthorityRepo` never learns what an object string means.
+## Opening a subsystem
+
+A child's path is its parent's path plus one segment; the operator's path is
+empty. `OpenActor` creates the actor on first use and returns the same identity
+every time after, so an embedder simply opens its subsystems at every boot:
+
+```rust
+use big_cabinet::authority::{Authority, OpenActor, Rights};
+use service_utils_rs::RequestContext;
+
+pub async fn start_runtime(
+    authority: &Authority,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: authority.root,
+                path: "rt".into(),
+                rights: Rights::all(),
+            },
+        )
+        .await?;
+    // runtime.url is "db+actor://<node>/rt"; runtime.capability is the
+    // runtime's own actor capability; runtime.certificate is the node-signed
+    // attribution certificate dmeta stores.
+    let _ = runtime;
+    Ok(())
+}
+```
+
+Only `rt`'s actor capability can open `rt/plugs`, and the child's rights stay
+inside the parent capability's. Retract a child's capability and open it again
+to rotate the handle; the actor's key and URL do not change.
+
+## Issuing and recognising capabilities
+
+A domain service holds a client and its own actor capability. When a caller
+presents *its* actor capability, the service resolves it, asks its own ledger
+namespace what that actor holds, decides containment, and mints an object
+capability from its own actor capability:
+
+```rust
+use big_cabinet::authority::{CheckGrant, MintCapability, ResolveActor, Rights};
+
+// inside DocumentsRepo, holding `authority: Client<AuthorityProtocol>` and its
+// own actor capability `docs`:
+let caller = authority.call(ctx.child(), ResolveActor { capability: presented }).await?;
+let held = authority
+    .call(ctx.child(), CheckGrant {
+        via: docs,
+        subject: caller.uuid,
+        object: format!("write drawer {drawer_id}"),
+    })
+    .await?;
+if !held.contains(Rights::USE) {
+    return Err(/* unauthorized */);
+}
+// DocumentsRepo knows the doc is in the drawer; the authority never does.
+let edit = authority
+    .call(ctx.child(), MintCapability {
+        issuer: docs,
+        object: format!("edit doc {document_id}"),
+        rights: Rights::USE,
+    })
+    .await?;
+```
+
+When the cap comes back, `InspectCapability` reports its object, rights, and
+`issuer` namespace UUID; DocumentsRepo accepts it only if that UUID is its own.
+The namespace UUID grants nothing by itself. Inspection does not disclose the
+parent handle, which would give the caller broader authority.
+
+A holder may `AttenuateCapability` to hand on fewer rights over the same object,
+never a different object. Attenuating an `is actor` handle is also a generic table
+operation: the result is live but is not an identity handle recognized by
+AuthorityActors. Use `OpenActor` through the parent to request another recognized
+handle with reduced rights.
+
+## Granting
+
+The issuer writes grants in its own namespace with its actor capability. To let a
+user share what it gave them, the issuer mints the user an object capability with
+`delegate`; grants written through it are bounded by it and vanish when it is
+retracted:
+
+```rust
+use big_cabinet::authority::{GrantAccess, MintCapability, Rights};
+
+let owner = authority
+    .call(ctx.child(), MintCapability {
+        issuer: docs,
+        object: format!("write drawer {drawer_id}"),
+        rights: Rights::USE | Rights::DELEGATE,
+    })
+    .await?;
+// later, the user shares with a plug:
+authority
+    .call(ctx.child(), GrantAccess {
+        via: owner.id,
+        subject: plug.uuid,
+        object: format!("write drawer {drawer_id}"),
+        rights: Rights::USE,
+    })
+    .await?;
+```
 
 ## Signing a facet claim
 
-DocumentsRepo is the only facet-claim caller. It evaluates the presented cap
-itself — object, rights, and the drawer membership that authorizes the claim's
-document — then calls:
+DocumentsRepo authorizes the write against the object capability it was shown,
+then signs as the acting actor with that actor's own capability:
 
 ```rust
-let signed = authority.sign_as(&edit_cap, claim).await?;
+use big_cabinet::authority::SignFacetClaim;
+
+let signed = authority
+    .call(ctx.child(), SignFacetClaim { actor: plug_actor_cap, claim })
+    .await?;
 ```
 
 `claim` is a `big_cabinet_core::dmeta::FacetClaim` (v2: origin document, facet
 key, chosen UUIDv7, **actor UUIDv7**, operation, native value CID,
-predecessors). `sign_as` checks the claim's actor UUID equals the root actor's
-UUID, and returns a `SignedFacetClaim` whose actor key is that actor's
-`MultibaseKey` and whose signature is native `SignatureBytes`. Current
-capability state is consulted; a legitimate historical claim remains verifiable
-after revocation, because core verification (`SignedFacetClaim::verify`,
-`Dmeta::verify_facet`) does not consult this repo at all.
+predecessors). The service refuses unless the capability is that actor's own,
+with `use`, and the claim names that actor. Core verification
+(`SignedFacetClaim::verify`, `Dmeta::verify_facet`) never consults this service,
+so a legitimate historical claim stays verifiable after its grants are revoked.
 
-## What a check establishes
+## Operations
 
-| Check | Establishes | Does not establish |
-| --- | --- | --- |
-| `verify_issued(cap)` | This cap is a row this repo issued, unretracted, whose parent chain narrowed or held, rooted where it claims. | That the holder may do anything in particular — object meaning belongs to the minter. |
-| Ledger `has_grant(s, o, a)` | This exact grant row currently exists. | Containment, Keyhive access, roster membership, or byte presence. |
-| `sign_as(cap, claim)` | The root actor's key signed this exact v2 claim, and the claim names that actor's UUID. | That the node may write the document, or that any drawer authorizes it — DocumentsRepo checks that before calling. |
-| BigRepo/Keyhive checks | Lower-layer node authority and effective access. | Actor capability issuance or attribution. |
+| Operation | Needs | Establishes | Does not establish |
+| --- | --- | --- | --- |
+| `OpenActor` | parent actor cap, `mintChild` | The persistent child actor at `path` and a live actor cap for it. | Any grant. A new actor holds nothing until an issuer says so. |
+| `ResolveActor` | actor cap, `use` | Which actor the presenter is. | That the actor's plug binary executed. |
+| `MintCapability` | actor cap, `narrow` | A new object, issued by that actor. | That the object means anything — only the issuer knows. |
+| `AttenuateCapability` | ocap, `narrow` | A copy of the same object and issuer with fewer rights. | AuthorityActors' exact-ID association. |
+| `InspectCapability` | the id | That the cap is live, and its object, rights, and issuer. | Parent handles or actor identity. |
+| `RetractCapability` | the cap or an ancestor | That it and its derivations are dead. | That historical signatures are invalid. |
+| `GrantAccess` / `RevokeAccess` | `delegate` | A standing entitlement in the issuer's namespace, or its withdrawal. | Anything about documents. |
+| `CheckGrant` | issuer's actor cap, `use` | The union of standing rights for this exact subject and object. | Containment, Keyhive access, roster membership, byte presence. |
+| `SignFacetClaim` | actor cap, `use` | That this actor's key signed this exact v2 claim. | That the node may write the document, or that any drawer authorizes it. |
+
+## Trust boundary
+
+A cap id is an opaque UUIDv4 **bearer handle**, like a file descriptor. All three
+transports carry the same handle to its owning authority. No signed token wrapper
+is needed. Keep handles confidential, admit callers at the transport boundary,
+and hand them only the handles they should exercise. A separate authority cannot
+verify a handle without its owning table. Attribution certificates are unrelated
+to this handle format; see ADR 017.
 
 ## Durability
 
-The private seed never leaves `secrets_rs`; the repo holds named signing
-handles and signs through them. Boot reconciles durable node/operator and
-actor-provisioning intents left by a cancelled or interrupted owner, completing
-or reconciling them rather than manufacturing a new identity, deleting a key,
-or silently treating an uncertain outcome as success. `ProvisioningUnresolved`
-and `CommitUnknown` are those reconciliation signals. Keyring and SQLite are
-separate durable systems; exact public-key bindings are preserved across the
-boundary and unresolved cross-store outcomes are reported, not hidden.
+The service's tables live in the `SqlCtx` it is booted on. Writes are single
+`BEGIN IMMEDIATE` transactions on the writer pool; inspection, resolution, grant
+checks, and signing read from the reader pool without waiting for writers.
+
+Node and actor seeds are sealed under one wrapping key held in the OS keyring and
+stored beside their registry rows, so creating an actor is a single transaction
+with nothing to reconcile after a crash. Boot refuses to continue if the keyring
+lost the wrapping key rather than issuing new identities.
 
 There is no backward compatibility with the deleted v1 `CapabilityToken` wire
-format: token and revocation rows are dropped at boot, and actor keys survive
-because they live in the secret store independently of these tables.
+format or the earlier keyring-held actor keys.

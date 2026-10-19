@@ -1109,20 +1109,23 @@ name = "big_cabinet"
 version = "0.1.0"
 dependencies = [
  "big_cabinet_core",
- "big_sync_core",
- "blake3",
  "ed25519-dalek 2.2.0",
+ "irpc",
  "keyring-core",
  "rand 0.9.5",
  "secrets_rs",
  "serde",
  "serde_json",
+ "service_utils_rs",
  "sqlx",
+ "sqlx_utils_rs",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "utils_rs",
+ "tracing",
+ "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -10898,7 +10901,6 @@ dependencies = [
  "android-native-keyring-store",
  "apple-native-keyring-store",
  "chacha20poly1305",
- "ed25519-dalek 2.2.0",
  "keyring-core",
  "linux-keyutils-keyring-store",
  "rand 0.9.5",
