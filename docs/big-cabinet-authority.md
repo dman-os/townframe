@@ -1,163 +1,108 @@
 # Big Cabinet Authority
 
-This guide describes the **current qualified Authority primitives**. It is not a document, drawer, branch, membership, or Daybook-migration guide. The qualified Authority source is `src/big_cabinet/authority.rs` at SHA-256 `3339b8bfb2a301bee26ab7b265f8f4ec33bb016ebfc7b4b28ef926ba026218c4`. The retained runtime qualification is 30 Authority tests; Schema qualification is separate (13 tests). This document does not rerun those checks.
+This guide describes the **current AuthorityRepo primitives** — actor
+identities, capabilities, a generic grant ledger, and secret-backed signing,
+as specified in [ADR 017](../docs/adrs/017-authority-actors-capabilities-and-grants.md).
+It is not a document, drawer, branch, membership, or Daybook-migration guide.
+Drawer and document contracts are [ADR 014](../docs/adrs/014-cabinet-drawers-and-selective-mirroring.md)
+and [ADR 015](../docs/adrs/015-documents-repo-and-facet-writes.md).
 
-## What the Authority boundary does
+## The four parts
 
-`AuthorityRepo` is a durable, local capability registry. It owns:
+`AuthorityRepo` owns four parts that stay independent inside it:
 
-- the node and operator signing identities;
-- registered actor public identities;
-- node-signed `CapabilityToken` values and their persisted ancestor chain;
-- current revocation and current coarse drawer-operation authorization; and
-- actor-authored `FacetClaim` signing after current capability authorization.
+- **Capability table.** A `CapId` names a row `{ object, rights, parent,
+  root_actor }`. `object` is an opaque string named by the minting domain
+  (`doc:<id>`, `drawer:<id>`, `branch-of:<id>`, `is subsystem <path>`);
+  `rights` is a set over a generic vocabulary (`Use`, `Narrow`, `MintChild`,
+  `Delegate`). Minting a child requires the parent to allow it and the child's
+  rights to be a subset; whether one object is narrower than another is the
+  minting domain's decision, made before the mint call. Caps are table rows,
+  not signed tokens — the table is the check.
+- **Actor registry.** An actor is a persistent subsystem: a `Uuid7`, an actor
+  URL, its Ed25519 public key, and a node-signed attribution certificate
+  binding them. The subsystem's cap is rooted at that actor.
+- **Grant ledger.** Opaque rows of `(subject, object, access)`. The only query
+  is exact match; containment (doc in drawer, child drawer) is resolved by the
+  caller first. Deleting a row revokes. This is the only persistent
+  authorization state.
+- **Signer.** `sign_as(cap, claim)` walks the chain to the root actor and signs
+  a dmeta v2 facet claim with that actor's key. A cap with no root actor cannot
+  sign.
 
-The public types are re-exported by [`big_cabinet::lib`](../src/big_cabinet/lib.rs#L1-L15): `AuthorityRepo`, `CapabilityToken`, `Grant`, `DrawerId`, `ActorClaim`, and the associated identity/error types.
+## Boot, subsystems, and minting
 
-`DrawerId` is the actual `big_sync_core::ObjKey`/Core `DocumentId`, not a fixed-width wrapper. Its identity is its byte string, so a real ID may be variable length. The v1 token wire format remains externally tagged JSON with drawer IDs as byte arrays; it must not be replaced with `ObjKey`'s human-readable string form. The custom `Grant` serializer and borrowed `UnsignedToken` are implemented in [`authority.rs`](../src/big_cabinet/authority.rs#L209-L410).
-
-## Constructing an authority and minting a capability
-
-Use the real platform `SecretStore` for a service process. `SecretStore::boot` opens the OS-backed keyring; it does not return private key material. `AuthorityRepo::boot` takes that store and a durable SQLite state path, then returns the stable operator root capability.
-
-The following example uses only public APIs. `document_id_bytes` must come from the caller's actual BigRepo/Core object identity. The example does **not** create a document or drawer, and an arbitrary byte vector is not evidence of a real document workflow.
+`AuthorityRepo::boot(store, path)` opens the durable SQLite state, reconciles
+any unfinished actor provisioning, and returns the repo plus the operator root
+cap. From it:
 
 ```rust
 use std::{path::Path, sync::Arc};
 
-use big_cabinet::{AuthorityRepo, DrawerId, Grant};
+use big_cabinet::AuthorityRepo;
 use secrets_rs::SecretStore;
 
-pub async fn mint_for_existing_document(
+pub async fn boot_authority(
     state_path: impl AsRef<Path>,
-    document_id_bytes: Vec<u8>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(AuthorityRepo, big_cabinet::CapId), Box<dyn std::error::Error>> {
     let store = Arc::new(SecretStore::boot().await?);
-    let (authority, operator) =
-        AuthorityRepo::boot(Arc::clone(&store), &state_path).await?;
-
-    // create_actor creates and registers a new actor; only its public identity leaves
-    // the AuthorityRepo boundary.
-    let actor = authority.create_actor().await?;
-    let operation = Grant::WriteDrawer(DrawerId::new(document_id_bytes));
-    let token = authority
-        .delegate(&operator, actor, vec![operation.clone()])
-        .await?;
-
-    // Portable cryptographic verification does not consult local revocation.
-    token.verify(&authority.node_public_key())?;
-    // Current verification checks the persisted row, revocation state, and ancestors.
-    authority.verify(&token).await?;
-    // Authorization checks this current token against this requested operation.
-    authority.authorize(&token, &operation).await?;
-
-    Ok(())
+    let (authority, root) = AuthorityRepo::boot(store, state_path).await?;
+    Ok((authority, root))
 }
 ```
 
-`delegate` is explicit and downward. The operator root may issue grants; a non-operator actor may only attenuate grants it owns and may not create a lateral sibling path. `Grant::Delegate { drawer, grants }` is the typed nested-delegation form when a caller needs to delegate a bounded set through a drawer. The Authority layer does not establish the corresponding BigRepo/Keyhive access or publish a drawer entry.
+A subsystem is created with `create_actor(&root, "<child/path>")`. The caller
+supplies the child path; the full actor URL is `db+actor://<node>/<path>`, and
+the registry rejects a path that does not extend the minting subsystem's own
+path. The returned `Actor` carries the `Uuid7`, the URL, the public key, the
+node-signed attribution certificate for the binding (the bytes dmeta stores as
+`ActorMetadata.delegation`), and the subsystem cap.
 
-## Actor keys and signing handles
+Grants and caps then compose in the domain services, not here. A domain
+service given an "is subsystem X" cap asks the registry who X is
+(`actor_of`), asks the ledger whether that actor may act on an object the
+service named, and mints its own cap parented to its own subsystem cap.
+`AuthorityRepo` never learns what an object string means.
 
-`create_actor` durably records a provisioning intent, creates a named Ed25519 key in `secrets_rs`, binds its public key to the actor registry, and returns only `[u8; 32]` (`ActorPublicKey`). The actor key name and private seed remain inside the secret store. On a later delegation or actor-claim signing operation, AuthorityRepo opens the persisted named key as a `SigningKeyHandle` and binds it to the registered public key before signing.
+## Signing a facet claim
 
-The standalone public signing-handle lifecycle is:
-
-```rust
-use std::sync::Arc;
-use secrets_rs::{SecretStore, SigningKeyHandle};
-
-pub async fn sign_without_exporting_a_key(
-    store: Arc<SecretStore>,
-    message: &[u8],
-) -> Result<[u8; 64], secrets_rs::SecretsError> {
-    let handle =
-        SigningKeyHandle::get_or_create(store, "example.service", "example-key").await?;
-    let public_key = handle.public_key().await?;
-    handle
-        .bind_public_key(public_key)
-        .sign(message)
-        .await
-}
-```
-
-That handle example is an application-owned signing key; it is **not** registered as an AuthorityRepo actor. The current public Authority API intentionally provides no “register this arbitrary handle” operation: use `create_actor` when the key must participate in AuthorityRepo delegation. `SigningKeyHandle::open` is the non-creating form used for a persisted key during reopen/recovery. The handle API is documented in [`secrets_rs`](../src/secrets_rs/src/lib.rs#L490-L589), and its private seed is never returned.
-
-## Actor facet claims: current authorization versus historical verification
-
-`ActorClaim` pairs a `Grant::WriteDrawer` operation with a Core `FacetClaim`. `sign_actor_claim` first checks the token against **current** AuthorityRepo state, opens the registered actor signer, and returns a `SignedFacetClaim`; it does not return a private key. Core supplies the claim's real document ID, facet key, UUID, operation, value CID, and predecessor IDs. The claim encoding and `SignedFacetClaim` constructors are public in [`big_cabinet_core::dmeta`](../src/big_cabinet_core/dmeta.rs#L184-L399).
+DocumentsRepo is the only facet-claim caller. It evaluates the presented cap
+itself — object, rights, and the drawer membership that authorizes the claim's
+document — then calls:
 
 ```rust
-use big_cabinet::{ActorClaim, AuthorityRepo, Grant};
-use big_cabinet_core::{DocumentId, FacetKey};
-use big_cabinet_core::dmeta::{value_cid, ClaimOperation, FacetClaim};
-use serde_json::json;
-use uuid::Uuid;
-
-pub async fn sign_and_verify_claim(
-    authority: &AuthorityRepo,
-    token: &big_cabinet::CapabilityToken,
-    document_id_bytes: Vec<u8>,
-    write_drawer: big_cabinet::DrawerId,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let claim = ActorClaim {
-        operation: Grant::WriteDrawer(write_drawer),
-        claim: FacetClaim {
-            origin_document: DocumentId::new(document_id_bytes),
-            facet_key: FacetKey::from_text("org.example.note", "main")?,
-            chosen_uuid: Uuid::new_v4(),
-            operation: ClaimOperation::Set,
-            value_cid: Some(value_cid(&json!({ "body": "example" }))?),
-            predecessors: Vec::new(),
-        },
-    };
-
-    let signed = authority.sign_actor_claim(token, &claim).await?;
-    authority.verify_actor_claim(token, &claim, &signed)?;
-    Ok(())
-}
+let signed = authority.sign_as(&edit_cap, claim).await?;
 ```
 
-`verify_actor_claim` verifies the historical actor signature, the node-signed token, and the exact actor/claim context. It deliberately does **not** require current capability authorization, so a legitimate historical claim remains verifiable after the capability is revoked. That historical result is not permission to perform a new write.
+`claim` is a `big_cabinet_core::dmeta::FacetClaim` (v2: origin document, facet
+key, chosen UUIDv7, **actor UUIDv7**, operation, native value CID,
+predecessors). `sign_as` checks the claim's actor UUID equals the root actor's
+UUID, and returns a `SignedFacetClaim` whose actor key is that actor's
+`MultibaseKey` and whose signature is native `SignatureBytes`. Current
+capability state is consulted; a legitimate historical claim remains verifiable
+after revocation, because core verification (`SignedFacetClaim::verify`,
+`Dmeta::verify_facet`) does not consult this repo at all.
 
-## Reopen, durability, and recovery boundaries
-
-The `state_path` passed to `AuthorityRepo::boot` is the durable SQLite owner boundary. A second process or a reopened handle reads current token rows, digests, ancestor links, and revocations from that store rather than trusting a process-local cache. Reopening the same path returns the persisted operator root and can verify previously persisted capabilities:
-
-```rust
-let (reopened, _root) = AuthorityRepo::boot(store, &state_path).await?;
-reopened.verify(&token).await?;
-```
-
-Boot also reconciles durable node/operator boot intents and unfinished actor-provisioning intents. A cancelled or interrupted creator is completed or reconciled by the next serialized owner when the exact key identity is available. `ProvisioningUnresolved` means the keyring/database outcome cannot be established safely; `CommitUnknown` means a commit outcome requires reconciliation. These are recovery signals, not permission to manufacture a new identity, delete a key, or silently treat an uncertain operation as successful. The recovery tests and implementation cover durable intent, restart, cancellation, and ambiguous-publication boundaries; they do not define the separate recovery-principal design in ADR 006.
-
-The keyring and SQLite state are separate durable systems. AuthorityRepo preserves exact public-key bindings and reports unresolved cross-store outcomes rather than pretending they form one atomic transaction. The private seed remains in the OS keyring throughout boot, delegation, claim signing, and reopen.
-
-The independent legacy qualification in [`authority.rs` tests](../src/big_cabinet/authority.rs#L2446-L2630) inserts a literal old full-token JSON row and its payload digest directly, then reopens, verifies, and authorizes it. This demonstrates lossless v1 Authority-token wire compatibility for the qualified variants; it is not a migration or re-signing procedure.
-
-## Do not conflate these checks
+## What a check establishes
 
 | Check | Establishes | Does not establish |
 | --- | --- | --- |
-| `CapabilityToken::verify(node_key)` | The token's v1 payload and node signature match the supplied node identity. | Current revocation, persisted-row existence, ancestor validity, actor authorization, or Keyhive access. |
-| `AuthorityRepo::verify(token)` | Current local persisted token row, digest, ancestor chain, revocation state, and node signature. | Document existence, drawer membership, physical bytes, or lower-layer node authority. |
-| `AuthorityRepo::authorize(token, grant)` | This current local capability authorizes this coarse requested operation. | A BigRepo/Keyhive grant, official roster inclusion, or a successful document mutation. |
-| `AuthorityRepo::sign_actor_claim(...)` | Current capability authorization plus an actor signature over the Core claim. | That the node can write the document, that the claim was applied, or that the actor is a Keyhive principal. |
-| `AuthorityRepo::verify_actor_claim(...)` | Historical signature and exact token/claim subject context. | Current permission to issue another write or a current membership decision. |
-| BigRepo/Keyhive checks | Lower-layer node authority and effective access. | Actor capability issuance, actor attribution, or this local AuthorityRepo policy. |
+| `verify_issued(cap)` | This cap is a row this repo issued, unretracted, whose parent chain narrowed or held, rooted where it claims. | That the holder may do anything in particular — object meaning belongs to the minter. |
+| Ledger `has_grant(s, o, a)` | This exact grant row currently exists. | Containment, Keyhive access, roster membership, or byte presence. |
+| `sign_as(cap, claim)` | The root actor's key signed this exact v2 claim, and the claim names that actor's UUID. | That the node may write the document, or that any drawer authorizes it — DocumentsRepo checks that before calling. |
+| BigRepo/Keyhive checks | Lower-layer node authority and effective access. | Actor capability issuance or attribution. |
 
-Official drawer roster inclusion, Keyhive access, and local byte presence are separate facts. The current Authority primitives do not create real documents, populate `DrawerRepo`/`DocumentsRepo`, establish target-drawer or branch workflows, admit membership, or prove current document history/native-content qualification. Branches remain separate physical `DocumentId` identities and are not implicitly admitted to a drawer, as described by [ADR 007](../docs/adrs/007-doc-branch-identity.md). The broader drawer and document contracts remain proposed in [ADR 014](../docs/adrs/014-cabinet-drawers-and-selective-mirroring.md) and [ADR 015](../docs/adrs/015-documents-repo-and-facet-writes.md).
+## Durability
 
-The two product choices referenced by the surrounding task remain unanswered. This guide makes no choice about them and does not infer a policy from the Authority primitives.
+The private seed never leaves `secrets_rs`; the repo holds named signing
+handles and signs through them. Boot reconciles durable node/operator and
+actor-provisioning intents left by a cancelled or interrupted owner, completing
+or reconciling them rather than manufacturing a new identity, deleting a key,
+or silently treating an uncertain outcome as success. `ProvisioningUnresolved`
+and `CommitUnknown` are those reconciliation signals. Keyring and SQLite are
+separate durable systems; exact public-key bindings are preserved across the
+boundary and unresolved cross-store outcomes are reported, not hidden.
 
-## Source references
-
-- [Authority public exports](../src/big_cabinet/lib.rs#L1-L15)
-- [Authority grant/token wire and borrowed payload implementation](../src/big_cabinet/authority.rs#L209-L410)
-- [Authority boot and actor lifecycle](../src/big_cabinet/authority.rs#L1335-L1565)
-- [Current token verification, delegation, authorization, revocation, and claim APIs](../src/big_cabinet/authority.rs#L1849-L2180)
-- [SecretStore and SigningKeyHandle public APIs](../src/secrets_rs/src/lib.rs#L116-L145) and [key handles](../src/secrets_rs/src/lib.rs#L490-L589)
-- [Core claim and signed-claim types](../src/big_cabinet_core/dmeta.rs#L184-L399)
-- [ADR 014: drawer/Keyhive boundary](../docs/adrs/014-cabinet-drawers-and-selective-mirroring.md)
-- [ADR 015: document, node authorization, and signed-claim boundaries](../docs/adrs/015-documents-repo-and-facet-writes.md)
-- [ADR 007: physical document and branch identity](../docs/adrs/007-doc-branch-identity.md)
+There is no backward compatibility with the deleted v1 `CapabilityToken` wire
+format: token and revocation rows are dropped at boot, and actor keys survive
+because they live in the secret store independently of these tables.

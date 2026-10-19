@@ -72,8 +72,12 @@ impl Attribution {
         let Value::Array(fields) = envelope.as_ref() else {
             return Err(AttributionError::Malformed("COSE array"));
         };
-        let [Value::Bytes(protected), Value::Map(unprotected), Value::Bytes(payload), Value::Bytes(signature)] =
-            fields.as_slice()
+        let [
+            Value::Bytes(protected),
+            Value::Map(unprotected),
+            Value::Bytes(payload),
+            Value::Bytes(signature),
+        ] = fields.as_slice()
         else {
             return Err(AttributionError::Malformed("COSE fields"));
         };
@@ -115,7 +119,10 @@ impl Attribution {
         }
 
         let payload = decode(payload)?;
-        let claims = closed_map(&payload, &[1, 2, ACTOR_UUID, ACTOR_URL, ATTRIBUTION_PURPOSE])?;
+        let claims = closed_map(
+            &payload,
+            &[1, 2, ACTOR_UUID, ACTOR_URL, ATTRIBUTION_PURPOSE],
+        )?;
         if text(field(claims, ATTRIBUTION_PURPOSE)?)? != PURPOSE {
             return Err(AttributionError::Unsupported("purpose"));
         }
@@ -187,8 +194,7 @@ impl Attribution {
 fn verifying_key(key: &MultibaseKey) -> Result<VerifyingKey, AttributionError> {
     let verifying_key = VerifyingKey::from_bytes(key.as_bytes())
         .map_err(|_| AttributionError::Malformed("Ed25519 public key"))?;
-    if verifying_key.is_weak()
-        || verifying_key.to_edwards().compress().as_bytes() != key.as_bytes()
+    if verifying_key.is_weak() || verifying_key.to_edwards().compress().as_bytes() != key.as_bytes()
     {
         return Err(AttributionError::Malformed(
             "weak or noncanonical Ed25519 key",
@@ -274,7 +280,11 @@ fn encode(value: &Value) -> Result<Vec<u8>, AttributionError> {
 }
 
 fn decode(bytes: &[u8]) -> Result<Value, AttributionError> {
-    fn scan(input: &mut &[u8], depth: usize, remaining: &mut usize) -> Result<(), AttributionError> {
+    fn scan(
+        input: &mut &[u8],
+        depth: usize,
+        remaining: &mut usize,
+    ) -> Result<(), AttributionError> {
         if depth > MAX_CBOR_DEPTH || *remaining == 0 {
             return Err(AttributionError::ResourceLimit);
         }
@@ -451,16 +461,19 @@ mod tests {
     fn rfc9052_signature1_literal_fixture() {
         let (attribution, actor, signer) = fixture();
         let expected = data_encoding::HEXLOWER
-            .decode(concat!(
-                "846a5369676e617475726531584ba4013202811003706170706c69636174696f6e2f63626f72",
-                "1078306170706c69636174696f6e2f766e642e646179626f6f6b2e6163746f722d6174747269",
-                "627574696f6e2e76312b6377744058b4a501782d7a4656656e3358363639784c7a7369364e32",
-                "563931446f69797a487a6731754167716954386a5a396e5339365a02782d7a3538365a374832",
-                "76705839714e684e3254346539557475676965336f676a62787a47614d744d3345364852353a",
-                "0001000050017f22e279b07cc398c4dc0c0c07398f3a000100017764622b6163746f723a2f2f",
-                "6e6f64652f70726f636573733a000100027819646179626f6f6b2e6163746f722d6174747269",
-                "627574696f6e",
-            ).as_bytes())
+            .decode(
+                concat!(
+                    "846a5369676e617475726531584ba4013202811003706170706c69636174696f6e2f63626f72",
+                    "1078306170706c69636174696f6e2f766e642e646179626f6f6b2e6163746f722d6174747269",
+                    "627574696f6e2e76312b6377744058b4a501782d7a4656656e3358363639784c7a7369364e32",
+                    "563931446f69797a487a6731754167716954386a5a396e5339365a02782d7a3538365a374832",
+                    "76705839714e684e3254346539557475676965336f676a62787a47614d744d3345364852353a",
+                    "0001000050017f22e279b07cc398c4dc0c0c07398f3a000100017764622b6163746f723a2f2f",
+                    "6e6f64652f70726f636573733a000100027819646179626f6f6b2e6163746f722d6174747269",
+                    "627574696f6e",
+                )
+                .as_bytes(),
+            )
             .unwrap();
         assert_eq!(attribution.signing_bytes().unwrap(), expected);
         let signature = signer.sign(&expected);
@@ -667,7 +680,10 @@ mod tests {
         for (index, label) in [(0, 99), (2, 3), (2, 4), (2, 5), (2, 6), (2, 9), (2, -65540)] {
             let mut fields = unpack(&certificate);
             modify_map(&mut fields, index, |map| {
-                map.push((Value::Integer(label.into()), Value::Text("extension".into())));
+                map.push((
+                    Value::Integer(label.into()),
+                    Value::Text("extension".into()),
+                ));
             });
             resign(&mut fields, &signer);
             assert_eq!(
@@ -847,7 +863,10 @@ mod tests {
             verify(&other_certificate, &attribution, &actor),
             Err(AttributionError::WrongIssuer)
         );
-        assert_eq!(verify(&other_certificate, &other, &actor), Ok(other.clone()));
+        assert_eq!(
+            verify(&other_certificate, &other, &actor),
+            Ok(other.clone())
+        );
         assert_eq!(
             verify(&certificate, &other, &actor),
             Err(AttributionError::WrongIssuer)
@@ -876,7 +895,11 @@ mod tests {
             ..attribution.clone()
         };
         assert_eq!(
-            verify(&signed(&descendant, &actor_signer), &attribution, &copied_actor),
+            verify(
+                &signed(&descendant, &actor_signer),
+                &attribution,
+                &copied_actor
+            ),
             Err(AttributionError::WrongIssuer)
         );
     }

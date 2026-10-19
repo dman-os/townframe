@@ -5,9 +5,15 @@
 ## Scope
 
 [The drawer FDR](../fdrs/001-drawers-as-document-collections.md) defines the
-user-visible collection model. This ADR defines the drawer model Cabinet implements in
-this PR. Subset drawers, managed-participant layouts, roster sharding, provider/home
-facets, and Panproto integration are later work.
+user-visible collection model. This ADR is the **target contract** for the
+drawer model Cabinet will implement: the drawer facets, roster, child entries,
+and required local drawers below are `DrawerRepo`'s contract, not delivered by
+any single PR. The authority slice that has landed — actor identities,
+capabilities, the grant ledger, and secret-backed signing — is specified in
+[ADR 017](017-authority-actors-capabilities-and-grants.md) and the
+[authority guide](../big-cabinet-authority.md). Subset drawers, managed-participant
+layouts, roster sharding, provider/home facets, and Panproto integration are
+later work.
 
 A doc can be entered in several drawers. Official inclusion, Keyhive access, and local
 byte availability are separate facts.
@@ -177,12 +183,11 @@ and split records are deferred together.
 
 ## Actors and node authority
 
-AuthorityRepo manages actor public-key identities and signed capability tokens. The
-operator capability is returned from AuthorityRepo boot and can explicitly delegate
-narrower drawer grants to other actors. Delegation is directional; non-operator actors
-cannot create lateral sibling authority paths. Tokens can cross address spaces, while
-private signing keys remain behind `secrets_rs` and AuthorityRepo returns signatures
-rather than keys.
+AuthorityRepo manages actor identities, capabilities, and a generic grant
+ledger. Boot returns the operator root capability; a subsystem presents its
+"is subsystem" capability here, and DrawerRepo checks the ledger for that actor
+before minting a drawer capability of its own (ADR 017). Private signing keys
+remain behind `secrets_rs`, and the service returns signatures rather than keys.
 
 Actor capabilities authorize Cabinet operations. BigRepo/Keyhive separately gate what
 the node can do. If the node lacks authority, no actor capability bypasses it. Recovery
