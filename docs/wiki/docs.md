@@ -79,9 +79,11 @@ The documents repo provides the primary interface for reading and writing docume
 It provides a key value shaped interface where documents and their facets can be read or writeen by their ids.
 It doesn't provide means of editing specific fields of facets and avoids overfitting to hte CRDT model of documents.
 
-Incoming writes are first diffed the existing data value and changes are written.
-Facet writes are generally expected to reference the existin heads they last read at so that the documents repo can create a Change atop those heads.
-This prevents TOCTOU issues and ensuring the automerge concurrent write semantics come into play in the case of a remote write that hasn't been observed has come in.
+Incoming writes are diffed against the base at the supplied heads, and changes are written atop those heads. Ordinary facet writes must name their base; it is never silently replaced by newer current heads. This preserves Automerge's concurrent-write semantics when an unobserved remote write has arrived.
+
+The default read path rejects forged facet state at those heads, and the write path enforces the same condition even if a caller supplies heads without reading first. Checking only the visible value is insufficient: hidden unsigned contributions that can reappear in later merges must not pass the base check. A forged unrelated facet does not block an authentic one. Missing verification evidence does not authorize an authenticated read or ordinary write.
+
+An older verified base remains writable even when newer heads contain a forgery. Explicit `AtCurrent` chooses current heads but does not disable authenticity checks. Specialized unsafe inspection and explicit repair may be provided separately; neither is the default or an automatic fallback. These are requirements for the future DocumentsRepo implementation, not guarantees already enforced by the core value-verification helper.
 
 Additionally, the DocumentRepo ensures that incoming writes adhere to the expected schema of the tag.
 This is not just about the incoming facet but also the resulting facet after the write.
@@ -289,68 +291,42 @@ This means that fields that reflect branch speciifc information like the documen
 
 ### Actors
 
+An actor's signing identity is its public key. Dmeta's `actorUuids` binds a UUIDv7 to that key and an exact `actorUrl`; the same key can have multiple UUID bindings. URLs describe applications, processes, or subsystems but confer no authority, and a signature does not prove that a particular plug binary executed. UUID timestamps are metadata, not trusted chronology.
+
+The optional `delegation` bytes contain a node-signed **attribution certificate**, despite the field's name. It certifies the actor UUID, public key, and exact URL, not current permissions. The verifier supplies an externally authenticated expected issuer; a certificate's own `iss` cannot establish whom to trust. The certificate is independent of live AuthorityRepo state and carries no grants, redelegation, audience, `iat`, or expiration. A missing certificate or expected-issuer proof leaves attribution pending.
+
+The certificate is CWT tag 61 around COSE_Sign1 tag 18, with empty unprotected headers and protected `alg: Ed25519 (-19)`, `crit: [16]`, content type `application/cbor`, and `typ: application/vnd.daybook.actor-attribution.v1+cwt`. That media type is private and unregistered. Claims are issuer (`1`), actor public key (`2`), raw UUIDv7 bytes (`-65537`), exact actor URL (`-65538`), and purpose `daybook.actor-attribution` (`-65539`). Issuer and subject are canonical multibase text of raw Ed25519 keys. Verification strictly checks the signature over the received protected/payload bytes and rejects duplicate or unsupported fields; [ADR 015 §5](../adrs/015-documents-repo-and-facet-writes.md#5-actors-attribution-and-dmeta) gives the full profile and bounds.
+
+Node admission through BigRepo/Keyhive, actor attribution, facet signatures, and host-managed local capabilities are separate checks. Host private-key custody is not part of the portable claim format. An AuthorityRepo service owning runtime/WIT routine capabilities for documents, facets, commands, and SQLite is a design direction, **not a PR3 runtime migration** or the meaning of `delegation`.
+
 ### Dmeta
 
-Every document carries document specific metadata in a dmeta facet that is mantained by the DocumentRepo. The details are presented in the following snippet:
+Every document carries a Daybook-owned provenance facet maintained by DocumentsRepo. This is an illustrative JSON shape, not a signed test vector; angle-bracketed bytes are placeholders:
 
-```js
+```json
 {
   "org.example.daybook.dmeta/main": {
-    createdAt: "2026-10-13T14:30:15Z",
-    updatedAt: ["2026-10-13T14:30:15Z"],
-    actors: { 
-      // pubkey of the actor used to sign facet signatures
-      "zAUKgPRFak3CHCQEeLjyP8LNj35pLKpFHcKytgbhN2Xtk": {
-        // url identifying the actor
-        actorUrl: "db+actor://<nodeid>/<path>/<to>/<subsystem>", 
-        // delegation from authority authorizing that the actor
-        delegation: { /* TODO */}, 
-        createdAt: "2026-10-13T14:30:15Z",
+    "createdAt": "2026-10-13T14:30:15Z",
+    "updatedAt": ["2026-10-13T14:30:15Z"],
+    "actorUuids": {
+      "019e5d38-0000-7000-8000-000000000001": {
+        "pubkey": "zAUKgPRFak3CHCQEeLjyP8LNj35pLKpFHcKytgbhN2Xtk",
+        "actorUrl": "db+actor://<nodeid>/<path>/<to>/<subsystem>",
+        "delegation": { "$bytes": "<base64 certificate>" }
       }
     },
-    facetUuids: {
-      // concurrent creations could produce the same facet
-      // so we assign UUIDs to identify them
-      "aa113c83-7eaa-48ad-9f6a-b27edefaf7df": {
-        key: "org.example.daybook.branch/main",
-        createdAt: "2026-10-13T14:30:15Z",
-      },
-      "a025415c-461e-4e43-b5d3-4baf0935f7a4": {
-        key: "org.example.daybook.branch/main",
-        createdAt: "2026-10-13T14:31:42Z",
-      },
+    "facetUuids": {
+      "019e5d38-0000-7000-8000-000000000002": "org.example.daybook.branch/main",
+      "019e5d38-0000-7000-8000-000000000003": "org.example.daybook.branch/main"
     },
-    facets: {
-      // a current competing set, not an audit log: a write replaces the entries it
-      // observed at its base heads, and concurrent writers can leave several
+    "facets": {
       "org.example.daybook.branch/main": {
-        updatedAt: ["2026-10-13T14:30:15Z"]
-        // removed facets are tombstoned, optional
-        deletedAt: ["2026-10-13T14:30:15Z"]
-        // every facet write produces a signature over the following, reconstructed
-        // from the change that introduced it rather than stored beside it:
-        // - document id
-        // - actor pubkey
-        // - facet key
-        // - the smallest alias visible in the writing transaction
-        // - whether it was a write or a removal
-        // - the Blake3-256 CID of the value in its native storage form, read back
-        //   from the transaction after the write
-        // - the signature ids visible on the facet at the parent heads
-        signatures: [
-          { 
-            actorPublicKey: "zAUKgPRFak3CHCQEeLjyP8LNj35pLKpFHcKytgbhN2Xtk",
-            signature: "zCHCQEyAyPpLKpFHckkUKgPRN2je8LXt3FtgbaLNjK3h5",
-            // set only for a signature copied onto a branch at its creation, where the
-            // origin's history is not available to reconstruct the signed bytes from.
-            // the message is the exact bytes the actor signed; the value is present only
-            // when the copied value is not the signed one. both are the protocol bytes
-            // object, and neither is present on a signature authored on this document.
-            inherited: {
-              originDoc: "zpLKpFHN2je8LXtEyAyCHCQckkUKgPRP3FtgbaLNjK3h5",
-              message: { "$bytes": "..." },
-              value: { "$bytes": "..." }
-            }
+        "updatedAt": ["2026-10-13T14:30:15Z"],
+        "deletedAt": [],
+        "signatures": [
+          {
+            "actorUuid": "019e5d38-0000-7000-8000-000000000001",
+            "signature": { "$bytes": "<base64 signature>" }
           }
         ]
       }
@@ -358,6 +334,38 @@ Every document carries document specific metadata in a dmeta facet that is manta
   }
 }
 ```
+
+`actorUuids` shares actor bindings and certificates across claims. `facetUuids` maps UUIDv7 aliases directly to complete facet keys: concurrent creators can assign different aliases to the same slot, and all aliases remain usable. They do not select different content winners. A new claim chooses the lexicographically smallest alias visible in its writing transaction, not the smallest alias after later merges. Neither index needs a separate per-binding `createdAt` or a duplicated reverse list. The document's own ID and branch relationships are not repeated in dmeta.
+
+`updatedAt`, `deletedAt`, and `signatures` are **current competing sets**, not logs. A write replaces entries observed at its supplied base heads; concurrent entries can survive. `deletedAt` is always initialized, empty for an authored non-tombstone. A Set clears observed deletion candidates, but a concurrent Remove can leave candidates after merge. Unsigned timestamps do not determine current tombstone status; the signed operation must match the slot's current state. Retained signature entries stay immutable and new signatures get fresh objects, preventing positional list reconciliation from mixing concurrent claims. Whole-JSON reconciliation traverses values but emits only changed operations and preserves unchanged native objects.
+
+A signature covers the complete v2 message: `UTF8("daybook.facet-claim.v2") || 0x00 || CBOR([originDocument, facetKey, chosenUuidBytes, actorUuidBytes, operation, valueCIDOrNull, sortedPredecessorIDs])`. UUIDs are raw 16-byte UUIDv7 values; operation is `0` for Set or `1` for Remove, whose CID is null. Set commits to the native value read back after the transaction's content mutation, not the caller's JSON. Predecessor IDs are sorted and deduplicated context, **not a recursive acceptance requirement**. Signature IDs use the separate `daybook.facet-claim-id.v2` domain. Public keys are multibase text, while signatures are native 64-byte `SignatureBytes` rendered as `$bytes`, never multibase signatures.
+
+The value CID is CIDv1 raw/BLAKE3-256 over tagged canonical native CBOR. Native kinds remain distinct (`Text` versus `Str`, `Counter` versus `Int`); maps have unique keys ordered by encoded bytes. Every float is binary64, all NaNs normalize to `0x7ff8000000000000`, infinities survive, and signed zeros remain distinct. Only plain text is supported; marks, blocks, tables, and unknown native kinds are unsupported rather than forged. Native verification does not require a facet schema. JSON export needs a schema or typed witness sufficient to reconstruct the native kinds; untyped flattening can lose that information.
+
+The signed-claim protocol is portable and independent of Automerge. Reconstructing an ordinary signature's message from its introduction change is only a storage optimization. A history-free export or compaction can add `message: { "$bytes": "<base64 complete signed message>" }` to a locally authored entry. It must retain the entire message, including parents and chosen UUID, not rebuild those from the current dmeta view.
+
+A signature copied to an independent branch instead carries `inherited` evidence, for example:
+
+```json
+{
+  "actorUuid": "019e5d38-0000-7000-8000-000000000001",
+  "signature": { "$bytes": "<base64 signature>" },
+  "inherited": {
+    "originDoc": "zpLKpFHN2je8LXtEyAyCHCQckkUKgPRP3FtgbaLNjK3h5",
+    "message": { "$bytes": "<base64 complete signed message>" },
+    "value": { "$bytes": "<base64 canonical native signed value>" }
+  }
+}
+```
+
+`inherited.value` is needed when the copied value differs from the signed historical value. Keep inherited witnesses: they authenticate their historical claim, **not a differing current merge result**. `message` and `inherited` are alternatives and must not both be set on one entry. A new claim authored on the branch names that branch as origin. Carried evidence does not supply missing origin-authority proof or recreate discarded Automerge operations.
+
+Value verification is facet-local: a valid claim and attribution matching the current value or removal is `Accepted`; missing required proofs are `Pending`; invalid claim or attribution evidence is `Rejected`; authentic historical claims that do not match current state are `Uncovered`. No signatures also means `Uncovered`. Any valid matching entry accepts at this value-evidence layer; otherwise the current fold prefers pending, then rejected, then uncovered. This helper result is not the full DocumentsRepo read/write gate: it does not establish that hidden state is safe to reuse. A bad signature entry does not poison the whole document, and explicit repair can establish a fresh valid replacement without recursively validating rejected predecessors.
+
+**The default path must prevent an actor from reading or building on a forged facet at its supplied heads.** Consider a hidden unsigned `x = "evil"` losing to `x = "safe"`. If A uses raw Automerge access to sign a change to another field while retaining that conflict, B's deletion of `"safe"` from an older verified base can later expose `"evil"`. This demonstrates why value-only checks are insufficient, not a failure of the guarded contract: A's default read or write-base check must fail before signing. B's older verified base remains valid. Unsafe inspection must not implicitly authorize a write, and a whole-JSON submission must not silently act as repair while retaining rejected native state.
+
+A legitimate concurrent merge can produce a value neither writer directly signed without being forged. Replaying the original forks at verified write points is a candidate verification approach, provided it verifies facet state rather than only matching visible values. Equal native values do not identify interchangeable histories: incrementing an existing counter and replacing it with a fresh counter of the same value can merge differently. Preserved messages and witnesses also cannot recreate operations discarded during compaction. These edge cases, the verification algorithm, and repair enforcement are future DocumentsRepo work; they select no new receipt format or node-attester trust policy. See [ADR 015 §§6–7](../adrs/015-documents-repo-and-facet-writes.md#6-verification-and-presentation) for the required future regressions.
 
 ### Blobs
 

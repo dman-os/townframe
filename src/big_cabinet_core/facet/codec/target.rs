@@ -221,7 +221,7 @@ fn compatible(scalar: &ScalarValue, declared: Declared, schema: Option<&Value>) 
 /// Whether the base's scalar and the submitted value are the same value, spelled however each
 /// side spells it: a base64 field says the same bytes with and without padding, an instant says
 /// the RFC 3339 of its millisecond.
-fn same_scalar(scalar: &ScalarValue, value: &Value) -> bool {
+fn same_scalar(scalar: &ScalarValue, value: &Value, declared: Declared) -> bool {
     match (scalar, value) {
         (ScalarValue::Null, Value::Null) => true,
         (ScalarValue::Boolean(stated), Value::Bool(submitted)) => stated == submitted,
@@ -229,9 +229,13 @@ fn same_scalar(scalar: &ScalarValue, value: &Value) -> bool {
         (ScalarValue::Uint(stated), Value::Number(submitted)) => {
             submitted.as_u64() == Some(*stated)
         }
-        (ScalarValue::F64(stated), Value::Number(submitted)) => submitted
-            .as_f64()
-            .is_some_and(|submitted| submitted == *stated),
+        (ScalarValue::F64(stated), submitted)
+            if submitted.is_number() || declared == Declared::Codec(Codec::Float) =>
+        {
+            super::parse_float(submitted).is_some_and(|submitted| {
+                submitted.to_bits() == stated.to_bits() || (submitted.is_nan() && stated.is_nan())
+            })
+        }
         (ScalarValue::Str(stated), Value::String(submitted)) => submitted == stated.as_str(),
         (ScalarValue::Counter(stated), Value::Number(submitted)) => {
             submitted.as_i64() == Some(i64::from(stated))
@@ -401,7 +405,7 @@ fn scalar_checked(
         );
         return Ok(());
     }
-    if compatible(scalar, declared, schema) && same_scalar(scalar, value) {
+    if compatible(scalar, declared, schema) && same_scalar(scalar, value, declared) {
         plan.set(path, Op::Skip);
         return Ok(());
     }
@@ -496,4 +500,70 @@ fn resolve<'a>(
             |err| err,
         )
         .map_err(|err| at(path, err))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn float_noop_equality_is_canonical_nan_and_bitwise_otherwise() {
+        for declared in [
+            Declared::Undeclared,
+            Declared::Plain,
+            Declared::Codec(Codec::Float),
+        ] {
+            for value in [-0.0, 0.0, 1.25] {
+                assert!(same_scalar(
+                    &ScalarValue::F64(value),
+                    &json!(value),
+                    declared
+                ));
+            }
+            for (held, submitted) in [(0.0, -0.0), (-0.0, 0.0), (1.25, 1.5)] {
+                assert!(!same_scalar(
+                    &ScalarValue::F64(held),
+                    &json!(submitted),
+                    declared
+                ));
+            }
+            assert_eq!(
+                same_scalar(&ScalarValue::F64(1.25), &json!("1.25"), declared),
+                declared == Declared::Codec(Codec::Float),
+            );
+        }
+        for (held, submitted) in [(0.0, "-0.0"), (-0.0, "0.0")] {
+            let mut plan = Plan::default();
+            let path = Path::root();
+            scalar_checked(
+                &ScalarValue::F64(held),
+                &json!(submitted),
+                Declared::Codec(Codec::Float),
+                None,
+                &path,
+                &mut plan,
+            )
+            .unwrap();
+            assert!(plan.get(&path).is_none());
+        }
+        for held in [
+            f64::NAN,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            f64::from_bits(0xfff8_0000_0000_0002),
+        ] {
+            let mut plan = Plan::default();
+            let path = Path::root();
+            scalar_checked(
+                &ScalarValue::F64(held),
+                &json!("NaN"),
+                Declared::Codec(Codec::Float),
+                None,
+                &path,
+                &mut plan,
+            )
+            .unwrap();
+            assert!(matches!(plan.get(&path), Some(Op::Skip)));
+        }
+    }
 }
