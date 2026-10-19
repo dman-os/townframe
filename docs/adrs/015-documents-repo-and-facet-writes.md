@@ -45,7 +45,7 @@ The verified **node signer** of a change is checked against Keyhive Write author
 
 Local capabilities and portable attribution are separate contracts. An actor's signing identity is its public key; names and paths confer no authority. Issuing or revoking local actor access does **not** mutate documents or invalidate historical attribution. A branch has a different document ID and does not inherit drawer entries merely because it records an origin. The same authorization boundary applies across local IPC: a transport is not proof that a caller controls an asserted actor.
 
-The design direction is an AuthorityRepo service owning runtime routine capabilities, including document, facet, command, and SQLite handles exposed through WIT. That is **not a PR3 runtime migration** or a selected portable capability-token format. Dmeta's `delegation` field does not carry those live capabilities. Private-key custody is likewise a host boundary, with secrets kept in `secrets_rs` and signing exposed without handing keys to callers; the cryptographic protocol does not depend on that particular custody implementation.
+The design direction is the authority service (ADR 017) owning runtime routine capabilities, including document, facet, command, and SQLite handles exposed through WIT. That is **not a PR3 runtime migration** or a selected portable capability-token format. Dmeta's `delegation` field does not carry those live capabilities. Private-key custody is likewise a host boundary, with secrets kept in `secrets_rs` and signing exposed without handing keys to callers; the cryptographic protocol does not depend on that particular custody implementation.
 
 Dmeta records **who claims authorship of a facet**, not the host's current capability policy. A node may attribute an actor to an application or process, but its certificate proves the node made that attribution, not that a particular binary executed. Node change signatures, actor-attribution certificates, actor facet signatures, and local capabilities are distinct artifacts.
 
@@ -83,7 +83,7 @@ An actor's cryptographic identity is its public key. `actorUuids` assigns a UUID
 
 ### Attribution certificate profile
 
-Despite its field name, `ActorMetadata.delegation` holds a **neutral node-signed attribution certificate**, not a grant or redelegation chain. It binds the issuer, actor UUIDv7, actor public key, and exact actor URL. Verification takes an **externally authenticated expected issuer** from the caller and compares it with the certificate's issuer; accepting the certificate's self-declared `iss` as the trust anchor would let anyone mint a replacement identity. The certificate does not make the actor a Keyhive principal, confer transitive issuer trust, or require a live AuthorityRepo query.
+Despite its field name, `ActorMetadata.delegation` holds a **neutral node-signed attribution certificate**, not a grant or redelegation chain. It binds the issuer, actor UUIDv7, actor public key, and exact actor URL. Verification takes an **externally authenticated expected issuer** from the caller and compares it with the certificate's issuer; accepting the certificate's self-declared `iss` as the trust anchor would let anyone mint a replacement identity. The certificate does not make the actor a Keyhive principal, confer transitive issuer trust, or require a live authority-service query.
 
 The profile uses CWT claims inside tagged COSE_Sign1:
 

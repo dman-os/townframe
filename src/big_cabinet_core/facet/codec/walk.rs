@@ -2,7 +2,10 @@
 
 use super::target::Plan;
 use super::validation::{CompiledSchema, ValidationProof};
-use super::{Codec, CodecError, JS_SAFE_INTEGER_MAX, KEYWORD, bytes_value, instant_string, kind};
+use super::{
+    Codec, CodecError, JS_SAFE_INTEGER_MAX, KEYWORD, bytes_value, declared_member, instant_string,
+    kind,
+};
 use automerge::{ObjId, ObjType, ReadDoc, ScalarValue};
 use autosurgeon::reconcile::{MapReconciler, NoKey, SeqReconciler};
 use autosurgeon::{HydrateError, Prop, Reconcile, Reconciler};
@@ -514,7 +517,7 @@ impl<'a> Position<'a> {
     }
 
     /// The position of one member of an object. A member the schema does not name is plain JSON, or
-    /// the schema `additionalProperties` states for the members it does not name.
+    /// the schema `additionalProperties` or a keyed map states for the members it does not name.
     pub(super) fn member(&self, schema: Option<&'a Value>, key: &str) -> Position<'a> {
         Position {
             document: self.document,
@@ -967,19 +970,6 @@ fn any_of(schema: &Value) -> Option<&Vec<Value>> {
         .get("anyOf")
         .or_else(|| schema.get("oneOf"))
         .and_then(Value::as_array)
-}
-
-/// The schema a member is declared by: the one it is named in, or the one `additionalProperties`
-/// states for the members the schema does not name.
-fn declared_member<'a>(schema: &'a Value, key: &str) -> Option<&'a Value> {
-    schema
-        .get("properties")
-        .and_then(|properties| properties.get(key))
-        .or_else(|| {
-            schema
-                .get("additionalProperties")
-                .filter(|stated| stated.is_object())
-        })
 }
 
 /// The schema an element is declared by: `items` says the same thing about every element, and the

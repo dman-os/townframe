@@ -3,7 +3,7 @@
 //! Lexicon is the primary artifact: it states the canonical JSON a peer reads. The sidecar is what
 //! Lexicon cannot say — the `x-automerge` storage annotations, and refinements that *narrow* a
 //! Lexicon type. Narrowing is the whole arrangement: a dynamic map is a Lexicon `unknown` whose
-//! value type the sidecar states, and a Lexicon `string` keeps its `pattern` and its byte lengths
+//! value type and key pattern the sidecar states, and a Lexicon `string` keeps its `pattern` and its byte lengths
 //! there, because Lexicon counts UTF-8 bytes where JSON Schema counts code points and copying one
 //! into the other would silently change the constraint.
 //!
@@ -15,7 +15,7 @@
 //! an error naming the position; it is never quietly turned into an `unknown` that admits more than
 //! the author declared.
 
-use super::codec::KEYWORD;
+use super::codec::{KEYWORD, keyed_map};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -96,7 +96,6 @@ fn position(
         "allOf",
         "not",
         "prefixItems",
-        "patternProperties",
         "propertyNames",
         "dependentSchemas",
         "contains",
@@ -112,6 +111,9 @@ fn position(
             ));
         }
     }
+    // A keyed map is the one `patternProperties` whose members share a declaration, and it projects
+    // as the dynamic map it is; any other use is refused here, wherever the position sits.
+    keyed_map(object).map_err(|reason| here(path, reason))?;
     if let Some(reference) = object.get("$ref") {
         return reference_position(reference, object.len(), definitions, carried, path);
     }
@@ -457,6 +459,10 @@ fn array(
 /// narrows to. A Lexicon-only peer therefore accepts more than this facet does, which is what the
 /// sidecar is for; what it may not do is admit a value outside the canonical data model, so the
 /// value type is projected for its alignment and then dropped rather than trusted unchecked.
+///
+/// A keyed map is the same dynamic map with its keys narrowed too: the sidecar's one anchored
+/// pattern is a constraint Lexicon cannot state, exactly like a string's `pattern`, so it stays in
+/// the sidecar and the position is the same `unknown`.
 fn object_position(
     object: &Map<String, Value>,
     definitions: &Map<String, Value>,
@@ -464,7 +470,9 @@ fn object_position(
     path: &str,
 ) -> Result<Value, String> {
     let properties = object.get("properties").and_then(Value::as_object);
-    if let Some(values) = typed_catch_all(object) {
+    let keyed = keyed_map(object)
+        .expect("`position` refused a `patternProperties` that is not a keyed map");
+    if let Some(values) = keyed.or_else(|| typed_catch_all(object)) {
         if properties.is_some_and(|properties| !properties.is_empty()) {
             return Err(here(
                 path,
@@ -1364,15 +1372,76 @@ mod tests {
 
     #[test]
     fn a_composition_lexicon_cannot_state_is_refused() {
-        for keyword in [
-            "allOf",
-            "not",
-            "prefixItems",
-            "patternProperties",
-            "propertyNames",
-        ] {
+        for keyword in ["allOf", "not", "prefixItems", "propertyNames"] {
             let reason = refused(json!({ "type": "object", keyword: [] }));
             assert!(reason.contains(keyword), "{reason}");
+        }
+    }
+
+    /// A map keyed by one anchored pattern is a dynamic map whose keys the sidecar narrows, so it is
+    /// the same `unknown` and its values are still held to the canonical data model.
+    #[test]
+    fn a_keyed_map_is_an_unknown_whose_values_must_align() {
+        let keyed = |values: Value| {
+            json!({
+                "type": "object",
+                "patternProperties": {"^[0-9a-f]{8}$": values},
+                "additionalProperties": false
+            })
+        };
+        assert_eq!(
+            projected(keyed(json!({"type": "string"}))),
+            json!({"type": "unknown"})
+        );
+        let reason = refused(keyed(json!({"type": "number"})));
+        assert!(reason.contains("$.value.<values>"), "{reason}");
+    }
+
+    /// Every other `patternProperties` leaves a member's declaration to a pattern match, which the
+    /// projection does not run, so it is refused with the reason rather than read past.
+    #[test]
+    fn a_pattern_map_that_is_not_keyed_is_refused() {
+        let string = json!({"type": "string"});
+        for (schema, reason_contains) in [
+            (
+                json!({"type": "object", "patternProperties": [], "additionalProperties": false}),
+                "exactly one key pattern",
+            ),
+            (
+                json!({"type": "object", "patternProperties": {"^a$": string, "^b$": string}, "additionalProperties": false}),
+                "exactly one key pattern",
+            ),
+            (
+                json!({"type": "object", "patternProperties": {"a": string}, "additionalProperties": false}),
+                "not anchored",
+            ),
+            (
+                json!({"type": "object", "patternProperties": {"^a\\$": string}, "additionalProperties": false}),
+                "not anchored",
+            ),
+            (
+                json!({"type": "object", "patternProperties": {"^a$": string}}),
+                "`additionalProperties: false` alone",
+            ),
+            (
+                json!({"type": "object", "patternProperties": {"^a$": string}, "additionalProperties": string}),
+                "`additionalProperties: false` alone",
+            ),
+            (
+                json!({"type": "object", "patternProperties": {"^a$": string}, "additionalProperties": false, "properties": {"b": string}}),
+                "beside named properties",
+            ),
+            (
+                json!({"type": "object", "patternProperties": {"^a$": true}, "additionalProperties": false}),
+                "not a schema object",
+            ),
+            (
+                json!({"type": "string", "patternProperties": {"a": string}}),
+                "not anchored",
+            ),
+        ] {
+            let reason = refused(schema);
+            assert!(reason.contains(reason_contains), "{reason}");
         }
     }
 }

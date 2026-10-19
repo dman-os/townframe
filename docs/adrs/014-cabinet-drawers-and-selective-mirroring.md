@@ -183,19 +183,24 @@ and split records are deferred together.
 
 ## Actors and node authority
 
-AuthorityRepo manages actor identities, capabilities, and a generic grant
-ledger. Boot returns the operator root capability; a subsystem presents its
-"is subsystem" capability here, and DrawerRepo checks the ledger for that actor
-before minting a drawer capability of its own (ADR 017). Private signing keys
-remain behind `secrets_rs`, and the service returns signatures rather than keys.
+The authority service (ADR 017) manages actor identities, capabilities, and a
+grant ledger namespaced by issuing actor. Boot returns the operator root capability; the
+embedder opens DrawerRepo as an actor and hands it its actor capability. A caller presents
+its own actor capability here, and DrawerRepo checks its ledger namespace for that actor
+before minting a drawer capability from its own actor capability (ADR 017). Actor
+signing keys are sealed under a `secrets_rs` keyring key, and the service returns
+signatures rather than keys.
 
 Actor capabilities authorize Cabinet operations. BigRepo/Keyhive separately gate what
 the node can do. If the node lacks authority, no actor capability bypasses it. Recovery
 principals are node-level work deferred to another PR.
 
-The drawer capability vocabulary covers Read, Write, Manage, doc creation,
-removal-from-drawer, child addition, and delegation. Removing a doc entry never means
-global doc deletion.
+Drawer access uses Keyhive's `Relay`, `Read`, `Write`, and `Admin` vocabulary in
+roster entries. In capabilities and ledger rows the access level is part of the object
+string DrawerRepo names (`write drawer D`), and the rights are ADR 017's generic
+vocabulary; the drawer meaning of an object string belongs to DrawerRepo, not to the
+authority service. Removing a doc entry never means global
+doc deletion.
 
 ## Required local drawers
 
@@ -206,7 +211,7 @@ embedder:
 - docs originated by this node.
 
 They use the same drawer model and remain local because the embedder does not grant them
-to other nodes. AuthorityRepo does not create them. Doc creation always specifies a
+to other nodes. The authority service does not create them. Doc creation always specifies a
 target drawer and also enters the new doc in both applicable local drawers, so a doc is
 never created outside every drawer.
 

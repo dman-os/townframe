@@ -5,7 +5,7 @@
 //! branch the content fits, and a member the schema does not name is plain JSON — which is what
 //! makes an open object open.
 
-use super::{CodecError, KEYWORD};
+use super::{CodecError, KEYWORD, declared_member, keyed_map};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -189,6 +189,11 @@ fn reject_unsupported_schema_keywords(document: &Value) -> Result<(), CodecError
                 message: "the carried JSON Schema uses both `anyOf` and `oneOf` at one position, which this codec cannot dispatch without composing branch candidates".to_owned(),
             });
         }
+        keyed_map(object).map_err(|reason| CodecError::InvalidSchema {
+            message: format!(
+                "the carried JSON Schema is not a keyed map this codec can store: {reason}"
+            ),
+        })?;
     }
     Ok(())
 }
@@ -395,16 +400,7 @@ fn normalize_authoring(
                     out.insert(key, child);
                 }
                 if let Some((key, value)) = entries.next() {
-                    let member_schema = schema
-                        .get("properties")
-                        .and_then(Value::as_object)
-                        .and_then(|properties| properties.get(&key))
-                        .or_else(|| {
-                            schema
-                                .get("additionalProperties")
-                                .filter(|schema| schema.is_object())
-                        });
-                    if let Some(member_schema) = member_schema {
+                    if let Some(member_schema) = declared_member(schema, &key) {
                         pending = Some(key);
                         tasks.push(NormalizationTask::Object {
                             schema,
