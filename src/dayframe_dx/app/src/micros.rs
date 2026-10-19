@@ -22,98 +22,70 @@ use crate::host::{AccessError, Host, Instance};
 
 use tokio::sync::watch;
 
-type Recovery = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-
-/// An explicit owner of transient effects, with asynchronous, reverse-order recovery.
-///
-/// Cloning shares ownership; dropping a handle does not dispose the scope. The lifecycle owner
-/// must await [`Self::close`] before destroying facilities its effects need for recovery. Once
-/// closure starts, it continues even if the requesting future is cancelled.
-#[derive(Clone)]
-pub struct Scope {
-    inner: Arc<ScopeInner>,
+struct OwnedFuture {
+    owner: Instance,
+    future: Pin<Box<dyn Future<Output = ()>>>,
 }
 
-struct ScopeInner {
-    effects: Mutex<Option<Vec<Recovery>>>,
-    completed: watch::Sender<bool>,
+struct OwnedFutures {
+    incoming: tokio::sync::mpsc::UnboundedReceiver<OwnedFuture>,
+    active: Vec<OwnedFuture>,
 }
 
-/// An effect was not installed because its owner has begun closing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("micro scope is closing")]
-pub struct ScopeClosed;
+pub(crate) struct FutureDriver<'a> {
+    storage: &'a RefCell<Option<OwnedFutures>>,
+    futures: Option<OwnedFutures>,
+}
 
-impl Default for Scope {
-    fn default() -> Self {
-        Self::new()
+impl<'a> FutureDriver<'a> {
+    fn take(storage: &'a RefCell<Option<OwnedFutures>>) -> Option<Self> {
+        let futures = storage.borrow_mut().take()?;
+        Some(Self {
+            storage,
+            futures: Some(futures),
+        })
     }
-}
 
-impl Scope {
-    /// Creates an explicitly owned root lifetime. This operation confers no capabilities.
-    pub fn new() -> Self {
-        let (completed, _) = watch::channel(false);
-        Self {
-            inner: Arc::new(ScopeInner {
-                effects: Mutex::new(Some(Vec::new())),
-                completed,
-            }),
+    pub fn reap(&mut self) {
+        let futures = self.futures.as_mut().unwrap();
+        while let Ok(future) = futures.incoming.try_recv() {
+            futures.active.push(future);
         }
+        futures.active.retain(|future| future.owner.check().is_ok());
     }
 
-    /// Installs an effect and adopts its recovery in one critical section.
-    ///
-    /// If closing has begun, `install` is not called. Installation must be synchronous,
-    /// non-reentrant, and short; it must not call this scope or await external work. The returned
-    /// future performs recovery only when polled during closure. An installation panic is an
-    /// invariant failure, not recoverable partial activation. Fallible/async activation needs a
-    /// separate protocol above this primitive.
-    pub fn effect<F, R>(&self, install: F) -> Result<(), ScopeClosed>
-    where
-        F: FnOnce() -> R,
-        R: Future<Output = ()> + Send + 'static,
-    {
-        let mut effects = self.inner.effects.lock().unwrap();
-        let effects = effects.as_mut().ok_or(ScopeClosed)?;
-        effects.push(Box::pin(install()));
-        Ok(())
-    }
-
-    /// Creates an owned child. Parent closure awaits child recovery at this position in its
-    /// reverse-order recovery sequence. A child may also close early without affecting siblings.
-    pub fn child(&self) -> Result<Self, ScopeClosed> {
-        let child = Self::new();
-        let recovery = child.clone();
-        self.effect(|| async move { recovery.close().await })?;
-        Ok(child)
-    }
-
-    /// Begins closure once and waits for all recoveries, including children, to finish.
-    ///
-    /// Calls may overlap. Recovery runs in an owned task so cancelling one waiter cannot strand
-    /// a half-closed scope. Recovery failure is a programming invariant: a panic propagates from
-    /// the task rather than being logged or swallowed. Provider/dependent ordering is not inferred
-    /// here; the future dependency runtime must close consumers before destroying providers.
-    pub async fn close(&self) {
-        let mut completed = self.inner.completed.subscribe();
-        {
-            let mut effects = self.inner.effects.lock().unwrap();
-            if let Some(effects) = effects.take() {
-                let inner = self.inner.clone();
-                tokio::spawn(async move {
-                    for recovery in effects.into_iter().rev() {
-                        recovery.await;
-                    }
-                    inner.completed.send_replace(true);
-                });
+    pub async fn run(&mut self) {
+        let futures = self.futures.as_mut().unwrap();
+        std::future::poll_fn(|context| {
+            while let std::task::Poll::Ready(future) = futures.incoming.poll_recv(context) {
+                futures
+                    .active
+                    .push(future.expect("registry owns its future sender"));
             }
-        }
-        completed.wait_for(|done| *done).await.unwrap();
+            futures.active.retain_mut(|future| {
+                future.owner.check().is_ok() && future.future.as_mut().poll(context).is_pending()
+            });
+            std::task::Poll::<()>::Pending
+        })
+        .await;
+    }
+}
+
+impl Drop for FutureDriver<'_> {
+    fn drop(&mut self) {
+        self.reap();
+        assert!(
+            self.storage
+                .borrow_mut()
+                .replace(self.futures.take().unwrap())
+                .is_none()
+        );
     }
 }
 /// Stable provider identity used by configuration and composition persistence.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct MicroId(String);
 
 impl MicroId {
@@ -151,9 +123,9 @@ pub struct MicroActivation {
     host: Host,
     instance: Instance,
     descriptor: MicroDescriptor,
-    bindings: BTreeMap<String, String>,
-    live: provisions::Provisions,
+    requirements: BTreeMap<String, provisions::Published>,
     pending: Arc<Mutex<Option<PendingProvisions>>>,
+    owned_futures: tokio::sync::mpsc::UnboundedSender<OwnedFuture>,
 }
 
 impl MicroActivation {
@@ -164,6 +136,26 @@ impl MicroActivation {
         self.instance.clone()
     }
 
+    pub fn own_future(
+        &self,
+        future: impl Future<Output = ()> + 'static,
+    ) -> Result<(), AccessError> {
+        self.instance.check()?;
+        let instance = self.instance.clone();
+        self.owned_futures
+            .send(OwnedFuture {
+                owner: instance.clone(),
+                future: Box::pin(async move {
+                    tokio::select! {
+                        biased;
+                        _ = instance.closed() => {},
+                        () = future => {},
+                    }
+                }),
+            })
+            .map_err(|_| AccessError::Revoked)
+    }
+
     pub fn require<T: Provision>(&self) -> Result<T, AccessError> {
         assert!(
             self.descriptor
@@ -172,8 +164,11 @@ impl MicroActivation {
                 .any(|requirement| requirement.id == T::ID && requirement.version == T::VERSION),
             "adapter requested an undeclared requirement"
         );
-        let supplier = self.bindings.get(T::ID).ok_or(AccessError::Denied)?;
-        self.live.get::<T>(supplier)
+        self.instance.check()?;
+        self.requirements
+            .get(T::ID)
+            .ok_or(AccessError::Denied)?
+            .get::<T>()
     }
 
     pub fn publish<T: Provision>(&self, value: T) {
@@ -208,9 +203,17 @@ pub trait MicroProvider {
     fn activate_async<'a>(
         &'a self,
         context: MicroActivation,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AccessError>> + 'a>> {
-        Box::pin(async move { self.activate(context) })
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActivationError>> + 'a>> {
+        Box::pin(async move { self.activate(context).map_err(Into::into) })
     }
+}
+
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ActivationError {
+    #[error(transparent)]
+    Access(#[from] AccessError),
+    #[error("micro initialization failed: {0}")]
+    Initialization(String),
 }
 
 /// Native implementation adapter: declares requirements, binds capabilities, and publishes outputs.
@@ -242,7 +245,7 @@ impl MicroProvider for MicroFactory {
 }
 
 type AsyncActivateFn =
-    Rc<dyn Fn(MicroActivation) -> Pin<Box<dyn Future<Output = Result<(), AccessError>>>>>;
+    Rc<dyn Fn(MicroActivation) -> Pin<Box<dyn Future<Output = Result<(), ActivationError>>>>>;
 
 /// Asynchronous provider adapter whose activation runs inside [`Host::activate_async`].
 /// Dropping or failing the activation future rolls back all owned effects and provisions.
@@ -255,7 +258,7 @@ impl AsyncMicroFactory {
     pub fn new<F, Fut>(descriptor: MicroDescriptor, activate: F) -> Self
     where
         F: Fn(MicroActivation) -> Fut + 'static,
-        Fut: Future<Output = Result<(), AccessError>> + 'static,
+        Fut: Future<Output = Result<(), ActivationError>> + 'static,
     {
         Self {
             descriptor,
@@ -276,7 +279,7 @@ impl MicroProvider for AsyncMicroFactory {
     fn activate_async<'a>(
         &'a self,
         context: MicroActivation,
-    ) -> Pin<Box<dyn Future<Output = Result<(), AccessError>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActivationError>> + 'a>> {
         (self.activate)(context)
     }
 }
@@ -291,8 +294,19 @@ pub enum MicroRegistryError {
     InvalidBinding(String),
     #[error("provider did not publish required provision {0}")]
     MissingProvision(String),
+    #[error("micro initialization failed: {0}")]
+    Initialization(String),
     #[error(transparent)]
     Access(#[from] AccessError),
+}
+
+impl From<ActivationError> for MicroRegistryError {
+    fn from(error: ActivationError) -> Self {
+        match error {
+            ActivationError::Access(error) => Self::Access(error),
+            ActivationError::Initialization(message) => Self::Initialization(message),
+        }
+    }
 }
 
 /// Host-facing dynamic dispatch for provider implementations.
@@ -304,14 +318,22 @@ pub struct MicroRegistry {
     providers: Rc<RefCell<BTreeMap<MicroId, Rc<dyn MicroProvider>>>>,
     live: provisions::Provisions,
     changes: watch::Sender<()>,
+    owned_futures: tokio::sync::mpsc::UnboundedSender<OwnedFuture>,
+    future_driver: Rc<RefCell<Option<OwnedFutures>>>,
 }
 
 impl Default for MicroRegistry {
     fn default() -> Self {
+        let (owned_futures, incoming) = tokio::sync::mpsc::unbounded_channel();
         Self {
             providers: Rc::default(),
             live: provisions::Provisions::default(),
             changes: watch::channel(()).0,
+            owned_futures,
+            future_driver: Rc::new(RefCell::new(Some(OwnedFutures {
+                incoming,
+                active: Vec::new(),
+            }))),
         }
     }
 }
@@ -322,6 +344,8 @@ impl Clone for MicroRegistry {
             providers: self.providers.clone(),
             live: self.live.clone(),
             changes: self.changes.clone(),
+            owned_futures: self.owned_futures.clone(),
+            future_driver: self.future_driver.clone(),
         }
     }
 }
@@ -329,7 +353,53 @@ impl Clone for MicroRegistry {
 struct PreparedActivation {
     provider: Rc<dyn MicroProvider>,
     descriptor: MicroDescriptor,
-    dependencies: Vec<Instance>,
+    requirements: BTreeMap<String, provisions::Published>,
+}
+
+pub(super) struct PendingActivation {
+    pub instance: Instance,
+    future: Pin<Box<dyn Future<Output = Result<(), ActivationError>>>>,
+    descriptor: MicroDescriptor,
+    pending: Arc<Mutex<Option<PendingProvisions>>>,
+    live: provisions::Provisions,
+    future_driver: Rc<RefCell<Option<OwnedFutures>>>,
+    committed: bool,
+}
+
+impl PendingActivation {
+    pub fn poll(
+        &mut self,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), ActivationError>> {
+        self.future.as_mut().poll(context)
+    }
+
+    pub fn commit(mut self) -> Result<Instance, MicroRegistryError> {
+        self.instance.check()?;
+        let values = self.pending.lock().unwrap().take().unwrap();
+        if let Some(id) = unpublished(&self.descriptor, &values) {
+            return Err(MicroRegistryError::MissingProvision(id.to_owned()));
+        }
+        self.live.commit(
+            self.instance.host(),
+            &self.instance,
+            values,
+            &self.descriptor,
+        )?;
+        self.instance.check()?;
+        self.committed = true;
+        Ok(self.instance.clone())
+    }
+}
+
+impl Drop for PendingActivation {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().take();
+        if !self.committed {
+            self.instance.close();
+            drop(FutureDriver::take(&self.future_driver));
+        }
+    }
 }
 
 fn unpublished<'a>(descriptor: &'a MicroDescriptor, values: &PendingProvisions) -> Option<&'a str> {
@@ -341,6 +411,14 @@ fn unpublished<'a>(descriptor: &'a MicroDescriptor, values: &PendingProvisions) 
 }
 
 impl MicroRegistry {
+    pub(crate) fn future_driver(&self) -> FutureDriver<'_> {
+        FutureDriver::take(&self.future_driver).expect("registry futures already driven")
+    }
+
+    pub async fn drive_owned_futures(&self) {
+        self.future_driver().run().await;
+    }
+
     pub(crate) fn changes(&self) -> watch::Receiver<()> {
         self.changes.subscribe()
     }
@@ -408,22 +486,80 @@ impl MicroRegistry {
                 return Err(MicroRegistryError::InvalidBinding(id.clone()));
             }
         }
-        let mut dependencies = Vec::new();
+        let mut requirements = BTreeMap::new();
         for requirement in &descriptor.requirements {
             let supplier = bindings
                 .get(&requirement.id)
                 .ok_or_else(|| MicroRegistryError::InvalidBinding(requirement.id.clone()))?;
-            let (owner, version) = self.live.provider(supplier, &requirement.id)?;
-            if version != requirement.version {
+            let provision = self.live.resolve(supplier, &requirement.id)?;
+            if provision.version != requirement.version {
                 return Err(MicroRegistryError::InvalidBinding(requirement.id.clone()));
             }
-            dependencies.push(owner);
+            requirements.insert(requirement.id.clone(), provision);
         }
         Ok(PreparedActivation {
             provider: provider_impl,
             descriptor,
-            dependencies,
+            requirements,
         })
+    }
+
+    fn stage(
+        &self,
+        host: &Host,
+        prepared: PreparedActivation,
+        instance_name: String,
+    ) -> Result<(PendingActivation, Rc<dyn MicroProvider>, MicroActivation), MicroRegistryError>
+    {
+        let PreparedActivation {
+            provider,
+            descriptor,
+            requirements,
+        } = prepared;
+        let instance = host.activate(instance_name, Ok)?;
+        let pending = Arc::new(Mutex::new(Some(BTreeMap::new())));
+        let activation = PendingActivation {
+            instance: instance.clone(),
+            future: Box::pin(std::future::pending()),
+            descriptor: descriptor.clone(),
+            pending: pending.clone(),
+            live: self.live.clone(),
+            future_driver: self.future_driver.clone(),
+            committed: false,
+        };
+        for provision in requirements.values() {
+            provision.owner.check()?;
+            host.bind_dependency(&instance, &provision.owner)?;
+        }
+        let context = MicroActivation {
+            host: host.clone(),
+            instance,
+            descriptor,
+            requirements,
+            pending,
+            owned_futures: self.owned_futures.clone(),
+        };
+        Ok((activation, provider, context))
+    }
+
+    pub(super) fn begin(
+        &self,
+        host: &Host,
+        provider: &MicroId,
+        instance_name: String,
+        bindings: &BTreeMap<String, String>,
+    ) -> Result<PendingActivation, MicroRegistryError> {
+        let prepared = self.prepare_activation(provider, bindings)?;
+        let (mut activation, provider, context) = self.stage(host, prepared, instance_name)?;
+        let instance = activation.instance.clone();
+        activation.future = Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = instance.closed() => Err(AccessError::Revoked.into()),
+                result = async { provider.activate_async(context).await } => result,
+            }
+        });
+        Ok(activation)
     }
 
     pub fn activate(
@@ -433,43 +569,10 @@ impl MicroRegistry {
         instance_name: impl Into<String>,
         bindings: BTreeMap<String, String>,
     ) -> Result<Instance, MicroRegistryError> {
-        let PreparedActivation {
-            provider: provider_impl,
-            descriptor,
-            dependencies,
-        } = self.prepare_activation(provider, &bindings)?;
-        let activation_host = host.clone();
-        let live = self.live.clone();
-        let missing = Arc::new(Mutex::new(None));
-        let missing_for_activation = missing.clone();
-        let activated = host.activate(instance_name, move |instance| {
-            for supplier in &dependencies {
-                activation_host.bind_dependency(&instance, supplier);
-            }
-            let pending = Arc::new(Mutex::new(Some(BTreeMap::new())));
-            provider_impl.activate(MicroActivation {
-                host: activation_host.clone(),
-                instance: instance.clone(),
-                descriptor: descriptor.clone(),
-                bindings,
-                live: live.clone(),
-                pending: pending.clone(),
-            })?;
-            let values = pending.lock().unwrap().take().unwrap();
-            if let Some(id) = unpublished(&descriptor, &values) {
-                *missing_for_activation.lock().unwrap() = Some(id.to_owned());
-                return Err(AccessError::Denied);
-            }
-            live.commit(&activation_host, &instance, values, &descriptor)?;
-            Ok(instance)
-        });
-        match activated {
-            Ok(instance) => Ok(instance),
-            Err(error) => Err(missing.lock().unwrap().take().map_or_else(
-                || MicroRegistryError::Access(error),
-                MicroRegistryError::MissingProvision,
-            )),
-        }
+        let prepared = self.prepare_activation(provider, &bindings)?;
+        let (activation, provider, context) = self.stage(host, prepared, instance_name.into())?;
+        provider.activate(context)?;
+        activation.commit()
     }
 
     pub async fn activate_async(
@@ -479,47 +582,9 @@ impl MicroRegistry {
         instance_name: impl Into<String>,
         bindings: BTreeMap<String, String>,
     ) -> Result<Instance, MicroRegistryError> {
-        let PreparedActivation {
-            provider: provider_impl,
-            descriptor,
-            dependencies,
-        } = self.prepare_activation(provider, &bindings)?;
-        let activation_host = host.clone();
-        let live = self.live.clone();
-        let missing = Arc::new(Mutex::new(None));
-        let missing_for_activation = missing.clone();
-        let activated = host
-            .activate_async(instance_name, move |instance| async move {
-                for supplier in &dependencies {
-                    activation_host.bind_dependency(&instance, supplier);
-                }
-                let pending = Arc::new(Mutex::new(Some(BTreeMap::new())));
-                provider_impl
-                    .activate_async(MicroActivation {
-                        host: activation_host.clone(),
-                        instance: instance.clone(),
-                        descriptor: descriptor.clone(),
-                        bindings,
-                        live: live.clone(),
-                        pending: pending.clone(),
-                    })
-                    .await?;
-                let values = pending.lock().unwrap().take().unwrap();
-                if let Some(id) = unpublished(&descriptor, &values) {
-                    *missing_for_activation.lock().unwrap() = Some(id.to_owned());
-                    return Err(AccessError::Denied);
-                }
-                live.commit(&activation_host, &instance, values, &descriptor)?;
-                Ok(instance)
-            })
-            .await;
-        match activated {
-            Ok(instance) => Ok(instance),
-            Err(error) => Err(missing.lock().unwrap().take().map_or_else(
-                || MicroRegistryError::Access(error),
-                MicroRegistryError::MissingProvision,
-            )),
-        }
+        let mut activation = self.begin(host, provider, instance_name.into(), &bindings)?;
+        std::future::poll_fn(|context| activation.poll(context)).await?;
+        activation.commit()
     }
 }
 
@@ -591,6 +656,146 @@ mod tests {
         host.close();
     }
 
+    #[tokio::test]
+    async fn closed_host_rejects_registry_activation_without_calling_provider() {
+        let host = Host::new();
+        let mut registry = MicroRegistry::default();
+        let id = MicroId::new("closed-host");
+        registry
+            .register(MicroFactory::new(
+                MicroDescriptor {
+                    id: id.clone(),
+                    version: 1,
+                    requirements: vec![],
+                    provisions: vec![],
+                },
+                |_| panic!("closed host must reject activation before invoking provider"),
+            ))
+            .unwrap();
+        host.close();
+        assert!(matches!(
+            registry.activate(&host, &id, "closed", BTreeMap::new()),
+            Err(MicroRegistryError::Access(AccessError::Revoked))
+        ));
+        assert!(matches!(
+            registry
+                .activate_async(&host, &id, "closed", BTreeMap::new())
+                .await,
+            Err(MicroRegistryError::Access(AccessError::Revoked))
+        ));
+    }
+
+    #[tokio::test]
+    async fn closure_before_first_poll_does_not_invoke_async_provider_factory() {
+        let host = Host::new();
+        let mut registry = MicroRegistry::default();
+        let id = MicroId::new("closed-before-poll");
+        registry
+            .register(AsyncMicroFactory::new(
+                MicroDescriptor {
+                    id: id.clone(),
+                    version: 1,
+                    requirements: vec![],
+                    provisions: vec![],
+                },
+                |_| -> std::future::Ready<Result<(), ActivationError>> {
+                    panic!("closed activation must not invoke provider factory")
+                },
+            ))
+            .unwrap();
+        let mut activation = registry
+            .begin(&host, &id, "closed".into(), &BTreeMap::new())
+            .unwrap();
+        activation.instance.close();
+        assert_eq!(
+            std::future::poll_fn(|context| activation.poll(context)).await,
+            Err(ActivationError::Access(AccessError::Revoked))
+        );
+        host.close();
+    }
+
+    #[tokio::test]
+    async fn registry_driver_polls_local_work_without_application_or_surface() {
+        let host = Host::new();
+        let mut registry = MicroRegistry::default();
+        let id = MicroId::new("local-work");
+        let seen = Rc::new(std::cell::Cell::new(0));
+        let observed = seen.clone();
+        registry
+            .register(MicroFactory::new(
+                MicroDescriptor {
+                    id: id.clone(),
+                    version: 1,
+                    requirements: vec![],
+                    provisions: vec![],
+                },
+                move |activation| {
+                    let observed = observed.clone();
+                    activation.own_future(async move { observed.set(observed.get() + 1) })
+                },
+            ))
+            .unwrap();
+        let instance = registry
+            .activate(&host, &id, "local", BTreeMap::new())
+            .unwrap();
+        assert_eq!(seen.get(), 0);
+        let mut driver = Box::pin(registry.drive_owned_futures());
+        std::future::poll_fn(|context| {
+            assert!(driver.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(seen.get(), 1);
+        std::future::poll_fn(|context| {
+            assert!(driver.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(seen.get(), 1);
+        instance.close();
+        drop(driver);
+        host.close();
+    }
+
+    #[test]
+    fn registry_failure_drops_queued_work_without_polling_a_driver() {
+        struct Dropped(Rc<std::cell::Cell<bool>>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let host = Host::new();
+        let mut registry = MicroRegistry::default();
+        let id = MicroId::new("queued-failure");
+        let dropped = Rc::new(std::cell::Cell::new(false));
+        let observed = dropped.clone();
+        registry
+            .register(MicroFactory::new(
+                MicroDescriptor {
+                    id: id.clone(),
+                    version: 1,
+                    requirements: vec![],
+                    provisions: vec![],
+                },
+                move |activation| {
+                    let guard = Dropped(observed.clone());
+                    activation.own_future(async move {
+                        let _guard = guard;
+                        panic!("failed activation's queued work must not be polled");
+                    })?;
+                    Err(AccessError::Denied)
+                },
+            ))
+            .unwrap();
+        assert!(matches!(
+            registry.activate(&host, &id, "failed", BTreeMap::new()),
+            Err(MicroRegistryError::Access(AccessError::Denied))
+        ));
+        assert!(dropped.get());
+        host.close();
+    }
+
     #[test]
     fn failed_provider_activation_rolls_back_published_effects() {
         let host = Host::new();
@@ -626,84 +831,5 @@ mod tests {
             Err(AccessError::Revoked)
         ));
         host.close();
-    }
-    use tokio::sync::oneshot;
-
-    #[tokio::test]
-    async fn children_recover_in_reverse_order_without_affecting_siblings() {
-        let root = Scope::new();
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let first = root.child().unwrap();
-        let second = root.child().unwrap();
-        for (scope, label) in [(&first, "first"), (&second, "second")] {
-            let log = log.clone();
-            scope
-                .effect(|| async move { log.lock().unwrap().push(label) })
-                .unwrap();
-        }
-        second.close().await;
-        assert_eq!(*log.lock().unwrap(), vec!["second"]);
-        first.effect(|| async {}).unwrap();
-        root.close().await;
-        assert_eq!(*log.lock().unwrap(), vec!["second", "first"]);
-        root.close().await;
-        assert_eq!(*log.lock().unwrap(), vec!["second", "first"]);
-    }
-
-    #[tokio::test]
-    async fn cancelling_close_waiter_does_not_cancel_recovery() {
-        let scope = Scope::new();
-        let (started_tx, started_rx) = oneshot::channel();
-        let (finish_tx, finish_rx) = oneshot::channel();
-        scope
-            .effect(|| async move {
-                started_tx.send(()).unwrap();
-                finish_rx.await.unwrap();
-            })
-            .unwrap();
-        let waiter_scope = scope.clone();
-        let waiter = tokio::spawn(async move { waiter_scope.close().await });
-        started_rx.await.unwrap();
-        waiter.abort();
-        assert!(waiter.await.unwrap_err().is_cancelled());
-        // Rejected installations must not execute their side effects.
-        assert_eq!(
-            scope.effect(|| -> std::future::Ready<()> { panic!("must not install") }),
-            Err(ScopeClosed)
-        );
-        assert!(matches!(scope.child(), Err(ScopeClosed)));
-        finish_tx.send(()).unwrap();
-        let ((), ()) = tokio::join!(scope.close(), scope.close());
-    }
-
-    #[tokio::test]
-    async fn recovery_is_lifo_and_effect_installation_is_immediate() {
-        let scope = Scope::new();
-        let log = Arc::new(Mutex::new(Vec::new()));
-        for label in ["one", "two"] {
-            let log = log.clone();
-            scope
-                .effect(|| {
-                    log.lock().unwrap().push(("install", label));
-                    async move {
-                        log.lock().unwrap().push(("recover", label));
-                    }
-                })
-                .unwrap();
-        }
-        assert_eq!(
-            *log.lock().unwrap(),
-            vec![("install", "one"), ("install", "two")]
-        );
-        scope.close().await;
-        assert_eq!(
-            *log.lock().unwrap(),
-            vec![
-                ("install", "one"),
-                ("install", "two"),
-                ("recover", "two"),
-                ("recover", "one"),
-            ]
-        );
     }
 }

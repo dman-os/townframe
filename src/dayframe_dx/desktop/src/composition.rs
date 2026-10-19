@@ -2,28 +2,30 @@
 use dayframe_app::{
     application::ApplicationRuntime,
     micros::{
-        MicroId,
         composition::{
-            ConfigurationError, ConfigurationSource, ConfiguredMicro, Enablement, InstanceState,
-            MockConfiguration,
+            ConfigurationError, ConfigurationSnapshot, ConfigurationSource, ConfiguredMicro,
+            Enablement, InstanceState, MockConfiguration,
         },
+        MicroId,
     },
-    native::{ComponentMount, use_component_recovery},
+    native::{use_component_recovery, ComponentMount},
 };
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
 
-struct DesktopRuntime {
-    application: ApplicationRuntime,
+#[derive(Clone)]
+pub(crate) struct DesktopRuntime {
+    pub(crate) application: ApplicationRuntime,
     configuration: MockConfiguration,
     states: BTreeMap<String, InstanceState>,
 }
 
 impl DesktopRuntime {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut application = ApplicationRuntime::new();
         let host = application.host();
         dayframe_sample::bind_mock_defaults(&host);
+        dayframe_counter::bind_mock_defaults(&host);
 
         application
             .register_provider(dayframe_settings::provider(
@@ -35,7 +37,10 @@ impl DesktopRuntime {
             .register_provider(dayframe_sample::provider(application.native()))
             .unwrap();
         application
-            .register_provider(dayframe_counter::provider(application.native()))
+            .register_provider(dayframe_counter::provider(
+                dayframe_counter::package(),
+                application.native(),
+            ))
             .unwrap();
 
         let locked = BTreeMap::from([(
@@ -98,7 +103,10 @@ impl DesktopRuntime {
     }
 
     fn desired(&self) -> BTreeMap<String, ConfiguredMicro> {
-        self.configuration.current().unwrap()
+        let ConfigurationSnapshot::Ready(desired) = self.configuration.current().unwrap() else {
+            unreachable!("in-memory desktop configuration is always hydrated")
+        };
+        desired
     }
 
     fn is_enabled(&self, instance: &str) -> bool {
@@ -121,8 +129,7 @@ impl DesktopRuntime {
 }
 
 #[component]
-pub fn Application() -> Element {
-    let mut runtime = use_signal(DesktopRuntime::new);
+pub(crate) fn Application(mut runtime: Signal<DesktopRuntime>) -> Element {
     let host = runtime.read().application.host();
     use_drop(move || host.close());
     use_component_recovery(runtime.read().application.native());
@@ -342,16 +349,14 @@ mod tests {
             runtime.application.output::<CounterMicro>("counter"),
             Err(AccessError::Revoked)
         ));
-        assert!(
-            runtime
-                .application
-                .output::<SettingsMicro>("settings")
-                .unwrap()
-                .sections
-                .snapshot()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(runtime
+            .application
+            .output::<SettingsMicro>("settings")
+            .unwrap()
+            .sections
+            .snapshot()
+            .unwrap()
+            .is_empty());
         assert_eq!(
             first_sample.watch().current().unwrap_err(),
             AccessError::Revoked

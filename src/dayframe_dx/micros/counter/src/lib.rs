@@ -1,19 +1,23 @@
-//! Wasm counter micro contributing a live Settings section over the WIT `presentation-client`
-//! boundary.
+//! Wasm counter micro contributing a live Settings section over the WIT `micro-client` world.
+//! Its count lives in the counter's owner-config facet: activation grants exactly that facet's
+//! read/write rights and passes the binding to the guest, which watches it and writes through it.
+//! `CONFIG_TAG`/`CONFIG_KEY` must match the constants compiled into the guest component.
 use dayframe_app::{
-    host::{ComponentRef, Instance},
-    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision},
+    documents::FacetRoute,
+    host::{ComponentRef, Host, Instance},
+    micros::{AsyncMicroFactory, MicroDescriptor, MicroId, MicroProvision, Provision},
     native::NativeComponents,
-    wasm::{WasmMicro, WasmPackage},
 };
+use dayframe_engine_wasmtime::{WasmMicro, WasmPackage};
 use dayframe_settings_contract::{SettingsSection, SettingsSections};
-use std::{
-    path::PathBuf,
-    process::Command,
-    sync::LazyLock,
-};
+use std::sync::LazyLock;
+
+#[path = "../../../counter_fixture.rs"]
+mod counter_fixture;
 
 pub const ID: &str = "dayframe.counter";
+pub const CONFIG_TAG: &str = "org.dayframe.counter.config";
+pub const CONFIG_KEY: &str = "count";
 
 #[derive(Clone)]
 pub struct CounterMicro {
@@ -32,83 +36,67 @@ impl Provision for CounterMicro {
 }
 
 pub fn package() -> WasmPackage {
-    static BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| {
-        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let output = Command::new("cargo")
-            .current_dir(&directory)
-            .args([
-                "build",
-                "-p",
-                "dayframe_guest",
-                "--example",
-                "counter",
-                "--target",
-                "wasm32-unknown-unknown",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "guest build failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let metadata = Command::new("cargo")
-            .current_dir(&directory)
-            .args(["metadata", "--no-deps", "--format-version", "1"])
-            .output()
-            .unwrap();
-        assert!(
-            metadata.status.success(),
-            "{}",
-            String::from_utf8_lossy(&metadata.stderr)
-        );
-        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
-        let core = PathBuf::from(metadata["target_directory"].as_str().unwrap())
-            .join("wasm32-unknown-unknown/debug/examples/counter.wasm");
-        let encoded = Command::new("wasm-tools")
-            .args(["component", "new"])
-            .arg(core)
-            .output()
-            .unwrap();
-        assert!(
-            encoded.status.success(),
-            "component encoding failed: {}",
-            String::from_utf8_lossy(&encoded.stderr)
-        );
-        encoded.stdout
+    static PACKAGE: LazyLock<WasmPackage> = LazyLock::new(|| {
+        WasmPackage::from_bytes(counter_fixture::counter_component())
+            .expect("DAYFRAME_COUNTER_COMPONENT must contain a valid counter Wasm component")
     });
-    WasmPackage::from_bytes(&*BYTES).expect("counter Wasm component is valid")
+    PACKAGE.clone()
 }
 
-pub fn provider(native: NativeComponents) -> MicroFactory {
-    provider_with_package(package(), native)
+pub fn bind_mock_defaults(host: &Host) {
+    let documents = host.mock_documents();
+    documents.bind_config("counter".into(), "counter-config".into(), "main".into());
+    documents.seed(
+        FacetRoute {
+            document: "counter-config".into(),
+            branch: "main".into(),
+            tag: CONFIG_TAG.into(),
+            key_id: CONFIG_KEY.into(),
+        },
+        serde_json::json!(0),
+    );
 }
 
-pub fn provider_with_package(package: WasmPackage, native: NativeComponents) -> MicroFactory {
-    MicroFactory::new(
+pub fn provider(package: WasmPackage, native: NativeComponents) -> AsyncMicroFactory {
+    AsyncMicroFactory::new(
         MicroDescriptor {
             id: MicroId::new(ID),
             version: 1,
             requirements: vec![MicroProvision {
                 id: SettingsSections::ID.into(),
                 version: 1,
-                        }],
+            }],
             provisions: vec![MicroProvision {
                 id: CounterMicro::ID.into(),
                 version: 1,
-                        }],
+            }],
         },
         move |activation| {
-            let instance = activation.instance();
-            let sections = activation.require::<SettingsSections>()?;
-            let settings = sections.bind(&instance)?;
-            let wasm = WasmMicro::activate(instance.clone(), &package, &native)?;
-            settings.insert(SettingsSection {
-                title: "Counter (Wasm)".into(),
-                detail: wasm.surface(),
-            })?;
-            activation.publish(CounterMicro { instance, wasm });
-            Ok(())
+            let package = package.clone();
+            let native = native.clone();
+            async move {
+                let instance = activation.instance();
+                let sections = activation.require::<SettingsSections>()?;
+                let settings = sections.bind(&instance)?;
+                let configs = activation.host().grant_config(
+                    &instance,
+                    "counter",
+                    vec![daybook_types::manifest::RoutineFacetAccess {
+                        tag: CONFIG_TAG.into(),
+                        key_id: Some(CONFIG_KEY.into()),
+                        read: true,
+                        write: true,
+                        ..Default::default()
+                    }],
+                )?;
+                let wasm = WasmMicro::activate(&activation, &package, &native, configs)?;
+                settings.insert(SettingsSection {
+                    title: "Counter (Wasm)".into(),
+                    detail: wasm.surface(),
+                })?;
+                activation.publish(CounterMicro { instance, wasm });
+                Ok(())
+            }
         },
     )
 }
@@ -121,8 +109,8 @@ mod tests {
         host::AccessError,
         micros::composition::{ConfiguredMicro, Enablement, InstanceState},
         native::ComponentMount,
-        presentation::SurfaceTree,
     };
+    use dayframe_presentation::SurfaceTree;
     use dayframe_settings::SettingsMicro;
     use dioxus::prelude::*;
     use dioxus_core::{RenderTargetId, VirtualDom};
@@ -159,12 +147,11 @@ mod tests {
     #[test]
     fn counter_micro_contributes_live_settings_section_and_withdraws_on_trap_or_disablement() {
         let mut app = ApplicationRuntime::new();
-        app.register_provider(dayframe_settings::provider(
-            app.native(),
-            app.root_mounts(),
-        ))
-        .unwrap();
-        app.register_provider(provider(app.native())).unwrap();
+        bind_mock_defaults(&app.host());
+        app.register_provider(dayframe_settings::provider(app.native(), app.root_mounts()))
+            .unwrap();
+        app.register_provider(provider(package(), app.native()))
+            .unwrap();
 
         let mut config = BTreeMap::from([
             (
@@ -205,7 +192,10 @@ mod tests {
         );
         let mut host_tree = SurfaceTree::new();
         host_dom.rebuild(&mut host_tree);
-        assert_eq!(host_tree.text_content(), "0");
+        assert_eq!(
+            host_tree.text_content(),
+            "0Pending counter writes: 0Refresh counter"
+        );
 
         let click = dioxus_core::Event::new(
             EventData::Mouse(SerializedMouseData::default()).into_any(),
@@ -215,12 +205,17 @@ mod tests {
             RenderTargetId::ROOT,
             "click",
             click,
-            dioxus_core::ElementId::from_raw(3),
+            host_tree
+                .listener_id("button", "click")
+                .expect("host tree rendered the counter button"),
         );
         host_dom.render_immediate(&mut host_tree);
-        assert_eq!(host_tree.text_content(), "1");
+        assert_eq!(
+            host_tree.text_content(),
+            "1Pending counter writes: 1Refresh counter"
+        );
 
-        first_counter.wasm.revoke_surfaces();
+        first_counter.wasm.exhaust_fuel();
         let click2 = dioxus_core::Event::new(
             EventData::Mouse(SerializedMouseData::default()).into_any(),
             true,
@@ -229,7 +224,9 @@ mod tests {
             RenderTargetId::ROOT,
             "click",
             click2,
-            dioxus_core::ElementId::from_raw(3),
+            host_tree
+                .listener_id("button", "click")
+                .expect("host tree rendered the counter button"),
         );
         assert_eq!(first_counter.instance.check(), Err(AccessError::Revoked));
         assert!(settings_micro.sections.snapshot().unwrap().is_empty());

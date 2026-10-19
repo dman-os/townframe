@@ -5,22 +5,23 @@
 //! for the real renderer; only tree semantics differ.
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
-    process::Command,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
 use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
 use wasmtime::{Engine, Store};
 
+#[path = "../counter_fixture.rs"]
+mod counter_fixture;
+use counter_fixture::counter_component;
+
 mod host_bindings {
     wasmtime::component::bindgen!({
-        path: "../app/wit",
-        world: "presentation-client",
+        path: "../presentation/wit",
+        world: "micro-client",
         imports: { default: trappable },
-        additional_derives: [PartialEq],
         with: {
             "townframe:dayframe/presentation.surface": super::Surface,
             "townframe:dayframe/presentation.mount-point": super::Placement,
@@ -32,7 +33,10 @@ use blitz_dom::{BaseDocument, DocumentConfig, LocalName, NodeId, QualName, ns};
 use dioxus_core::{BorrowedAttributeValue, ElementId, WriteMutations};
 use dioxus_native_dom::DioxusState;
 use host_bindings::exports::townframe::dayframe::presentation_events::Event;
-use host_bindings::townframe::dayframe::presentation::{self, *};
+use host_bindings::townframe::dayframe::{
+    documents,
+    presentation::{self, *},
+};
 
 /// Replays one wire batch into any host `WriteMutations`, in order.
 fn replay(batch: &[Mutation], to: &mut impl WriteMutations) {
@@ -151,15 +155,17 @@ enum Backend {
     },
 }
 
+#[derive(Clone)]
 pub struct Surface {
     alive: Arc<AtomicBool>,
-    backend: Backend,
+    backend: Arc<Mutex<Backend>>,
+    identity: u64,
 }
 
 impl Surface {
-    fn batches(&self) -> &[Vec<Mutation>] {
-        match &self.backend {
-            Backend::Recording(batches) => batches,
+    fn batches(&self) -> Vec<Vec<Mutation>> {
+        match &*self.backend.lock().unwrap() {
+            Backend::Recording(batches) => batches.clone(),
             Backend::Blitz { .. } => {
                 panic!("a Blitz surface commits into a real tree; it records nothing")
             }
@@ -184,7 +190,9 @@ struct TestHost {
     table: ResourceTable,
     doc: Option<BaseDocument>,
     /// Per-surface Blitz tree state, keyed by the surface resource's rep.
-    states: BTreeMap<u32, DioxusState>,
+    states: BTreeMap<u64, DioxusState>,
+    routes: BTreeMap<u64, Vec<u32>>,
+    next_surface: u64,
 }
 
 impl TestHost {
@@ -193,7 +201,22 @@ impl TestHost {
             table: ResourceTable::new(),
             doc: None,
             states: BTreeMap::new(),
+            routes: BTreeMap::new(),
+            next_surface: 0,
         }
+    }
+
+    fn start(
+        store: &mut Store<Self>,
+        component: &Component,
+        linker: &Linker<Self>,
+    ) -> wasmtime::Result<host_bindings::MicroClient> {
+        let guest = host_bindings::MicroClient::instantiate(&mut *store, component, linker)?;
+        guest
+            .townframe_dayframe_micro_lifecycle()
+            .call_activate(store, &[])?
+            .map_err(wasmtime::Error::msg)?;
+        Ok(guest)
     }
 
     /// Grants a placement rooted at a real node in this host's document, creating the document on
@@ -270,36 +293,35 @@ impl TestHost {
     /// invoke the guest (which re-entrantly calls `surface.apply` and mutates `BaseDocument`).
     fn resolve_click(&self, target: NodeId) -> Option<(u32, Event)> {
         use dioxus_html::{
-            EventData, SerializedMouseData,
+            EventData, Modifiers, SerializedMouseData,
             geometry::{ClientPoint, Coordinates, ElementPoint, PagePoint, ScreenPoint},
             input_data::{MouseButton, decode_mouse_button_set},
-             Modifiers,
         };
 
         let doc = self.doc.as_ref()?;
         let mut current = Some(target);
-        let (rep, node_id, element_id) = loop {
-            let node_id = current?;
-            let node = doc.get_node(node_id)?;
-            if let Some(raw_id) = node
-                .attr(LocalName::from("data-dioxus-id"))
-                .and_then(|value| value.parse::<usize>().ok())
-            {
-                let element_id = ElementId::from_raw(raw_id);
-                if let Some((&rep, _)) = self
-                    .states
-                    .iter()
-                    .find(|(_, state)| state.try_element_to_node_id(element_id) == Some(node_id))
+        let (rep, node_id, element_id) =
+            loop {
+                let node_id = current?;
+                let node = doc.get_node(node_id)?;
+                if let Some(raw_id) = node
+                    .attr(LocalName::from("data-dioxus-id"))
+                    .and_then(|value| value.parse::<usize>().ok())
                 {
-                    break (rep, node_id, element_id);
+                    let element_id = ElementId::from_raw(raw_id);
+                    if let Some((&rep, _)) = self.states.iter().find(|(_, state)| {
+                        state.try_element_to_node_id(element_id) == Some(node_id)
+                    }) {
+                        break (rep, node_id, element_id);
+                    }
                 }
-            }
-            current = node.parent;
-        };
+                current = node.parent;
+            };
 
+        let rep = *self.routes.get(&rep)?.first()?;
         let surface = self.table.get(&Resource::<Surface>::new_borrow(rep)).ok()?;
-        let revision = match surface.backend {
-            Backend::Blitz { revisions } => revisions,
+        let revision = match &*surface.backend.lock().unwrap() {
+            Backend::Blitz { revisions } => *revisions,
             Backend::Recording(_) => return None,
         };
         let node = doc.get_node(node_id)?;
@@ -329,6 +351,76 @@ impl TestHost {
     }
 }
 
+impl documents::Host for TestHost {}
+
+impl documents::HostDocumentAccess for TestHost {
+    fn watch(
+        &mut self,
+        _access: Resource<documents::DocumentAccess>,
+        _selection: documents::WatchSelection,
+    ) -> wasmtime::Result<Result<Resource<documents::DocumentWatch>, documents::DocumentError>>
+    {
+        Ok(Err(documents::DocumentError::Denied))
+    }
+
+    fn mutate(
+        &mut self,
+        _access: Resource<documents::DocumentAccess>,
+        _route: documents::FacetRoute,
+        _mutation: documents::FacetMutation,
+    ) -> wasmtime::Result<Result<Resource<documents::Operation>, documents::DocumentError>> {
+        Ok(Err(documents::DocumentError::Denied))
+    }
+
+    fn drop(&mut self, access: Resource<documents::DocumentAccess>) -> wasmtime::Result<()> {
+        self.table.delete(access)?;
+        Ok(())
+    }
+}
+
+impl documents::HostDocumentWatch for TestHost {
+    fn current(
+        &mut self,
+        _watch: Resource<documents::DocumentWatch>,
+    ) -> wasmtime::Result<Result<documents::DocumentSnapshot, documents::DocumentError>> {
+        Ok(Err(documents::DocumentError::Denied))
+    }
+
+    fn select(
+        &mut self,
+        _watch: Resource<documents::DocumentWatch>,
+        _selection: documents::WatchSelection,
+    ) -> wasmtime::Result<Result<(), documents::DocumentError>> {
+        Ok(Err(documents::DocumentError::Denied))
+    }
+
+    fn refresh(
+        &mut self,
+        _watch: Resource<documents::DocumentWatch>,
+    ) -> wasmtime::Result<Result<(), documents::DocumentError>> {
+        Ok(Err(documents::DocumentError::Denied))
+    }
+
+    fn drop(&mut self, watch: Resource<documents::DocumentWatch>) -> wasmtime::Result<()> {
+        self.table.delete(watch)?;
+        Ok(())
+    }
+}
+
+impl documents::HostOperation for TestHost {
+    fn current(
+        &mut self,
+        _operation: Resource<documents::Operation>,
+    ) -> wasmtime::Result<Result<documents::OperationReceipt, documents::DocumentError>> {
+        Ok(Err(documents::DocumentError::Denied))
+    }
+
+    fn drop(&mut self, operation: Resource<documents::Operation>) -> wasmtime::Result<()> {
+        self.table.delete(operation)?;
+        Ok(())
+    }
+}
+
 impl presentation::Host for TestHost {}
 impl presentation::HostMountPoint for TestHost {
     fn open(
@@ -345,10 +437,20 @@ impl presentation::HostMountPoint for TestHost {
             Some(_) => Backend::Blitz { revisions: 0 },
             None => Backend::Recording(Vec::new()),
         };
-        let surface = self.table.push(Surface { alive, backend })?;
+        self.next_surface = self.next_surface.checked_add(1).unwrap();
+        let identity = self.next_surface;
+        let surface = self.table.push(Surface {
+            alive,
+            backend: Arc::new(Mutex::new(backend)),
+            identity,
+        })?;
+        assert!(self.routes.insert(identity, vec![surface.rep()]).is_none());
         if let Some(root) = root {
-            let previous = self.states.insert(surface.rep(), DioxusState::create(root));
-            assert!(previous.is_none(), "surface rep reused while still mounted");
+            let previous = self.states.insert(identity, DioxusState::create(root));
+            assert!(
+                previous.is_none(),
+                "surface identity reused while still mounted"
+            );
         }
         Ok(Ok(surface))
     }
@@ -363,13 +465,14 @@ impl presentation::HostSurface for TestHost {
         surface: Resource<Surface>,
         edits: Vec<Mutation>,
     ) -> wasmtime::Result<Result<u64, PresentationError>> {
-        let Self { table, doc, states } = self;
-        let rep = surface.rep();
+        let Self {
+            table, doc, states, ..
+        } = self;
         let surface = table.get_mut(&surface)?;
         if !surface.alive.load(Ordering::Acquire) {
             return Ok(Err(PresentationError::Revoked));
         }
-        match &mut surface.backend {
+        match &mut *surface.backend.lock().unwrap() {
             Backend::Recording(batches) => {
                 let mut writer = RecordingWriter::default();
                 replay(&edits, &mut writer);
@@ -378,7 +481,7 @@ impl presentation::HostSurface for TestHost {
             }
             Backend::Blitz { revisions } => {
                 let state = states
-                    .get_mut(&rep)
+                    .get_mut(&surface.identity)
                     .expect("a Blitz surface always has tree state");
                 let doc = doc.as_mut().expect("a Blitz placement implies a document");
                 let mut writer = state.writer(doc);
@@ -388,8 +491,36 @@ impl presentation::HostSurface for TestHost {
             }
         }
     }
+    fn retain(
+        &mut self,
+        surface: Resource<Surface>,
+    ) -> wasmtime::Result<Result<Resource<Surface>, PresentationError>> {
+        let surface = self.table.get(&surface)?;
+        if !surface.alive.load(Ordering::Acquire) {
+            return Ok(Err(PresentationError::Revoked));
+        }
+        let retained = surface.clone();
+        let identity = surface.identity;
+        let retained = self.table.push(retained)?;
+        self.routes.get_mut(&identity).unwrap().push(retained.rep());
+        Ok(Ok(retained))
+    }
+
+    fn identity(&mut self, surface: Resource<Surface>) -> wasmtime::Result<u64> {
+        Ok(self.table.get(&surface)?.identity)
+    }
+
     fn drop(&mut self, surface: Resource<Surface>) -> wasmtime::Result<()> {
-        if let Some(state) = self.states.remove(&surface.rep())
+        let rep = surface.rep();
+        let surface = self.table.delete(surface)?;
+        let routes = self.routes.get_mut(&surface.identity).unwrap();
+        routes.retain(|routed| *routed != rep);
+        if Arc::strong_count(&surface.backend) > 1 {
+            return Ok(());
+        }
+        assert!(routes.is_empty());
+        self.routes.remove(&surface.identity);
+        if let Some(state) = self.states.remove(&surface.identity)
             && let Some(doc) = self.doc.as_mut()
         {
             let root = state.element_to_node_id(ElementId::ROOT);
@@ -398,61 +529,13 @@ impl presentation::HostSurface for TestHost {
                 mutator.remove_and_drop_node(child);
             }
         }
-        self.table.delete(surface)?;
         Ok(())
     }
 }
 
-fn counter_component() -> Vec<u8> {
-    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let output = Command::new("cargo")
-        .current_dir(&directory)
-        .args([
-            "build",
-            "-p",
-            "dayframe_guest",
-            "--example",
-            "counter",
-            "--target",
-            "wasm32-unknown-unknown",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "guest build failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // Ask Cargo for its configured target directory; never choose a separate target directory.
-    let metadata = Command::new("cargo")
-        .current_dir(&directory)
-        .args(["metadata", "--no-deps", "--format-version", "1"])
-        .output()
-        .unwrap();
-    assert!(
-        metadata.status.success(),
-        "{}",
-        String::from_utf8_lossy(&metadata.stderr)
-    );
-    let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
-    let core = PathBuf::from(metadata["target_directory"].as_str().unwrap())
-        .join("wasm32-unknown-unknown/debug/examples/counter.wasm");
-    let output = Command::new("wasm-tools")
-        .args(["component", "new"])
-        .arg(core)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "component encoding failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output.stdout
-}
-
-fn click_event(revision: u64) -> Event {
+fn click_event(revision: u64, element: u32) -> Event {
     let html = dioxus_html::HtmlEvent {
-        element: dioxus_core::ElementId::from_raw(1),
+        element: dioxus_core::ElementId::from_raw(element as usize),
         name: "click".into(),
         bubbles: true,
         data: dioxus_html::EventData::Mouse(dioxus_html::SerializedMouseData::default()),
@@ -466,21 +549,248 @@ fn click_event(revision: u64) -> Event {
     }
 }
 
+fn sdk_text_edits(dom: &mut crate::GuestDom, target: dioxus_core::RenderTargetId) -> Vec<String> {
+    dom.edits
+        .get_mut(&target)
+        .unwrap()
+        .take()
+        .into_iter()
+        .filter_map(|edit| match edit {
+            crate::presentation::Mutation::CreateText(text)
+            | crate::presentation::Mutation::SetText(text) => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+fn sdk_click(dom: &mut crate::GuestDom, target: dioxus_core::RenderTargetId) {
+    let event = dioxus_core::Event::new(
+        dioxus_html::EventData::Mouse(dioxus_html::SerializedMouseData::default()).into_any(),
+        true,
+    );
+    dom.dom
+        .runtime()
+        .handle_event_for_target(target, "click", event, ElementId::from_raw(1));
+    dom.render().unwrap();
+}
+
+#[test]
+fn sdk_one_root_shares_state_across_targets_and_survives_all_mounts_closing() {
+    use dioxus::prelude::*;
+    use std::{cell::Cell, rc::Rc};
+
+    fn counter(initializations: Rc<Cell<usize>>) -> Element {
+        use_hook(move || initializations.set(initializations.get() + 1));
+        let mut count = use_signal(|| 0_u64);
+        rsx! { button { onclick: move |_| count += 1, "{count}" } }
+    }
+
+    let initializations = Rc::new(Cell::new(0));
+    let mut dom = crate::GuestDom::new_with_props(counter, initializations.clone());
+    assert_eq!(initializations.get(), 1);
+    let first = dom.mount_target(100);
+    dom.render().unwrap();
+    assert_eq!(sdk_text_edits(&mut dom, first), ["0"]);
+    let second = dom.mount_target(101);
+    dom.render().unwrap();
+    assert!(sdk_text_edits(&mut dom, first).is_empty());
+    assert_eq!(sdk_text_edits(&mut dom, second), ["0"]);
+
+    sdk_click(&mut dom, second);
+    assert_eq!(sdk_text_edits(&mut dom, first), ["1"]);
+    assert_eq!(sdk_text_edits(&mut dom, second), ["1"]);
+    dom.unmount_target(100);
+    assert!(sdk_text_edits(&mut dom, second).is_empty());
+    assert!(!dom.edits.contains_key(&first));
+    let third = dom.mount_target(102);
+    dom.render().unwrap();
+    assert_eq!(sdk_text_edits(&mut dom, third), ["1"]);
+    sdk_click(&mut dom, third);
+    assert_eq!(sdk_text_edits(&mut dom, second), ["2"]);
+    assert_eq!(sdk_text_edits(&mut dom, third), ["2"]);
+
+    dom.unmount_target(101);
+    dom.unmount_target(102);
+    assert!(dom.edits.is_empty());
+    for identity in 103..111 {
+        let target = dom.mount_target(identity);
+        dom.render().unwrap();
+        assert_eq!(sdk_text_edits(&mut dom, target), ["2"]);
+        dom.unmount_target(identity);
+        assert!(dom.edits.is_empty());
+    }
+    assert_eq!(initializations.get(), 1);
+}
+
+#[test]
+fn sdk_colliding_element_ids_dispatch_only_to_the_selected_target_scope() {
+    use dioxus::prelude::*;
+
+    #[component]
+    fn LocalCounter() -> Element {
+        let mut count = use_signal(|| 0_u64);
+        rsx! { button { onclick: move |_| count += 1, "{count}" } }
+    }
+
+    fn app() -> Element {
+        rsx! { LocalCounter {} }
+    }
+
+    let mut dom = crate::GuestDom::new(app);
+    let first = dom.mount_target(1);
+    let second = dom.mount_target(2);
+    dom.render().unwrap();
+    assert_eq!(sdk_text_edits(&mut dom, first), ["0"]);
+    assert_eq!(sdk_text_edits(&mut dom, second), ["0"]);
+    sdk_click(&mut dom, second);
+    assert!(sdk_text_edits(&mut dom, first).is_empty());
+    assert_eq!(sdk_text_edits(&mut dom, second), ["1"]);
+    sdk_click(&mut dom, first);
+    assert_eq!(sdk_text_edits(&mut dom, first), ["1"]);
+    assert!(sdk_text_edits(&mut dom, second).is_empty());
+    dom.unmount_target(1);
+    sdk_click(&mut dom, second);
+    assert_eq!(sdk_text_edits(&mut dom, second), ["2"]);
+    dom.unmount_target(2);
+}
+
+#[test]
+fn sdk_external_updates_render_into_live_mounts_and_later_mounts() {
+    use dioxus::prelude::*;
+    use std::{cell::Cell, rc::Rc};
+
+    fn app(external: Rc<Cell<Option<Signal<u64>>>>) -> Element {
+        let count = use_signal(|| 0_u64);
+        external.set(Some(count));
+        rsx! { button { "{count}" } }
+    }
+
+    let external = Rc::new(Cell::new(None));
+    let mut dom = crate::GuestDom::new_with_props(app, external.clone());
+    let mut count = external.get().unwrap();
+    count.set(17);
+    dom.render().unwrap();
+    let first = dom.mount_target(10);
+    dom.render().unwrap();
+    assert_eq!(sdk_text_edits(&mut dom, first), ["17"]);
+    let second = dom.mount_target(11);
+    dom.render().unwrap();
+    assert!(sdk_text_edits(&mut dom, first).is_empty());
+    assert_eq!(sdk_text_edits(&mut dom, second), ["17"]);
+    count.set(18);
+    dom.render().unwrap();
+    assert_eq!(sdk_text_edits(&mut dom, first), ["18"]);
+    assert_eq!(sdk_text_edits(&mut dom, second), ["18"]);
+    dom.unmount_target(10);
+    count.set(19);
+    dom.render().unwrap();
+    assert_eq!(sdk_text_edits(&mut dom, second), ["19"]);
+    assert!(!dom.edits.contains_key(&first));
+    dom.unmount_target(11);
+}
+
+#[test]
+fn sdk_retained_surface_shares_identity_tree_and_revocation() -> wasmtime::Result<()> {
+    let mut host = TestHost::new();
+    let placement = host.grant_blitz_placement();
+    let original =
+        presentation::HostMountPoint::open(&mut host, Resource::new_borrow(placement.rep()))?
+            .unwrap();
+    let retained =
+        presentation::HostSurface::retain(&mut host, Resource::new_borrow(original.rep()))?
+            .unwrap();
+    assert_ne!(original.rep(), retained.rep());
+    let identity =
+        presentation::HostSurface::identity(&mut host, Resource::new_borrow(original.rep()))?;
+    assert_eq!(
+        presentation::HostSurface::identity(&mut host, Resource::new_borrow(retained.rep()))?,
+        identity,
+    );
+    presentation::HostSurface::drop(&mut host, original)?;
+    presentation::HostSurface::apply(
+        &mut host,
+        Resource::new_borrow(retained.rep()),
+        vec![
+            Mutation::PushId(0),
+            Mutation::CreateElement(("button".into(), None)),
+            Mutation::SetId(1),
+            Mutation::CreateText("kept".into()),
+            Mutation::AppendChildren(1),
+            Mutation::AppendChildren(1),
+        ],
+    )?
+    .unwrap();
+    assert_eq!(host.counter_text(&placement), "kept");
+    host.table
+        .get(&placement)?
+        .alive
+        .store(false, Ordering::Release);
+    assert!(matches!(
+        presentation::HostSurface::retain(&mut host, Resource::new_borrow(retained.rep()))?,
+        Err(PresentationError::Revoked),
+    ));
+    assert!(matches!(
+        presentation::HostSurface::apply(&mut host, Resource::new_borrow(retained.rep()), vec![])?,
+        Err(PresentationError::Revoked),
+    ));
+    presentation::HostSurface::drop(&mut host, retained)?;
+    assert!(host.buttons(&placement).is_empty());
+    assert!(host.states.is_empty());
+    assert!(host.routes.is_empty());
+    let next_placement = host.grant_blitz_placement();
+    let next =
+        presentation::HostMountPoint::open(&mut host, Resource::new_borrow(next_placement.rep()))?
+            .unwrap();
+    assert_ne!(
+        presentation::HostSurface::identity(&mut host, Resource::new_borrow(next.rep()))?,
+        identity,
+    );
+    presentation::HostSurface::drop(&mut host, next)?;
+    Ok(())
+}
+
 #[test]
 fn event_envelope_roundtrips_through_dioxus_without_a_second_payload_schema() {
-    let event = click_event(1);
+    let event = click_event(1, 7);
     let json = serde_json::json!({"element": event.element, "name": event.name,
         "bubbles": event.bubbles, "data": serde_json::from_str::<serde_json::Value>(&event.data_json).unwrap()});
     let html: dioxus_html::HtmlEvent = serde_json::from_value(json).unwrap();
     assert_eq!(
         html,
         dioxus_html::HtmlEvent {
-            element: dioxus_core::ElementId::from_raw(1),
+            element: dioxus_core::ElementId::from_raw(7),
             name: "click".into(),
             bubbles: true,
             data: dioxus_html::EventData::Mouse(dioxus_html::SerializedMouseData::default()),
         }
     );
+}
+
+/// Wire types carry no derived equality now that the documents interface has resources, so
+/// recorded batches are compared through their structural `Debug` form, which still names any
+/// differing mutation.
+fn assert_batches(actual: &[Vec<Mutation>], expected: &[Vec<Mutation>]) {
+    assert_eq!(format!("{actual:#?}"), format!("{expected:#?}"));
+}
+
+fn counter_click_element(batch: &[Mutation]) -> u32 {
+    let mut host = TestHost::new();
+    let placement = host.grant_blitz_placement();
+    let surface =
+        presentation::HostMountPoint::open(&mut host, Resource::new_borrow(placement.rep()))
+            .unwrap()
+            .unwrap();
+    presentation::HostSurface::apply(
+        &mut host,
+        Resource::new_borrow(surface.rep()),
+        batch.to_vec(),
+    )
+    .unwrap()
+    .unwrap();
+    let buttons = host.buttons(&placement);
+    assert_eq!(buttons.len(), 1);
+    assert!(host.has_click_listener(&placement));
+    host.resolve_click(buttons[0]).unwrap().1.element
 }
 
 /// The same counter rendered natively through a host `WriteMutations`. If the guest's batches
@@ -491,11 +801,18 @@ fn expected_counter_batches(event_count: u64) -> Vec<Vec<Mutation>> {
     use dioxus_html::{EventData, SerializedHtmlEventConverter, SerializedMouseData};
 
     fn counter() -> Element {
-        let mut count = use_signal(|| 0_u64);
+        let mut count = use_signal(|| Some(0_u64));
+        let current = count();
         rsx! {
-            button {
-                onclick: move |_| count += 1,
-                "{count}"
+            div { class: "flex flex-col gap-4",
+                button {
+                    class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
+                    "aria-label": "Increment Wasm counter",
+                    disabled: current.is_none(),
+                    onclick: move |_| count.set(Some(count().unwrap() + 1)),
+                    if let Some(count) = current { "{count}" } else { "Loading counter" }
+                }
+                {Option::<VNode>::None}
             }
         }
     }
@@ -506,17 +823,14 @@ fn expected_counter_batches(event_count: u64) -> Vec<Vec<Mutation>> {
     let mut writer = RecordingWriter::default();
     dom.rebuild(&mut writer);
     batches.push(std::mem::take(&mut writer.0));
+    let element = ElementId::from_raw(counter_click_element(&batches[0]) as usize);
     for _ in 0..event_count {
         let event = dioxus_core::Event::new(
             EventData::Mouse(SerializedMouseData::default()).into_any(),
             true,
         );
-        dom.runtime().handle_event_for_target(
-            RenderTargetId::ROOT,
-            "click",
-            event,
-            ElementId::from_raw(1),
-        );
+        dom.runtime()
+            .handle_event_for_target(RenderTargetId::ROOT, "click", event, element);
         dom.render_immediate(&mut writer);
         batches.push(std::mem::take(&mut writer.0));
     }
@@ -562,9 +876,9 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
     let engine = Engine::default();
     let component = Component::new(&engine, counter_component())?;
     let mut linker = Linker::new(&engine);
-    presentation::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| host)?;
+    host_bindings::MicroClient::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| host)?;
     let mut store = Store::new(&engine, TestHost::new());
-    let first = host_bindings::PresentationClient::instantiate(&mut store, &component, &linker)?;
+    let first = TestHost::start(&mut store, &component, &linker)?;
     let events = first.townframe_dayframe_presentation_events();
     let denied = store
         .data_mut()
@@ -583,7 +897,8 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
         .call_mount(&mut store, Resource::new_borrow(placement.rep()))?
         .unwrap();
     let expected_batches = expected_counter_batches(4);
-    let click = click_event;
+    let element = counter_click_element(&expected_batches[0]);
+    let click = |revision| click_event(revision, element);
     for revision in 1..=2 {
         let response = events.call_dispatch(
             &mut store,
@@ -592,13 +907,13 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
         )?;
         assert!(!response.prevent_default && !response.stop_propagation);
     }
-    assert_eq!(
-        store.data().table.get(&surface)?.batches(),
-        expected_batches[..3].to_vec()
+    assert_batches(
+        &store.data().table.get(&surface)?.batches(),
+        &expected_batches[..3],
     );
 
     // A second instance of the same compiled component has a separate counter/address space.
-    let second = host_bindings::PresentationClient::instantiate(&mut store, &component, &linker)?;
+    let second = TestHost::start(&mut store, &component, &linker)?;
     let second_events = second.townframe_dayframe_presentation_events();
     let second_placement = store
         .data_mut()
@@ -612,24 +927,24 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
         Resource::new_borrow(second_surface.rep()),
         &click(1),
     )?;
-    assert_eq!(
-        store.data().table.get(&second_surface)?.batches(),
-        expected_batches[..2].to_vec()
+    assert_batches(
+        &store.data().table.get(&second_surface)?.batches(),
+        &expected_batches[..2],
     );
     events.call_dispatch(&mut store, Resource::new_borrow(surface.rep()), &click(3))?;
-    let expected = expected_batches[..4].to_vec();
-    assert_eq!(store.data().table.get(&surface)?.batches(), expected);
+    let expected = &expected_batches[..4];
+    assert_batches(&store.data().table.get(&surface)?.batches(), expected);
 
-    // Revocation is enforced at the imported operation, not trusted to the guest's event handler.
-    first_lifetime.store(false, Ordering::Release);
+    let mut malformed = click(4);
+    malformed.data_json = "invalid JSON".into();
     let error = events
-        .call_dispatch(&mut store, Resource::new_borrow(surface.rep()), &click(4))
+        .call_dispatch(&mut store, Resource::new_borrow(surface.rep()), &malformed)
         .unwrap_err();
     assert_eq!(
         error.downcast_ref::<wasmtime::Trap>(),
         Some(&wasmtime::Trap::UnreachableCodeReached)
     );
-    assert_eq!(store.data().table.get(&surface)?.batches(), expected);
+    assert_batches(&store.data().table.get(&surface)?.batches(), expected);
     let error = second_events
         .call_dispatch(
             &mut store,
@@ -641,23 +956,22 @@ fn shared_store_probe_pins_cross_incarnation_failure_after_guest_trap() -> wasmt
         error.downcast_ref::<wasmtime::Trap>(),
         Some(&wasmtime::Trap::CannotEnterComponent)
     );
-    assert_eq!(
-        store.data().table.get(&second_surface)?.batches(),
-        expected_batches[..2].to_vec()
+    assert_batches(
+        &store.data().table.get(&second_surface)?.batches(),
+        &expected_batches[..2],
     );
     Ok(())
 }
 
 #[test]
-fn separate_stores_isolate_guest_traps_and_revoke_only_their_own_surface() -> wasmtime::Result<()> {
+fn separate_stores_isolate_guest_traps() -> wasmtime::Result<()> {
     let engine = Engine::default();
     let component = Component::new(&engine, counter_component())?;
     let mut linker = Linker::new(&engine);
-    presentation::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| host)?;
+    host_bindings::MicroClient::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| host)?;
     let create = || -> wasmtime::Result<_> {
         let mut store = Store::new(&engine, TestHost::new());
-        let guest =
-            host_bindings::PresentationClient::instantiate(&mut store, &component, &linker)?;
+        let guest = TestHost::start(&mut store, &component, &linker)?;
         let alive = Arc::new(AtomicBool::new(true));
         let placement = store
             .data_mut()
@@ -667,12 +981,13 @@ fn separate_stores_isolate_guest_traps_and_revoke_only_their_own_surface() -> wa
             .townframe_dayframe_presentation_events()
             .call_mount(&mut store, Resource::new_borrow(placement.rep()))?
             .unwrap();
-        Ok((store, guest, surface, alive))
+        Ok((store, guest, surface))
     };
-    let (mut first_store, first_guest, first_surface, first_lifetime) = create()?;
-    let (mut second_store, second_guest, second_surface, _) = create()?;
+    let (mut first_store, first_guest, first_surface) = create()?;
+    let (mut second_store, second_guest, second_surface) = create()?;
     let expected_batches = expected_counter_batches(2);
-    let click = click_event;
+    let element = counter_click_element(&expected_batches[0]);
+    let click = |revision| click_event(revision, element);
     let first_events = first_guest.townframe_dayframe_presentation_events();
     let second_events = second_guest.townframe_dayframe_presentation_events();
     first_events.call_dispatch(
@@ -694,16 +1009,15 @@ fn separate_stores_isolate_guest_traps_and_revoke_only_their_own_surface() -> wa
         .expect("surface is live")
         .batches()
         .to_vec();
-    assert_eq!(
-        first_before_close,
-        second_store.data().table.get(&second_surface)?.batches()
-    );
-    first_lifetime.store(false, Ordering::Release);
+    let second_after_first_click = second_store.data().table.get(&second_surface)?.batches();
+    assert_batches(&first_before_close, &second_after_first_click);
+    let mut malformed = click(2);
+    malformed.data_json = "invalid JSON".into();
     let error = first_events
         .call_dispatch(
             &mut first_store,
             Resource::new_borrow(first_surface.rep()),
-            &click(2),
+            &malformed,
         )
         .unwrap_err();
     assert_eq!(
@@ -715,13 +1029,13 @@ fn separate_stores_isolate_guest_traps_and_revoke_only_their_own_surface() -> wa
         Resource::new_borrow(second_surface.rep()),
         &click(2),
     )?;
-    assert_eq!(
-        first_store.data().table.get(&first_surface)?.batches(),
-        first_before_close
+    assert_batches(
+        &first_store.data().table.get(&first_surface)?.batches(),
+        &first_before_close,
     );
-    assert_eq!(
-        second_store.data().table.get(&second_surface)?.batches(),
-        expected_batches[..3].to_vec()
+    assert_batches(
+        &second_store.data().table.get(&second_surface)?.batches(),
+        &expected_batches[..3],
     );
     Ok(())
 }
@@ -738,7 +1052,9 @@ impl BlitzRig {
         let engine = Engine::default();
         let component = Component::new(&engine, counter_component())?;
         let mut linker = Linker::new(&engine);
-        presentation::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| host)?;
+        host_bindings::MicroClient::add_to_linker::<_, HasSelf<TestHost>>(&mut linker, |host| {
+            host
+        })?;
         Ok(Self {
             store: Store::new(&engine, TestHost::new()),
             component,
@@ -746,14 +1062,8 @@ impl BlitzRig {
         })
     }
 
-    /// Starts another incarnation of the counter. Each owns its virtual DOM, so two surfaces in one
-    /// document need two instances.
-    fn spawn(&mut self) -> wasmtime::Result<host_bindings::PresentationClient> {
-        host_bindings::PresentationClient::instantiate(
-            &mut self.store,
-            &self.component,
-            &self.linker,
-        )
+    fn spawn(&mut self) -> wasmtime::Result<host_bindings::MicroClient> {
+        TestHost::start(&mut self.store, &self.component, &self.linker)
     }
 
     fn grant(&mut self) -> Resource<Placement> {
@@ -777,10 +1087,11 @@ impl BlitzRig {
     /// `presentation-events.dispatch` (which re-entrantly applies mutations into the document).
     fn click(
         &mut self,
-        guest: &host_bindings::PresentationClient,
+        guest: &host_bindings::MicroClient,
         target: NodeId,
-    ) -> wasmtime::Result<host_bindings::exports::townframe::dayframe::presentation_events::EventResponse>
-    {
+    ) -> wasmtime::Result<
+        host_bindings::exports::townframe::dayframe::presentation_events::EventResponse,
+    > {
         let (rep, event) = self
             .store
             .data()
@@ -854,6 +1165,141 @@ fn two_surfaces_in_one_document_keep_independent_subtrees() -> wasmtime::Result<
 }
 
 #[test]
+fn wasm_one_incarnation_shares_state_across_live_surfaces_and_remounts() -> wasmtime::Result<()> {
+    let mut rig = BlitzRig::new()?;
+    let guest = rig.spawn()?;
+    let events = guest.townframe_dayframe_presentation_events();
+    let first_placement = rig.grant();
+    let second_placement = rig.grant();
+    let first = events
+        .call_mount(&mut rig.store, Resource::new_borrow(first_placement.rep()))?
+        .unwrap();
+    let second = events
+        .call_mount(&mut rig.store, Resource::new_borrow(second_placement.rep()))?
+        .unwrap();
+    let first_identity = presentation::HostSurface::identity(
+        rig.store.data_mut(),
+        Resource::new_borrow(first.rep()),
+    )?;
+    let second_identity = presentation::HostSurface::identity(
+        rig.store.data_mut(),
+        Resource::new_borrow(second.rep()),
+    )?;
+    assert_ne!(first_identity, second_identity);
+    assert_eq!(rig.store.data().routes[&first_identity].len(), 2);
+    assert_eq!(rig.store.data().routes[&second_identity].len(), 2);
+    let first_button = rig.buttons(&first_placement)[0];
+    let second_button = rig.buttons(&second_placement)[0];
+    rig.click(&guest, first_button)?;
+    assert_eq!(rig.counter_text(&first_placement), "1");
+    assert_eq!(rig.counter_text(&second_placement), "1");
+    rig.click(&guest, second_button)?;
+    assert_eq!(rig.counter_text(&first_placement), "2");
+    assert_eq!(rig.counter_text(&second_placement), "2");
+    events.call_unmount(&mut rig.store, Resource::new_borrow(first.rep()))?;
+    assert_eq!(rig.store.data().routes[&first_identity].len(), 1);
+    presentation::HostSurface::drop(rig.store.data_mut(), first)?;
+    assert!(rig.buttons(&first_placement).is_empty());
+    assert_eq!(rig.store.data().states.len(), 1);
+    assert!(!rig.store.data().routes.contains_key(&first_identity));
+    rig.click(&guest, second_button)?;
+    assert_eq!(rig.counter_text(&second_placement), "3");
+    assert_eq!(rig.buttons(&second_placement), [second_button]);
+
+    let remounted = events
+        .call_mount(&mut rig.store, Resource::new_borrow(first_placement.rep()))?
+        .unwrap();
+    let remounted_identity = presentation::HostSurface::identity(
+        rig.store.data_mut(),
+        Resource::new_borrow(remounted.rep()),
+    )?;
+    assert_ne!(remounted_identity, first_identity);
+    assert_ne!(remounted_identity, second_identity);
+    assert_eq!(rig.counter_text(&first_placement), "3");
+    let remounted_button = rig.buttons(&first_placement)[0];
+    rig.click(&guest, remounted_button)?;
+    assert_eq!(rig.counter_text(&first_placement), "4");
+    assert_eq!(rig.counter_text(&second_placement), "4");
+    events.call_unmount(&mut rig.store, Resource::new_borrow(second.rep()))?;
+    presentation::HostSurface::drop(rig.store.data_mut(), second)?;
+    events.call_unmount(&mut rig.store, Resource::new_borrow(remounted.rep()))?;
+    presentation::HostSurface::drop(rig.store.data_mut(), remounted)?;
+    assert!(rig.store.data().states.is_empty());
+    assert!(rig.store.data().routes.is_empty());
+
+    let last = events
+        .call_mount(&mut rig.store, Resource::new_borrow(first_placement.rep()))?
+        .unwrap();
+    assert_eq!(rig.counter_text(&first_placement), "4");
+    let last_button = rig.buttons(&first_placement)[0];
+    rig.click(&guest, last_button)?;
+    assert_eq!(rig.counter_text(&first_placement), "5");
+    events.call_unmount(&mut rig.store, Resource::new_borrow(last.rep()))?;
+    presentation::HostSurface::drop(rig.store.data_mut(), last)?;
+    assert!(rig.store.data().states.is_empty());
+    assert!(rig.store.data().routes.is_empty());
+    Ok(())
+}
+
+#[test]
+fn wasm_revoked_target_does_not_trap_or_invalidate_live_siblings() -> wasmtime::Result<()> {
+    let mut rig = BlitzRig::new()?;
+    let guest = rig.spawn()?;
+    let events = guest.townframe_dayframe_presentation_events();
+    let first_placement = rig.grant();
+    let second_placement = rig.grant();
+    let first = events
+        .call_mount(&mut rig.store, Resource::new_borrow(first_placement.rep()))?
+        .unwrap();
+    let second = events
+        .call_mount(&mut rig.store, Resource::new_borrow(second_placement.rep()))?
+        .unwrap();
+    let first_identity = presentation::HostSurface::identity(
+        rig.store.data_mut(),
+        Resource::new_borrow(first.rep()),
+    )?;
+    rig.store
+        .data()
+        .table
+        .get(&first_placement)?
+        .alive
+        .store(false, Ordering::Release);
+    let button = rig.buttons(&second_placement)[0];
+    rig.click(&guest, button)?;
+    assert_eq!(rig.counter_text(&second_placement), "1");
+    assert_eq!(rig.counter_text(&first_placement), "0");
+    assert_eq!(rig.store.data().routes[&first_identity].len(), 1);
+    rig.click(&guest, button)?;
+    assert_eq!(rig.counter_text(&second_placement), "2");
+    events.call_unmount(&mut rig.store, Resource::new_borrow(first.rep()))?;
+    presentation::HostSurface::drop(rig.store.data_mut(), first)?;
+    assert!(rig.buttons(&first_placement).is_empty());
+    assert!(matches!(
+        events.call_mount(&mut rig.store, Resource::new_borrow(first_placement.rep()))?,
+        Err(PresentationError::Revoked),
+    ));
+    let replacement_placement = rig.grant();
+    let replacement = events
+        .call_mount(
+            &mut rig.store,
+            Resource::new_borrow(replacement_placement.rep()),
+        )?
+        .unwrap();
+    assert_eq!(rig.counter_text(&replacement_placement), "2");
+    let replacement_button = rig.buttons(&replacement_placement)[0];
+    rig.click(&guest, replacement_button)?;
+    assert_eq!(rig.counter_text(&replacement_placement), "3");
+    assert_eq!(rig.counter_text(&second_placement), "3");
+    events.call_unmount(&mut rig.store, Resource::new_borrow(second.rep()))?;
+    presentation::HostSurface::drop(rig.store.data_mut(), second)?;
+    events.call_unmount(&mut rig.store, Resource::new_borrow(replacement.rep()))?;
+    presentation::HostSurface::drop(rig.store.data_mut(), replacement)?;
+    assert!(rig.store.data().states.is_empty());
+    assert!(rig.store.data().routes.is_empty());
+    Ok(())
+}
+
+#[test]
 fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_siblings()
 -> wasmtime::Result<()> {
     let mut rig = BlitzRig::new()?;
@@ -887,6 +1333,9 @@ fn dropping_a_blitz_surface_withdraws_its_subtree_without_disturbing_siblings()
 
     // Dropping the first surface removes its rendered nodes from the Blitz document while leaving
     // the sibling surface intact and interactive.
+    first
+        .townframe_dayframe_presentation_events()
+        .call_unmount(&mut rig.store, Resource::new_borrow(first_surface.rep()))?;
     presentation::HostSurface::drop(rig.store.data_mut(), first_surface)?;
     assert!(rig.buttons(&first_placement).is_empty());
     assert_eq!(rig.counter_text(&second_placement), "0");

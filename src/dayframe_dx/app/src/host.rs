@@ -2,9 +2,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    thread::ThreadId,
 };
 use tokio::sync::watch;
 
@@ -51,11 +52,59 @@ pub struct RootMount {
     pub content: ComponentRef,
 }
 
+#[derive(Default)]
+struct RecoveryState {
+    owner: Option<(ThreadId, usize)>,
+    waiters: usize,
+}
+
+#[derive(Default)]
+struct RecoveryGate {
+    state: Mutex<RecoveryState>,
+    changed: Condvar,
+}
+
+struct RecoveryGuard<'a>(&'a RecoveryGate);
+
+impl RecoveryGate {
+    fn enter(&self) -> RecoveryGuard<'_> {
+        let thread = std::thread::current().id();
+        let mut state = self.state.lock().unwrap();
+        if let Some((current, depth)) = state.owner.as_mut()
+            && *current == thread
+        {
+            *depth += 1;
+            return RecoveryGuard(self);
+        }
+        state.waiters += 1;
+        self.changed.notify_all();
+        while state.owner.is_some() {
+            state = self.changed.wait(state).unwrap();
+        }
+        state.waiters -= 1;
+        state.owner = Some((thread, 1));
+        RecoveryGuard(self)
+    }
+}
+
+impl Drop for RecoveryGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock().unwrap();
+        let (_, depth) = state.owner.as_mut().unwrap();
+        *depth -= 1;
+        if *depth == 0 {
+            state.owner = None;
+            self.0.changed.notify_all();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Host {
     pub(crate) inner: Arc<Mutex<State>>,
     pub(crate) documents: DocumentService,
     identity: u64,
+    recovery: Arc<RecoveryGate>,
 }
 
 pub(crate) struct State {
@@ -125,6 +174,7 @@ impl Host {
     pub fn new() -> Self {
         Self {
             identity: NEXT_HOST.fetch_add(1, Ordering::Relaxed),
+            recovery: Arc::default(),
             inner: Arc::new(Mutex::new(State {
                 next: 0,
                 instances: BTreeMap::new(),
@@ -141,8 +191,15 @@ impl Host {
     }
 
     pub fn start(&self, name: impl Into<String>) -> Instance {
+        self.try_start(name)
+            .expect("cannot start instances on a closed host")
+    }
+
+    fn try_start(&self, name: impl Into<String>) -> Result<Instance, AccessError> {
         let mut state = self.inner.lock().unwrap();
-        assert!(!state.closed, "cannot start instances on a closed host");
+        if state.closed {
+            return Err(AccessError::Revoked);
+        }
         state.next += 1;
         let id = state.next;
         let (ended, lifetime) = watch::channel(None);
@@ -159,12 +216,12 @@ impl Host {
                 .is_none()
         );
         state.changes.send_replace(HostStatus::Running);
-        Instance {
+        Ok(Instance {
             host: self.clone(),
             id,
             name: name.into(),
             ended: lifetime,
-        }
+        })
     }
 
     /// Activation is transactional with respect to owned effects. Failed mandatory publication
@@ -175,10 +232,11 @@ impl Host {
         activate: impl FnOnce(Instance) -> Result<T, AccessError>,
     ) -> Result<T, AccessError> {
         let mut guard = ActivationGuard {
-            instance: self.start(name),
+            instance: self.try_start(name)?,
             committed: false,
         };
         let result = activate(guard.instance.clone())?;
+        guard.instance.check()?;
         guard.committed = true;
         Ok(result)
     }
@@ -190,10 +248,16 @@ impl Host {
         activate: impl FnOnce(Instance) -> F,
     ) -> Result<T, AccessError> {
         let mut guard = ActivationGuard {
-            instance: self.start(name),
+            instance: self.try_start(name)?,
             committed: false,
         };
-        let result = activate(guard.instance.clone()).await?;
+        let instance = guard.instance.clone();
+        let result = tokio::select! {
+            biased;
+            _ = instance.closed() => return Err(AccessError::Revoked),
+            result = async { activate(instance.clone()).await } => result?,
+        };
+        instance.check()?;
         guard.committed = true;
         Ok(result)
     }
@@ -201,7 +265,7 @@ impl Host {
     pub fn publish_component(&self, owner: &Instance) -> Result<ComponentRef, AccessError> {
         self.check(owner)?;
         let mut state = self.inner.lock().unwrap();
-        if !state.instances.contains_key(&owner.id) {
+        if !state.instances.contains_key(&owner.id) || state.closing.contains(&owner.id) {
             return Err(AccessError::Revoked);
         }
         state.next += 1;
@@ -226,13 +290,16 @@ impl Host {
             return Err(AccessError::Denied);
         }
         let mut state = self.inner.lock().unwrap();
-        if !state.instances.contains_key(&owner.id) {
+        if !state.instances.contains_key(&owner.id) || state.closing.contains(&owner.id) {
             return Err(AccessError::Revoked);
         }
         let supplier = *state
             .components
             .get(&component)
             .ok_or(AccessError::Revoked)?;
+        if state.closing.contains(&supplier) {
+            return Err(AccessError::Revoked);
+        }
         let (live, receiver) = watch::channel(true);
         state.next += 1;
         let id = state.next;
@@ -263,11 +330,14 @@ impl Host {
         instance.check()
     }
 
-    pub(crate) fn own(&self, instance: &Instance, cleanup: Cleanup) -> Result<(), AccessError> {
+    pub fn own(&self, instance: &Instance, cleanup: Cleanup) -> Result<(), AccessError> {
         if self != &instance.host {
             return Err(AccessError::Denied);
         }
         let mut state = self.inner.lock().unwrap();
+        if state.closing.contains(&instance.id) {
+            return Err(AccessError::Revoked);
+        }
         state
             .instances
             .get_mut(&instance.id)
@@ -282,6 +352,7 @@ impl Host {
     }
 
     pub fn close(&self) {
+        let _recovery = self.recovery.enter();
         let ids = {
             let mut state = self.inner.lock().unwrap();
             if state.closed {
@@ -294,20 +365,34 @@ impl Host {
         for id in ids {
             self.close_instance_inner(id, CloseReason::HostShutdown);
         }
-        self.inner
-            .lock()
-            .unwrap()
-            .changes
-            .send_replace(HostStatus::Closed);
+        self.publish_closed();
     }
 
-    pub(crate) fn bind_dependency(&self, consumer: &Instance, provider: &Instance) {
-        self.check(consumer).unwrap();
-        self.check(provider).unwrap();
-        if consumer.id == provider.id {
-            return;
+    fn publish_closed(&self) {
+        let state = self.inner.lock().unwrap();
+        if state.closed && state.instances.is_empty() && state.closing.is_empty() {
+            state.changes.send_replace(HostStatus::Closed);
         }
+    }
+
+    pub(crate) fn bind_dependency(
+        &self,
+        consumer: &Instance,
+        provider: &Instance,
+    ) -> Result<(), AccessError> {
+        self.check(consumer)?;
+        self.check(provider)?;
         let mut state = self.inner.lock().unwrap();
+        if !state.instances.contains_key(&consumer.id)
+            || !state.instances.contains_key(&provider.id)
+            || state.closing.contains(&consumer.id)
+            || state.closing.contains(&provider.id)
+        {
+            return Err(AccessError::Revoked);
+        }
+        if consumer.id == provider.id {
+            return Ok(());
+        }
         let mut frontier = vec![provider.id];
         let mut seen = BTreeSet::new();
         while let Some(id) = frontier.pop() {
@@ -323,16 +408,18 @@ impl Host {
             .entry(consumer.id)
             .or_default()
             .insert(provider.id);
+        Ok(())
     }
 
     fn close_instance(&self, id: u64) {
+        let _recovery = self.recovery.enter();
         if self.close_instance_inner(id, CloseReason::Requested) {
             let state = self.inner.lock().unwrap();
             if !state.closed {
-                // Notify only after the entire dependent subtree and its cleanup have completed.
                 state.changes.send_replace(HostStatus::Running);
             }
         }
+        self.publish_closed();
     }
 
     fn close_instance_inner(&self, id: u64, reason: CloseReason) -> bool {
@@ -376,17 +463,18 @@ impl Host {
             state
                 .live_components
                 .send_replace(state.components.keys().copied().collect());
-            state.dependencies.remove(&id);
-            for providers in state.dependencies.values_mut() {
-                providers.remove(&id);
-            }
             effects
         };
         for cleanup in effects.effects.into_iter().rev() {
             cleanup();
         }
+        let mut state = self.inner.lock().unwrap();
+        state.dependencies.remove(&id);
+        for providers in state.dependencies.values_mut() {
+            providers.remove(&id);
+        }
+        state.closing.remove(&id);
         effects.ended.send_replace(Some(reason));
-        self.inner.lock().unwrap().closing.remove(&id);
         true
     }
 }
@@ -415,6 +503,12 @@ impl Instance {
             Err(AccessError::Revoked)
         }
     }
+    pub async fn closed(&self) -> CloseReason {
+        let mut ended = self.ended.clone();
+        let reason = ended.wait_for(Option::is_some).await.unwrap();
+        reason.unwrap()
+    }
+
     pub fn close(&self) {
         self.host.close_instance(self.id);
     }
@@ -508,7 +602,7 @@ impl<T: Clone + Send + Sync + 'static> HostedCollection<T> {
     }
     pub fn reader(&self, consumer: &Instance) -> CollectionReader<T> {
         self.host.check(consumer).unwrap();
-        self.host.bind_dependency(consumer, &self.provider);
+        self.host.bind_dependency(consumer, &self.provider).unwrap();
         let mut state = self.state.lock().unwrap();
         state.next += 1;
         let id = state.next;
@@ -533,7 +627,9 @@ impl<T: Clone + Send + Sync + 'static> HostedCollection<T> {
     }
     pub fn writer(&self, contributor: &Instance) -> CollectionWriter<T> {
         self.host.check(contributor).unwrap();
-        self.host.bind_dependency(contributor, &self.provider);
+        self.host
+            .bind_dependency(contributor, &self.provider)
+            .unwrap();
         CollectionWriter {
             collection: self.clone(),
             contributor: contributor.clone(),
@@ -701,7 +797,7 @@ mod tests {
         let host = Host::new();
         let provider = host.start("provider");
         let consumer = host.start("consumer");
-        host.bind_dependency(&consumer, &provider);
+        host.bind_dependency(&consumer, &provider).unwrap();
         let mut changes = host.changes();
         for instance in [&provider, &consumer] {
             let observer = changes.clone();
@@ -749,5 +845,91 @@ mod tests {
         host.close();
         assert_eq!(*changes.borrow(), HostStatus::Closed);
         assert_eq!(instance.close_reason(), Some(CloseReason::HostShutdown));
+    }
+
+    #[test]
+    fn overlapping_shutdown_waits_for_consumer_recovery() {
+        let host = Host::new();
+        let provider = host.start("provider");
+        let consumer = host.start("consumer");
+        host.bind_dependency(&consumer, &provider).unwrap();
+        let changes = host.changes();
+        let (started, recovering) = std::sync::mpsc::sync_channel(1);
+        let (release, released) = std::sync::mpsc::sync_channel(1);
+        let provider_for_cleanup = provider.clone();
+        let recovered = Arc::new(Mutex::new(Vec::new()));
+        let consumer_recovered = recovered.clone();
+        host.own(
+            &consumer,
+            Box::new(move || {
+                started.send(()).unwrap();
+                released.recv().unwrap();
+                provider_for_cleanup.check().unwrap();
+                consumer_recovered.lock().unwrap().push("consumer");
+            }),
+        )
+        .unwrap();
+        let provider_recovered = recovered.clone();
+        host.own(
+            &provider,
+            Box::new(move || provider_recovered.lock().unwrap().push("provider")),
+        )
+        .unwrap();
+        std::thread::scope(|scope| {
+            scope.spawn(|| consumer.close());
+            recovering.recv().unwrap();
+            scope.spawn(|| host.close());
+            let mut gate = host.recovery.state.lock().unwrap();
+            while gate.waiters == 0 {
+                gate = host.recovery.changed.wait(gate).unwrap();
+            }
+            assert_ne!(*changes.borrow(), HostStatus::Closed);
+            assert!(recovered.lock().unwrap().is_empty());
+            drop(gate);
+            release.send(()).unwrap();
+        });
+        assert_eq!(*recovered.lock().unwrap(), ["consumer", "provider"]);
+        assert_eq!(*changes.borrow(), HostStatus::Closed);
+        assert_eq!(consumer.close_reason(), Some(CloseReason::Requested));
+        assert_eq!(provider.close_reason(), Some(CloseReason::HostShutdown));
+    }
+
+    #[test]
+    fn reentrant_shutdown_does_not_publish_closed_before_current_cleanup() {
+        let host = Host::new();
+        let instance = host.start("owned");
+        let changes = host.changes();
+        let observer = changes.clone();
+        let reentrant = host.clone();
+        host.own(
+            &instance,
+            Box::new(move || {
+                reentrant.close();
+                assert_eq!(*observer.borrow(), HostStatus::Closing);
+            }),
+        )
+        .unwrap();
+        instance.close();
+        assert_eq!(*changes.borrow(), HostStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn closing_an_instance_cancels_its_pending_activation() {
+        use std::{future::Future, task::Poll};
+
+        let host = Host::new();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let mut activation = Box::pin(host.activate_async("pending", |instance| async move {
+            assert!(ready.send(instance).is_ok());
+            std::future::pending::<Result<(), AccessError>>().await
+        }));
+        std::future::poll_fn(|context| {
+            assert!(activation.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        started.await.unwrap().close();
+        assert_eq!(activation.await, Err(AccessError::Revoked));
+        host.close();
     }
 }

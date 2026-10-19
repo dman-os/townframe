@@ -2,13 +2,15 @@
 mod view;
 pub use view::SettingsView;
 
-pub use dayframe_settings_contract as contract;
 use contract::{SettingsSection, SettingsSections};
 use dayframe_app::{
-    host::{AccessError, CollectionReader, CollectionWriter, HostedCollection, Instance, RootMount},
+    host::{
+        AccessError, CollectionReader, CollectionWriter, HostedCollection, Instance, RootMount,
+    },
     micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision},
     native::NativeComponents,
 };
+pub use dayframe_settings_contract as contract;
 
 #[derive(Clone)]
 pub struct SettingsMicro {
@@ -58,10 +60,7 @@ impl Provision for SettingsMicro {
 }
 
 /// Native adapter owns Settings' context construction; composition only supplies host facilities.
-pub fn provider(
-    native: NativeComponents,
-    roots: HostedCollection<RootMount>,
-) -> MicroFactory {
+pub fn provider(native: NativeComponents, roots: HostedCollection<RootMount>) -> MicroFactory {
     MicroFactory::new(
         MicroDescriptor {
             id: MicroId::new("dayframe.settings"),
@@ -71,11 +70,11 @@ pub fn provider(
                 MicroProvision {
                     id: SettingsSections::ID.into(),
                     version: 1,
-                                },
+                },
                 MicroProvision {
                     id: SettingsMicro::ID.into(),
                     version: 1,
-                                },
+                },
             ],
         },
         move |activation| {

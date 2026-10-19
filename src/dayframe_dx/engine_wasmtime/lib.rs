@@ -5,32 +5,50 @@
 //! `dispatch`, the adapter immediately withdraws the surface and closes the micro's [`Instance`],
 //! which revokes its [`ComponentRef`] and any host collections bound to that instance.
 
-use crate::{
-    host::{AccessError, ComponentRef, Instance},
-    micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision},
+mod documents;
+
+use dayframe_app::{
+    documents::DocumentRef,
+    host::{ComponentRef, Instance},
+    micros::{
+        ActivationError, AsyncMicroFactory, MicroActivation, MicroDescriptor, MicroId,
+        MicroProvision, Provision,
+    },
     native::{NativeComponents, SurfaceSession, SurfaceWriter},
-    presentation::{AttributeValue, Event, EventResponse, Mutation, PresentationError},
 };
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use dayframe_presentation::{
+    AttributeValue, Event, EventResponse, Mutation, PresentationError, SurfaceTree,
+};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+use tokio::sync::mpsc;
 use wasmtime::{
-    Engine, Store,
+    Config, Engine, Store, StoreLimits, StoreLimitsBuilder,
     component::{Component, HasSelf, Linker, Resource, ResourceTable},
 };
 
 mod bindings {
     wasmtime::component::bindgen!({
-        path: "wit",
-        world: "presentation-client",
+        path: "../presentation/wit",
+        world: "micro-client",
         imports: { default: trappable },
         with: {
             "townframe:dayframe/presentation.surface": super::WasmSurface,
             "townframe:dayframe/presentation.mount-point": super::WasmPlacement,
+            "townframe:dayframe/documents.document-access": super::documents::WasmDocumentAccess,
+            "townframe:dayframe/documents.document-watch": super::documents::WasmDocumentWatch,
+            "townframe:dayframe/documents.operation": super::documents::WasmOperation,
         },
     });
 }
 
 use bindings::{
-    PresentationClient,
+    MicroClient,
     exports::townframe::dayframe::presentation_events,
     townframe::dayframe::presentation::{self as wit_presentation},
 };
@@ -38,21 +56,54 @@ use bindings::{
 pub struct WasmPlacement {
     writer: SurfaceWriter,
     revoked: Arc<AtomicBool>,
+    surface_identity: Option<u64>,
 }
 
+#[derive(Clone)]
 pub struct WasmSurface {
     writer: SurfaceWriter,
     revoked: Arc<AtomicBool>,
+    identity: u64,
+    ownership: Arc<()>,
+}
+
+impl Drop for WasmSurface {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.ownership) == 1 {
+            self.writer.withdraw();
+        }
+    }
 }
 
 struct WasmStoreState {
     table: ResourceTable,
+    instance: Instance,
+    work: mpsc::Sender<documents::Work>,
+    next_watch: u64,
+    next_surface: u64,
+    document_handles: usize,
+    surface_handles: usize,
+    limits: StoreLimits,
 }
 
 impl WasmStoreState {
-    fn new() -> Self {
+    const MAX_SURFACE_HANDLES: usize = 1024;
+    const MAX_DOCUMENT_HANDLES: usize = 1024;
+    const MAX_PENDING_DELIVERIES: usize = 1024;
+
+    fn new(instance: Instance, work: mpsc::Sender<documents::Work>) -> Self {
         Self {
             table: ResourceTable::new(),
+            instance,
+            work,
+            next_watch: 0,
+            next_surface: 0,
+            document_handles: 0,
+            surface_handles: 0,
+            limits: StoreLimitsBuilder::new()
+                .memory_size(64 * 1024 * 1024)
+                .table_elements(8192)
+                .build(),
         }
     }
 }
@@ -104,6 +155,53 @@ fn convert_error(error: PresentationError) -> wit_presentation::PresentationErro
     }
 }
 
+fn ingress_budget(edits: &[wit_presentation::Mutation]) -> Result<(), &'static str> {
+    if edits.len() > SurfaceTree::MAX_BATCH_MUTATIONS {
+        return Err("batch mutation limit");
+    }
+    let mut bytes = 0_usize;
+    for mutation in edits {
+        let strings: [Option<&str>; 3] = match mutation {
+            wit_presentation::Mutation::CreateElement((tag, ns)) => {
+                [Some(tag), ns.as_deref(), None]
+            }
+            wit_presentation::Mutation::CreateText(text)
+            | wit_presentation::Mutation::SetText(text)
+            | wit_presentation::Mutation::AddEventListener(text)
+            | wit_presentation::Mutation::RemoveEventListener(text) => [Some(text), None, None],
+            wit_presentation::Mutation::SetAttribute((name, ns, value)) => [
+                Some(name),
+                ns.as_deref(),
+                match value {
+                    wit_presentation::AttributeValue::Text(text) => Some(text),
+                    _ => None,
+                },
+            ],
+            wit_presentation::Mutation::PushId(_)
+            | wit_presentation::Mutation::SetId(_)
+            | wit_presentation::Mutation::Child(_)
+            | wit_presentation::Mutation::Pop
+            | wit_presentation::Mutation::CloneNode
+            | wit_presentation::Mutation::AppendChildren(_)
+            | wit_presentation::Mutation::ReplaceWith(_)
+            | wit_presentation::Mutation::InsertAfter(_)
+            | wit_presentation::Mutation::InsertBefore(_)
+            | wit_presentation::Mutation::Remove => [None, None, None],
+        };
+        bytes += std::mem::size_of::<Mutation>();
+        for value in strings.into_iter().flatten() {
+            if value.len() > SurfaceTree::MAX_STRING_BYTES {
+                return Err("string byte limit");
+            }
+            bytes += value.len();
+        }
+        if bytes > SurfaceTree::MAX_BATCH_BYTES {
+            return Err("batch byte limit");
+        }
+    }
+    Ok(())
+}
+
 impl wit_presentation::Host for WasmStoreState {}
 
 impl wit_presentation::HostMountPoint for WasmStoreState {
@@ -111,15 +209,33 @@ impl wit_presentation::HostMountPoint for WasmStoreState {
         &mut self,
         placement: Resource<WasmPlacement>,
     ) -> wasmtime::Result<Result<Resource<WasmSurface>, wit_presentation::PresentationError>> {
-        let granted = self.table.get(&placement)?;
+        let granted = self.table.get_mut(&placement)?;
         if granted.revoked.load(Ordering::Acquire) || !granted.writer.is_live() {
             return Ok(Err(wit_presentation::PresentationError::Revoked));
         }
+        if granted.surface_identity.is_some() {
+            return Ok(Err(wit_presentation::PresentationError::Unsupported(
+                "placement already opened".into(),
+            )));
+        }
+        if self.surface_handles >= Self::MAX_SURFACE_HANDLES {
+            return Ok(Err(wit_presentation::PresentationError::Unsupported(
+                "surface handle limit".into(),
+            )));
+        }
+        self.next_surface = self
+            .next_surface
+            .checked_add(1)
+            .expect("surface identity overflow");
+        granted.surface_identity = Some(self.next_surface);
         let surface = WasmSurface {
             writer: granted.writer.clone(),
             revoked: granted.revoked.clone(),
+            identity: self.next_surface,
+            ownership: Arc::new(()),
         };
         let resource = self.table.push(surface)?;
+        self.surface_handles += 1;
         Ok(Ok(resource))
     }
 
@@ -139,14 +255,41 @@ impl wit_presentation::HostSurface for WasmStoreState {
         if surface.revoked.load(Ordering::Acquire) || !surface.writer.is_live() {
             return Ok(Err(wit_presentation::PresentationError::Revoked));
         }
+        if let Err(reason) = ingress_budget(&edits) {
+            surface.writer.withdraw();
+            return Ok(Err(wit_presentation::PresentationError::Unsupported(
+                reason.into(),
+            )));
+        }
         let converted: Vec<Mutation> = edits.into_iter().map(convert_mutation).collect();
         Ok(surface.writer.apply(&converted).map_err(convert_error))
     }
 
-    fn drop(&mut self, surface: Resource<WasmSurface>) -> wasmtime::Result<()> {
-        if let Ok(entry) = self.table.delete(surface) {
-            entry.writer.withdraw();
+    fn retain(
+        &mut self,
+        surface: Resource<WasmSurface>,
+    ) -> wasmtime::Result<Result<Resource<WasmSurface>, wit_presentation::PresentationError>> {
+        let surface = self.table.get(&surface)?;
+        if surface.revoked.load(Ordering::Acquire) || !surface.writer.is_live() {
+            return Ok(Err(wit_presentation::PresentationError::Revoked));
         }
+        if self.surface_handles >= Self::MAX_SURFACE_HANDLES {
+            return Ok(Err(wit_presentation::PresentationError::Unsupported(
+                "surface handle limit".into(),
+            )));
+        }
+        let retained = self.table.push(surface.clone())?;
+        self.surface_handles += 1;
+        Ok(Ok(retained))
+    }
+
+    fn identity(&mut self, surface: Resource<WasmSurface>) -> wasmtime::Result<u64> {
+        Ok(self.table.get(&surface)?.identity)
+    }
+
+    fn drop(&mut self, surface: Resource<WasmSurface>) -> wasmtime::Result<()> {
+        self.table.delete(surface)?;
+        self.surface_handles -= 1;
         Ok(())
     }
 }
@@ -161,10 +304,12 @@ pub struct WasmPackage {
 
 impl WasmPackage {
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, String> {
-        let engine = Engine::default();
+        let mut config = Config::new();
+        config.consume_fuel(true);
+        let engine = Engine::new(&config).map_err(|error| error.to_string())?;
         let component = Component::new(&engine, bytes).map_err(|err| err.to_string())?;
         let mut linker = Linker::new(&engine);
-        wit_presentation::add_to_linker::<_, HasSelf<WasmStoreState>>(&mut linker, |state| state)
+        MicroClient::add_to_linker::<_, HasSelf<WasmStoreState>>(&mut linker, |state| state)
             .map_err(|err| err.to_string())?;
         Ok(Self {
             engine,
@@ -173,24 +318,52 @@ impl WasmPackage {
         })
     }
 
-    fn instantiate(&self) -> Result<WasmIncarnation, AccessError> {
-        let mut store = Store::new(&self.engine, WasmStoreState::new());
-        let client = PresentationClient::instantiate(&mut store, &self.component, &self.linker)
-            .map_err(|_| AccessError::Denied)?;
-        Ok(WasmIncarnation { store, client })
+    fn instantiate(
+        &self,
+        instance: Instance,
+    ) -> Result<(WasmIncarnation, mpsc::Receiver<documents::Work>), ActivationError> {
+        let (work, incoming) = mpsc::channel(WasmStoreState::MAX_PENDING_DELIVERIES);
+        let mut store = Store::new(&self.engine, WasmStoreState::new(instance, work));
+        store.limiter(|state| &mut state.limits);
+        store.set_fuel(WasmIncarnation::FUEL_PER_CALL).unwrap();
+        let client = MicroClient::instantiate(&mut store, &self.component, &self.linker).map_err(
+            |error| {
+                ActivationError::Initialization(format!("instantiating Wasm component: {error:#}"))
+            },
+        )?;
+        Ok((
+            WasmIncarnation {
+                store,
+                client,
+                fuel_per_call: WasmIncarnation::FUEL_PER_CALL,
+            },
+            incoming,
+        ))
     }
 }
 
 struct WasmIncarnation {
     store: Store<WasmStoreState>,
-    client: PresentationClient,
+    client: MicroClient,
+    fuel_per_call: u64,
+}
+
+impl WasmIncarnation {
+    const FUEL_PER_CALL: u64 = 50_000_000;
+
+    /// Every host-initiated guest entry gets a fresh, bounded instruction budget, so a guest that
+    /// loops forever inside one synchronous call traps with `OutOfFuel` instead of hanging the UI
+    /// or document driver that called it.
+    fn refuel(&mut self) {
+        self.store.set_fuel(self.fuel_per_call).unwrap();
+    }
 }
 
 #[derive(Clone)]
 pub struct WasmMicro {
     pub instance: Instance,
     pub detail: ComponentRef,
-    revoked: Arc<AtomicBool>,
+    incarnation: Arc<Mutex<Option<WasmIncarnation>>>,
 }
 
 impl PartialEq for WasmMicro {
@@ -205,11 +378,20 @@ impl Provision for WasmMicro {
 
 impl WasmMicro {
     pub fn activate(
-        instance: Instance,
+        activation: &MicroActivation,
         package: &WasmPackage,
         native: &NativeComponents,
-    ) -> Result<Self, AccessError> {
-        let incarnation = Arc::new(Mutex::new(Some(package.instantiate()?)));
+        configs: BTreeMap<String, DocumentRef>,
+    ) -> Result<Self, ActivationError> {
+        let instance = activation.instance();
+        let (mut active, incoming) = package.instantiate(instance.clone())?;
+        documents::activate(&mut active, configs)?;
+        let incarnation = Arc::new(Mutex::new(Some(active)));
+        activation.own_future(documents::drive(
+            instance.clone(),
+            incarnation.clone(),
+            incoming,
+        ))?;
         let cleanup_incarnation = incarnation.clone();
         let revoked = Arc::new(AtomicBool::new(false));
         let cleanup_revoked = revoked.clone();
@@ -225,7 +407,7 @@ impl WasmMicro {
         let incarnation_for_surface = incarnation.clone();
         let revoked_for_surface = revoked.clone();
         let detail = native.publish_surface(&instance, move |_mount, writer| {
-            let placement_rep = {
+            let surface_rep = {
                 let mut guard = incarnation_for_surface.lock().unwrap();
                 let Some(active) = guard.as_mut() else {
                     return Err(PresentationError::Revoked);
@@ -237,20 +419,39 @@ impl WasmMicro {
                     .push(WasmPlacement {
                         writer: writer.clone(),
                         revoked: revoked_for_surface.clone(),
+                        surface_identity: None,
                     })
                     .map_err(|_| PresentationError::Revoked)?;
                 let placement_rep = placement.rep();
+                active.refuel();
                 let mount_result = active
                     .client
                     .townframe_dayframe_presentation_events()
                     .call_mount(&mut active.store, Resource::new_borrow(placement_rep));
-                let _ = active
+                let placement = active
                     .store
                     .data_mut()
                     .table
-                    .delete(Resource::<WasmPlacement>::new_own(placement_rep));
+                    .delete(Resource::<WasmPlacement>::new_own(placement_rep))
+                    .expect("borrowed placement must remain in the host resource table");
                 match mount_result {
-                    Ok(Ok(surface)) => surface.rep(),
+                    Ok(Ok(surface)) => {
+                        let granted = active
+                            .store
+                            .data()
+                            .table
+                            .get(&surface)
+                            .expect("returned surface must be in the host resource table");
+                        if placement.surface_identity != Some(granted.identity) {
+                            wit_presentation::HostSurface::drop(active.store.data_mut(), surface)
+                                .expect("returned surface must remain in the host resource table");
+                            writer.withdraw();
+                            return Err(PresentationError::InvalidBatch(
+                                "guest returned a surface from another placement".into(),
+                            ));
+                        }
+                        surface.rep()
+                    }
                     Ok(Err(err)) => {
                         writer.withdraw();
                         return Err(match err {
@@ -279,6 +480,7 @@ impl WasmMicro {
             let dispatch_instance = instance_for_surface.clone();
             let dispatch_writer = writer.clone();
             let drop_incarnation = incarnation_for_surface.clone();
+            let drop_instance = instance_for_surface.clone();
             let drop_writer = writer;
 
             Ok(SurfaceSession::with_drop(
@@ -295,12 +497,13 @@ impl WasmMicro {
                         let Some(active) = guard.as_mut() else {
                             return EventResponse::default();
                         };
+                        active.refuel();
                         let outcome = active
                             .client
                             .townframe_dayframe_presentation_events()
                             .call_dispatch(
                                 &mut active.store,
-                                Resource::new_borrow(placement_rep),
+                                Resource::new_borrow(surface_rep),
                                 &wit_event,
                             );
                         if outcome.is_err() {
@@ -321,14 +524,31 @@ impl WasmMicro {
                     }
                 },
                 move || {
-                    drop_writer.withdraw();
                     let mut guard = drop_incarnation.lock().unwrap();
-                    if let Some(active) = guard.as_mut() {
-                        let _ = active
-                            .store
-                            .data_mut()
-                            .table
-                            .delete(Resource::<WasmSurface>::new_own(placement_rep));
+                    let trapped = if let Some(active) = guard.as_mut() {
+                        active.refuel();
+                        let outcome = active
+                            .client
+                            .townframe_dayframe_presentation_events()
+                            .call_unmount(&mut active.store, Resource::new_borrow(surface_rep));
+                        if outcome.is_err() {
+                            guard.take();
+                            true
+                        } else {
+                            wit_presentation::HostSurface::drop(
+                                active.store.data_mut(),
+                                Resource::new_own(surface_rep),
+                            )
+                            .expect("mounted surface must remain in the host resource table");
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    drop(guard);
+                    drop_writer.withdraw();
+                    if trapped {
+                        drop_instance.close();
                     }
                 },
             ))
@@ -337,7 +557,7 @@ impl WasmMicro {
         Ok(Self {
             instance,
             detail,
-            revoked,
+            incarnation,
         })
     }
 
@@ -345,11 +565,14 @@ impl WasmMicro {
         self.detail
     }
 
-    /// Revokes this incarnation's surface capability handles without closing the instance first,
-    /// allowing tests to verify that a subsequent guest `surface.apply` sees `Revoked`, traps, and
-    /// triggers automatic instance closure and collection withdrawal.
-    pub fn revoke_surfaces(&self) {
-        self.revoked.store(true, Ordering::Release);
+    /// Withdraws this incarnation's execution budget, so the next guest entry (event dispatch,
+    /// mount, or document callback) traps with `OutOfFuel`. This drives the same trap recovery a
+    /// runaway guest takes: the store is discarded, the instance closes, and its contributions are
+    /// withdrawn while sibling micros keep running.
+    pub fn exhaust_fuel(&self) {
+        if let Some(active) = self.incarnation.lock().unwrap().as_mut() {
+            active.fuel_per_call = 0;
+        }
     }
 
     pub fn close(&self) {
@@ -357,8 +580,8 @@ impl WasmMicro {
     }
 }
 
-pub fn provider(id: MicroId, package: WasmPackage, native: NativeComponents) -> MicroFactory {
-    MicroFactory::new(
+pub fn provider(id: MicroId, package: WasmPackage, native: NativeComponents) -> AsyncMicroFactory {
+    AsyncMicroFactory::new(
         MicroDescriptor {
             id,
             version: 1,
@@ -366,13 +589,16 @@ pub fn provider(id: MicroId, package: WasmPackage, native: NativeComponents) -> 
             provisions: vec![MicroProvision {
                 id: WasmMicro::ID.into(),
                 version: 1,
-                        }],
+            }],
         },
         move |activation| {
-            let instance = activation.instance();
-            let micro = WasmMicro::activate(instance, &package, &native)?;
-            activation.publish(micro);
-            Ok(())
+            let package = package.clone();
+            let native = native.clone();
+            async move {
+                let micro = WasmMicro::activate(&activation, &package, &native, BTreeMap::new())?;
+                activation.publish(micro);
+                Ok(())
+            }
         },
     )
 }
@@ -380,25 +606,20 @@ pub fn provider(id: MicroId, package: WasmPackage, native: NativeComponents) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
+    use dayframe_app::{
         application::ApplicationRuntime,
-        host::{HostedCollection, Host},
+        host::{AccessError, Host, HostedCollection},
         micros::{
             AsyncMicroFactory, MicroRegistry,
             composition::{ConfiguredMicro, Enablement, InstanceState},
         },
         native::ComponentMount,
-        presentation::SurfaceTree,
     };
     use dioxus::prelude::*;
     use dioxus_core::{RenderTargetId, VirtualDom};
     use dioxus_html::{EventData, SerializedMouseData};
-    use std::{
-        collections::BTreeMap,
-        path::PathBuf,
-        process::Command,
-        sync::LazyLock,
-    };
+    use std::collections::BTreeMap;
+    use wasmtime::component::Resource;
 
     fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
@@ -409,52 +630,71 @@ mod tests {
     }
 
     fn counter_package() -> WasmPackage {
-        static BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| {
-            let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let output = Command::new("cargo")
-                .current_dir(&directory)
-                .args([
-                    "build",
-                    "-p",
-                    "dayframe_guest",
-                    "--example",
-                    "counter",
-                    "--target",
-                    "wasm32-unknown-unknown",
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "guest build failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let metadata = Command::new("cargo")
-                .current_dir(&directory)
-                .args(["metadata", "--no-deps", "--format-version", "1"])
-                .output()
-                .unwrap();
-            assert!(
-                metadata.status.success(),
-                "{}",
-                String::from_utf8_lossy(&metadata.stderr)
-            );
-            let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
-            let core = PathBuf::from(metadata["target_directory"].as_str().unwrap())
-                .join("wasm32-unknown-unknown/debug/examples/counter.wasm");
-            let encoded = Command::new("wasm-tools")
-                .args(["component", "new"])
-                .arg(core)
-                .output()
-                .unwrap();
-            assert!(
-                encoded.status.success(),
-                "component encoding failed: {}",
-                String::from_utf8_lossy(&encoded.stderr)
-            );
-            encoded.stdout
-        });
-        WasmPackage::from_bytes(&*BYTES).expect("counter component is valid")
+        let path = std::env::var("DAYFRAME_COUNTER_COMPONENT")
+            .expect("prepare the counter fixture with x/check-dayframe.ts --prepare-only and set DAYFRAME_COUNTER_COMPONENT");
+        WasmPackage::from_bytes(
+            std::fs::read(path).expect("prepared counter component is readable"),
+        )
+        .expect("counter component is valid")
+    }
+
+    #[test]
+    fn ingress_budget_rejects_oversized_batches_before_conversion() {
+        use wit_presentation::Mutation as Wire;
+        assert_eq!(
+            ingress_budget(&[Wire::Pop, Wire::CreateText("ok".into())]),
+            Ok(())
+        );
+        assert_eq!(
+            ingress_budget(&vec![Wire::Pop; SurfaceTree::MAX_BATCH_MUTATIONS + 1]),
+            Err("batch mutation limit")
+        );
+        assert_eq!(
+            ingress_budget(&[Wire::SetAttribute((
+                "title".into(),
+                None,
+                wit_presentation::AttributeValue::Text(
+                    "x".repeat(SurfaceTree::MAX_STRING_BYTES + 1)
+                ),
+            ))]),
+            Err("string byte limit")
+        );
+        let text = "x".repeat(SurfaceTree::MAX_STRING_BYTES);
+        let batch = vec![
+            Wire::CreateText(text);
+            SurfaceTree::MAX_BATCH_BYTES / SurfaceTree::MAX_STRING_BYTES + 1
+        ];
+        assert_eq!(ingress_budget(&batch), Err("batch byte limit"));
+    }
+
+    #[test]
+    fn execution_and_linear_memory_are_bounded_per_incarnation() {
+        let host = Host::new();
+        let package = counter_package();
+        let (mut active, _incoming) = package.instantiate(host.start("bounded")).unwrap();
+        let module = wasmtime::Module::new(
+            &package.engine,
+            r#"(module
+            (memory (export "memory") 1)
+            (func (export "loop") (loop br 0))
+        )"#,
+        )
+        .unwrap();
+        let instance = wasmtime::Instance::new(&mut active.store, &module, &[]).unwrap();
+        let memory = instance.get_memory(&mut active.store, "memory").unwrap();
+        assert!(memory.grow(&mut active.store, 1024).is_err());
+        let looping = instance
+            .get_typed_func::<(), ()>(&mut active.store, "loop")
+            .unwrap();
+        active.store.set_fuel(16).unwrap();
+        let trap = looping.call(&mut active.store, ()).unwrap_err();
+        assert_eq!(
+            trap.downcast_ref::<wasmtime::Trap>(),
+            Some(&wasmtime::Trap::OutOfFuel)
+        );
+        active.refuel();
+        assert_eq!(active.store.get_fuel().unwrap(), 50_000_000);
+        host.close();
     }
 
     #[derive(Clone, PartialEq)]
@@ -474,6 +714,81 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn retained_surface_handles_are_bounded_and_release_capacity() {
+        use wit_presentation::{HostMountPoint, HostSurface};
+
+        let host = Host::new();
+        let owner = host.start("surface-budget");
+        let native = NativeComponents::new(&host);
+        let (work, _incoming) = mpsc::channel(1);
+        let state = Arc::new(Mutex::new(WasmStoreState::new(owner.clone(), work)));
+        let capture = state.clone();
+        let reference = native
+            .publish_surface(&owner, move |_mount, writer| {
+                let mut state = capture.lock().unwrap();
+                let placement = state
+                    .table
+                    .push(WasmPlacement {
+                        writer: writer.clone(),
+                        revoked: Arc::new(AtomicBool::new(false)),
+                        surface_identity: None,
+                    })
+                    .unwrap();
+                let surface =
+                    HostMountPoint::open(&mut *state, Resource::new_borrow(placement.rep()))
+                        .unwrap()
+                        .unwrap();
+                let identity =
+                    HostSurface::identity(&mut *state, Resource::new_borrow(surface.rep()))
+                        .unwrap();
+                let mut retained = Vec::new();
+                for _ in 1..WasmStoreState::MAX_SURFACE_HANDLES {
+                    retained.push(
+                        HostSurface::retain(&mut *state, Resource::new_borrow(surface.rep()))
+                            .unwrap()
+                            .unwrap(),
+                    );
+                }
+                assert!(matches!(
+                    HostSurface::retain(&mut *state, Resource::new_borrow(surface.rep())).unwrap(),
+                    Err(wit_presentation::PresentationError::Unsupported(_))
+                ));
+                assert!(writer.is_live());
+                HostSurface::drop(&mut *state, retained.pop().unwrap()).unwrap();
+                let replacement =
+                    HostSurface::retain(&mut *state, Resource::new_borrow(surface.rep()))
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(
+                    HostSurface::identity(&mut *state, Resource::new_borrow(replacement.rep()))
+                        .unwrap(),
+                    identity
+                );
+                HostSurface::drop(&mut *state, surface).unwrap();
+                for resource in retained {
+                    HostSurface::drop(&mut *state, resource).unwrap();
+                }
+                assert!(writer.is_live());
+                HostSurface::drop(&mut *state, replacement).unwrap();
+                assert!(!writer.is_live());
+                assert_eq!(state.surface_handles, 0);
+                HostMountPoint::drop(&mut *state, placement).unwrap();
+                Ok(SurfaceSession::new(|_| EventResponse::default()))
+            })
+            .unwrap();
+        let mut dom = VirtualDom::new_with_props(
+            mount_host_app,
+            MountProps {
+                components: native,
+                owner,
+                reference,
+            },
+        );
+        dom.rebuild(&mut SurfaceTree::new());
+        host.close();
     }
 
     #[test]
@@ -519,7 +834,9 @@ mod tests {
             RenderTargetId::ROOT,
             "click",
             click,
-            dioxus_core::ElementId::from_raw(3),
+            host_tree
+                .listener_id("button", "click")
+                .expect("host tree rendered the counter button"),
         );
         host_dom.render_immediate(&mut host_tree);
         assert_eq!(host_tree.text_content(), "1");
@@ -537,7 +854,7 @@ mod tests {
         let package = counter_package();
         let native = app.native();
 
-        app.register_provider(MicroFactory::new(
+        app.register_provider(AsyncMicroFactory::new(
             MicroDescriptor {
                 id: MicroId::new("dayframe.wasm.counter"),
                 version: 1,
@@ -545,16 +862,20 @@ mod tests {
                 provisions: vec![MicroProvision {
                     id: WasmMicro::ID.into(),
                     version: 1,
-                                }],
+                }],
             },
             move |activation| {
-                let instance = activation.instance();
-                let micro = WasmMicro::activate(instance.clone(), &package, &native)?;
-                collection_for_provider
-                    .writer(&instance)
-                    .insert(micro.surface())?;
-                activation.publish(micro);
-                Ok(())
+                let package = package.clone();
+                let native = native.clone();
+                let collection = collection_for_provider.clone();
+                async move {
+                    let instance = activation.instance();
+                    let micro =
+                        WasmMicro::activate(&activation, &package, &native, BTreeMap::new())?;
+                    collection.writer(&instance).insert(micro.surface())?;
+                    activation.publish(micro);
+                    Ok(())
+                }
             },
         ))
         .unwrap();
@@ -585,7 +906,7 @@ mod tests {
         host_dom.rebuild(&mut host_tree);
         assert_eq!(host_tree.text_content(), "0");
 
-        first_wasm.revoke_surfaces();
+        first_wasm.exhaust_fuel();
         let click = dioxus_core::Event::new(
             EventData::Mouse(SerializedMouseData::default()).into_any(),
             true,
@@ -594,7 +915,9 @@ mod tests {
             RenderTargetId::ROOT,
             "click",
             click,
-            dioxus_core::ElementId::from_raw(3),
+            host_tree
+                .listener_id("button", "click")
+                .expect("host tree rendered the counter button"),
         );
         assert_eq!(first_wasm.instance.check(), Err(AccessError::Revoked));
         assert!(reader.snapshot().unwrap().is_empty());
@@ -655,7 +978,7 @@ mod tests {
                         tokio::task::yield_now().await;
                         let comp = context.host().publish_component(&context.instance())?;
                         *leaked_capture.lock().unwrap() = Some((context.instance(), comp));
-                        Err(AccessError::Denied)
+                        Err(AccessError::Denied.into())
                     }
                 },
             ))
@@ -671,7 +994,9 @@ mod tests {
             registry
                 .activate_async(&host, &fail_id, "async-fail", BTreeMap::new())
                 .await,
-            Err(crate::micros::MicroRegistryError::Access(AccessError::Denied))
+            Err(dayframe_app::micros::MicroRegistryError::Access(
+                AccessError::Denied
+            ))
         ));
         let (failed_instance, _) = leaked.lock().unwrap().take().unwrap();
         assert_eq!(failed_instance.check(), Err(AccessError::Revoked));

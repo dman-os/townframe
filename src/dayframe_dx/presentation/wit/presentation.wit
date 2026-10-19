@@ -51,11 +51,12 @@ interface presentation {
         /// atomically with respect to other batches on the same surface. The receipt describes
         /// the logical edit commit, not completion of layout or paint.
         apply: func(edits: list<mutation>) -> result<u64, presentation-error>;
+        retain: func() -> result<surface, presentation-error>;
+        identity: func() -> u64;
     }
 
     resource mount-point {
         /// Opens one owned surface in this explicitly granted placement.
-        /// Dropping a surface withdraws its tree; closing the incarnation revokes every handle.
         open: func() -> result<surface, presentation-error>;
     }
 }
@@ -86,6 +87,7 @@ interface presentation-events {
     /// The guest receives a borrowed placement, not authority to mount at arbitrary application roots.
     mount: func(placement: borrow<mount-point>) -> result<surface, presentation-error>;
 
+    unmount: func(surface: borrow<surface>);
     dispatch: func(surface: borrow<surface>, event: event) -> event-response;
 }
 

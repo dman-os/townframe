@@ -125,6 +125,25 @@ A micro that presents in several places (a Settings detail, a toolbar item, its 
 virtual DOM and maps each granted mount to a render target. Upstream Core already models this with
 `RenderTargetId`/`MultiWriter`. Settled without operator input; revisit only on evidence.
 
+**Implemented (turn 12).** `GuestDom` owns one `VirtualDom` whose root renders a keyed `Portal` per
+live mount, plus a `BTreeMap<RenderTargetId, WireMutations>` so each surface only receives its own
+edits. `GuestDom::new`/`new_with_props` build the DOM once; `mount(&MountPoint)`, `unmount(&Surface)`,
+`render()` and `update(change)` drive it. `update` runs the change inside `VirtualDom::in_runtime` so
+a document callback arriving outside event dispatch still schedules its signal subscribers — writing
+a signal with no runtime context silently does nothing.
+
+This required two contract additions, because the original `mount` handed the *only* surface handle
+back to the host and left the guest nothing to update a sibling mount with: `surface.retain()`
+returns a second handle over the same placement, `surface.identity()` is a stable per-mount id (not a
+resource rep), and `presentation-events.unmount(borrow<surface>)` lets the host tell the guest to
+release a target before the surface is withdrawn. `retain` clones do not create a new writer or
+target, and a revoked placement stays revoked through every handle: the engine's `WasmSurface`
+withdraws only when its last owner drops.
+
+Consequence for the earlier defect: switching Settings sections, or closing and reopening Settings,
+remounts the *same* incarnation, which previously asserted "mounted twice" and trapped. It now
+unmounts and remounts one target of one DOM, keeping guest state.
+
 ### D6 — Node seam borrows `service_utils_rs` vocabulary but does not depend on it
 
 PR #66 (`stack/cabinet-01-services`) fixes the shape of node services: typed `Operation`s, one
@@ -138,6 +157,14 @@ will use the same names and semantics so a `Client<Proto>`-backed adapter can be
 
 It will **not** depend on the crate: #66 is unmerged, and it pulls `tokio/net`, `axum`, `hyper` and
 `reqwest`, none of which belong in a browser guest.
+
+**Implemented (turn 12).** `dayframe_app::documents` uses that vocabulary without the dependency:
+typed `Operation`/`OperationReceipt`/`OperationStatus`, `OperationError::Transport { outcome_unknown
+}`, and `DocumentError::SubscriptionLagged` forcing a reread. There is still no production
+`daybook_core` source adapter — the only source is `MockDocuments`, whose privileged controls
+(`seed`, `complete`, `settle`, `external_change`, `hold_refreshes`) are deliberately absent from
+`DocumentAccess`/`MicroContext`. A successful completion commits its own intent into the source and
+rolls the overlay back on failure, so acceptance never waits for a later event watermark.
 
 ### D7 — Dioxus fork scope
 
@@ -288,6 +315,81 @@ Because `DioxusState` is not `Send`, the proof keeps tree state in a host side m
 rep rather than in the Wasmtime resource table. Whatever shape the engine-neutral seam takes, it has
 to allow for renderer state that is neither `Send` nor storable in the engine's own handle table.
 
+### D11 — Guests get documents as named, already-granted WIT resources
+
+`presentation/wit/documents.wit` adds a `documents` import interface, a `document-events` export and
+a `micro-lifecycle` export, and a `micro-client` world that includes `presentation-client`. The guest
+never looks up a global config store and never mints authority: the host calls
+`micro-lifecycle.activate(list<document-binding>)` once per incarnation, and each binding carries an
+opaque `document-access` resource for a facet the host already approved. From there the guest can
+`watch(selection)` and `mutate(route, mutation)`, both of which return host-owned resources
+(`document-watch`, `operation`) rather than callbacks or renderer state.
+
+Values cross as `facet-raw` strings (the existing `doc-id`/`facet-raw` vocabulary), so the guest owns
+its own decoding and the host keeps no schema. Watch updates arrive as `changed(snapshot)`;
+`subscription-lagged` is a distinct error and also an explicit `lagged(watch-id)` callback, so a
+guest that falls behind must reread instead of silently missing state. Writes return an `operation`
+whose receipt distinguishes `locally-applied`, `accepted` and
+`rolled-back(rejected | transport { outcome-unknown })` — the ADR 014 acceptance boundary, carried
+across the address space without collapsing transport uncertainty into rejection.
+
+Trade-off accepted: activation is now a guest export the engine must call before any mount, so a
+presentation-only component is no longer a valid `micro-client`. That is deliberate; `micro-client`
+is the feature world, and `presentation-client` remains the renderer-only contract.
+
+### D12 — The engine bounds a guest's memory, execution and ingress
+
+A guest is untrusted code inside the UI process, so the Wasmtime store is limited rather than
+assumed cooperative: a 64 MiB limit per linear memory and 8192 elements per Wasm table, and a fresh fuel
+budget (`WasmIncarnation::FUEL_PER_CALL`) granted immediately before each host-initiated entry
+(`activate`, `mount`, `dispatch`, `unmount`, and every document callback). A guest that loops forever
+therefore traps with `OutOfFuel` inside that one call, which takes the existing trap path: discard
+the store, close the instance, withdraw its contributions, leave siblings running.
+`WasmMicro::exhaust_fuel` is the test hook for that path and replaces the old `revoke_surfaces`.
+
+`surface.apply` also checks the batch against `SurfaceTree`'s budgets *before* converting it into a
+second owned `Vec`, so an oversized batch is rejected once, not copied and then rejected.
+`SurfaceTree` itself enforces mutation/byte/string/node-slot/stack/tree-depth/retained-byte limits,
+recycles vacant node slots (so the quota bounds live nodes, not lifetime churn), stamps every node
+with a generation so a recycled id cannot be addressed by a stale handle, and rejects an explicit
+tag/attribute/listener vocabulary instead of silently falling back to `div`.
+
+Surface resource handles have a separate 1024-handle cap per incarnation; dropping a retained
+handle restores capacity without withdrawing a surface that still has owners. The Wasm table limit
+does not itself constrain Wasmtime's host-side resource table.
+
+Document delivery has one 1024-deep channel per incarnation, a matching cap on in-flight waits,
+and `try_reserve_owned` so registration beyond the queue budget returns `denied` before applying a
+mutation. A receipt or snapshot whose guest handle was dropped before
+delivery is suppressed (`Work::released`), so the guest never sees a callback for a resource it no
+longer holds.
+
+**Remaining hardening boundary:** these checks run after canonical ABI lifting. A malicious component
+can alias guest string buffers across list entries, so a small guest memory does not bound aggregate
+host allocations while lifting `list<mutation>` or document selections. Host import execution and
+cumulative node-owned pending writes are not bounded by Wasm fuel either. The current caps are
+specific defenses, not proof of process-wide memory or latency isolation for hostile components.
+A bounded/lazy lifting strategy or process isolation remains required before making that claim.
+
+### D13 — Incarnation-owned local work is driven by the composition driver
+
+An activation that needs to keep running after it returns (a guest's document watch/receipt pump, a
+background preload) registers it with `MicroActivation::own_future(impl Future<Output = ()>)`. The
+future is owned by the incarnation, not by a mount and not by a detached task:
+`ApplicationRuntime`'s driver polls every owned future alongside reconciliation, drops the ones whose
+`Instance` closed, and reaps them on cancel. `MicroRegistry::drive_owned_futures` is the same driver
+for callers that drive the registry directly.
+
+This is what makes event-driven guest callbacks possible without a Tokio task per watch and without
+tying delivery to a mounted widget: the Wasm engine registers one `documents::drive` loop per
+incarnation, and that loop waits on watches and operations created later. Two rules fall out of it:
+never hold the Wasmtime `Store` lock across an await, and never deliver a callback for a resource the
+guest already dropped.
+
+Rejected alternative: a `use_future` per mounted surface. It would cancel guest delivery whenever the
+widget is unmounted (Settings closed, section switched) even though the incarnation is alive and its
+writes are still in flight.
+
 ## Settled operator answers
 
 - **Rebase:** fork rebased onto latest upstream main (`0.8.0-alpha.3`, Blitz `0.3.0-beta.4`).
@@ -311,11 +413,9 @@ Recorded because they shape what a turn can attempt.
 
 - `cargo`/`rustc` on `PATH` are rustup shims that cannot execute here. Build through the flake:
   `nix develop --command cargo …` (nightly 2026-08-16, cargo 1.100.0-nightly).
-- Build through the flake with a persistent target shared by generations:
-  `CARGO_TARGET_DIR=/run/media/asdf/p3N/tmp/townframe-dayframe-target nix develop --command cargo …`.
-  Do not create a per-generation target directory. Budget for the cold first build, prefer
-  `-p dayframe_app`-scoped checks, run long builds in the background, and never run the full
-  workspace test suite.
+- Use Cargo's configured default target directory; do not override `CARGO_TARGET_DIR`.
+  Query `cargo metadata --no-deps --format-version 1` for artifact locations. Budget for cold builds,
+  prefer scoped checks, and never run the full workspace suite for this slice.
 - **WIT deps are gitignored and must be fetched per fresh worktree — and the harness can rotate the
   worktree mid-turn**, which silently deletes them again (observed in turn 9: a check that passed
   earlier in the same turn failed later with the same `api_utils_rs` WIT error). Re-run the fetch
@@ -333,6 +433,19 @@ Recorded because they shape what a turn can attempt.
   `cargo nextest run -p dayframe_guest` 4/4 pass; clippy clean on everything touched.
 - Disk: the worktree filesystem has ~71G free; the root filesystem (`/home`, `/tmp`) has ~6G. Keep
   dioxus worktrees and build artifacts on the worktree filesystem.
+- **RAM is the tighter limit.** The dayframe graph compiles `wgpu`, `stylo`, `blitz`, `wasmtime` and
+  the whole dioxus stack. The operator reported a suspected OOM on the 14 GiB host; kernel evidence
+  was not captured. Run the scoped suite as
+  `CARGO_BUILD_JOBS=2 … cargo nextest run --test-threads 2 --no-fail-fast -p …`, with its output
+  redirected to a log under the arena tmp dir, and poll the log instead of blocking a tool call on it.
+- The arena tmp log directory is per-session: a log path that worked earlier in the turn can stop
+  existing after the harness rotates the worktree. `mkdir -p` the current session's directory before
+  redirecting into it.
+- **Every worktree rotation deletes the gitignored state again**, and it does so mid-turn. Turn 12 hit
+  both halves of this after a `generation-14-a` → `generation-15-a` rotation: `../dioxus` was gone
+  (`failed to read …/dioxus/packages/core/Cargo.toml`) and `src/*/wit/deps` was gone
+  (`package 'wasi:clocks@0.2.6' not found`). Tracked edits survive. On any such error, re-point the
+  symlink and re-run `x/wit-fetch.ts` before concluding anything about the code.
 - The arena allows bash writes to `/home/asdf/repos/rust/dioxus`, but the file tools are restricted to
   the worktree, `TMPDIR`, attachments and skill dirs.
 
@@ -346,8 +459,15 @@ To be fixed as the slices land, not all at once.
    Sample-only enable/disable controls; it consumes `ConfigurationSource` generically.
 3. (Resolved, turn 10) `MicroProvider::activate_async`, `AsyncMicroFactory`, and
    `MicroRegistry::activate_async` added and tested.
-4. Two parallel data stacks: the older `backend.rs`/`data/` from ADR 014's accepted half, and the
-   session's `documents.rs`. They should collapse into one node seam using the D6 vocabulary.
+4. (Resolved, turn 12) The two parallel data stacks collapsed into one. `backend.rs`/`backend/` and
+   `data.rs`/`data/` are empty, unlinked source files; their `dayframe_app` exports are removed.
+   `documents.rs` is the only data runtime, and it carries the D6 node-seam vocabulary: a per-write `Operation`
+   with a stable id, `OperationReceipt { id, revision, status }`,
+   `OperationStatus::{LocallyApplied, Accepted, RolledBack(OperationError)}`, and
+   `OperationError::{Rejected, Transport { outcome_unknown }}`. Gap-free continuation is
+   `DocumentWatch::next(after_revision)` / `Operation::next(after_revision)`, both of which return
+   `DocumentError::SubscriptionLagged` for an invalid continuation so the caller must reread. The
+   projection/overlay primitives moved to a private `documents/collection.rs`.
 5. (Resolved, turn 11) `ProvisionKind` removed. It was never read; contract identity is the provision id and version.
 6. (Resolved, turn 11) A missing mandatory provision is `MicroRegistryError::MissingProvision(id)`, not `AccessError::Denied`.
 7. (Resolved, turn 8) Guest ships the typed `list<mutation>` wire; sledgehammer and its vendored
@@ -447,5 +567,106 @@ To be fixed as the slices land, not all at once.
   `MicroRegistryError::MissingProvision`. Desktop installs its configuration source and lets the
   observer reconcile, so the UI thread does not block on activation. Verified: 59 nextest across
   `dayframe_app`, settings/sample/counter crates, and `desktop`, plus clippy `-D warnings`.
+- **Turn 12** — Implemented D5/D6/D11–D13: one guest VDOM with retained multi-mount surfaces;
+  a single permissioned document runtime with exact-intent acceptance and observable receipts;
+  named WIT grants and incarnation-owned document delivery; lifecycle close/activation ownership;
+  neutral presentation and separate Wasmtime crates. Added presentation validation, recycled node
+  identities, stale-event suppression, fuel/memory/ingress limits and bounded surface handles.
+  Extended composed DOM coverage through rejection, transport uncertainty, remount, persisted
+  reactivation and guest-trap isolation. Counter fixtures are explicitly prepared by
+  `x/check-dayframe.ts`, not built by runtime code or tests. Generation 15 verified all 13 guest
+  tests; subsequent generation-16 edits require fresh verification. Preparation and Deno checks
+  passed in generation 16, but the first scoped native run failed compiling the surface-limit test:
+  Dioxus and Wasmtime both glob-imported `Resource`. No test/clippy success is claimed for that run.
+- **Turn 13** — Resumed the existing generation-16 build rather than starting a duplicate.
+  Fixed the ambiguous test import and moved test-only `AccessError` out of production imports.
+  Found the unfinished `FacetConfiguration::{set_enablement,rebind}` seam still returning bare IDs;
+  both now return `Operation`. Added a regression exercising accepted enablement, transport-uncertain
+  rebind rollback, and receipt completion after the configuration authority closes.
+  The first rerun exposed a presentation-test defect: it returned one keyed node directly as a
+  component root, bypassing the production keyed sibling list. The same replacement assertion passes
+  through `SurfaceTree::render`; the test now uses that path and additionally proves text updates
+  preserve the host node while clear/recreate replaces it. No renderer implementation change was
+  needed. All 131 scoped tests now pass (zero skipped), including the actual Wasm ABI/remount tests,
+  surface-handle accounting and new configuration-receipt regression. Nine-package formatting and
+  `deno check`, `deno lint`, `deno fmt --check x/check-dayframe.ts` pass.
+  Desktop's cold build exposed a stale caller of `ConfigurationSource::current`: the mock-backed
+  launcher now extracts `ConfigurationSnapshot::Ready` explicitly. Three desktop composition tests
+  then passed, while the composed DOM test exposed two harness defects: synthetic clicks requested
+  layout data from text nodes (now resolved through the mapped element ancestor), and the transport
+  predicate expected Rust's `outcome_unknown` rather than the generated WIT debug field
+  `outcome-unknown`. Instrumentation showed the actual rolled-back value `41` and transport receipt
+  with uncertainty `true`; no delivery timeout or uncertainty loss occurred. Temporary logging was
+  removed after pinning the assertion defect.
+  Final verification in generation 16: **135 tests passed, zero skipped** (131 across the eight core/
+  micro packages, then all four desktop tests, including `composed_settings_wasm_dom_flow`).
+  `cargo clippy --locked --all-targets --all-features --no-deps` passed without compiler/lint warnings
+  for all nine packages; final nine-package `cargo fmt -- --check` passed. Commands ran through
+  `nix develop --command`, with `CARGO_BUILD_JOBS=2`, nextest `--locked --no-fail-fast --test-threads 2`,
+  and the prepared absolute `DAYFRAME_COUNTER_COMPONENT`. The nine packages were `dayframe_app`,
+  `dayframe_presentation`, `dayframe_engine_wasmtime`, `dayframe_guest`, `dayframe_counter`,
+  `dayframe_sample`, `dayframe_settings`, `dayframe_settings_contract`, and `desktop`.
+  Native window, screenshot and accessibility verification remain outstanding; headless DOM coverage
+  is not proof of those capabilities. The path-dependency CLI bootstrap gap, production document
+  adapter, browser engine and post-lifting hostile-component isolation gap remain open; no feature-
+  foundation readiness claim includes those unsupported capabilities. No commits or fork edits.
+- **Turn 14 (generation 17)** — Fixed the native CLI bootstrap to follow either a local
+  Dioxus patch or an explicitly pinned Git patch. Local discovery uses `cargo metadata --locked
+  --no-deps` to find the workspace's `dioxus-cli` package instead of assuming its directory or choosing
+  a registry CLI. Installation keeps `--locked`, `--features no-downloads`, the repository-local
+  install root and post-install `--version` validation. Added four inline Deno regressions, including
+  a real minimal Cargo workspace with spaced paths and a CLI in a non-assumed directory. All four
+  pass through `nix develop --command deno test --allow-all x/install-dx.ts`; Deno typechecking, lint
+  and formatting pass for `x/install-dx.ts` and `x/dx.ts` (the latter only received formatting).
+  Updated the native dev-loop instructions with the verified installer and explicit counter-fixture
+  preparation. No application Rust or fork source was edited.
+  The initial `../dioxus` lookup failed because the dependency was absent; it became available during
+  this turn without a source change by this agent. Built `dioxus-cli` and prepared `counter.component.wasm`,
+  then launched `dx serve --desktop -p desktop --renderer native` in a private tmux session and began
+  compiling the `desktop-dev` binary.
+- **Turn 15 (generation 18)** — Identified why `./target` was still being created inside the worktree
+  and copied into `/nix/store` despite `.env` setting `CARGO_TARGET_DIR=/run/media/asdf/p3N/tmp/townframe-target`:
+  1) `x/dx.ts` and `x/install-dx.ts` hardcoded `root.join("target", "dioxus-cli")` when `DIOXUS_CLI_ROOT`
+     was unset, ignoring `CARGO_TARGET_DIR`, so `cargo install --root ./target/dioxus-cli` created a
+     388 MB `./target` directory inside the worktree.
+  2) Running `x/dx.ts`, `x/install-dx.ts`, or `x/check-dayframe.ts` outside `nix develop` (or before
+     `.env` was sourced) left `CARGO_TARGET_DIR` unset in `Deno.env`.
+  Fixed `x/install-dx.ts`, `x/dx.ts`, and `x/check-dayframe.ts` to read `CARGO_TARGET_DIR` from the
+  environment or `.env`, export it into `Deno.env` for child `cargo`/`dx` processes, and default the
+  Dioxus CLI install root to `<CARGO_TARGET_DIR>/dioxus-cli` (`/run/media/asdf/p3N/tmp/townframe-target/dioxus-cli`).
+  Verified with 5/5 Deno tests (`nix develop --command deno test --allow-all x/install-dx.ts`),
+  `deno check`, `deno lint`, `deno fmt --check`, and `test ! -e target` in the worktree.
+  Built `accessibility-cli` into `/run/media/asdf/p3N/tmp/townframe-target/debug/accessibility-cli`,
+  launched `desktop` natively via `x/dx.ts serve --desktop -p desktop --renderer native --hot-patch false --watch false`,
+  verified the Wayland window (`title: "Dayframe"`) on niri, captured a window screenshot confirming
+  `Settings` renders both `Counter (Wasm)` (`0`, `Pending counter writes: 0`, `Refresh counter`) and
+  `Sample micro` in the same native host tree, and inspected the AT-SPI tree via `a11y.sh`.
+  Confirmed and recorded in `.agents/skills/blitz-dioxus-native-limits/SKILL.md` that `blitz-dom 0.3.0-beta.4`
+  has an inverted `BaseDocument::has_changes(&self)` (`self.changed_nodes.is_empty()` at
+  `blitz-dom-0.3.0-beta.4/src/document.rs:1028`), so `blitz-shell 0.3.0-beta.4` only publishes the
+  initial `InitialTreeRequested` snapshot from `dom.rebuild()` (`Heading`, `Button[title="Close Settings"]`,
+  `Switch`) and never pushes later `use_future` micro-reconciliation or interaction updates to AT-SPI.
+   Stopped the temporary native window after verification.
+- **Turn 16 (generation 20)** — Pre-review self-audit of the full change against ADR 014 and the
+   settled rules, then re-verification. Removed the dead empty legacy modules left on disk
+   (`app/src/backend.rs`, `app/src/backend/mock.rs`, `app/src/data.rs`, `app/src/data/{collection,refresh,transaction}.rs`).
+   Replaced the engine's magic numbers with named limits beside `MAX_SURFACE_HANDLES`
+   (`WasmStoreState::MAX_DOCUMENT_HANDLES = 1024`, `MAX_PENDING_DELIVERIES = 1024`, wired into the
+   work-channel bound and the drive/watch/mutate gates) and gave `Facet::write`'s serialization an
+   explicit `expect` message. Read every remaining unaudited file to completion (`native.rs`,
+   `application.rs` driver half, `micros.rs` registry half, `micros/composition.rs`,
+   `micros/provisions.rs`, `documents/collection.rs`, `presentation` limits/validation surface,
+   `guest/lib.rs`, `guest/wire.rs`, all four micro crates, `desktop/src/{main,composition,e2e}.rs`):
+   no abstraction drift from the settled design, no TODO/FIXME, error handling matches the
+   crash-on-invariant policy, and web/mobile/showcase still depend only on `dioxus`/`ui`.
+   Post-rotation recovery was required before verification: `x/wit-fetch.ts` re-fetch (the missing
+   `api_utils_rs` WIT bindings broke the workspace build) and `x/check-dayframe.ts --prepare-only`
+   to rebuild `counter.component.wasm` from current guest sources. Final state: 131/131 core tests
+   and 4/4 desktop tests passed (nextest `--locked --no-fail-fast --test-threads 2`,
+   `CARGO_BUILD_JOBS=2`, prepared `DAYFRAME_COUNTER_COMPONENT`); nine-package clippy reported zero
+   warnings from the change (the only clippy warnings came from `ui/src/tiles/mod.rs`, byte-identical
+   to the base checkout and outside this PR's scope); nine-package `cargo fmt -- --check` clean.
+   No commits, no fork edits.
+
 
 

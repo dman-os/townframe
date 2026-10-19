@@ -48,7 +48,15 @@ Do not invoke a bare `dx` from the shell. On this machine it can resolve to deno
 deno run --allow-all x/dx.ts <command> [args...]
 ```
 
-The wrapper selects the repository-local CLI under `target/dioxus-cli`, installs it through `x/install-dx.ts` when absent, and forwards the command unchanged.
+The wrapper selects the repository-local CLI under `$CARGO_TARGET_DIR/dioxus-cli` (or `target/dioxus-cli` when `CARGO_TARGET_DIR` is not configured), installs it through `x/install-dx.ts` when absent, and forwards the command unchanged.
+
+The installer follows the root `[patch.crates-io].dioxus` source. A local `path` patch uses Cargo
+metadata to find `dioxus-cli` in that workspace; a Git patch requires both `git` and `rev`. It never
+substitutes a registry CLI when the local fork is absent. Validate the installer with
+`nix develop --command deno test --allow-all x/install-dx.ts`; its bounded local-workspace fixture
+checks package discovery, installation, spaced paths and the `no-downloads` feature without compiling
+Dioxus. Before launching the document-backed counter, prepare its component with
+`x/check-dayframe.ts --prepare-only` and export the printed absolute `DAYFRAME_COUNTER_COMPONENT`.
 
 ## Run it in tmux, not in the background
 
@@ -65,6 +73,14 @@ documented recovery path after a failed hot-reload.
 Verify the pane is alive before blaming a build: if the shell is back at a prompt, the wrapped serve process has
 exited (it does this on its own after a few hours), and any keys you send go into the shell as literal
 text. That has produced confusing "my edit didn't land" reports.
+
+In arena shells, the shared tmux server may not see the current worktree. A `getcwd` failure before
+`dx` starts is a server-namespace problem, not a build failure. Use a private server socket inside
+the current session's `$TMPDIR`, an explicit shell from `command -v bash` (not `/bin/bash` on NixOS),
+and `remain-on-exit on` so early failures remain inspectable. Use the same `tmux -S <socket>` prefix
+for subsequent pane operations; do not reuse unrelated panes. Bind arena listeners with
+`--addr 127.0.0.1 --port "$PASEO_PORT"`, using the current environment, and use `--log-to-file` under
+the current session directory. A native dev server's asset listener is not a browser-hosted app.
 
 ## Screenshots
 
@@ -159,6 +175,8 @@ The operator has interrupted this loop to ask for less noise. When inspecting a 
 - Capture `a11y.sh --llm-query` to a file, then filter that file. Piping the CLI directly into `head` closes stdout early and makes its Rust printing path panic with `Broken pipe`; that is a CLI output failure, not an application crash.
 - Semantic verification must target the actual lifecycle control, not a configuration switch with a similar label. Expand `Mock node and micro lifecycle controls` before targeting the demo lifecycle buttons. Selectors can include `[role-description="push button"]` to distinguish buttons from switches. The sample's configuration-flag toggle is now labelled separately from micro enablement.
 
+- (2026-10) `x/dx.ts`, `x/install-dx.ts`, and `x/check-dayframe.ts` now resolve `CARGO_TARGET_DIR` from the environment or `.env` and place `dioxus-cli` at `$CARGO_TARGET_DIR/dioxus-cli` so running `dx` or `install-dx.ts` never creates a `./target` directory inside the worktree (which `nix develop` would otherwise copy into `/nix/store`).
+- (2026-10) `blitz-dom 0.3.0-beta.4` has an inverted `BaseDocument::has_changes(&self)` (`self.changed_nodes.is_empty()`), so `blitz-shell 0.3.0-beta.4` only publishes the `InitialTreeRequested` accessibility snapshot from initial `dom.rebuild()` (`Heading`, `Button[title="Close Settings"]`, `Switch`) and never pushes later `use_future` micro-reconciliation or interaction updates to AT-SPI, even though the native window renders those updates visually.
 - (2026-09) `blitz-shell 0.3.0-beta.2` enables accessibility but depends on `accesskit_xplat 0.1.1` with defaults disabled. Without an explicit Linux dependency enabling xplat defaults, its Unix adapter is absent and the app never registers on AT-SPI even with the service configured. Desktop now enables that backend. This is distinct from missing `XDG_DATA_DIRS`.
 - The native window may have a CLI-generated title (`dioxus | ⛺`) and no app ID. Resolve it from `niri msg -j windows` rather than assuming `desktop` matches. Desktop now explicitly requests the title `Dayframe`.
 - (2026-09) bare `dx` resolving to deno's shim; wrapped Dioxus checks being stale; CSS-only edits needing a Rust

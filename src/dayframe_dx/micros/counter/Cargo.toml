@@ -5,10 +5,13 @@ edition = "2024"
 
 [dependencies]
 dayframe_app = { path = "../../app" }
+daybook_types.workspace = true
+dayframe_engine_wasmtime = { path = "../../engine_wasmtime" }
 dayframe_settings_contract = { path = "../settings_contract" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+dayframe_presentation = { path = "../../presentation" }
 dayframe_settings = { path = "../settings" }
 dioxus.workspace = true
 dioxus-core.workspace = true

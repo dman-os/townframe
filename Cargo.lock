@@ -20,15 +20,6 @@ checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
 name = "accesskit"
-version = "0.24.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3b7f7f85a7e5f68090000ed7622545829afd484d210358702ae4cb97dd0c320"
-dependencies = [
- "uuid",
-]
-
-[[package]]
-name = "accesskit"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ad442f58ee04714aaa0ba0a2768c1ea1935b29507bb22ddece8cbbc76db02932"
@@ -38,46 +29,16 @@ dependencies = [
 
 [[package]]
 name = "accesskit_atspi_common"
-version = "0.18.1"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e8c61bee90b42a772d39d06a740207dc71a4e780004ace1db8d99fb1baaa954"
+checksum = "52c182f9c282ac9c5638d876d551d15e5f7d397ec263349a0c6a2b61595dd5e4"
 dependencies = [
- "accesskit 0.24.1",
- "accesskit_consumer 0.36.0",
+ "accesskit",
+ "accesskit_consumer",
  "atspi-common",
- "phf 0.13.1",
+ "phf 0.14.0",
  "serde",
  "zvariant",
-]
-
-[[package]]
-name = "accesskit_consumer"
-version = "0.35.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53cf47daed85312e763fbf85ceca136e0d7abc68e0a7e12abe11f48172bc3b10"
-dependencies = [
- "accesskit 0.24.1",
- "hashbrown 0.16.1",
-]
-
-[[package]]
-name = "accesskit_consumer"
-version = "0.36.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25e0d7e25d06f4dc21d1774d67146e9e80d6789216cbd4d1e88185b0095dba60"
-dependencies = [
- "accesskit 0.24.1",
- "hashbrown 0.16.1",
-]
-
-[[package]]
-name = "accesskit_consumer"
-version = "0.38.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d10a236f96f87d70732e44520046785431ef01d5bcd6b041317bfadd2f88245"
-dependencies = [
- "accesskit 0.24.1",
- "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -86,22 +47,8 @@ version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a45e2bb300bea6d5f33a82c3e051c3ddc6f41c209750f68a0acbe991a284344"
 dependencies = [
- "accesskit 0.25.1",
+ "accesskit",
  "hashbrown 0.17.1",
-]
-
-[[package]]
-name = "accesskit_macos"
-version = "0.26.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce02dc63b43f0c9296af9ac946312a2dc8814427d7a64d2d600971dac55b6076"
-dependencies = [
- "accesskit 0.24.1",
- "accesskit_consumer 0.38.0",
- "hashbrown 0.16.1",
- "objc2 0.5.2",
- "objc2-app-kit 0.2.2",
- "objc2-foundation 0.2.2",
 ]
 
 [[package]]
@@ -110,8 +57,8 @@ version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5701624bf6a11efb6d4c8e922bf44126ed96250e5faa9a7a0468c979635839a4"
 dependencies = [
- "accesskit 0.25.1",
- "accesskit_consumer 0.39.1",
+ "accesskit",
+ "accesskit_consumer",
  "hashbrown 0.17.1",
  "objc2 0.5.2",
  "objc2-app-kit 0.2.2",
@@ -120,11 +67,11 @@ dependencies = [
 
 [[package]]
 name = "accesskit_unix"
-version = "0.21.1"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b016ca8db0ea0ea2ceff29a9d6240391492d960716aa471967c00e8cc8cb197c"
+checksum = "202f24df034a7476d07b7f74284de84f6d62aabd858dbe7ee9cad3b7ad6f8f9d"
 dependencies = [
- "accesskit 0.24.1",
+ "accesskit",
  "accesskit_atspi_common",
  "async-channel",
  "async-executor",
@@ -138,26 +85,12 @@ dependencies = [
 
 [[package]]
 name = "accesskit_windows"
-version = "0.32.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eff7009f1a532e917d66970a1e80c965140c6cfbbabbdde3d64e5431e6c78e21"
-dependencies = [
- "accesskit 0.24.1",
- "accesskit_consumer 0.35.0",
- "hashbrown 0.16.1",
- "static_assertions",
- "windows 0.62.2",
- "windows-core 0.62.2",
-]
-
-[[package]]
-name = "accesskit_windows"
 version = "0.35.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce63f35d6bdcf59f26b76b3379063f738e6412cef46999cc772d46aa3de35adb"
 dependencies = [
- "accesskit 0.25.1",
- "accesskit_consumer 0.39.1",
+ "accesskit",
+ "accesskit_consumer",
  "hashbrown 0.17.1",
  "static_assertions",
  "windows 0.62.2",
@@ -166,27 +99,14 @@ dependencies = [
 
 [[package]]
 name = "accesskit_xplat"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbb69cd9e9ca89e4bb0ac98821c509849d5e51c6ae8c96bddf7b0c97579b839a"
-dependencies = [
- "accesskit 0.24.1",
- "accesskit_macos 0.26.3",
- "accesskit_unix",
- "accesskit_windows 0.32.1",
- "android-activity",
- "raw-window-handle 0.6.2",
-]
-
-[[package]]
-name = "accesskit_xplat"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "538784c169bebd349060eb5ceedc294c0b0e603a9862ff055f7572fd830980db"
 dependencies = [
- "accesskit 0.25.1",
- "accesskit_macos 0.27.1",
- "accesskit_windows 0.35.1",
+ "accesskit",
+ "accesskit_macos",
+ "accesskit_unix",
+ "accesskit_windows",
  "android-activity",
  "raw-window-handle 0.6.2",
 ]
@@ -1886,7 +1806,7 @@ version = "0.3.0-beta.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a814bfd3ad19e6d8d26f99c75188062baca499564f9abe44250230962427d183"
 dependencies = [
- "accesskit 0.25.1",
+ "accesskit",
  "anyrender 0.14.0",
  "app_units",
  "atomic_refcell",
@@ -1985,8 +1905,8 @@ version = "0.3.0-beta.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d80b952b007a4bd82012583da8540d95cfd276b3c790ded39299fce728864fdb"
 dependencies = [
- "accesskit 0.25.1",
- "accesskit_xplat 0.2.1",
+ "accesskit",
+ "accesskit_xplat",
  "android-activity",
  "anyrender 0.14.0",
  "arboard",
@@ -3957,7 +3877,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.3",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -4142,22 +4062,24 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "daybook_types",
+ "dayframe_presentation",
  "dioxus",
  "dioxus-core",
  "dioxus-html",
- "pastey 0.1.1",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "wasmtime",
 ]
 
 [[package]]
 name = "dayframe_counter"
 version = "0.1.0"
 dependencies = [
+ "daybook_types",
  "dayframe_app",
+ "dayframe_engine_wasmtime",
+ "dayframe_presentation",
  "dayframe_settings",
  "dayframe_settings_contract",
  "dioxus",
@@ -4165,6 +4087,22 @@ dependencies = [
  "dioxus-html",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "dayframe_engine_wasmtime"
+version = "0.1.0"
+dependencies = [
+ "daybook_types",
+ "dayframe_app",
+ "dayframe_presentation",
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "futures",
+ "serde_json",
+ "tokio",
+ "wasmtime",
 ]
 
 [[package]]
@@ -4179,6 +4117,18 @@ dependencies = [
  "serde_json",
  "wasmtime",
  "wit-bindgen 0.60.0",
+]
+
+[[package]]
+name = "dayframe_presentation"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "pastey 0.1.1",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4461,18 +4411,22 @@ dependencies = [
 name = "desktop"
 version = "0.1.0"
 dependencies = [
- "accesskit_xplat 0.1.1",
+ "accesskit_xplat",
  "anyrender 0.13.0",
  "anyrender_vello",
  "anyrender_vello_cpu 0.17.0",
  "anyrender_vello_hybrid 0.10.0",
+ "blitz-dom",
  "daybook_types",
  "dayframe_app",
  "dayframe_counter",
  "dayframe_sample",
  "dayframe_settings",
  "dioxus",
+ "dioxus-core",
+ "dioxus-html",
  "dioxus-native",
+ "dioxus-native-dom",
  "serde",
  "serde_json",
  "tokio",
@@ -10724,7 +10678,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 3.5.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -21203,9 +21157,9 @@ dependencies = [
 
 [[package]]
 name = "zvariant"
-version = "5.14.0"
+version = "5.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5e28c25bd8bb8da5a1f3e7065d0c156b9ee9a7973adf78b0e35eaefdf3b1b5c"
+checksum = "80bf6d6cd6a4b601acb64cfb8284cdc643fcfa75ef26ae3c46ec8aa4e8a1fbb7"
 dependencies = [
  "endi",
  "enumflags2",
@@ -21218,9 +21172,9 @@ dependencies = [
 
 [[package]]
 name = "zvariant_derive"
-version = "5.14.0"
+version = "5.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d496a145685283b67e232bd9e47377f6b60ad9d51e3601b23867f77c42477f96"
+checksum = "ef2672456ba1cb54b5eaec136e63135b3c7495fb938e53b28a62e633496d486d"
 dependencies = [
  "proc-macro-crate 3.5.0",
  "proc-macro2",
@@ -21231,9 +21185,9 @@ dependencies = [
 
 [[package]]
 name = "zvariant_utils"
-version = "4.0.0"
+version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "629d80ece222cad20fe0e8741be493c4ab166acf3b85341bdc2cdbcfd8f3c2d6"
+checksum = "bad0294361a320b694a328460dc73add56c306150f5cb6bfafc44446120008a3"
 dependencies = [
  "proc-macro2",
  "quote",

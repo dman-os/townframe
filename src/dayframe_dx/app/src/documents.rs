@@ -1,8 +1,10 @@
 //! Narrow document projection boundary. Source cursors and cache policy remain host-owned.
 //! Native wrappers use these data values and handles; future WIT resources can map the same
 //! watch/selection/mutation protocol without transporting callbacks or renderer state.
-use crate::data::{Collection, CollectionChange, TransactionId, TransactionStatus};
+mod collection;
+
 use crate::host::{AccessError, Host, Instance};
+use collection::{Collection, CollectionChange};
 use daybook_types::manifest::RoutineFacetAccess;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -48,7 +50,6 @@ pub struct DocumentSnapshot {
     pub revision: u64,
     pub facets: BTreeMap<FacetRoute, FacetValue>,
     pub pending: BTreeSet<u64>,
-    pub last_transaction: Option<(u64, TransactionStatus)>,
     pub refreshing: bool,
     pub revoked: bool,
 }
@@ -57,6 +58,95 @@ pub enum FacetMutation {
     Write(Value),
     Create(Value),
     Delete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum OperationError {
+    #[error("operation rejected: {message}")]
+    Rejected { message: String },
+    #[error("transport failure (outcome unknown: {outcome_unknown}): {message}")]
+    Transport {
+        message: String,
+        outcome_unknown: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationStatus {
+    LocallyApplied,
+    Accepted,
+    RolledBack(OperationError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationReceipt {
+    pub id: u64,
+    pub revision: u64,
+    pub status: OperationStatus,
+}
+
+#[derive(Clone)]
+pub struct Operation {
+    service: DocumentService,
+    updates: watch::Receiver<OperationReceipt>,
+}
+
+impl std::fmt::Debug for Operation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("Operation")
+            .field(&self.current())
+            .finish()
+    }
+}
+
+impl Operation {
+    pub fn id(&self) -> u64 {
+        self.updates.borrow().id
+    }
+
+    pub fn current(&self) -> OperationReceipt {
+        let _state = self.service.inner.lock().unwrap();
+        self.updates.borrow().clone()
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<OperationReceipt> {
+        self.updates.clone()
+    }
+
+    pub async fn next(
+        &self,
+        after_revision: u64,
+    ) -> Result<Option<OperationReceipt>, DocumentError> {
+        let mut updates = self.subscribe();
+        loop {
+            let receipt = {
+                let _state = self.service.inner.lock().unwrap();
+                updates.borrow_and_update().clone()
+            };
+            if after_revision > receipt.revision {
+                return Err(DocumentError::SubscriptionLagged);
+            }
+            if receipt.revision > after_revision {
+                return Ok(Some(receipt));
+            }
+            if receipt.status != OperationStatus::LocallyApplied {
+                return Ok(None);
+            }
+            updates
+                .changed()
+                .await
+                .expect("pending operation lost its completion owner");
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DocumentError {
+    #[error(transparent)]
+    Access(#[from] AccessError),
+    #[error("subscription continuation is invalid; reread the current snapshot")]
+    SubscriptionLagged,
 }
 
 /// Resolved, host-approved document grants. Owner configuration resolution precedes issuance;
@@ -92,7 +182,6 @@ pub(crate) struct DocumentService {
 }
 struct State {
     next: u64,
-    revision: u64,
     clock: u64,
     capacity: usize,
     source: BTreeMap<FacetRoute, Value>,
@@ -109,16 +198,18 @@ struct State {
 }
 struct CacheEntry {
     touched: u64,
-    receipt: Option<(u64, TransactionStatus)>,
 }
 struct WatchRecord {
     authority: Arc<Authority>,
     selection: WatchSelection,
     generation: u64,
+    minimum_revision: u64,
     updates: watch::Sender<DocumentSnapshot>,
 }
 struct PendingMutation {
     route: FacetRoute,
+    mutation: FacetMutation,
+    updates: watch::Sender<OperationReceipt>,
 }
 
 /// Privileged mock controls are deliberately absent from MicroContext and DocumentAccess.
@@ -132,7 +223,6 @@ impl DocumentService {
         Self {
             inner: Arc::new(Mutex::new(State {
                 next: 0,
-                revision: 0,
                 clock: 0,
                 capacity,
                 source: BTreeMap::new(),
@@ -255,16 +345,13 @@ impl DocumentAccess {
         self.check()?;
         self.authority.validate(&selection)?;
         let mut state = self.service.inner.lock().unwrap();
-        if self.authority.revoked.load(Ordering::Acquire) {
-            return Err(AccessError::Revoked);
-        }
+        self.check()?;
         state.next += 1;
         let id = state.next;
         let (updates, _) = watch::channel(DocumentSnapshot {
-            revision: state.revision,
+            revision: 0,
             facets: BTreeMap::new(),
             pending: BTreeSet::new(),
-            last_transaction: None,
             refreshing: false,
             revoked: false,
         });
@@ -277,6 +364,7 @@ impl DocumentAccess {
                         authority: self.authority.clone(),
                         selection,
                         generation: 0,
+                        minimum_revision: 0,
                         updates
                     }
                 )
@@ -292,7 +380,11 @@ impl DocumentAccess {
         })
     }
 
-    pub fn mutate(&self, route: FacetRoute, mutation: FacetMutation) -> Result<u64, AccessError> {
+    pub fn mutate(
+        &self,
+        route: FacetRoute,
+        mutation: FacetMutation,
+    ) -> Result<Operation, AccessError> {
         self.check()?;
         let right = match &mutation {
             FacetMutation::Write(_) => Right::Write,
@@ -303,41 +395,47 @@ impl DocumentAccess {
             return Err(AccessError::Denied);
         }
         let mut state = self.service.inner.lock().unwrap();
-        if self.authority.revoked.load(Ordering::Acquire) {
-            return Err(AccessError::Revoked);
-        }
+        self.check()?;
         // Seed this route's base before overlaying a write. Never hydrate unrelated facets.
         if !state.cache.contains_key(&route) {
             state.hydrate(&route);
         }
-        let value = match mutation {
-            FacetMutation::Write(value) | FacetMutation::Create(value) => Some(value),
-            FacetMutation::Delete => None,
-        };
         state.next += 1;
         let id = state.next;
-        let change = value.map_or_else(
-            || CollectionChange::Remove { key: route.clone() },
-            |value| CollectionChange::Upsert {
-                key: route.clone(),
-                value,
-            },
-        );
-        state
-            .projection
-            .apply_optimistic(TransactionId(id), change)
-            .unwrap();
+        let change = match &mutation {
+            FacetMutation::Write(value) | FacetMutation::Create(value) => {
+                CollectionChange::Upsert {
+                    key: route.clone(),
+                    value: value.clone(),
+                }
+            }
+            FacetMutation::Delete => CollectionChange::Remove { key: route.clone() },
+        };
+        state.projection.apply_optimistic(id, change);
         state.note_route(&route);
-        state.cache.get_mut(&route).unwrap().receipt =
-            Some((id, TransactionStatus::LocallyApplied));
+        let (updates, receipt) = watch::channel(OperationReceipt {
+            id,
+            revision: 0,
+            status: OperationStatus::LocallyApplied,
+        });
         assert!(
             state
                 .pending
-                .insert(id, PendingMutation { route })
+                .insert(
+                    id,
+                    PendingMutation {
+                        route,
+                        mutation,
+                        updates
+                    }
+                )
                 .is_none()
         );
         state.publish();
-        Ok(id)
+        Ok(Operation {
+            service: self.service.clone(),
+            updates: receipt,
+        })
     }
 }
 
@@ -379,12 +477,24 @@ impl DocumentAccess {
     }
 }
 impl DocumentRef {
+    pub fn document_id(&self) -> &str {
+        &self.document
+    }
+
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    pub fn access(&self) -> DocumentAccess {
+        self.access.clone()
+    }
+
     pub fn mutate(
         &self,
         tag: String,
         key_id: String,
         mutation: FacetMutation,
-    ) -> Result<u64, AccessError> {
+    ) -> Result<Operation, AccessError> {
         self.access.mutate(
             FacetRoute {
                 document: self.document.clone(),
@@ -429,10 +539,12 @@ impl<T: serde::de::DeserializeOwned + serde::Serialize> Facet<T> {
             Some(FacetValue::Loading | FacetValue::Absent) | None => None,
         }
     }
-    pub fn write(&self, value: T) -> Result<u64, AccessError> {
+    pub fn write(&self, value: T) -> Result<Operation, AccessError> {
         self.access.mutate(
             self.route.clone(),
-            FacetMutation::Write(serde_json::to_value(value).unwrap()),
+            FacetMutation::Write(
+                serde_json::to_value(value).expect("facet value must serialize to JSON"),
+            ),
         )
     }
 }
@@ -440,15 +552,39 @@ impl DocumentWatch {
     pub fn current(&self) -> Result<DocumentSnapshot, AccessError> {
         self.lease.access.check()?;
         let state = self.lease.service.inner.lock().unwrap();
+        self.lease.access.check()?;
         let record = state
             .watches
             .get(&self.lease.id)
             .ok_or(AccessError::Revoked)?;
         Ok(record.updates.borrow().clone())
     }
+    pub async fn next(&self, after_revision: u64) -> Result<DocumentSnapshot, DocumentError> {
+        let mut updates = self.subscribe()?;
+        loop {
+            {
+                let state = self.lease.service.inner.lock().unwrap();
+                self.lease.access.check()?;
+                let record = state
+                    .watches
+                    .get(&self.lease.id)
+                    .ok_or(AccessError::Revoked)?;
+                let snapshot = record.updates.borrow();
+                if after_revision < record.minimum_revision || after_revision > snapshot.revision {
+                    return Err(DocumentError::SubscriptionLagged);
+                }
+                if snapshot.revision > after_revision {
+                    return Ok(snapshot.clone());
+                }
+            }
+            updates.changed().await.map_err(|_| AccessError::Revoked)?;
+        }
+    }
+
     pub fn subscribe(&self) -> Result<watch::Receiver<DocumentSnapshot>, AccessError> {
         self.lease.access.check()?;
         let state = self.lease.service.inner.lock().unwrap();
+        self.lease.access.check()?;
         Ok(state
             .watches
             .get(&self.lease.id)
@@ -459,6 +595,7 @@ impl DocumentWatch {
     pub fn refresh(&self) -> Result<(), AccessError> {
         self.lease.access.check()?;
         let mut state = self.lease.service.inner.lock().unwrap();
+        self.lease.access.check()?;
         if !state.watches.contains_key(&self.lease.id) {
             return Err(AccessError::Revoked);
         }
@@ -469,11 +606,13 @@ impl DocumentWatch {
         self.lease.access.check()?;
         self.lease.access.authority.validate(&selection)?;
         let mut state = self.lease.service.inner.lock().unwrap();
+        self.lease.access.check()?;
         let record = state
             .watches
             .get_mut(&self.lease.id)
             .ok_or(AccessError::Revoked)?;
         record.generation += 1;
+        record.minimum_revision = record.updates.borrow().revision + 1;
         record.selection = selection;
         state.refresh_watch(self.lease.id);
         state.evict();
@@ -642,12 +781,11 @@ impl State {
                 value,
             },
         );
-        self.projection.apply_authoritative(change).unwrap();
+        self.projection.apply_authoritative(change);
         self.cache.insert(
             route.clone(),
             CacheEntry {
                 touched: self.clock,
-                receipt: self.cache.get(route).and_then(|entry| entry.receipt),
             },
         );
     }
@@ -672,14 +810,7 @@ impl State {
     fn snapshot(&self, id: u64, record: &WatchRecord) -> DocumentSnapshot {
         let mut facets = BTreeMap::new();
         let mut pending = BTreeSet::new();
-        let mut last_transaction = None;
         for route in self.routes_for(record) {
-            if let Some(receipt) = self.cache.get(&route).and_then(|entry| entry.receipt)
-                && last_transaction
-                    .is_none_or(|previous: (u64, TransactionStatus)| previous.0 <= receipt.0)
-            {
-                last_transaction = Some(receipt);
-            }
             let value = if self.cache.contains_key(&route) {
                 self.projection
                     .get(&route)
@@ -698,7 +829,6 @@ impl State {
             revision: record.updates.borrow().revision,
             facets,
             pending,
-            last_transaction,
             refreshing: self
                 .requests
                 .values()
@@ -711,7 +841,7 @@ impl State {
         // Each mirror advances only for its own permitted changes, not for unrelated source work.
         for (id, record) in &self.watches {
             let mut snapshot = self.snapshot(*id, record);
-            if snapshot != *record.updates.borrow() {
+            if snapshot != *record.updates.borrow() || snapshot.revision < record.minimum_revision {
                 snapshot.revision += 1;
                 record.updates.send_replace(snapshot);
             }
@@ -727,7 +857,6 @@ impl State {
                 facets: BTreeMap::new(),
                 pending: BTreeSet::new(),
                 refreshing: false,
-                last_transaction: None,
                 revoked,
             });
         }
@@ -736,6 +865,34 @@ impl State {
             !waiters.is_empty()
         });
         self.evict();
+    }
+
+    fn complete(&mut self, id: u64, outcome: Result<(), OperationError>) {
+        let pending = self.pending.remove(&id).expect("operation is not pending");
+        let status = match outcome {
+            Ok(()) => {
+                self.projection.accept(id);
+                match pending.mutation {
+                    FacetMutation::Write(value) | FacetMutation::Create(value) => {
+                        self.source.insert(pending.route, value);
+                    }
+                    FacetMutation::Delete => {
+                        self.source.remove(&pending.route);
+                    }
+                }
+                OperationStatus::Accepted
+            }
+            Err(error) => {
+                self.projection.rollback(id);
+                OperationStatus::RolledBack(error)
+            }
+        };
+        self.publish();
+        pending.updates.send_replace(OperationReceipt {
+            id,
+            revision: 1,
+            status,
+        });
     }
 
     fn evict(&mut self) {
@@ -756,8 +913,7 @@ impl State {
         for (_, route) in unretained.into_iter().take(excess) {
             self.cache.remove(&route);
             self.projection
-                .apply_authoritative(CollectionChange::Remove { key: route })
-                .unwrap();
+                .apply_authoritative(CollectionChange::Remove { key: route });
         }
     }
 }
@@ -779,34 +935,23 @@ impl MockDocuments {
         state.note_route(&route);
         state.source.entry(route).or_insert(value);
     }
+    pub fn complete(&self, id: u64, outcome: Result<(), OperationError>) {
+        self.service.inner.lock().unwrap().complete(id, outcome);
+    }
+
     pub fn settle(&self, accept: bool) {
         let mut state = self.service.inner.lock().unwrap();
-        let pending = std::mem::take(&mut state.pending);
-        for (id, mutation) in pending {
-            if accept {
-                state.projection.accept(TransactionId(id)).unwrap();
-                if let Some(value) = state.projection.get(&mutation.route) {
-                    state.source.insert(mutation.route.clone(), value);
-                } else {
-                    state.source.remove(&mutation.route);
-                }
+        let ids = state.pending.keys().copied().collect::<Vec<_>>();
+        for id in ids {
+            let outcome = if accept {
+                Ok(())
             } else {
-                state.projection.rollback(TransactionId(id)).unwrap();
-            }
-            state.cache.get_mut(&mutation.route).unwrap().receipt = Some((
-                id,
-                if accept {
-                    TransactionStatus::Accepted
-                } else {
-                    TransactionStatus::RolledBack
-                },
-            ));
-            state
-                .projection
-                .forget_completed(TransactionId(id))
-                .unwrap();
+                Err(OperationError::Rejected {
+                    message: "mock source rejected operation".into(),
+                })
+            };
+            state.complete(id, outcome);
         }
-        state.publish();
     }
     pub fn external_change(&self, route: FacetRoute, value: Option<Value>) {
         let mut state = self.service.inner.lock().unwrap();
@@ -826,8 +971,7 @@ impl MockDocuments {
             state.cache.remove(&route);
             state
                 .projection
-                .apply_authoritative(CollectionChange::Remove { key: route })
-                .unwrap();
+                .apply_authoritative(CollectionChange::Remove { key: route });
         }
         state.publish();
     }

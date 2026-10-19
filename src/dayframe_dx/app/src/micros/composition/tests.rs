@@ -26,7 +26,7 @@ impl Fixture {
         let activations = Arc::new(Mutex::new(Vec::new()));
         let declaration = MicroProvision {
             id: Facility::ID.into(),
-                    version: 1,
+            version: 1,
         };
         // Deliberately register the consumer first. Registration and configured identity ordering
         // must not decide dependency order.
@@ -73,18 +73,23 @@ impl Fixture {
         }
     }
 
-    fn try_reconcile(
-        &mut self,
-    ) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
+    fn try_reconcile(&mut self) -> Result<BTreeMap<String, InstanceState>, ConfigurationError> {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(self.composition.reconcile(
-                &self.host,
-                &self.registry,
-                &self.desired,
-            ))
+            .block_on(async {
+                loop {
+                    let states =
+                        self.composition
+                            .update(&self.host, &self.registry, &self.desired)?;
+                    if self.composition.is_settled() {
+                        return Ok(states);
+                    }
+                    let name = self.composition.next().await;
+                    self.composition.complete(name, &self.desired);
+                }
+            })
     }
 
     fn reconcile(&mut self) -> BTreeMap<String, InstanceState> {
@@ -272,7 +277,7 @@ fn unavailable_implementations_remain_inspectable_and_activate_when_registered()
                 requirements: vec![],
                 provisions: vec![MicroProvision {
                     id: Facility::ID.into(),
-                                    version: 1,
+                    version: 1,
                 }],
             },
             |activation| {
@@ -297,7 +302,7 @@ fn failed_activations_are_not_retried_on_unrelated_edits_but_new_inputs_allow_re
                 version: 1,
                 requirements: vec![MicroProvision {
                     id: Facility::ID.into(),
-                                    version: 1,
+                    version: 1,
                 }],
                 provisions: vec![],
             },
@@ -346,7 +351,7 @@ fn unfulfilled_provider_outputs_fail_the_provider_and_block_consumers_without_re
                 requirements: vec![],
                 provisions: vec![MicroProvision {
                     id: Facility::ID.into(),
-                                    version: 1,
+                    version: 1,
                 }],
             },
             move |_| {

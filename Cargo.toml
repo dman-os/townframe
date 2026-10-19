@@ -28,6 +28,8 @@ members = [
   "./src/wflow_tokio/",
   "./src/xtask",
   "./src/dayframe_dx/app",
+  "./src/dayframe_dx/presentation",
+  "./src/dayframe_dx/engine_wasmtime",
   "./src/dayframe_dx/guest",
   "./src/dayframe_dx/micros/settings_contract",
   "./src/dayframe_dx/micros/settings",

@@ -5,7 +5,150 @@ use crate::{
         Provision,
     },
 };
-use std::collections::BTreeMap;
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+
+#[test]
+fn retained_activation_cannot_resolve_replacement_or_use_revoked_consumer() {
+    let host = Host::new();
+    let mut registry = MicroRegistry::default();
+    let count = Rc::new(std::cell::Cell::new(0));
+    let counted = count.clone();
+    provider(&mut registry, move |activation| {
+        counted.set(counted.get() + 1);
+        activation.publish(Facility(if counted.get() == 1 {
+            "original"
+        } else {
+            "replacement"
+        }));
+        Ok(())
+    });
+    let retained = Rc::new(RefCell::new(None));
+    let saved = retained.clone();
+    registry
+        .register(MicroFactory::new(
+            MicroDescriptor {
+                id: MicroId::new("consumer"),
+                version: 1,
+                requirements: vec![declaration()],
+                provisions: vec![],
+            },
+            move |activation| {
+                assert_eq!(activation.require::<Facility>()?, Facility("original"));
+                *saved.borrow_mut() = Some(activation);
+                Ok(())
+            },
+        ))
+        .unwrap();
+    let supplier = registry
+        .activate(
+            &host,
+            &MicroId::new("provider"),
+            "supplier",
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let consumer = registry
+        .activate(
+            &host,
+            &MicroId::new("consumer"),
+            "consumer",
+            BTreeMap::from([(Facility::ID.into(), "supplier".into())]),
+        )
+        .unwrap();
+    consumer.close();
+    assert_eq!(
+        retained.borrow().as_ref().unwrap().require::<Facility>(),
+        Err(AccessError::Revoked)
+    );
+    supplier.close();
+    registry
+        .activate(
+            &host,
+            &MicroId::new("provider"),
+            "supplier",
+            BTreeMap::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        registry.output::<Facility>("supplier"),
+        Ok(Facility("replacement"))
+    );
+    assert_eq!(
+        retained.borrow().as_ref().unwrap().require::<Facility>(),
+        Err(AccessError::Revoked)
+    );
+    host.close();
+}
+
+#[tokio::test]
+async fn supplier_withdrawal_cancels_awaiting_consumer_and_pins_its_context() {
+    use crate::micros::{ActivationError, AsyncMicroFactory};
+    use std::{future::Future, task::Poll};
+    let host = Host::new();
+    let mut registry = MicroRegistry::default();
+    provider(&mut registry, |activation| {
+        activation.publish(Facility("supplier"));
+        Ok(())
+    });
+    let retained = Rc::new(RefCell::new(None));
+    let saved = retained.clone();
+    let (finish, receiver) = tokio::sync::oneshot::channel();
+    let receiver = Rc::new(RefCell::new(Some(receiver)));
+    registry
+        .register(AsyncMicroFactory::new(
+            MicroDescriptor {
+                id: MicroId::new("consumer"),
+                version: 1,
+                requirements: vec![declaration()],
+                provisions: vec![],
+            },
+            move |activation| {
+                *saved.borrow_mut() = Some(activation.clone());
+                let receiver = receiver.borrow_mut().take().unwrap();
+                async move {
+                    receiver.await.unwrap();
+                    activation.require::<Facility>()?;
+                    Ok::<(), ActivationError>(())
+                }
+            },
+        ))
+        .unwrap();
+    let supplier = registry
+        .activate(
+            &host,
+            &MicroId::new("provider"),
+            "supplier",
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let bindings = BTreeMap::from([(Facility::ID.into(), "supplier".into())]);
+    let id = MicroId::new("consumer");
+    let mut consumer = Box::pin(registry.activate_async(&host, &id, "consumer", bindings));
+    std::future::poll_fn(|context| {
+        assert!(consumer.as_mut().poll(context).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    std::thread::spawn(move || supplier.close()).join().unwrap();
+    registry
+        .activate(
+            &host,
+            &MicroId::new("provider"),
+            "supplier",
+            BTreeMap::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        retained.borrow().as_ref().unwrap().require::<Facility>(),
+        Err(AccessError::Revoked)
+    );
+    assert!(matches!(
+        consumer.await,
+        Err(MicroRegistryError::Access(AccessError::Revoked))
+    ));
+    assert!(finish.send(()).is_err());
+    host.close();
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Facility(&'static str);
@@ -17,7 +160,7 @@ fn declaration() -> MicroProvision {
     MicroProvision {
         id: Facility::ID.into(),
         version: Facility::VERSION,
-        }
+    }
 }
 
 fn provider(

@@ -1,5 +1,18 @@
 use super::*;
 use serde_json::json;
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Waker},
+};
+
+fn assert_pending<T>(future: Pin<&mut impl Future<Output = T>>) {
+    assert!(
+        future
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+}
 
 fn route(document: &str, key_id: &str) -> FacetRoute {
     FacetRoute {
@@ -274,4 +287,581 @@ fn only_unretained_projection_values_are_evicted() {
     drop(retained);
     assert_eq!(node.cached_routes().len(), 32);
     host.close();
+}
+
+#[test]
+fn read_only_grants_reject_every_mutation_without_hydration() {
+    let host = Host::new();
+    let node = host.mock_documents();
+    node.seed(route("a", "main"), json!(1));
+    let instance = host.start("reader");
+    let access = host
+        .grant_documents(
+            &instance,
+            vec![DocumentGrant {
+                document: "a".into(),
+                branch: "main".into(),
+                facets: vec![RoutineFacetAccess {
+                    tag: "org.example.config".into(),
+                    key_id: Some("main".into()),
+                    read: true,
+                    ..Default::default()
+                }],
+            }],
+        )
+        .unwrap();
+    let mirror = access.watch(selection(&["a"])).unwrap();
+    let before = mirror.current().unwrap();
+    let reads = node.reads();
+    for mutation in [
+        FacetMutation::Write(json!(2)),
+        FacetMutation::Create(json!(3)),
+        FacetMutation::Delete,
+    ] {
+        assert_eq!(
+            access.mutate(route("a", "main"), mutation).unwrap_err(),
+            AccessError::Denied
+        );
+    }
+    assert_eq!(
+        access
+            .mutate(route("a", "secret"), FacetMutation::Write(json!(4)))
+            .unwrap_err(),
+        AccessError::Denied
+    );
+    assert_eq!(mirror.current().unwrap(), before);
+    assert_eq!(node.reads(), reads);
+    host.close();
+}
+
+#[test]
+fn document_ref_access_preserves_the_grant_and_its_revocation() {
+    let host = Host::new();
+    let instance = host.start("reader");
+    let access = host
+        .grant_documents(
+            &instance,
+            vec![DocumentGrant {
+                document: "a".into(),
+                branch: "approved-branch".into(),
+                facets: vec![RoutineFacetAccess {
+                    tag: "org.example.config".into(),
+                    key_id: Some("main".into()),
+                    read: true,
+                    ..Default::default()
+                }],
+            }],
+        )
+        .unwrap();
+    let document = access
+        .document("a".into(), "approved-branch".into())
+        .unwrap();
+    assert_eq!(document.document_id(), "a");
+    assert_eq!(document.branch(), "approved-branch");
+    let cloned = document.access();
+    assert!(Arc::ptr_eq(&cloned.authority, &access.authority));
+    assert!(matches!(
+        cloned.document("other".into(), document.branch().into()),
+        Err(AccessError::Denied)
+    ));
+    assert!(matches!(
+        cloned.document(document.document_id().into(), "unapproved-branch".into()),
+        Err(AccessError::Denied)
+    ));
+    let permitted = WatchSelection {
+        documents: [document.document_id().into()].into(),
+        branch: document.branch().into(),
+        facets: FacetSelection::Keys([("org.example.config".into(), "main".into())].into()),
+    };
+    let mirror = cloned.watch(permitted.clone()).unwrap();
+    assert_eq!(
+        mirror.current().unwrap().facets,
+        BTreeMap::from([(
+            FacetRoute {
+                document: "a".into(),
+                branch: "approved-branch".into(),
+                tag: "org.example.config".into(),
+                key_id: "main".into()
+            },
+            FacetValue::Absent,
+        )])
+    );
+    assert_eq!(
+        document
+            .mutate(
+                "org.example.config".into(),
+                "main".into(),
+                FacetMutation::Write(json!(1))
+            )
+            .unwrap_err(),
+        AccessError::Denied
+    );
+    instance.close();
+    assert!(matches!(cloned.watch(permitted), Err(AccessError::Revoked)));
+    assert!(matches!(
+        document
+            .access()
+            .document("a".into(), "approved-branch".into()),
+        Err(AccessError::Revoked)
+    ));
+    assert_eq!(mirror.current(), Err(AccessError::Revoked));
+    host.close();
+}
+
+#[tokio::test]
+async fn operation_subscription_retains_the_receipt_before_and_after_owner_closure() {
+    let host = Host::new();
+    let node = host.mock_documents();
+    let instance = host.start("writer");
+    let access = grant(&host, &instance, &["a"], Some("main"));
+    let operation = access
+        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .unwrap();
+    let mut updates = operation.subscribe();
+    assert_eq!(*updates.borrow_and_update(), operation.current());
+    instance.close();
+    assert_eq!(operation.current().status, OperationStatus::LocallyApplied);
+    node.complete(operation.id(), Ok(()));
+    updates.changed().await.unwrap();
+    let accepted = OperationReceipt {
+        id: operation.id(),
+        revision: 1,
+        status: OperationStatus::Accepted,
+    };
+    assert_eq!(*updates.borrow_and_update(), accepted);
+    assert!(updates.changed().await.is_err());
+    let mut late = operation.subscribe();
+    assert_eq!(*late.borrow_and_update(), accepted);
+    assert!(late.changed().await.is_err());
+    drop(operation);
+    host.close();
+    assert_eq!(*updates.borrow(), accepted);
+    assert_eq!(*late.borrow(), accepted);
+}
+
+#[test]
+fn accepting_one_mutation_never_persists_a_later_overlay() {
+    for (accepted, rejected, expected) in [
+        (
+            FacetMutation::Write(json!(2)),
+            FacetMutation::Write(json!(3)),
+            FacetValue::Present(json!(2)),
+        ),
+        (
+            FacetMutation::Create(json!(2)),
+            FacetMutation::Delete,
+            FacetValue::Present(json!(2)),
+        ),
+        (
+            FacetMutation::Delete,
+            FacetMutation::Create(json!(3)),
+            FacetValue::Absent,
+        ),
+    ] {
+        let host = Host::new();
+        let node = host.mock_documents();
+        node.seed(route("a", "main"), json!(1));
+        let instance = host.start("writer");
+        let access = grant(&host, &instance, &["a"], Some("main"));
+        let mirror = access.watch(selection(&["a"])).unwrap();
+        let first = access.mutate(route("a", "main"), accepted).unwrap();
+        let later = access.mutate(route("a", "main"), rejected).unwrap();
+        node.complete(first.id(), Ok(()));
+        assert_eq!(
+            first.current(),
+            OperationReceipt {
+                id: first.id(),
+                revision: 1,
+                status: OperationStatus::Accepted,
+            }
+        );
+        assert_eq!(
+            later.current(),
+            OperationReceipt {
+                id: later.id(),
+                revision: 0,
+                status: OperationStatus::LocallyApplied,
+            }
+        );
+        let rejection = OperationError::Rejected {
+            message: "later write denied".into(),
+        };
+        node.complete(later.id(), Err(rejection.clone()));
+        assert_eq!(
+            later.current(),
+            OperationReceipt {
+                id: later.id(),
+                revision: 1,
+                status: OperationStatus::RolledBack(rejection),
+            }
+        );
+        assert_eq!(
+            mirror.current().unwrap().facets,
+            BTreeMap::from([(route("a", "main"), expected.clone())])
+        );
+        mirror.refresh().unwrap();
+        assert_eq!(
+            mirror.current().unwrap().facets,
+            BTreeMap::from([(route("a", "main"), expected)])
+        );
+        assert!(mirror.current().unwrap().pending.is_empty());
+        host.close();
+    }
+}
+
+#[test]
+fn transport_failures_preserve_uncertainty_and_restore_the_latest_source() {
+    for outcome_unknown in [false, true] {
+        let host = Host::new();
+        let node = host.mock_documents();
+        node.seed(route("a", "main"), json!(1));
+        let instance = host.start("writer");
+        let access = grant(&host, &instance, &["a"], Some("main"));
+        let mirror = access.watch(selection(&["a"])).unwrap();
+        let operation = access
+            .mutate(route("a", "main"), FacetMutation::Write(json!(2)))
+            .unwrap();
+        node.external_change(route("a", "main"), Some(json!(3)));
+        assert_eq!(
+            mirror.current().unwrap().facets[&route("a", "main")],
+            FacetValue::Present(json!(2))
+        );
+        let failure = OperationError::Transport {
+            message: "connection lost".into(),
+            outcome_unknown,
+        };
+        node.complete(operation.id(), Err(failure.clone()));
+        assert_eq!(
+            operation.current(),
+            OperationReceipt {
+                id: operation.id(),
+                revision: 1,
+                status: OperationStatus::RolledBack(failure),
+            }
+        );
+        assert_eq!(
+            mirror.current().unwrap().facets,
+            BTreeMap::from([(route("a", "main"), FacetValue::Present(json!(3)))])
+        );
+        assert!(mirror.current().unwrap().pending.is_empty());
+        node.external_change(route("a", "main"), Some(json!(2)));
+        assert_eq!(
+            mirror.current().unwrap().facets[&route("a", "main")],
+            FacetValue::Present(json!(2))
+        );
+        host.close();
+    }
+}
+
+#[tokio::test]
+async fn independent_receipts_survive_out_of_order_completion_and_snapshot_coalescing() {
+    let host = Host::new();
+    let node = host.mock_documents();
+    node.seed(route("a", "main"), json!(0));
+    let instance = host.start("writer");
+    let access = grant(&host, &instance, &["a"], Some("main"));
+    let mirror = access.watch(selection(&["a"])).unwrap();
+    let before = mirror.current().unwrap();
+    let mut notifications = mirror.subscribe().unwrap();
+    let first = access
+        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .unwrap();
+    let second = access
+        .mutate(route("a", "main"), FacetMutation::Write(json!(2)))
+        .unwrap();
+    let third = access
+        .mutate(route("a", "main"), FacetMutation::Write(json!(3)))
+        .unwrap();
+    assert!(first.id() < second.id() && second.id() < third.id());
+    let transport = OperationError::Transport {
+        message: "lost reply".into(),
+        outcome_unknown: true,
+    };
+    let rejection = OperationError::Rejected {
+        message: "denied".into(),
+    };
+    node.complete(third.id(), Err(transport.clone()));
+    node.complete(first.id(), Ok(()));
+    node.complete(second.id(), Err(rejection.clone()));
+    let current = mirror.current().unwrap();
+    assert!(current.revision > before.revision + 1);
+    assert_eq!(
+        current.facets,
+        BTreeMap::from([(route("a", "main"), FacetValue::Present(json!(1)))])
+    );
+    assert!(current.pending.is_empty());
+    assert_eq!(*notifications.borrow_and_update(), current);
+    assert_eq!(mirror.next(before.revision).await.unwrap(), current);
+    for (operation, status) in [
+        (&first, OperationStatus::Accepted),
+        (&second, OperationStatus::RolledBack(rejection)),
+        (&third, OperationStatus::RolledBack(transport)),
+    ] {
+        let receipt = OperationReceipt {
+            id: operation.id(),
+            revision: 1,
+            status,
+        };
+        assert_eq!(operation.current(), receipt);
+        assert_eq!(operation.next(0).await.unwrap(), Some(receipt));
+        assert_eq!(operation.next(1).await.unwrap(), None);
+    }
+    let retained = first.clone();
+    drop(first);
+    for value in 4..40 {
+        let operation = access
+            .mutate(route("a", "main"), FacetMutation::Write(json!(value)))
+            .unwrap();
+        node.complete(operation.id(), Ok(()));
+    }
+    assert_eq!(
+        retained.current(),
+        OperationReceipt {
+            id: retained.id(),
+            revision: 1,
+            status: OperationStatus::Accepted
+        }
+    );
+    host.close();
+}
+
+#[test]
+fn out_of_order_acceptance_and_rejection_remain_operation_local() {
+    let host = Host::new();
+    let node = host.mock_documents();
+    node.seed(route("a", "main"), json!(0));
+    let instance = host.start("writer");
+    let access = grant(&host, &instance, &["a"], Some("main"));
+    let mirror = access.watch(selection(&["a"])).unwrap();
+    let older = access
+        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .unwrap();
+    let newer = access
+        .mutate(route("a", "main"), FacetMutation::Write(json!(2)))
+        .unwrap();
+    node.complete(newer.id(), Ok(()));
+    assert_eq!(newer.current().status, OperationStatus::Accepted);
+    assert_eq!(older.current().status, OperationStatus::LocallyApplied);
+    let rejection = OperationError::Rejected {
+        message: "older rejected".into(),
+    };
+    node.complete(older.id(), Err(rejection.clone()));
+    assert_eq!(
+        older.current().status,
+        OperationStatus::RolledBack(rejection)
+    );
+    assert_eq!(newer.current().status, OperationStatus::Accepted);
+    mirror.refresh().unwrap();
+    assert_eq!(
+        mirror.current().unwrap().facets,
+        BTreeMap::from([(route("a", "main"), FacetValue::Present(json!(2)))])
+    );
+    host.close();
+}
+
+#[tokio::test]
+async fn operation_next_atomically_observes_completion_after_read_or_while_waiting() {
+    let host = Host::new();
+    let node = host.mock_documents();
+    let instance = host.start("writer");
+    let access = grant(&host, &instance, &["a"], Some("main"));
+    let first = access
+        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .unwrap();
+    let before = first.current();
+    node.complete(first.id(), Ok(()));
+    assert_eq!(
+        first.next(before.revision).await.unwrap(),
+        Some(first.current())
+    );
+    assert_eq!(first.next(2).await, Err(DocumentError::SubscriptionLagged));
+    let second = access
+        .mutate(route("a", "main"), FacetMutation::Write(json!(2)))
+        .unwrap();
+    let mut next = std::pin::pin!(second.next(second.current().revision));
+    assert_pending(next.as_mut());
+    node.complete(second.id(), Ok(()));
+    assert_eq!(next.await.unwrap(), Some(second.current()));
+    assert_eq!(second.next(second.current().revision).await.unwrap(), None);
+    host.close();
+}
+
+#[tokio::test]
+async fn owner_and_watch_closure_do_not_cancel_operations_or_erase_receipts() {
+    let host = Host::new();
+    let node = host.mock_documents();
+    let writer = host.start("writer");
+    let reader = host.start("reader");
+    let access = grant(&host, &writer, &["a"], Some("main"));
+    let mirror = access.watch(selection(&["a"])).unwrap();
+    let other = grant(&host, &reader, &["a"], Some("main"))
+        .watch(selection(&["a"]))
+        .unwrap();
+    let operation = access
+        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .unwrap();
+    let initial = operation.current();
+    let mut next = std::pin::pin!(operation.next(initial.revision));
+    assert_pending(next.as_mut());
+    mirror.close();
+    writer.close();
+    assert_eq!(operation.current(), initial);
+    assert_pending(next.as_mut());
+    node.complete(operation.id(), Ok(()));
+    assert_eq!(
+        next.await.unwrap(),
+        Some(OperationReceipt {
+            id: operation.id(),
+            revision: 1,
+            status: OperationStatus::Accepted
+        })
+    );
+    assert_eq!(
+        other.current().unwrap().facets,
+        BTreeMap::from([(route("a", "main"), FacetValue::Present(json!(1)))])
+    );
+    assert!(other.current().unwrap().pending.is_empty());
+    host.close();
+    assert_eq!(operation.current().status, OperationStatus::Accepted);
+}
+
+#[test]
+fn dropping_an_operation_handle_does_not_cancel_source_completion() {
+    let host = Host::new();
+    let node = host.mock_documents();
+    let writer = host.start("writer");
+    let access = grant(&host, &writer, &["a"], Some("main"));
+    let operation = access
+        .mutate(route("a", "main"), FacetMutation::Write(json!(1)))
+        .unwrap();
+    let id = operation.id();
+    drop(operation);
+    writer.close();
+    node.complete(id, Ok(()));
+    let reader = host.start("reader");
+    let mirror = grant(&host, &reader, &["a"], Some("main"))
+        .watch(selection(&["a"]))
+        .unwrap();
+    assert_eq!(
+        mirror.current().unwrap().facets,
+        BTreeMap::from([(route("a", "main"), FacetValue::Present(json!(1)))])
+    );
+    assert!(mirror.current().unwrap().pending.is_empty());
+    host.close();
+}
+
+#[test]
+fn all_mutation_wrappers_use_the_same_source_completion_path() {
+    let host = Host::new();
+    let node = host.mock_documents();
+    let instance = host.start("writer");
+    let access = grant(&host, &instance, &["a"], Some("main"));
+    let document = access.document("a".into(), "main".into()).unwrap();
+    let facet = document
+        .facet::<Value>("org.example.config".into(), "main".into())
+        .unwrap();
+    let write = facet.write(json!(1)).unwrap();
+    let create = document
+        .mutate(
+            "org.example.config".into(),
+            "main".into(),
+            FacetMutation::Create(json!(2)),
+        )
+        .unwrap();
+    node.settle(true);
+    assert_eq!(write.current().status, OperationStatus::Accepted);
+    assert_eq!(create.current().status, OperationStatus::Accepted);
+    facet.watch.refresh().unwrap();
+    assert_eq!(facet.value(&facet.watch.current().unwrap()), Some(json!(2)));
+    let delete = access
+        .mutate(route("a", "main"), FacetMutation::Delete)
+        .unwrap();
+    node.settle(false);
+    assert_eq!(
+        delete.current().status,
+        OperationStatus::RolledBack(OperationError::Rejected {
+            message: "mock source rejected operation".into()
+        })
+    );
+    assert_eq!(facet.value(&facet.watch.current().unwrap()), Some(json!(2)));
+    host.close();
+}
+
+#[tokio::test]
+async fn document_next_is_gap_free_and_coalesces_complete_snapshots() {
+    let host = Host::new();
+    let node = host.mock_documents();
+    node.seed(route("a", "main"), json!(1));
+    let instance = host.start("reader");
+    let mirror = grant(&host, &instance, &["a"], Some("main"))
+        .watch(selection(&["a"]))
+        .unwrap();
+    let before = mirror.current().unwrap();
+    node.external_change(route("a", "main"), Some(json!(2)));
+    node.external_change(route("a", "main"), Some(json!(3)));
+    let latest = mirror.current().unwrap();
+    assert_eq!(mirror.next(before.revision).await.unwrap(), latest);
+    assert_eq!(
+        mirror.next(latest.revision + 1).await,
+        Err(DocumentError::SubscriptionLagged)
+    );
+    let mut next = std::pin::pin!(mirror.next(latest.revision));
+    assert_pending(next.as_mut());
+    node.external_change(route("a", "main"), Some(json!(4)));
+    assert_eq!(next.await.unwrap(), mirror.current().unwrap());
+    host.close();
+}
+
+#[tokio::test]
+async fn document_next_rejects_old_selection_continuations_and_allows_rereading() {
+    let host = Host::new();
+    let instance = host.start("reader");
+    let access = grant(&host, &instance, &["a", "b"], Some("main"));
+    let mirror = access.watch(selection(&["a"])).unwrap();
+    let before = mirror.current().unwrap();
+    let mut next = std::pin::pin!(mirror.next(before.revision));
+    assert_pending(next.as_mut());
+    mirror.select(selection(&["b"])).unwrap();
+    assert_eq!(next.await, Err(DocumentError::SubscriptionLagged));
+    let selected = mirror.current().unwrap();
+    assert_eq!(
+        selected.facets,
+        BTreeMap::from([(route("b", "main"), FacetValue::Absent)])
+    );
+    let mut next = std::pin::pin!(mirror.next(selected.revision));
+    assert_pending(next.as_mut());
+    mirror.select(selection(&["b"])).unwrap();
+    assert_eq!(next.await, Err(DocumentError::SubscriptionLagged));
+    let selected = mirror.current().unwrap();
+    let mut next = std::pin::pin!(mirror.next(selected.revision));
+    assert_pending(next.as_mut());
+    host.mock_documents()
+        .external_change(route("b", "main"), Some(json!(1)));
+    assert_eq!(next.await.unwrap(), mirror.current().unwrap());
+    host.close();
+}
+
+#[tokio::test]
+async fn document_next_rechecks_revocation_after_pending_or_ready_notifications() {
+    for ready_notification in [false, true] {
+        let host = Host::new();
+        let node = host.mock_documents();
+        let instance = host.start("reader");
+        let mirror = grant(&host, &instance, &["a"], Some("main"))
+            .watch(selection(&["a"]))
+            .unwrap();
+        let revision = mirror.current().unwrap().revision;
+        let mut next = std::pin::pin!(mirror.next(revision));
+        assert_pending(next.as_mut());
+        if ready_notification {
+            node.external_change(route("a", "main"), Some(json!(1)));
+        }
+        instance.close();
+        assert_eq!(next.await, Err(DocumentError::Access(AccessError::Revoked)));
+        assert_eq!(
+            mirror.next(revision).await,
+            Err(DocumentError::Access(AccessError::Revoked))
+        );
+        host.close();
+    }
 }

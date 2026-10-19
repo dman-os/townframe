@@ -16,41 +16,39 @@ pub trait Provision: Clone + Send + Sync + 'static {
 }
 
 #[derive(Clone)]
-struct Published {
-    owner: Instance,
-    version: u32,
+pub(super) struct Published {
+    pub owner: Instance,
+    pub version: u32,
     value: Arc<dyn Any + Send + Sync>,
+}
+
+impl Published {
+    pub fn get<T: Provision>(&self) -> Result<T, AccessError> {
+        self.owner.check()?;
+        assert_eq!(self.version, T::VERSION, "native contract version mismatch");
+        Ok(self
+            .value
+            .downcast_ref::<T>()
+            .expect("contract identity mapped to two native types")
+            .clone())
+    }
 }
 
 #[derive(Clone, Default)]
 pub(super) struct Provisions(Arc<Mutex<BTreeMap<(String, String), Published>>>);
 
 impl Provisions {
-    pub fn provider(&self, instance: &str, contract: &str) -> Result<(Instance, u32), AccessError> {
+    pub fn resolve(&self, instance: &str, contract: &str) -> Result<Published, AccessError> {
         let records = self.0.lock().unwrap();
         let record = records
             .get(&(instance.into(), contract.into()))
             .ok_or(AccessError::Revoked)?;
         record.owner.check()?;
-        Ok((record.owner.clone(), record.version))
+        Ok(record.clone())
     }
 
     pub fn get<T: Provision>(&self, instance: &str) -> Result<T, AccessError> {
-        let records = self.0.lock().unwrap();
-        let record = records
-            .get(&(instance.into(), T::ID.into()))
-            .ok_or(AccessError::Revoked)?;
-        record.owner.check()?;
-        assert_eq!(
-            record.version,
-            T::VERSION,
-            "native contract version mismatch"
-        );
-        Ok(record
-            .value
-            .downcast_ref::<T>()
-            .expect("contract identity mapped to two native types")
-            .clone())
+        self.resolve(instance, T::ID)?.get::<T>()
     }
 
     pub fn commit(

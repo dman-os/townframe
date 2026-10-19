@@ -54,9 +54,12 @@ Consequences and the pattern to use instead:
   `inner_size()` → `surface_size()`.)
 - Verified 0.8.0-alpha / `blitz-dom` 0.3.0-beta.2.
 
-### Linux accessibility: enable the backend; semantic actions are not wired
+### Linux accessibility: enable the backend; semantic actions are not wired; post-mount DOM edits do not update AT-SPI
 
-`blitz-shell 0.3.0-beta.2` disables defaults on `accesskit_xplat 0.1.1`. Accessibility alone does not enable its Unix backend; desktop explicitly enables xplat defaults on Linux. Once enabled, AT-SPI inspection can work, but `BlitzShellEvent::Accessibility → ActionRequested` is still an empty TODO in this resolved version. An accessibility CLI click can therefore report dispatch success without changing the UI. Do not use that receipt as evidence of an interaction; verify the resulting state. Use normal keyboard input or operator input for activation; do not patch the upstream TODO as part of unrelated feature work.
+`blitz-shell 0.3.0-beta.4` disables defaults on `accesskit_xplat`. Accessibility alone does not enable its Unix backend; desktop explicitly enables `accesskit_xplat = "0.2.1"` defaults on Linux. Once enabled, initial AT-SPI registration works (`InitialTreeRequested` builds the first tree), but two upstream defects remain in `blitz-dom 0.3.0-beta.4` / `blitz-shell 0.3.0-beta.4`:
+
+1. `BaseDocument::has_changes(&self)` (`blitz-dom-0.3.0-beta.4/src/document.rs:1028`) returns `self.changed_nodes.is_empty()` (inverted) and `changed_nodes` is never cleared after initial node creation, so `window.poll()` in `blitz-shell-0.3.0-beta.4/src/window.rs:379` (`if inner.has_changes() { self.accessibility.update_tree(&inner); }`) never pushes DOM mutations that land after `InitialTreeRequested` (such as async `use_future` micro activation or state updates) to AT-SPI.
+2. `BlitzShellEvent::Accessibility → ActionRequested` (`blitz-shell-0.3.0-beta.4/src/application.rs:87`) is still an empty `// TODO`. An accessibility CLI click can therefore report dispatch success without changing the UI. Do not use that receipt as evidence of an interaction; verify the resulting state.
 
 ### `tabindex` panics, so keyboard focus is unavailable
 
@@ -114,5 +117,4 @@ units. Use `page_coordinates()` for anything that spans a gesture.
 
 ## Verified against
 
-- `dioxus 0.8.0-alpha.1`, `dioxus-native` local patch, `blitz-dom 0.3.0-beta.2` from crates.io
-  (`../blitz` checkout is the same version but was **not** the resolved source). Recorded 2026-09.
+- `dioxus 0.8.0-alpha.3` (`dioxus-native` local fork `c47a76bd8097`), `blitz-dom 0.3.0-beta.4` and `blitz-shell 0.3.0-beta.4` from crates.io. Recorded 2026-10.

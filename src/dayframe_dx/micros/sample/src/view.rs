@@ -1,6 +1,6 @@
 //! Contributor-owned native presentation; Settings mounts it without reading its document.
 use super::SampleConfig;
-use dayframe_app::documents::Facet;
+use dayframe_app::documents::{Facet, Operation, OperationReceipt};
 use dioxus::prelude::*;
 
 #[component]
@@ -22,6 +22,21 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
     let snapshot = state();
     let config = facet.value(&snapshot);
     let mut status = use_signal(|| "Configuration loaded from the mock node.".to_string());
+    let mut receipt = use_signal(|| None::<OperationReceipt>);
+    let mut track = move |operation: Operation| {
+        let initial = operation.current();
+        receipt.set(Some(initial.clone()));
+        spawn(async move {
+            if let Some(completed) = operation.next(initial.revision).await.unwrap()
+                && receipt
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|current| current.id == completed.id)
+            {
+                receipt.set(Some(completed));
+            }
+        });
+    };
     let config_for_toggle = config.clone();
     let sample_for_toggle = facet.clone();
     let sample_for_refresh = facet.clone();
@@ -38,7 +53,10 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                         let mut next = config_for_toggle.clone().unwrap();
                         next.enabled = !next.enabled;
                         match sample_for_toggle.write(next) {
-                            Ok(_) => status.set("Optimistic edit is visible. Accept or reject it below.".into()),
+                            Ok(operation) => {
+                                 track(operation);
+                                 status.set("Optimistic edit is visible. Accept or reject it below.".into());
+                             },
                             Err(error) => status.set(error.to_string()),
                         }
                     },
@@ -53,7 +71,10 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
                             let mut next = SampleConfig { enabled: config.enabled, greeting: event.value() };
                             next.greeting.truncate(120);
                             match facet.write(next) {
-                                Ok(_) => status.set("Optimistic greeting edit pending.".into()),
+                                Ok(operation) => {
+                                     track(operation);
+                                     status.set("Optimistic greeting edit pending.".into());
+                                 },
                                 Err(error) => status.set(error.to_string()),
                             }
                         }
@@ -73,8 +94,8 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
             }
             p { role: "status", "{status}" }
             p { class: "text-sm text-muted-foreground", "Mirror revision {snapshot.revision} · pending writes: {snapshot.pending.len()}" }
-            if let Some((id, outcome)) = snapshot.last_transaction {
-                p { role: "status", "Transaction {id}: {outcome:?}" }
+            if let Some(receipt) = receipt() {
+                p { role: "status", "Operation {receipt.id}: {receipt.status:?}" }
             }
         }
     }

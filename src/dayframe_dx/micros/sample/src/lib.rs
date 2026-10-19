@@ -4,7 +4,7 @@ mod tests;
 mod view;
 
 use dayframe_app::{
-    documents::{DocumentRef, DocumentSnapshot, DocumentWatch, Facet, FacetRoute},
+    documents::{DocumentRef, DocumentSnapshot, DocumentWatch, Facet, FacetRoute, Operation},
     host::{AccessError, ComponentRef, Host, Instance},
     micros::{MicroDescriptor, MicroFactory, MicroId, MicroProvision, Provision},
     native::NativeComponents,
@@ -77,7 +77,7 @@ impl SampleMicro {
         self.config.value(snapshot)
     }
 
-    pub fn edit(&self, value: SampleConfig) -> Result<u64, AccessError> {
+    pub fn edit(&self, value: SampleConfig) -> Result<Operation, AccessError> {
         self.config.write(value)
     }
 
@@ -119,11 +119,11 @@ pub fn provider(native: NativeComponents) -> MicroFactory {
             requirements: vec![MicroProvision {
                 id: SettingsSections::ID.into(),
                 version: 1,
-                        }],
+            }],
             provisions: vec![MicroProvision {
                 id: SampleMicro::ID.into(),
                 version: 1,
-                        }],
+            }],
         },
         move |activation| {
             let instance = activation.instance();

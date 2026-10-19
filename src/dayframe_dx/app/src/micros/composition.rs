@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use super::{MicroDescriptor, MicroId, MicroRegistry, MicroRegistryError};
 use crate::{
-    documents::{DocumentSnapshot, Facet},
+    documents::{DocumentSnapshot, Facet, Operation},
     host::{AccessError, CloseReason, Host, Instance},
 };
 
@@ -41,6 +41,7 @@ pub enum InstanceState {
     Blocked {
         requirements: Vec<String>,
     },
+    Activating,
     Active,
     Failed(MicroRegistryError),
 }
@@ -59,8 +60,18 @@ pub enum ConfigurationError {
     LockedInstance(String),
     #[error("unknown configured instance: {0}")]
     UnknownInstance(String),
+    #[error("configuration is not hydrated")]
+    Loading,
+    #[error("configuration request was superseded")]
+    Superseded,
     #[error(transparent)]
     Access(#[from] AccessError),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigurationSnapshot {
+    Loading,
+    Ready(BTreeMap<String, ConfiguredMicro>),
 }
 
 /// Atomic current composition plus change notification.
@@ -68,10 +79,10 @@ pub enum ConfigurationError {
 /// Nothing below this trait knows whether the desired composition comes from static locked-down
 /// linkage, a host document facet, or an in-memory test mock.
 pub trait ConfigurationSource {
-    fn current(&self) -> Result<BTreeMap<String, ConfiguredMicro>, AccessError>;
+    fn current(&self) -> Result<ConfigurationSnapshot, AccessError>;
     fn subscribe(&self) -> Result<ConfigurationWatch, AccessError>;
-    fn is_locked(&self, _instance: &str) -> bool {
-        false
+    fn fixed(&self) -> Option<&BTreeMap<String, ConfiguredMicro>> {
+        None
     }
 }
 
@@ -104,21 +115,31 @@ impl ConfigurationWatch {
         }
     }
 
-    pub fn current(&mut self) -> Result<BTreeMap<String, ConfiguredMicro>, AccessError> {
+    pub fn current(&mut self) -> Result<ConfigurationSnapshot, AccessError> {
         match &mut self.inner {
-            ConfigurationWatchInner::Static(entries) => Ok(entries.clone()),
-            ConfigurationWatchInner::Watch(receiver) => Ok(receiver.borrow_and_update().clone()),
+            ConfigurationWatchInner::Static(entries) => {
+                Ok(ConfigurationSnapshot::Ready(entries.clone()))
+            }
+            ConfigurationWatchInner::Watch(receiver) => Ok(ConfigurationSnapshot::Ready(
+                receiver.borrow_and_update().clone(),
+            )),
             ConfigurationWatchInner::Facet(watch) => {
                 let snapshot = watch.updates.borrow_and_update();
-                if snapshot.revoked {
-                    return Err(AccessError::Revoked);
-                }
-                let mut desired = watch.facet.value(&snapshot).unwrap_or_default();
-                for (name, config) in &watch.locked {
-                    desired.insert(name.clone(), config.clone());
-                }
-                Ok(desired)
+                facet_configuration(&watch.facet, &watch.locked, &snapshot)
             }
+        }
+    }
+
+    pub fn has_changed(&self) -> Result<bool, AccessError> {
+        match &self.inner {
+            ConfigurationWatchInner::Static(_) => Ok(false),
+            ConfigurationWatchInner::Watch(receiver) => {
+                receiver.has_changed().map_err(|_| AccessError::Revoked)
+            }
+            ConfigurationWatchInner::Facet(watch) => watch
+                .updates
+                .has_changed()
+                .map_err(|_| AccessError::Revoked),
         }
     }
 
@@ -156,16 +177,16 @@ impl StaticConfiguration {
 }
 
 impl ConfigurationSource for StaticConfiguration {
-    fn current(&self) -> Result<BTreeMap<String, ConfiguredMicro>, AccessError> {
-        Ok(self.entries.clone())
+    fn current(&self) -> Result<ConfigurationSnapshot, AccessError> {
+        Ok(ConfigurationSnapshot::Ready(self.entries.clone()))
     }
 
     fn subscribe(&self) -> Result<ConfigurationWatch, AccessError> {
         Ok(ConfigurationWatch::from_static(self.entries.clone()))
     }
 
-    fn is_locked(&self, instance: &str) -> bool {
-        self.entries.contains_key(instance)
+    fn fixed(&self) -> Option<&BTreeMap<String, ConfiguredMicro>> {
+        Some(&self.entries)
     }
 }
 
@@ -228,12 +249,19 @@ impl MockConfiguration {
         if self.locked.contains_key(instance) {
             return Err(ConfigurationError::LockedInstance(instance.to_owned()));
         }
-        let mut next = self.sender.borrow().clone();
-        let entry = next
-            .get_mut(instance)
-            .ok_or_else(|| ConfigurationError::UnknownInstance(instance.to_owned()))?;
-        entry.enablement = enablement;
-        self.set(next)
+        let mut result = Ok(());
+        self.sender.send_if_modified(|current| {
+            let Some(entry) = current.get_mut(instance) else {
+                result = Err(ConfigurationError::UnknownInstance(instance.to_owned()));
+                return false;
+            };
+            if entry.enablement == enablement {
+                return false;
+            }
+            entry.enablement = enablement;
+            true
+        });
+        result
     }
 
     pub fn rebind(
@@ -244,26 +272,33 @@ impl MockConfiguration {
         if self.locked.contains_key(instance) {
             return Err(ConfigurationError::LockedInstance(instance.to_owned()));
         }
-        let mut next = self.sender.borrow().clone();
-        let entry = next
-            .get_mut(instance)
-            .ok_or_else(|| ConfigurationError::UnknownInstance(instance.to_owned()))?;
-        entry.bindings = bindings;
-        self.set(next)
+        let mut result = Ok(());
+        self.sender.send_if_modified(|current| {
+            let Some(entry) = current.get_mut(instance) else {
+                result = Err(ConfigurationError::UnknownInstance(instance.to_owned()));
+                return false;
+            };
+            if entry.bindings == bindings {
+                return false;
+            }
+            entry.bindings = bindings;
+            true
+        });
+        result
     }
 }
 
 impl ConfigurationSource for MockConfiguration {
-    fn current(&self) -> Result<BTreeMap<String, ConfiguredMicro>, AccessError> {
-        Ok(self.sender.borrow().clone())
+    fn current(&self) -> Result<ConfigurationSnapshot, AccessError> {
+        Ok(ConfigurationSnapshot::Ready(self.sender.borrow().clone()))
     }
 
     fn subscribe(&self) -> Result<ConfigurationWatch, AccessError> {
         Ok(ConfigurationWatch::from_watch(self.sender.subscribe()))
     }
 
-    fn is_locked(&self, instance: &str) -> bool {
-        self.locked.contains_key(instance)
+    fn fixed(&self) -> Option<&BTreeMap<String, ConfiguredMicro>> {
+        Some(&self.locked)
     }
 }
 
@@ -291,11 +326,13 @@ impl FacetConfiguration {
         &self,
         instance: &str,
         enablement: Enablement,
-    ) -> Result<u64, ConfigurationError> {
+    ) -> Result<Operation, ConfigurationError> {
         if self.locked.contains_key(instance) {
             return Err(ConfigurationError::LockedInstance(instance.to_owned()));
         }
-        let mut next = self.current()?;
+        let ConfigurationSnapshot::Ready(mut next) = self.current()? else {
+            return Err(ConfigurationError::Loading);
+        };
         let entry = next
             .get_mut(instance)
             .ok_or_else(|| ConfigurationError::UnknownInstance(instance.to_owned()))?;
@@ -310,11 +347,13 @@ impl FacetConfiguration {
         &self,
         instance: &str,
         bindings: BTreeMap<String, String>,
-    ) -> Result<u64, ConfigurationError> {
+    ) -> Result<Operation, ConfigurationError> {
         if self.locked.contains_key(instance) {
             return Err(ConfigurationError::LockedInstance(instance.to_owned()));
         }
-        let mut next = self.current()?;
+        let ConfigurationSnapshot::Ready(mut next) = self.current()? else {
+            return Err(ConfigurationError::Loading);
+        };
         let entry = next
             .get_mut(instance)
             .ok_or_else(|| ConfigurationError::UnknownInstance(instance.to_owned()))?;
@@ -327,16 +366,8 @@ impl FacetConfiguration {
 }
 
 impl ConfigurationSource for FacetConfiguration {
-    fn current(&self) -> Result<BTreeMap<String, ConfiguredMicro>, AccessError> {
-        let snapshot = self.facet.watch.current()?;
-        if snapshot.revoked {
-            return Err(AccessError::Revoked);
-        }
-        let mut desired = self.facet.value(&snapshot).unwrap_or_default();
-        for (name, config) in &self.locked {
-            desired.insert(name.clone(), config.clone());
-        }
-        Ok(desired)
+    fn current(&self) -> Result<ConfigurationSnapshot, AccessError> {
+        facet_configuration(&self.facet, &self.locked, &self.facet.watch.current()?)
     }
 
     fn subscribe(&self) -> Result<ConfigurationWatch, AccessError> {
@@ -350,9 +381,31 @@ impl ConfigurationSource for FacetConfiguration {
         })
     }
 
-    fn is_locked(&self, instance: &str) -> bool {
-        self.locked.contains_key(instance)
+    fn fixed(&self) -> Option<&BTreeMap<String, ConfiguredMicro>> {
+        Some(&self.locked)
     }
+}
+
+fn facet_configuration(
+    facet: &Facet<BTreeMap<String, ConfiguredMicro>>,
+    locked: &BTreeMap<String, ConfiguredMicro>,
+    snapshot: &DocumentSnapshot,
+) -> Result<ConfigurationSnapshot, AccessError> {
+    if snapshot.revoked {
+        return Err(AccessError::Revoked);
+    }
+    if snapshot
+        .facets
+        .values()
+        .any(|value| matches!(value, crate::documents::FacetValue::Loading))
+    {
+        return Ok(ConfigurationSnapshot::Loading);
+    }
+    let mut desired = facet.value(snapshot).unwrap_or_default();
+    for (name, config) in locked {
+        desired.insert(name.clone(), config.clone());
+    }
+    Ok(ConfigurationSnapshot::Ready(desired))
 }
 
 struct Active {
@@ -366,16 +419,42 @@ struct Failed {
     error: MicroRegistryError,
 }
 
+struct Pending {
+    configuration: ConfiguredMicro,
+    dependencies: Vec<Instance>,
+    activation: super::PendingActivation,
+    result: Option<Result<(), super::ActivationError>>,
+}
+
 #[derive(Default)]
 pub(crate) struct Composition {
     active: BTreeMap<String, Active>,
     failed: BTreeMap<String, Failed>,
     stopped: BTreeMap<String, ConfiguredMicro>,
-    order: Vec<String>,
+    pending: BTreeMap<String, Pending>,
 }
 
 impl Composition {
-    pub async fn reconcile(
+    pub fn validate(
+        registry: &MicroRegistry,
+        desired: &BTreeMap<String, ConfiguredMicro>,
+    ) -> Result<(), ConfigurationError> {
+        let definitions = registry
+            .descriptors()
+            .map(|descriptor| (descriptor.id.clone(), descriptor))
+            .collect();
+        activation_order(&definitions, desired).map(|_| ())
+    }
+
+    pub fn cancel_pending(&mut self) {
+        self.pending.clear();
+    }
+
+    pub fn is_settled(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    pub fn update(
         &mut self,
         host: &Host,
         registry: &MicroRegistry,
@@ -385,121 +464,191 @@ impl Composition {
             .descriptors()
             .map(|descriptor| (descriptor.id.clone(), descriptor))
             .collect();
-        // Validate before withdrawing anything: a malformed edit must not destroy a working graph.
         let order = activation_order(&definitions, desired)?;
-        for name in self.order.iter().rev() {
-            let active = self.active.get(name).unwrap();
+        for (name, active) in &self.active {
             if desired.get(name) != Some(&active.configuration) {
                 active.instance.close();
             }
         }
-        for (name, active) in &self.active {
-            if active.instance.close_reason() == Some(CloseReason::Requested)
-                && desired.get(name) == Some(&active.configuration)
+        self.pending
+            .retain(|name, pending| desired.get(name) == Some(&pending.configuration));
+        for (name, configuration, instance) in self
+            .active
+            .iter()
+            .map(|(name, active)| (name, &active.configuration, &active.instance))
+            .chain(self.pending.iter().map(|(name, pending)| {
+                (name, &pending.configuration, &pending.activation.instance)
+            }))
+        {
+            if instance.close_reason() == Some(CloseReason::Requested)
+                && desired.get(name) == Some(configuration)
             {
-                // Do not turn a self-stop or administrative close into an automatic restart loop.
-                self.stopped
-                    .insert(name.clone(), active.configuration.clone());
+                self.stopped.insert(name.clone(), configuration.clone());
             }
         }
         self.stopped
             .retain(|name, configuration| desired.get(name) == Some(configuration));
         self.active
             .retain(|_, active| active.instance.check().is_ok());
+        self.pending
+            .retain(|_, pending| pending.activation.instance.check().is_ok());
         self.failed
             .retain(|name, failed| desired.get(name) == Some(&failed.configuration));
         let mut states: BTreeMap<_, _> = desired
             .iter()
-            .filter(|(_, configuration)| configuration.enablement == Enablement::Disabled)
+            .filter(|(_, config)| config.enablement == Enablement::Disabled)
             .map(|(name, _)| (name.clone(), InstanceState::Disabled))
             .collect();
-        for name in &order {
-            let configuration = &desired[name];
-            if !definitions.contains_key(&configuration.provider) {
-                states.insert(
-                    name.clone(),
-                    InstanceState::UnavailableProvider(configuration.provider.clone()),
-                );
-                continue;
-            }
-            if self.stopped.contains_key(name) {
-                states.insert(name.clone(), InstanceState::Stopped);
-                continue;
-            }
-            let missing: Vec<_> = configuration
-                .bindings
-                .iter()
-                .filter(|(_, supplier)| !self.active.contains_key(*supplier))
-                .map(|(contract, _)| contract.clone())
-                .collect();
-            if !missing.is_empty() {
-                states.insert(
-                    name.clone(),
+        for name in order {
+            let configuration = &desired[&name];
+            let state = if !definitions.contains_key(&configuration.provider) {
+                InstanceState::UnavailableProvider(configuration.provider.clone())
+            } else if self.stopped.contains_key(&name) {
+                InstanceState::Stopped
+            } else if self.active.contains_key(&name) {
+                InstanceState::Active
+            } else {
+                let missing: Vec<_> = configuration
+                    .bindings
+                    .iter()
+                    .filter(|(_, supplier)| !self.active.contains_key(*supplier))
+                    .map(|(contract, _)| contract.clone())
+                    .collect();
+                if !missing.is_empty() {
                     InstanceState::Blocked {
                         requirements: missing,
+                    }
+                } else if self.pending.contains_key(&name) {
+                    InstanceState::Activating
+                } else {
+                    let dependencies: Vec<_> = configuration
+                        .bindings
+                        .values()
+                        .map(|supplier| self.active[supplier].instance.clone())
+                        .collect();
+                    if let Some(failed) = self.failed.get(&name)
+                        && failed.dependencies == dependencies
+                    {
+                        InstanceState::Failed(failed.error.clone())
+                    } else {
+                        match registry.begin(
+                            host,
+                            &configuration.provider,
+                            name.clone(),
+                            &configuration.bindings,
+                        ) {
+                            Ok(activation) => {
+                                assert!(
+                                    self.pending
+                                        .insert(
+                                            name.clone(),
+                                            Pending {
+                                                configuration: configuration.clone(),
+                                                dependencies,
+                                                activation,
+                                                result: None
+                                            }
+                                        )
+                                        .is_none()
+                                );
+                                InstanceState::Activating
+                            }
+                            Err(error) => {
+                                self.failed.insert(
+                                    name.clone(),
+                                    Failed {
+                                        configuration: configuration.clone(),
+                                        dependencies,
+                                        error: error.clone(),
+                                    },
+                                );
+                                InstanceState::Failed(error)
+                            }
+                        }
+                    }
+                }
+            };
+            states.insert(name, state);
+        }
+        Ok(states)
+    }
+
+    pub async fn next(&mut self) -> String {
+        std::future::poll_fn(|context| {
+            for (name, pending) in &mut self.pending {
+                if pending.result.is_none()
+                    && let std::task::Poll::Ready(result) = pending.activation.poll(context)
+                {
+                    pending.result = Some(result);
+                }
+                if pending.result.is_some() {
+                    return std::task::Poll::Ready(name.clone());
+                }
+            }
+            std::task::Poll::Pending
+        })
+        .await
+    }
+
+    pub fn complete(&mut self, name: String, desired: &BTreeMap<String, ConfiguredMicro>) {
+        let mut pending = self.pending.remove(&name).unwrap();
+        let result = pending.result.take().unwrap();
+        if desired.get(&name) != Some(&pending.configuration) {
+            return;
+        }
+        if pending.activation.instance.check().is_err() {
+            if pending.activation.instance.close_reason() == Some(CloseReason::Requested) {
+                self.stopped.insert(name, pending.configuration);
+            }
+            return;
+        }
+        let dependencies: Option<Vec<_>> = pending
+            .configuration
+            .bindings
+            .values()
+            .map(|supplier| {
+                self.active
+                    .get(supplier)
+                    .map(|active| active.instance.clone())
+            })
+            .collect();
+        if dependencies.as_ref() != Some(&pending.dependencies)
+            || pending
+                .dependencies
+                .iter()
+                .any(|instance| instance.check().is_err())
+        {
+            return;
+        }
+        match result
+            .map_err(MicroRegistryError::from)
+            .and_then(|()| pending.activation.commit())
+        {
+            Ok(instance) => {
+                self.failed.remove(&name);
+                assert!(
+                    self.active
+                        .insert(
+                            name,
+                            Active {
+                                configuration: pending.configuration,
+                                instance
+                            }
+                        )
+                        .is_none()
+                );
+            }
+            Err(error) => {
+                self.failed.insert(
+                    name,
+                    Failed {
+                        configuration: pending.configuration,
+                        dependencies: pending.dependencies,
+                        error,
                     },
                 );
-                continue;
-            }
-            if self.active.contains_key(name) {
-                states.insert(name.clone(), InstanceState::Active);
-                continue;
-            }
-            let dependencies: Vec<_> = configuration
-                .bindings
-                .values()
-                .map(|supplier| self.active[supplier].instance.clone())
-                .collect();
-            // Failure is retained until its inputs change. Unrelated configuration edits do not
-            // repeatedly run a failing activation; disable/re-enable explicitly permits another try.
-            if let Some(failed) = self.failed.get(name)
-                && failed.dependencies == dependencies
-            {
-                states.insert(name.clone(), InstanceState::Failed(failed.error.clone()));
-                continue;
-            }
-            match registry
-                .activate_async(
-                    host,
-                    &configuration.provider,
-                    name.clone(),
-                    configuration.bindings.clone(),
-                )
-                .await
-            {
-                Ok(instance) => {
-                    self.failed.remove(name);
-                    assert!(
-                        self.active
-                            .insert(
-                                name.clone(),
-                                Active {
-                                    configuration: configuration.clone(),
-                                    instance,
-                                }
-                            )
-                            .is_none()
-                    );
-                    states.insert(name.clone(), InstanceState::Active);
-                }
-                Err(error) => {
-                    states.insert(name.clone(), InstanceState::Failed(error.clone()));
-                    self.failed.insert(
-                        name.clone(),
-                        Failed {
-                            configuration: configuration.clone(),
-                            dependencies,
-                            error,
-                        },
-                    );
-                }
             }
         }
-        self.order = order
-            .into_iter()
-            .filter(|name| self.active.contains_key(name))
-            .collect();
-        Ok(states)
     }
 }
 
