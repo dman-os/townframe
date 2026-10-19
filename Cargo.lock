@@ -1134,6 +1134,7 @@ dependencies = [
  "big_sync_core",
  "blake3",
  "ciborium",
+ "coset",
  "data-encoding",
  "displaydoc",
  "ed25519-dalek 2.2.0",
@@ -2503,6 +2504,16 @@ dependencies = [
  "libc",
  "metal",
  "objc",
+]
+
+[[package]]
+name = "coset"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1eb98d5e9155e2cf7cd942c8b3033097d4563b6fb0a00b9caecb74669555c058"
+dependencies = [
+ "ciborium",
+ "ciborium-io",
 ]
 
 [[package]]

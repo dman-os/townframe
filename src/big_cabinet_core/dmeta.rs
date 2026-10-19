@@ -20,25 +20,31 @@
 //! holds the resulting CID; the repository is what reads the value back out of the transaction and
 //! passes those bytes here.
 
+mod attribution;
 mod native;
 mod verification;
 
+#[cfg(test)]
+mod e2e;
+
+pub use attribution::{Attribution, AttributionError};
+
 use jiff::Timestamp;
-pub use native::{FiniteF64, NativeValue, encode_native};
+pub use native::{CanonicalF64, NativeReadError, NativeValue, encode_native};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use uuid::Uuid;
 pub use verification::{
-    Evidence, SignatureChecks, SignedFacetClaim, VerificationState, document_verification,
+    Evidence, FacetValue, SignatureChecks, SignedFacetClaim, VerificationState, facet_verification,
     fold_checks,
 };
 
 use crate::reference::FacetKey;
 
 pub const DMETA_FACET_TAG: &str = "org.example.daybook.dmeta";
-const CLAIM_DOMAIN: &[u8] = b"daybook.facet-claim.v1\0";
-const CLAIM_ID_DOMAIN: &[u8] = b"daybook.facet-claim-id.v1\0";
+const CLAIM_DOMAIN: &[u8] = b"daybook.facet-claim.v2\0";
+const CLAIM_ID_DOMAIN: &[u8] = b"daybook.facet-claim-id.v2\0";
 const CID_VERSION_RAW_BLAKE3: [u8; 4] = [0x01, 0x55, 0x1e, 0x20];
 const CID_LENGTH: usize = 36;
 
@@ -56,34 +62,77 @@ pub struct DocumentIdentity {
     pub created_at: Timestamp,
 }
 
-/// An actor as dmeta records it: a public key, the node-signed attribution that binds the node to
-/// that key, and when the binding was made.
-///
-/// The delegation is opaque here. Its shape is the capability token, which belongs to the authority
-/// repository, and dmeta records authorship rather than the actor's current grants — so this module
-/// carries the bytes and never interprets them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct Uuid7(Uuid);
+
+impl Uuid7 {
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
+
+    pub fn unix_millis(&self) -> u64 {
+        let (seconds, nanos) = self.0.get_timestamp().expect("a UUIDv7 carries a timestamp").to_unix();
+        seconds * 1000 + u64::from(nanos) / 1_000_000
+    }
+}
+
+impl Default for Uuid7 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TryFrom<Uuid> for Uuid7 {
+    type Error = DmetaError;
+
+    fn try_from(value: Uuid) -> Result<Self, Self::Error> {
+        if value.get_version_num() != 7 || value.get_variant() != uuid::Variant::RFC4122 {
+            return Err(DmetaError::InvalidUuidVersion);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl std::fmt::Display for Uuid7 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl<'de> Deserialize<'de> for Uuid7 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Uuid::deserialize(deserializer)?.try_into().map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Uuid7 {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Uuid7".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ActorMetadata {
+    pub pubkey: MultibaseKey,
     pub actor_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<Bytes>,
-    pub created_at: Timestamp,
-}
-
-/// One alias assigned to a facet slot, and when it was assigned.
-///
-/// `key` is the whole facet key, tag and instance together. Concurrent creators of the same slot
-/// each record an alias, and the record is the durable evidence of that concurrency after Automerge
-/// no longer exposes the original conflict. The alias selects nothing: a facet's content is the
-/// merged value at its key, not a value chosen by UUID.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub struct FacetAlias {
-    pub key: FacetKey,
-    pub created_at: Timestamp,
 }
 
 /// The compact provenance facet. Maps are ordered so snapshots and derived evidence are stable.
@@ -101,10 +150,9 @@ pub struct Dmeta {
     #[serde(default)]
     pub updated_at: Vec<Timestamp>,
     #[serde(default)]
-    pub actors: BTreeMap<MultibaseKey, ActorMetadata>,
+    pub actor_uuids: BTreeMap<Uuid7, ActorMetadata>,
     #[serde(default)]
-    #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<String, FacetAlias>"))]
-    pub facet_uuids: BTreeMap<Uuid, FacetAlias>,
+    pub facet_uuids: BTreeMap<Uuid7, FacetKey>,
     #[serde(default)]
     pub facets: BTreeMap<FacetKey, FacetMetadata>,
     /// Members a newer dmeta wrote that this declaration does not name. An open facet keeps them,
@@ -118,7 +166,7 @@ impl Dmeta {
         Self {
             created_at,
             updated_at: Vec::new(),
-            actors: BTreeMap::new(),
+            actor_uuids: BTreeMap::new(),
             facet_uuids: BTreeMap::new(),
             facets: BTreeMap::new(),
             extra: crate::facet::Extra::new(),
@@ -127,15 +175,22 @@ impl Dmeta {
 
     /// Record an alias without selecting content. Multiple aliases for one key are durable evidence
     /// of concurrent creation even after the conflict that produced them is no longer visible.
-    pub fn record_facet_alias(&mut self, uuid: Uuid, alias: FacetAlias) {
-        self.facet_uuids.insert(uuid, alias);
+    pub fn record_facet_alias(&mut self, uuid: Uuid7, key: FacetKey) -> Result<(), DmetaError> {
+        match self.facet_uuids.entry(uuid) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(key);
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(entry) if entry.get() == &key => Ok(()),
+            std::collections::btree_map::Entry::Occupied(_) => Err(DmetaError::ReboundAlias),
+        }
     }
 
     /// Whether more than one creator independently opened this slot.
     pub fn has_concurrent_creation(&self, key: &FacetKey) -> bool {
         self.facet_uuids
             .values()
-            .filter(|alias| &alias.key == key)
+            .filter(|alias| *alias == key)
             .count()
             > 1
     }
@@ -156,7 +211,6 @@ impl Dmeta {
 pub struct FacetMetadata {
     #[serde(default)]
     pub updated_at: Vec<Timestamp>,
-    #[serde(default)]
     pub deleted_at: Vec<Timestamp>,
     #[serde(default)]
     pub signatures: Vec<FacetSignature>,
@@ -198,8 +252,10 @@ pub struct InheritedWitness {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FacetSignature {
-    pub actor_public_key: MultibaseKey,
-    pub signature: MultibaseSignature,
+    pub actor_uuid: Uuid7,
+    pub signature: SignatureBytes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<Bytes>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited: Option<InheritedWitness>,
 }
@@ -221,7 +277,8 @@ pub enum ClaimOperation {
 pub struct FacetClaim {
     pub origin_document: DocumentId,
     pub facet_key: FacetKey,
-    pub chosen_uuid: Uuid,
+    pub chosen_uuid: Uuid7,
+    pub actor_uuid: Uuid7,
     pub operation: ClaimOperation,
     pub value_cid: Option<Cid>,
     #[serde(default)]
@@ -365,17 +422,17 @@ impl schemars::JsonSchema for MultibaseKey {
     }
 }
 
-/// An Ed25519 signature, in the same multibase text form as the key that produced it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MultibaseSignature([u8; 64]);
 
-impl MultibaseSignature {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SignatureBytes([u8; 64]);
+
+impl SignatureBytes {
     pub fn as_bytes(&self) -> &[u8; 64] {
         &self.0
     }
 }
 
-impl TryFrom<&[u8]> for MultibaseSignature {
+impl TryFrom<&[u8]> for SignatureBytes {
     type Error = DmetaError;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
@@ -384,47 +441,34 @@ impl TryFrom<&[u8]> for MultibaseSignature {
     }
 }
 
-impl std::fmt::Display for MultibaseSignature {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&utils_rs::hash::encode_base58_multibase(self.0))
-    }
-}
-
-impl FromStr for MultibaseSignature {
-    type Err = DmetaError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let bytes = utils_rs::hash::decode_base58_multibase(value)
-            .map_err(|_| DmetaError::InvalidSignature)?;
-        Self::try_from(bytes.as_slice())
-    }
-}
-
-impl Serialize for MultibaseSignature {
+impl Serialize for SignatureBytes {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_string())
+        use serde::ser::SerializeMap;
+        let mut object = serializer.serialize_map(Some(1))?;
+        object.serialize_entry("$bytes", &data_encoding::BASE64.encode(&self.0))?;
+        object.end()
     }
 }
 
-impl<'de> Deserialize<'de> for MultibaseSignature {
+impl<'de> Deserialize<'de> for SignatureBytes {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        value.parse().map_err(serde::de::Error::custom)
+        let bytes = Bytes::deserialize(deserializer)?;
+        Self::try_from(bytes.as_slice()).map_err(serde::de::Error::custom)
     }
 }
 
 #[cfg(feature = "schemars")]
-impl schemars::JsonSchema for MultibaseSignature {
+impl schemars::JsonSchema for SignatureBytes {
+    fn inline_schema() -> bool {
+        true
+    }
+
     fn schema_name() -> std::borrow::Cow<'static, str> {
-        "MultibaseSignature".into()
+        "SignatureBytes".into()
     }
 
-    fn schema_id() -> std::borrow::Cow<'static, str> {
-        concat!(module_path!(), "::MultibaseSignature").into()
-    }
-
-    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({ "type": "string" })
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        Bytes::json_schema(generator)
     }
 }
 
@@ -506,8 +550,14 @@ impl schemars::JsonSchema for Bytes {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DmetaError {
-    #[error("claim predecessor IDs must be CID bytes")]
-    InvalidPredecessor,
+    #[error("an actor or facet alias must be an RFC 9562 UUIDv7")]
+    InvalidUuidVersion,
+    #[error("a facet UUID alias cannot be rebound to another key")]
+    ReboundAlias,
+    #[error("signed message evidence is unavailable")]
+    MissingMessage,
+    #[error("signature and claim contexts disagree")]
+    WrongContext,
     #[error("claim operation and value CID disagree")]
     InvalidClaim,
     #[error("malformed facet claim: {0}")]
@@ -525,10 +575,11 @@ impl FacetClaim {
             return Err(DmetaError::InvalidClaim);
         }
         let mut out = Vec::new();
-        cbor_array(&mut out, 6);
+        cbor_array(&mut out, 7);
         cbor_text(&mut out, &self.origin_document.to_string());
         cbor_text(&mut out, &self.facet_key.to_string());
-        cbor_bytes(&mut out, self.chosen_uuid.as_bytes());
+        cbor_bytes(&mut out, self.chosen_uuid.as_uuid().as_bytes());
+        cbor_bytes(&mut out, self.actor_uuid.as_uuid().as_bytes());
         cbor_uint(
             &mut out,
             u8::from(matches!(self.operation, ClaimOperation::Remove)) as u64,
@@ -561,9 +612,9 @@ impl FacetClaim {
     pub fn from_cbor_fields(bytes: &[u8]) -> Result<Self, DmetaError> {
         let mut cursor = 0;
         let (major, length) = read_cbor_head_strict(bytes, &mut cursor)?;
-        if major != 4 || length != 6 {
+        if major != 4 || length != 7 {
             return Err(DmetaError::MalformedClaim(
-                "claim must be a six-element array",
+                "claim must be a seven-element array",
             ));
         }
 
@@ -574,8 +625,11 @@ impl FacetClaim {
         let facet_key = FacetKey::from_str(&facet_key_text)
             .map_err(|_| DmetaError::MalformedClaim("invalid facet key"))?;
         let uuid_bytes = read_cbor_bytes_strict(bytes, &mut cursor)?;
-        let chosen_uuid = Uuid::from_slice(&uuid_bytes)
-            .map_err(|_| DmetaError::MalformedClaim("chosen UUID must be 16 bytes"))?;
+        let chosen_uuid = Uuid7::try_from(Uuid::from_slice(&uuid_bytes)
+            .map_err(|_| DmetaError::MalformedClaim("chosen UUID must be 16 bytes"))?)?;
+        let actor_bytes = read_cbor_bytes_strict(bytes, &mut cursor)?;
+        let actor_uuid = Uuid7::try_from(Uuid::from_slice(&actor_bytes)
+            .map_err(|_| DmetaError::MalformedClaim("actor UUID must be 16 bytes"))?)?;
         let (operation_major, operation_value) = read_cbor_head_strict(bytes, &mut cursor)?;
         if operation_major != 0 || operation_value > 1 {
             return Err(DmetaError::MalformedClaim("operation must be 0 or 1"));
@@ -629,6 +683,7 @@ impl FacetClaim {
             origin_document,
             facet_key,
             chosen_uuid,
+            actor_uuid,
             operation,
             value_cid,
             predecessors,
@@ -802,40 +857,188 @@ mod tests {
         FacetKey::from_str(value).unwrap()
     }
 
+    const PORTABLE_PROOF: &str = r#"{
+        "createdAt": "1970-01-01T00:00:00Z",
+        "updatedAt": [],
+        "actorUuids": {
+            "01890f3e-1234-7000-8000-000000000002": {
+                "pubkey": "zGmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
+                "actorUrl": "did:key:test",
+                "delegation": {"$bytes": "AQID/w=="}
+            }
+        },
+        "facetUuids": {
+            "01890f3e-1234-7000-8000-000000000001": "org.example.note/main"
+        },
+        "facets": {
+            "org.example.note/main": {
+                "updatedAt": [],
+                "deletedAt": [],
+                "signatures": [{
+                    "actorUuid": "01890f3e-1234-7000-8000-000000000002",
+                    "signature": {"$bytes": "7OJ5Fpuon7QCm9iAUz+gJ7ePC9pXGDQYBu8GxSthtkEzcmogHSGTzh8Pr+G1AvIdOK2QqQ+qr2+58orrETzcBQ=="},
+                    "message": {"$bytes": "ZGF5Ym9vay5mYWNldC1jbGFpbS52MgCHZXphamRrdW9yZy5leGFtcGxlLm5vdGUvbWFpblABiQ8+EjRwAIAAAAAAAAABUAGJDz4SNHAAgAAAAAAAAAIAWCQBVR4gLWvLu8YEORo43f1WfOLngEcapPP3vFmdHGSY17U+tsaA"}
+                }]
+            }
+        }
+    }"#;
+
+    fn uuid7(index: u128) -> Uuid7 {
+        Uuid7::try_from(Uuid::from_u128(
+            0x0189_0f3e_1234_7000_8000_0000_0000_0000 | index,
+        ))
+        .unwrap()
+    }
+
+    fn native_value() -> NativeValue {
+        NativeValue::Map(BTreeMap::from([
+            ("a".into(), NativeValue::Int(1)),
+            ("b".into(), NativeValue::Bytes(vec![0, 255])),
+        ]))
+    }
+
+    fn claim_for(value: &NativeValue) -> FacetClaim {
+        FacetClaim {
+            origin_document: DocumentId::new(b"doc"),
+            facet_key: facet_key("org.example.note/main"),
+            chosen_uuid: uuid7(1),
+            actor_uuid: uuid7(2),
+            operation: ClaimOperation::Set,
+            value_cid: Some(cid_of(&encode_native(value))),
+            predecessors: Vec::new(),
+        }
+    }
+
+    fn signed_entry(claim: &FacetClaim) -> (ActorMetadata, FacetSignature) {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        (
+            ActorMetadata {
+                pubkey: MultibaseKey::try_from(key.verifying_key().to_bytes().as_slice()).unwrap(),
+                actor_url: "did:key:test".into(),
+                delegation: None,
+            },
+            FacetSignature {
+                actor_uuid: claim.actor_uuid,
+                signature: SignatureBytes::try_from(
+                    key.sign(&claim.signing_bytes().unwrap())
+                        .to_bytes()
+                        .as_slice(),
+                )
+                .unwrap(),
+                message: None,
+                inherited: None,
+            },
+        )
+    }
+
     fn cid_with(byte: u8) -> Cid {
         cid_of(&[byte; 32])
     }
 
     #[test]
     fn aliases_retain_concurrency_without_a_reverse_index() {
-        let timestamp = Timestamp::from_second(0).unwrap();
-        let mut dmeta = Dmeta::new(timestamp);
+        let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
         let key = facet_key("org.example.note/main");
-        dmeta.record_facet_alias(
-            Uuid::from_u128(2),
-            FacetAlias {
-                key: key.clone(),
-                created_at: timestamp,
-            },
-        );
-        dmeta.record_facet_alias(
-            Uuid::from_u128(1),
-            FacetAlias {
-                key: key.clone(),
-                created_at: Timestamp::from_second(1).unwrap(),
-            },
-        );
+        dmeta.record_facet_alias(uuid7(2), key.clone()).unwrap();
+        assert!(!dmeta.has_concurrent_creation(&key));
+        dmeta.record_facet_alias(uuid7(1), key.clone()).unwrap();
         assert!(dmeta.has_concurrent_creation(&key));
         assert!(!dmeta.has_concurrent_creation(&facet_key("org.example.note/other")));
         // The chosen alias is the smallest one visible, and it falls out of the index order.
         let chosen = dmeta
             .facet_uuids
             .iter()
-            .filter(|(_, alias)| alias.key == key)
+            .filter(|(_, alias)| **alias == key)
             .map(|(uuid, _)| *uuid)
             .min()
             .unwrap();
-        assert_eq!(chosen, Uuid::from_u128(1));
+        assert_eq!(chosen, uuid7(1));
+        assert_eq!(
+            serde_json::from_value::<Dmeta>(serde_json::to_value(&dmeta).unwrap()).unwrap(),
+            dmeta
+        );
+    }
+
+    #[test]
+    fn a_facet_alias_can_be_repeated_but_never_rebound() {
+        let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
+        let key = facet_key("org.example.note/main");
+        dmeta.record_facet_alias(uuid7(1), key.clone()).unwrap();
+        let original = dmeta.clone();
+        dmeta.record_facet_alias(uuid7(1), key).unwrap();
+        assert_eq!(dmeta, original);
+        assert!(matches!(
+            dmeta.record_facet_alias(uuid7(1), facet_key("org.example.note/other")),
+            Err(DmetaError::ReboundAlias)
+        ));
+        assert_eq!(dmeta, original);
+    }
+
+    #[test]
+    fn uuid7_is_validated_in_values_and_metadata_map_keys() {
+        let uuid = uuid7(1);
+        assert_eq!(uuid.unix_millis(), 1_688_177_873_460);
+        assert_eq!(uuid.as_uuid().get_version_num(), 7);
+        let fresh = Uuid7::new();
+        assert_eq!(Uuid7::try_from(*fresh.as_uuid()).unwrap(), fresh);
+        assert_eq!(
+            serde_json::to_value(uuid).unwrap(),
+            serde_json::json!("01890f3e-1234-7000-8000-000000000001")
+        );
+        assert_eq!(
+            serde_json::from_value::<Uuid7>(serde_json::to_value(uuid).unwrap()).unwrap(),
+            uuid
+        );
+        let fixture: serde_json::Value = serde_json::from_str(PORTABLE_PROOF).unwrap();
+        for invalid in [
+            "00000000-0000-0000-0000-000000000000",
+            "01890f3e-1234-4000-8000-000000000001",
+            "01890f3e-1234-7000-0000-000000000001",
+        ] {
+            assert!(matches!(
+                Uuid7::try_from(Uuid::parse_str(invalid).unwrap()),
+                Err(DmetaError::InvalidUuidVersion)
+            ));
+            assert!(serde_json::from_value::<Uuid7>(serde_json::json!(invalid)).is_err());
+            for member in ["actorUuids", "facetUuids"] {
+                let mut malformed = fixture.clone();
+                let map = malformed[member].as_object_mut().unwrap();
+                let valid_key = map.keys().next().unwrap().clone();
+                let value = map.remove(&valid_key).unwrap();
+                assert!(map.insert(invalid.into(), value).is_none());
+                assert!(serde_json::from_value::<Dmeta>(malformed).is_err());
+            }
+            let mut malformed = fixture["facets"]["org.example.note/main"]["signatures"][0].clone();
+            malformed["actorUuid"] = serde_json::json!(invalid);
+            assert!(serde_json::from_value::<FacetSignature>(malformed).is_err());
+        }
+    }
+
+    #[test]
+    fn deleted_at_is_a_required_list_even_when_empty() {
+        let metadata = FacetMetadata {
+            updated_at: Vec::new(),
+            deleted_at: Vec::new(),
+            signatures: Vec::new(),
+        };
+        let json = serde_json::json!({"updatedAt": [], "deletedAt": [], "signatures": []});
+        assert_eq!(serde_json::to_value(&metadata).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<FacetMetadata>(json).unwrap(),
+            metadata
+        );
+        assert_eq!(
+            serde_json::from_value::<FacetMetadata>(serde_json::json!({"deletedAt": []})).unwrap(),
+            metadata
+        );
+        for malformed in [
+            serde_json::json!({}),
+            serde_json::json!({"updatedAt": [], "signatures": []}),
+            serde_json::json!({"deletedAt": null}),
+            serde_json::json!({"deletedAt": "1970-01-01T00:00:00Z"}),
+        ] {
+            assert!(serde_json::from_value::<FacetMetadata>(malformed).is_err());
+        }
     }
 
     #[cfg(feature = "schemars")]
@@ -860,24 +1063,52 @@ mod tests {
     }
 
     #[test]
-    fn an_actor_key_and_a_signature_round_trip_as_multibase_text() {
+    fn actor_keys_are_multibase_but_signatures_are_fixed_length_bytes() {
         let key = MultibaseKey::try_from([7; 32].as_slice()).unwrap();
         let text = key.to_string();
         assert!(text.starts_with('z'));
         assert_eq!(text.parse::<MultibaseKey>().unwrap(), key);
+        assert_eq!(serde_json::to_value(&key).unwrap(), serde_json::json!(text));
         assert_eq!(
             serde_json::from_str::<MultibaseKey>(&serde_json::to_string(&key).unwrap()).unwrap(),
             key
         );
         // A truncated or over-long spelling is refused rather than decoded into a different key.
         assert!(text[..text.len() - 1].parse::<MultibaseKey>().is_err());
+        assert!(format!("{text}1").parse::<MultibaseKey>().is_err());
 
-        let signature = MultibaseSignature::try_from([9; 64].as_slice()).unwrap();
-        let signature_text = signature.to_string();
+        let fixture: serde_json::Value = serde_json::from_str(PORTABLE_PROOF).unwrap();
+        let json = fixture["facets"]["org.example.note/main"]["signatures"][0]["signature"].clone();
+        let signature: SignatureBytes = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(signature.as_bytes().len(), 64);
+        assert_eq!(serde_json::to_value(&signature).unwrap(), json);
+        let mut unpadded = json.clone();
+        unpadded["$bytes"] =
+            serde_json::json!(json["$bytes"].as_str().unwrap().trim_end_matches('='));
         assert_eq!(
-            signature_text.parse::<MultibaseSignature>().unwrap(),
+            serde_json::from_value::<SignatureBytes>(unpadded).unwrap(),
             signature
         );
+        for length in [0, 32, 63, 65] {
+            let bytes = vec![9; length];
+            assert!(SignatureBytes::try_from(bytes.as_slice()).is_err());
+            assert!(
+                serde_json::from_value::<SignatureBytes>(
+                    serde_json::json!({"$bytes": data_encoding::BASE64.encode(&bytes)})
+                )
+                .is_err()
+            );
+        }
+        for malformed in [
+            serde_json::json!(utils_rs::hash::encode_base58_multibase(
+                signature.as_bytes()
+            )),
+            serde_json::json!(signature.as_bytes().as_slice()),
+            serde_json::json!({"$bytes": "not base64"}),
+            serde_json::json!({"$bytes": json["$bytes"], "extra": true}),
+        ] {
+            assert!(serde_json::from_value::<SignatureBytes>(malformed).is_err());
+        }
     }
 
     #[test]
@@ -891,259 +1122,445 @@ mod tests {
     }
 
     #[test]
-    fn claim_cbor_and_ed25519_vectors_are_stable() {
-        let claim = FacetClaim {
-            origin_document: DocumentId::new(b"doc"),
-            facet_key: facet_key("org.example.note/main"),
-            chosen_uuid: Uuid::from_u128(1),
-            operation: ClaimOperation::Set,
-            value_cid: Some(cid_of(br#"{"a":1,"b":2}"#)),
-            predecessors: vec![],
-        };
-        let expected_cbor = [
-            0x86, 0x65, b'z', b'a', b'j', b'd', b'k', 0x75, b'o', b'r', b'g', b'.', b'e', b'x',
-            b'a', b'm', b'p', b'l', b'e', b'.', b'n', b'o', b't', b'e', b'/', b'm', b'a', b'i',
-            b'n', 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0x58, 0x24, 0x01, 0x55,
-            0x1e, 0x20, 0x8e, 0x80, 0x43, 0x9b, 0x77, 0xac, 0x62, 0xd4, 0x19, 0x44, 0x99, 0xed,
-            0xd4, 0x66, 0x84, 0xc4, 0x79, 0xda, 0x3a, 0xa1, 0xac, 0x80, 0xdd, 0x55, 0x11, 0x46,
-            0x8e, 0xfa, 0xe0, 0x49, 0x16, 0x6e, 0x80,
-        ];
+    fn claim_cbor_and_openssl_ed25519_vectors_are_stable() {
+        use ciborium::Value as Cbor;
+
+        let value = native_value();
+        let native_bytes = data_encoding::HEXLOWER
+            .decode(b"da64626b0ba26161da64626b02016162da64626b064200ff")
+            .unwrap();
+        assert_eq!(encode_native(&value), native_bytes);
+        let expected_cid = data_encoding::HEXLOWER
+            .decode(b"01551e202d6bcbbbc604391a38ddfd567ce2e780471aa4f3f7bc599d1c6498d7b53eb6c6")
+            .unwrap();
+        assert_eq!(cid_of(&native_bytes).as_bytes().as_slice(), expected_cid);
+        let claim = claim_for(&value);
+        let expected_cbor = data_encoding::HEXLOWER
+            .decode(
+                concat!(
+                    "87657a616a646b756f72672e6578616d706c652e6e6f74652f6d61696e",
+                    "5001890f3e1234700080000000000000015001890f3e12347000800000000000000200",
+                    "582401551e202d6bcbbbc604391a38ddfd567ce2e780471aa4f3f7bc599d1c6498d7b53eb6c680"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
         assert_eq!(claim.cbor_fields().unwrap(), expected_cbor);
-        let independently_decoded: ciborium::Value =
-            ciborium::from_reader(&expected_cbor[..]).unwrap();
-        let ciborium::Value::Array(fields) = independently_decoded else {
-            panic!("normative claim fixture is not an array");
-        };
-        assert_eq!(fields.len(), 6);
-        assert_eq!(fields[0], ciborium::Value::Text("zajdk".into()));
+        assert_eq!(FacetClaim::from_cbor_fields(&expected_cbor).unwrap(), claim);
+        let independently_decoded: Cbor = ciborium::from_reader(&expected_cbor[..]).unwrap();
         assert_eq!(
-            fields[1],
-            ciborium::Value::Text("org.example.note/main".into())
+            independently_decoded,
+            Cbor::Array(vec![
+                Cbor::Text("zajdk".into()),
+                Cbor::Text("org.example.note/main".into()),
+                Cbor::Bytes(uuid7(1).as_uuid().as_bytes().to_vec()),
+                Cbor::Bytes(uuid7(2).as_uuid().as_bytes().to_vec()),
+                Cbor::Integer(0.into()),
+                Cbor::Bytes(expected_cid),
+                Cbor::Array(Vec::new()),
+            ])
         );
+        let fixture: Dmeta = serde_json::from_str(PORTABLE_PROOF).unwrap();
+        let entry = &fixture.facets[&claim.facet_key].signatures[0];
         assert_eq!(
-            fields[2],
-            ciborium::Value::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+            claim.signing_bytes().unwrap(),
+            entry.message.as_ref().unwrap().as_slice()
         );
-        assert_eq!(fields[3], ciborium::Value::Integer(0.into()));
-        assert_eq!(
-            fields[4],
-            ciborium::Value::Bytes(claim.value_cid.as_ref().unwrap().as_bytes().to_vec())
-        );
-        assert_eq!(fields[5], ciborium::Value::Array(Vec::new()));
-        let key = SigningKey::from_bytes(&[7; 32]);
-        let signature = key.sign(&claim.signing_bytes().unwrap()).to_bytes();
-        assert_eq!(
-            signature,
-            [
-                0x48, 0xb7, 0xb4, 0xdd, 0x7b, 0x4a, 0xea, 0x80, 0xa0, 0x3f, 0x13, 0xeb, 0x7f, 0x5c,
-                0xe8, 0x5b, 0x8f, 0x85, 0x74, 0x45, 0xfc, 0xa8, 0x70, 0x8a, 0xd0, 0x5a, 0x81, 0xd0,
-                0x17, 0x7c, 0x18, 0x41, 0xb9, 0x58, 0x3d, 0x6d, 0xa5, 0x10, 0x78, 0x49, 0x9c, 0xad,
-                0xc6, 0x30, 0xfc, 0xd8, 0x2c, 0x3c, 0x89, 0x86, 0x8f, 0x7b, 0x73, 0x8f, 0x94, 0xd4,
-                0xd9, 0xb8, 0x1b, 0x4e, 0x5c, 0x5b, 0xfe, 0x0b,
-            ]
-        );
+        assert_eq!(signed_entry(&claim).1.signature, entry.signature);
     }
 
     #[test]
-    fn real_ed25519_vector_rejects_tampering() {
-        let key = SigningKey::from_bytes(&[7; 32]);
-        let claim = FacetClaim {
-            origin_document: DocumentId::new(b"doc"),
-            facet_key: facet_key("org.example.note/main"),
-            chosen_uuid: Uuid::from_u128(1),
-            operation: ClaimOperation::Set,
-            value_cid: Some(cid_of(br#"{"a":1,"b":2}"#)),
-            predecessors: vec![],
-        };
-        let message = claim.signing_bytes().unwrap();
-        let signed = SignedFacetClaim::from_signature(
-            claim.clone(),
-            MultibaseKey::try_from(key.verifying_key().to_bytes().as_slice()).unwrap(),
-            MultibaseSignature::try_from(key.sign(&message).to_bytes().as_slice()).unwrap(),
-        )
-        .unwrap();
+    fn real_ed25519_vector_rejects_tampering_with_every_signed_field() {
+        let claim = claim_for(&native_value());
+        let (actor, entry) = signed_entry(&claim);
+        let signed = entry.authenticate(&actor, Some(&claim)).unwrap();
         signed.verify().unwrap();
         assert_eq!(signed.signature_id().unwrap().as_bytes().len(), CID_LENGTH);
+        let mut altered = Vec::new();
+        let mut wrong = claim.clone();
+        wrong.origin_document = DocumentId::new(b"another-document");
+        altered.push(wrong);
+        let mut wrong = claim.clone();
+        wrong.facet_key = facet_key("org.example.note/mainx");
+        altered.push(wrong);
+        let mut wrong = claim.clone();
+        wrong.chosen_uuid = uuid7(3);
+        altered.push(wrong);
+        let mut wrong = claim.clone();
+        wrong.actor_uuid = uuid7(3);
+        altered.push(wrong);
+        let mut wrong = claim.clone();
+        wrong.operation = ClaimOperation::Remove;
+        wrong.value_cid = None;
+        altered.push(wrong);
+        let mut wrong = claim.clone();
+        wrong.value_cid = Some(cid_of(&encode_native(&NativeValue::Null)));
+        altered.push(wrong);
+        let mut wrong = claim;
+        wrong.predecessors.push(cid_with(1));
+        altered.push(wrong);
+        for wrong in altered {
+            let forged = SignedFacetClaim {
+                claim: wrong.clone(),
+                ..signed.clone()
+            };
+            assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
+            assert_ne!(
+                forged.signature_id().unwrap(),
+                signed.signature_id().unwrap()
+            );
+            assert!(matches!(
+                SignedFacetClaim::from_signature(
+                    wrong,
+                    actor.pubkey.clone(),
+                    entry.signature.clone()
+                ),
+                Err(DmetaError::InvalidSignature)
+            ));
+        }
         let mut forged = signed.clone();
-        forged.claim.facet_key = facet_key("org.example.note/mainx");
+        let mut signature = *forged.signature.as_bytes();
+        signature[0] ^= 1;
+        forged.signature = SignatureBytes::try_from(signature.as_slice()).unwrap();
+        assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
+        let mut forged = signed;
+        let other_key = SigningKey::from_bytes(&[8; 32]);
+        forged.actor_public_key =
+            MultibaseKey::try_from(other_key.verifying_key().as_bytes().as_slice()).unwrap();
         assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
     }
 
     #[test]
-    fn an_inherited_witness_verifies_against_its_own_bytes() {
-        let key = SigningKey::from_bytes(&[9; 32]);
-        let signed_value = Bytes::from(b"native-value".to_vec());
-        let claim = FacetClaim {
-            origin_document: DocumentId::new(b"origin"),
-            facet_key: facet_key("org.example.note/main"),
-            chosen_uuid: Uuid::from_u128(4),
-            operation: ClaimOperation::Set,
-            value_cid: Some(cid_of(signed_value.as_slice())),
-            predecessors: Vec::new(),
+    fn an_inherited_historical_witness_does_not_cover_changed_current_content() {
+        let value = native_value();
+        let changed = NativeValue::Map(BTreeMap::from([
+            ("a".into(), NativeValue::Int(2)),
+            ("b".into(), NativeValue::Bytes(vec![0, 255])),
+        ]));
+        let claim = claim_for(&value);
+        let (actor, mut entry) = signed_entry(&claim);
+        let witness = InheritedWitness {
+            origin_doc: claim.origin_document.clone(),
+            message: Bytes::from(claim.signing_bytes().unwrap()),
+            value: None,
         };
-        let message = claim.signing_bytes().unwrap();
-        let entry = FacetSignature {
-            actor_public_key: MultibaseKey::try_from(key.verifying_key().to_bytes().as_slice())
-                .unwrap(),
-            signature: MultibaseSignature::try_from(key.sign(&message).to_bytes().as_slice())
-                .unwrap(),
-            inherited: Some(InheritedWitness {
-                origin_doc: DocumentId::new(b"origin"),
-                message: Bytes::from(message),
-                value: Some(signed_value.clone()),
+        entry.inherited = Some(witness);
+        let signed = entry.authenticate(&actor, None).unwrap();
+        assert_eq!(
+            signed.value_evidence(FacetValue::Present(&value)),
+            Evidence::Present
+        );
+        entry.inherited.as_mut().unwrap().value = Some(Bytes::from(encode_native(&value)));
+        assert_eq!(entry.authenticate(&actor, Some(&claim)).unwrap(), signed);
+        assert_eq!(
+            signed.value_evidence(FacetValue::Present(&changed)),
+            Evidence::Invalid
+        );
+        assert_eq!(
+            fold_checks(SignatureChecks {
+                message: Evidence::Present,
+                attribution: Evidence::Present,
+                value: signed.value_evidence(FacetValue::Present(&changed)),
             }),
-        };
-        // The branch copied exactly the signed value, so no witness value is required.
-        assert_eq!(
-            entry.verify_inherited(&claim, Some(signed_value.as_slice())),
-            VerificationState::Accepted
+            VerificationState::Uncovered
         );
-        // The branch copied a different value, and the witness carries the one that was signed.
         assert_eq!(
-            entry.verify_inherited(&claim, Some(b"merged-value")),
-            VerificationState::Accepted
+            fold_checks(SignatureChecks {
+                message: Evidence::Present,
+                attribution: Evidence::Missing,
+                value: signed.value_evidence(FacetValue::Present(&value)),
+            }),
+            VerificationState::Pending
         );
-        // A witness value that is not the signed one is a forgery, not a disagreement.
+        assert_eq!(
+            signed.value_evidence(FacetValue::Missing),
+            Evidence::Missing
+        );
         let mut forged = entry.clone();
-        forged.inherited.as_mut().unwrap().value = Some(Bytes::from(b"other-value".to_vec()));
-        assert_eq!(
-            forged.verify_inherited(&claim, None),
-            VerificationState::ProvenForgery
-        );
-        // A removal signs no value, so a witness that carries one is a forgery.
+        forged.inherited.as_mut().unwrap().value = Some(Bytes::from(encode_native(&changed)));
+        assert!(matches!(
+            forged.authenticate(&actor, None),
+            Err(DmetaError::WrongContext)
+        ));
         let remove = FacetClaim {
             operation: ClaimOperation::Remove,
             value_cid: None,
-            predecessors: Vec::new(),
             ..claim.clone()
         };
-        let remove_message = remove.signing_bytes().unwrap();
-        let remove_witness = FacetSignature {
-            actor_public_key: entry.actor_public_key.clone(),
-            signature: MultibaseSignature::try_from(
-                key.sign(&remove_message).to_bytes().as_slice(),
-            )
-            .unwrap(),
-            inherited: Some(InheritedWitness {
-                origin_doc: remove.origin_document.clone(),
-                message: Bytes::from(remove_message),
-                value: Some(signed_value),
-            }),
-        };
+        let (_, mut remove_entry) = signed_entry(&remove);
+        remove_entry.inherited = Some(InheritedWitness {
+            origin_doc: remove.origin_document.clone(),
+            message: Bytes::from(remove.signing_bytes().unwrap()),
+            value: Some(Bytes::from(encode_native(&value))),
+        });
+        assert!(matches!(
+            remove_entry.authenticate(&actor, None),
+            Err(DmetaError::WrongContext)
+        ));
+        remove_entry.inherited.as_mut().unwrap().value = None;
+        let signed_remove = remove_entry.authenticate(&actor, None).unwrap();
         assert_eq!(
-            remove_witness.verify_inherited(&remove, None),
-            VerificationState::ProvenForgery
+            signed_remove.value_evidence(FacetValue::Removed),
+            Evidence::Present
         );
-        // No carried message means the signature cannot be reconstructed here: pending, not forged.
-        let mut pending = entry;
-        pending.inherited = None;
         assert_eq!(
-            pending.verify_inherited(&claim, None),
-            VerificationState::Pending
+            signed_remove.value_evidence(FacetValue::Present(&value)),
+            Evidence::Invalid
         );
+        assert_eq!(
+            signed_remove.value_evidence(FacetValue::Missing),
+            Evidence::Missing
+        );
+        entry.inherited = None;
+        assert!(matches!(
+            entry.authenticate(&actor, None),
+            Err(DmetaError::MissingMessage)
+        ));
+        assert_eq!(entry.authenticate(&actor, Some(&claim)).unwrap(), signed);
     }
 
     #[test]
-    fn missing_evidence_is_not_forgery_and_a_rejected_predecessor_cannot_be_laundered() {
-        let present = SignatureChecks {
+    fn missing_invalid_and_uncovered_evidence_remain_distinct() {
+        use Evidence::{Invalid, Missing, Present};
+        use VerificationState::{Accepted, Pending, Rejected, Uncovered};
+
+        for (checks, expected) in [
+            ([Present, Present, Present], Accepted),
+            ([Missing, Present, Present], Pending),
+            ([Present, Missing, Present], Pending),
+            ([Present, Present, Missing], Pending),
+            ([Present, Present, Invalid], Uncovered),
+            ([Present, Missing, Invalid], Pending),
+            ([Invalid, Present, Present], Rejected),
+            ([Present, Invalid, Present], Rejected),
+            ([Invalid, Missing, Missing], Rejected),
+            ([Missing, Invalid, Missing], Rejected),
+        ] {
+            let [message, attribution, value] = checks;
+            assert_eq!(
+                fold_checks(SignatureChecks {
+                    message,
+                    attribution,
+                    value
+                }),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_replacement_can_name_rejected_ancestry_without_accepting_it() {
+        let old_value = native_value();
+        let old_claim = claim_for(&old_value);
+        let (actor, old_entry) = signed_entry(&old_claim);
+        let mut forged = old_entry.authenticate(&actor, Some(&old_claim)).unwrap();
+        forged.claim.value_cid = Some(cid_of(&encode_native(&NativeValue::Bool(false))));
+        assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
+        let rejected = fold_checks(SignatureChecks {
+            message: Evidence::Invalid,
+            attribution: Evidence::Present,
+            value: forged.value_evidence(FacetValue::Present(&old_value)),
+        });
+        assert_eq!(rejected, VerificationState::Rejected);
+        let forged_id = forged.signature_id().unwrap();
+        let new_value = NativeValue::Bytes(vec![0, 255, 42]);
+        let replacement = FacetClaim {
+            predecessors: vec![forged_id.clone()],
+            ..claim_for(&new_value)
+        };
+        let (_, mut entry) = signed_entry(&replacement);
+        entry.carry_message(&replacement).unwrap();
+        let signed = entry.authenticate(&actor, None).unwrap();
+        assert_eq!(signed.claim.predecessors, vec![forged_id]);
+        let accepted = fold_checks(SignatureChecks {
             message: Evidence::Present,
-            delegation: Evidence::Present,
-            value: Evidence::Present,
-            authority: Evidence::Present,
-        };
+            attribution: Evidence::Present,
+            value: signed.value_evidence(FacetValue::Present(&new_value)),
+        });
+        assert_eq!(accepted, VerificationState::Accepted);
         assert_eq!(
-            fold_checks(
-                SignatureChecks {
-                    delegation: Evidence::Missing,
-                    ..present
-                },
-                []
-            ),
-            VerificationState::Pending
+            facet_verification([rejected, accepted]),
+            VerificationState::Accepted
         );
         assert_eq!(
-            fold_checks(
-                SignatureChecks {
-                    authority: Evidence::Invalid,
-                    ..present
-                },
-                []
-            ),
-            VerificationState::ProvenForgery
+            facet_verification([accepted, rejected]),
+            VerificationState::Accepted
         );
-        assert_eq!(fold_checks(present, []), VerificationState::Accepted);
-        // A successor whose own checks pass still cannot accept a forged or pending predecessor.
+        assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
+    }
+
+    #[test]
+    fn a_static_openssl_proof_round_trips_and_verifies_without_document_history() {
+        let fixture: Dmeta = serde_json::from_str(PORTABLE_PROOF).unwrap();
+        let json = serde_json::to_value(&fixture).unwrap();
         assert_eq!(
-            fold_checks(present, [VerificationState::ProvenForgery]),
-            VerificationState::ProvenForgery
+            json,
+            serde_json::from_str::<serde_json::Value>(PORTABLE_PROOF).unwrap()
+        );
+        let restored: Dmeta = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, fixture);
+        let value = native_value();
+        let claim = claim_for(&value);
+        assert_eq!(restored.facet_uuids[&claim.chosen_uuid], claim.facet_key);
+        let entry = &restored.facets[&claim.facet_key].signatures[0];
+        let actor = &restored.actor_uuids[&entry.actor_uuid];
+        assert_eq!(actor.delegation, Some(Bytes::from(vec![1, 2, 3, 255])));
+        let signed = entry.authenticate(actor, None).unwrap();
+        assert_eq!(signed.claim, claim);
+        signed.verify().unwrap();
+        let expected_id = data_encoding::HEXLOWER
+            .decode(b"01551e2013385c30b0068b9a2255aa45affdd47e4904fbb335408527ac2a259901a90270")
+            .unwrap();
+        assert_eq!(
+            signed.signature_id().unwrap().as_bytes().as_slice(),
+            expected_id
         );
         assert_eq!(
-            fold_checks(present, [VerificationState::Pending]),
-            VerificationState::Pending
-        );
-        assert_eq!(
-            document_verification([VerificationState::Accepted, VerificationState::Pending]),
-            VerificationState::Pending
-        );
-        assert_eq!(
-            document_verification([VerificationState::Pending, VerificationState::ProvenForgery]),
-            VerificationState::ProvenForgery
+            fold_checks(SignatureChecks {
+                message: Evidence::Present,
+                attribution: Evidence::Present,
+                value: signed.value_evidence(FacetValue::Present(&value)),
+            }),
+            VerificationState::Accepted
         );
     }
 
     #[test]
-    fn an_independently_produced_ed25519_signature_is_accepted() {
-        // The signature bytes below were produced by OpenSSL over this claim's signing bytes with
-        // the seed [7; 32], so the check does not depend on ed25519-dalek agreeing with itself.
-        let claim = FacetClaim {
-            origin_document: DocumentId::new(b"doc"),
-            facet_key: facet_key("org.example.note/main"),
-            chosen_uuid: Uuid::from_u128(1),
-            operation: ClaimOperation::Set,
-            value_cid: Some(cid_of(br#"{"a":1,"b":2}"#)),
-            predecessors: vec![],
-        };
-        let actor_public_key = MultibaseKey::try_from(
-            [
-                0xea, 0x4a, 0x6c, 0x63, 0xe2, 0x9c, 0x52, 0x0a, 0xbe, 0xf5, 0x50, 0x7b, 0x13, 0x2e,
-                0xc5, 0xf9, 0x95, 0x47, 0x76, 0xae, 0xbe, 0xbe, 0x7b, 0x92, 0x42, 0x1e, 0xea, 0x69,
-                0x14, 0x46, 0xd2, 0x2c,
-            ]
-            .as_slice(),
-        )
-        .unwrap();
-        let signature = MultibaseSignature::try_from(
-            [
-                0x48, 0xb7, 0xb4, 0xdd, 0x7b, 0x4a, 0xea, 0x80, 0xa0, 0x3f, 0x13, 0xeb, 0x7f, 0x5c,
-                0xe8, 0x5b, 0x8f, 0x85, 0x74, 0x45, 0xfc, 0xa8, 0x70, 0x8a, 0xd0, 0x5a, 0x81, 0xd0,
-                0x17, 0x7c, 0x18, 0x41, 0xb9, 0x58, 0x3d, 0x6d, 0xa5, 0x10, 0x78, 0x49, 0x9c, 0xad,
-                0xc6, 0x30, 0xfc, 0xd8, 0x2c, 0x3c, 0x89, 0x86, 0x8f, 0x7b, 0x73, 0x8f, 0x94, 0xd4,
-                0xd9, 0xb8, 0x1b, 0x4e, 0x5c, 0x5b, 0xfe, 0x0b,
-            ]
-            .as_slice(),
-        )
-        .unwrap();
-        let signed = SignedFacetClaim::from_signature(claim, actor_public_key, signature).unwrap();
-        signed.verify().unwrap();
+    fn a_stale_signature_authenticates_but_does_not_cover_the_current_native_value() {
+        let value = native_value();
+        let claim = claim_for(&value);
+        let (actor, mut entry) = signed_entry(&claim);
+        entry.carry_message(&claim).unwrap();
+        let signed = entry.authenticate(&actor, None).unwrap();
+        let changed = NativeValue::Map(BTreeMap::from([
+            ("a".into(), NativeValue::Uint(1)),
+            ("b".into(), NativeValue::Bytes(vec![0, 255])),
+        ]));
+        for (current, evidence, state) in [
+            (
+                FacetValue::Present(&value),
+                Evidence::Present,
+                VerificationState::Accepted,
+            ),
+            (
+                FacetValue::Present(&changed),
+                Evidence::Invalid,
+                VerificationState::Uncovered,
+            ),
+            (
+                FacetValue::Removed,
+                Evidence::Invalid,
+                VerificationState::Uncovered,
+            ),
+            (
+                FacetValue::Missing,
+                Evidence::Missing,
+                VerificationState::Pending,
+            ),
+        ] {
+            signed.verify().unwrap();
+            assert_eq!(signed.value_evidence(current), evidence);
+            assert_eq!(
+                fold_checks(SignatureChecks {
+                    message: Evidence::Present,
+                    attribution: Evidence::Present,
+                    value: signed.value_evidence(current),
+                }),
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn empty_signature_sets_are_uncovered_and_competitors_do_not_poison_acceptance() {
+        use VerificationState::{Accepted, Pending, Rejected, Uncovered};
+
+        assert_eq!(facet_verification([]), Uncovered);
+        assert_eq!(facet_verification([Uncovered]), Uncovered);
+        assert_eq!(facet_verification([Rejected, Uncovered]), Rejected);
+        assert_eq!(facet_verification([Pending, Rejected]), Pending);
+        assert_eq!(facet_verification([Rejected, Pending]), Pending);
+        assert_eq!(facet_verification([Uncovered, Pending]), Pending);
         assert_eq!(
-            signed.signature_id().unwrap().as_bytes(),
-            &[
-                0x01, 0x55, 0x1e, 0x20, 0xec, 0x57, 0x2f, 0x95, 0x11, 0x9a, 0xa6, 0x1b, 0xbe, 0xca,
-                0x0d, 0xcd, 0x46, 0xd9, 0x66, 0xe5, 0x46, 0x66, 0xf6, 0x84, 0xdd, 0xf4, 0xe1, 0x54,
-                0x8a, 0xe6, 0xbc, 0x48, 0x4b, 0x4f, 0x33, 0x86,
-            ]
+            facet_verification([Accepted, Pending, Rejected, Uncovered]),
+            Accepted
+        );
+        assert_eq!(
+            facet_verification([Uncovered, Rejected, Pending, Accepted]),
+            Accepted
+        );
+    }
+
+    #[test]
+    fn a_corrupted_other_facet_does_not_poison_a_valid_facet() {
+        let value = native_value();
+        let claim = claim_for(&value);
+        let (actor, mut valid) = signed_entry(&claim);
+        valid.carry_message(&claim).unwrap();
+        let other_claim = FacetClaim {
+            facet_key: facet_key("org.example.note/other"),
+            chosen_uuid: uuid7(3),
+            ..claim.clone()
+        };
+        let (_, mut corrupt) = signed_entry(&other_claim);
+        corrupt.carry_message(&other_claim).unwrap();
+        let mut bytes = *corrupt.signature.as_bytes();
+        bytes[0] ^= 1;
+        corrupt.signature = SignatureBytes::try_from(bytes.as_slice()).unwrap();
+        let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
+        assert!(dmeta.actor_uuids.insert(claim.actor_uuid, actor).is_none());
+        for (facet_claim, entry) in [(&claim, valid), (&other_claim, corrupt)] {
+            dmeta
+                .record_facet_alias(facet_claim.chosen_uuid, facet_claim.facet_key.clone())
+                .unwrap();
+            assert!(
+                dmeta
+                    .facets
+                    .insert(
+                        facet_claim.facet_key.clone(),
+                        FacetMetadata {
+                            updated_at: Vec::new(),
+                            deleted_at: Vec::new(),
+                            signatures: vec![entry],
+                        }
+                    )
+                    .is_none()
+            );
+        }
+        let states: BTreeMap<_, _> = dmeta
+            .facets
+            .iter()
+            .map(|(key, metadata)| {
+                let state = facet_verification(metadata.signatures.iter().map(|entry| {
+                    let actor = &dmeta.actor_uuids[&entry.actor_uuid];
+                    match entry.authenticate(actor, None) {
+                        Ok(signed) => fold_checks(SignatureChecks {
+                            message: Evidence::Present,
+                            attribution: Evidence::Present,
+                            value: signed.value_evidence(FacetValue::Present(&value)),
+                        }),
+                        Err(DmetaError::InvalidSignature) => VerificationState::Rejected,
+                        Err(error) => panic!("unexpected authentication failure: {error}"),
+                    }
+                }));
+                (key.clone(), state)
+            })
+            .collect();
+        assert_eq!(
+            states,
+            BTreeMap::from([
+                (claim.facet_key, VerificationState::Accepted),
+                (other_claim.facet_key, VerificationState::Rejected),
+            ])
         );
     }
 
     #[test]
     fn a_hostile_predecessor_count_is_refused_before_allocation() {
         let claim = FacetClaim {
-            origin_document: DocumentId::new(b"doc"),
-            facet_key: facet_key("org.example.note/main"),
-            chosen_uuid: Uuid::from_u128(1),
             operation: ClaimOperation::Remove,
             value_cid: None,
-            predecessors: vec![],
+            ..claim_for(&NativeValue::Null)
         };
         let mut fields = claim.cbor_fields().unwrap();
         assert_eq!(fields.pop(), Some(0x80));
@@ -1162,14 +1579,9 @@ mod tests {
 
     #[test]
     fn the_decoder_rejects_malformed_noncanonical_and_trailing_bytes() {
-        let claim = FacetClaim {
-            origin_document: DocumentId::new(b"origin"),
-            facet_key: facet_key("org.example.note/main"),
-            chosen_uuid: Uuid::from_u128(7),
-            operation: ClaimOperation::Set,
-            value_cid: Some(cid_of(b"signed-native-bytes")),
-            predecessors: vec![],
-        };
+        use ciborium::Value as Cbor;
+
+        let claim = claim_for(&native_value());
         let fields = claim.cbor_fields().unwrap();
         assert_eq!(FacetClaim::from_cbor_fields(&fields).unwrap(), claim);
         let signing = claim.signing_bytes().unwrap();
@@ -1178,86 +1590,199 @@ mod tests {
             FacetKey::from_str("org.example.note/"),
             Err(ReferenceError::MissingFacetKey)
         ));
+        for length in 0..fields.len() {
+            assert!(FacetClaim::from_cbor_fields(&fields[..length]).is_err());
+        }
         let mut trailing = fields.clone();
         trailing.push(0);
         assert!(FacetClaim::from_cbor_fields(&trailing).is_err());
         let mut noncanonical = fields.clone();
-        noncanonical.splice(0..1, [0x98, 6]);
+        noncanonical.splice(0..1, [0x98, 7]);
         assert!(FacetClaim::from_cbor_fields(&noncanonical).is_err());
-        let mut wrong_uuid = fields.clone();
-        wrong_uuid[33] = 0x4f;
-        assert!(FacetClaim::from_cbor_fields(&wrong_uuid).is_err());
-        let mut wrong_cid = fields;
-        let cid_offset = wrong_cid.len() - 37;
-        wrong_cid[cid_offset + 1] = 0x01;
-        assert!(FacetClaim::from_cbor_fields(&wrong_cid).is_err());
+        let mut wrong_arity = fields.clone();
+        wrong_arity[0] = 0x86;
+        assert!(FacetClaim::from_cbor_fields(&wrong_arity).is_err());
+        let mut invalid_utf8 = fields.clone();
+        invalid_utf8[2] = 0xff;
+        assert!(FacetClaim::from_cbor_fields(&invalid_utf8).is_err());
+        let mut old_domain = b"daybook.facet-claim.v1\0".to_vec();
+        old_domain.extend(&fields);
+        assert!(FacetClaim::from_signing_bytes(&old_domain).is_err());
+        assert!(FacetClaim::from_signing_bytes(&fields).is_err());
+        let Cbor::Array(decoded) = ciborium::from_reader(&fields[..]).unwrap() else {
+            panic!("claim fixture is not an array");
+        };
+        let reject_field = |index: usize, value: Cbor| {
+            let mut malformed = decoded.clone();
+            malformed[index] = value;
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&Cbor::Array(malformed), &mut bytes).unwrap();
+            assert!(FacetClaim::from_cbor_fields(&bytes).is_err());
+        };
+        for index in [2, 3] {
+            for invalid in [
+                Vec::new(),
+                vec![0; 15],
+                vec![0; 16],
+                vec![0; 17],
+                Uuid::parse_str("01890f3e-1234-4000-8000-000000000001")
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+                Uuid::parse_str("01890f3e-1234-7000-0000-000000000001")
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec(),
+            ] {
+                reject_field(index, Cbor::Bytes(invalid));
+            }
+            reject_field(index, Cbor::Text(uuid7(1).to_string()));
+        }
+        reject_field(0, Cbor::Text("not a document ID".into()));
+        reject_field(1, Cbor::Text("org.example.note/".into()));
+        reject_field(4, Cbor::Integer(2.into()));
+        reject_field(4, Cbor::Integer(1.into()));
+        reject_field(5, Cbor::Null);
+        reject_field(5, Cbor::Bytes(vec![0; 36]));
+        reject_field(6, Cbor::Null);
+        let mut invalid = claim.clone();
+        invalid.value_cid = None;
+        assert!(matches!(
+            invalid.signing_bytes(),
+            Err(DmetaError::InvalidClaim)
+        ));
+        invalid = claim;
+        invalid.operation = ClaimOperation::Remove;
+        assert!(matches!(
+            invalid.signing_bytes(),
+            Err(DmetaError::InvalidClaim)
+        ));
     }
 
     #[test]
     fn an_inherited_claim_binds_the_source_context_not_the_branch() {
-        let key = SigningKey::from_bytes(&[11; 32]);
         let predecessor_a = cid_with(1);
         let predecessor_b = cid_with(2);
+        let value = native_value();
         let source_claim = FacetClaim {
             origin_document: DocumentId::new(b"origin-a"),
-            facet_key: facet_key("org.example.note/main"),
-            chosen_uuid: Uuid::from_u128(9),
-            operation: ClaimOperation::Set,
-            value_cid: Some(cid_of(b"the signed value")),
             predecessors: vec![
                 predecessor_b.clone(),
                 predecessor_a.clone(),
                 predecessor_b.clone(),
             ],
+            ..claim_for(&value)
         };
-        let message = source_claim.signing_bytes().unwrap();
-        let witness = FacetSignature {
-            actor_public_key: MultibaseKey::try_from(key.verifying_key().to_bytes().as_slice())
-                .unwrap(),
-            signature: MultibaseSignature::try_from(key.sign(&message).to_bytes().as_slice())
-                .unwrap(),
-            inherited: Some(InheritedWitness {
-                origin_doc: source_claim.origin_document.clone(),
-                message: Bytes::from(message),
-                value: Some(Bytes::from(b"the signed value".to_vec())),
-            }),
-        };
-        assert_eq!(
-            witness.verify_inherited(&source_claim, None),
-            VerificationState::Accepted
-        );
+        let (actor, mut witness) = signed_entry(&source_claim);
+        witness.inherited = Some(InheritedWitness {
+            origin_doc: source_claim.origin_document.clone(),
+            message: Bytes::from(source_claim.signing_bytes().unwrap()),
+            value: Some(Bytes::from(encode_native(&value))),
+        });
+        let signed = witness.authenticate(&actor, Some(&source_claim)).unwrap();
         // The witness's predecessors were sorted and deduplicated before signing, so the normalized
         // form is the same claim.
         let mut normalized = source_claim.clone();
-        normalized.predecessors = vec![predecessor_a.clone(), predecessor_b.clone()];
+        normalized.predecessors = vec![predecessor_a.clone(), predecessor_b];
+        normalized.predecessors.sort();
+        assert_eq!(signed.claim, normalized);
         assert_eq!(
-            witness.verify_inherited(&normalized, None),
-            VerificationState::Accepted
+            witness.authenticate(&actor, Some(&normalized)).unwrap(),
+            signed
         );
         let mut wrong_frontier = normalized.clone();
-        wrong_frontier.predecessors = vec![predecessor_a.clone()];
-        assert_eq!(
-            witness.verify_inherited(&wrong_frontier, None),
-            VerificationState::ProvenForgery
-        );
+        wrong_frontier.predecessors = vec![predecessor_a];
         let mut wrong_facet = source_claim.clone();
         wrong_facet.facet_key = facet_key("org.example.note/wrong");
-        assert_eq!(
-            witness.verify_inherited(&wrong_facet, None),
-            VerificationState::ProvenForgery
-        );
         let mut wrong_uuid = source_claim.clone();
-        wrong_uuid.chosen_uuid = Uuid::from_u128(10);
-        assert_eq!(
-            witness.verify_inherited(&wrong_uuid, None),
-            VerificationState::ProvenForgery
-        );
+        wrong_uuid.chosen_uuid = uuid7(10);
+        let mut wrong_actor = source_claim.clone();
+        wrong_actor.actor_uuid = uuid7(10);
         let mut wrong_origin = source_claim;
         wrong_origin.origin_document = DocumentId::new(b"branch-b");
+        for wrong in [
+            wrong_frontier,
+            wrong_facet,
+            wrong_uuid,
+            wrong_actor,
+            wrong_origin,
+        ] {
+            assert!(matches!(
+                witness.authenticate(&actor, Some(&wrong)),
+                Err(DmetaError::WrongContext)
+            ));
+        }
+        let mut wrong_origin = witness.clone();
+        wrong_origin.inherited.as_mut().unwrap().origin_doc = DocumentId::new(b"branch-b");
+        assert!(matches!(
+            wrong_origin.authenticate(&actor, None),
+            Err(DmetaError::WrongContext)
+        ));
+        let mut wrong_actor = witness.clone();
+        wrong_actor.actor_uuid = uuid7(10);
+        assert!(matches!(
+            wrong_actor.authenticate(&actor, None),
+            Err(DmetaError::WrongContext)
+        ));
+        let mut double_carrier = witness.clone();
+        double_carrier.message = Some(Bytes::from(normalized.signing_bytes().unwrap()));
+        assert!(matches!(
+            double_carrier.authenticate(&actor, None),
+            Err(DmetaError::WrongContext)
+        ));
+        let before = witness.clone();
+        assert!(matches!(
+            witness.carry_message(&normalized),
+            Err(DmetaError::WrongContext)
+        ));
+        assert_eq!(witness, before);
+    }
+
+    #[test]
+    fn portable_messages_bind_actor_and_expected_context() {
+        let claim = claim_for(&native_value());
+        let (actor, mut entry) = signed_entry(&claim);
+        let reconstructed = entry.authenticate(&actor, Some(&claim)).unwrap();
+        let mut wrong_actor = claim.clone();
+        wrong_actor.actor_uuid = uuid7(3);
+        assert!(matches!(
+            entry.carry_message(&wrong_actor),
+            Err(DmetaError::WrongContext)
+        ));
+        assert!(entry.message.is_none());
+        entry.carry_message(&claim).unwrap();
+        assert_eq!(entry.authenticate(&actor, None).unwrap(), reconstructed);
         assert_eq!(
-            witness.verify_inherited(&wrong_origin, None),
-            VerificationState::ProvenForgery
+            entry.authenticate(&actor, Some(&claim)).unwrap(),
+            reconstructed
         );
+        let mut wrong_context = claim.clone();
+        wrong_context.facet_key = facet_key("org.example.note/other");
+        assert!(matches!(
+            entry.authenticate(&actor, Some(&wrong_context)),
+            Err(DmetaError::WrongContext)
+        ));
+        let mut wrong_entry = entry.clone();
+        wrong_entry.actor_uuid = uuid7(3);
+        assert!(matches!(
+            wrong_entry.authenticate(&actor, None),
+            Err(DmetaError::WrongContext)
+        ));
+        let other_key = SigningKey::from_bytes(&[8; 32]);
+        let other_actor = ActorMetadata {
+            pubkey: MultibaseKey::try_from(other_key.verifying_key().as_bytes().as_slice())
+                .unwrap(),
+            ..actor.clone()
+        };
+        assert!(matches!(
+            entry.authenticate(&other_actor, None),
+            Err(DmetaError::InvalidSignature)
+        ));
+        entry.message = Some(Bytes::from(wrong_context.signing_bytes().unwrap()));
+        assert!(matches!(
+            entry.authenticate(&actor, None),
+            Err(DmetaError::InvalidSignature)
+        ));
     }
 
     #[test]
@@ -1266,7 +1791,8 @@ mod tests {
         let claim = FacetClaim {
             origin_document: DocumentId::new(b"doc"),
             facet_key: key.clone(),
-            chosen_uuid: Uuid::from_u128(12),
+            chosen_uuid: uuid7(12),
+            actor_uuid: uuid7(2),
             operation: ClaimOperation::Remove,
             value_cid: None,
             predecessors: vec![],
@@ -1286,18 +1812,53 @@ mod tests {
 
     #[test]
     fn predecessors_are_sorted_and_deduplicated_before_signing() {
-        let first = cid_with(1);
-        let second = cid_with(2);
+        use ciborium::Value as Cbor;
+
+        let mut predecessors = [cid_with(1), cid_with(2)];
+        predecessors.sort();
+        let [first, second] = predecessors;
         let claim = FacetClaim {
-            origin_document: DocumentId::new(b"d"),
-            facet_key: facet_key("org.example.test/main"),
-            chosen_uuid: Uuid::nil(),
             operation: ClaimOperation::Remove,
             value_cid: None,
             predecessors: vec![second.clone(), first.clone(), second.clone()],
+            ..claim_for(&NativeValue::Null)
         };
         let bytes = claim.cbor_fields().unwrap();
-        let decoded = FacetClaim::from_cbor_fields(&bytes).unwrap();
-        assert_eq!(decoded.predecessors, vec![first, second]);
+        let normalized = FacetClaim {
+            predecessors: vec![first.clone(), second.clone()],
+            ..claim.clone()
+        };
+        assert_eq!(FacetClaim::from_cbor_fields(&bytes).unwrap(), normalized);
+        assert_eq!(
+            claim.signing_bytes().unwrap(),
+            normalized.signing_bytes().unwrap()
+        );
+        let (actor, entry) = signed_entry(&claim);
+        let signed = entry.authenticate(&actor, Some(&claim)).unwrap();
+        let normalized_signed = entry.authenticate(&actor, Some(&normalized)).unwrap();
+        assert_eq!(
+            signed.signature_id().unwrap(),
+            normalized_signed.signature_id().unwrap()
+        );
+        let Cbor::Array(fields) = ciborium::from_reader(&bytes[..]).unwrap() else {
+            panic!("claim fixture is not an array");
+        };
+        for malformed_predecessors in [vec![second, first.clone()], vec![first.clone(), first]] {
+            let mut malformed = fields.clone();
+            malformed[6] = Cbor::Array(
+                malformed_predecessors
+                    .into_iter()
+                    .map(|cid| Cbor::Bytes(cid.as_bytes().to_vec()))
+                    .collect(),
+            );
+            let mut encoded = Vec::new();
+            ciborium::into_writer(&Cbor::Array(malformed), &mut encoded).unwrap();
+            assert!(matches!(
+                FacetClaim::from_cbor_fields(&encoded),
+                Err(DmetaError::MalformedClaim(
+                    "predecessors must be sorted and unique"
+                ))
+            ));
+        }
     }
 }
