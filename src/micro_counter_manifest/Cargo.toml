@@ -1,0 +1,15 @@
+[package]
+name = "micro_counter_manifest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[features]
+composition = ["dep:clay_compose", "dep:daybook_types"]
+
+[dependencies]
+clay_compose = { path = "../clay_compose", optional = true }
+daybook_types = { workspace = true, default-features = false, features = ["manifest"], optional = true }

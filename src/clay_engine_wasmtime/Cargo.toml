@@ -1,0 +1,23 @@
+[package]
+name = "clay_engine_wasmtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_data = { path = "../clay_data" }
+clay_host = { path = "../clay_host" }
+clay_surface = { path = "../clay_surface" }
+wasmtime.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+daybook_types.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }

@@ -1,0 +1,11 @@
+[package]
+name = "micro_settings_manifest"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_compose = { path = "../clay_compose" }
+clay_host = { path = "../clay_host" }

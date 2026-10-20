@@ -5,7 +5,7 @@ description: Check and work around the upstream limits of Blitz / dioxus-native 
 
 # Blitz / dioxus-native limits
 
-`src/dayframe_dx` runs on a pinned, pre-release Blitz stack. Several ordinary DOM capabilities are
+`src` runs on a pinned, pre-release Blitz stack. Several ordinary DOM capabilities are
 missing, and a few APIs **panic** rather than degrade. Knowing this up front changes design decisions
 (a feature can be impossible for reasons unrelated to the app code), so consult this list before
 committing to an approach that depends on one of these.

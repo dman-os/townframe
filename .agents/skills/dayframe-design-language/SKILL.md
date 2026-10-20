@@ -5,7 +5,7 @@ description: Apply and extend the Dayframe design language when implementing or 
 
 # Dayframe design language
 
-Use this skill for UI work in `src/dayframe_dx`. It is the design-system counterpart to `dayframe-native-dev-loop`, which covers running, screenshotting, and semantically inspecting the native app.
+Use this skill for UI work in `src`. It is the design-system counterpart to `dayframe-native-dev-loop`, which covers running, screenshotting, and semantically inspecting the native app.
 
 The design language is a maintained implementation contract, not background prose. New UI MUST use it, and a request that exceeds its expressivity MUST be made explicit before being silently implemented as an ad-hoc value.
 
@@ -17,22 +17,22 @@ Read the repository `AGENTS.md`, then the relevant design-language documents:
 - `docs/design-language/foundations.md` — normative foundation rules and `FOUND-*` IDs.
 - `docs/design-language/composition.md` — layout and composition rules.
 - `docs/design-language/interaction.md` — state and interaction rules.
-- `src/dayframe_dx/ui/styles/README.md` — stylesheet integration.
+- `src/ui/styles/README.md` — stylesheet integration.
 - `docs/adrs/014-dayframe-dx-application-architecture.md` — application crate, feature-module, data-lifecycle, and feature-gate boundaries when UI work crosses presentation into app architecture.
 
 For token or Tailwind work, also inspect:
 
-- `src/dayframe_dx/ui/styles/tokens/primitives.tokens.json`
-- `src/dayframe_dx/ui/styles/tokens/semantic.tokens.json`
+- `src/ui/styles/tokens/primitives.tokens.json`
+- `src/ui/styles/tokens/semantic.tokens.json`
 - `x/design-tokens.ts`
-- `src/dayframe_dx/ui/tailwind.css`
+- `src/ui/tailwind.css`
 
 For native build or visual verification, also read `.agents/skills/dayframe-native-dev-loop/SKILL.md`.
 
 ## Source-of-truth rules
 
 - Authored token JSON is canonical. Generated CSS and bundled Tailwind output are derived artifacts and MUST NOT be hand-edited.
-- Run `x/design-tokens.ts --check` after token changes. Regenerate with `--write`, then regenerate `src/dayframe_dx/ui/assets/tailwind.css` through the documented Tailwind command.
+- Run `x/design-tokens.ts --check` after token changes. Regenerate with `--write`, then regenerate `src/ui/assets/tailwind.css` through the documented Tailwind command.
 - Foundation tokens are application-agnostic. They MUST NOT contain tiles, columns, widgets, screens, routes, workflows, or other product-specific grammar.
 - Keep the dependency direction `primitive -> semantic -> optional reusable component`. A primitive MUST NOT depend on a semantic or feature token.
 - The showcase is curated executable evidence, not the normative source and not an exhaustive token catalog.
@@ -115,7 +115,7 @@ deno check x/design-tokens.ts
 deno run --allow-read --allow-write x/design-tokens.ts --self-test
 deno run --allow-read --allow-write x/design-tokens.ts --write
 deno run --allow-read --allow-write x/design-tokens.ts --check
-tailwindcss -i src/dayframe_dx/ui/tailwind.css -o src/dayframe_dx/ui/assets/tailwind.css
+tailwindcss -i src/ui/tailwind.css -o src/ui/assets/tailwind.css
 cargo fmt --all -- --check
 ```
 

@@ -1,17 +1,17 @@
 # Dayframe UI guidance
 
-For any UI implementation or review under `src/dayframe_dx`, read `.agents/skills/dayframe-design-language/SKILL.md` before changing UI. It defines the canonical token source, Tailwind vocabulary, foundation-versus-feature boundary, and the process for surfacing missing design-language expressivity.
+For any UI implementation or review under `src`, read `.agents/skills/dayframe-design-language/SKILL.md` before changing UI. It defines the canonical token source, Tailwind vocabulary, foundation-versus-feature boundary, and the process for surfacing missing design-language expressivity.
 
 For native build, screenshot, accessibility, or renderer verification, also read `.agents/skills/dayframe-native-dev-loop/SKILL.md`.
 
 ---
 name: dayframe-native-dev-loop
-description: Run, screenshot, and semantically inspect the dayframe_dx Dioxus/Blitz native desktop app. Use when building or visually verifying src/dayframe_dx, when the wrapped Dioxus serve process misbehaves, when taking app screenshots under niri, or when driving the native app with accessibility-cli over AT-SPI.
+description: Run, screenshot, and semantically inspect the dayframe_dx Dioxus/Blitz native desktop app. Use when building or visually verifying src, when the wrapped Dioxus serve process misbehaves, when taking app screenshots under niri, or when driving the native app with accessibility-cli over AT-SPI.
 ---
 
 # Dayframe native dev loop
 
-Use this for any build/run/screenshot/inspect cycle on `src/dayframe_dx` (the Dioxus 0.8-alpha
+Use this for any build/run/screenshot/inspect cycle on `src` (the Dioxus 0.8-alpha
 native app). Read the repository `AGENTS.md` first.
 
 This skill exists because the loop is not obvious and every step below has cost a wasted cycle at
@@ -166,7 +166,7 @@ The operator has interrupted this loop to ask for less noise. When inspecting a 
 
 - `.agents/skills/blitz-dioxus-native-limits` — the upstream Blitz/dioxus-native limits that shape
   what the app can do at all.
-- `src/dayframe_dx/AGENTS.md` — Dioxus 0.8-alpha API notes (0.7 docs differ; `cx`/`Scope`/`use_state`
+- `src/AGENTS.md` — Dioxus 0.8-alpha API notes (0.7 docs differ; `cx`/`Scope`/`use_state`
   are gone).
 - `docs/fdrs/005-tiles-primitive.md`, `docs/adrs/010-dayframe-dx-architecture.md`.
 

@@ -27,19 +27,24 @@ members = [
   "./src/wflow_sdk",
   "./src/wflow_tokio/",
   "./src/xtask",
-  "./src/dayframe_dx/app",
-  "./src/dayframe_dx/presentation",
-  "./src/dayframe_dx/engine_wasmtime",
-  "./src/dayframe_dx/guest",
-  "./src/dayframe_dx/micros/settings_contract",
-  "./src/dayframe_dx/micros/settings",
-  "./src/dayframe_dx/micros/sample",
-  "./src/dayframe_dx/micros/counter",
-  "./src/dayframe_dx/ui",
-  "./src/dayframe_dx/web",
-  "./src/dayframe_dx/desktop",
-  "./src/dayframe_dx/mobile",
-  "./src/dayframe_dx/showcase",
+  "./src/clay_wit",
+  "./src/clay_surface",
+  "./src/clay_host",
+  "./src/clay_data",
+  "./src/clay_compose",
+  "./src/clay_dioxus",
+  "./src/clay_mdk",
+  "./src/clay_engine_wasmtime",
+  "./src/micro_settings_manifest",
+  "./src/micro_settings",
+  "./src/micro_sample",
+  "./src/micro_counter",
+  "./src/micro_counter_manifest",
+  "./src/ui",
+  "./src/dayframe_web",
+  "./src/dayframe_desktop",
+  "./src/dayframe_mobile",
+  "./src/dayframe_showcase",
 ]
 
 [workspace.package]
@@ -51,6 +56,8 @@ license = ""
 repository = ""
 
 [workspace.dependencies]
+getrandom = { version = "0.4" }
+getrandom03 = { package = "getrandom", version = "0.3" }
 #
 # internal
 utils_rs = { path = "./src/utils_rs", default-features = false }
@@ -253,7 +260,7 @@ dioxus-core = { path = "../dioxus/packages/core" }
 dioxus-html = { path = "../dioxus/packages/html" }
 dioxus-native-dom = { path = "../dioxus/packages/native-dom" }
 blitz-dom = "=0.3.0-beta.4"
-ui = { path = "./src/dayframe_dx/ui" }
+ui = { path = "./src/ui" }
 # xilem = { path = "../xilem/xilem/" }
 
 [patch.crates-io]

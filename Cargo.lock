@@ -2657,6 +2657,109 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "clay_compose"
+version = "0.1.0"
+dependencies = [
+ "clay_data",
+ "clay_host",
+ "daybook_types",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "clay_data"
+version = "0.1.0"
+dependencies = [
+ "clay_host",
+ "daybook_types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "clay_dioxus"
+version = "0.1.0"
+dependencies = [
+ "clay_compose",
+ "clay_data",
+ "clay_engine_wasmtime",
+ "clay_host",
+ "clay_surface",
+ "daybook_types",
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "clay_engine_wasmtime"
+version = "0.1.0"
+dependencies = [
+ "clay_data",
+ "clay_host",
+ "clay_surface",
+ "daybook_types",
+ "futures",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "wasmtime",
+]
+
+[[package]]
+name = "clay_host"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "clay_mdk"
+version = "0.1.0"
+dependencies = [
+ "blitz-dom",
+ "clay_data",
+ "clay_host",
+ "clay_surface",
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "dioxus-native-dom",
+ "serde",
+ "serde_json",
+ "wasmtime",
+ "wit-bindgen 0.60.0",
+]
+
+[[package]]
+name = "clay_surface"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "pastey 0.1.1",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "clay_wit"
+version = "0.1.0"
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4057,108 +4160,74 @@ dependencies = [
 ]
 
 [[package]]
-name = "dayframe_app"
+name = "dayframe_desktop"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "daybook_types",
- "dayframe_presentation",
- "dioxus",
- "dioxus-core",
- "dioxus-html",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "dayframe_counter"
-version = "0.1.0"
-dependencies = [
- "daybook_types",
- "dayframe_app",
- "dayframe_engine_wasmtime",
- "dayframe_presentation",
- "dayframe_settings",
- "dayframe_settings_contract",
- "dioxus",
- "dioxus-core",
- "dioxus-html",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "dayframe_engine_wasmtime"
-version = "0.1.0"
-dependencies = [
- "daybook_types",
- "dayframe_app",
- "dayframe_presentation",
- "dioxus",
- "dioxus-core",
- "dioxus-html",
- "futures",
- "serde_json",
- "tokio",
- "wasmtime",
-]
-
-[[package]]
-name = "dayframe_guest"
-version = "0.1.0"
-dependencies = [
+ "accesskit_xplat",
+ "anyrender 0.13.0",
+ "anyrender_vello",
+ "anyrender_vello_cpu 0.17.0",
+ "anyrender_vello_hybrid 0.10.0",
  "blitz-dom",
- "dioxus",
- "dioxus-core",
- "dioxus-html",
- "dioxus-native-dom",
- "serde_json",
- "wasmtime",
- "wit-bindgen 0.60.0",
-]
-
-[[package]]
-name = "dayframe_presentation"
-version = "0.1.0"
-dependencies = [
- "dioxus",
- "dioxus-core",
- "dioxus-html",
- "pastey 0.1.1",
- "serde_json",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "dayframe_sample"
-version = "0.1.0"
-dependencies = [
+ "clay_compose",
+ "clay_data",
+ "clay_dioxus",
+ "clay_host",
+ "clay_surface",
  "daybook_types",
- "dayframe_app",
- "dayframe_settings",
- "dayframe_settings_contract",
  "dioxus",
+ "dioxus-core",
+ "dioxus-html",
+ "dioxus-native",
+ "dioxus-native-dom",
+ "micro_counter_manifest",
+ "micro_sample",
+ "micro_settings",
+ "micro_settings_manifest",
  "serde",
  "serde_json",
  "tokio",
+ "ui",
 ]
 
 [[package]]
-name = "dayframe_settings"
+name = "dayframe_mobile"
 version = "0.1.0"
 dependencies = [
- "dayframe_app",
- "dayframe_settings_contract",
+ "android-activity",
+ "anyrender 0.13.0",
+ "anyrender_skia",
+ "anyrender_vello",
+ "anyrender_vello_cpu 0.17.0",
+ "anyrender_vello_hybrid 0.10.0",
  "dioxus",
+ "dioxus-native",
+ "tokio",
+ "ui",
+ "winit",
 ]
 
 [[package]]
-name = "dayframe_settings_contract"
+name = "dayframe_showcase"
 version = "0.1.0"
 dependencies = [
- "dayframe_app",
+ "anyrender 0.13.0",
+ "anyrender_vello",
+ "anyrender_vello_cpu 0.17.0",
+ "anyrender_vello_hybrid 0.10.0",
+ "dioxus",
+ "dioxus-native",
+ "serde",
+ "serde_json",
+ "ui",
+]
+
+[[package]]
+name = "dayframe_web"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "ui",
 ]
 
 [[package]]
@@ -4405,32 +4474,6 @@ dependencies = [
  "rustc_version",
  "syn 2.0.119",
  "unicode-xid",
-]
-
-[[package]]
-name = "desktop"
-version = "0.1.0"
-dependencies = [
- "accesskit_xplat",
- "anyrender 0.13.0",
- "anyrender_vello",
- "anyrender_vello_cpu 0.17.0",
- "anyrender_vello_hybrid 0.10.0",
- "blitz-dom",
- "daybook_types",
- "dayframe_app",
- "dayframe_counter",
- "dayframe_sample",
- "dayframe_settings",
- "dioxus",
- "dioxus-core",
- "dioxus-html",
- "dioxus-native",
- "dioxus-native-dom",
- "serde",
- "serde_json",
- "tokio",
- "ui",
 ]
 
 [[package]]
@@ -9708,6 +9751,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "micro_counter"
+version = "0.1.0"
+dependencies = [
+ "clay_mdk",
+ "dioxus",
+ "micro_counter_manifest",
+ "serde_json",
+]
+
+[[package]]
+name = "micro_counter_manifest"
+version = "0.1.0"
+dependencies = [
+ "clay_compose",
+ "daybook_types",
+]
+
+[[package]]
+name = "micro_sample"
+version = "0.1.0"
+dependencies = [
+ "clay_compose",
+ "clay_dioxus",
+ "clay_mdk",
+ "daybook_types",
+ "dioxus",
+ "micro_settings",
+ "micro_settings_manifest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "micro_settings"
+version = "0.1.0"
+dependencies = [
+ "clay_compose",
+ "clay_dioxus",
+ "clay_mdk",
+ "dioxus",
+ "micro_settings_manifest",
+]
+
+[[package]]
+name = "micro_settings_manifest"
+version = "0.1.0"
+dependencies = [
+ "clay_compose",
+ "clay_host",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9767,23 +9863,6 @@ dependencies = [
  "tokio",
  "url",
  "utils_rs",
-]
-
-[[package]]
-name = "mobile"
-version = "0.1.0"
-dependencies = [
- "android-activity",
- "anyrender 0.13.0",
- "anyrender_skia",
- "anyrender_vello",
- "anyrender_vello_cpu 0.17.0",
- "anyrender_vello_hybrid 0.10.0",
- "dioxus",
- "dioxus-native",
- "tokio",
- "ui",
- "winit",
 ]
 
 [[package]]
@@ -14601,21 +14680,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "showcase"
-version = "0.1.0"
-dependencies = [
- "anyrender 0.13.0",
- "anyrender_vello",
- "anyrender_vello_cpu 0.17.0",
- "anyrender_vello_hybrid 0.10.0",
- "dioxus",
- "dioxus-native",
- "serde",
- "serde_json",
- "ui",
-]
-
-[[package]]
 name = "signal-hook"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -18822,14 +18886,6 @@ dependencies = [
  "log",
  "once_cell",
  "pkg-config",
-]
-
-[[package]]
-name = "web"
-version = "0.1.0"
-dependencies = [
- "dioxus",
- "ui",
 ]
 
 [[package]]

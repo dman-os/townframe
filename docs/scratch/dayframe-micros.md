@@ -647,6 +647,174 @@ To be fixed as the slices land, not all at once.
   initial `InitialTreeRequested` snapshot from `dom.rebuild()` (`Heading`, `Button[title="Close Settings"]`,
   `Switch`) and never pushes later `use_future` micro-reconciliation or interaction updates to AT-SPI.
    Stopped the temporary native window after verification.
+- **Turn 17 (generation 24)** — ADR 015 written (`docs/adrs/015-clay-composition-runtime.md`):
+  clay runtime shapes (native process, browser module), boundary rules R1–R8, crate layout,
+  data-layer spec quoting the transcript, MDK direction, FIXME disposition table, vocabulary.
+  **Stage 1 landed (mechanical crate split, no behavior change intended).** `src/dayframe_dx`
+  is gone; crates now live directly under `src/`: `clay_wit` (owns the WIT package),
+  `clay_surface` (was presentation), `clay_host` (host.rs minus documents),
+  `clay_data` (documents.rs + collection + mock; grant/mock methods moved off `Host` onto
+  `DocumentService` with explicit `&Host` for lifecycle), `clay_compose` (micros + flags;
+  `MicroRegistry::new(documents)`, `MicroActivation::grant_config`), `clay_dioxus` (native
+  adapter + `ApplicationRuntime`, which owns Host+DocumentService+NativeComponents),
+  `clay_mdk` (was guest), `clay_engine_wasmtime`, `micro_settings_manifest`, `micro_settings`,
+  `micro_sample`, `micro_counter` (fixture.rs shared), launchers `dayframe_desktop`/
+  `dayframe_web`/`dayframe_mobile`/`dayframe_showcase`, `ui` at `src/ui`. All FIXMEs resolved
+  per ADR 015 §11 (one deliberate `FIXME(ADR-015 stage 6)` remains on micro_counter's
+  native-adapter role). `x/check-dayframe.ts` tracks the new package names;
+  `x/design-tokens.ts` and skills updated for the path move. Mid-stage the `../dioxus`
+  symlink had to be repointed from the stale real checkout (alpha.1) to the alpha.3 fork
+  workspace `dayframe-gen-aa578c2c49e78545-10-a`. Verification: 13-crate
+  `cargo check --all-targets` clean; **135/135 nextest green** (131 core + 4 desktop incl.
+  `composed_settings_wasm_dom_flow`); clippy clean across the 13 crates (only pre-existing
+  `ui/tiles` warnings remain); `cargo fmt --check` clean; Deno check/fmt/token-check green.
+  Remaining stages per ADR 015 Migration: 2 runtime-shape fixes (Instance id/lease, Condvar
+  removal, slim MicroActivation), 3 clay_data semantics, 4 leases for contribution
+  collections, 5 clay_mdk dual backends, 6 generic wasm provider, 7 slots, 8 launcher rename
+  (already done as part of stage 1).
+- **Turn 18 (generation 24)** — **Stage 2 landed (runtime-shape fixes).** Removed the
+  `RecoveryGate` (`Condvar`+`ThreadId`) and all `std::thread` use from production host code;
+  the close cascade is now a non-blocking state machine (`Recovery { active, closed, pending }`)
+  driven by `run_closes`, which preserves the consumer-before-provider and
+  cleanup-before-Closed ordering without OS blocking. The multi-threaded
+  `overlapping_shutdown_waits_for_consumer_recovery` test was replaced by
+  `a_close_started_inside_cleanup_recovers_dependents_before_their_provider`, which encodes the
+  same contract on one thread. Collapsed the `MicroProvider` sync/async split into one async
+  `activate` returning a future; `MicroFactory` wraps a sync closure, `AsyncMicroFactory` holds
+  an async one, and the dead `activate -> Denied` path is gone. `MicroRegistry::activate` polls
+  once with a noop waker and panics if a provider pends (documented: use `activate_async`).
+  **wasm32 smoke test:** `clay_host`/`clay_data`/`clay_compose` now compile for
+  `wasm32-unknown-unknown`; only `getrandom` 0.4 + 0.3 needed the `wasm_js` feature, wired via
+  workspace deps + a `cfg(target_arch = "wasm32")` target dep in clay_host (aliased
+  `getrandom03` for the 0.3 line). Fixed `dayframe_showcase`'s `include_str!` to be
+  `CARGO_MANIFEST_DIR`-relative after the crate move. Verified: 135/135 nextest green, clippy
+  clean on touched crates, fmt clean, native + wasm32 checks clean. Remaining stages: 3
+  clay_data semantics, 4 contribution-collection leases, 5 clay_mdk dual backends, 6 generic
+  wasm provider, 7 slots.
+- **Turn 19 (generation 24)** — **Stage 3 landed (clay_data semantics).** Replaced the boolean
+  `refreshing` flag with the transcript's freshness vocabulary: `FacetValue::{Loading, Absent,
+  Present}` (Loading = not hydrated, Absent = known-absent after read — never conflated) and
+  `Freshness::{Cached, Refreshing, Current}` on `DocumentSnapshot` (evidence, not a loading
+  state; a pending refresh never hides an existing local value, ADR 014 §4). Added
+  `DocumentWatch::read(&FacetRoute) -> Result<FacetValue>` — a targeted single-route hydration
+  through the mirror, returning Denied for routes outside the selection, never a whole-map
+  clone. `DocumentWatch::refresh()` now returns the post-request `DocumentSnapshot` so callers
+  see `Refreshing` evidence directly. WIT keeps its existing `refreshing: bool` (mapped from
+  `Freshness`); the wire enum is a future breaking change. New focused test
+  `a_targeted_read_hydrates_only_that_route_and_preserves_loading_states`. Verified: 136/136
+  nextest green, clippy + fmt clean. Remaining stages: 4 contribution-collection leases, 5
+  clay_mdk dual backends, 6 generic wasm provider, 7 slots.
+- **Turn 20 (generation 24)** — **Stage 4 landed (contribution-collection leases).** `Entry<T>`
+  is now a lease (ADR 015 §6): `remove(self)`/`release(&self)` withdraw idempotently — removing
+  an already-gone entry is not an error and never requires live authority (cleanup must not
+  need it), and `update` still returns `Revoked` once the entry is gone. Added a per-entry
+  generation so the owner-closure cleanup and stale leases withdraw only the exact `(id,
+  generation)` incarnation: a replacement entry that reuses an id slot is never withdrawn by a
+  stale handle (transcript:222 "stale cleanup cannot remove a replacement"; Cordis §3.4.2's
+  commutativity boundary). Settings sections and root mounts already flow through these
+  collections. New test `withdrawing_an_entry_is_idempotent_and_a_stale_lease_cannot_remove_
+  a_replacement`. Verified: 137/137 nextest green, clippy + fmt clean. Remaining stages: 5
+  clay_mdk dual backends, 6 generic wasm provider, 7 slots.
+
+- **Turn 21 (generation 24)** — **Stage 5 landed (clay_mdk dual backends).** Restructured
+  `clay_mdk` into three feature-gated backends (ADR 015 §5): `wit` (WIT bindings plus the new
+  typed mirror authoring surface `mirror.rs` — `ConfigDocument`/`MirrorWatch`/`MirrorSnapshot`/
+  `FacetState`, Loading≠Absent evidence preserved, typed `value::<T>` decode, targeted
+  `refresh`), `native` (in-process backend re-exporting the clay_host/clay_data authoring
+  handles; `DocumentService` included for composition-time mock seeding), and `dioxus`
+  (`GuestDom`/`WireMutations` moved out of the crate root into `guest.rs`/`wire.rs` behind
+  optional dioxus deps, so the bindings/mirror core compiles engine-free and for
+  `wasm32-unknown-unknown` with `--no-default-features --features wit`). micro_sample and
+  micro_settings now depend on `clay_mdk` (feature `native`) instead of `clay_host`/`clay_data`
+  directly, per the ADR dependency direction (micros depend on the MDK and contract crates).
+  Verified: 137/137 nextest green, clippy clean, all four feature combos check (empty, native,
+  wit, wit+wasm32), counter guest example still builds to `counter.component.wasm`. Remaining
+  stages: 6 generic wasm provider + counter collapse, 7 slots.
+
+- **Turn 22 (generation 25)** — **Stage 6 landed (generic wasm provider + counter collapse).**
+  `clay_dioxus::wasmtime` (optional `wasmtime` feature) now owns the generic manifest/package
+  provider: declared config grants, component activation, incarnation-owned delivery future,
+  surface publication, contribution insertion, and staged controller publication. Typed
+  contribution insertion stays in a composition-root callback; neither the provider nor the
+  engine depends on Counter or Settings. `clay_compose` supplies `MicroManifest<C>` and
+  `ConfigManifest`. `clay_engine_wasmtime::WasmRuntime` no longer depends on clay_compose or
+  clay_dioxus; the host-internal `SurfaceSink`/`SurfaceSession` seam lives in clay_surface.
+  `micro_counter` is now the actual wasm guest, not a native adapter; engine-free
+  `micro_counter_manifest` owns shared constants and declarations (optional `composition`
+  feature). The desktop root loads the package, seeds mock config, and binds the typed Settings
+  contribution. Removed the MDK counter example; `x/check-dayframe.ts` builds the guest crate
+  and includes the new manifest package. Provider tests now live in clay_dioxus; Counter's
+  Settings integration test lives in the desktop composition root. Added focused regressions
+  for contribution-failure rollback, read-only grant enforcement, and failed guest activation
+  publishing neither contributions nor controller; trap isolation, withdrawal, disable/re-enable,
+  and fresh incarnation behavior remain covered. Verified: **140/140 nextest green** via
+  `x/check-dayframe.ts --no-fail-fast --test-threads 2`, scoped all-target/all-feature Clippy,
+  engine-disabled clay_dioxus Clippy, wasm32 core/MDK/manifest/guest Clippy, Rust fmt checks,
+  and Deno check/fmt. The wasm32 matrix reports three unused-variable warnings in the Dioxus
+  fork's `html/src/file_data.rs` (lines 167, 190, 218), not in the changed crates. Verification
+  required `x/wit-fetch.ts` for missing generated WIT dependencies and `CARGO_INCREMENTAL=0`
+  to bypass stale clay_surface artifacts (source mtimes appeared as 2019; package cleaning
+  encountered `work-products.bin: Invalid argument (os error 22)`). Kept the configured shared
+  target directory and `CARGO_BUILD_JOBS=2`; no VCS mutations. Remaining stage: 7 slots
+  (`MountComponent` on the wire and context-based native lookup); launcher renames were
+  already completed in stage 1.
+
+- **Turn 23 (generation 25)** — **Stage 7 landed (presentation slots + native context lookup).**
+  WIT now carries host-issued `component-ref` resources and borrowed `mount-component` mutations;
+  mount explicitly transfers the selected component grants, with no global lookup or DOM targeting.
+  Wasmtime validates host/liveness before granting references, resolves borrows through the store's
+  resource table, and bounds outstanding component handles at 1024 with capacity restored on drop.
+  `clay_surface` parameterizes mutations, trees, and sinks over the reference type so it gains no
+  host dependency; slots are opaque leaf nodes with generation-based identity. Plain
+  `WriteMutations` replay rejects slot batches before applying even a preceding ordinary edit.
+  `ComponentMount` remains the native backing and accepts an explicit registry or inherited Dioxus
+  context; Settings and desktop no longer thread registry props through feature views. Nested
+  surfaces check ancestor mount and surface lifetimes, while cyclic or deeper-than-64 component
+  paths are rejected before invoking another factory. Added native identity/replacement/revocation,
+  opaque-slot/clone/replay, resource-table/capacity, and actual WIT layout-around-interactive-WASM-child
+  regressions. `x/check-dayframe.ts` prepares both Counter and slots components. Verification caught
+  mixed keyed/unkeyed text siblings around a slot; keyed text fragments fix this without adding DOM
+  wrappers. Verified: **146/146 nextest green**, nine focused slot/resource tests green, scoped
+  all-target/all-feature Clippy, engine-disabled Dioxus Clippy, wasm32 core/adapter/MDK/manifest/guest
+  Clippy, MDK empty/native/WIT feature checks, Rust fmt, and Deno check/fmt. The strengthened atomic
+  replay test and scoped lint/format checks passed again after the final test edit. Three wasm32
+  unused-variable warnings remain pinned to the Dioxus fork's `html/src/file_data.rs` at 167, 190,
+  and 218. An initial scoped run was terminated by the tool's 120-second command limit; the complete
+  rerun used a longer command limit without changing test timeouts. Kept the configured target,
+  `CARGO_BUILD_JOBS=2`, and `CARGO_INCREMENTAL=0`; no VCS mutations. ADR 015 migration stages are
+  complete, including the launcher renames already done in stage 1; deferred work stays deferred.
+
+- **Turn 24 (generation 26)** — **ADR 015 FIXME-disposition audit and close-out.** No FIXME/TODO
+  comments remain in the clay/micro/dayframe crates, but auditing §11 against the code found four
+  dispositions recorded as done that were only partial; all four are now implemented.
+  (1) §6/R3: `Instance::host()` is gone, so a token never yields the `Host`; `PendingActivation`
+  carries the host it commits against. (2) §7: `MicroActivation::host()` is gone; Settings gets
+  its section store from the narrow `MicroActivation::collection::<T>()` (a collection provided
+  by the activating incarnation), and the generic Wasm provider takes the engine's host from the
+  `NativeComponents` registry it serves. (3) §7, `micros.rs:59`: the owned-future driver is now a
+  `FuturesUnordered` fed by `tokio::select!` (a wake polls only the woken future instead of every
+  future), and `reap` still drops a closed owner's future without polling it via a shared slot.
+  New regression `closing_an_owner_drops_its_pending_future_on_reap_without_polling`. (4) §7,
+  `micros.rs:255`: `AsyncMicroFactory` folded into `MicroFactory::new_async`, and the public
+  synchronous `MicroRegistry::activate` (noop-waker poll that panicked on a pending provider) was
+  removed; `activate` is the async path. The registry-only async rollback test moved from
+  clay_dioxus's Wasm tests into clay_compose. clay_compose now depends on `futures` (workspace)
+  and declares tokio `macros`, which it already used; unused `async-trait` dropped. (5) §11,
+  `presentation/lib.rs:1`: `clay_surface` split into `wire.rs` (transport values + sink/session),
+  `replay.rs`, `tree.rs` (validation + stack machine), `render.rs` (VDOM projection and the static
+  tag/attribute/listener vocabulary that validation consults), tests in `tree_tests.rs`; public API
+  unchanged. Not done, by choice: an `InstanceId` boundary type (§6) — no boundary carries instance
+  identities yet, so it would be an unused public symbol; lease *names* (`EntryLease`/`WatchLease`/
+  `MountLease`) remain `Entry`/`DocumentWatch`/`Mount`, with the once-only release semantics.
+  Environment: this generation's `../dioxus` was missing; created jj workspace
+  `dayframe-gen-aa578c2c49e78545-26-b` at fork bookmark `dayframe-fork-a3e1e68334b7` (0.8.0-alpha.3)
+  under the session tmp dir and pointed `…/aa578c2c49e78545/dioxus` at it (no dioxus edits), and
+  reran `x/wit-fetch.ts`. A first full run lost 23 clay_surface tests to `double-spawn ... No such
+  file` (the test binary was removed from the shared target dir mid-run by a concurrent build);
+  the immediate full rerun was clean. Verified: **147/147 nextest**, scoped all-target/all-feature
+  Clippy, engine-disabled clay_dioxus Clippy, wasm32 core/adapter/MDK/manifest/guest Clippy, MDK
+  empty/native/WIT feature checks, Rust fmt check, Deno check/fmt. No VCS mutations.
+
 - **Turn 16 (generation 20)** — Pre-review self-audit of the full change against ADR 014 and the
    settled rules, then re-verification. Removed the dead empty legacy modules left on disk
    (`app/src/backend.rs`, `app/src/backend/mock.rs`, `app/src/data.rs`, `app/src/data/{collection,refresh,transaction}.rs`).

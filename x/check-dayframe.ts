@@ -19,7 +19,8 @@ if (!Deno.env.get("CARGO_TARGET_DIR") && await dotenvPath.exists()) {
   }
 }
 
-await $`cargo build --locked -p dayframe_guest --example counter --target wasm32-unknown-unknown`;
+await $`cargo build --locked -p micro_counter --target wasm32-unknown-unknown`;
+await $`cargo build --locked -p clay_mdk --example slots --target wasm32-unknown-unknown`;
 const metadata = await $`cargo metadata --locked --no-deps --format-version 1`
   .json<{ target_directory: string }>();
 const target = $.path(metadata.target_directory);
@@ -29,26 +30,43 @@ const component = directory.join("counter.component.wasm");
 const core = target.join(
   "wasm32-unknown-unknown",
   "debug",
-  "examples",
-  "counter.wasm",
+  "micro_counter.wasm",
 );
 await $`wasm-tools component new ${core} --output ${component}`;
 
+const slotsComponent = directory.join("slots.component.wasm");
+const slotsCore = target.join(
+  "wasm32-unknown-unknown",
+  "debug",
+  "examples",
+  "slots.wasm",
+);
+await $`wasm-tools component new ${slotsCore} --output ${slotsComponent}`;
+
 console.log(`DAYFRAME_COUNTER_COMPONENT=${component}`);
+console.log(`DAYFRAME_SLOTS_COMPONENT=${slotsComponent}`);
 
 if (!prepareOnly) {
   const packages = [
-    "dayframe_presentation",
-    "dayframe_app",
-    "dayframe_guest",
-    "dayframe_engine_wasmtime",
-    "dayframe_settings_contract",
-    "dayframe_settings",
-    "dayframe_sample",
-    "dayframe_counter",
-    "desktop",
+    "clay_surface",
+    "clay_wit",
+    "clay_host",
+    "clay_data",
+    "clay_compose",
+    "clay_dioxus",
+    "clay_mdk",
+    "clay_engine_wasmtime",
+    "micro_settings_manifest",
+    "micro_settings",
+    "micro_sample",
+    "micro_counter",
+    "micro_counter_manifest",
+    "dayframe_desktop",
   ].flatMap((name) => ["-p", name]);
-  const env = { DAYFRAME_COUNTER_COMPONENT: component.toString() };
+  const env = {
+    DAYFRAME_COUNTER_COMPONENT: component.toString(),
+    DAYFRAME_SLOTS_COMPONENT: slotsComponent.toString(),
+  };
   await $`cargo nextest run --locked ${packages} ${Deno.args}`.env(env);
   await $`cargo clippy --locked --no-deps --all-targets --all-features ${packages}`
     .env(env);

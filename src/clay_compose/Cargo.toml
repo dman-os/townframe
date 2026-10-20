@@ -1,0 +1,26 @@
+[package]
+name = "clay_compose"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_host = { path = "../clay_host" }
+clay_data = { path = "../clay_data" }
+futures.workspace = true
+daybook_types = { workspace = true, default-features = false, features = ["manifest"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[features]
+default = []
+camera = []
+mltools = []

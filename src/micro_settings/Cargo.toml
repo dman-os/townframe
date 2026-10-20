@@ -1,0 +1,14 @@
+[package]
+name = "micro_settings"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_compose = { path = "../clay_compose" }
+clay_dioxus = { path = "../clay_dioxus" }
+clay_mdk = { path = "../clay_mdk", default-features = false, features = ["native"] }
+micro_settings_manifest = { path = "../micro_settings_manifest" }
+dioxus.workspace = true
