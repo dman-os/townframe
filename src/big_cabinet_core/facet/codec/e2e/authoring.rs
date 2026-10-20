@@ -1,6 +1,7 @@
 //! Schema-directed authoring, normalization, and hydration behavior.
 
 use super::*;
+use crate::facet::CodecError;
 use autosurgeon::Hydrate as _;
 
 /// The whole point of the facility: the codec reads what the schema says, not how the field is
@@ -115,12 +116,9 @@ fn a_storage_form_this_build_does_not_have_is_refused() {
         "bytes",
         json!({"type": "string", "x-automerge": "vectorClock"}),
     );
-    let error = Stored::check(
-        &compiled(&document),
-        complete_stored(json!({ "bytes": {"$bytes": "AQ=="} })),
-    )
-    .expect_err("refused");
-    assert!(error.to_string().contains("JSON Schema"), "{error}");
+    let error = CompiledSchema::compile(document)
+        .expect_err("unsupported storage is refused during admission");
+    assert!(matches!(error, CodecError::Unknown { stated } if stated == "vectorClock"));
 
     assert_eq!(
         Codec::of(&json!({"x-automerge": "counter"})).unwrap(),

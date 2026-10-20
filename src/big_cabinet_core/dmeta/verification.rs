@@ -1,7 +1,7 @@
 use super::{
     ActorMetadata, Attribution, AttributionError, Bytes, CLAIM_ID_DOMAIN, Cid, ClaimOperation,
-    Dmeta, DmetaError, DocumentId, FacetClaim, FacetSignature, MultibaseKey, NativeValue,
-    SignatureBytes, Uuid7, cid_of, encode_native,
+    Dmeta, DmetaError, FacetClaim, FacetSignature, MultibaseKey, NativeValue, SignatureBytes,
+    Uuid7, cid_of, encode_native,
 };
 use crate::FacetKey;
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -67,7 +67,6 @@ impl SignedFacetClaim {
 impl Dmeta {
     pub fn verify_facet(
         &self,
-        document: &DocumentId,
         key: &FacetKey,
         current: FacetValue<'_>,
         reconstructed: &BTreeMap<SignatureBytes, FacetClaim>,
@@ -77,22 +76,29 @@ impl Dmeta {
             return VerificationState::Uncovered;
         };
         facet_verification(metadata.signatures.iter().map(|entry| {
-            let Some(actor) = self.actor_uuids.get(&entry.actor_uuid) else {
-                return VerificationState::Pending;
+            let Some(actor) = self.actors.get(&entry.actor_uuid) else {
+                return VerificationState::Rejected;
+            };
+            let Some(certificate) = actor.delegation.as_ref() else {
+                return VerificationState::Rejected;
             };
             let signed = match entry.authenticate(actor, reconstructed.get(&entry.signature)) {
                 Ok(signed) => signed,
                 Err(DmetaError::MissingMessage) => return VerificationState::Pending,
                 Err(_) => return VerificationState::Rejected,
             };
+            // A compaction witness names its origin itself; every other entry names it through the
+            // binding of its `docUuid`.
             if signed.claim.facet_key != *key
                 || self.facet_uuids.get(&signed.claim.chosen_uuid) != Some(key)
-                || (entry.inherited.is_none() && signed.claim.origin_document != *document)
+                || (entry.inherited.is_none()
+                    && self.branch_uuids.get(&entry.doc_uuid)
+                        != Some(&signed.claim.origin_document))
             {
                 return VerificationState::Rejected;
             }
-            let attribution = match (actor.delegation.as_ref(), issuers.get(&entry.actor_uuid)) {
-                (Some(certificate), Some(issuer)) => {
+            let attribution = match issuers.get(&entry.actor_uuid) {
+                Some(issuer) => {
                     match Attribution::verify(certificate, issuer, entry.actor_uuid, actor) {
                         Ok(_) => Evidence::Present,
                         Err(AttributionError::Unsupported(_) | AttributionError::ResourceLimit) => {
@@ -101,7 +107,7 @@ impl Dmeta {
                         Err(_) => Evidence::Invalid,
                     }
                 }
-                _ => Evidence::Missing,
+                None => Evidence::Missing,
             };
             fold_checks(SignatureChecks {
                 message: Evidence::Present,

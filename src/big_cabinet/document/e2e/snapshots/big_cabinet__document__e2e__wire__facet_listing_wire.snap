@@ -1,0 +1,15 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: "FacetListing\n{\n    heads: vec![hash(1)], facets:\n    BTreeMap::from([(key(\"main\"), vec![hash(2), hash(3)])]),\n}"
+---
+{
+  "heads": [
+    "0101010101010101010101010101010101010101010101010101010101010101"
+  ],
+  "facets": {
+    "org.example.note/main": [
+      "0202020202020202020202020202020202020202020202020202020202020202",
+      "0303030303030303030303030303030303030303030303030303030303030303"
+    ]
+  }
+}

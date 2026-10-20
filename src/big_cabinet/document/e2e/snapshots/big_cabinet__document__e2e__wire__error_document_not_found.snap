@@ -1,0 +1,5 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: error
+---
+"DocumentNotFound"

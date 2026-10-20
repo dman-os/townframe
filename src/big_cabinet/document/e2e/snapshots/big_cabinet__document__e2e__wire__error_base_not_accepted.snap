@@ -1,0 +1,13 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: error
+---
+{
+  "BaseNotAccepted": {
+    "facet_key": "org.example.note/main",
+    "verdict": {
+      "status": "rejected",
+      "reason": "unsigned value"
+    }
+  }
+}

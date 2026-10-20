@@ -308,7 +308,8 @@ Every document carries a Daybook-owned provenance facet maintained by DocumentsR
   "org.example.daybook.dmeta/main": {
     "createdAt": "2026-10-13T14:30:15Z",
     "updatedAt": ["2026-10-13T14:30:15Z"],
-    "actorUuids": {
+    // FIXME: actorUuids -> actors
+    "actors": {
       "019e5d38-0000-7000-8000-000000000001": {
         "pubkey": "zAUKgPRFak3CHCQEeLjyP8LNj35pLKpFHcKytgbhN2Xtk",
         "actorUrl": "db+actor://<nodeid>/<path>/<to>/<subsystem>",
@@ -335,7 +336,7 @@ Every document carries a Daybook-owned provenance facet maintained by DocumentsR
 }
 ```
 
-`actorUuids` shares actor bindings and certificates across claims. `facetUuids` maps UUIDv7 aliases directly to complete facet keys: concurrent creators can assign different aliases to the same slot, and all aliases remain usable. They do not select different content winners. A new claim chooses the lexicographically smallest alias visible in its writing transaction, not the smallest alias after later merges. Neither index needs a separate per-binding `createdAt` or a duplicated reverse list. The document's own ID and branch relationships are not repeated in dmeta.
+`actors` shares actor bindings and certificates across claims. `facetUuids` maps UUIDv7 aliases directly to complete facet keys: concurrent creators can assign different aliases to the same slot, and all aliases remain usable. They do not select different content winners. A new claim chooses the lexicographically smallest alias visible in its writing transaction, not the smallest alias after later merges. Neither index needs a separate per-binding `createdAt` or a duplicated reverse list. The document's own ID and branch relationships are not repeated in dmeta.
 
 `updatedAt`, `deletedAt`, and `signatures` are **current competing sets**, not logs. A write replaces entries observed at its supplied base heads; concurrent entries can survive. `deletedAt` is always initialized, empty for an authored non-tombstone. A Set clears observed deletion candidates, but a concurrent Remove can leave candidates after merge. Unsigned timestamps do not determine current tombstone status; the signed operation must match the slot's current state. Retained signature entries stay immutable and new signatures get fresh objects, preventing positional list reconciliation from mixing concurrent claims. Whole-JSON reconciliation traverses values but emits only changed operations and preserves unchanged native objects.
 

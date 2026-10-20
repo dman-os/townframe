@@ -1,0 +1,11 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: read
+---
+{
+  "status": "undecodable",
+  "reason": "not a string",
+  "facet_heads": [
+    "0404040404040404040404040404040404040404040404040404040404040404"
+  ]
+}
