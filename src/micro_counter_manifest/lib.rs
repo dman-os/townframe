@@ -1,3 +1,8 @@
+//! Engine-neutral Counter declarations. The manifest is portable MDK vocabulary (ADR 015 §9):
+//! identity, contract references, facet ACL, and the host-side contribution the composition root
+//! binds. The wasm guest reads only the constants; the composition root reads `manifest()`.
+use clay_mdk::{ConfigGrant, FacetAccess, MicroId, MicroManifest, ProvisionRef};
+
 pub const ID: &str = "dayframe.counter";
 pub const CONFIG_NAME: &str = "counter";
 pub const CONFIG_TAG: &str = "org.dayframe.counter.config";
@@ -8,27 +13,21 @@ pub enum Contribution {
     SettingsSection { title: String },
 }
 
-#[cfg(feature = "composition")]
-pub fn manifest() -> clay_compose::micros::MicroManifest<Contribution> {
-    use clay_compose::micros::{
-        ConfigManifest, MicroDescriptor, MicroId, MicroManifest, MicroProvision,
-    };
+pub fn manifest() -> MicroManifest<Contribution> {
     MicroManifest {
-        descriptor: MicroDescriptor {
-            id: MicroId::new(ID),
+        id: MicroId::new(ID),
+        version: 1,
+        requirements: vec![ProvisionRef {
+            id: "settings.sections".into(),
             version: 1,
-            requirements: vec![MicroProvision {
-                id: "settings.sections".into(),
-                version: 1,
-            }],
-            provisions: vec![MicroProvision {
-                id: "wasm.controller".into(),
-                version: 1,
-            }],
-        },
-        config: Some(ConfigManifest {
+        }],
+        provisions: vec![ProvisionRef {
+            id: "wasm.controller".into(),
+            version: 1,
+        }],
+        config: Some(ConfigGrant {
             name: CONFIG_NAME.into(),
-            facets: vec![daybook_types::manifest::RoutineFacetAccess {
+            facets: vec![FacetAccess {
                 tag: CONFIG_TAG.into(),
                 key_id: Some(CONFIG_KEY.into()),
                 read: true,

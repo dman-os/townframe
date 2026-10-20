@@ -22,6 +22,9 @@ dioxus-core = { workspace = true, optional = true }
 dioxus-html = { workspace = true, optional = true }
 clay_host = { path = "../clay_host", optional = true }
 clay_data = { path = "../clay_data", optional = true }
+clay_compose = { path = "../clay_compose", optional = true }
+clay_dioxus = { path = "../clay_dioxus", optional = true }
+daybook_types = { workspace = true, default-features = false, features = ["manifest"], optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 clay_surface = { path = "../clay_surface" }
@@ -34,7 +37,11 @@ blitz-dom.workspace = true
 default = ["wit", "dioxus"]
 # WIT guest bindings + the typed mirror authoring surface over them.
 wit = []
-# In-process backend: the same authoring surface backed by clay_host/clay_data handles.
-native = ["dep:clay_host", "dep:clay_data"]
+# In-process backend: one authoring API over clay_host/clay_data handles, with provider
+# assembly over clay_compose and the clay_dioxus renderer adapter. Micro crates depend on
+# this, never on the host-side crates directly.
+native = ["dep:clay_host", "dep:clay_data", "dep:clay_compose", "dep:clay_dioxus", "dep:daybook_types", "dep:dioxus"]
+# Wasm provider assembly for composition roots that link the Wasmtime engine.
+wasmtime = ["native", "clay_dioxus/wasmtime"]
 # The Dioxus guest VirtualDom adapter (GuestDom, WireMutations).
 dioxus = ["wit", "dep:dioxus", "dep:dioxus-core", "dep:dioxus-html"]

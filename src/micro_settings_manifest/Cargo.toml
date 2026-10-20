@@ -7,5 +7,7 @@ edition = "2024"
 path = "lib.rs"
 
 [dependencies]
-clay_compose = { path = "../clay_compose" }
+clay_mdk = { path = "../clay_mdk", default-features = false, features = ["native"] }
+
+[dev-dependencies]
 clay_host = { path = "../clay_host" }

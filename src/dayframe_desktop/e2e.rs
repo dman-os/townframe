@@ -227,8 +227,8 @@ async fn composed_settings_wasm_dom_flow() {
         ui.find(SAMPLE).is_some() && ui.find(COUNTER).is_some()
     })
     .await;
-    let settings = application.output::<SettingsMicro>("settings").unwrap();
-    let sample = application.output::<SampleMicro>("sample").unwrap();
+    let settings = clay_mdk::native::output::<SettingsMicro>(&application, "settings").unwrap();
+    let sample = clay_mdk::native::output::<SampleMicro>(&application, "sample").unwrap();
     let first_counter = application.output::<WasmMicro>("counter").unwrap();
 
     ui.click(COUNTER);

@@ -6,7 +6,7 @@ use clay_compose::micros::{
     },
     MicroId,
 };
-use clay_dioxus::wasmtime::{self, WasmPackage};
+use clay_dioxus::wasmtime::WasmPackage;
 use clay_dioxus::{application::ApplicationRuntime, use_component_recovery, ComponentMount};
 use dioxus::prelude::*;
 use micro_settings_manifest::{SettingsSection, SettingsSections};
@@ -50,36 +50,36 @@ impl DesktopRuntime {
             serde_json::json!(0),
         );
 
-        application
-            .register_provider(micro_settings::provider(
-                application.native(),
-                application.root_mounts(),
-            ))
-            .unwrap();
-        application
-            .register_provider(micro_sample::provider(application.native()))
-            .unwrap();
-        application
-            .register_provider(wasmtime::provider(
-                micro_counter_manifest::manifest(),
-                counter_package(),
-                application.native(),
-                |activation, contribution, detail| {
-                    match contribution {
-                        micro_counter_manifest::Contribution::SettingsSection { title } => {
-                            activation
-                                .require::<SettingsSections>()?
-                                .bind(&activation.instance())?
-                                .insert(SettingsSection {
-                                    title: title.clone(),
-                                    detail,
-                                })?;
-                        }
-                    }
+        let settings_provider = clay_mdk::native::provider(
+            &application,
+            micro_settings_manifest::manifest(),
+            micro_settings::activate,
+        );
+        application.register_provider(settings_provider).unwrap();
+        let sample_provider = clay_mdk::native::provider(
+            &application,
+            micro_sample::manifest(),
+            micro_sample::activate,
+        );
+        application.register_provider(sample_provider).unwrap();
+        let counter_provider = clay_mdk::native::wasm_provider(
+            &application,
+            micro_counter_manifest::manifest(),
+            counter_package(),
+            |context, contribution, detail| match contribution {
+                micro_counter_manifest::Contribution::SettingsSection { title } => {
+                    context
+                        .require::<SettingsSections>()?
+                        .bind(&context.instance())?
+                        .insert(SettingsSection {
+                            title: title.clone(),
+                            detail,
+                        })?;
                     Ok(())
-                },
-            ))
-            .unwrap();
+                }
+            },
+        );
+        application.register_provider(counter_provider).unwrap();
 
         let locked = BTreeMap::from([(
             "settings".into(),
@@ -309,6 +309,7 @@ mod tests {
     use super::*;
     use clay_dioxus::wasmtime::WasmMicro;
     use clay_host::AccessError;
+    use clay_mdk::native::output;
     use micro_sample::{SampleConfig, SampleMicro};
     use micro_settings::SettingsMicro;
 
@@ -332,12 +333,10 @@ mod tests {
             runtime.set_enablement("settings", Enablement::Disabled),
             Err(ConfigurationError::LockedInstance("settings".into()))
         );
-        let sample = runtime.application.output::<SampleMicro>("sample").unwrap();
+        let sample = output::<SampleMicro>(&runtime.application, "sample").unwrap();
         let counter = runtime.application.output::<WasmMicro>("counter").unwrap();
         assert!(runtime.application.host().check(&counter.instance).is_ok());
-        let sections = runtime
-            .application
-            .output::<SettingsMicro>("settings")
+        let sections = output::<SettingsMicro>(&runtime.application, "settings")
             .unwrap()
             .sections
             .snapshot()
@@ -359,7 +358,7 @@ mod tests {
     #[test]
     fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_restarts_wasm() {
         let mut runtime = started();
-        let first_sample = runtime.application.output::<SampleMicro>("sample").unwrap();
+        let first_sample = output::<SampleMicro>(&runtime.application, "sample").unwrap();
         let first_counter = runtime.application.output::<WasmMicro>("counter").unwrap();
         let changed = SampleConfig {
             enabled: false,
@@ -381,16 +380,14 @@ mod tests {
         assert_eq!(runtime.states["sample"], InstanceState::Disabled);
         assert_eq!(runtime.states["counter"], InstanceState::Disabled);
         assert!(matches!(
-            runtime.application.output::<SampleMicro>("sample"),
+            output::<SampleMicro>(&runtime.application, "sample"),
             Err(AccessError::Revoked)
         ));
         assert!(matches!(
             runtime.application.output::<WasmMicro>("counter"),
             Err(AccessError::Revoked)
         ));
-        assert!(runtime
-            .application
-            .output::<SettingsMicro>("settings")
+        assert!(output::<SettingsMicro>(&runtime.application, "settings")
             .unwrap()
             .sections
             .snapshot()
@@ -402,7 +399,7 @@ mod tests {
         );
         set_now(&mut runtime, "sample", Enablement::Enabled);
         set_now(&mut runtime, "counter", Enablement::Enabled);
-        let second_sample = runtime.application.output::<SampleMicro>("sample").unwrap();
+        let second_sample = output::<SampleMicro>(&runtime.application, "sample").unwrap();
         let second_counter = runtime.application.output::<WasmMicro>("counter").unwrap();
         assert!(first_sample.instance != second_sample.instance);
         assert!(first_counter.instance != second_counter.instance);
@@ -411,9 +408,7 @@ mod tests {
             Some(changed)
         );
         assert_eq!(
-            runtime
-                .application
-                .output::<SettingsMicro>("settings")
+            output::<SettingsMicro>(&runtime.application, "settings")
                 .unwrap()
                 .sections
                 .snapshot()
@@ -427,18 +422,16 @@ mod tests {
     #[test]
     fn provider_withdrawal_closes_dependents_before_their_collection() {
         let runtime = started();
-        let sample = runtime.application.output::<SampleMicro>("sample").unwrap();
+        let sample = output::<SampleMicro>(&runtime.application, "sample").unwrap();
         let counter = runtime.application.output::<WasmMicro>("counter").unwrap();
         let mut updates = sample.watch().subscribe().unwrap();
-        let settings_instance = runtime
-            .application
-            .output::<SettingsMicro>("settings")
+        let settings_instance = output::<SettingsMicro>(&runtime.application, "settings")
             .unwrap()
             .instance;
         let sample_mount = runtime
             .application
             .host()
-            .mount(&settings_instance, sample.detail())
+            .mount(&settings_instance, sample.detail().host())
             .unwrap();
         let counter_mount = runtime
             .application

@@ -2742,9 +2742,12 @@ name = "clay_mdk"
 version = "0.1.0"
 dependencies = [
  "blitz-dom",
+ "clay_compose",
  "clay_data",
+ "clay_dioxus",
  "clay_host",
  "clay_surface",
+ "daybook_types",
  "dioxus",
  "dioxus-core",
  "dioxus-html",
@@ -4181,6 +4184,7 @@ dependencies = [
  "clay_data",
  "clay_dioxus",
  "clay_host",
+ "clay_mdk",
  "clay_surface",
  "daybook_types",
  "dioxus",
@@ -9772,8 +9776,7 @@ dependencies = [
 name = "micro_counter_manifest"
 version = "0.1.0"
 dependencies = [
- "clay_compose",
- "daybook_types",
+ "clay_mdk",
 ]
 
 [[package]]
@@ -9783,7 +9786,6 @@ dependencies = [
  "clay_compose",
  "clay_dioxus",
  "clay_mdk",
- "daybook_types",
  "dioxus",
  "micro_settings",
  "micro_settings_manifest",
@@ -9796,8 +9798,6 @@ dependencies = [
 name = "micro_settings"
 version = "0.1.0"
 dependencies = [
- "clay_compose",
- "clay_dioxus",
  "clay_mdk",
  "dioxus",
  "micro_settings_manifest",
@@ -9807,8 +9807,8 @@ dependencies = [
 name = "micro_settings_manifest"
 version = "0.1.0"
 dependencies = [
- "clay_compose",
  "clay_host",
+ "clay_mdk",
 ]
 
 [[package]]

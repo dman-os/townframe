@@ -510,6 +510,45 @@ contradicts the comment.
 
 ## Turn log
 
+- **Turn 30 — native/WIT MDK authoring parity: micros no longer import host-side crates.**
+  `clay_mdk` gained the neutral authoring vocabulary (`manifest.rs`: `Provision` trait with
+  `const ID`/`VERSION`, `MicroId`, `ProvisionRef`, `FacetAccess`, `ConfigGrant`,
+  `MicroManifest<C = ()>`), an MDK-owned opaque `ComponentRef` (`component.rs`; the native
+  backend wraps `clay_host::ComponentRef` via `from_host`/`host()`, the guest-side form waits on
+  the collections WIT waist), and the native authoring backend (`native.rs`: `Context` with
+  `instance/config/require/publish/collection/publish_component/mount_root/own_future`,
+  `Collection<T>`, `ComponentSlot`, `provider()`, `wasm_provider()` behind a new `wasmtime`
+  feature, and host-side `output()`). The `Provided<T>` bridge implements
+  `clay_compose::micros::Provision`, so MDK-published values land in the compose registry
+  without micro crates naming clay_compose. Feature wiring: `native = [dep:clay_host,
+  dep:clay_data, dep:clay_compose, dep:clay_dioxus, dep:daybook_types, dep:dioxus]`,
+  `wasmtime = ["native", "clay_dioxus/wasmtime"]`; default stays `["wit", "dioxus"]`.
+  Migrated: `micro_settings_manifest` is now a portable contract (`SettingsSection.detail:
+  clay_mdk::ComponentRef`, `SettingsSections` over `Collection`, `manifest()`; clay_host demoted
+  to dev-dependency for its tests), `micro_settings` activates through `activate(&Context)` and
+  renders slots via `ComponentSlot`, `micro_sample` publishes `manifest()` with
+  `ConfigGrant`/`FacetAccess` and activates through `&Context` (tests rewritten onto
+  `clay_mdk::native::{provider, output}`), and `micro_counter_manifest` dropped its `composition`
+  feature plus clay_compose/daybook_types deps for the neutral `MicroManifest<Contribution>`.
+  The desktop composition root assembles providers host-side through
+  `clay_mdk::native::{provider, wasm_provider}`; its tests retrieve via `native::output` and
+  cross the mount boundary through `ComponentRef::host()`. Baseline fix: the stale exact-string
+  counter-guest expectation in `counter_tests.rs` — the receipt line (`Operation N:
+  OperationStatus::LocallyApplied`) renders since the mirror lane carries receipts on the write
+  result — is now a `starts_with`/`ends_with` pair. Defect surfaced by the native-only
+  `--all-targets` check: clay_mdk's SDK test module exercises the `dioxus` guest adapter but was
+  gated on `test` alone; it is now `#[cfg(all(test, feature = "dioxus", not(wasm32)))]`.
+  Verified: **176/176 scoped nextest** via `x/check-dayframe.ts --no-fail-fast -j 2`, scoped
+  all-target/all-feature Clippy clean (only the three known `unused variable: path` warnings in
+  the Dioxus fork's `html/src/file_data.rs`), fmt clean, clay_mdk feature matrix (empty/native/wit
+  lib; native and default with `--all-targets`); the wasm32 matrix is unaffected (cfg-gate-only
+  change since turn 29's green run). Environment: `../dioxus` workspace symlink restored
+  (`dayframe-gen-aa578c2c49e78545-10-a`, 0.8.0-alpha.3), `x/wit-fetch.ts` rerun (the
+  `daybook_core` GHCR fetch times out — unrelated to the dayframe scope; the clay deps fetched),
+  disk-watch running. Next increments: collections WIT waist (guest-neutral contracts + partial
+  replication), native local-only reads, Sample Loading/Absent display, presentation-session
+  extraction.
+
 - **Generation 30 — boundary repair and independently verified integration.** `Instance` is now
   a plain host/id/name value; Host services check, close and observe it. Terminal receivers survive
   closure without permanent tombstones. Composition retains retiring incarnations until their

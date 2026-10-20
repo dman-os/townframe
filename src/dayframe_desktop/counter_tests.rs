@@ -1,6 +1,7 @@
 use super::*;
 use clay_dioxus::{wasmtime::WasmMicro, NativeComponents};
 use clay_host::{AccessError, ComponentRef, Instance};
+use clay_mdk::native::output;
 use clay_surface::SurfaceTree;
 use dioxus_core::{RenderTargetId, VirtualDom};
 use dioxus_html::{EventData, SerializedMouseData};
@@ -38,7 +39,7 @@ fn counter_manifest_contributes_live_settings_and_withdraws_on_trap_or_disableme
     let mut runtime = DesktopRuntime::new();
     runtime.apply_now().unwrap();
     let app = runtime.application.clone();
-    let settings = app.output::<SettingsMicro>("settings").unwrap();
+    let settings = output::<SettingsMicro>(&app, "settings").unwrap();
     let first = app.output::<WasmMicro>("counter").unwrap();
     let sections = settings.sections.snapshot().unwrap();
     assert_eq!(sections.len(), 2);
@@ -46,13 +47,13 @@ fn counter_manifest_contributes_live_settings_and_withdraws_on_trap_or_disableme
         .values()
         .find(|section| section.title == "Counter (Wasm)")
         .unwrap();
-    assert_eq!(section.detail, first.surface());
+    assert_eq!(section.detail.host(), first.surface());
     let mut dom = VirtualDom::new_with_props(
         mount_host_app,
         MountProps {
             components: app.native(),
             owner: settings.instance.clone(),
-            reference: section.detail,
+            reference: section.detail.host(),
         },
     );
     let mut tree = SurfaceTree::new();
@@ -62,9 +63,11 @@ fn counter_manifest_contributes_live_settings_and_withdraws_on_trap_or_disableme
         "0Pending counter writes: 0Refresh counter"
     );
     click(&mut dom, &mut tree);
-    assert_eq!(
-        tree.text_content(),
-        "1Pending counter writes: 1Refresh counter"
+    let text = tree.text_content();
+    assert!(
+        text.starts_with("1Pending counter writes: 1Operation ")
+            && text.ends_with(": OperationStatus::LocallyAppliedRefresh counter"),
+        "optimistic write renders its LocallyApplied receipt: {text}"
     );
     first.exhaust_fuel();
     click(&mut dom, &mut tree);
@@ -97,6 +100,6 @@ fn counter_manifest_contributes_live_settings_and_withdraws_on_trap_or_disableme
     assert_eq!(sections.len(), 2);
     assert!(sections
         .values()
-        .any(|entry| entry.detail == second.surface()));
+        .any(|entry| entry.detail.host() == second.surface()));
     app.host().close();
 }

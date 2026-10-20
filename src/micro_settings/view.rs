@@ -1,6 +1,6 @@
 //! Settings presentation consumes its own typed collection and host-mediated component mounts.
 use crate::SettingsMicro;
-use clay_dioxus::ComponentMount;
+use clay_mdk::native::ComponentSlot;
 use dioxus::prelude::*;
 
 #[derive(Props, Clone)]
@@ -51,7 +51,7 @@ pub fn SettingsView(props: SettingsViewProps) -> Element {
                     if let Some(section) = current {
                         div { key: "{selected().unwrap()}",
                             h3 { class: "mb-4 text-lg font-semibold", "{section.title}" }
-                            ComponentMount { owner: props.micro.instance.clone(), reference: section.detail }
+                            ComponentSlot { owner: props.micro.instance.clone(), reference: section.detail }
                         }
                     } else { p { "Select a section." } }
                 }

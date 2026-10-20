@@ -4,7 +4,7 @@ use clay_compose::micros::{
     composition::{ConfiguredMicro, Enablement, InstanceState},
 };
 use clay_dioxus::application::ApplicationRuntime;
-use clay_mdk::native::FacetRoute;
+use clay_mdk::native::{FacetRoute, output, provider};
 use micro_settings::SettingsMicro;
 use std::collections::BTreeMap;
 
@@ -20,15 +20,14 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller() {
     let mut application = ApplicationRuntime::new();
     assert!(application.roots().snapshot().unwrap().is_empty());
-    application
-        .register_provider(micro_settings::provider(
-            application.native(),
-            application.root_mounts(),
-        ))
-        .unwrap();
-    application
-        .register_provider(provider(application.native()))
-        .unwrap();
+    let settings_provider = provider(
+        &application,
+        micro_settings_manifest::manifest(),
+        micro_settings::activate,
+    );
+    application.register_provider(settings_provider).unwrap();
+    let sample_provider = provider(&application, manifest(), activate);
+    application.register_provider(sample_provider).unwrap();
     let host = application.host();
     let documents = application.documents();
     documents
@@ -51,7 +50,7 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
         (
             "first".into(),
             ConfiguredMicro {
-                provider: MicroId::new("dayframe.settings"),
+                provider: MicroId::new(micro_settings_manifest::ID),
                 enablement: Enablement::Enabled,
                 bindings: BTreeMap::new(),
             },
@@ -59,7 +58,7 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
         (
             "second".into(),
             ConfiguredMicro {
-                provider: MicroId::new("dayframe.settings"),
+                provider: MicroId::new(micro_settings_manifest::ID),
                 enablement: Enablement::Enabled,
                 bindings: BTreeMap::new(),
             },
@@ -67,7 +66,7 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
         (
             "sample".into(),
             ConfiguredMicro {
-                provider: MicroId::new("dayframe.sample"),
+                provider: MicroId::new(ID),
                 enablement: Enablement::Enabled,
                 bindings: BTreeMap::from([("settings.sections".into(), "second".into())]),
             },
@@ -81,16 +80,14 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
             ("sample".into(), InstanceState::Active),
         ])
     );
-    let first = application
-        .output::<SettingsMicro>("first")
+    let first = output::<SettingsMicro>(&application, "first")
         .unwrap()
         .instance;
-    let sample = application
-        .output::<SampleMicro>("sample")
+    let sample = output::<SampleMicro>(&application, "sample")
         .unwrap()
         .instance;
-    let first_settings = application.output::<SettingsMicro>("first").unwrap();
-    let second_settings = application.output::<SettingsMicro>("second").unwrap();
+    let first_settings = output::<SettingsMicro>(&application, "first").unwrap();
+    let second_settings = output::<SettingsMicro>(&application, "second").unwrap();
     assert!(first_settings.sections.snapshot().unwrap().is_empty());
     assert_eq!(second_settings.sections.snapshot().unwrap().len(), 1);
     configuration.get_mut("second").unwrap().enablement = Enablement::Disabled;
@@ -109,7 +106,7 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
     );
     assert_eq!(host.check(&sample), Err(AccessError::Revoked));
     assert!(matches!(
-        application.output::<SampleMicro>("sample"),
+        output::<SampleMicro>(&application, "sample"),
         Err(AccessError::Revoked)
     ));
     assert_eq!(host.check(&first), Ok(()));
@@ -124,29 +121,25 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
         ])
     );
     assert!(
-        application
-            .output::<SettingsMicro>("first")
+        output::<SettingsMicro>(&application, "first")
             .unwrap()
             .instance
             == first
     );
     assert!(
-        application
-            .output::<SettingsMicro>("second")
+        output::<SettingsMicro>(&application, "second")
             .unwrap()
             .instance
             != second_settings.instance
     );
     assert!(
-        application
-            .output::<SampleMicro>("sample")
+        output::<SampleMicro>(&application, "sample")
             .unwrap()
             .instance
             != sample
     );
     assert_eq!(
-        application
-            .output::<SettingsMicro>("second")
+        output::<SettingsMicro>(&application, "second")
             .unwrap()
             .sections
             .snapshot()
@@ -154,12 +147,11 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
             .len(),
         1
     );
-    let sample = application.output::<SampleMicro>("sample").unwrap();
+    let sample = output::<SampleMicro>(&application, "sample").unwrap();
     application.host().close_instance(&sample.instance).unwrap();
     assert_eq!(sample.watch().current().unwrap_err(), AccessError::Revoked);
     assert!(
-        application
-            .output::<SettingsMicro>("second")
+        output::<SettingsMicro>(&application, "second")
             .unwrap()
             .sections
             .snapshot()

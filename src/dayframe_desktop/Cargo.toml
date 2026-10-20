@@ -14,10 +14,11 @@ clay_compose = { path = "../clay_compose" }
 clay_data = { path = "../clay_data" }
 clay_dioxus = { path = "../clay_dioxus", features = ["wasmtime"] }
 clay_host = { path = "../clay_host" }
+clay_mdk = { path = "../clay_mdk", default-features = false, features = ["native", "wasmtime"] }
 micro_settings = { path = "../micro_settings" }
 micro_settings_manifest = { path = "../micro_settings_manifest" }
 micro_sample = { path = "../micro_sample" }
-micro_counter_manifest = { path = "../micro_counter_manifest", features = ["composition"] }
+micro_counter_manifest = { path = "../micro_counter_manifest" }
 daybook_types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

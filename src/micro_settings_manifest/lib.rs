@@ -1,12 +1,16 @@
 //! Public Settings contribution contract. Consumers do not depend on the Settings controller.
 //!
-//! This crate is the Settings micro's manifest surface (ADR 015 §9): the shared contract types
-//! and provision identity, in the `micro_<name>_manifest` pattern the plug crates established
-//! (`plug_<name>_manifest` holds shared types and tests; the micro crate itself compiles to
-//! wasm where applicable). Manifest data is written in Rust so compatibility is type-checked;
-//! an OCI packaging step remains future work (ADR 015 Deferred).
-use clay_compose::micros::Provision;
-use clay_host::{AccessError, CollectionWriter, ComponentRef, Entry, HostedCollection, Instance};
+//! This crate is the Settings micro's manifest surface (ADR 015 §9): the shared contract types,
+//! the micro manifest declaration, and provision identity, in the `micro_<name>_manifest`
+//! pattern the plug crates established (`plug_<name>_manifest` holds shared types and tests;
+//! the micro crate itself compiles to wasm where applicable). Manifest data is written in Rust
+//! so compatibility is type-checked; an OCI packaging step remains future work (ADR 015
+//! Deferred). Contract types are portable MDK vocabulary: no host or composition crate types
+//! cross this boundary (ADR 015 §Boundary correction).
+use clay_mdk::native::{AccessError, Collection, CollectionWriter, Entry, Instance};
+use clay_mdk::{ComponentRef, MicroId, MicroManifest, Provision, ProvisionRef};
+
+pub const ID: &str = "dayframe.settings";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsSection {
@@ -19,7 +23,7 @@ pub struct SettingsSection {
 /// either the consumer or the provider closes.
 #[derive(Clone)]
 pub struct SettingsSections {
-    collection: HostedCollection<SettingsSection>,
+    collection: Collection<SettingsSection>,
 }
 
 impl Provision for SettingsSections {
@@ -27,7 +31,7 @@ impl Provision for SettingsSections {
 }
 
 impl SettingsSections {
-    pub fn new(collection: HostedCollection<SettingsSection>) -> Self {
+    pub fn new(collection: Collection<SettingsSection>) -> Self {
         Self { collection }
     }
 
@@ -50,10 +54,29 @@ impl SettingsContribution {
     }
 }
 
+/// The Settings micro's compile-time declaration: it provides the sections collection and the
+/// controller provision, and requires nothing.
+pub fn manifest() -> MicroManifest {
+    MicroManifest {
+        id: MicroId::new(ID),
+        version: 1,
+        requirements: vec![],
+        provisions: vec![
+            ProvisionRef::of::<SettingsSections>(),
+            ProvisionRef {
+                id: "settings.controller".into(),
+                version: 1,
+            },
+        ],
+        config: None,
+        contributions: vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clay_host::Host;
+    use clay_host::{Host, HostedCollection};
 
     #[test]
     fn output_binds_independent_consumers_and_cannot_outlive_provider() {
@@ -61,19 +84,19 @@ mod tests {
         let provider = host.start("settings");
         let first = host.start("first");
         let second = host.start("second");
-        let collection = HostedCollection::new(&host, &provider);
+        let collection = Collection::from_host(HostedCollection::new(&host, &provider));
         let output = SettingsSections::new(collection.clone());
-        let reader = collection.reader(&provider);
+        let reader = collection.host().reader(&provider);
         let first_grant = output.bind(&first).unwrap();
         let second_grant = output.bind(&second).unwrap();
-        let detail = host.publish_component(&first).unwrap();
+        let detail = ComponentRef::from_host(host.publish_component(&first).unwrap());
         let first_entry = first_grant
             .insert(SettingsSection {
                 title: "First".into(),
                 detail,
             })
             .unwrap();
-        let second_detail = host.publish_component(&second).unwrap();
+        let second_detail = ComponentRef::from_host(host.publish_component(&second).unwrap());
         let second_entry = second_grant
             .insert(SettingsSection {
                 title: "Second".into(),
