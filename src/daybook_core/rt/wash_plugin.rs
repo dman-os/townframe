@@ -47,7 +47,8 @@ use daybook_types::doc::DocId;
 use daybook_types::wit::doc as wit_doc;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::plugin::WitInterfaces;
-use wash_runtime::wit::{WitInterface, WitWorld};
+use wash_runtime::wit::WitInterface;
+use wash_runtime::wit::WitWorld;
 
 pub struct DaybookPlugin {
     drawer_repo: Arc<crate::drawer::DrawerRepo>,
@@ -240,7 +241,8 @@ impl drawer::Host for SharedWashCtx {
         doc_id: drawer::DocId,
         heads: drawer::Heads,
     ) -> wasmtime::Result<Result<drawer::Doc, drawer::GetDocError>> {
-        use crate::rt::dispatch::{ActiveDispatchArgs, FacetRoutineArgs};
+        use crate::rt::dispatch::ActiveDispatchArgs;
+        use crate::rt::dispatch::FacetRoutineArgs;
 
         let heads = match am_utils_rs::parse_commit_heads(&heads) {
             Ok(val) => val,

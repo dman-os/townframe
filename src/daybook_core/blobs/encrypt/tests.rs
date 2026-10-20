@@ -1,14 +1,20 @@
-use super::codec::{
-    HEADER_LEN, HeaderFacts, MASTER_KEY_LEN, RECORD_OVERHEAD, SALT_LEN, StreamDecryptor,
-    decrypt_bytes_ikm, encrypt_raw_ikm, payload_size,
-};
+use super::codec::HEADER_LEN;
+use super::codec::HeaderFacts;
+use super::codec::MASTER_KEY_LEN;
+use super::codec::RECORD_OVERHEAD;
+use super::codec::SALT_LEN;
+use super::codec::StreamDecryptor;
+use super::codec::decrypt_bytes_ikm;
+use super::codec::encrypt_raw_ikm;
+use super::codec::payload_size;
 use super::params::MAX_WIRE_RECORD_SIZE;
 use super::*;
 
 use crate::blobs::pair_roots::PairRoots;
 use crate::interlude::eyre;
 
-use iroh_blobs::{Hash, api::Store};
+use iroh_blobs::Hash;
+use iroh_blobs::api::Store;
 
 /// A throwaway root record: these tests exercise the store-level provider, so
 /// the record only has to exist because every rooting path writes it before
@@ -765,7 +771,8 @@ async fn cipher_reader_reads_plaintext_windows() -> Res<()> {
 /// outboard `C` before it is decrypted.
 #[tokio::test(flavor = "multi_thread")]
 async fn serves_virtual_ciphertext_from_fs_store() -> Res<()> {
-    use iroh_blobs::store::fs::{FsStore, options::Options};
+    use iroh_blobs::store::fs::FsStore;
+    use iroh_blobs::store::fs::options::Options;
 
     let dir = tempfile::tempdir()?;
     let (fs, virtuals) =
@@ -819,8 +826,12 @@ async fn setup_node() -> Res<(
     iroh::address_lookup::MemoryLookup,
     iroh_blobs::store::virtual_blob::VirtualProviders,
 )> {
-    use iroh::{Endpoint, address_lookup::MemoryLookup, endpoint::presets, protocol::Router};
-    use iroh_blobs::{ALPN, BlobsProtocol};
+    use iroh::Endpoint;
+    use iroh::address_lookup::MemoryLookup;
+    use iroh::endpoint::presets;
+    use iroh::protocol::Router;
+    use iroh_blobs::ALPN;
+    use iroh_blobs::BlobsProtocol;
     let (mem, virtuals) = iroh_blobs::store::mem::MemStore::new_with_virtuals(Default::default());
     let store = Store::from(mem);
     let sp = MemoryLookup::new();

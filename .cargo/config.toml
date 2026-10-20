@@ -1,5 +1,5 @@
 [target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"', '--cfg', 'tokio_unstable']
 
 [alias]
 x = "run --package xtask --"
@@ -11,4 +11,14 @@ rustflags = ["--cfg", "tokio_unstable"]
 # One debuginfo file per dependency, to reduce file size of tests/examples.
 # Note that this value is not supported on Windows.
 # See https://doc.rust-lang.org/cargo/reference/profiles.html#split-debuginfo
-split-debuginfo="unpacked"
+split-debuginfo = "unpacked"
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
+[unstable]
+feature-unification = true
+
+[resolver]
+feature-unification = "workspace"

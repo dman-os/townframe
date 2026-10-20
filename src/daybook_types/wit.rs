@@ -3,7 +3,14 @@ pub mod doc {
 
     use crate::doc as root_doc;
     use api_utils_rs::wit::townframe::api_utils::utils::Datetime;
-    pub use root_doc::{Blob, BlobPin, DocId, FacetKey, MimeType, Multihash, Note, UserPathBuf};
+    pub use root_doc::Blob;
+    pub use root_doc::BlobPin;
+    pub use root_doc::DocId;
+    pub use root_doc::FacetKey;
+    pub use root_doc::MimeType;
+    pub use root_doc::Multihash;
+    pub use root_doc::Note;
+    pub use root_doc::UserPathBuf;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct UserMeta {

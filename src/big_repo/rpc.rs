@@ -1,11 +1,16 @@
-use crate::{BigRepo, interlude::*};
+use crate::BigRepo;
+use crate::interlude::*;
 use tracing::Instrument;
 
 use big_sync_core::PeerKey;
 use iroh::endpoint::Connection;
-use iroh::protocol::{AcceptError, ProtocolHandler};
-use irpc::{WithChannels, channel, rpc_requests};
-use std::{collections::HashMap, sync::RwLock};
+use iroh::protocol::AcceptError;
+use iroh::protocol::ProtocolHandler;
+use irpc::WithChannels;
+use irpc::channel;
+use irpc::rpc_requests;
+use std::collections::HashMap;
+use std::sync::RwLock;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -300,7 +305,8 @@ impl IrohBigRepoRpcClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Config, StorageConfig};
+    use crate::Config;
+    use crate::StorageConfig;
 
     use iroh::protocol::Router;
     use std::net::Ipv4Addr;

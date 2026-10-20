@@ -1,9 +1,9 @@
 use crate::interlude::*;
 
-use sedimentree_core::{
-    fragment::Fragment, id::SedimentreeId, loose_commit::LooseCommit,
-    sedimentree::minimized::MinimizedSedimentree,
-};
+use sedimentree_core::fragment::Fragment;
+use sedimentree_core::id::SedimentreeId;
+use sedimentree_core::loose_commit::LooseCommit;
+use sedimentree_core::sedimentree::minimized::MinimizedSedimentree;
 use utils_rs::lru::KeyedLruPool;
 
 /// Metadata-weighted capacity of the tree projection cache, in metadata

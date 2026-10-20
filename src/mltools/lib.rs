@@ -342,10 +342,12 @@ mod local {
 
         let input_text = text.to_string();
         tokio::task::spawn_blocking(move || -> Res<EmbedResult> {
-            use fastembed::{
-                InitOptionsUserDefined, Pooling, QuantizationMode, TextEmbedding, TokenizerFiles,
-                UserDefinedEmbeddingModel,
-            };
+            use fastembed::InitOptionsUserDefined;
+            use fastembed::Pooling;
+            use fastembed::QuantizationMode;
+            use fastembed::TextEmbedding;
+            use fastembed::TokenizerFiles;
+            use fastembed::UserDefinedEmbeddingModel;
 
             let mut user_model = UserDefinedEmbeddingModel::new(
                 std::fs::read(&onnx_path)
@@ -534,9 +536,9 @@ mod local {
         }
 
         tokio::task::spawn_blocking(move || -> Res<EmbedResult> {
-            use fastembed::{
-                ImageEmbedding, ImageInitOptionsUserDefined, UserDefinedImageEmbeddingModel,
-            };
+            use fastembed::ImageEmbedding;
+            use fastembed::ImageInitOptionsUserDefined;
+            use fastembed::UserDefinedImageEmbeddingModel;
 
             let user_model = UserDefinedImageEmbeddingModel::new(
                 std::fs::read(&onnx_path)
@@ -1271,7 +1273,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let image_bytes = include_bytes!("../plug_test/e2e/sample-screenshot-meme.jpg").to_vec();
+        let image_bytes = include_bytes!("../test_fixtures/sample-screenshot-meme.jpg").to_vec();
 
         runtime.block_on(async {
             let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set");

@@ -1,7 +1,12 @@
 use crate::interlude::*;
 
-use automerge::{Automerge, ChangeHash, ObjType, ReadDoc, Value};
-use daybook_types::doc::{FacetKey, WellKnownFacetTag};
+use automerge::Automerge;
+use automerge::ChangeHash;
+use automerge::ObjType;
+use automerge::ReadDoc;
+use automerge::Value;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::WellKnownFacetTag;
 
 pub fn recover_facet_heads(doc: &Automerge, facet_key: &FacetKey) -> Res<Vec<ChangeHash>> {
     recover_facet_heads_inner(doc, facet_key, None)
@@ -158,7 +163,8 @@ mod tests {
     use super::*;
     use automerge::Automerge;
     use automerge::transaction::Transactable;
-    use daybook_types::doc::{FacetKey, WellKnownFacetTag};
+    use daybook_types::doc::FacetKey;
+    use daybook_types::doc::WellKnownFacetTag;
 
     #[test]
     fn test_recover_facet_heads_single() -> Res<()> {

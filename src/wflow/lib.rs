@@ -6,13 +6,19 @@ mod interlude {
 pub mod test;
 
 #[cfg(any(test, feature = "test-harness"))]
-pub use test::{InitialWorkload, WflowTestContext, WflowTestContextBuilder};
+pub use test::InitialWorkload;
+#[cfg(any(test, feature = "test-harness"))]
+pub use test::WflowTestContext;
+#[cfg(any(test, feature = "test-harness"))]
+pub use test::WflowTestContextBuilder;
 
 pub mod ingress;
 pub mod kvstore;
 
-pub use ingress::{PartitionLogIngress, WflowIngress};
-pub use kvstore::{SqliteKvFactory, SqliteKvStore};
+pub use ingress::PartitionLogIngress;
+pub use ingress::WflowIngress;
+pub use kvstore::SqliteKvFactory;
+pub use kvstore::SqliteKvStore;
 pub use wash_plugin_wflow;
 pub use wflow_core;
 pub use wflow_tokio;
@@ -21,7 +27,8 @@ use crate::interlude::*;
 
 use sqlite_rs::Database;
 use wash_runtime::*;
-use wflow_core::{r#gen::types::PartitionId, kvstore::KvStore};
+use wflow_core::r#gen::types::PartitionId;
+use wflow_core::kvstore::KvStore;
 
 // pub struct Config {}
 

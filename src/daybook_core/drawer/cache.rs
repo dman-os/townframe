@@ -3,7 +3,9 @@ use crate::interlude::*;
 use super::DrawerRepo;
 use utils_rs::lru::KeyedLruPool;
 
-use daybook_types::doc::{ChangeHashSet, DocId, FacetRaw};
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetRaw;
 
 pub struct FacetCacheState {
     pub entries: HashMap<FacetCacheKey, FacetCacheEntry>,

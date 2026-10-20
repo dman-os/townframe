@@ -37,12 +37,46 @@ load_dotenv_safe_file() {
   done < "$dotenv_path"
 }
 
+scope_cargo_target_dir() {
+  local configured="${CARGO_TARGET_DIR:-}"
+  local worktree
+  if [[ -z "$configured" || "${TOWNFRAME_SHARED_TARGET_DIR:-0}" == "1" ]]; then
+    return 0
+  fi
+  worktree="${PWD##*/}"
+  if [[ "${configured##*/}" == "$worktree" ]]; then
+    return 0
+  fi
+  export CARGO_TARGET_DIR="${configured%/}/$worktree"
+  mkdir -p "$CARGO_TARGET_DIR"
+}
+
+configure_sccache() {
+  [[ "${TOWNFRAME_SCCACHE:-0}" == "1" ]] || return 0
+  if ! command -v sccache >/dev/null 2>&1; then
+    printf 'load-dotenv-safe: TOWNFRAME_SCCACHE=1 but sccache is unavailable\n' >&2
+    return 1
+  fi
+  local worktree_parent="${PWD%/*}"
+  local target_dir="${CARGO_TARGET_DIR:-$PWD/target}"
+  export RUSTC_WRAPPER=sccache
+  export CARGO_INCREMENTAL=0
+  export SCCACHE_DIR="${SCCACHE_DIR:-${target_dir%/*}/sccache-cache}"
+  export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-8G}"
+  export SCCACHE_BASEDIRS="${SCCACHE_BASEDIRS:-$worktree_parent}"
+  mkdir -p "$SCCACHE_DIR"
+}
+
 if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" == "$0" ]]; then
   if [[ $# -ne 1 ]]; then
     printf 'usage: %s <.env-file>\n' "$0" >&2
     exit 1
   fi
   load_dotenv_safe_file "$1"
+  scope_cargo_target_dir
+  configure_sccache
 elif [[ $# -eq 1 ]]; then
   load_dotenv_safe_file "$1"
+  scope_cargo_target_dir
+  configure_sccache
 fi

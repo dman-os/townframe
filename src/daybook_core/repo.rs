@@ -5,7 +5,8 @@ use crate::sync::PeerId;
 
 use big_repo::BigDocHandle;
 use big_repo::SharedPartStore;
-use daybook_types::doc::{UserPath, UserPathBuf};
+use daybook_types::doc::UserPath;
+use daybook_types::doc::UserPathBuf;
 use fs4::fs_std::FileExt;
 
 const REPO_MARKER_FILE: &str = "db.repo.txt";
@@ -1237,7 +1238,7 @@ pub async fn mark_repo_initialized(repo_root: &std::path::Path) -> Res<()> {
 }
 pub async fn is_repo_initialized(repo_root: &std::path::Path) -> Res<bool> {
     let layout = repo_layout(repo_root)?;
-    Ok(utils_rs::file_exists(&layout.marker_path).await?)
+    Ok(native_utils_rs::file_exists(&layout.marker_path).await?)
 }
 
 pub async fn is_repo_bootstrapped(
@@ -1385,7 +1386,9 @@ async fn init_core_docs(
 }
 
 pub mod globals {
-    use crate::{app::Database, interlude::*, sqlite::queries};
+    use crate::app::Database;
+    use crate::interlude::*;
+    use crate::sqlite::queries;
 
     #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
     pub enum InitState {

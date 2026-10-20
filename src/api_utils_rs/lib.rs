@@ -10,7 +10,8 @@ pub mod prelude {
     pub use crate::interlude::*;
 
     pub use crate::wit::townframe::api_utils::utils::Datetime;
-    pub use crate::wit::utils::{ErrorInternal, ErrorsValidation};
+    pub use crate::wit::utils::ErrorInternal;
+    pub use crate::wit::utils::ErrorsValidation;
     pub use crate::wit::wasi::clocks::wall_clock;
 
     pub use dotenv_flow;
@@ -24,7 +25,8 @@ mod interlude {
     pub use utils_rs::prelude::*;
 
     pub use crate::internal_err;
-    pub use utoipa::{self, openapi};
+    pub use utoipa::openapi;
+    pub use utoipa::{self};
 }
 
 pub mod wit {
@@ -49,7 +51,8 @@ pub mod wit {
     });
 
     pub mod utils {
-        pub use crate::errs::{ErrorInternal, ErrorsValidation};
+        pub use crate::errs::ErrorInternal;
+        pub use crate::errs::ErrorsValidation;
         pub use crate::wit::townframe::api_utils::utils::*;
         pub type Json = String;
     }

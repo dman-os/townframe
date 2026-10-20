@@ -1,0 +1,38 @@
+version = 1
+role = "foundation"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = ["utils_rs"]
+allow_external_api_types = false
+
+[builds.native]
+features = ["automerge"]
+
+[builds.wasm32-wasip2]
+features = ["automerge"]
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/api_utils_rs/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/api_utils_rs/lib.rs"
+symbol = "module::prelude"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/api_utils_rs/lib.rs"
+symbol = "module::wit::utils"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"

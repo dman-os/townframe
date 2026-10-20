@@ -1,15 +1,14 @@
 #[expect(unused)]
 mod interlude {
     pub use std::future::Future;
-    pub use std::path::{Path, PathBuf};
+    pub use std::path::Path;
+    pub use std::path::PathBuf;
     pub use std::sync::Arc;
 
     pub use utils_rs::prelude::*;
 }
 
-mod r#gen;
-mod keyhive_demo;
-mod keyhive_visibility;
+mod guardrails;
 mod sql;
 
 use clap::builder::styling::AnsiColor;
@@ -18,6 +17,29 @@ use crate::interlude::*;
 
 const OCI_PLUG_ARTIFACT_TYPE: &str = "application/vnd.daybook.plug.v1";
 const OCI_PLUG_MANIFEST_LAYER_MEDIA_TYPE: &str = "application/vnd.daybook.plug.manifest.v1+json";
+const OCI_WASM_LAYER_MEDIA_TYPE: &str = "application/vnd.wasm.content.layer.v1+wasm";
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlugManifestHeader {
+    namespace: String,
+    name: String,
+    #[serde(default)]
+    wflow_bundles: HashMap<String, PlugWflowBundleHeader>,
+}
+
+impl PlugManifestHeader {
+    fn id(&self) -> String {
+        format!("@{}/{}", self.namespace, self.name)
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlugWflowBundleHeader {
+    #[serde(default)]
+    component_urls: Vec<url::Url>,
+}
 
 fn main() -> Res<()> {
     dotenv_flow::dotenv_flow().ok();
@@ -71,80 +93,151 @@ async fn main_main() -> Res<()> {
             )
             .await?;
         }
-        Commands::Gen {} => {
-            r#gen::cli()?;
-        }
-        Commands::KeyhiveDemo {} => {
-            keyhive_demo::cli().await?;
-        }
-        Commands::KeyhiveVisibility {} => {
-            keyhive_visibility::cli().await?;
-        }
         Commands::BuildPlugOci {
             plug_root,
             out_root,
         } => {
             build_plug_oci(plug_root, out_root).await?;
         }
-        Commands::Play {} => {
-            /*
-            use ollama_rs::generation::completion::request::GenerationRequest;
-            use ollama_rs::generation::images::Image;
-
-            tokio::try_join!(
-                async {
-                    let generation_request =
-                        GenerationRequest::new("gemma3".into(), "Extract the text.").images(vec![
-                            Image::from_base64(data_encoding::BASE64.encode(
-                                &tokio::fs::read("/tmp/photo_2025-12-25_22-56-09.jpg").await?,
-                            )),
-                        ]);
-
-                    let ollama = ollama_rs::Ollama::new("http://localhost", 11434);
-                    let ollama_response = ollama.generate(generation_request).await?;
-                    println!("{ollama_response:#?}");
-                    eyre::Ok(())
-                },
-                async {
-                    let generation_request =
-                        GenerationRequest::new("gemma3".into(), "Extract the text.").images(vec![
-                            Image::from_base64(data_encoding::BASE64.encode(
-                                &tokio::fs::read("/tmp/photo_2025-12-26_00-05-33.jpg").await?,
-                            )),
-                        ]);
-
-                    let ollama = ollama_rs::Ollama::new("http://localhost", 11434);
-                    let ollama_response = ollama.generate(generation_request).await?;
-                    println!("{ollama_response:#?}");
-                    eyre::Ok(())
-                },
-                async {
-                    let generation_request =
-                        GenerationRequest::new("gemma3".into(), "Extract the text.").images(vec![
-                            Image::from_base64(data_encoding::BASE64.encode(
-                                &tokio::fs::read("/tmp/photo_2025-12-26_17-22-49.jpg").await?,
-                            )),
-                        ]);
-
-                    let ollama = ollama_rs::Ollama::new("http://localhost", 11434);
-                    let ollama_response = ollama.generate(generation_request).await?;
-                    println!("{ollama_response:#?}");
-                    eyre::Ok(())
+        Commands::Guardrails { command } => {
+            let root = sql::workspace_root().await?;
+            guardrails::dispatch(&root, command)?;
+        }
+        Commands::Lint {
+            package,
+            format,
+            json,
+        } => {
+            let root = sql::workspace_root().await?;
+            guardrails::dispatch(
+                &root,
+                guardrails::GuardrailsCmd::Check {
+                    package,
+                    format,
+                    json,
                 },
             )?;
-            */
+        }
+        Commands::Api {
+            package,
+            all,
+            bless,
+            check,
+            json,
+        } => {
+            let root = sql::workspace_root().await?;
+            guardrails::dispatch(
+                &root,
+                guardrails::GuardrailsCmd::Api {
+                    package,
+                    all,
+                    bless,
+                    check,
+                    json,
+                },
+            )?;
+        }
+        Commands::CheckMatrix {
+            package,
+            target,
+            dry_run,
+        } => {
+            let root = sql::workspace_root().await?;
+            let repo = guardrails::repository::Repository::load(&root)?;
+            guardrails::matrix::run(&repo, package.as_deref(), target.as_deref(), dry_run)?;
+        }
+        Commands::Doctor { json } => {
+            let root = sql::workspace_root().await?;
+            guardrails::dispatch(&root, guardrails::GuardrailsCmd::Doctor { json })?;
+        }
+        Commands::Overlap {
+            base,
+            worktrees_dir,
+            json,
+        } => {
+            let root = sql::workspace_root().await?;
+            guardrails::dispatch(
+                &root,
+                guardrails::GuardrailsCmd::Overlap {
+                    base,
+                    worktrees_dir,
+                    json,
+                },
+            )?;
+        }
+        Commands::Plan { files } => {
+            let root = sql::workspace_root().await?;
+            guardrails::dispatch(&root, guardrails::GuardrailsCmd::Plan { files })?;
+        }
+        Commands::Record { output, command } => {
+            let root = sql::workspace_root().await?;
+            guardrails::dispatch(&root, guardrails::GuardrailsCmd::Record { output, command })?;
+        }
+        Commands::Verify { receipt } => {
+            let root = sql::workspace_root().await?;
+            guardrails::dispatch(&root, guardrails::GuardrailsCmd::Verify { receipt })?;
         }
     }
 
     Ok(())
 }
 
+async fn read_plug_manifest(
+    plug_root: &Path,
+) -> Res<(PlugManifestHeader, serde_json::Value, PathBuf)> {
+    #[derive(serde::Deserialize)]
+    struct PlugPackage {
+        package: PackageMetadata,
+    }
+    #[derive(serde::Deserialize)]
+    struct PackageMetadata {
+        metadata: PlugMetadata,
+    }
+    #[derive(serde::Deserialize)]
+    struct PlugMetadata {
+        townframe: PlugBuild,
+    }
+    #[derive(serde::Deserialize)]
+    struct PlugBuild {
+        routines: PathBuf,
+    }
+
+    let manifest_path = plug_root.join("Cargo.toml");
+    eyre::ensure!(
+        manifest_path.is_file(),
+        "expected Cargo.toml at {}",
+        manifest_path.display()
+    );
+    let package: PlugPackage = toml::from_str(&tokio::fs::read_to_string(&manifest_path).await?)?;
+    let routines_root = plug_root.join(package.package.metadata.townframe.routines);
+
+    let output = tokio::process::Command::new("cargo")
+        .args(["run", "--locked", "--quiet", "--manifest-path"])
+        .arg(&manifest_path)
+        .args(["--bin", "manifest"])
+        .output()
+        .await?;
+    eyre::ensure!(
+        output.status.success(),
+        "failed running plug manifest at '{}': {}",
+        plug_root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest_json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .wrap_err("error parsing manifest bin stdout as JSON")?;
+    let manifest: PlugManifestHeader = serde_json::from_value(manifest_json.clone())
+        .wrap_err("error parsing PlugManifest JSON")?;
+    Ok((manifest, manifest_json, routines_root))
+}
+
 async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()> {
-    use daybook_types::manifest::PlugManifest;
-    use oci_spec::image::{
-        Descriptor, ImageIndexBuilder, ImageManifestBuilder, MediaType, OciLayoutBuilder,
-    };
-    use sha2::{Digest as _, Sha256};
+    use oci_spec::image::Descriptor;
+    use oci_spec::image::ImageIndexBuilder;
+    use oci_spec::image::ImageManifestBuilder;
+    use oci_spec::image::MediaType;
+    use oci_spec::image::OciLayoutBuilder;
+    use sha2::Digest as _;
+    use sha2::Sha256;
 
     let cwd = std::env::current_dir()?;
     let plug_root = if plug_root.is_absolute() {
@@ -152,39 +245,7 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
     } else {
         cwd.join(plug_root)
     };
-    eyre::ensure!(
-        plug_root.join("manifest.rs").exists(),
-        "expected manifest bin source at {}",
-        plug_root.join("manifest.rs").display()
-    );
-    eyre::ensure!(
-        plug_root.join("Cargo.toml").exists(),
-        "expected Cargo.toml at {}",
-        plug_root.join("Cargo.toml").display()
-    );
-
-    let output = tokio::process::Command::new("cargo")
-        .args([
-            "run",
-            "--quiet",
-            "--manifest-path",
-            &plug_root.join("Cargo.toml").display().to_string(),
-            "--bin",
-            "manifest",
-        ])
-        .output()
-        .await?;
-    eyre::ensure!(
-        output.status.success(),
-        "failed running plug manifest bin at '{}': {}",
-        plug_root.display(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let manifest_json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .wrap_err("error parsing manifest bin stdout as JSON")?;
-    let manifest: PlugManifest = serde_json::from_value(manifest_json.clone())
-        .wrap_err("error parsing PlugManifest JSON")?;
+    let (manifest, manifest_json, routines_root) = read_plug_manifest(&plug_root).await?;
 
     #[derive(serde::Deserialize)]
     struct CargoWorkspace {
@@ -194,7 +255,7 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
 
     let output = tokio::process::Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version", "1"])
-        .current_dir(&plug_root)
+        .current_dir(&routines_root)
         .output()
         .await?;
     eyre::ensure!(
@@ -207,7 +268,9 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
         workspace_root,
         target_directory,
     } = serde_json::from_slice(&output.stdout)?;
-    let out_root = out_root.unwrap_or_else(|| workspace_root.join("target/oci"));
+    build_plug_wasm_component(&workspace_root, &routines_root).await?;
+    let repository_root = sql::workspace_root().await?;
+    let out_root = out_root.unwrap_or_else(|| repository_root.join("target/oci"));
     let artifact_root = out_root.join(manifest.id());
     let blobs_sha_root = artifact_root.join("blobs/sha256");
 
@@ -219,16 +282,7 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
     let mut component_url_to_digest_hex: HashMap<String, String> = HashMap::new();
     let mut layer_descriptors: Vec<Descriptor> = vec![];
     let mut seen_digests = HashSet::<String>::new();
-    let needs_wasm_build = manifest.wflow_bundles.values().any(|bundle| {
-        bundle
-            .component_urls
-            .iter()
-            .any(|component_url| matches!(component_url.scheme(), "build"))
-    });
-    let wasm_target_dir = target_directory.join("wasm");
-    if needs_wasm_build {
-        build_plug_wasm_component(&workspace_root, &plug_root, &wasm_target_dir).await?;
-    }
+    let wasm_target_dir = target_directory;
     for bundle in manifest.wflow_bundles.values() {
         for component_url in &bundle.component_urls {
             let bytes = match component_url.scheme() {
@@ -269,14 +323,12 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
                             .map(|ext| ext.to_ascii_lowercase())
                             .as_deref()
                         {
-                            Some("wasm") => {
-                                MediaType::Other(oci_wasm::WASM_LAYER_MEDIA_TYPE.into())
-                            }
+                            Some("wasm") => MediaType::Other(OCI_WASM_LAYER_MEDIA_TYPE.into()),
                             _ => MediaType::Other("application/octet-stream".into()),
                         }
                     }
                     "build" if is_build_wasm_component(component_url) => {
-                        MediaType::Other(oci_wasm::WASM_LAYER_MEDIA_TYPE.into())
+                        MediaType::Other(OCI_WASM_LAYER_MEDIA_TYPE.into())
                     }
                     _ => MediaType::Other("application/octet-stream".into()),
                 };
@@ -373,23 +425,20 @@ async fn build_plug_oci(plug_root: PathBuf, out_root: Option<PathBuf>) -> Res<()
     Ok(())
 }
 
-async fn build_plug_wasm_component(
-    workspace_root: &Path,
-    plug_root: &Path,
-    wasm_target_dir: &Path,
-) -> Res<()> {
+async fn build_plug_wasm_component(workspace_root: &Path, plug_root: &Path) -> Res<()> {
     let mut build = tokio::process::Command::new("cargo");
     build
         .args([
             "build",
+            "--locked",
+            "--lib",
             "--release",
             "--target",
             "wasm32-wasip2",
             "--manifest-path",
             &plug_root.join("Cargo.toml").display().to_string(),
         ])
-        .current_dir(workspace_root)
-        .env("CARGO_TARGET_DIR", wasm_target_dir);
+        .current_dir(workspace_root);
     append_tokio_unstable_rustflags(&mut build);
     let output = build.output().await?;
     eyre::ensure!(
@@ -543,14 +592,74 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    KeyhiveDemo {},
-    KeyhiveVisibility {},
-    Play {},
-    Gen {},
     BuildPlugOci {
         #[arg(long)]
         plug_root: PathBuf,
         #[arg(long)]
         out_root: Option<PathBuf>,
     },
+    /// Guardrail subcommands (`check`, `inventory`, `adopt`, `bless`, `plan`, `api`, `record`, `verify`, `doctor`, `overlap`).
+    Guardrails {
+        #[command(subcommand)]
+        command: guardrails::GuardrailsCmd,
+    },
+    /// Run AST, architecture, migration-identity, and documentation guardrails.
+    Lint {
+        #[arg(long)]
+        package: Option<String>,
+        #[arg(long, value_enum, default_value_t = guardrails::OutputFormat::Text)]
+        format: guardrails::OutputFormat,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check or bless public-API snapshots and print change-impact reports.
+    Api {
+        #[arg(long)]
+        package: Option<String>,
+        #[arg(long)]
+        all: bool,
+        #[arg(long, alias = "accept")]
+        bless: bool,
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check effective rustflags, sysroot identity, rustfmt/profile config, and build environment.
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    CheckMatrix {
+        #[arg(long)]
+        package: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Detect symbol-level, migration-stream, and API-contract overlap across sibling worktrees.
+    Overlap {
+        /// Trunk checkout every worktree is diffed against (default: $TOWNFRAME_TRUNK_DIR).
+        #[arg(long)]
+        base: Option<PathBuf>,
+        #[arg(long)]
+        worktrees_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compute affected crates and validation commands for workspace-relative changed paths.
+    Plan {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
+    /// Record a source-bound validation receipt around a command execution.
+    Record {
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(required = true, last = true)]
+        command: Vec<String>,
+    },
+    /// Verify that a validation receipt matches the current source tree and toolchain.
+    Verify { receipt: PathBuf },
 }

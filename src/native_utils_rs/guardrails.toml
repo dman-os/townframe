@@ -1,0 +1,6 @@
+version = 1
+role = "foundation"
+dependency_reason = "Native filesystem and HTTP utilities stay outside portable dependency closures."
+allowed_dependencies = ["utils_rs"]
+
+[builds.native]

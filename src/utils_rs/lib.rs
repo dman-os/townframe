@@ -1,7 +1,5 @@
 pub mod batching;
 pub mod census;
-#[cfg(feature = "downloader")]
-pub mod downloader;
 pub mod lru;
 mod macros;
 pub mod testing;
@@ -21,32 +19,53 @@ pub mod prelude {
 }
 
 mod interlude {
-    pub use crate::{CHeapStr, DHashMap, JsonExt, ToAnyhow, ToEyre, default, error_loc, warn_loc};
+    pub use crate::CHeapStr;
+    pub use crate::DHashMap;
+    pub use crate::JsonExt;
+    pub use crate::ToAnyhow;
+    pub use crate::ToEyre;
+    pub use crate::default;
+    pub use crate::error_loc;
+    pub use crate::warn_loc;
 
-    pub use std::{
-        collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-        path::{Path, PathBuf},
-        rc::Rc,
-        sync::{Arc, LazyLock},
-        time::Duration,
-    };
+    pub use std::collections::BTreeMap;
+    pub use std::collections::BTreeSet;
+    pub use std::collections::HashMap;
+    pub use std::collections::HashSet;
+    pub use std::path::Path;
+    pub use std::path::PathBuf;
+    pub use std::rc::Rc;
+    pub use std::sync::Arc;
+    pub use std::sync::LazyLock;
+    pub use std::time::Duration;
 
     #[cfg(feature = "hash")]
     pub use crate::hash::UuidExt;
     pub use async_trait::async_trait;
-    pub use color_eyre::eyre::{
-        self as eyre, OptionExt as EyreOptExt, Result as Res, WrapErr, format_err as ferr,
-    };
-    pub use indexmap::{IndexMap, indexmap};
-    pub use jiff::{self, Timestamp};
-    pub use serde::{Deserialize, Serialize};
+    pub use color_eyre::eyre::OptionExt as EyreOptExt;
+    pub use color_eyre::eyre::Result as Res;
+    pub use color_eyre::eyre::WrapErr;
+    pub use color_eyre::eyre::format_err as ferr;
+    pub use color_eyre::eyre::{self as eyre};
+    pub use indexmap::IndexMap;
+    pub use indexmap::indexmap;
+    pub use jiff::Timestamp;
+    pub use jiff::{self};
+    pub use serde::Deserialize;
+    pub use serde::Serialize;
     pub use serde_json::json;
     pub use url::Url;
-    pub use uuid::{self, Uuid};
+    pub use uuid::Uuid;
+    pub use uuid::{self};
 
     pub use crate::expect_tags::*;
 
-    pub use tracing::{self, debug, error, info, trace, warn};
+    pub use tracing::debug;
+    pub use tracing::error;
+    pub use tracing::info;
+    pub use tracing::trace;
+    pub use tracing::warn;
+    pub use tracing::{self};
     pub use tracing_futures::Instrument;
     pub use tracing_unwrap::*;
 
@@ -70,7 +89,7 @@ pub mod expect_tags {
     pub const ERROR_CHANNEL: &str = "channel error: closed?";
     pub const ERROR_JSON: &str = "json error: oom?";
     pub const ERROR_UTF8: &str = "utf8 error";
-    pub const ERROR_MUTEX: &str = "poisioned mutex";
+    pub const ERROR_MUTEX: &str = "poisoned mutex";
     pub const ERROR_PARSE: &str = "stringly type bites again";
     // Preferred over ERROR_CHANNEL when sending a message
     // to an actor like task that's doing an event loop.
@@ -224,10 +243,9 @@ pub fn app_startup_elapsed_ms() -> u128 {
 mod cheapstr {
     use crate::interlude::*;
 
-    use std::{
-        borrow::Cow,
-        hash::{Hash, Hasher},
-    };
+    use std::borrow::Cow;
+    use std::hash::Hash;
+    use std::hash::Hasher;
     // lifted from github.com/bevyengine/bevy 's bevy_core/Name struct
     // MIT/APACHE2 licence
     #[derive(Clone, Serialize, Deserialize)]
@@ -536,19 +554,6 @@ pub mod hash {
             )),
             (_, Err(err)) => Err(eyre::format_err!("error decoding hex: {err}")),
         }
-    }
-}
-
-/// A simpler version of [`tokio::fs::try_exists`] that returns
-/// false on a non-existent file and not just on a broken symlink.
-#[inline(always)]
-#[cfg(feature = "native")]
-pub async fn file_exists(path: &Path) -> Result<bool, std::io::Error> {
-    match tokio::fs::try_exists(path).await {
-        Ok(true) => Ok(true),
-        Ok(false) => Ok(false),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(err),
     }
 }
 

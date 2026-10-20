@@ -26,23 +26,35 @@ mod reconciliation;
 mod tests;
 pub mod types;
 
-pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
+pub use crate::drawer::types::DocBundle;
+pub use crate::drawer::types::DocEntry;
+pub use crate::drawer::types::DocEntryDiff;
+pub use crate::drawer::types::DocNBranches;
+pub use crate::drawer::types::DrawerEvent;
 pub use meta::doc_version_updates;
 pub use meta::version_updates;
 pub use mutations::StagedAdd;
 
-use big_repo::{
-    BigKeyhiveGroup, BigRepoLocalListenerRegistration, BigRepoLocalNotification, SharedBigRepo,
-    SharedPartStore,
-};
+use big_repo::BigKeyhiveGroup;
+use big_repo::BigRepoLocalListenerRegistration;
+use big_repo::BigRepoLocalNotification;
+use big_repo::SharedBigRepo;
+use big_repo::SharedPartStore;
 use cache::FacetCacheKey;
 use cache::*;
-use types::{BranchSnapshot, DocDeleteTombstone};
+use types::BranchSnapshot;
+use types::DocDeleteTombstone;
 use utils_rs::lru::SharedKeyedLruPool;
 
 use automerge::ReadDoc;
-use daybook_types::doc::{BranchId, ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef};
-use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
+use daybook_types::doc::BranchId;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetRaw;
+use daybook_types::doc::FacetRef;
+use daybook_types::url::FACET_SELF_DOC_ID;
+use daybook_types::url::parse_facet_ref;
 
 use tokio_util::sync::CancellationToken;
 
@@ -484,7 +496,8 @@ impl DrawerRepo {
     /// branch. Presenting or using a branch must consult this, so the two channels
     /// cannot produce a branch that is listed and unwritable.
     pub(crate) async fn branch_doc_reachable(&self, branch_doc_id: &DocumentId) -> Res<bool> {
-        use big_repo::keyhive_core::principal::{identifier::Identifier, public::Public};
+        use big_repo::keyhive_core::principal::identifier::Identifier;
+        use big_repo::keyhive_core::principal::public::Public;
 
         // The write gate (`NativeBigRepoIo::has_doc_write_access`) derives its
         // local identifier from this repo's peer key, and the local keyhive agent

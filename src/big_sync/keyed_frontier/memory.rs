@@ -1,13 +1,22 @@
 //! In-memory keyed-frontier implementation.
 
 use crate::interlude::*;
-use big_sync_core::keyed_frontier::{
-    FrontierEntry, FrontierMutation, FrontierRead, FrontierReadLimits, FrontierRevision,
-    KeyedFrontier, KeyedFrontierError, KeyedFrontierReader, KeyedFrontierResult,
-    KeyedFrontierTransaction, TransactionIsolation,
-};
-use std::collections::{BTreeMap, BTreeSet};
-use tokio::sync::{Mutex, OwnedMutexGuard, watch};
+use big_sync_core::keyed_frontier::FrontierEntry;
+use big_sync_core::keyed_frontier::FrontierMutation;
+use big_sync_core::keyed_frontier::FrontierRead;
+use big_sync_core::keyed_frontier::FrontierReadLimits;
+use big_sync_core::keyed_frontier::FrontierRevision;
+use big_sync_core::keyed_frontier::KeyedFrontier;
+use big_sync_core::keyed_frontier::KeyedFrontierError;
+use big_sync_core::keyed_frontier::KeyedFrontierReader;
+use big_sync_core::keyed_frontier::KeyedFrontierResult;
+use big_sync_core::keyed_frontier::KeyedFrontierTransaction;
+use big_sync_core::keyed_frontier::TransactionIsolation;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use tokio::sync::Mutex;
+use tokio::sync::OwnedMutexGuard;
+use tokio::sync::watch;
 
 pub trait MemoryKeyedFrontierSelector<K>: Send + Sync + 'static {
     /// `None` excludes the key. `Some(revision)` includes the key during

@@ -129,6 +129,7 @@ pub fn discover_dirs(root: &Path) -> Res<Vec<PathBuf>> {
 pub async fn workspace_root() -> Res<PathBuf> {
     let output = tokio::process::Command::new("cargo")
         .args(["locate-project", "--workspace", "--message-format", "plain"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .await?;
     eyre::ensure!(

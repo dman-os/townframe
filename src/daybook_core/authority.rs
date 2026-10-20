@@ -1,6 +1,8 @@
 use crate::interlude::*;
 
-use big_repo::{BigKeyhiveAuthority, BigKeyhiveGroup, SharedBigRepo};
+use big_repo::BigKeyhiveAuthority;
+use big_repo::BigKeyhiveGroup;
+use big_repo::SharedBigRepo;
 
 const REPO_AGENTS_GROUP_KEY: &str = "global.authority.repo_agents_group";
 const CORE_DOCS_GROUP_KEY: &str = "global.authority.core_docs_group";
@@ -241,7 +243,8 @@ pub(crate) async fn grant_docs_admin(
     group: &BigKeyhiveGroup,
     doc_ids: impl IntoIterator<Item = DocumentId>,
 ) -> Res<()> {
-    use big_repo::keyhive_core::{access::Access, principal::identifier::Identifier};
+    use big_repo::keyhive_core::access::Access;
+    use big_repo::keyhive_core::principal::identifier::Identifier;
     let group_ident = Identifier::from(group.id());
     for doc_id in doc_ids {
         let vk = ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32()?)

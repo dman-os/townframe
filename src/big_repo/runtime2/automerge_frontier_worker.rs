@@ -22,24 +22,33 @@
 //! Both streams tail live from the walker's durable revision. There is no gap
 //! handling: neither log is pruned. The worker's [`WorkerGroupScope`] is read
 //! through a [`GroupScopeHandle`] so the embedder can update it at runtime.
-use crate::changes::{BigRepoLocalNotification, LocalFilter};
+use crate::changes::BigRepoLocalNotification;
+use crate::changes::LocalFilter;
 use crate::interlude::*;
-use crate::runtime2::types::{BrokenReason, MaterializationOutcome};
-use crate::runtime2::{GroupScopeHandle, WorkerGroupScope, keyhive_admission};
+use crate::runtime2::GroupScopeHandle;
+use crate::runtime2::WorkerGroupScope;
+use crate::runtime2::keyhive_admission;
+use crate::runtime2::types::BrokenReason;
+use crate::runtime2::types::MaterializationOutcome;
 use crate::store::sqlite::SqliteBigRepoStore;
+use big_sync::HostPartStore;
+use big_sync::LocalPartRevisionReader;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
-use big_sync::{HostPartStore, LocalPartRevisionReader};
-use big_sync_core::concurrent_delta_walker::{ConcurrentDeltaRead, ConcurrentDeltaWalker};
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
 use big_sync_core::outbox::Outbox;
-use big_sync_core::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStore;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
 use big_sync_core::rpc::PartEvent;
 use big_sync_core::scheduler::Retry;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 

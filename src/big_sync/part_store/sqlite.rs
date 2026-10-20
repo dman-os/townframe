@@ -1,31 +1,58 @@
 use super::HostPartStore;
 use super::LocalPartRevisionReader;
+use super::PartFrontierKey;
+use super::PartScope;
 use super::PartStoreStats;
+use super::ReadTarget;
+use super::SqlitePartFrontier;
+use super::SqlitePartSelector;
 use super::sqlite_core::EVENT_REMOVED;
-use super::{PartFrontierKey, PartScope, ReadTarget, SqlitePartFrontier, SqlitePartSelector};
 use crate::interlude::*;
 use crate::keyed_frontier::open_sqlite_reader_with_byte_budget;
 #[cfg(test)]
-use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
+use crate::test_support::ObservedObjSnapshot;
+#[cfg(test)]
+use crate::test_support::ObservedStore;
+#[cfg(test)]
+use crate::test_support::ObservedStoreSnapshot;
 
 use crate::sqlite::queries;
+use big_sync_core::BuckId;
 #[cfg(test)]
 use big_sync_core::ByteKey;
-use big_sync_core::keyed_frontier::{KeyedFrontier, KeyedFrontierTransaction};
+use big_sync_core::Fingerprint;
+use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
+use big_sync_core::PeerKey;
+use big_sync_core::keyed_frontier::KeyedFrontier;
+use big_sync_core::keyed_frontier::KeyedFrontierTransaction;
+use big_sync_core::part_store::CursorIndex;
+use big_sync_core::part_store::ObjPayload;
+use big_sync_core::part_store::PartDirtyCount;
 #[cfg(test)]
 use big_sync_core::part_store::PartStoreReadOnly;
-use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
-use big_sync_core::rpc::{
-    BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
-    LeafBucketsError, LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart,
-    PartEvent, PartPage, PartSummary, SubPartsRequest,
-};
-use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey};
+use big_sync_core::rpc::BucketObjPageEntry;
+use big_sync_core::rpc::BucketSummary;
+use big_sync_core::rpc::GetChangedBucketsRequest;
+use big_sync_core::rpc::LeafBucketPage;
+use big_sync_core::rpc::LeafBucketResult;
+use big_sync_core::rpc::LeafBucketsError;
+use big_sync_core::rpc::LeafBucketsRequest;
+use big_sync_core::rpc::ListPartsError;
+use big_sync_core::rpc::ObjChanged;
+use big_sync_core::rpc::ObjRemovedFromPart;
+use big_sync_core::rpc::PartEvent;
+use big_sync_core::rpc::PartPage;
+use big_sync_core::rpc::PartSummary;
+use big_sync_core::rpc::SubPartsRequest;
 #[cfg(test)]
-use future_form::{FutureForm, Sendable};
+use future_form::FutureForm;
+#[cfg(test)]
+use future_form::Sendable;
 #[cfg(test)]
 use futures::future::BoxFuture;
-use sqlite_rs::{Database, Sql};
+use sqlite_rs::Database;
+use sqlite_rs::Sql;
 use tokio::sync::Notify;
 
 use super::sqlite_core::encode_access;
@@ -1651,12 +1678,15 @@ mod tests {
             drained: *drained,
         }
     }
-    use crate::part_store::host_contract::{
-        self, HostPartStoreContractHarness, PageEventStore, SingleTargetPageStore,
-    };
+    use crate::part_store::host_contract::HostPartStoreContractHarness;
+    use crate::part_store::host_contract::PageEventStore;
+    use crate::part_store::host_contract::SingleTargetPageStore;
+    use crate::part_store::host_contract::{self};
     use big_sync_core::keyed_frontier::KeyedFrontierTransaction;
     use big_sync_core::part_store::contract;
-    use big_sync_core::rpc::{ReplayPage, SubscriptionTarget, TargetVerdict};
+    use big_sync_core::rpc::ReplayPage;
+    use big_sync_core::rpc::SubscriptionTarget;
+    use big_sync_core::rpc::TargetVerdict;
 
     async fn test_sql() -> Res<Database> {
         let runtime = sqlite_rs::SqliteRuntime::new(Default::default());
@@ -1729,7 +1759,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn hidden_parts_are_invisible_to_bucket_walks() -> Res<()> {
         use big_sync_core::FingerprintSeed;
-        use big_sync_core::rpc::{LeafBucketRequest, LeafBucketsRequest};
+        use big_sync_core::rpc::LeafBucketRequest;
+        use big_sync_core::rpc::LeafBucketsRequest;
 
         let hidden = test_part_id(60);
         let visible = test_part_id(61);

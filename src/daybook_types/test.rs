@@ -1,8 +1,12 @@
 use crate::interlude::*;
 
-use crate::doc::{
-    BlobPin, ChangeHashSet, CipherBlob, FacetRaw, Representation, WellKnownFacet, WellKnownFacetTag,
-};
+use crate::doc::BlobPin;
+use crate::doc::ChangeHashSet;
+use crate::doc::CipherBlob;
+use crate::doc::FacetRaw;
+use crate::doc::Representation;
+use crate::doc::WellKnownFacet;
+use crate::doc::WellKnownFacetTag;
 
 #[test]
 fn test_blob_pin_facet_schema() -> Res<()> {

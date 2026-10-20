@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
-use big_repo::{BigRepo, SharedBigRepo};
+use big_repo::BigRepo;
+use big_repo::SharedBigRepo;
 
 use crate::drawer::DrawerRepo;
 use crate::plugs::PlugsRepo;
@@ -36,7 +37,8 @@ pub struct DaybookTestCxOptions {
 impl DaybookTestContext {
     /// Wait until there are no active jobs, with a timeout
     pub async fn _wait_until_no_active_jobs(&self, timeout_secs: u64) -> Res<()> {
-        use tokio::time::{Duration, Instant};
+        use tokio::time::Duration;
+        use tokio::time::Instant;
 
         let start = Instant::now();
         let timeout_duration = Duration::from_secs(timeout_secs);
@@ -609,14 +611,21 @@ pub async fn test_cx_with_options(
     })
 }
 
+pub fn plug_oci_root(plug_id: &str) -> std::path::PathBuf {
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+        });
+    target_dir.join("oci").join(plug_id)
+}
+
 #[cfg(test)]
 pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<crate::plugs::ImportedPlug> {
-    let artifact_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/oci")
-        .join("@daybook/test");
+    let artifact_path = plug_oci_root("@daybook/test");
     eyre::ensure!(
         artifact_path.exists(),
-        "missing OCI plug artifact at '{}'. Build it first with: cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test",
+        "missing OCI plug artifact at '{}'. Build it first with: cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test_manifest",
         artifact_path.display()
     );
     test_cx

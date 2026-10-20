@@ -3,11 +3,14 @@ use crate::interlude::*;
 use crate::repo::blob_presence_part_id;
 use big_repo::SharedPartStore;
 use big_sync_core::ObjKey;
-use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
+use iroh_blobs::api::blobs::AddPathOptions;
+use iroh_blobs::api::blobs::ImportMode;
 use iroh_blobs::store::fs::FsStore;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
-use std::path::{Component, Path};
+use std::path::Component;
+use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
 pub mod encrypt;
@@ -30,8 +33,10 @@ pub(crate) mod sqlite {
 }
 pub mod sync;
 
-pub(crate) use encryption_worker::{BlobEncryptionWorkerArgs, spawn_blob_encryption_worker};
-pub(crate) use pin_worker::{BlobPinWorkerArgs, spawn_blob_pin_worker};
+pub(crate) use encryption_worker::BlobEncryptionWorkerArgs;
+pub(crate) use encryption_worker::spawn_blob_encryption_worker;
+pub(crate) use pin_worker::BlobPinWorkerArgs;
+pub(crate) use pin_worker::spawn_blob_pin_worker;
 pub(crate) use pins_part_worker::spawn_blob_pins_part_worker;
 
 pub fn blob_inventory_part_id(doc_id: &DocumentId) -> PartKey {

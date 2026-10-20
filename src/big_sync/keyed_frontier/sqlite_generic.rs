@@ -1,12 +1,21 @@
 #![allow(clippy::disallowed_names)]
-use super::sqlite_read::{SqliteReadError, SqliteReadSource, open_sqlite_reader};
+use super::sqlite_read::SqliteReadError;
+use super::sqlite_read::SqliteReadSource;
+use super::sqlite_read::open_sqlite_reader;
 use crate::sqlite::queries;
-use big_sync_core::keyed_frontier::{
-    FrontierEntry, FrontierRevision, KeyedFrontier, KeyedFrontierError, KeyedFrontierReader,
-    KeyedFrontierResult, KeyedFrontierTransaction, TransactionIsolation,
-};
-use sqlite_rs::{Database, Sql, Tx};
-use std::{collections::BTreeMap, sync::Arc};
+use big_sync_core::keyed_frontier::FrontierEntry;
+use big_sync_core::keyed_frontier::FrontierRevision;
+use big_sync_core::keyed_frontier::KeyedFrontier;
+use big_sync_core::keyed_frontier::KeyedFrontierError;
+use big_sync_core::keyed_frontier::KeyedFrontierReader;
+use big_sync_core::keyed_frontier::KeyedFrontierResult;
+use big_sync_core::keyed_frontier::KeyedFrontierTransaction;
+use big_sync_core::keyed_frontier::TransactionIsolation;
+use sqlite_rs::Database;
+use sqlite_rs::Sql;
+use sqlite_rs::Tx;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio::sync::Notify;
 use utils_rs::prelude::async_trait;
 
@@ -714,12 +723,10 @@ mod tests {
     #[tokio::test]
     async fn walker_state_and_frontier_settle_in_one_context() -> utils_rs::prelude::Res<()> {
         use crate::delta_walker_state::SqliteDeltaWalkerStateRepo;
-        use big_sync_core::delta_walker_sparse_state::{
-            DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
-        };
-        use big_sync_core::delta_walker_state::{
-            DeltaWalkerStateRepo, DeltaWalkerStateTransaction,
-        };
+        use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateRepo;
+        use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateTransaction;
+        use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
+        use big_sync_core::delta_walker_state::DeltaWalkerStateTransaction;
         use utils_rs::prelude::futures::FutureExt;
 
         let runtime = sqlite_rs::SqliteRuntime::new(Default::default());

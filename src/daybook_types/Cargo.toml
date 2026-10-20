@@ -12,7 +12,7 @@ path = "lib.rs"
 crate-type = ["rlib"]
 
 [features]
-default = ["uniffi", "wit", "manifest"]
+default = ["wit", "manifest"]
 uniffi = ["dep:uniffi", "dep:uuid"]
 wit = []
 schemars = ["dep:schemars"]

@@ -1,7 +1,10 @@
 use crate::interlude::*;
 
-use crate::kvstore::{CasError, KvStore};
-use crate::metastore::{MetdataStore, PartitionsMeta, WflowMeta};
+use crate::kvstore::CasError;
+use crate::kvstore::KvStore;
+use crate::metastore::MetdataStore;
+use crate::metastore::PartitionsMeta;
+use crate::metastore::WflowMeta;
 
 pub struct KvStoreMetadtaStore {
     kv_store: Arc<dyn KvStore + Send + Sync>,

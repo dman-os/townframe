@@ -1,8 +1,15 @@
 use crate::interlude::*;
 
-use crate::ffi::{FfiError, SharedFfiCtx};
+use crate::ffi::FfiError;
+use crate::ffi::SharedFfiCtx;
 
-use daybook_core::tables::{Panel, Tab, Table, TablesEvent, TablesPatches, TablesRepo, Window};
+use daybook_core::tables::Panel;
+use daybook_core::tables::Tab;
+use daybook_core::tables::Table;
+use daybook_core::tables::TablesEvent;
+use daybook_core::tables::TablesPatches;
+use daybook_core::tables::TablesRepo;
+use daybook_core::tables::Window;
 
 #[derive(uniffi::Object)]
 struct TablesRepoFfi {

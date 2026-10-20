@@ -9,9 +9,13 @@ use crate::interlude::*;
 
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use daybook_types::doc::{
-    ChangeHashSet, FacetKey, FacetMeta, UserMeta, UserPath, WellKnownFacet, WellKnownFacetTag,
-};
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetMeta;
+use daybook_types::doc::UserMeta;
+use daybook_types::doc::UserPath;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
 
 fn dmeta_key() -> String {
     [WellKnownFacetTag::Dmeta.as_str(), "/main"].concat()

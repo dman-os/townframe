@@ -5,9 +5,9 @@
 //! Implementations therefore retain atomicity between sparse memory writes and
 //! upstream cursor advancement.
 
-use crate::delta_walker_state::{
-    DeltaWalkerStateRepo, DeltaWalkerStateResult, DeltaWalkerStateTransaction,
-};
+use crate::delta_walker_state::DeltaWalkerStateRepo;
+use crate::delta_walker_state::DeltaWalkerStateResult;
+use crate::delta_walker_state::DeltaWalkerStateTransaction;
 use async_trait::async_trait;
 
 /// Sparse state operations available on a delta-walker transaction.

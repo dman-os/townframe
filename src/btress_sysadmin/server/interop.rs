@@ -2,14 +2,17 @@
 // migrate wstd to wasi p3 and expose it to work
 
 use crate::interlude::*;
-use http::{Uri, uri::Parts};
-use wasip2::{
-    http::types::{
-        Headers, IncomingBody, IncomingRequest, Method, OutgoingBody, OutgoingResponse,
-        ResponseOutparam, Scheme,
-    },
-    io::streams::StreamError,
-};
+use http::Uri;
+use http::uri::Parts;
+use wasip2::http::types::Headers;
+use wasip2::http::types::IncomingBody;
+use wasip2::http::types::IncomingRequest;
+use wasip2::http::types::Method;
+use wasip2::http::types::OutgoingBody;
+use wasip2::http::types::OutgoingResponse;
+use wasip2::http::types::ResponseOutparam;
+use wasip2::http::types::Scheme;
+use wasip2::io::streams::StreamError;
 
 /// When working with streams, this crate will try to chunk bytes with
 /// this size.

@@ -1,0 +1,28 @@
+version = 1
+role = "plugin"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = [
+    "api_utils_rs",
+    "wflow_sdk",
+]
+allow_external_api_types = false
+
+[builds.wasm32-wasip2]
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/test_wflows/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/test_wflows/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"

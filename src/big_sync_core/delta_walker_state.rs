@@ -64,9 +64,8 @@ pub trait DeltaWalkerStateRepo: Send + Sync {
 #[cfg(any(test, feature = "test-support"))]
 pub mod contract {
     use super::*;
-    use crate::delta_walker_sparse_state::{
-        DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
-    };
+    use crate::delta_walker_sparse_state::DeltaWalkerSparseStateRepo;
+    use crate::delta_walker_sparse_state::DeltaWalkerSparseStateTransaction;
 
     /// Supplies a repo and key/value constructors to the reusable
     /// DeltaWalkerState contract suite.
@@ -263,14 +262,15 @@ pub mod contract {
 
 #[cfg(test)]
 mod tests {
-    use super::contract::{DeltaWalkerStateContractHarness, assert_delta_walker_state_contract};
-    use crate::delta_walker_sparse_state::{
-        DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
-    };
-    use crate::delta_walker_state::{
-        DeltaWalkerProgress, DeltaWalkerStateError, DeltaWalkerStateRepo, DeltaWalkerStateResult,
-        DeltaWalkerStateTransaction,
-    };
+    use super::contract::DeltaWalkerStateContractHarness;
+    use super::contract::assert_delta_walker_state_contract;
+    use crate::delta_walker_sparse_state::DeltaWalkerSparseStateRepo;
+    use crate::delta_walker_sparse_state::DeltaWalkerSparseStateTransaction;
+    use crate::delta_walker_state::DeltaWalkerProgress;
+    use crate::delta_walker_state::DeltaWalkerStateError;
+    use crate::delta_walker_state::DeltaWalkerStateRepo;
+    use crate::delta_walker_state::DeltaWalkerStateResult;
+    use crate::delta_walker_state::DeltaWalkerStateTransaction;
     use parking_lot::Mutex;
     use std::collections::BTreeMap;
 

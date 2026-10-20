@@ -1,8 +1,10 @@
 use crate::interlude::*;
 
-use crate::ffi::{FfiError, SharedFfiCtx};
+use crate::ffi::FfiError;
+use crate::ffi::SharedFfiCtx;
 
-use daybook_core::rt::init::{InitEvent, InitRepo};
+use daybook_core::rt::init::InitEvent;
+use daybook_core::rt::init::InitRepo;
 
 #[derive(uniffi::Object)]
 pub struct InitRepoFfi {

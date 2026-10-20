@@ -1,11 +1,10 @@
 use crate::interlude::*;
 
-use crate::{
-    part_store::PartStoreReadOnly,
-    rpc,
-    rpc::BigSyncRpcClient,
-    tasks::{TaskCtx, TaskResultDeets},
-};
+use crate::part_store::PartStoreReadOnly;
+use crate::rpc;
+use crate::rpc::BigSyncRpcClient;
+use crate::tasks::TaskCtx;
+use crate::tasks::TaskResultDeets;
 
 /// One round of a logical replay subscription: at most one `Update`, then at most one page.
 ///

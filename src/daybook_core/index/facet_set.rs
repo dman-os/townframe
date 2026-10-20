@@ -11,30 +11,50 @@ pub(crate) mod sqlite {
 }
 use sqlite::queries;
 
-use crate::blobs::{BlobId, encryption_worker::plaintext_blob_id};
-use crate::drawer::{BranchIdentityResolution, DrawerRepo, ExactFacetValueHydration};
-use crate::index::doc_delta_store::{
-    DocDelta, DocDeltaBranchFilter, DocDeltaRevisionStore, DocDeltaSelector, begin_settlement,
-};
-use crate::index::facet_delta::{FacetDelta, FacetRouteKey, FacetSnapshot};
-use big_repo::{
-    AutomergeFrontierRevisionStore, AutomergeFrontierSelector, AutomergeFrontierTarget,
-};
-use big_sync::keyed_frontier::{SqliteFrontierCodec, SqliteKeyedFrontier};
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
-};
+use crate::blobs::BlobId;
+use crate::blobs::encryption_worker::plaintext_blob_id;
+use crate::drawer::BranchIdentityResolution;
+use crate::drawer::DrawerRepo;
+use crate::drawer::ExactFacetValueHydration;
+use crate::index::doc_delta_store::DocDelta;
+use crate::index::doc_delta_store::DocDeltaBranchFilter;
+use crate::index::doc_delta_store::DocDeltaRevisionStore;
+use crate::index::doc_delta_store::DocDeltaSelector;
+use crate::index::doc_delta_store::begin_settlement;
+use crate::index::facet_delta::FacetDelta;
+use crate::index::facet_delta::FacetRouteKey;
+use crate::index::facet_delta::FacetSnapshot;
+use big_repo::AutomergeFrontierRevisionStore;
+use big_repo::AutomergeFrontierSelector;
+use big_repo::AutomergeFrontierTarget;
+use big_sync::keyed_frontier::SqliteFrontierCodec;
+use big_sync::keyed_frontier::SqliteKeyedFrontier;
+use big_sync_core::concurrent_delta_walker::ConcurrentDelta;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
-use big_sync_core::keyed_frontier::{
-    FrontierEntry, FrontierRead, KeyedFrontier, KeyedFrontierReader,
-};
-use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore, RevisionedStoreReader};
-use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
-use daybook_types::doc::{
-    BranchId, ChangeHashSet, DocId, FacetKey, FacetTag, WellKnownFacet, WellKnownFacetTag,
-};
-use sqlite_rs::{Sql, Tx};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use big_sync_core::keyed_frontier::FrontierEntry;
+use big_sync_core::keyed_frontier::FrontierRead;
+use big_sync_core::keyed_frontier::KeyedFrontier;
+use big_sync_core::keyed_frontier::KeyedFrontierReader;
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionedStore;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
+use big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler;
+use big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion;
+use daybook_types::doc::BranchId;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetTag;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
+use sqlite_rs::Sql;
+use sqlite_rs::Tx;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::VecDeque;
 use tokio_util::sync::CancellationToken;
 
 const FACET_SET_LOCAL_STATE_ID: &str = "@daybook/core/doc-facet-set-index";
@@ -819,7 +839,8 @@ const FACET_SET_TASK_BUDGET: usize = 64;
 struct DocDeltaKey(u64);
 
 fn doc_delta_key(branch_id: &BranchId) -> DocDeltaKey {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     branch_id.0.hash(&mut hasher);
     DocDeltaKey(hasher.finish())
@@ -1236,7 +1257,11 @@ mod tests {
     use super::*;
     use crate::test_support::test_cx;
     use big_sync_core::revisioned_store::RevisionReadLimits;
-    use daybook_types::doc::{AddDocArgs, BranchPathBuf, FacetKey, FacetRaw, WellKnownFacet};
+    use daybook_types::doc::AddDocArgs;
+    use daybook_types::doc::BranchPathBuf;
+    use daybook_types::doc::FacetKey;
+    use daybook_types::doc::FacetRaw;
+    use daybook_types::doc::WellKnownFacet;
     use std::collections::VecDeque;
 
     #[tokio::test]

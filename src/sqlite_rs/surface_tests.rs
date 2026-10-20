@@ -436,7 +436,9 @@ async fn cancelled_begin_rolls_back_before_writer_reuse() -> SqlResult<()> {
 async fn statement_cache_reuses_preparation_and_validates_bind_count() -> SqlResult<()> {
     let db = test_support::db(&[]).expect("test db");
     db.run(true, |connection| {
-        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use rusqlite::hooks::AuthAction;
+        use rusqlite::hooks::AuthContext;
+        use rusqlite::hooks::Authorization;
         let prepared = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&prepared);
         connection.authorizer(Some(move |context: AuthContext<'_>| {

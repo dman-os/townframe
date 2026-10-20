@@ -7,23 +7,30 @@
 use super::harness::fixtures::wait_for_agent;
 use super::harness::log_nickname;
 use super::harness::topo::Node;
-use crate::{BigKeyhiveGroup, DocumentId, PeerKey, Res, StorageConfig};
+use crate::BigKeyhiveGroup;
+use crate::DocumentId;
+use crate::PeerKey;
+use crate::Res;
+use crate::StorageConfig;
 use am_utils_rs::codecs::ThroughJson;
-use big_sync::{
-    HostPartStore,
-    stress_support::{self, StressFixture},
-};
-use big_sync_core::{ObjKey, PartKey};
+use big_sync::HostPartStore;
+use big_sync::stress_support::StressFixture;
+use big_sync::stress_support::{self};
+use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
 use futures::future::try_join_all;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
 use keyhive_core::access::Access;
-use rand::{SeedableRng, rngs::StdRng};
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 use tempfile::tempdir;
 use tokio::sync::Mutex;
 use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
@@ -1342,9 +1349,10 @@ impl StressFixture for BigRepoStressFixture {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use big_sync::stress_support::{
-        PHASE1_MUTATIONS, PHASE2_MUTATIONS, PHASE3_MUTATIONS, run_randomized_stress,
-    };
+    use big_sync::stress_support::PHASE1_MUTATIONS;
+    use big_sync::stress_support::PHASE2_MUTATIONS;
+    use big_sync::stress_support::PHASE3_MUTATIONS;
+    use big_sync::stress_support::run_randomized_stress;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn long_test_big_repo_tier10_stress_4_editor_converges() -> Res<()> {

@@ -31,7 +31,8 @@ daybook_types = { workspace = true, features = [
 ] }
 daybook_pdk = { workspace = true }
 mltools = { workspace = true, features = ["hf_hub", "tests"] }
-utils_rs = { workspace = true, features = ["hash", "native", "downloader"] }
+utils_rs = { workspace = true, features = ["hash"] }
+native_utils_rs.workspace = true
 secrets_rs = { workspace = true }
 wash_plugin_wflow.workspace = true
 wash_plugin_sqlite.workspace = true

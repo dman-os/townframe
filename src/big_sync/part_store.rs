@@ -1,14 +1,33 @@
 use crate::interlude::*;
 
-use big_sync_core::keyed_frontier::{FrontierRead, FrontierRevision, KeyedFrontierReader};
-use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
-use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
-use big_sync_core::rpc::{
-    BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
-    LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart, PartEvent, PartPage,
-    PartSummary, ReplayPage, ReplayPageRequest, SubPartsRequest, SubscriptionTarget, TargetVerdict,
-};
-use big_sync_core::{BuckId, ObjKey, PartKey, PeerKey};
+use big_sync_core::BuckId;
+use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
+use big_sync_core::PeerKey;
+use big_sync_core::keyed_frontier::FrontierRead;
+use big_sync_core::keyed_frontier::FrontierRevision;
+use big_sync_core::keyed_frontier::KeyedFrontierReader;
+use big_sync_core::part_store::CursorIndex;
+use big_sync_core::part_store::ObjPayload;
+use big_sync_core::part_store::PartDirtyCount;
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::rpc::BucketSummary;
+use big_sync_core::rpc::GetChangedBucketsRequest;
+use big_sync_core::rpc::LeafBucketResult;
+use big_sync_core::rpc::LeafBucketsError;
+use big_sync_core::rpc::LeafBucketsRequest;
+use big_sync_core::rpc::ListPartsError;
+use big_sync_core::rpc::ObjChanged;
+use big_sync_core::rpc::ObjRemovedFromPart;
+use big_sync_core::rpc::PartEvent;
+use big_sync_core::rpc::PartPage;
+use big_sync_core::rpc::PartSummary;
+use big_sync_core::rpc::ReplayPage;
+use big_sync_core::rpc::ReplayPageRequest;
+use big_sync_core::rpc::SubPartsRequest;
+use big_sync_core::rpc::SubscriptionTarget;
+use big_sync_core::rpc::TargetVerdict;
 // Only the test-support contract module uses this, so gate it the same way that
 // module is gated; otherwise a plain lib build reports it as unused.
 #[cfg(any(test, feature = "test-support"))]

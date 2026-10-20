@@ -1,16 +1,23 @@
-use crate::{
-    Config, EmbedBackendConfig, EmbedConfig, ImageEmbedBackendConfig, ImageEmbedConfig,
-    LlmBackendConfig, LlmConfig, OcrBackendConfig, OcrConfig,
-};
+use crate::Config;
+use crate::EmbedBackendConfig;
+use crate::EmbedConfig;
+use crate::ImageEmbedBackendConfig;
+use crate::ImageEmbedConfig;
+use crate::LlmBackendConfig;
+use crate::LlmConfig;
+use crate::OcrBackendConfig;
+use crate::OcrConfig;
 use fs4::fs_std::FileExt;
-use hf_hub::{Cache, Repo, api::tokio::ApiBuilder};
+use hf_hub::Cache;
+use hf_hub::Repo;
+use hf_hub::api::tokio::ApiBuilder;
+use native_utils_rs::downloader::Downloader;
 use std::fs::OpenOptions;
-use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
-use utils_rs::downloader::Downloader;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use utils_rs::prelude::*;
 
 pub(crate) const OLLAMA_URL_DEFAULT: &str = env!("OLLAMA_URL");
@@ -110,19 +117,19 @@ async fn download_url_to_path_with_observer(
         return Ok(());
     }
 
-    let downloader = utils_rs::downloader::ReqwestRangeDownloader::new()?;
+    let downloader = native_utils_rs::downloader::ReqwestRangeDownloader::new()?;
     let download_observer = observer.map(|observer| {
         let observer = observer.clone();
         let source = source.clone();
         let file = file.clone();
-        utils_rs::downloader::DownloadObserver::new(move |event| match event {
-            utils_rs::downloader::DownloadEvent::Started => {
+        native_utils_rs::downloader::DownloadObserver::new(move |event| match event {
+            native_utils_rs::downloader::DownloadEvent::Started => {
                 observer.emit(MobileDefaultEvent::DownloadStarted {
                     source: source.clone(),
                     file: file.clone(),
                 });
             }
-            utils_rs::downloader::DownloadEvent::Progress(progress) => {
+            native_utils_rs::downloader::DownloadEvent::Progress(progress) => {
                 observer.emit(MobileDefaultEvent::DownloadProgress {
                     source: source.clone(),
                     file: file.clone(),
@@ -130,13 +137,13 @@ async fn download_url_to_path_with_observer(
                     total_bytes: progress.total_bytes,
                 });
             }
-            utils_rs::downloader::DownloadEvent::Completed => {
+            native_utils_rs::downloader::DownloadEvent::Completed => {
                 observer.emit(MobileDefaultEvent::DownloadCompleted {
                     source: source.clone(),
                     file: file.clone(),
                 });
             }
-            utils_rs::downloader::DownloadEvent::Failed { message } => {
+            native_utils_rs::downloader::DownloadEvent::Failed { message } => {
                 observer.emit(MobileDefaultEvent::DownloadFailed {
                     source: source.clone(),
                     file: file.clone(),
@@ -147,7 +154,7 @@ async fn download_url_to_path_with_observer(
     });
     downloader
         .download_to_path(
-            &utils_rs::downloader::DownloadRequest {
+            &native_utils_rs::downloader::DownloadRequest {
                 url: url.to_string(),
                 output_path: output_path.to_path_buf(),
             },

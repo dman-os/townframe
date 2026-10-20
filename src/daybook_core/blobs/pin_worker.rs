@@ -1,24 +1,34 @@
 use crate::interlude::*;
 
-use daybook_types::doc::{
-    BlobPin, ChangeHashSet, DocId, DocPatch, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
-};
+use daybook_types::doc::BlobPin;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::DocPatch;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetRaw;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
 use tokio_util::sync::CancellationToken;
 
-use crate::blobs::pair_roots::{PairRoots, UnresolvedPair};
+use crate::blobs::pair_roots::PairRoots;
+use crate::blobs::pair_roots::UnresolvedPair;
 use crate::blobs::sqlite::queries;
-use crate::drawer::{DrawerRepo, MaterializationWake};
+use crate::drawer::DrawerRepo;
+use crate::drawer::MaterializationWake;
 use crate::index::facet_delta::FacetDelta;
-use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
+use crate::index::facet_set::FacetSetRevisionStore;
+use crate::index::facet_set::FacetSetSelector;
 use crate::repos::RepoStopToken;
 use big_sync::DeltaWalkerStateRepo as _;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
-};
-use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore as _};
+use big_sync_core::concurrent_delta_walker::ConcurrentDelta;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionedStore as _;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
-use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
+use big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler;
+use big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion;
 use daybook_types::doc::BranchId;
 use sqlite_rs::Sql;
 
@@ -921,7 +931,8 @@ const BLOB_PIN_TASK_BUDGET: usize = 64;
 struct BlobPinKey(u64);
 
 fn blob_pin_facet_key(branch_id: &BranchId) -> BlobPinKey {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     branch_id.0.hash(&mut hasher);
     BlobPinKey(hasher.finish())
@@ -998,7 +1009,8 @@ async fn run_blob_pin_task(task: BlobPinTask, ctx: Arc<Ctx>) -> Res<BlobPinTaskO
 struct PlugPinKey(u64);
 
 fn plug_pin_key(plug_id: &str) -> PlugPinKey {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     plug_id.hash(&mut hasher);
     PlugPinKey(hasher.finish())
@@ -1450,8 +1462,14 @@ mod tests {
     use super::*;
     use crate::test_support::test_cx;
     use big_sync::DeltaWalkerStateRepo;
-    use daybook_types::doc::{AddDocArgs, Blob, BranchPath, DocPatch, FacetRaw, WellKnownFacet};
-    use daybook_types::manifest::{PlugManifest, WflowBundleManifest};
+    use daybook_types::doc::AddDocArgs;
+    use daybook_types::doc::Blob;
+    use daybook_types::doc::BranchPath;
+    use daybook_types::doc::DocPatch;
+    use daybook_types::doc::FacetRaw;
+    use daybook_types::doc::WellKnownFacet;
+    use daybook_types::manifest::PlugManifest;
+    use daybook_types::manifest::WflowBundleManifest;
 
     /// Pins recorded as BlobPin facets on an inventory doc (the actual
     /// observable: the machines apply their state into these drawer docs).

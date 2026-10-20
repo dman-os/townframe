@@ -124,3 +124,18 @@ repos:
         language: system
         entry: cargo x sql-gen --check --all
         pass_filenames: false
+      - id: guardrails-lint
+        name: check AST, architecture, migration-identity, and doc guardrails
+        language: system
+        entry: cargo x lint
+        pass_filenames: false
+      - id: guardrails-api
+        name: check boundary crate public API snapshots
+        language: system
+        entry: cargo x api --all --check
+        pass_filenames: false
+      - id: guardrails-doctor
+        name: check build flags and toolchain configuration
+        language: system
+        entry: cargo x doctor
+        pass_filenames: false

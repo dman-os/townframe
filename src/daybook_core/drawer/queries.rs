@@ -1,22 +1,37 @@
 use crate::interlude::*;
+use big_repo::AutomergeFrontierEvent;
+use big_repo::AutomergeFrontierSelector;
+use big_repo::AutomergeFrontierTarget;
 use big_repo::BigRepoLocalFilter;
-use big_repo::{AutomergeFrontierEvent, AutomergeFrontierSelector, AutomergeFrontierTarget};
-use big_sync_core::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStore;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
 
-use super::{DrawerRepo, MaterializationWake};
+use super::DrawerRepo;
+use super::MaterializationWake;
 
-use crate::drawer::{
-    BranchIdentity, BranchIdentityResolution, ExactFacetValueHydration, dmeta, facet_recovery,
-    types::{DocBundle, DocEntry, DocNBranches},
-};
+use crate::drawer::BranchIdentity;
+use crate::drawer::BranchIdentityResolution;
+use crate::drawer::ExactFacetValueHydration;
+use crate::drawer::dmeta;
+use crate::drawer::facet_recovery;
+use crate::drawer::types::DocBundle;
+use crate::drawer::types::DocEntry;
+use crate::drawer::types::DocNBranches;
 
 use automerge::ReadDoc;
-use daybook_types::doc::{
-    BranchId, ChangeHashSet, Doc, DocId, FacetKey, FacetRaw, WellKnownFacet, WellKnownFacetTag,
-};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use daybook_types::doc::BranchId;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::Doc;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetRaw;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::VecDeque;
 
 /// A Drawer-owned view of AFW materialization publications.
 ///

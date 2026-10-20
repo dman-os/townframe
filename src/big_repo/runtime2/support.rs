@@ -7,29 +7,30 @@
 
 use crate::interlude::*;
 
-use crate::{
-    BigKeyhiveHandle,
-    encrypted_blob::{decode_encrypted_blob, encode_encrypted_blob},
-    keyhive_storage::BigRepoKeyhiveStorage,
-};
+use crate::BigKeyhiveHandle;
+use crate::encrypted_blob::decode_encrypted_blob;
+use crate::encrypted_blob::encode_encrypted_blob;
+use crate::keyhive_storage::BigRepoKeyhiveStorage;
 use future_form::Sendable;
 use futures::future::BoxFuture;
 use keyhive_core::event::static_event::StaticEvent;
-use sedimentree_core::{
-    blob::{Blob, BlobMeta},
-    depth::CountLeadingZeroBytes,
-    fragment::Fragment,
-    id::SedimentreeId,
-    loose_commit::{LooseCommit, id::CommitId},
-    sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
-};
+use sedimentree_core::blob::Blob;
+use sedimentree_core::blob::BlobMeta;
+use sedimentree_core::depth::CountLeadingZeroBytes;
+use sedimentree_core::fragment::Fragment;
+use sedimentree_core::id::SedimentreeId;
+use sedimentree_core::loose_commit::LooseCommit;
+use sedimentree_core::loose_commit::id::CommitId;
+use sedimentree_core::sedimentree::Sedimentree;
+use sedimentree_core::sedimentree::minimized::MinimizedSedimentree;
 use std::collections::BTreeSet;
 use std::time::Duration;
-use subduction_core::{
-    authenticated::Authenticated, collections::bounded_sharded_map::BoundedShardedMap,
-    handler::sync::SyncHandler, storage::traits::Storage, subduction::Subduction,
-    transport::message::MessageTransport,
-};
+use subduction_core::authenticated::Authenticated;
+use subduction_core::collections::bounded_sharded_map::BoundedShardedMap;
+use subduction_core::handler::sync::SyncHandler;
+use subduction_core::storage::traits::Storage;
+use subduction_core::subduction::Subduction;
+use subduction_core::transport::message::MessageTransport;
 use subduction_keyhive::message::EventHash;
 
 // Re-exports that handler.rs / keyhive_conn.rs / ephemeral.rs / native.rs need.

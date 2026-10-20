@@ -100,7 +100,7 @@
           ghjkMainEnv = {
             CARGO_BUILD_JOBS = "8";
             CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "${pkgs.clang}/bin/clang";
-            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=${pkgs.mold-wrapped}/bin/mold";
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS = "-C link-arg=-fuse-ld=${pkgs.mold-wrapped}/bin/mold --cfg tokio_unstable";
           };
 
           ghjkDevEnv = {
@@ -293,6 +293,8 @@
           ];
 
           devTools = with pkgs; [
+            # Shared compilation cache for parallel worktrees; opt in with `TOWNFRAME_SCCACHE=1` or `x/agent-build.ts --sccache`.
+            sccache
             rogcat
             opentofu
             terragrunt
@@ -370,6 +372,7 @@
                 pkgs.llvmPackages.clang
                 pkgs.llvmPackages.libclang
                 pkgs.stdenv.cc.cc.lib
+                pkgs.sccache
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.linuxHeaders ];
             shellHook = ''
@@ -383,6 +386,9 @@
                   pkgs.stdenv.cc.cc.lib
                 ]
               }"
+              if [ -e .env ]; then
+                source "$PWD/x/load-dotenv-safe.sh" .env
+              fi
             '';
           } // ghjkMainEnv);
 
@@ -423,7 +429,7 @@
                 ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.linuxHeaders}/include -idirafter ${pkgs.stdenv.cc.libc.dev}/include"
                 ''}
-                export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${self}/target/debug/:${
+                export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$PWD/target/debug/:${
                   pkgs.lib.makeLibraryPath (
                     pkgs.lib.map (packageValue: pkgs.lib.getLib packageValue) (
                       devShellBuildInputs ++ desktopRuntimeLibPackages

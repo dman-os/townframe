@@ -24,20 +24,31 @@ use crate::interlude::*;
 
 use bao_tree::io::mixed::ReadBytesAt as _;
 use bytes::Bytes;
-use iroh_blobs::{Hash, api::Store, store::virtual_blob::SyncReader};
+use iroh_blobs::Hash;
+use iroh_blobs::api::Store;
+use iroh_blobs::store::virtual_blob::SyncReader;
 use std::io;
 use std::sync::Mutex;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 use super::Res;
-use super::codec::{
-    Cipher, HEADER_LEN, RECORD_OVERHEAD, ciphertext_len, header, n_records_for, payload_size,
-};
+use super::codec::Cipher;
+use super::codec::HEADER_LEN;
+use super::codec::RECORD_OVERHEAD;
+use super::codec::ciphertext_len;
+use super::codec::header;
+use super::codec::n_records_for;
+use super::codec::payload_size;
 use super::keys::MasterKey;
-use super::params::{EncodingParams, Padding};
-use super::store::{PROVIDER_NAME, install_virtual_encrypted, set_pair_tags};
+use super::params::EncodingParams;
+use super::params::Padding;
+use super::store::PROVIDER_NAME;
+use super::store::install_virtual_encrypted;
+use super::store::set_pair_tags;
 /// Serves virtual ciphertext entries by encrypting stored plaintext on demand.
 ///
 /// `reader_for(C)` looks up a pair `(key, plaintext reader)` registered via
@@ -439,7 +450,8 @@ impl bao_tree::io::mixed::ReadBytesAt for CipherSource {
 mod tests {
     use super::*;
 
-    use super::super::{RECORD_SIZE, encrypt_with_rs};
+    use super::super::RECORD_SIZE;
+    use super::super::encrypt_with_rs;
 
     /// The store's bao leaf size: the granularity its export path reads the
     /// ciphertext at, and therefore the reads a server actually issues.

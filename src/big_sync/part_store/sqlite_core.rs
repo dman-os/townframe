@@ -1,11 +1,21 @@
 use crate::interlude::*;
 
-use big_sync_core::part_store::{CursorIndex, ObjPayload};
-use big_sync_core::rpc::{BUCKET_DEAD_FP_SEED, BUCKET_LIVE_FP_SEED, BucketSummary};
-use big_sync_core::{BuckId, ByteKey, Fingerprint, ObjKey, PartKey, PeerKey};
+use big_sync_core::BuckId;
+use big_sync_core::ByteKey;
+use big_sync_core::Fingerprint;
+use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
+use big_sync_core::PeerKey;
+use big_sync_core::part_store::CursorIndex;
+use big_sync_core::part_store::ObjPayload;
+use big_sync_core::rpc::BUCKET_DEAD_FP_SEED;
+use big_sync_core::rpc::BUCKET_LIVE_FP_SEED;
+use big_sync_core::rpc::BucketSummary;
 
 use crate::sqlite::queries;
-use sqlite_rs::{Database, Sql, Tx};
+use sqlite_rs::Database;
+use sqlite_rs::Sql;
+use sqlite_rs::Tx;
 
 // ---------------------------------------------------------------------------
 // Stable Access encode / decode

@@ -1,6 +1,8 @@
 use crate::interlude::*;
 
-use crate::test::{InitialWorkload, WflowTestContext, test_wflows_wasm_path};
+use crate::test::InitialWorkload;
+use crate::test::WflowTestContext;
+use crate::test::test_wflows_wasm_path;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fails_until_told() -> Res<()> {
@@ -31,7 +33,8 @@ async fn test_fails_until_told() -> Res<()> {
     // This confirms the job is running and checking the flag
     test_cx
         .wait_until_entry(0, 10, |_entry_id, entry| {
-            use wflow_core::partition::job_events::{JobError, JobRunResult};
+            use wflow_core::partition::job_events::JobError;
+            use wflow_core::partition::job_events::JobRunResult;
             use wflow_core::partition::log::PartitionLogEntry;
 
             if let PartitionLogEntry::JobEffectResult(event) = entry

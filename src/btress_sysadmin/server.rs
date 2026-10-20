@@ -1,7 +1,8 @@
 use crate::interlude::*;
 
 use axum_extra::extract::cookie::Key;
-use wasip2::http::types::{IncomingRequest, ResponseOutparam};
+use wasip2::http::types::IncomingRequest;
+use wasip2::http::types::ResponseOutparam;
 
 mod interop;
 pub mod session;
@@ -11,7 +12,8 @@ pub async fn server_main(wasi_req: IncomingRequest, out_param: ResponseOutparam)
     use axum::Router;
     use axum::http;
     use leptos::prelude::*;
-    use leptos_axum::{LeptosRoutes, generate_route_list};
+    use leptos_axum::LeptosRoutes;
+    use leptos_axum::generate_route_list;
     use tower_http::ServiceBuilderExt;
 
     utils_rs::setup_tracing().expect("tracing setup error");

@@ -10,22 +10,33 @@ pub(crate) mod sqlite {
 use sqlite::queries;
 
 use crate::drawer::DrawerRepo;
-use crate::index::facet_delta::{FacetDelta, FacetRouteKey};
-use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
+use crate::index::facet_delta::FacetDelta;
+use crate::index::facet_delta::FacetRouteKey;
+use crate::index::facet_set::FacetSetRevisionStore;
+use crate::index::facet_set::FacetSetSelector;
 use crate::plugs::PlugsRepo;
 use big_sync::DeltaWalkerStateRepo as _;
 use big_sync::DeltaWalkerStateTransaction;
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
-};
+use big_sync_core::concurrent_delta_walker::ConcurrentDelta;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
 use big_sync_core::revisioned_store::RevisionedStore as _;
-use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
-use daybook_types::doc::{ArcFacetRaw, ChangeHashSet, DocId, FacetKey, FacetRef};
-use daybook_types::manifest::{FacetReferenceKind, FacetReferenceManifest};
+use big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler;
+use big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion;
+use daybook_types::doc::ArcFacetRaw;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetRef;
+use daybook_types::manifest::FacetReferenceKind;
+use daybook_types::manifest::FacetReferenceManifest;
 use daybook_types::reference::select_json_path_values;
-use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
+use daybook_types::url::FACET_SELF_DOC_ID;
+use daybook_types::url::parse_facet_ref;
 use sqlite_rs::Tx;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
 
 const FACET_REF_LOCAL_STATE_ID: &str = "@daybook/core/doc-facet-ref-index";
@@ -386,7 +397,8 @@ fn facet_ref_key(route: &FacetRouteKey) -> FacetRefKey {
 }
 
 fn facet_ref_key_from_branch(branch_id: &daybook_types::doc::BranchId) -> FacetRefKey {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     branch_id.0.hash(&mut hasher);
     FacetRefKey(hasher.finish())
@@ -831,7 +843,11 @@ fn row_to_edge(row: EdgeRow) -> Res<DocFacetRefEdge> {
 mod tests {
     use super::*;
     use crate::test_support::test_cx;
-    use daybook_types::doc::{AddDocArgs, FacetRaw, Note, WellKnownFacet, WellKnownFacetTag};
+    use daybook_types::doc::AddDocArgs;
+    use daybook_types::doc::FacetRaw;
+    use daybook_types::doc::Note;
+    use daybook_types::doc::WellKnownFacet;
+    use daybook_types::doc::WellKnownFacetTag;
 
     async fn wait_for_outgoing(
         repo: &DocFacetRefIndexRepo,

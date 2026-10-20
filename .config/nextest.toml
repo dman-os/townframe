@@ -1,6 +1,5 @@
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 2 }
-# flaky-result = "fail"
 
 [[profile.default.overrides]]
 filter = 'test(/long_test/)'
@@ -19,5 +18,16 @@ retries = { backoff = "exponential", count = 3, delay = "2s", max-delay = "10s",
 failure-output = "never"
  
 [profile.ci.junit]
+path = "target/nextest/ci/results.xml"
+store-failure-output = true
+
+# Nightly cron runs keep the CI retry schedule but report any test that needed a retry as a
+# failure, so a flake surfaces as a red run with its seed instead of hiding behind a green
+# retry. PR runs keep `ci` (flaky tests pass) so transient CI noise does not block merges.
+[profile.nightly]
+inherits = "ci"
+flaky-result = "fail"
+
+[profile.nightly.junit]
 path = "target/nextest/ci/results.xml"
 store-failure-output = true

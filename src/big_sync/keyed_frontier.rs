@@ -4,25 +4,34 @@ mod memory;
 mod sqlite_generic;
 mod sqlite_read;
 
-pub use memory::{
-    MemoryKeySelector, MemoryKeyedFrontier, MemoryKeyedFrontierSelector, MemoryKeyedFrontierSource,
-    MemoryKeyedFrontierTable, MemoryKeyedFrontierTxn, MemoryKeyedFrontierView,
-    open_memory_keyed_frontier,
-};
-pub use sqlite_generic::{
-    SqliteFrontierCodec, SqliteFrontierSelector, SqliteKeyedFrontier,
-    SqliteKeyedFrontierTransaction,
-};
-pub(crate) use sqlite_read::{
-    SqliteReadError, SqliteReadSource, open_sqlite_reader, open_sqlite_reader_with_byte_budget,
-};
+pub use memory::MemoryKeySelector;
+pub use memory::MemoryKeyedFrontier;
+pub use memory::MemoryKeyedFrontierSelector;
+pub use memory::MemoryKeyedFrontierSource;
+pub use memory::MemoryKeyedFrontierTable;
+pub use memory::MemoryKeyedFrontierTxn;
+pub use memory::MemoryKeyedFrontierView;
+pub use memory::open_memory_keyed_frontier;
+pub use sqlite_generic::SqliteFrontierCodec;
+pub use sqlite_generic::SqliteFrontierSelector;
+pub use sqlite_generic::SqliteKeyedFrontier;
+pub use sqlite_generic::SqliteKeyedFrontierTransaction;
+pub(crate) use sqlite_read::SqliteReadError;
+pub(crate) use sqlite_read::SqliteReadSource;
+pub(crate) use sqlite_read::open_sqlite_reader;
+pub(crate) use sqlite_read::open_sqlite_reader_with_byte_budget;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod contract {
-    use big_sync_core::keyed_frontier::{
-        FrontierEntry, FrontierMutation, FrontierRead, FrontierReadLimits, FrontierRevision,
-        KeyedFrontier, KeyedFrontierReader, KeyedFrontierTransaction, TransactionIsolation,
-    };
+    use big_sync_core::keyed_frontier::FrontierEntry;
+    use big_sync_core::keyed_frontier::FrontierMutation;
+    use big_sync_core::keyed_frontier::FrontierRead;
+    use big_sync_core::keyed_frontier::FrontierReadLimits;
+    use big_sync_core::keyed_frontier::FrontierRevision;
+    use big_sync_core::keyed_frontier::KeyedFrontier;
+    use big_sync_core::keyed_frontier::KeyedFrontierReader;
+    use big_sync_core::keyed_frontier::KeyedFrontierTransaction;
+    use big_sync_core::keyed_frontier::TransactionIsolation;
     use std::collections::BTreeMap;
     use std::num::NonZeroUsize;
     /// Supplies a frontier and selector constructors to the reusable
@@ -544,10 +553,15 @@ pub mod contract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use big_sync_core::keyed_frontier::{
-        FrontierRead, FrontierReadLimits, FrontierRevision, KeyedFrontier, KeyedFrontierError,
-        KeyedFrontierReader, KeyedFrontierResult, KeyedFrontierTransaction, TransactionIsolation,
-    };
+    use big_sync_core::keyed_frontier::FrontierRead;
+    use big_sync_core::keyed_frontier::FrontierReadLimits;
+    use big_sync_core::keyed_frontier::FrontierRevision;
+    use big_sync_core::keyed_frontier::KeyedFrontier;
+    use big_sync_core::keyed_frontier::KeyedFrontierError;
+    use big_sync_core::keyed_frontier::KeyedFrontierReader;
+    use big_sync_core::keyed_frontier::KeyedFrontierResult;
+    use big_sync_core::keyed_frontier::KeyedFrontierTransaction;
+    use big_sync_core::keyed_frontier::TransactionIsolation;
     use std::collections::BTreeMap;
     use std::num::NonZeroUsize;
     use utils_rs::prelude::async_trait;

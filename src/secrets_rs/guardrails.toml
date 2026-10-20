@@ -1,0 +1,5 @@
+version = 1
+role = "foundation"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = ["utils_rs"]
+allow_external_api_types = false

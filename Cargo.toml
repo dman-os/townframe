@@ -6,7 +6,6 @@ members = [
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
-  "./src/btress_sysadmin/",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
@@ -14,12 +13,12 @@ members = [
   "./src/daybook_types",
   "./src/mltools/",
   "./src/pauperfuse/",
-  "./src/plug_dayledger/",
+  "./src/native_utils_rs",
+  "./src/plug_test_manifest",
+  "./src/plug_plabels_manifest",
+  "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
-  "./src/plug_plabels/",
-  "./src/plug_test/",
   "./src/sqlite_rs/",
-  "./src/test_wflows",
   "./src/utils_rs",
   "./src/wash_plugin_sqlite/",
   "./src/wash_plugin_wflow/",
@@ -28,6 +27,14 @@ members = [
   "./src/wflow_sdk",
   "./src/wflow_tokio/",
   "./src/xtask",
+]
+exclude = [
+  "src/wasm_utils_rs",
+  "src/plug_test_routines",
+  "src/plug_plabels_routines",
+  "src/plug_dayledger_routines",
+  "src/test_wflows",
+  "src/btress_sysadmin",
 ]
 
 [workspace.package]
@@ -42,6 +49,7 @@ repository = ""
 #
 # internal
 utils_rs = { path = "./src/utils_rs", default-features = false }
+native_utils_rs = { path = "./src/native_utils_rs" }
 sqlite_rs = { path = "./src/sqlite_rs", default-features = false }
 api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
@@ -240,25 +248,12 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
 
-# Optimize for size in the wasm-release profile to reduce load times and bandwidth usage on web.
-# # NOTE: the comment above is now stale
 [profile.wasm-release]
 inherits = "release"
-# Compile the entire crate as one unit.
-# Slows compile times, marginal improvements.
 codegen-units = 1
-# Do a second optimization pass over the entire program, including dependencies.
-# Slows compile times, marginal improvements.
 lto = "thin"
-# lto = true
-# Optimize with size in mind (also try "z", sometimes it is better).
-# Slightly slows compile times, great improvements to file size and runtime performance.
-opt-level = "s"
-# opt-level = 'z'
-# Strip all debugging information from the binary to slightly reduce file size.
-strip = "none"
-# panic = "abort"
-debug = true
+opt-level = 3
+debug = "line-tables-only"
 
 [workspace.lints]
 clippy.clone_on_ref_ptr = "warn"

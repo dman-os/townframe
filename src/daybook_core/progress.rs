@@ -10,8 +10,11 @@ pub(crate) mod sqlite {
     }
 }
 use sqlite::queries;
-use std::collections::{HashMap, HashSet, VecDeque};
-use tokio::sync::{mpsc, oneshot};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 const MAX_UPDATES_PER_TASK: usize = 256;

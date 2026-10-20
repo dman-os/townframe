@@ -1,9 +1,11 @@
 use crate::interlude::*;
 
-use futures::{StreamExt, stream::BoxStream};
+use futures::StreamExt;
+use futures::stream::BoxStream;
 
 use crate::kvstore::KvStore;
-use crate::log::{LogStore, TailLogEntry};
+use crate::log::LogStore;
+use crate::log::TailLogEntry;
 
 pub struct KvStoreLog {
     // we use these to communicate the latest

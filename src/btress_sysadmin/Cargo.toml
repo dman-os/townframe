@@ -1,5 +1,6 @@
 [package]
 name = "btress_sysadmin"
+workspace = "../wasm_utils_rs"
 version.workspace = true
 edition.workspace = true
 
@@ -13,7 +14,7 @@ path = "lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-utils_rs = { workspace = true, default-features = false, features = ["wasm"] }
+utils_rs = { workspace = true, default-features = false }
 
 getrandom = "0.4.3"
 # getrandom 0.3.x is pulled in transitively (ahash/irpc-iroh/jobserver) and
@@ -47,7 +48,6 @@ http.workspace = true
 leptos = { version = "0.8.20" }
 leptos_meta = "0.8.6"
 leptos_router = "0.8.15"
-leptos_wasi = { version = "0.3.1", optional = true }
 wasip2 = { version = "1.0.4", optional = true }
 any_spawner = { version = "0.3.0", features = ["tracing", "tokio"], optional = true }
 web-sys = { version = "0.3.103", features = ["Storage", "MediaQueryList", "Window", "Request", "RequestInit", "RequestCredentials", "Response", "Headers", "SubmitEvent", "Event", "EventTarget", "HtmlFormElement", "FormData"] }
@@ -63,10 +63,7 @@ default-features = false
 features = ["wasm"]
 
 [features]
-default = [
-    "ssr",
-    "hydrate",
-]
+default = []
 hydrate = [
     "getrandom/wasm_js",
     "dep:getrandom-03",
@@ -83,7 +80,6 @@ ssr = [
     "dep:tower",
     "dep:tower-http",
     "dep:wasip2",
-    # "dep:leptos_wasi",
     "dep:any_spawner",
     "leptos/ssr",
     "leptos_meta/ssr",

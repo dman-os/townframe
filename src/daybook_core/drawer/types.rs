@@ -1,6 +1,9 @@
 use crate::interlude::*;
 
-use daybook_types::doc::{ChangeHashSet, Doc, DocId, FacetKey};
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::Doc;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]

@@ -1,0 +1,34 @@
+version = 1
+role = "plugin"
+dependency_reason = "native manifest, portable helpers, and plug tests"
+allowed_dependencies = [
+    "api_utils_rs",
+    "daybook_core",
+    "daybook_pdk",
+    "daybook_types",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[builds.native]
+
+[builds.wasm32-wasip2]
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/plug_test_manifest/lib.rs"
+symbol = "module::plug_manifest"
+ceiling = 1004
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/plug_test_manifest/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"

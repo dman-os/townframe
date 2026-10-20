@@ -65,18 +65,30 @@ mod serve;
 mod store;
 mod windowed;
 
-pub use codec::{decrypt_bytes, encrypt_bytes, encrypt_with_rs};
-pub use download::{FsDownloadLedger, download_encrypted};
-pub use keys::{CipherKeySource, JwkOct, MapKeySource, MasterKey};
-pub use params::{
-    CONTENT_ENCODING_AES128GCM, DEFAULT_PADDING, EncodingParams, Padding, RECORD_SIZE,
-};
+pub use codec::decrypt_bytes;
+pub use codec::encrypt_bytes;
+pub use codec::encrypt_with_rs;
+pub use download::FsDownloadLedger;
+pub use download::download_encrypted;
+pub use keys::CipherKeySource;
+pub use keys::JwkOct;
+pub use keys::MapKeySource;
+pub use keys::MasterKey;
+pub use params::CONTENT_ENCODING_AES128GCM;
+pub use params::DEFAULT_PADDING;
+pub use params::EncodingParams;
+pub use params::Padding;
+pub use params::RECORD_SIZE;
 pub use serve::CipherBlobProvider;
-pub use store::{
-    PROVIDER_NAME, TAG_CT_PREFIX, TAG_PT_PREFIX, add_encrypted, add_encrypted_stream,
-    ensure_stored, get_decrypted,
-};
-pub(crate) use store::{drop_pair_tags, has_pair_tags};
+pub use store::PROVIDER_NAME;
+pub use store::TAG_CT_PREFIX;
+pub use store::TAG_PT_PREFIX;
+pub use store::add_encrypted;
+pub use store::add_encrypted_stream;
+pub(crate) use store::drop_pair_tags;
+pub use store::ensure_stored;
+pub use store::get_decrypted;
+pub(crate) use store::has_pair_tags;
 pub use windowed::CipherReader;
 
 // Crate-internal plumbing, reachable under the umbrella path (tests read it

@@ -28,22 +28,26 @@
 //! admission log is not exposed (§1).
 
 use crate::interlude::*;
-use crate::keyhive::{BigKeyhiveHandle, EventSubject};
+use crate::keyhive::BigKeyhiveHandle;
+use crate::keyhive::EventSubject;
 use crate::runtime2::keyhive_admission;
 use crate::runtime2::tasks::TokioTimer;
 use crate::store::sqlite::SqliteBigRepoStore;
 use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateRepo;
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
-use big_sync_core::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStore;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
 use keyhive_core::access::Access;
 use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::group::id::GroupId as KhGroupId;
 use keyhive_core::principal::identifier::Identifier;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
-use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -467,15 +471,13 @@ mod tests {
     use crate::keyhive::BigKeyhiveAgent;
     use crate::keyhive_listener::BigRepoKeyhiveListener;
     use crate::keyhive_storage::BigRepoKeyhiveStorage;
-    use big_sync::delta_walker_state::{
-        SqliteDeltaWalkerStateRepo, SqliteDeltaWalkerStateTransaction,
-    };
-    use big_sync_core::delta_walker_state::{
-        DeltaWalkerProgress, DeltaWalkerStateResult, DeltaWalkerStateTransaction,
-    };
-    use big_sync_core::revisioned_store::contract::{
-        RevisionedStoreContractHarness, assert_revisioned_store_contract,
-    };
+    use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
+    use big_sync::delta_walker_state::SqliteDeltaWalkerStateTransaction;
+    use big_sync_core::delta_walker_state::DeltaWalkerProgress;
+    use big_sync_core::delta_walker_state::DeltaWalkerStateResult;
+    use big_sync_core::delta_walker_state::DeltaWalkerStateTransaction;
+    use big_sync_core::revisioned_store::contract::RevisionedStoreContractHarness;
+    use big_sync_core::revisioned_store::contract::assert_revisioned_store_contract;
     use keyhive_core::event::Event;
     use keyhive_core::principal::group::delegation::StaticDelegation;
     use keyhive_core::principal::membered::Membered;
@@ -483,7 +485,9 @@ mod tests {
     use keyhive_crypto::signer::memory::MemorySigner;
     use keyhive_crypto::verifiable::Verifiable;
     use sqlite_rs::Database;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use subduction_keyhive::storage::StorageHash;
 
     const SCOPE: &str = "keyhive-access-stream";

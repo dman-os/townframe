@@ -1,0 +1,676 @@
+#![recursion_limit = "256"]
+
+mod interlude {
+    pub use utils_rs::prelude::Arc;
+    pub use utils_rs::prelude::ERROR_JSON;
+    pub use utils_rs::prelude::ferr;
+}
+
+mod wit {
+    wit_bindgen::generate!({
+        path: "wit",
+        world: "bundle",
+        with: {
+            "wasi:keyvalue/store@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::store,
+            "wasi:keyvalue/atomics@0.2.0-draft": api_utils_rs::wit::wasi::keyvalue::atomics,
+            "wasi:logging/logging@0.1.0-draft": api_utils_rs::wit::wasi::logging::logging,
+            "wasmcloud:postgres/types@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::types,
+            "wasmcloud:postgres/query@0.1.1-draft": api_utils_rs::wit::wasmcloud::postgres::query,
+            "wasi:io/poll@0.2.6": api_utils_rs::wit::wasi::io::poll,
+            "wasi:clocks/monotonic-clock@0.2.6": api_utils_rs::wit::wasi::clocks::monotonic_clock,
+            "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
+            "wasi:config/runtime@0.2.0-draft": api_utils_rs::wit::wasi::config::runtime,
+
+            "townframe:api-utils/utils": api_utils_rs::wit::utils,
+            "townframe:wflow/types": wflow_sdk::wit::townframe::wflow::types,
+            "townframe:wflow/host": wflow_sdk::wit::townframe::wflow::host,
+            "townframe:wflow/bundle": generate,
+            "townframe:mltools/ocr": generate,
+            "townframe:mltools/embed": generate,
+            "townframe:sqlite/types": generate,
+
+            "townframe:daybook-types/doc": generate,
+            "townframe:daybook/types": generate,
+            "townframe:daybook/drawer": generate,
+            "townframe:daybook/capabilities": generate,
+            "townframe:daybook/facet-routine": generate,
+            "townframe:sqlite/sqlite-connection": generate,
+            "townframe:daybook/mltools-ocr": generate,
+            "townframe:daybook/mltools-embed": generate,
+            "townframe:daybook/mltools-image-tools": generate,
+            "townframe:daybook/mltools-llm-chat": generate,
+        }
+    });
+}
+
+mod wflows;
+
+mod wasm_runtime {
+    use crate::interlude::*;
+    use crate::wflows;
+    use crate::wit;
+    use crate::wit::exports::townframe::wflow::bundle::JobResult;
+    use daybook_pdk::InvokeCommandAccepted;
+    use daybook_pdk::InvokeCommandRequest;
+    use daybook_pdk::InvokeCommandStatus;
+    use wflow_sdk::JobErrorX;
+    use wflow_sdk::Json;
+    use wflow_sdk::WflowCtx;
+
+    wit::export!(Component with_types_in wit);
+
+    struct Component;
+
+    use plug_test_manifest::ChildArgs;
+
+    fn find_facet_token_with_rights<'a>(
+        args: &'a crate::wit::townframe::daybook::facet_routine::FacetRoutineArgs,
+        key: &str,
+        required_right: crate::wit::townframe::daybook::capabilities::FacetRights,
+    ) -> Result<&'a crate::wit::townframe::daybook::capabilities::FacetToken, JobErrorX> {
+        args.primary_doc
+            .facets
+            .iter()
+            .find(|tag| tag.key() == key && tag.rights().contains(required_right))
+            .ok_or_else(|| {
+                JobErrorX::Terminal(ferr!(
+                    "facet token '{}' with required rights not found",
+                    key
+                ))
+            })
+    }
+
+    fn find_facet_token<'a>(
+        args: &'a crate::wit::townframe::daybook::facet_routine::FacetRoutineArgs,
+        key: &str,
+    ) -> Result<&'a crate::wit::townframe::daybook::capabilities::FacetToken, JobErrorX> {
+        args.primary_doc
+            .facets
+            .iter()
+            .find(|tag| tag.key() == key)
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("facet token '{}' not found", key)))
+    }
+
+    fn find_command_token<'a>(
+        args: &'a crate::wit::townframe::daybook::facet_routine::FacetRoutineArgs,
+        command_name: &str,
+    ) -> Result<&'a crate::wit::townframe::daybook::capabilities::CommandInvokeToken, JobErrorX>
+    {
+        args.command_invoke_tokens
+            .iter()
+            .find(|(url, _)| url.ends_with(&format!("/{}", command_name.trim_start_matches('/'))))
+            .map(|(_, token)| token)
+            .ok_or_else(|| {
+                JobErrorX::Terminal(ferr!("missing command invoke token for {command_name}"))
+            })
+    }
+
+    fn update_label(
+        cx: &mut WflowCtx,
+        token: &crate::wit::townframe::daybook::capabilities::FacetToken,
+        value: &str,
+    ) -> Result<(), JobErrorX> {
+        use daybook_types::doc::WellKnownFacet;
+        cx.effect(|| {
+            let facet: daybook_types::doc::FacetRaw =
+                WellKnownFacet::LabelGeneric(value.into()).into();
+            let facet_json = serde_json::to_string(&facet).expect(ERROR_JSON);
+            token
+                .update(&facet_json)
+                .map_err(|err| JobErrorX::Terminal(ferr!("error updating label facet: {err:?}")))?
+                .map_err(|err| JobErrorX::Terminal(ferr!("update doc error: {err:?}")))?;
+            Ok(Json(()))
+        })?;
+        Ok(())
+    }
+
+    fn write_report_v2(
+        args: &crate::wit::townframe::daybook::facet_routine::FacetRoutineArgs,
+        test_name: &str,
+        summary: &serde_json::Value,
+    ) -> Result<(), JobErrorX> {
+        use crate::wit::townframe::sqlite::types::SqlValue;
+        let local_state_key = "@daybook/test/capability-report";
+        let sqlite_connection = args
+            .sqlite_connections
+            .iter()
+            .find(|(key, _)| key == local_state_key)
+            .map(|(_, conn)| conn)
+            .ok_or_else(|| {
+                JobErrorX::Terminal(ferr!("missing sqlite connection '{local_state_key}'"))
+            })?;
+
+        sqlite_connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS capability_report_v2 (doc_id TEXT NOT NULL, test_name TEXT NOT NULL, summary_json TEXT NOT NULL, PRIMARY KEY (doc_id, test_name)) STRICT"
+            )
+            .map_err(|err| JobErrorX::Terminal(ferr!("error creating capability_report_v2 table: {err:?}")))?;
+
+        sqlite_connection
+            .execute(
+                "INSERT OR REPLACE INTO capability_report_v2 (doc_id, test_name, summary_json) VALUES (?1, ?2, ?3)",
+                &[
+                    SqlValue::Text(args.doc_id.clone()),
+                    SqlValue::Text(test_name.into()),
+                    SqlValue::Text(summary.to_string()),
+                ],
+            )
+            .map_err(|err| JobErrorX::Terminal(ferr!("error writing capability report: {err:?}")))?;
+        Ok(())
+    }
+
+    fn invoke_child_and_wait(
+        cx: &mut WflowCtx,
+        token: &crate::wit::townframe::daybook::capabilities::CommandInvokeToken,
+        request_id: &str,
+        expect_failed: bool,
+    ) -> Result<(), JobErrorX> {
+        let request = InvokeCommandRequest {
+            request_id: request_id.to_string(),
+            args_json: serde_json::json!({ "source": "plug-test-parent" }).to_string(),
+        };
+        let _accepted: InvokeCommandAccepted =
+            daybook_pdk::invoke_command_effect(cx, &request, |req| {
+                let req_json = serde_json::to_string(req).expect(ERROR_JSON);
+                let accepted_json = token
+                    .invoke(&req_json)
+                    .map_err(|err| JobErrorX::Terminal(ferr!("invoke command failed: {err:?}")))?;
+                let accepted = serde_json::from_str::<InvokeCommandAccepted>(&accepted_json)
+                    .map_err(|err| {
+                        JobErrorX::Terminal(ferr!("invalid invoke accepted JSON: {err}"))
+                    })?;
+                Ok(Json(accepted))
+            })?;
+
+        let reply = daybook_pdk::wait_command_reply(cx)?;
+        if reply.request_id != request_id {
+            return Err(JobErrorX::Terminal(ferr!(
+                "mismatched reply request_id: expected {request_id}, got {}",
+                reply.request_id
+            )));
+        }
+
+        match (expect_failed, reply.status) {
+            (false, InvokeCommandStatus::Succeeded) => Ok(()),
+            (true, InvokeCommandStatus::Failed) if reply.error_json.is_some() => Ok(()),
+            (true, status) => Err(JobErrorX::Terminal(ferr!(
+                "expected failed status with error_json, got {status:?}"
+            ))),
+            (false, status) => Err(JobErrorX::Terminal(ferr!(
+                "expected succeeded status, got {status:?}"
+            ))),
+        }
+    }
+
+    fn invoke_child_success(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric)
+                .to_string();
+        let working = find_facet_token_with_rights(
+            &args,
+            &label_key,
+            crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE,
+        )?;
+        update_label(cx, working, "invoke-child-success-started")?;
+        let token = find_command_token(&args, "/child-success")?;
+        invoke_child_and_wait(cx, token, "req-child-success", false)?;
+        Ok(())
+    }
+
+    fn invoke_child_failure(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric)
+                .to_string();
+        let working = find_facet_token_with_rights(
+            &args,
+            &label_key,
+            crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE,
+        )?;
+        update_label(cx, working, "invoke-child-failure-started")?;
+        let token = find_command_token(&args, "/child-failure")?;
+        invoke_child_and_wait(cx, token, "req-child-failure", true)?;
+        Ok(())
+    }
+
+    fn child_success(cx: &mut WflowCtx, args: ChildArgs) -> Result<(), JobErrorX> {
+        if args.source.is_empty() {
+            return Err(JobErrorX::Terminal(ferr!(
+                "child-success received empty source"
+            )));
+        }
+        let routine_args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric)
+                .to_string();
+        let working = find_facet_token_with_rights(
+            &routine_args,
+            &label_key,
+            crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE,
+        )?;
+        update_label(cx, working, "child-success-ran")?;
+        Ok(())
+    }
+
+    fn child_failure(cx: &mut WflowCtx, args: ChildArgs) -> Result<(), JobErrorX> {
+        let routine_args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric)
+                .to_string();
+        let working = find_facet_token_with_rights(
+            &routine_args,
+            &label_key,
+            crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE,
+        )?;
+        update_label(cx, working, "child-failure-ran")?;
+        Err(JobErrorX::Terminal(ferr!(
+            "child-failure from source '{}'",
+            args.source
+        )))
+    }
+
+    fn test_downscope(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric)
+                .to_string();
+        let token = find_facet_token_with_rights(
+            &args,
+            &label_key,
+            crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE,
+        )?;
+
+        let read_only = token
+            .clone(Some(
+                crate::wit::townframe::daybook::capabilities::FacetRights::READ,
+            ))
+            .map_err(|err| JobErrorX::Terminal(ferr!("clone denied: {err:?}")))?;
+
+        let has_read = read_only
+            .rights()
+            .contains(crate::wit::townframe::daybook::capabilities::FacetRights::READ);
+        let has_update = read_only
+            .rights()
+            .contains(crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE);
+
+        let facet_json = serde_json::to_string(&daybook_types::doc::WellKnownFacet::LabelGeneric(
+            "downscope-read-only".into(),
+        ))
+        .expect(ERROR_JSON);
+        let update_denied = read_only.update(&facet_json).is_err();
+
+        let summary = serde_json::json!({
+            "has_read": has_read,
+            "has_update": has_update,
+            "update_denied": update_denied,
+        });
+        write_report_v2(&args, "test_downscope", &summary)?;
+        Ok(())
+    }
+
+    fn test_denied_update(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric)
+                .to_string();
+        let token = find_facet_token(&args, &label_key)?;
+
+        let facet_json = serde_json::to_string(&daybook_types::doc::WellKnownFacet::LabelGeneric(
+            "should-fail".into(),
+        ))
+        .expect(ERROR_JSON);
+        let update_denied = token.update(&facet_json).is_err();
+
+        let summary = serde_json::json!({ "update_denied": update_denied });
+        write_report_v2(&args, "test_denied_update", &summary)?;
+        Ok(())
+    }
+
+    fn test_acl_aggregate(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+
+        let tag_token = args
+            .primary_doc
+            .tags
+            .iter()
+            .find(|keyid| keyid.tag() == "org.example.daybook.labelGeneric")
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("labelgeneric tag token not found")))?;
+        let tag_has_read = tag_token
+            .rights()
+            .contains(crate::wit::townframe::daybook::capabilities::FacetRights::READ);
+        let tag_has_update = tag_token
+            .rights()
+            .contains(crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE);
+
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric)
+                .to_string();
+        let facet_token = find_facet_token_with_rights(
+            &args,
+            &label_key,
+            crate::wit::townframe::daybook::capabilities::FacetRights::READ,
+        )?;
+        let facet_has_read = facet_token
+            .rights()
+            .contains(crate::wit::townframe::daybook::capabilities::FacetRights::READ);
+        let facet_has_update = facet_token
+            .rights()
+            .contains(crate::wit::townframe::daybook::capabilities::FacetRights::UPDATE);
+
+        let summary = serde_json::json!({
+            "tag_has_read": tag_has_read,
+            "tag_has_update": tag_has_update,
+            "facet_has_read": facet_has_read,
+            "facet_has_update": facet_has_update,
+        });
+        write_report_v2(&args, "test_acl_aggregate", &summary)?;
+        Ok(())
+    }
+
+    fn test_create_facet(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let tag_token = args
+            .primary_doc
+            .tags
+            .iter()
+            .find(|keyid| keyid.tag() == "org.example.test.createable")
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("createable tag token not found")))?;
+
+        if !tag_token
+            .rights()
+            .contains(crate::wit::townframe::daybook::capabilities::FacetRights::CREATE)
+        {
+            return Err(JobErrorX::Terminal(ferr!(
+                "createable tag token missing CREATE right"
+            )));
+        }
+
+        let new_facet = daybook_types::doc::WellKnownFacet::LabelGeneric("created-via-tag".into());
+        let facet_json = serde_json::to_string(&new_facet).expect(ERROR_JSON);
+        let created = tag_token
+            .create("new-key", &facet_json)
+            .map_err(|err| JobErrorX::Terminal(ferr!("create failed: {err:?}")))?;
+
+        let summary = serde_json::json!({
+            "created_key": created.key(),
+            "created_rights": format!("{:?}", created.rights()),
+        });
+        write_report_v2(&args, "test_create_facet", &summary)?;
+        Ok(())
+    }
+
+    fn test_get_create_token(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let tag_token = args
+            .primary_doc
+            .tags
+            .iter()
+            .find(|tag| tag.tag() == "org.example.test.createable")
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("createable tag token not found")))?;
+
+        let ctoken = tag_token
+            .get_create_token("another-key")
+            .map_err(|err| JobErrorX::Terminal(ferr!("get_create_token failed: {err:?}")))?;
+
+        let new_facet =
+            daybook_types::doc::WellKnownFacet::LabelGeneric("created-via-create-token".into());
+        let facet_json = serde_json::to_string(&new_facet).expect(ERROR_JSON);
+        let created = ctoken
+            .create_facet(&facet_json)
+            .map_err(|err| JobErrorX::Terminal(ferr!("create_facet failed: {err:?}")))?;
+
+        let summary = serde_json::json!({
+            "ctoken_key": ctoken.key(),
+            "created_key": created.key(),
+            "created_rights": format!("{:?}", created.rights()),
+        });
+        write_report_v2(&args, "test_get_create_token", &summary)?;
+        Ok(())
+    }
+
+    fn test_delete_facet(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let doc = &args.primary_doc.doc;
+        let label_key =
+            daybook_types::doc::FacetKey::from(daybook_types::doc::WellKnownFacetTag::LabelGeneric)
+                .to_string();
+
+        let token = doc
+            .get_facet(&label_key)
+            .map_err(|err| JobErrorX::Terminal(ferr!("get_facet error: {err:?}")))?
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("labelgeneric facet not found")))?;
+
+        if !token
+            .rights()
+            .contains(crate::wit::townframe::daybook::capabilities::FacetRights::DELETE)
+        {
+            return Err(JobErrorX::Terminal(ferr!(
+                "labelgeneric facet token missing DELETE right"
+            )));
+        }
+
+        crate::wit::townframe::daybook::capabilities::delete_facet(token)
+            .map_err(|err| JobErrorX::Terminal(ferr!("delete_facet failed: {err:?}")))?;
+
+        let summary = serde_json::json!({ "deleted": true });
+        write_report_v2(&args, "test_delete_facet", &summary)?;
+        Ok(())
+    }
+
+    fn test_key_specific_create_acl(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        let args = crate::wit::townframe::daybook::facet_routine::get_args();
+        let tag_token = args
+            .primary_doc
+            .tags
+            .iter()
+            .find(|tag| tag.tag() == "org.example.test.createable")
+            .ok_or_else(|| JobErrorX::Terminal(ferr!("createable tag token not found")))?;
+
+        if !tag_token
+            .rights()
+            .contains(crate::wit::townframe::daybook::capabilities::FacetRights::CREATE)
+        {
+            return Err(JobErrorX::Terminal(ferr!(
+                "createable tag token missing CREATE right"
+            )));
+        }
+
+        let new_facet =
+            daybook_types::doc::WellKnownFacet::LabelGeneric("created-via-key-specific-acl".into());
+        let facet_json = serde_json::to_string(&new_facet).expect(ERROR_JSON);
+
+        // Authorized: key_id matches the ACL's key-specific entry
+        let created = tag_token
+            .create("authorized-key", &facet_json)
+            .map_err(|err| JobErrorX::Terminal(ferr!("create authorized-key failed: {err:?}")))?;
+
+        // Unauthorized: key_id doesn't match any ACL entry
+        let denied = tag_token.create("unauthorized-key", &facet_json).is_err();
+
+        let summary = serde_json::json!({
+            "created_key": created.key(),
+            "created_rights": format!("{:?}", created.rights()),
+            "unauthorized_denied": denied,
+        });
+        write_report_v2(&args, "test_key_specific_create_acl", &summary)?;
+        Ok(())
+    }
+
+    fn report_capabilities(_cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+        use crate::wit::townframe::daybook::facet_routine;
+        use crate::wit::townframe::sqlite::types::SqlValue;
+
+        let args = facet_routine::get_args();
+
+        let invocation_kind = match &args.invocation {
+            facet_routine::RoutineInvocation::Processor(proc) => {
+                serde_json::json!({
+                    "kind": "Processor",
+                    "trigger_doc_id": proc.trigger_doc_id.clone(),
+                    "changed_facet_keys": proc.changed_facet_keys.clone(),
+                })
+            }
+            facet_routine::RoutineInvocation::Command => {
+                serde_json::json!({ "kind": "Command" })
+            }
+        };
+
+        let facet_keys_and_rights: Vec<(String, String)> = args
+            .primary_doc
+            .facets
+            .iter()
+            .map(|tag| (tag.key(), format!("{:?}", tag.rights())))
+            .collect();
+        let tag_keys_and_rights: Vec<(String, String)> = args
+            .primary_doc
+            .tags
+            .iter()
+            .map(|tag| (tag.tag(), format!("{:?}", tag.rights())))
+            .collect();
+        let config_doc_facet_keys_and_rights: Vec<Vec<(String, String)>> = args
+            .config_docs
+            .iter()
+            .map(|cd| {
+                cd.facets
+                    .iter()
+                    .map(|tag| (tag.key(), format!("{:?}", tag.rights())))
+                    .collect()
+            })
+            .collect();
+        let config_doc_tag_keys_and_rights: Vec<Vec<(String, String)>> = args
+            .config_docs
+            .iter()
+            .map(|cd| {
+                cd.tags
+                    .iter()
+                    .map(|tag| (tag.tag(), format!("{:?}", tag.rights())))
+                    .collect()
+            })
+            .collect();
+
+        let facet_keys: Vec<String> = facet_keys_and_rights
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect();
+        let tag_keys: Vec<String> = tag_keys_and_rights
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect();
+        let config_doc_facet_keys: Vec<Vec<String>> = config_doc_facet_keys_and_rights
+            .iter()
+            .map(|vals| vals.iter().map(|(key, _)| key.clone()).collect())
+            .collect();
+        let config_doc_tag_keys: Vec<Vec<String>> = config_doc_tag_keys_and_rights
+            .iter()
+            .map(|val| val.iter().map(|(key, _)| key.clone()).collect())
+            .collect();
+        let facet_rights_map: std::collections::BTreeMap<String, String> =
+            facet_keys_and_rights.into_iter().collect();
+        let tag_rights_map: std::collections::BTreeMap<String, String> =
+            tag_keys_and_rights.into_iter().collect();
+        let config_facet_rights: Vec<std::collections::BTreeMap<String, String>> =
+            config_doc_facet_keys_and_rights
+                .into_iter()
+                .map(|val| val.into_iter().collect())
+                .collect();
+        let config_tag_rights: Vec<std::collections::BTreeMap<String, String>> =
+            config_doc_tag_keys_and_rights
+                .into_iter()
+                .map(|val| val.into_iter().collect())
+                .collect();
+
+        let summary = serde_json::json!({
+            "invocation": invocation_kind,
+            "primary_facet_keys": facet_keys,
+            "primary_tag_keys": tag_keys,
+            "primary_facet_rights": facet_rights_map,
+            "primary_tag_rights": tag_rights_map,
+            "config_doc_facet_keys": config_doc_facet_keys,
+            "config_doc_tag_keys": config_doc_tag_keys,
+            "config_doc_facet_rights": config_facet_rights,
+            "config_doc_tag_rights": config_tag_rights,
+            "command_invoke_urls": args.command_invoke_tokens.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
+            "sqlite_connections": args.sqlite_connections.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
+        });
+
+        let local_state_key = "@daybook/test/capability-report";
+        let sqlite_connection = args
+            .sqlite_connections
+            .iter()
+            .find(|(key, _)| key == local_state_key)
+            .map(|(_, conn)| conn)
+            .ok_or_else(|| {
+                JobErrorX::Terminal(ferr!("missing sqlite connection '{local_state_key}'"))
+            })?;
+
+        sqlite_connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS capability_report (doc_id TEXT PRIMARY KEY, summary_json TEXT NOT NULL) STRICT"
+            )
+            .map_err(|err| JobErrorX::Terminal(ferr!("error creating capability_report table: {err:?}")))?;
+
+        sqlite_connection
+            .execute(
+                "INSERT OR REPLACE INTO capability_report (doc_id, summary_json) VALUES (?1, ?2)",
+                &[
+                    SqlValue::Text(args.doc_id.clone()),
+                    SqlValue::Text(summary.to_string()),
+                ],
+            )
+            .map_err(|err| {
+                JobErrorX::Terminal(ferr!("error writing capability report: {err:?}"))
+            })?;
+
+        Ok(())
+    }
+
+    impl crate::wit::exports::townframe::wflow::bundle::Guest for Component {
+        fn run(args: crate::wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
+            wflow_sdk::route_wflows!(args, {
+                "invoke-child-success" => |cx, _args: serde_json::Value| invoke_child_success(cx),
+                "invoke-child-failure" => |cx, _args: serde_json::Value| invoke_child_failure(cx),
+                "child-success" => |cx, args: ChildArgs| child_success(cx, args),
+                "child-failure" => |cx, args: ChildArgs| child_failure(cx, args),
+                "report-capabilities" => |cx, _args: serde_json::Value| report_capabilities(cx),
+                "test-downscope" => |cx, _args: serde_json::Value| test_downscope(cx),
+                "test-denied-update" => |cx, _args: serde_json::Value| test_denied_update(cx),
+                "test-acl-aggregate" => |cx, _args: serde_json::Value| test_acl_aggregate(cx),
+                "test-create-facet" => |cx, _args: serde_json::Value| test_create_facet(cx),
+                "test-get-create-token" => |cx, _args: serde_json::Value| test_get_create_token(cx),
+                "test-key-specific-create-acl" => |cx, _args: serde_json::Value| test_key_specific_create_acl(cx),
+                "test-delete-facet" => |cx, _args: serde_json::Value| test_delete_facet(cx),
+                "test-label" => |cx, _args: serde_json::Value| wflows::test_labeler::run(cx),
+                "ocr-image" => |cx, _args: serde_json::Value| wflows::ocr_image::run(cx),
+                "embed-image" => |cx, _args: serde_json::Value| wflows::embed_image::run(cx),
+                "embed-text" => |cx, _args: serde_json::Value| wflows::embed_text::run(cx),
+                "index-embedding" => |cx, _args: serde_json::Value| wflows::index_embedding::run(cx),
+            })
+        }
+    }
+
+    impl crate::wit::exports::townframe::daybook::stateless_view::Guest for Component {
+        fn render_facet_view(
+            args: crate::wit::exports::townframe::daybook::stateless_view::RenderFacetViewArgs,
+        ) -> Result<
+            crate::wit::exports::townframe::daybook::stateless_view::RenderViewResponse,
+            crate::wit::exports::townframe::daybook::stateless_view::RenderViewError,
+        > {
+            let view_key = args.view_key;
+            if view_key != plug_test_manifest::SAMPLE_VIEW_KEY {
+                return Err(
+                    crate::wit::exports::townframe::daybook::stateless_view::RenderViewError::InvalidView(
+                        format!("unknown view key '{}'", view_key),
+                    ),
+                );
+            }
+
+            Ok(
+                crate::wit::exports::townframe::daybook::stateless_view::RenderViewResponse {
+                    view_json: plug_test_manifest::sample_stateless_view_json(),
+                    plugin_state_json: None,
+                },
+            )
+        }
+    }
+}

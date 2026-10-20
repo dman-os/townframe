@@ -1,14 +1,18 @@
 use super::*;
+use big_sync::HostPartStoreContractHarness;
 use big_sync::LocalPartRevisionReader;
+use big_sync::SingleTargetPageStore;
 use big_sync::SqliteDeltaWalkerStateRepo;
-use big_sync::{HostPartStoreContractHarness, SingleTargetPageStore, host_part_store_contract};
-use big_sync_core::delta_walker_state::{
-    DeltaWalkerStateRepo as _, DeltaWalkerStateTransaction as _,
-};
-use big_sync_core::rpc::{
-    ObjChanged, ObjRemovedFromPart, PartEvent, PartPage, ReplayPage, SubscriptionTarget,
-    TargetVerdict,
-};
+use big_sync::host_part_store_contract;
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
+use big_sync_core::delta_walker_state::DeltaWalkerStateTransaction as _;
+use big_sync_core::rpc::ObjChanged;
+use big_sync_core::rpc::ObjRemovedFromPart;
+use big_sync_core::rpc::PartEvent;
+use big_sync_core::rpc::PartPage;
+use big_sync_core::rpc::ReplayPage;
+use big_sync_core::rpc::SubscriptionTarget;
+use big_sync_core::rpc::TargetVerdict;
 
 /// A walker state repo for `(namespace, consumer)` over `sql`, plus the retention
 /// reader id that names it.

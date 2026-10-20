@@ -4,14 +4,18 @@
 //! frontier worker. It is not a second projection, revision log, or driver.
 use crate::interlude::*;
 use crate::runtime2::automerge_obj_to_doc_id;
-use big_sync::{HostPartStore, LocalPartRevisionReader};
+use big_sync::HostPartStore;
+use big_sync::LocalPartRevisionReader;
 use big_sync_core::part_store::ObjPayload;
-use big_sync_core::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
-use big_sync_core::rpc::{
-    ObjChanged, ObjRemovedFromPart, PartEvent, SubPartsRequest, SubscriptionTarget,
-};
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStore;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
+use big_sync_core::rpc::ObjChanged;
+use big_sync_core::rpc::ObjRemovedFromPart;
+use big_sync_core::rpc::PartEvent;
+use big_sync_core::rpc::SubPartsRequest;
+use big_sync_core::rpc::SubscriptionTarget;
 use serde_json::Value;
 
 /// A document revision observed on the physical frontier.
@@ -266,7 +270,8 @@ impl RevisionedStoreReader<u64, AutomergeFrontierEvent, eyre::Report> for Reader
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     struct Scripted(VecDeque<big_sync_core::revisioned_store::RevisionRead<u64, PartEvent>>);
     #[async_trait::async_trait]

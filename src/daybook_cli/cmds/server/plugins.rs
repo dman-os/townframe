@@ -7,7 +7,8 @@ use wash_plugin_sqlite::SqlPlugin;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::engine::workload::WorkloadItem;
 use wash_runtime::plugin::WitInterfaces;
-use wash_runtime::wit::{WitInterface, WitWorld};
+use wash_runtime::wit::WitInterface;
+use wash_runtime::wit::WitWorld;
 
 mod binds_auth {
 

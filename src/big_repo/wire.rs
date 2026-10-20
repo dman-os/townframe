@@ -1,19 +1,20 @@
 //! Adapted from `subduction_cli/src/wire.rs`.
 //! Original license: Apache-2.0/MIT. (c) 2024 Ink & Switch
 
-use sedimentree_core::{
-    codec::{
-        decode::Decode,
-        encode::Encode,
-        error::{DecodeError, InvalidSchema},
-    },
-    id::SedimentreeId,
-};
-use subduction_core::connection::message::{
-    BatchSyncResponse, MESSAGE_SCHEMA, SyncMessage, TryAsBatchSyncResponse, TryAsSubscribeRequest,
-};
-use subduction_ephemeral::message::{EPHEMERAL_SCHEMA, EphemeralMessage};
-use subduction_keyhive::{KEYHIVE_SCHEMA, KeyhiveMessage};
+use sedimentree_core::codec::decode::Decode;
+use sedimentree_core::codec::encode::Encode;
+use sedimentree_core::codec::error::DecodeError;
+use sedimentree_core::codec::error::InvalidSchema;
+use sedimentree_core::id::SedimentreeId;
+use subduction_core::connection::message::BatchSyncResponse;
+use subduction_core::connection::message::MESSAGE_SCHEMA;
+use subduction_core::connection::message::SyncMessage;
+use subduction_core::connection::message::TryAsBatchSyncResponse;
+use subduction_core::connection::message::TryAsSubscribeRequest;
+use subduction_ephemeral::message::EPHEMERAL_SCHEMA;
+use subduction_ephemeral::message::EphemeralMessage;
+use subduction_keyhive::KEYHIVE_SCHEMA;
+use subduction_keyhive::KeyhiveMessage;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BigRepoWireMessage {

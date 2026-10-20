@@ -5,7 +5,7 @@
 // component's own /public volume serving does not work, so this static
 // server is the fallback. Run alongside `daybook_cli server`.
 
-const siteDir = new URL("../target/site/", import.meta.url);
+const siteDir = new URL("../src/wasm_utils_rs/target/site/", import.meta.url);
 const port = 3001;
 const headers = {
   "Access-Control-Allow-Origin": "*",

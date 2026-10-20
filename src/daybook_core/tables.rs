@@ -1653,7 +1653,8 @@ impl TablesRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stores::{VersionTag, Versioned};
+    use crate::stores::VersionTag;
+    use crate::stores::Versioned;
 
     fn versioned<T>(val: T) -> Versioned<T> {
         Versioned {

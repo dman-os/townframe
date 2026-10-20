@@ -1,14 +1,16 @@
 use crate::interlude::*;
 
-use crate::{
-    bucket::BucketMachine,
-    part_store::{CursorIndex, PartStoreReadOnly},
-    rpc::{
-        BigSyncRpcClient, BuckLevel, BucketSummary, GetChangedBucketsRequest, ListPartsError,
-        RpcError,
-    },
-    tasks::{TaskCtx, TaskResultDeets},
-};
+use crate::bucket::BucketMachine;
+use crate::part_store::CursorIndex;
+use crate::part_store::PartStoreReadOnly;
+use crate::rpc::BigSyncRpcClient;
+use crate::rpc::BuckLevel;
+use crate::rpc::BucketSummary;
+use crate::rpc::GetChangedBucketsRequest;
+use crate::rpc::ListPartsError;
+use crate::rpc::RpcError;
+use crate::tasks::TaskCtx;
+use crate::tasks::TaskResultDeets;
 
 #[derive(Debug, Clone)]
 pub struct ListBucketsTask {

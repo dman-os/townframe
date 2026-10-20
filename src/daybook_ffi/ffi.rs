@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
-use daybook_core::app::{AppCtx, globals::KnownRepoEntry};
+use daybook_core::app::AppCtx;
+use daybook_core::app::globals::KnownRepoEntry;
 use tokio::sync::oneshot;
 
 daybook_types::custom_type_set!();

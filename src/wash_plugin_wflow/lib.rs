@@ -12,12 +12,16 @@ use utils_rs::prelude::tokio::sync::mpsc;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::engine::workload::WorkloadItem;
 use wash_runtime::plugin::WitInterfaces;
-use wash_runtime::wit::{WitInterface, WitWorld};
+use wash_runtime::wit::WitInterface;
+use wash_runtime::wit::WitWorld;
 
 use wasmtime::component::HasSelf;
-use wflow_core::r#gen::metastore::{WasmcloudWflowServiceMeta, WflowServiceMeta};
+use wflow_core::r#gen::metastore::WasmcloudWflowServiceMeta;
+use wflow_core::r#gen::metastore::WflowServiceMeta;
 use wflow_core::metastore::MetdataStore;
-use wflow_core::partition::{effects, job_events, state};
+use wflow_core::partition::effects;
+use wflow_core::partition::job_events;
+use wflow_core::partition::state;
 use wflow_tokio::partition::service;
 
 pub mod binds_partition_host {

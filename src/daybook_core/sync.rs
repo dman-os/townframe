@@ -4,12 +4,12 @@ use std::str::FromStr;
 
 use big_repo::BigRepo;
 use big_sync::BackendId;
-use iroh::{
-    EndpointId,
-    endpoint::Connection,
-    protocol::{AcceptError, ProtocolHandler},
-};
-use tokio::{sync::mpsc, task::JoinHandle};
+use iroh::EndpointId;
+use iroh::endpoint::Connection;
+use iroh::protocol::AcceptError;
+use iroh::protocol::ProtocolHandler;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::blobs::BlobsRepo;

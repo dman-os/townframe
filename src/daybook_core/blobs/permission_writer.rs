@@ -33,20 +33,26 @@ use crate::interlude::*;
 
 use crate::blobs::blob_inventory_part_id_from_doc_id;
 use crate::repos::RepoStopToken;
+use big_repo::AccessSubject;
+use big_repo::AccessSubjectSet;
+use big_repo::BigKeyhiveHandle;
+use big_repo::DocumentId;
+use big_repo::KeyhiveAccessDelta;
+use big_repo::KeyhiveAccessRevisionStore;
+use big_repo::KeyhiveAccessSelector;
+use big_repo::SharedBigRepo;
+use big_repo::SharedPartStore;
 use big_repo::keyhive_core::access::Access;
 use big_repo::keyhive_core::principal::identifier::Identifier;
-use big_repo::{
-    AccessSubject, AccessSubjectSet, BigKeyhiveHandle, DocumentId, KeyhiveAccessDelta,
-    KeyhiveAccessRevisionStore, KeyhiveAccessSelector, SharedBigRepo, SharedPartStore,
-};
 use big_sync::DeltaWalkerStateRepo as _;
 use big_sync::SqliteDeltaWalkerStateRepo;
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
-};
+use big_sync_core::concurrent_delta_walker::ConcurrentDelta;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
 use big_sync_core::delta_walker_state::DeltaWalkerStateTransaction as _;
 use big_sync_core::revisioned_store::RevisionedStore as _;
-use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
+use big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler;
+use big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion;
 use tokio_util::sync::CancellationToken;
 
 /// Walker-state identity of the permission machine.
@@ -575,7 +581,8 @@ mod tests {
     use super::*;
     use crate::test_support::boot_repo;
     use automerge::transaction::Transactable as _;
-    use big_sync::{ReadTarget, SqlitePartStore};
+    use big_sync::ReadTarget;
+    use big_sync::SqlitePartStore;
     use big_sync_core::BuckId;
     use std::time::Duration;
 
