@@ -253,24 +253,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "api_utils_rs"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "automerge",
- "autosurgeon",
- "displaydoc",
- "garde",
- "http",
- "serde",
- "thiserror 2.0.20",
- "tokio",
- "utils_rs",
- "utoipa",
- "wit-bindgen 0.60.0",
-]
-
-[[package]]
 name = "apple-native-keyring-store"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2732,7 +2714,6 @@ dependencies = [
  "aes-gcm",
  "am_utils_rs",
  "anyhow",
- "api_utils_rs",
  "async-channel",
  "async-trait",
  "atproto-dasl",
@@ -2802,7 +2783,6 @@ name = "daybook_ffi"
 version = "0.1.0"
 dependencies = [
  "am_utils_rs",
- "api_utils_rs",
  "autosurgeon",
  "big_sync_core",
  "daybook_core",
@@ -2842,7 +2822,6 @@ version = "0.1.0"
 dependencies = [
  "addr",
  "am_utils_rs",
- "api_utils_rs",
  "automerge",
  "autosurgeon",
  "blake3",
@@ -2862,6 +2841,7 @@ dependencies = [
  "uniffi",
  "utils_rs",
  "uuid",
+ "wasm_utils_rs",
 ]
 
 [[package]]
@@ -8146,7 +8126,6 @@ dependencies = [
 name = "plug_test_manifest"
 version = "0.1.0"
 dependencies = [
- "api_utils_rs",
  "daybook_core",
  "daybook_pdk",
  "daybook_types",
@@ -11913,30 +11892,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "utoipa"
-version = "5.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bde15df68e80b16c7d16b9616e80770ad158988daa56a27dccd1e55558b0160"
-dependencies = [
- "indexmap 2.14.0",
- "serde",
- "serde_json",
- "utoipa-gen",
-]
-
-[[package]]
-name = "utoipa-gen"
-version = "5.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba0b99ee52df3028635d93840c797102da61f8a7bb3cf751032455895b52ef8"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
- "uuid",
-]
-
-[[package]]
 name = "uuid"
 version = "1.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12411,6 +12366,15 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "wasm_utils_rs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "utils_rs",
+ "wit-bindgen 0.60.0",
 ]
 
 [[package]]
@@ -12919,12 +12883,13 @@ dependencies = [
 name = "wflow_sdk"
 version = "0.1.0"
 dependencies = [
- "api_utils_rs",
  "color-eyre",
  "displaydoc",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "utils_rs",
+ "wasm_utils_rs",
  "wit-bindgen 0.60.0",
 ]
 

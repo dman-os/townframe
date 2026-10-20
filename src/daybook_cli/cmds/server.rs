@@ -39,13 +39,13 @@ pub async fn run() -> Res<ExitCode> {
         .map_err(|err| eyre::eyre!(err.to_string()))
 }
 
-/// Where the wasm workspace writes cargo-leptos output: `CARGO_TARGET_DIR` when the dev
-/// shell scoped it per worktree, otherwise the guest workspace's own `target/`.
+/// Where the btress_sysadmin workspace writes cargo-leptos output: `CARGO_TARGET_DIR` when
+/// the dev shell scoped it per worktree, otherwise the crate workspace's own `target/`.
 fn wasm_workspace_target_dir() -> std::path::PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../wasm_utils_rs/target")
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../btress_sysadmin/target")
         })
 }
 

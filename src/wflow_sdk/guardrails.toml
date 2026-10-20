@@ -1,7 +1,10 @@
 version = 1
 role = "interface"
 dependency_reason = "initial guardrail baseline"
-allowed_dependencies = ["api_utils_rs"]
+allowed_dependencies = [
+    "utils_rs",
+    "wasm_utils_rs",
+]
 allow_external_api_types = false
 
 [builds.native]

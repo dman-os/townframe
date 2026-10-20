@@ -2,7 +2,6 @@ version = 1
 role = "plugin"
 dependency_reason = "native manifest, portable helpers, and plug tests"
 allowed_dependencies = [
-    "api_utils_rs",
     "daybook_core",
     "daybook_pdk",
     "daybook_types",

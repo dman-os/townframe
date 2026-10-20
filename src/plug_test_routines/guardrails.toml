@@ -3,11 +3,11 @@ role = "plugin"
 dependency_reason = "WASM workflows consume portable types and helpers from the native manifest crate"
 allowed_dependencies = [
     "am_utils_rs",
-    "api_utils_rs",
     "daybook_pdk",
     "daybook_types",
     "plug_test_manifest",
     "utils_rs",
+    "wasm_utils_rs",
     "wflow_sdk",
 ]
 allow_external_api_types = false

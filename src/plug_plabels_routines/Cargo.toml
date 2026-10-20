@@ -17,7 +17,7 @@ crate-type = ["cdylib"]
 [dependencies]
 plug_plabels_manifest.workspace = true
 utils_rs.workspace = true
-api_utils_rs.workspace = true
+wasm_utils_rs.workspace = true
 am_utils_rs.workspace = true
 wflow_sdk.workspace = true
 daybook_types = { workspace = true, features = ["wit"] }

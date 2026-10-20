@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 [dependencies]
 plug_test_manifest.workspace = true
 utils_rs.workspace = true
-api_utils_rs.workspace = true
+wasm_utils_rs.workspace = true
 am_utils_rs.workspace = true
 daybook_pdk.workspace = true
 daybook_types = { workspace = true, features = ["wit"] }

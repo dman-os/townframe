@@ -28,4 +28,3 @@ schemars = { version = "1.2", features = ["url2"] }
 daybook_core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true }
 sqlite_rs = { workspace = true }
-api_utils_rs = { workspace = true }

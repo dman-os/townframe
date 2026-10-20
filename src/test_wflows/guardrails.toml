@@ -2,7 +2,8 @@ version = 1
 role = "plugin"
 dependency_reason = "initial guardrail baseline"
 allowed_dependencies = [
-    "api_utils_rs",
+    "utils_rs",
+    "wasm_utils_rs",
     "wflow_sdk",
 ]
 allow_external_api_types = false

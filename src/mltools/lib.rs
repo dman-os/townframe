@@ -29,13 +29,13 @@ ML tools support:
 //         world: "guest",
 //         additional_derives: [serde::Serialize, serde::Deserialize],
 //         with: {
-//             // "wasi:logging/logging@0.1.0-draft": api_utils_rs::wit::wasi::logging::logging,
-//             // "wasi:io/poll@0.2.6": api_utils_rs::wit::wasi::io::poll,
-//             // "wasi:clocks/monotonic-clock@0.2.6": api_utils_rs::wit::wasi::clocks::monotonic_clock,
-//             "wasi:clocks/wall-clock@0.2.6": api_utils_rs::wit::wasi::clocks::wall_clock,
-//             // "wasi:config/runtime@0.2.0-draft": api_utils_rs::wit::wasi::config::runtime,
+//             // "wasi:logging/logging@0.1.0-draft": wasm_utils_rs::wit::wasi::logging::logging,
+//             // "wasi:io/poll@0.2.6": wasm_utils_rs::wit::wasi::io::poll,
+//             // "wasi:clocks/monotonic-clock@0.2.6": wasm_utils_rs::wit::wasi::clocks::monotonic_clock,
+//             "wasi:clocks/wall-clock@0.2.6": wasm_utils_rs::wit::wasi::clocks::wall_clock,
+//             // "wasi:config/runtime@0.2.0-draft": wasm_utils_rs::wit::wasi::config::runtime,
 //
-//             // "townframe:api-utils/utils": api_utils_rs::wit::utils,
+//             // "townframe:api-utils/utils": wasm_utils_rs::wit::utils,
 //
 //             "townframe:mltools/types": generate,
 //             "townframe:mltools/llm-chat": generate,

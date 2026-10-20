@@ -22,7 +22,6 @@ test-support = ["dep:tempfile", "big_repo/test-support", "big_sync/test-support"
 #
 # internal
 am_utils_rs = { workspace = true }
-api_utils_rs = { workspace = true, features = ["automerge"] }
 daybook_types = { workspace = true, features = [
     "uniffi",
     "wit",

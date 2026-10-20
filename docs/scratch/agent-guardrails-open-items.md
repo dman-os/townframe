@@ -66,6 +66,13 @@ All in `src/xtask/` (`cargo x …`), no separate checker crate:
   `cargo x doctor` flags in-tree or shared target dirs. Found the hard way: with one shared
   dir, `target/debug/xtask` was another worktree's binary while `cargo build -p xtask`
   reported "fresh", so guardrail output came from foreign code.
+- `btress_sysadmin` is a single-crate workspace, not a guest member: cargo-leptos assumes
+  packages live under their workspace root and failed `cargo leptos build` with "Could not
+  remove base …/src/wasm_utils_rs from …/src/btress_sysadmin/Cargo.toml" (E2E sysadmin job).
+  A standalone closure also keeps root feature unification out of its hydrate build. It gets
+  its own `Cargo.lock` (third lockfile) and the guest profiles are copied into its manifest.
+  `Repository::load` discovers any `src/*/Cargo.toml` with a `[workspace]` table instead of
+  hardcoding the guest manifest.
 
 ---
 
@@ -93,6 +100,31 @@ and cgroup limits; `cargo x doctor` confirmed the inherited jobserver and no Rus
 
 Not rerun in this handoff: the full workspace nextest suite and complete `check-matrix` builds.
 Those are not implied by the checks above; their broader CI results still need review before merge.
+
+### 0.3 CI failure fixes (2026-10-20, PR #70 run 39366765119)
+
+- **pre-commit `fmt` hook**: the hook runs `cargo fmt -- <each .rs file>`, which reaches files
+  outside every crate module tree; `cargo fmt --all` never visits those. With the new
+  `imports_granularity`/`group_imports` options, three such files failed:
+  `src/daybook_core/gen/mod.rs` (PR-created, hand-maintained), `src/daybook_core/index/hydrate.rs`
+  and `src/utils_rs/cheapstr.rs` (both pre-existing orphans; `cheapstr.rs` is a dead duplicate
+  of the live inline `mod cheapstr` in `utils_rs/lib.rs:243`). Formatted all three with the
+  hook-equivalent command; repo-wide hook-equivalent check is clean. Deleting the two dead
+  orphans is left to the operator.
+- **E2E (sysadmin / chromium)**: `cargo leptos build --release` failed in cargo-leptos
+  (`Could not remove base …/src/wasm_utils_rs from …/src/btress_sysadmin/Cargo.toml`) because
+  the crate had joined the guest workspace, whose root is a sibling directory. Moved
+  `btress_sysadmin` to a single-crate workspace (§0.1): explicit dep versions in its manifest,
+  own `Cargo.lock` seeded from the guest lock, `Repository::load` generalized to discover all
+  `src/` workspace roots, and target-dir consumers repointed (`daybook_cli/cmds/server.rs`,
+  `x/dev-btress-static.ts`). Verified: `cargo metadata` workspace_root is the crate dir;
+  `cargo x check-matrix --package btress_sysadmin` passes both target contracts; and the exact
+  failing CI step `cargo leptos build --release` completes, emitting
+  `src/btress_sysadmin/target/site/pkg/btress_sysadmin.js`.
+- Also verified after the fixes: `cargo x lint` (0 diagnostics, 608 modules), xtask clippy
+  `-D warnings`, nextest 18/18, guest workspace `cargo check --locked`, `daybook_cli` check,
+  `cargo x api --all --check`, `cargo x doctor`, matrix `--dry-run`, and fmt checks across all
+  three workspaces plus the repo-wide per-file hook form.
 
 ## 1. Decisions locked by the operator
 
@@ -722,7 +754,8 @@ that pin ever feels wrong, the alternative is dropping unification and accepting
 
 Still open:
 - [ ] `cargo-hakari` measurement remains unrun; not needed while the guest workspace is small.
-- [ ] Two lockfiles can drift. Seeded from the root lock, 40 of 341 shared crates resolve to
+- [ ] The three lockfiles (root, `src/wasm_utils_rs`, `src/btress_sysadmin`) can drift.
+      Seeded from the root lock, 40 of 341 shared crates resolve to
       different versions, and 6 of those are versions the root lock does not contain
       (`const-str`, `convert_case`, `derive-where`, `prettyplease`, `toml`, `tower-http` — all
       in the Leptos-only subtree). A `ERROR_LOCK_DIVERGENCE` check should require every crate
@@ -915,6 +948,12 @@ Still needed for conspicuous policy-change review:
       serialization fixtures, DB migrations + migration identities, hash/domain-separation
       identifiers, and ordering/cancellation/durability semantics.
 - [ ] **`cargo-hack`** for independent-crate builds under supported features.
+- [ ] **Orphan `.rs` file lint**: flag `.rs` files not reachable from any crate module tree.
+      The pre-commit fmt hook (per-file rustfmt) is the only check that visits them — it
+      caught `src/utils_rs/cheapstr.rs` (dead duplicate of the inline `mod cheapstr` in
+      `utils_rs/lib.rs`) and `src/daybook_core/index/hydrate.rs` (parked, unreferenced)
+      when the import-granularity options changed (§0.3). A lint would make the debt
+      explicit instead of leaving dead files to rot.
 
 ---
 

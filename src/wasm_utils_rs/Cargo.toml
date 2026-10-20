@@ -9,9 +9,14 @@ workspace = true
 [lib]
 path = "lib.rs"
 
+[dependencies]
+utils_rs.workspace = true
+serde.workspace = true
+wit-bindgen.workspace = true
+
 [workspace]
 resolver = "3"
-members = [".", "../plug_test_routines", "../plug_plabels_routines", "../plug_dayledger_routines", "../test_wflows", "../btress_sysadmin"]
+members = [".", "../plug_test_routines", "../plug_plabels_routines", "../plug_dayledger_routines", "../test_wflows"]
 default-members = [".", "../plug_test_routines", "../plug_plabels_routines", "../plug_dayledger_routines", "../test_wflows"]
 
 [workspace.package]
@@ -25,7 +30,6 @@ plug_test_manifest = { path = "../plug_test_manifest" }
 plug_plabels_manifest = { path = "../plug_plabels_manifest" }
 plug_dayledger_manifest = { path = "../plug_dayledger_manifest" }
 utils_rs = { path = "../utils_rs", default-features = false }
-api_utils_rs = { path = "../api_utils_rs", default-features = false }
 am_utils_rs = { path = "../am_utils_rs", default-features = false }
 daybook_types = { path = "../daybook_types", default-features = false }
 daybook_pdk = { path = "../daybook_pdk", default-features = false }

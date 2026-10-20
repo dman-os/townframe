@@ -3,7 +3,6 @@ role = "runtime"
 dependency_reason = "initial guardrail baseline"
 allowed_dependencies = [
     "am_utils_rs",
-    "api_utils_rs",
     "big_repo",
     "big_sync",
     "big_sync_core",

@@ -3,10 +3,10 @@ role = "plugin"
 dependency_reason = "WASM workflows consume portable labeling algorithms and types from the native manifest crate"
 allowed_dependencies = [
     "am_utils_rs",
-    "api_utils_rs",
     "daybook_types",
     "plug_plabels_manifest",
     "utils_rs",
+    "wasm_utils_rs",
     "wflow_sdk",
 ]
 allow_external_api_types = false

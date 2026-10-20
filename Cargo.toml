@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
   "./src/am_utils_rs",
-  "./src/api_utils_rs",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
@@ -51,7 +50,7 @@ repository = ""
 utils_rs = { path = "./src/utils_rs", default-features = false }
 native_utils_rs = { path = "./src/native_utils_rs" }
 sqlite_rs = { path = "./src/sqlite_rs", default-features = false }
-api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
+wasm_utils_rs = { path = "./src/wasm_utils_rs", default-features = false }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
 daybook_core = { path = "./src/daybook_core", default-features = false }

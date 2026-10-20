@@ -2,7 +2,6 @@ pub mod doc {
     use crate::interlude::*;
 
     use crate::doc as root_doc;
-    use api_utils_rs::wit::townframe::api_utils::utils::Datetime;
     pub use root_doc::Blob;
     pub use root_doc::BlobPin;
     pub use root_doc::DocId;
@@ -11,6 +10,7 @@ pub mod doc {
     pub use root_doc::Multihash;
     pub use root_doc::Note;
     pub use root_doc::UserPathBuf;
+    use wasm_utils_rs::wit::townframe::api_utils::utils::Datetime;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct UserMeta {
@@ -45,7 +45,7 @@ pub mod doc {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde_with::serde_as]
     pub struct FacetMeta {
-        #[serde(with = "api_utils_rs::codecs::datetime")]
+        #[serde(with = "wasm_utils_rs::codecs::datetime")]
         pub created_at: Datetime,
         #[serde_as(as = "Vec<Datetime>")]
         pub updated_at: Vec<Datetime>,
@@ -59,7 +59,7 @@ pub mod doc {
     #[serde_with::serde_as]
     pub struct Dmeta {
         pub id: String,
-        #[serde(with = "api_utils_rs::codecs::datetime")]
+        #[serde(with = "wasm_utils_rs::codecs::datetime")]
         pub created_at: Datetime,
         #[serde_as(as = "Vec<Datetime>")]
         pub updated_at: Vec<Datetime>,

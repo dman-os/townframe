@@ -230,6 +230,8 @@ pub fn run(
                     "--locked".into(),
                     "--manifest-path".into(),
                     repo.packages[&name].manifest_path.display().to_string(),
+                    "-p".into(),
+                    name.clone(),
                     "--lib".into(),
                     "--no-default-features".into(),
                 ];
@@ -358,6 +360,7 @@ mod tests {
             Repository {
                 root,
                 packages: map,
+                workspace_manifests: Vec::new(),
             },
         )
     }

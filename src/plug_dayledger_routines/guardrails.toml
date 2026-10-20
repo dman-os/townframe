@@ -2,10 +2,10 @@ version = 1
 role = "plugin"
 dependency_reason = "WASM workflows consume portable ledger types and helpers from the native manifest crate"
 allowed_dependencies = [
-    "api_utils_rs",
     "daybook_types",
     "plug_dayledger_manifest",
     "utils_rs",
+    "wasm_utils_rs",
     "wflow_sdk",
 ]
 allow_external_api_types = false

@@ -42,11 +42,11 @@ cargo x build-plug-oci --plug-root ./src/plug_test_manifest/
 
 ## Rust target contracts
 
-The root workspace owns native applications and portable libraries. `src/wasm_utils_rs/Cargo.toml` owns Wasm applications and components without moving them out of `src/`. Both lockfiles are committed; update and review each affected resolution. Native `--workspace --all-features` never includes Wasm entrypoints.
+The root workspace owns native applications and portable libraries. `src/wasm_utils_rs/Cargo.toml` owns Wasm applications and components without moving them out of `src/`. All three lockfiles are committed (root, `src/wasm_utils_rs`, `src/btress_sysadmin`); update and review each affected resolution. Native `--workspace --all-features` never includes Wasm entrypoints.
 
 Portable libraries declare supported targets and feature combinations in their crate-local `guardrails.toml` under `[builds.<target>]`. `cargo x check-matrix` runs one isolated Cargo invocation per configuration: no defaults, each declared feature alone, all declared features, and the crate defaults merged in — deduplicated, so a crate with no features costs one run per target. `powerset = true` opts a contract into every subset instead. `required_features` describes target-specific applications such as Leptos SSR versus hydration. New features must be added to a contract or `cargo x lint` reports `ERROR_FEATURE_CONTRACT`. Features named after platforms are rejected (`ERROR_PLATFORM_FEATURE`): a platform is a target or a separate crate, never an additive feature. A Wasm build may only depend on crates whose contract covers that target (`ERROR_TARGET_BOUNDARY`); native dev-dependencies such as `daybook_core`'s test harness are exempt because they are never built for the guest.
 
-Use `cargo x check-matrix --package utils_rs --dry-run` to inspect commands and omit `--dry-run` to execute them. CI checks native, WASI, and browser contracts in separate jobs. Run `cargo fmt --all` in both workspaces. Build guest artifacts with `cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml --target wasm32-wasip2 --release`; browser builds require the browser target and their declared features. Guest workspace dev/release and shared-library `wasm-release` profiles use optimization level 3.
+Use `cargo x check-matrix --package utils_rs --dry-run` to inspect commands and omit `--dry-run` to execute them. CI checks native, WASI, and browser contracts in separate jobs. Run `cargo fmt --all` in all three workspaces (root, `src/wasm_utils_rs`, `src/btress_sysadmin`). Build guest artifacts with `cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml --target wasm32-wasip2 --release`; browser builds require the browser target and their declared features. Guest workspace dev/release and shared-library `wasm-release` profiles use optimization level 3. `src/btress_sysadmin` is a separate single-crate workspace: cargo-leptos assumes each package lives under its workspace root and failed with "Could not remove base" when the crate was a member of `src/wasm_utils_rs`, whose root is a sibling directory.
 
 Each manifest crate declares `[package.metadata.townframe] routines = "../plug_name_routines"`. `cargo x build-plug-oci --plug-root src/plug_name_manifest` runs its native `manifest` binary, builds the sibling routines component, and packages both under the existing logical plug ID. Wasmtime is not a dependency of xtask.
 
@@ -80,7 +80,6 @@ Both root and guest `Cargo.lock` files are tracked. Resolve dependency intent in
 - `./src/utils_rs/`: Portable shared utilities (native, WASI, browser).
 - `./src/native_utils_rs/`: Native filesystem and HTTP utilities.
 - `./src/wasm_utils_rs/`: Wasm workspace and home for guest-specific utilities. Its workspace owns guest crates at sibling paths, with a separate lockfile and `opt-level = 3` in dev and release profiles.
-  - `./src/api_utils_rs/`: Utilities for writing WASI APIs.
   - `./src/am_utils_rs/`: Automerge utilities.
   - `./src/sqlite_rs/`: Shared SQLite runtime, typed queries, and embedded migrations.
 - `./src/wflow/`: Top level crate for wflow, a durable workflows impl.

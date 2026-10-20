@@ -1,8 +1,8 @@
 [package]
 name = "btress_sysadmin"
-workspace = "../wasm_utils_rs"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
 
 # needed to fool cargo-leptos
 [[bin]]
@@ -14,22 +14,22 @@ path = "lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-utils_rs = { workspace = true, default-features = false }
+utils_rs = { path = "../utils_rs", default-features = false }
 
 getrandom = "0.4.3"
 # getrandom 0.3.x is pulled in transitively (ahash/irpc-iroh/jobserver) and
 # needs the wasm_js backend for the hydrate (wasm32-unknown-unknown) build.
 # Renamed dep so the feature can be gated to the `hydrate` feature only.
 getrandom-03 = { package = "getrandom", version = "0.3", features = ["wasm_js"], optional = true }
-serde.workspace = true
+serde = { version = "1", features = ["derive", "rc"] }
 
 #
 # errors
-thiserror.workspace = true
+thiserror = "2"
 
 #
 # wasm
-wit-bindgen = { workspace = true, features = ["async-spawn"], optional = true }
+wit-bindgen = { version = "0.60.0", features = ["async-spawn"], optional = true }
 console_error_panic_hook = { version = "0.1.7", optional = true}
 wasm-bindgen = { version = "0.2.126", optional = true }
 wasm-bindgen-futures = { version = "0.4.76", optional = true }
@@ -37,11 +37,11 @@ wasm-bindgen-futures = { version = "0.4.76", optional = true }
 
 #
 # http
-axum = { workspace = true, optional = true }
-axum-extra = { workspace = true, optional = true, features = ["cookie", "cookie-signed"] }
-tower = { workspace = true, optional = true }
-tower-http = { workspace = true, features = ["util", "sensitive-headers", "trace"], optional = true }
-http.workspace = true
+axum = { version = "0.8.9", default-features = false, optional = true }
+axum-extra = { version = "0.12.6", default-features = false, features = ["cookie", "cookie-signed"], optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.7", features = ["util", "sensitive-headers", "trace"], optional = true }
+http = "1"
 
 #
 # web
@@ -100,3 +100,20 @@ bin-profile-release = "wasm-release"
 bin-target-triple = "wasm32-wasip2"
 bin-target-dir = "target/wasm"
 bin-features = ["ssr"]
+
+# Single-crate workspace: cargo-leptos assumes packages live under their workspace root
+# (it failed with "Could not remove base" as a src/wasm_utils_rs member), and a standalone
+# closure keeps root-workspace feature unification out of hydrate builds.
+[workspace]
+
+[profile.dev]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"
+debug = "line-tables-only"
+
+[profile.wasm-release]
+inherits = "release"

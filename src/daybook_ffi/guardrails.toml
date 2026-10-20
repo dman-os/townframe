@@ -3,7 +3,6 @@ role = "interface"
 dependency_reason = "initial guardrail baseline"
 allowed_dependencies = [
     "am_utils_rs",
-    "api_utils_rs",
     "big_sync_core",
     "daybook_core",
     "daybook_types",

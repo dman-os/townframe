@@ -7,7 +7,6 @@ pub mod datetime {
         datetime: &Datetime,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        // Convert Datetime to Timestamp
         let ts = Timestamp::from_second(datetime.seconds as i64)
             .map_err(|err| serde::ser::Error::custom(format!("invalid timestamp: {err}")))?
             .checked_add(std::time::Duration::from_nanos(datetime.nanoseconds.into()))

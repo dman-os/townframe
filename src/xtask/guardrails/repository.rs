@@ -20,6 +20,8 @@ use crate::interlude::*;
 pub struct Repository {
     pub root: PathBuf,
     pub packages: BTreeMap<String, Package>,
+    /// Workspace-root manifests under `src/` (relative to `root`), excluding the root manifest.
+    pub workspace_manifests: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -68,7 +70,7 @@ const PILOT_API_PACKAGES: &[&str] = &[
 
 fn infer_role(name: &str) -> LayerRole {
     match name {
-        "utils_rs" | "sqlite_rs" | "am_utils_rs" | "api_utils_rs" | "secrets_rs" => {
+        "utils_rs" | "sqlite_rs" | "am_utils_rs" | "wasm_utils_rs" | "secrets_rs" => {
             LayerRole::Foundation
         }
         "daybook_types" | "big_sync_core" | "wflow_core" => LayerRole::Domain,
@@ -81,46 +83,52 @@ fn infer_role(name: &str) -> LayerRole {
 }
 
 impl Repository {
-    pub fn load(root: &Path) -> Res<Self> {
-        let bytes = output(Command::new("cargo").current_dir(root).args([
+    fn metadata(root: &Path, manifest: Option<&Path>) -> Res<Metadata> {
+        let mut command = Command::new("cargo");
+        command.current_dir(root).args([
             "metadata",
             "--no-deps",
             "--locked",
             "--offline",
             "--format-version",
             "1",
-        ]))?;
-        let mut metadata: Metadata = serde_json::from_slice(&bytes)?;
-        let wasm_manifest = root.join("src/wasm_utils_rs/Cargo.toml");
-        if wasm_manifest.is_file() {
-            let bytes = output(
-                Command::new("cargo")
-                    .current_dir(root)
-                    .args([
-                        "metadata",
-                        "--no-deps",
-                        "--locked",
-                        "--offline",
-                        "--format-version",
-                        "1",
-                        "--manifest-path",
-                    ])
-                    .arg(wasm_manifest),
-            )?;
-            let wasm: Metadata = serde_json::from_slice(&bytes)?;
-            let native_names: BTreeSet<_> = metadata
-                .packages
-                .iter()
-                .map(|package| package.name.clone())
-                .collect();
-            eyre::ensure!(
-                wasm.packages
-                    .iter()
-                    .all(|package| !native_names.contains(&package.name)),
-                "native and wasm workspaces have duplicate members"
-            );
-            metadata.packages.extend(wasm.packages);
+        ]);
+        if let Some(manifest) = manifest {
+            command.arg("--manifest-path").arg(manifest);
         }
+        let bytes = output(&mut command)?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    pub fn load(root: &Path) -> Res<Self> {
+        let mut metadata = Self::metadata(root, None)?;
+        let mut names: BTreeSet<String> = metadata
+            .packages
+            .iter()
+            .map(|package| package.name.clone())
+            .collect();
+        let mut workspace_manifests = Vec::new();
+        for entry in std::fs::read_dir(root.join("src"))? {
+            let manifest = entry?.path().join("Cargo.toml");
+            if !manifest.is_file() {
+                continue;
+            }
+            let value: toml::Value = toml::from_str(&std::fs::read_to_string(&manifest)?)?;
+            if value.get("workspace").is_none() {
+                continue;
+            }
+            let extra = Self::metadata(root, Some(&manifest))?;
+            for package in &extra.packages {
+                eyre::ensure!(
+                    names.insert(package.name.clone()),
+                    "duplicate package {} across workspaces",
+                    package.name
+                );
+            }
+            metadata.packages.extend(extra.packages);
+            workspace_manifests.push(manifest.strip_prefix(root)?.to_path_buf());
+        }
+        workspace_manifests.sort();
         Ok(Self {
             root: root.into(),
             packages: metadata
@@ -128,6 +136,7 @@ impl Repository {
                 .into_iter()
                 .map(|package| (package.name.clone(), package))
                 .collect(),
+            workspace_manifests,
         })
     }
 
@@ -399,10 +408,11 @@ impl Repository {
                         .any(|part| part == std::path::Component::ParentDir),
                 "plan paths must be workspace-relative, including deleted paths"
             );
-            if matches!(
-                path.to_str(),
-                Some("src/wasm_utils_rs/Cargo.toml" | "src/wasm_utils_rs/Cargo.lock")
-            ) {
+            if self
+                .workspace_manifests
+                .iter()
+                .any(|manifest| path == manifest || path == &manifest.with_file_name("Cargo.lock"))
+            {
                 global = true;
             }
             let absolute = self.root.join(path);

@@ -1,7 +1,9 @@
 version = 1
 role = "foundation"
 dependency_reason = "Workspace anchor for browser and WASI guests, independent of native runtime features."
-allowed_dependencies = []
+allowed_dependencies = ["utils_rs"]
+
+[builds.native]
 
 [builds.wasm32-wasip2]
 

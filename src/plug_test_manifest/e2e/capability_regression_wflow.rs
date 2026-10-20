@@ -1,4 +1,3 @@
-use api_utils_rs::prelude::*;
 use daybook_types::doc::AddDocArgs;
 use daybook_types::doc::FacetKey;
 use daybook_types::doc::FacetRaw;
@@ -6,6 +5,7 @@ use daybook_types::doc::WellKnownFacet;
 use daybook_types::doc::WellKnownFacetTag;
 use sqlite_rs::Database;
 use sqlite_rs::IntoParams;
+use utils_rs::prelude::*;
 
 async fn open_plug_test_local_state(
     test_cx: &daybook_core::test_support::DaybookTestContext,

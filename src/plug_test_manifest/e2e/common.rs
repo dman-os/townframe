@@ -1,4 +1,4 @@
-use api_utils_rs::prelude::*;
+use utils_rs::prelude::*;
 
 pub async fn import_test_plug_oci(
     test_cx: &daybook_core::test_support::DaybookTestContext,
