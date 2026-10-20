@@ -1,4 +1,4 @@
-//! POC: PlugsRepo writes Panproto revisions; DocumentsRepo resolves them read-only.
+//! POC: PlugsRepo writes Panproto revisions; DocsRepo resolves them read-only.
 
 use std::path::Path;
 
@@ -10,7 +10,7 @@ use panproto_vcs::{
     tree::resolve_commit_schema,
 };
 
-/// The read-only surface DocumentsRepo needs. PlugsRepo owns `Repository` and
+/// The read-only surface DocsRepo needs. PlugsRepo owns `Repository` and
 /// publishes commits; document reads are pinned to an exact commit ID.
 struct SchemaStore {
     store: FsStore,
@@ -124,7 +124,7 @@ mod tests {
         };
         drop(plugs_repo);
 
-        // DocumentsRepo gets only this query facade, not Panproto's writer API.
+        // DocsRepo gets only this query facade, not Panproto's writer API.
         let schema_store = SchemaStore::open(directory.path()).unwrap();
         let read_v1 = schema_store.schema_at(&v1_revision).unwrap();
         let read_v2 = schema_store.schema_at(&v2_revision).unwrap();

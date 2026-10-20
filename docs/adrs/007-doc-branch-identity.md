@@ -1,6 +1,6 @@
 # ADR 007: Doc and Branch Identity
 
-**Status:** Partially implemented — `DocumentId` unification, `db+facet` references, `BranchDocument`/`MergeDocument`, the `org.example.daybook.branch` and `org.example.daybook.branches` core facets, and `dmeta.branchUuids` provenance across branches and merges are implemented in `big_cabinet_core` and `big_cabinet`. Explicit branch-link removal and physical document deletion remain deferred.
+**Status:** Partially implemented — `DocumentId` unification, `db+facet` references, `BranchDoc`/`MergeDoc`, the `org.example.daybook.branch` and `org.example.daybook.branches` core facets, and `dmeta.branchUuids` provenance across branches and merges are implemented in `big_cabinet_core` and `big_cabinet`. Explicit branch-link removal and physical document deletion remain deferred.
 
 ## Context
 
@@ -35,7 +35,7 @@ logical-document wrapper whose identity differs from the physical doc.
 ### Branch links are weak, local relationships
 
 A normal branch is a new `DocumentId` whose initial Automerge state is forked (`fork_at`)
-from the origin document at the requested heads, and a merge (`MergeDocument`) merges one
+from the origin document at the requested heads, and a merge (`MergeDoc`) merges one
 history-sharing document's Automerge changes into another (`doc.merge`). Because the
 Automerge changes themselves travel between origin and branch, facets are not copied by
 value and signatures authored on either document reconstruct at their introducing changes
@@ -79,9 +79,9 @@ present, readable, or still available. A branch created from B records the new
 relationship in B and the new branch; branch information is not propagated through every
 ancestor or sibling.
 
-`BranchDocument` owns both system facets (`org.example.daybook.branch/*` and
-`org.example.daybook.branches/*`) and signs them with `DocumentsRepo`'s system actor after
-checking the caller's access. Ordinary `CreateDocument` and `WriteFacets` calls cannot
+`BranchDoc` owns both system facets (`org.example.daybook.branch/*` and
+`org.example.daybook.branches/*`) and signs them with `DocsRepo`'s system actor after
+checking the caller's access. Ordinary `CreateDoc` and `WriteFacets` calls cannot
 set or remove them (`SystemFacet`), while `ReadFacets` and `ListFacets` read them like any
 other facet.
 
@@ -102,7 +102,7 @@ Publication, retention, and access are drawer and Keyhive concerns.
 
 ### Initial identity precedes publication
 
-BigRepo allocates the final doc identity before initial content. DocumentsRepo can then
+BigRepo allocates the final doc identity before initial content. DocsRepo can then
 write final IDs, initial content, dmeta, and branch metadata in the first Automerge
 change, persist its Sedimentree, initialize Keyhive state, and only then expose it through
 its requested drawer.

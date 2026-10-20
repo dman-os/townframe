@@ -53,7 +53,7 @@ const CID_VERSION_RAW_BLAKE3: [u8; 4] = [0x01, 0x55, 0x1e, 0x20];
 const CID_LENGTH: usize = 36;
 
 /// The document identity shared with BigRepo: arbitrary bytes with canonical multibase text.
-pub use big_sync_core::ObjKey as DocumentId;
+pub use big_sync_core::ObjKey as DocId;
 
 /// Identity allocated before initial content is persisted and publication begins.
 ///
@@ -61,8 +61,8 @@ pub use big_sync_core::ObjKey as DocumentId;
 /// a field inside the facet would be copied verbatim onto a branch, where it would name the origin
 /// rather than the branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocumentIdentity {
-    pub id: DocumentId,
+pub struct DocIdentity {
+    pub id: DocId,
     pub created_at: Timestamp,
 }
 
@@ -167,7 +167,7 @@ pub struct Dmeta {
     /// and this index is how the entry that carries no document id is tied to that claim.
     #[serde(default)]
     #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<Uuid7, String>"))]
-    pub branch_uuids: BTreeMap<Uuid7, DocumentId>,
+    pub branch_uuids: BTreeMap<Uuid7, DocId>,
     #[serde(default)]
     pub facet_uuids: BTreeMap<Uuid7, FacetKey>,
     #[serde(default)]
@@ -194,16 +194,12 @@ impl Dmeta {
     /// The UUID a signature introduced on `document` carries as its `docUuid`: the smallest one
     /// already bound to `document`, or `minted` when none is.
     ///
-    /// A normal branch *is* its origin's changes under a new [`DocumentId`], so it arrives with the
+    /// A normal branch *is* its origin's changes under a new [`DocId`], so it arrives with the
     /// origin's bindings and none of its own. Its first write — the branch's own
     /// `org.example.daybook.branch/<docid>` facet — binds a fresh UUID to it, so every later
     /// write on the branch finds one. Choosing the smallest visible binding keeps two stagings of
     /// the same write, and two concurrent writers that both see it, on the same UUID.
-    pub fn document_uuid(
-        &mut self,
-        document: &DocumentId,
-        minted: Uuid7,
-    ) -> Result<Uuid7, DmetaError> {
+    pub fn doc_uuid(&mut self, document: &DocId, minted: Uuid7) -> Result<Uuid7, DmetaError> {
         if let Some(uuid) = self
             .branch_uuids
             .iter()
@@ -284,7 +280,7 @@ pub struct FacetMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct InheritedWitness {
     #[cfg_attr(feature = "schemars", schemars(with = "String"))]
-    pub origin_doc: DocumentId,
+    pub origin_doc: DocId,
     pub message: Bytes,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<Bytes>,
@@ -330,16 +326,16 @@ pub struct BranchLink {
 #[serde(rename_all = "camelCase")]
 pub struct BranchesPath {
     #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<String, BranchLink>"))]
-    pub by_id: BTreeMap<DocumentId, BranchLink>,
+    pub by_id: BTreeMap<DocId, BranchLink>,
     #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<String, Vec<String>>"))]
-    pub by_path: BTreeMap<String, Vec<DocumentId>>,
+    pub by_path: BTreeMap<String, Vec<DocId>>,
     #[serde(flatten)]
     pub extra: crate::facet::Extra,
 }
 
 impl BranchesPath {
     /// Record a branch. Re-recording the same branch is a no-op.
-    pub fn record(&mut self, branch: DocumentId, path: String) {
+    pub fn record(&mut self, branch: DocId, path: String) {
         if let Some(previous) = self
             .by_id
             .insert(branch.clone(), BranchLink { path: path.clone() })
@@ -399,7 +395,7 @@ pub struct FacetClaim {
     /// The document the claim was made on. A branch or a merge later moves the signature to other
     /// documents unchanged, so this is not necessarily the document that now holds it; the entry
     /// names this document through its `docUuid` and the `branchUuids` binding.
-    pub origin_document: DocumentId,
+    pub origin_document: DocId,
     pub facet_key: FacetKey,
     pub chosen_uuid: Uuid7,
     pub actor_uuid: Uuid7,
@@ -742,7 +738,7 @@ impl FacetClaim {
         }
 
         let origin_text = read_cbor_text_strict(bytes, &mut cursor)?;
-        let origin_document = DocumentId::from_str(&origin_text)
+        let origin_document = DocId::from_str(&origin_text)
             .map_err(|_| DmetaError::MalformedClaim("invalid origin document ID"))?;
         let facet_key_text = read_cbor_text_strict(bytes, &mut cursor)?;
         let facet_key = FacetKey::from_str(&facet_key_text)
@@ -978,7 +974,7 @@ mod tests {
     use crate::facet::FacetShape;
     use ed25519_dalek::{Signer, SigningKey};
 
-    use crate::{FacetReference, ReferenceDocumentId, ReferenceError};
+    use crate::{FacetReference, ReferenceDocId, ReferenceError};
 
     fn facet_key(value: &str) -> FacetKey {
         FacetKey::from_str(value).unwrap()
@@ -1030,7 +1026,7 @@ mod tests {
 
     fn claim_for(value: &NativeValue) -> FacetClaim {
         FacetClaim {
-            origin_document: DocumentId::new(b"doc"),
+            origin_document: DocId::new(b"doc"),
             facet_key: facet_key("org.example.note/main"),
             chosen_uuid: uuid7(1),
             actor_uuid: uuid7(2),
@@ -1310,7 +1306,7 @@ mod tests {
         assert_eq!(signed.signature_id().unwrap().as_bytes().len(), CID_LENGTH);
         let mut altered = Vec::new();
         let mut wrong = claim.clone();
-        wrong.origin_document = DocumentId::new(b"another-document");
+        wrong.origin_document = DocId::new(b"another-document");
         altered.push(wrong);
         let mut wrong = claim.clone();
         wrong.facet_key = facet_key("org.example.note/mainx");
@@ -1630,7 +1626,7 @@ mod tests {
                 "actor" => { dmeta.actors.remove(&claim.actor_uuid).unwrap(); }
                 "alias" => { dmeta.facet_uuids.remove(&claim.chosen_uuid).unwrap(); }
                 "document" => { dmeta.branch_uuids.remove(&uuid7(9)).unwrap(); }
-                "rebound document" => { dmeta.branch_uuids.insert(uuid7(9), DocumentId::new(b"other")).unwrap(); }
+                "rebound document" => { dmeta.branch_uuids.insert(uuid7(9), DocId::new(b"other")).unwrap(); }
                 "certificate" => dmeta.actors.get_mut(&claim.actor_uuid).unwrap().delegation = None,
                 "issuer" => issuers.clear(),
                 other => panic!("unknown case: {other}"),
@@ -1649,8 +1645,8 @@ mod tests {
         intact: ("none", true, VerificationState::Accepted),
         missing_actor_is_invalid: ("actor", true, VerificationState::Rejected),
         missing_alias_is_invalid: ("alias", true, VerificationState::Rejected),
-        unbound_document_uuid_is_invalid: ("document", true, VerificationState::Rejected),
-        document_uuid_bound_elsewhere_is_invalid: ("rebound document", true, VerificationState::Rejected),
+        unbound_doc_uuid_is_invalid: ("document", true, VerificationState::Rejected),
+        doc_uuid_bound_elsewhere_is_invalid: ("rebound document", true, VerificationState::Rejected),
         missing_certificate_is_invalid: ("certificate", true, VerificationState::Rejected),
         unknown_external_issuer_is_pending: ("issuer", true, VerificationState::Pending),
         unsupplied_message_is_pending: ("none", false, VerificationState::Pending),
@@ -1851,7 +1847,7 @@ mod tests {
         let predecessor_b = cid_with(2);
         let value = native_value();
         let source_claim = FacetClaim {
-            origin_document: DocumentId::new(b"origin-a"),
+            origin_document: DocId::new(b"origin-a"),
             predecessors: vec![
                 predecessor_b.clone(),
                 predecessor_a.clone(),
@@ -1885,7 +1881,7 @@ mod tests {
         let mut wrong_actor = source_claim.clone();
         wrong_actor.actor_uuid = uuid7(10);
         let mut wrong_origin = source_claim;
-        wrong_origin.origin_document = DocumentId::new(b"branch-b");
+        wrong_origin.origin_document = DocId::new(b"branch-b");
         for wrong in [
             wrong_frontier,
             wrong_facet,
@@ -1899,7 +1895,7 @@ mod tests {
             ));
         }
         let mut wrong_origin = witness.clone();
-        wrong_origin.inherited.as_mut().unwrap().origin_doc = DocumentId::new(b"branch-b");
+        wrong_origin.inherited.as_mut().unwrap().origin_doc = DocId::new(b"branch-b");
         assert!(matches!(
             wrong_origin.authenticate(&actor, None),
             Err(DmetaError::WrongContext)
@@ -1975,7 +1971,7 @@ mod tests {
     fn a_facet_key_with_slashes_and_non_utf8_survives_the_claim_and_the_uri() {
         let key = FacetKey::new("org.example.note", b"main/bytes/\x80".to_vec()).unwrap();
         let claim = FacetClaim {
-            origin_document: DocumentId::new(b"doc"),
+            origin_document: DocId::new(b"doc"),
             facet_key: key.clone(),
             chosen_uuid: uuid7(12),
             actor_uuid: uuid7(2),
@@ -1988,8 +1984,7 @@ mod tests {
         assert_eq!(FacetKey::from_str(&key.to_string()).unwrap(), key);
         assert!(key.to_string().contains("\\x80"));
 
-        let reference =
-            FacetReference::new(ReferenceDocumentId::SelfDocument, key.clone()).unwrap();
+        let reference = FacetReference::new(ReferenceDocId::SelfDoc, key.clone()).unwrap();
         let uri = reference.to_uri_string().unwrap();
         assert!(uri.contains("%5Cx80"));
         assert_eq!(FacetReference::parse(&uri).unwrap().key(), &key);

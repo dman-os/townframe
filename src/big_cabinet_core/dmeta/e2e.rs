@@ -1,5 +1,5 @@
 use super::{
-    ActorMetadata, Attribution, Cid, ClaimOperation, Dmeta, DmetaError, DocumentId, Evidence,
+    ActorMetadata, Attribution, Cid, ClaimOperation, Dmeta, DmetaError, DocId, Evidence,
     FacetClaim, FacetMetadata, FacetSignature, FacetValue, MultibaseKey, NativeValue,
     SignatureBytes, SignedFacetClaim, Uuid7, VerificationState, cid_of, encode_native,
 };
@@ -24,7 +24,7 @@ fn current_value(doc: &impl ReadDoc) -> NativeValue {
 fn signed_claim(doc: &impl ReadDoc, actor: u8, predecessors: Vec<Cid>) -> SignedFacetClaim {
     let value = current_value(doc);
     let claim = FacetClaim {
-        origin_document: DocumentId::new(b"facet-verification-e2e"),
+        origin_document: DocId::new(b"facet-verification-e2e"),
         facet_key: FACET.parse().unwrap(),
         chosen_uuid: uuid7(1),
         actor_uuid: uuid7(100 + u128::from(actor)),
@@ -66,7 +66,7 @@ fn fixture() -> (Automerge, ObjId, SignedFacetClaim) {
 fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> VerificationState {
     let mut dmeta = Dmeta::new(jiff::Timestamp::from_second(0).unwrap());
     let doc_uuid = dmeta
-        .document_uuid(&DocumentId::new(b"facet-verification-e2e"), uuid7(9))
+        .doc_uuid(&DocId::new(b"facet-verification-e2e"), uuid7(9))
         .unwrap();
     let mut issuers = BTreeMap::new();
     let mut signatures = Vec::new();
@@ -75,7 +75,7 @@ fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> Verification
     for signed in claims {
         assert_eq!(
             signed.claim.origin_document,
-            DocumentId::new(b"facet-verification-e2e")
+            DocId::new(b"facet-verification-e2e")
         );
         assert_eq!(signed.claim.facet_key, FACET.parse().unwrap());
         let attribution = Attribution {
