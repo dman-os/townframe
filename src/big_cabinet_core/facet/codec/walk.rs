@@ -35,15 +35,16 @@ fn protocol_key(key: &str) -> bool {
 /// of the convention: a float arriving from a foreign author is stored as the `F64` it is, and only
 /// a position *declared* a float emits the decimal string the convention spells. Refusing an
 /// undeclared one would make a field nobody described stricter than a field somebody did.
-fn canonical(value: &Value, path: &Path<'_>) -> Result<(), CodecError> {
+fn canonical(value: &Value, path: &Path<'_>, lexicon: bool) -> Result<(), CodecError> {
     match value {
         Value::Number(number) => {
-            let outside = number
-                .as_i64()
-                .is_some_and(|integer| !js_safe_integer(i128::from(integer)))
-                || number
-                    .as_u64()
-                    .is_some_and(|integer| integer > JS_SAFE_INTEGER_MAX as u64);
+            let outside = !lexicon
+                && (number
+                    .as_i64()
+                    .is_some_and(|integer| !js_safe_integer(i128::from(integer)))
+                    || number
+                        .as_u64()
+                        .is_some_and(|integer| integer > JS_SAFE_INTEGER_MAX as u64));
             if outside {
                 return Err(at(
                     path,
@@ -69,20 +70,20 @@ fn canonical(value: &Value, path: &Path<'_>) -> Result<(), CodecError> {
                 return Ok(());
             }
             for (key, member) in members {
-                if key.starts_with('$') && !protocol_key(key) {
+                if !lexicon && key.starts_with("$") && !protocol_key(key) {
                     return Err(at(
                         &Path::key(path, key),
                         CodecError::ReservedKey { key: key.clone() },
                     ));
                 }
-                canonical(member, &Path::key(path, key))?;
+                canonical(member, &Path::key(path, key), lexicon)?;
             }
             Ok(())
         }
         Value::Array(items) => items
             .iter()
             .enumerate()
-            .try_for_each(|(index, item)| canonical(item, &Path::index(path, index))),
+            .try_for_each(|(index, item)| canonical(item, &Path::index(path, index), lexicon)),
         _ => Ok(()),
     }
 }
@@ -503,7 +504,9 @@ impl<'a> Position<'a> {
             // A position our keyword is on is spelled by the codec, and a float is the one whose
             // storage and JSON are of different kinds: the document holds the number and the
             // convention carries the string, so both spellings are the float branch.
-            Some(Codec::Float) => Ok(matches!(kind, Kind::Number | Kind::String)),
+            Some(Codec::Float | Codec::Uint | Codec::Datetime) => {
+                Ok(matches!(kind, Kind::Number | Kind::String))
+            }
             _ => match branch.get("type") {
                 None => Ok(true),
                 Some(Value::String(one)) => Ok(kind.matches(one)),
@@ -536,7 +539,9 @@ impl<'a> Position<'a> {
     /// Refuse a value the declarations here cannot hold. Nothing is written afterwards, so this is
     /// where a declaration turns into an assertion.
     pub(super) fn check<'p>(&self, value: &'p Value, path: &'p Path<'p>) -> Result<(), CodecError> {
-        if let Value::Number(number) = value
+        let lexicon = self.document.get(crate::facet::input::DATA) == Some(&Value::Bool(true));
+        if !lexicon
+            && let Value::Number(number) = value
             && (number
                 .as_i64()
                 .is_some_and(|integer| !js_safe_integer(i128::from(integer)))
@@ -552,8 +557,10 @@ impl<'a> Position<'a> {
             ));
         }
         if let Value::Object(members) = value {
-            for key in members.keys().filter(|key| key.starts_with('$')) {
-                if !protocol_key(key) {
+            for key in members.keys().filter(|key| key.starts_with("$")) {
+                if self.document.get(crate::facet::input::DATA) != Some(&Value::Bool(true))
+                    && !protocol_key(key)
+                {
                     return Err(at(
                         &Path::key(path, key),
                         CodecError::ReservedKey { key: key.clone() },
@@ -577,7 +584,7 @@ impl<'a> Position<'a> {
             // Nothing declares this position, which is not the same as nothing checking it: an
             // unknown member a peer wrote is still a value in this document, and the data model
             // reaches every depth of it.
-            return canonical(value, path);
+            return canonical(value, path, lexicon);
         };
         if type_mentions(schema, "integer")
             && let Value::Number(number) = value
@@ -614,7 +621,10 @@ impl<'a> Position<'a> {
                 for (key, member) in members {
                     let child = Path::key(path, key);
                     let declared = properties.and_then(|properties| properties.get(key));
-                    if declared.is_none() && key.starts_with('$') {
+                    if self.document.get(crate::facet::input::DATA) != Some(&Value::Bool(true))
+                        && declared.is_none()
+                        && key.starts_with("$")
+                    {
                         return Err(at(
                             &child,
                             CodecError::ReservedKey {
@@ -811,7 +821,12 @@ impl<'a> Position<'a> {
         match stored {
             automerge::Value::Scalar(scalar) => {
                 let raw = raw_fallback(schema).map_err(|err| refusal(path, err))?;
-                scalar_json(&scalar, path, raw)
+                scalar_json(
+                    &scalar,
+                    path,
+                    raw,
+                    self.document.get(crate::facet::input::DATA) == Some(&Value::Bool(true)),
+                )
             }
             automerge::Value::Object(ObjType::Map | ObjType::Table) => {
                 let mut members = serde_json::Map::new();
@@ -1012,12 +1027,17 @@ pub(super) fn raw_fallback(schema: Option<&Value>) -> Result<bool, CodecError> {
 /// storage form other than that is refused: a counter read as a plain number, or bytes read as a
 /// string, is a value whose type the writer intended to be read differently. Where nothing is
 /// declared (`raw_fallback`), the scalars Automerge holds are what the raw spellings carry.
-fn scalar_json(scalar: &ScalarValue, path: &Path<'_>, raw: bool) -> Result<Value, HydrateError> {
+fn scalar_json(
+    scalar: &ScalarValue,
+    path: &Path<'_>,
+    raw: bool,
+    lexicon: bool,
+) -> Result<Value, HydrateError> {
     let undeclared = |held: &'static str| refusal(path, CodecError::Undeclared { held });
     match scalar {
         ScalarValue::Null => Ok(Value::Null),
         ScalarValue::Boolean(stated) => Ok(Value::Bool(*stated)),
-        ScalarValue::Int(stated) if js_safe_integer(i128::from(*stated)) => {
+        ScalarValue::Int(stated) if lexicon || js_safe_integer(i128::from(*stated)) => {
             Ok(Value::Number((*stated).into()))
         }
         ScalarValue::Int(stated) => Err(refusal(
@@ -1026,7 +1046,9 @@ fn scalar_json(scalar: &ScalarValue, path: &Path<'_>, raw: bool) -> Result<Value
                 stated: stated.to_string(),
             },
         )),
-        ScalarValue::Uint(stated) if *stated <= JS_SAFE_INTEGER_MAX as u64 => {
+        ScalarValue::Uint(stated)
+            if (lexicon && *stated <= i64::MAX as u64) || *stated <= JS_SAFE_INTEGER_MAX as u64 =>
+        {
             Ok(Value::Number((*stated).into()))
         }
         ScalarValue::Uint(stated) => Err(refusal(

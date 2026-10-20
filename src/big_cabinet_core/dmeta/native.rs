@@ -6,7 +6,9 @@
 //! and `Int`. A float is always binary64 with canonical NaN bits. The repository reads this tree
 //! back out of the transaction and passes the bytes to [`super::cid_of`].
 
-use automerge::{ObjId, ObjType, Prop, ReadDoc, ScalarValueRef, Value, ValueRef};
+use automerge::{
+    ChangeHash, ObjId, ObjType, Prop, ReadDoc, ScalarValue, ScalarValueRef, Value, ValueRef,
+};
 use std::collections::BTreeMap;
 
 /// A binary64 with canonical NaN bits and distinct signed zeros.
@@ -57,9 +59,21 @@ pub enum NativeReadError {
     ResourceLimit(&'static str),
 }
 
-struct NativeReadBudget {
-    nodes: usize,
-    bytes: usize,
+#[derive(Debug, Clone)]
+pub struct NativeReadBudget {
+    pub nodes: usize,
+    pub bytes: usize,
+    pub max_depth: usize,
+}
+
+impl Default for NativeReadBudget {
+    fn default() -> Self {
+        Self {
+            nodes: Self::MAX_NODES,
+            bytes: Self::MAX_BYTES,
+            max_depth: Self::MAX_DEPTH,
+        }
+    }
 }
 
 impl NativeReadBudget {
@@ -68,7 +82,7 @@ impl NativeReadBudget {
     const MAX_BYTES: usize = 16 * 1024 * 1024;
 
     fn visit(&mut self, depth: usize) -> Result<(), NativeReadError> {
-        if depth >= Self::MAX_DEPTH {
+        if depth >= self.max_depth {
             return Err(NativeReadError::ResourceLimit("depth"));
         }
         self.nodes = self
@@ -93,18 +107,60 @@ impl NativeValue {
         object: &ObjId,
         prop: impl Into<Prop>,
     ) -> Result<Option<Self>, NativeReadError> {
-        let Some((value, id)) = doc.get(object, prop)? else {
+        Self::read(
+            doc,
+            object,
+            prop.into(),
+            None,
+            &mut NativeReadBudget::default(),
+        )
+    }
+
+    pub fn read_at_heads<D: ReadDoc + ?Sized>(
+        doc: &D,
+        object: &ObjId,
+        prop: impl Into<Prop>,
+        heads: &[ChangeHash],
+        budget: &mut NativeReadBudget,
+    ) -> Result<Option<Self>, NativeReadError> {
+        Self::read(doc, object, prop.into(), Some(heads), budget)
+    }
+
+    fn read<D: ReadDoc + ?Sized>(
+        doc: &D,
+        object: &ObjId,
+        prop: Prop,
+        heads: Option<&[ChangeHash]>,
+        budget: &mut NativeReadBudget,
+    ) -> Result<Option<Self>, NativeReadError> {
+        let entry = match heads {
+            Some(heads) => doc.get_at(object, prop, heads)?,
+            None => doc.get(object, prop)?,
+        };
+        let Some((value, id)) = entry else {
             return Ok(None);
         };
         let value = match value {
             Value::Object(kind) => ValueRef::Object(kind),
-            Value::Scalar(value) => ValueRef::Scalar(value.into_owned().into()),
+            Value::Scalar(value) => {
+                let bytes = match value.as_ref() {
+                    ScalarValue::Str(value) => value.len(),
+                    ScalarValue::Bytes(value) => value.len(),
+                    _ => 0,
+                };
+                if bytes > budget.bytes {
+                    return Err(NativeReadError::ResourceLimit("bytes"));
+                }
+                if budget.nodes == 0 {
+                    return Err(NativeReadError::ResourceLimit("nodes"));
+                }
+                if budget.max_depth == 0 {
+                    return Err(NativeReadError::ResourceLimit("depth"));
+                }
+                ValueRef::Scalar(value.into_owned().into())
+            }
         };
-        let mut budget = NativeReadBudget {
-            nodes: NativeReadBudget::MAX_NODES,
-            bytes: NativeReadBudget::MAX_BYTES,
-        };
-        Self::read_value(doc, &id, value, 0, &mut budget).map(Some)
+        Self::read_value(doc, &id, value, 0, heads, budget).map(Some)
     }
 
     fn read_value<D: ReadDoc + ?Sized>(
@@ -112,6 +168,7 @@ impl NativeValue {
         id: &ObjId,
         value: ValueRef<'_>,
         depth: usize,
+        heads: Option<&[ChangeHash]>,
         budget: &mut NativeReadBudget,
     ) -> Result<Self, NativeReadError> {
         budget.visit(depth)?;
@@ -139,38 +196,59 @@ impl NativeValue {
             ValueRef::Object(ObjType::Table) => Err(NativeReadError::Unsupported("table")),
             ValueRef::Object(ObjType::Map) => {
                 let mut entries = BTreeMap::new();
-                for item in doc.map_range(id, ..) {
+                let members = match heads {
+                    Some(heads) => doc.map_range_at(id, .., heads),
+                    None => doc.map_range(id, ..),
+                };
+                for item in members {
                     budget.consume_bytes(item.key.len())?;
-                    let value = Self::read_value(doc, &item.id(), item.value, depth + 1, budget)?;
+                    let value =
+                        Self::read_value(doc, &item.id(), item.value, depth + 1, heads, budget)?;
                     assert!(entries.insert(item.key.into_owned(), value).is_none());
                 }
                 Ok(Self::Map(entries))
             }
             ValueRef::Object(ObjType::List) => {
                 let mut items = Vec::new();
-                for item in doc.list_range(id, ..) {
+                let entries = match heads {
+                    Some(heads) => doc.list_range_at(id, .., heads),
+                    None => doc.list_range(id, ..),
+                };
+                for item in entries {
                     items.push(Self::read_value(
                         doc,
                         &item.id(),
                         item.value,
                         depth + 1,
+                        heads,
                         budget,
                     )?);
                 }
                 Ok(Self::List(items))
             }
             ValueRef::Object(ObjType::Text) => {
-                if !doc.marks(id)?.is_empty() {
+                let marks = match heads {
+                    Some(heads) => doc.marks_at(id, heads)?,
+                    None => doc.marks(id)?,
+                };
+                if !marks.is_empty() {
                     return Err(NativeReadError::Unsupported("text marks"));
                 }
-                for item in doc.list_range(id, ..) {
+                let entries = match heads {
+                    Some(heads) => doc.list_range_at(id, .., heads),
+                    None => doc.list_range(id, ..),
+                };
+                for item in entries {
                     budget.visit(depth)?;
                     let ValueRef::Scalar(ScalarValueRef::Str(value)) = item.value else {
                         return Err(NativeReadError::Unsupported("embedded text value"));
                     };
                     budget.consume_bytes(value.len())?;
                 }
-                Ok(Self::Text(doc.text(id)?))
+                Ok(Self::Text(match heads {
+                    Some(heads) => doc.text_at(id, heads)?,
+                    None => doc.text(id)?,
+                }))
             }
         }
     }
@@ -321,6 +399,48 @@ mod tests {
         transaction::Transactable,
     };
     use ciborium::Value as Cbor;
+
+    #[test]
+    fn historical_reads_use_one_shared_budget_and_preserve_native_kinds() {
+        let mut doc = Automerge::new();
+        let mut tx = doc.transaction();
+        let map = tx
+            .put_object(automerge::ROOT, "facet", ObjType::Map)
+            .unwrap();
+        tx.put(&map, "counter", ScalarValue::Counter(3.into()))
+            .unwrap();
+        let text = tx.put_object(&map, "text", ObjType::Text).unwrap();
+        tx.splice_text(&text, 0, 0, "old").unwrap();
+        tx.commit();
+        let heads = doc.get_heads();
+        let expected = NativeValue::read_at(&doc, &automerge::ROOT, "facet").unwrap();
+        let mut tx = doc.transaction();
+        tx.increment(&map, "counter", 2).unwrap();
+        tx.splice_text(&text, 0, 3, "new").unwrap();
+        tx.commit();
+        let mut budget = NativeReadBudget::default();
+        assert_eq!(
+            NativeValue::read_at_heads(&doc, &automerge::ROOT, "facet", &heads, &mut budget)
+                .unwrap(),
+            expected
+        );
+        assert_ne!(
+            NativeValue::read_at(&doc, &automerge::ROOT, "facet").unwrap(),
+            expected
+        );
+        let mut budget = NativeReadBudget {
+            nodes: 1,
+            ..NativeReadBudget::default()
+        };
+        assert_eq!(
+            NativeValue::read_at_heads(&doc, &map, "counter", &heads, &mut budget).unwrap(),
+            Some(NativeValue::Counter(3))
+        );
+        assert!(matches!(
+            NativeValue::read_at_heads(&doc, &map, "counter", &heads, &mut budget),
+            Err(NativeReadError::ResourceLimit("nodes"))
+        ));
+    }
 
     fn assert_fixture(value: &NativeValue, expected: &[u8]) -> Cbor {
         let encoded = encode_native(value);

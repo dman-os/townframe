@@ -1,0 +1,12 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: mode
+---
+{
+  "mode": "ifFacetsUnchanged",
+  "facets": {
+    "org.example.note/main": [
+      "0202020202020202020202020202020202020202020202020202020202020202"
+    ]
+  }
+}

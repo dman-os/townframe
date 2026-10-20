@@ -192,6 +192,10 @@ fn compatible(scalar: &ScalarValue, declared: Declared, schema: Option<&Value>) 
     match declared {
         Declared::Codec(Codec::Bytes) => matches!(scalar, ScalarValue::Bytes(_)),
         Declared::Codec(Codec::Timestamp) => matches!(scalar, ScalarValue::Timestamp(_)),
+        Declared::Codec(Codec::Datetime) => {
+            matches!(scalar, ScalarValue::Timestamp(_) | ScalarValue::Str(_))
+        }
+        Declared::Codec(Codec::Uint) => matches!(scalar, ScalarValue::Uint(_)),
         Declared::Codec(Codec::Counter) => matches!(scalar, ScalarValue::Counter(_)),
         // The one native kind a float's declaration produces is the `F64` its write puts; an
         // integer or an unsigned there is the token-kind drift the declaration fixes.
@@ -226,6 +230,11 @@ fn same_scalar(scalar: &ScalarValue, value: &Value, declared: Declared) -> bool 
         (ScalarValue::Null, Value::Null) => true,
         (ScalarValue::Boolean(stated), Value::Bool(submitted)) => stated == submitted,
         (ScalarValue::Int(stated), Value::Number(submitted)) => submitted.as_i64() == Some(*stated),
+        (ScalarValue::Uint(stated), Value::String(submitted))
+            if declared == Declared::Codec(Codec::Uint) =>
+        {
+            submitted.parse::<u64>().ok() == Some(*stated)
+        }
         (ScalarValue::Uint(stated), Value::Number(submitted)) => {
             submitted.as_u64() == Some(*stated)
         }
@@ -244,7 +253,11 @@ fn same_scalar(scalar: &ScalarValue, value: &Value, declared: Declared) -> bool 
             bytes_value(submitted).as_deref() == Some(stated.as_slice())
         }
         (ScalarValue::Timestamp(stated), Value::String(submitted)) => {
-            instant_millis(submitted) == Some(*stated)
+            if declared == Declared::Codec(Codec::Datetime) {
+                super::instant_string(*stated) == *submitted
+            } else {
+                instant_millis(submitted) == Some(*stated)
+            }
         }
         _ => false,
     }

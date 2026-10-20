@@ -1,0 +1,10 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: error
+---
+{
+  "InvalidValue": {
+    "facet_key": "org.example.note/main",
+    "reason": "not a string"
+  }
+}

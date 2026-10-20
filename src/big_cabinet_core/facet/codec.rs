@@ -148,16 +148,20 @@ pub enum Codec {
     Float,
     /// A collaborative text in the document, a string in JSON.
     Text,
+    Uint,
+    Datetime,
 }
 
 impl Codec {
     /// Every shape a declaration can state.
-    pub const ALL: [Codec; 5] = [
+    pub const ALL: [Codec; 7] = [
         Codec::Bytes,
         Codec::Timestamp,
         Codec::Counter,
         Codec::Text,
         Codec::Float,
+        Codec::Uint,
+        Codec::Datetime,
     ];
 
     /// How this shape is spelled in our keyword, and how it is named in a message.
@@ -168,6 +172,8 @@ impl Codec {
             Codec::Counter => "counter",
             Codec::Float => "float",
             Codec::Text => "text",
+            Codec::Uint => "uint",
+            Codec::Datetime => "datetime",
         }
     }
 
@@ -220,6 +226,16 @@ impl Codec {
                 let stated = value.as_str().expect("checked");
                 reconciler.timestamp(instant_millis(stated).expect("checked"))
             }
+            Codec::Datetime => {
+                let stated = value.as_str().expect("checked");
+                match instant_millis(stated).filter(|millis| instant_string(*millis) == stated) {
+                    Some(millis) => reconciler.timestamp(millis),
+                    None => reconciler.str(stated),
+                }
+            }
+            Codec::Uint => {
+                reconciler.u64(value.as_str().expect("checked").parse().expect("checked"))
+            }
             Codec::Counter => reconciler.counter()?.set(value.as_i64().expect("checked")),
             Codec::Text => reconciler.text()?.update(value.as_str().expect("checked")),
             Codec::Float => {
@@ -253,6 +269,16 @@ impl Codec {
                 }
                 other => Err(unexpected(stored_scalar(other))),
             },
+            (Codec::Uint, automerge::Value::Scalar(stated)) => match stated.as_ref() {
+                ScalarValue::Uint(value) => Ok(Value::String(value.to_string())),
+                ScalarValue::Int(value) if *value >= 0 => Ok(Value::String(value.to_string())),
+                other => Err(unexpected(stored_scalar(other))),
+            },
+            (Codec::Datetime, automerge::Value::Scalar(stated)) => match stated.as_ref() {
+                ScalarValue::Timestamp(millis) => Ok(Value::String(instant_string(*millis))),
+                ScalarValue::Str(value) => Ok(Value::String(value.to_string())),
+                other => Err(unexpected(stored_scalar(other))),
+            },
             (Codec::Timestamp, automerge::Value::Scalar(stated)) => match stated.as_ref() {
                 ScalarValue::Timestamp(millis) => Ok(Value::String(instant_string(*millis))),
                 other => Err(unexpected(stored_scalar(other))),
@@ -271,7 +297,8 @@ impl Codec {
             },
             (Codec::Counter, automerge::Value::Scalar(stated)) => match stated.as_ref() {
                 ScalarValue::Counter(value)
-                    if i64::from(value).unsigned_abs() <= JS_SAFE_INTEGER_MAX as u64 =>
+                    if schema.get(crate::facet::input::KEYWORD).is_some()
+                        || i64::from(value).unsigned_abs() <= JS_SAFE_INTEGER_MAX as u64 =>
                 {
                     Ok(Value::Number(i64::from(value).into()))
                 }
@@ -307,6 +334,26 @@ impl Codec {
                     stated: found.to_owned(),
                 }),
             },
+            Codec::Datetime => value
+                .as_str()
+                .filter(|value| crate::facet::input::datetime(value))
+                .map(|_| ())
+                .ok_or_else(|| CodecError::NotAnInstant {
+                    stated: found.to_owned(),
+                }),
+            Codec::Uint => value
+                .as_str()
+                .filter(|value| {
+                    !value.is_empty()
+                        && value.bytes().all(|byte| byte.is_ascii_digit())
+                        && (value.len() == 1 || !value.starts_with('0'))
+                })
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|_| ())
+                .ok_or_else(|| CodecError::SchemaViolation {
+                    path: String::new(),
+                    message: "expected a stringified uint64".to_owned(),
+                }),
             Codec::Counter => value
                 .as_i64()
                 .map(|_value| ())
@@ -392,6 +439,11 @@ fn instant_string(millis: i64) -> String {
 /// this was never a whole number) and the three values JSON cannot state at all by the names every
 /// parser reads.
 pub(super) fn float_string(stated: f64, at_f32: bool) -> String {
+    let stated = if at_f32 {
+        (stated as f32) as f64
+    } else {
+        stated
+    };
     match stated.classify() {
         FpCategory::Nan => return "NaN".to_owned(),
         FpCategory::Infinite if stated.is_sign_negative() => return "-Infinity".to_owned(),
@@ -433,7 +485,7 @@ pub fn codec_schema(codec: Codec, schema: Schema) -> Schema {
         Codec::Timestamp => {
             schema.insert(FORMAT.to_owned(), DATE_TIME.into());
         }
-        Codec::Counter | Codec::Text | Codec::Float => {
+        Codec::Counter | Codec::Text | Codec::Float | Codec::Uint | Codec::Datetime => {
             schema.insert(KEYWORD.to_owned(), codec.name().into());
         }
     };

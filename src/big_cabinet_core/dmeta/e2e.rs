@@ -65,6 +65,9 @@ fn fixture() -> (Automerge, ObjId, SignedFacetClaim) {
 
 fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> VerificationState {
     let mut dmeta = Dmeta::new(jiff::Timestamp::from_second(0).unwrap());
+    let doc_uuid = dmeta
+        .document_uuid(&DocumentId::new(b"facet-verification-e2e"), uuid7(9))
+        .unwrap();
     let mut issuers = BTreeMap::new();
     let mut signatures = Vec::new();
     let node = SigningKey::from_bytes(&[250; 32]);
@@ -108,7 +111,7 @@ fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> Verification
         );
         assert!(
             dmeta
-                .actor_uuids
+                .actors
                 .insert(signed.claim.actor_uuid, actor)
                 .is_none()
         );
@@ -122,6 +125,7 @@ fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> Verification
             .unwrap();
         let mut entry = FacetSignature {
             actor_uuid: signed.claim.actor_uuid,
+            doc_uuid,
             signature: signed.signature.clone(),
             message: None,
             inherited: None,
@@ -144,7 +148,6 @@ fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> Verification
     );
     let value = current_value(doc);
     dmeta.verify_facet(
-        &DocumentId::new(b"facet-verification-e2e"),
         &FACET.parse().unwrap(),
         FacetValue::Present(&value),
         &BTreeMap::new(),

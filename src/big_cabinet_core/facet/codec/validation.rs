@@ -5,7 +5,7 @@
 //! branch the content fits, and a member the schema does not name is plain JSON — which is what
 //! makes an open object open.
 
-use super::{CodecError, KEYWORD, declared_member, keyed_map};
+use super::{Codec, CodecError, KEYWORD, declared_member, keyed_map};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -50,8 +50,8 @@ impl jsonschema::Retrieve for CarriedSchemaRetriever {
 impl CompiledSchema {
     /// Compile one carried Bundle schema for reuse by checks and target writes.
     pub fn compile(document: Value) -> Result<Self, CodecError> {
-        reject_unsupported_schema_keywords(&document)?;
-        let validator = jsonschema::options()
+        Self::check_storage_declarations(&document)?;
+        let validator = crate::facet::input::options()
             .with_retriever(CarriedSchemaRetriever)
             .build(&document)
             .map_err(|error| CodecError::InvalidSchema {
@@ -160,7 +160,7 @@ fn compile_branch_validators(document: &Value) -> Result<BranchValidators, Codec
                         }
                     }
                 }
-                let validator = jsonschema::options()
+                let validator = crate::facet::input::options()
                     .with_retriever(CarriedSchemaRetriever)
                     .build(&branch_document)
                     .map_err(|error| CodecError::InvalidSchema {
@@ -174,28 +174,71 @@ fn compile_branch_validators(document: &Value) -> Result<BranchValidators, Codec
     Ok(validators)
 }
 
-fn reject_unsupported_schema_keywords(document: &Value) -> Result<(), CodecError> {
-    for schema in schema_positions(document) {
-        let Some(object) = schema.as_object() else {
-            continue;
-        };
-        if object.contains_key("prefixItems") || object.contains_key("allOf") {
-            return Err(CodecError::InvalidSchema {
+impl CompiledSchema {
+    pub(in crate::facet) fn check_storage_declarations(document: &Value) -> Result<(), CodecError> {
+        for schema in schema_positions(document) {
+            let Some(object) = schema.as_object() else {
+                continue;
+            };
+            if object.contains_key("prefixItems") || object.contains_key("allOf") {
+                return Err(CodecError::InvalidSchema {
                 message: "the carried JSON Schema uses an unsupported composition keyword (`allOf` or `prefixItems`)".to_owned(),
             });
-        }
-        if object.contains_key("anyOf") && object.contains_key("oneOf") {
-            return Err(CodecError::InvalidSchema {
+            }
+            if object.contains_key("anyOf") && object.contains_key("oneOf") {
+                return Err(CodecError::InvalidSchema {
                 message: "the carried JSON Schema uses both `anyOf` and `oneOf` at one position, which this codec cannot dispatch without composing branch candidates".to_owned(),
             });
+            }
+            keyed_map(object).map_err(|reason| CodecError::InvalidSchema {
+                message: format!(
+                    "the carried JSON Schema is not a keyed map this codec can store: {reason}"
+                ),
+            })?;
+            let Some(codec) = Codec::of(schema)? else {
+                continue;
+            };
+            if ["$ref", "anyOf", "oneOf"]
+                .iter()
+                .any(|keyword| object.contains_key(*keyword))
+            {
+                return Err(CodecError::InvalidSchema {
+                    message: format!(
+                        "the {} storage declaration sits beside a reference or branches that the codec resolves before reading the declaration",
+                        codec.name()
+                    ),
+                });
+            }
+            let expected = match codec {
+                Codec::Bytes => "object",
+                Codec::Timestamp | Codec::Float | Codec::Text | Codec::Uint | Codec::Datetime => {
+                    "string"
+                }
+                Codec::Counter => "integer",
+            };
+            if let Some(stated) = object.get("type") {
+                let agrees = match stated {
+                    Value::String(kind) => kind == expected,
+                    Value::Array(kinds) => {
+                        kinds.iter().any(|kind| kind.as_str() == Some(expected))
+                            && kinds.iter().all(|kind| {
+                                kind.as_str() == Some(expected) || kind.as_str() == Some("null")
+                            })
+                    }
+                    _ => false,
+                };
+                if !agrees {
+                    return Err(CodecError::InvalidSchema {
+                        message: format!(
+                            "the {} storage declaration requires JSON type `{expected}`, not {stated}",
+                            codec.name()
+                        ),
+                    });
+                }
+            }
         }
-        keyed_map(object).map_err(|reason| CodecError::InvalidSchema {
-            message: format!(
-                "the carried JSON Schema is not a keyed map this codec can store: {reason}"
-            ),
-        })?;
+        Ok(())
     }
-    Ok(())
 }
 
 /// Every schema in a document, reached through schema positions only.
@@ -353,10 +396,18 @@ fn normalize_authoring(
                     continue;
                 }
                 if schema.get(KEYWORD).and_then(Value::as_str) == Some("float")
-                    && let Some(number) = value.as_f64()
+                    && let Some(number) = super::parse_float(&value)
                 {
                     let at_f32 = schema.get("format").and_then(Value::as_str) == Some("float");
                     results.push(Some(Value::String(super::float_string(number, at_f32))));
+                    continue;
+                }
+                if schema.get(KEYWORD).and_then(Value::as_str) == Some("uint")
+                    && let Some(number) = value
+                        .as_u64()
+                        .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()))
+                {
+                    results.push(Some(Value::String(number.to_string())));
                     continue;
                 }
                 match value {
@@ -413,7 +464,7 @@ fn normalize_authoring(
                         tasks.push(NormalizationTask::Visit {
                             schema: member_schema,
                             value,
-                            hops: hops - 1,
+                            hops: HOPS,
                             depth,
                         });
                     } else {
@@ -461,7 +512,7 @@ fn normalize_authoring(
                         tasks.push(NormalizationTask::Visit {
                             schema: item_schema,
                             value,
-                            hops: hops - 1,
+                            hops: HOPS,
                             depth,
                         });
                     } else {
@@ -589,7 +640,11 @@ fn resolve_schema<'a>(
 }
 
 fn authoring_matches(schema: &Value, value: &Value) -> bool {
-    if schema.get(KEYWORD).and_then(Value::as_str) == Some("float") && value.is_number() {
+    if matches!(
+        schema.get(KEYWORD).and_then(Value::as_str),
+        Some("float" | "uint")
+    ) && value.is_number()
+    {
         return true;
     }
     let Some(kind) = schema.get("type") else {
@@ -617,5 +672,92 @@ fn authoring_matches(schema: &Value, value: &Value) -> bool {
         Value::String(kind) => matches(kind),
         Value::Array(kinds) => kinds.iter().filter_map(Value::as_str).any(matches),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn compilation_rejects_contradictory_storage_declarations_at_nested_positions() {
+        for (codec, kind) in [
+            ("bytes", "string"),
+            ("timestamp", "integer"),
+            ("float", "number"),
+            ("text", "integer"),
+            ("counter", "boolean"),
+        ] {
+            let declaration = json!({"type": kind, "x-automerge": codec});
+            for document in [
+                declaration.clone(),
+                json!({"type": "array", "items": declaration}),
+                json!({"$ref": "#/$defs/Carried", "$defs": {"Carried": declaration}}),
+            ] {
+                let error = CompiledSchema::compile(document).expect_err("contradictory codec");
+                assert!(matches!(
+                    error,
+                    CodecError::InvalidSchema { message }
+                        if message.contains(codec) && message.contains("requires JSON type")
+                ));
+            }
+        }
+        assert!(matches!(
+            CompiledSchema::compile(json!({"type": "integer", "format": "date-time"})),
+            Err(CodecError::InvalidSchema { message }) if message.contains("timestamp")
+        ));
+    }
+
+    #[test]
+    fn compilation_refuses_unknown_or_bypassed_storage_declarations() {
+        assert!(matches!(
+            CompiledSchema::compile(json!({"type": "string", "x-automerge": "future"})),
+            Err(CodecError::Unknown { stated }) if stated == "future"
+        ));
+        assert!(matches!(
+            CompiledSchema::compile(json!({"type": "string", "x-automerge": 1})),
+            Err(CodecError::NotASpelling { stated }) if stated == json!(1)
+        ));
+        for document in [
+            json!({
+                "$ref": "#/$defs/Carried",
+                "$defs": {"Carried": {"type": "string"}},
+                "x-automerge": "text"
+            }),
+            json!({"anyOf": [{"type": "string"}], "x-automerge": "text"}),
+            json!({"oneOf": [{"type": "string"}], "format": "date-time"}),
+        ] {
+            assert!(matches!(
+                CompiledSchema::compile(document),
+                Err(CodecError::InvalidSchema { message }) if message.contains("resolves before")
+            ));
+        }
+    }
+
+    #[test]
+    fn compilation_preserves_supported_nullable_and_referenced_codec_declarations() {
+        for (codec, kind) in [
+            ("bytes", "object"),
+            ("timestamp", "string"),
+            ("float", "string"),
+            ("text", "string"),
+            ("counter", "integer"),
+        ] {
+            let declaration = json!({"type": [kind, "null"], "x-automerge": codec});
+            let document = json!({
+                "$ref": "#/$defs/Carried",
+                "$defs": {"Carried": declaration},
+                "const": {"x-automerge": "future", "type": "not-a-type"}
+            });
+            assert_eq!(
+                CompiledSchema::compile(document.clone())
+                    .expect("codec declarations are schema positions, not literal data")
+                    .document(),
+                &document
+            );
+            CompiledSchema::compile(json!({"x-automerge": codec}))
+                .expect("a codec without a redundant JSON type still declares its storage");
+        }
     }
 }

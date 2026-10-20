@@ -16,7 +16,11 @@ mod value;
 #[cfg(feature = "schemars")]
 mod codec;
 #[cfg(feature = "schemars")]
+mod input;
+#[cfg(feature = "schemars")]
 pub mod lexicon;
+#[cfg(feature = "schemars")]
+pub use input::LexiconAdmissionError;
 #[cfg(feature = "schemars")]
 mod universe;
 #[cfg(feature = "schemars")]

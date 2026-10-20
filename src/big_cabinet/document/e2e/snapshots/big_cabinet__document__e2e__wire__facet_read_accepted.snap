@@ -1,0 +1,14 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: read
+---
+{
+  "status": "accepted",
+  "value": {
+    "$type": "org.example.note",
+    "value": "hello"
+  },
+  "facet_heads": [
+    "0101010101010101010101010101010101010101010101010101010101010101"
+  ]
+}

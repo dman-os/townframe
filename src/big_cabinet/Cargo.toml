@@ -12,8 +12,9 @@ path = "lib.rs"
 [dependencies]
 # internal
 utils_rs.workspace = true
-big_cabinet_core = { path = "../big_cabinet_core" }
+big_cabinet_core = { path = "../big_cabinet_core", features = ["schemars"] }
 big_sync_core.workspace = true
+big_sync.workspace = true
 big_repo.workspace = true
 secrets_rs.workspace = true
 service_utils_rs.workspace = true
@@ -30,6 +31,7 @@ serde_json.workspace = true
 blake3.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 atproto-dasl.workspace = true
+jiff.workspace = true
 
 # crypto and identity
 ed25519-dalek.workspace = true
@@ -42,6 +44,8 @@ sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
+insta = { workspace = true, features = ["json"] }
+proptest.workspace = true
 keyring-core = { version = "1.0", default-features = false }
 tempfile.workspace = true
 url.workspace = true

@@ -22,15 +22,19 @@
 
 mod attribution;
 mod native;
+#[cfg(feature = "schemars")]
+mod storage;
 mod verification;
 
 #[cfg(test)]
 mod e2e;
 
 pub use attribution::{Attribution, AttributionError};
+#[cfg(feature = "schemars")]
+pub use storage::StorageError;
 
 use jiff::Timestamp;
-pub use native::{CanonicalF64, NativeReadError, NativeValue, encode_native};
+pub use native::{CanonicalF64, NativeReadBudget, NativeReadError, NativeValue, encode_native};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -156,7 +160,14 @@ pub struct Dmeta {
     #[serde(default)]
     pub updated_at: Vec<Timestamp>,
     #[serde(default)]
-    pub actor_uuids: BTreeMap<Uuid7, ActorMetadata>,
+    pub actors: BTreeMap<Uuid7, ActorMetadata>,
+    /// Which document each `docUuid` names. A normal branch carries its origin's changes, and with
+    /// them the origin's signature entries and this index's bindings for the origin; merging back
+    /// brings the branch's bindings along. A signature's claim names the document it was made on,
+    /// and this index is how the entry that carries no document id is tied to that claim.
+    #[serde(default)]
+    #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<Uuid7, String>"))]
+    pub branch_uuids: BTreeMap<Uuid7, DocumentId>,
     #[serde(default)]
     pub facet_uuids: BTreeMap<Uuid7, FacetKey>,
     #[serde(default)]
@@ -172,10 +183,40 @@ impl Dmeta {
         Self {
             created_at,
             updated_at: Vec::new(),
-            actor_uuids: BTreeMap::new(),
+            actors: BTreeMap::new(),
+            branch_uuids: BTreeMap::new(),
             facet_uuids: BTreeMap::new(),
             facets: BTreeMap::new(),
             extra: crate::facet::Extra::new(),
+        }
+    }
+
+    /// The UUID a signature introduced on `document` carries as its `docUuid`: the smallest one
+    /// already bound to `document`, or `minted` when none is.
+    ///
+    /// A normal branch *is* its origin's changes under a new [`DocumentId`], so it arrives with the
+    /// origin's bindings and none of its own. Its first write — the branch's own
+    /// `org.example.daybook.branch/<docid>` facet — binds a fresh UUID to it, so every later
+    /// write on the branch finds one. Choosing the smallest visible binding keeps two stagings of
+    /// the same write, and two concurrent writers that both see it, on the same UUID.
+    pub fn document_uuid(
+        &mut self,
+        document: &DocumentId,
+        minted: Uuid7,
+    ) -> Result<Uuid7, DmetaError> {
+        if let Some(uuid) = self
+            .branch_uuids
+            .iter()
+            .find_map(|(uuid, bound)| (bound == document).then_some(*uuid))
+        {
+            return Ok(uuid);
+        }
+        match self.branch_uuids.entry(minted) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(document.clone());
+                Ok(minted)
+            }
+            std::collections::btree_map::Entry::Occupied(_) => Err(DmetaError::ReboundAlias),
         }
     }
 
@@ -222,18 +263,18 @@ pub struct FacetMetadata {
     pub signatures: Vec<FacetSignature>,
 }
 
-/// A signature a branch retained from its origin, where the origin's history is not available to
-/// reconstruct the signed bytes from.
+/// A signature a compaction retained from history it dropped, where that history is no longer
+/// available to reconstruct the signed bytes from.
 ///
 /// An ordinary signature stores nothing but the actor and the signature bytes: the message is
-/// rebuilt from the state at the change that introduced it. A branch is a different document and
-/// carries none of that history, so the bytes have to travel with it. `message` is the exact
-/// domain-prefixed message the actor signed, and it is authenticated by the signature — a fork
+/// rebuilt from the state at the change that introduced it. That includes a signature that reached
+/// this document through a branch or a merge, because those carry the changes themselves. A
+/// compaction does not, so the bytes have to travel with it. `message` is the exact
+/// domain-prefixed message the actor signed, and it is authenticated by the signature — a copy
 /// that substitutes other bytes fails verification rather than being trusted. `value` is present
-/// only when the value the branch copied is not the value that was signed, which happens when a
-/// concurrent write landed on the origin before the branch was taken; it is the canonical native
-/// bytes of that signed value, so its CID can be checked without presenting the signature as
-/// covering the merged result.
+/// only when the value the compaction kept is not the value that was signed, which happens when
+/// concurrent writes had merged; it is the canonical native bytes of that signed value, so its CID
+/// can be checked without presenting the signature as covering the merged result.
 ///
 /// What the witness cannot prove on its own is that the actor was authorized on the origin at the
 /// frontier where the signature was made. That frontier lives on the origin document, and an origin
@@ -249,17 +290,91 @@ pub struct InheritedWitness {
     pub value: Option<Bytes>,
 }
 
+pub const BRANCH_FACET_TAG: &str = "org.example.daybook.branch";
+pub const BRANCHES_FACET_TAG: &str = "org.example.daybook.branches";
+
+/// The branch side of a branch: `org.example.daybook.branch/<docid>` on the branch document,
+/// naming that document's branch path.
+///
+/// The facet id carries the document id, not the value, because a branch merged back brings this
+/// facet along: the origin then holds the branch's entry under the branch's id, and still finds
+/// its own path (if it is itself a branch) under its own id. Only Branch writes it.
+#[cfg_attr(feature = "schemars", macros::facet(id = "org.example.daybook.branch"))]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchPath {
+    pub path: String,
+    #[serde(flatten)]
+    pub extra: crate::facet::Extra,
+}
+
+/// One branch an origin lists in [`BranchesPath`]. The same shape as [`BranchPath`], but a facet's
+/// value type cannot also be a nested definition of another facet.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchLink {
+    pub path: String,
+}
+
+/// The origin side of a branch: `org.example.daybook.branches/main` on the origin, written by a
+/// non-stealth Branch and by nothing else. `by_path` is the reverse of `by_id`: a path can name more
+/// than one branch, because two branches can be taken concurrently under the same path.
+#[cfg_attr(
+    feature = "schemars",
+    macros::facet(id = "org.example.daybook.branches")
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchesPath {
+    #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<String, BranchLink>"))]
+    pub by_id: BTreeMap<DocumentId, BranchLink>,
+    #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<String, Vec<String>>"))]
+    pub by_path: BTreeMap<String, Vec<DocumentId>>,
+    #[serde(flatten)]
+    pub extra: crate::facet::Extra,
+}
+
+impl BranchesPath {
+    /// Record a branch. Re-recording the same branch is a no-op.
+    pub fn record(&mut self, branch: DocumentId, path: String) {
+        if let Some(previous) = self
+            .by_id
+            .insert(branch.clone(), BranchLink { path: path.clone() })
+            && previous.path != path
+            && let Some(listed) = self.by_path.get_mut(&previous.path)
+        {
+            listed.retain(|id| id != &branch);
+            if listed.is_empty() {
+                self.by_path.remove(&previous.path);
+            }
+        }
+        let listed = self.by_path.entry(path).or_default();
+        if !listed.contains(&branch) {
+            listed.push(branch);
+            listed.sort();
+        }
+    }
+}
+
 /// One entry in a facet's competing set of signatures.
 ///
-/// `inherited` is set only for a signature copied onto a branch at its creation. A signature
-/// authored on the branch itself has none: its message is reconstructed from the branch's own
-/// history, and its origin is the branch.
+/// `inherited` is set only for a signature carried over a compaction, where the history its
+/// message would be reconstructed from is gone. Every other signature, including one that arrived
+/// with a branch's or a merge's changes, has none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FacetSignature {
     pub actor_uuid: Uuid7,
     pub signature: SignatureBytes,
+    // The document this entry was introduced on, through the `branchUuids` binding visible at its
+    // introduction. A branch or a merge moves the entry to another document unchanged, so the
+    // entry cannot assume the document holding it is the one its claim names. (A plain comment: a
+    // doc comment would become a description beside the UUID's `$ref`, which Lexicon cannot state.)
+    pub doc_uuid: Uuid7,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<Bytes>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,6 +396,9 @@ pub enum ClaimOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FacetClaim {
+    /// The document the claim was made on. A branch or a merge later moves the signature to other
+    /// documents unchanged, so this is not necessarily the document that now holds it; the entry
+    /// names this document through its `docUuid` and the `branchUuids` binding.
     pub origin_document: DocumentId,
     pub facet_key: FacetKey,
     pub chosen_uuid: Uuid7,
@@ -869,12 +987,15 @@ mod tests {
     const PORTABLE_PROOF: &str = r#"{
         "createdAt": "1970-01-01T00:00:00Z",
         "updatedAt": [],
-        "actorUuids": {
+        "actors": {
             "01890f3e-1234-7000-8000-000000000002": {
                 "pubkey": "zGmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
                 "actorUrl": "did:key:test",
                 "delegation": {"$bytes": "AQID/w=="}
             }
+        },
+        "branchUuids": {
+            "01890f3e-1234-7000-8000-000000000009": "zajdk"
         },
         "facetUuids": {
             "01890f3e-1234-7000-8000-000000000001": "org.example.note/main"
@@ -885,6 +1006,7 @@ mod tests {
                 "deletedAt": [],
                 "signatures": [{
                     "actorUuid": "01890f3e-1234-7000-8000-000000000002",
+                    "docUuid": "01890f3e-1234-7000-8000-000000000009",
                     "signature": {"$bytes": "7OJ5Fpuon7QCm9iAUz+gJ7ePC9pXGDQYBu8GxSthtkEzcmogHSGTzh8Pr+G1AvIdOK2QqQ+qr2+58orrETzcBQ=="},
                     "message": {"$bytes": "ZGF5Ym9vay5mYWNldC1jbGFpbS52MgCHZXphamRrdW9yZy5leGFtcGxlLm5vdGUvbWFpblABiQ8+EjRwAIAAAAAAAAABUAGJDz4SNHAAgAAAAAAAAAIAWCQBVR4gLWvLu8YEORo43f1WfOLngEcapPP3vFmdHGSY17U+tsaA"}
                 }]
@@ -928,6 +1050,7 @@ mod tests {
             },
             FacetSignature {
                 actor_uuid: claim.actor_uuid,
+                doc_uuid: uuid7(9),
                 signature: SignatureBytes::try_from(
                     key.sign(&claim.signing_bytes().unwrap())
                         .to_bytes()
@@ -1009,7 +1132,7 @@ mod tests {
                 Err(DmetaError::InvalidUuidVersion)
             ));
             assert!(serde_json::from_value::<Uuid7>(serde_json::json!(invalid)).is_err());
-            for member in ["actorUuids", "facetUuids"] {
+            for member in ["actors", "facetUuids"] {
                 let mut malformed = fixture.clone();
                 let map = malformed[member].as_object_mut().unwrap();
                 let valid_key = map.keys().next().unwrap().clone();
@@ -1412,7 +1535,7 @@ mod tests {
         let claim = claim_for(&value);
         assert_eq!(restored.facet_uuids[&claim.chosen_uuid], claim.facet_key);
         let entry = &restored.facets[&claim.facet_key].signatures[0];
-        let actor = &restored.actor_uuids[&entry.actor_uuid];
+        let actor = &restored.actors[&entry.actor_uuid];
         assert_eq!(actor.delegation, Some(Bytes::from(vec![1, 2, 3, 255])));
         let signed = entry.authenticate(actor, None).unwrap();
         assert_eq!(signed.claim, claim);
@@ -1480,6 +1603,60 @@ mod tests {
         }
     }
 
+    utils_rs::table_tests! {
+        verification_evidence,
+        (missing, carried_message, expected),
+        {
+            let mut dmeta: Dmeta = serde_json::from_str(PORTABLE_PROOF).unwrap();
+            let value = native_value();
+            let claim = claim_for(&value);
+            let node = SigningKey::from_bytes(&[42; 32]);
+            let issuer = MultibaseKey::try_from(node.verifying_key().as_bytes().as_slice()).unwrap();
+            let actor = dmeta.actors.get_mut(&claim.actor_uuid).unwrap();
+            let attribution = Attribution {
+                issuer: issuer.clone(), actor_uuid: claim.actor_uuid,
+                pubkey: actor.pubkey.clone(), actor_url: actor.actor_url.clone(),
+            };
+            let signature = SignatureBytes::try_from(
+                node.sign(&attribution.signing_bytes().unwrap()).to_bytes().as_slice(),
+            ).unwrap();
+            actor.delegation = Some(attribution.certificate(signature).unwrap());
+            let mut issuers = BTreeMap::from([(claim.actor_uuid, issuer)]);
+            if !carried_message {
+                dmeta.facets.get_mut(&claim.facet_key).unwrap().signatures[0].message = None;
+            }
+            match missing {
+                "none" => {}
+                "actor" => { dmeta.actors.remove(&claim.actor_uuid).unwrap(); }
+                "alias" => { dmeta.facet_uuids.remove(&claim.chosen_uuid).unwrap(); }
+                "document" => { dmeta.branch_uuids.remove(&uuid7(9)).unwrap(); }
+                "rebound document" => { dmeta.branch_uuids.insert(uuid7(9), DocumentId::new(b"other")).unwrap(); }
+                "certificate" => dmeta.actors.get_mut(&claim.actor_uuid).unwrap().delegation = None,
+                "issuer" => issuers.clear(),
+                other => panic!("unknown case: {other}"),
+            }
+            assert_eq!(
+                dmeta.verify_facet(
+                    &claim.facet_key, FacetValue::Present(&value),
+                    &BTreeMap::new(), &issuers,
+                ),
+                expected,
+            );
+        }
+    }
+
+    verification_evidence! {
+        intact: ("none", true, VerificationState::Accepted),
+        missing_actor_is_invalid: ("actor", true, VerificationState::Rejected),
+        missing_alias_is_invalid: ("alias", true, VerificationState::Rejected),
+        unbound_document_uuid_is_invalid: ("document", true, VerificationState::Rejected),
+        document_uuid_bound_elsewhere_is_invalid: ("rebound document", true, VerificationState::Rejected),
+        missing_certificate_is_invalid: ("certificate", true, VerificationState::Rejected),
+        unknown_external_issuer_is_pending: ("issuer", true, VerificationState::Pending),
+        unsupplied_message_is_pending: ("none", false, VerificationState::Pending),
+        missing_message_does_not_hide_missing_certificate: ("certificate", false, VerificationState::Rejected),
+    }
+
     #[test]
     fn empty_signature_sets_are_uncovered_and_competitors_do_not_poison_acceptance() {
         use VerificationState::{Accepted, Pending, Rejected, Uncovered};
@@ -1517,7 +1694,7 @@ mod tests {
         bytes[0] ^= 1;
         corrupt.signature = SignatureBytes::try_from(bytes.as_slice()).unwrap();
         let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
-        assert!(dmeta.actor_uuids.insert(claim.actor_uuid, actor).is_none());
+        assert!(dmeta.actors.insert(claim.actor_uuid, actor).is_none());
         for (facet_claim, entry) in [(&claim, valid), (&other_claim, corrupt)] {
             dmeta
                 .record_facet_alias(facet_claim.chosen_uuid, facet_claim.facet_key.clone())
@@ -1541,7 +1718,7 @@ mod tests {
             .iter()
             .map(|(key, metadata)| {
                 let state = facet_verification(metadata.signatures.iter().map(|entry| {
-                    let actor = &dmeta.actor_uuids[&entry.actor_uuid];
+                    let actor = &dmeta.actors[&entry.actor_uuid];
                     match entry.authenticate(actor, None) {
                         Ok(signed) => fold_checks(SignatureChecks {
                             message: Evidence::Present,
