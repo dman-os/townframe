@@ -233,7 +233,7 @@ async fn composed_settings_wasm_dom_flow() {
 
     ui.click(COUNTER);
     ui.wait_until("Wasm section selected", |ui| {
-        assert_eq!(first_counter.instance.check(), Ok(()));
+        assert_eq!(application.host().check(&first_counter.instance), Ok(()));
         ui.attribute(COUNTER, "aria-pressed").as_deref() == Some("true")
             && ui.find(COUNTER_VALUE).is_some()
     })
@@ -304,7 +304,7 @@ async fn composed_settings_wasm_dom_flow() {
         }),
     );
     ui.wait_until("transport uncertainty survived the WIT receipt", |ui| {
-        assert_eq!(first_counter.instance.check(), Ok(()));
+        assert_eq!(application.host().check(&first_counter.instance), Ok(()));
         let value = ui.text(COUNTER_VALUE);
         let status = ui.text(COUNTER_STATUS);
         value == "41" && status.contains("Transport") && status.contains("outcome-unknown: true")
@@ -328,7 +328,7 @@ async fn composed_settings_wasm_dom_flow() {
     ui.click(COUNTER);
     ui.wait_until("Wasm section remounted after switching back", |ui| {
         assert_eq!(
-            first_counter.instance.check(),
+            application.host().check(&first_counter.instance),
             Ok(()),
             "switching sections must not trap or revoke the counter incarnation"
         );
@@ -358,7 +358,7 @@ async fn composed_settings_wasm_dom_flow() {
     ui.click(COUNTER);
     ui.wait_until("Wasm section remounted after reopening Settings", |ui| {
         assert_eq!(
-            first_counter.instance.check(),
+            application.host().check(&first_counter.instance),
             Ok(()),
             "reopening Settings must not trap or revoke the counter incarnation"
         );
@@ -398,9 +398,12 @@ async fn composed_settings_wasm_dom_flow() {
         },
     )
     .await;
-    assert_eq!(first_counter.instance.check(), Err(AccessError::Revoked));
-    assert_eq!(sample.instance.check(), Ok(()));
-    assert_eq!(settings.instance.check(), Ok(()));
+    assert_eq!(
+        application.host().check(&first_counter.instance),
+        Err(AccessError::Revoked)
+    );
+    assert_eq!(application.host().check(&sample.instance), Ok(()));
+    assert_eq!(application.host().check(&settings.instance), Ok(()));
     assert_eq!(
         ui.attribute(SAMPLE, "aria-pressed").as_deref(),
         Some("true")
@@ -434,9 +437,12 @@ async fn composed_settings_wasm_dom_flow() {
             && reports.borrow().as_ref().unwrap().get("counter") == Some(&InstanceState::Stopped)
     })
     .await;
-    assert_eq!(second_counter.instance.check(), Err(AccessError::Revoked));
-    assert_eq!(sample.instance.check(), Ok(()));
-    assert_eq!(settings.instance.check(), Ok(()));
+    assert_eq!(
+        application.host().check(&second_counter.instance),
+        Err(AccessError::Revoked)
+    );
+    assert_eq!(application.host().check(&sample.instance), Ok(()));
+    assert_eq!(application.host().check(&settings.instance), Ok(()));
     assert_eq!(
         ui.attribute(SAMPLE, "aria-pressed").as_deref(),
         Some("true")
@@ -458,6 +464,6 @@ async fn composed_settings_wasm_dom_flow() {
         },
     )
     .await;
-    assert_eq!(sample.instance.check(), Ok(()));
-    assert_eq!(settings.instance.check(), Ok(()));
+    assert_eq!(application.host().check(&sample.instance), Ok(()));
+    assert_eq!(application.host().check(&settings.instance), Ok(()));
 }

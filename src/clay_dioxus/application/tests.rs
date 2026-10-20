@@ -186,8 +186,8 @@ async fn owned_work_can_release_activation_and_disable_drops_only_its_incarnatio
         .set_enablement("first", Enablement::Disabled)
         .unwrap();
     assert_pending(observer.as_mut()).await;
-    assert_eq!(first.check(), Err(AccessError::Revoked));
-    assert_eq!(second.check(), Ok(()));
+    assert_eq!(runtime.host().check(&first), Err(AccessError::Revoked));
+    assert_eq!(runtime.host().check(&second), Ok(()));
     assert_eq!(counts.borrow()["first"].get().1, 1);
     assert_eq!(counts.borrow()["second"].get().1, 0);
     runtime.host().close();
@@ -400,7 +400,7 @@ async fn independent_ready_micro_starts_and_disable_cancels_pending_activation()
     assert_pending(observer.as_mut()).await;
     assert_eq!(gate.dropped.get(), 1);
     assert_eq!(
-        gate.instances.borrow()[0].check(),
+        runtime.host().check(&gate.instances.borrow()[0]),
         Err(AccessError::Revoked)
     );
     assert_eq!(
@@ -449,12 +449,12 @@ async fn dropping_reconciliation_preserves_committed_instances_and_cancels_pendi
     let committed = runtime.output::<Facility>("a-ready").unwrap().0;
     drop(configure);
     assert_eq!(gate.dropped.get(), 1);
-    assert_eq!(committed.check(), Ok(()));
+    assert_eq!(runtime.host().check(&committed), Ok(()));
     assert_eq!(
         runtime.configure(&BTreeMap::new()).await,
         Ok(BTreeMap::new())
     );
-    assert_eq!(committed.check(), Err(AccessError::Revoked));
+    assert_eq!(runtime.host().check(&committed), Err(AccessError::Revoked));
     assert_eq!(count.get(), 1);
     runtime.host().close();
 }
@@ -473,7 +473,7 @@ async fn cancelling_after_withdrawal_leaves_no_stale_order_entries() {
     let next = BTreeMap::from([("pending".into(), configured("gated"))]);
     let mut configure = Box::pin(runtime.configure(&next));
     assert_pending(configure.as_mut()).await;
-    assert_eq!(removed.check(), Err(AccessError::Revoked));
+    assert_eq!(runtime.host().check(&removed), Err(AccessError::Revoked));
     drop(configure);
     assert_eq!(
         runtime.configure(&BTreeMap::new()).await,
@@ -581,7 +581,10 @@ async fn reports_recheck_earlier_incarnation_after_later_await() {
     ]);
     let mut configure = Box::pin(runtime.configure(&desired));
     assert_pending(configure.as_mut()).await;
-    runtime.output::<Facility>("a-ready").unwrap().0.close();
+    runtime
+        .host()
+        .close_instance(&runtime.output::<Facility>("a-ready").unwrap().0)
+        .unwrap();
     gate.finish.borrow_mut().pop().unwrap().send(()).unwrap();
     assert_eq!(
         configure.await,
@@ -617,7 +620,7 @@ async fn privileged_configure_cannot_remove_or_rebind_fixed_entries() {
         runtime.configure(&changed).await,
         Err(ConfigurationError::LockedInstance("fixed".into()))
     );
-    assert_eq!(instance.check(), Ok(()));
+    assert_eq!(runtime.host().check(&instance), Ok(()));
     runtime.host().close();
 }
 
@@ -710,7 +713,7 @@ async fn source_read_and_subscribe_failures_keep_graph_and_recover_on_replacemen
         assert_eq!(runtime.reports().borrow().clone(), failure);
         assert_eq!(runtime.configure(&BTreeMap::new()).await, failure);
         assert_eq!(runtime.reconcile_configuration().await, failure);
-        assert_eq!(instance.check(), Ok(()));
+        assert_eq!(runtime.host().check(&instance), Ok(()));
         assert_eq!(
             runtime
                 .set_configuration_source(StaticConfiguration::new(desired))
@@ -759,7 +762,7 @@ async fn disconnected_source_watch_reports_revocation_without_tearing_down_graph
         runtime.reports().borrow().clone(),
         Err(ConfigurationError::Access(AccessError::Revoked))
     );
-    assert_eq!(instance.check(), Ok(()));
+    assert_eq!(runtime.host().check(&instance), Ok(()));
     runtime.install_configuration_source(StaticConfiguration::new(desired));
     assert_pending(observer.as_mut()).await;
     assert_eq!(
@@ -874,7 +877,7 @@ async fn facet_configuration_writes_preserve_observable_operations() {
     assert!(facet.watch.current().unwrap().pending.is_empty());
 
     let pending = source.set_enablement("ready", Enablement::Enabled).unwrap();
-    owner.close();
+    runtime.host().close_instance(&owner).unwrap();
     mock.complete(pending.id(), Ok(()));
     assert_eq!(
         pending.next(0).await.unwrap(),
@@ -912,7 +915,7 @@ async fn cold_configuration_keeps_graph_until_ready_and_absent_remains_empty() {
     );
     let mut install = Box::pin(runtime.set_configuration_source(source));
     assert_pending(install.as_mut()).await;
-    assert_eq!(instance.check(), Ok(()));
+    assert_eq!(runtime.host().check(&instance), Ok(()));
     assert_eq!(
         runtime.reports().borrow().clone(),
         Err(ConfigurationError::Loading)
@@ -929,7 +932,7 @@ async fn cold_configuration_keeps_graph_until_ready_and_absent_remains_empty() {
     runtime.mock_documents().external_change(route, None);
     assert_pending(observer.as_mut()).await;
     assert_eq!(runtime.reports().borrow().clone(), Ok(BTreeMap::new()));
-    assert_eq!(instance.check(), Err(AccessError::Revoked));
+    assert_eq!(runtime.host().check(&instance), Err(AccessError::Revoked));
     runtime.host().close();
     observer.await;
 }
@@ -952,13 +955,13 @@ async fn revoked_configuration_snapshot_is_reported_without_replacing_last_graph
     let instance = runtime.output::<Facility>("ready").unwrap().0;
     let mut observer = Box::pin(runtime.observe());
     assert_pending(observer.as_mut()).await;
-    owner.close();
+    runtime.host().close_instance(&owner).unwrap();
     assert_pending(observer.as_mut()).await;
     assert_eq!(
         runtime.reports().borrow().clone(),
         Err(ConfigurationError::Access(AccessError::Revoked))
     );
-    assert_eq!(instance.check(), Ok(()));
+    assert_eq!(runtime.host().check(&instance), Ok(()));
     runtime.host().close();
     observer.await;
 }
@@ -975,7 +978,7 @@ async fn observer_cancellation_drops_pending_activation_and_can_resume() {
     drop(observer);
     assert_eq!(gate.dropped.get(), 1);
     assert_eq!(
-        gate.instances.borrow()[0].check(),
+        runtime.host().check(&gate.instances.borrow()[0]),
         Err(AccessError::Revoked)
     );
     source
@@ -1135,10 +1138,8 @@ async fn late_registration_activates_blocked_instances_without_manual_reconcilia
             assert_eq!(
                 fixture
                     .runtime
-                    .output::<Facility>("consumer")
-                    .unwrap()
-                    .0
-                    .check(),
+                    .host()
+                    .check(&fixture.runtime.output::<Facility>("consumer").unwrap().0),
                 Ok(())
             );
             fixture.runtime.host().close();
@@ -1192,7 +1193,10 @@ async fn independent_stop_withdraws_dependents_but_does_not_restart_the_provider
                 .unwrap();
             let supplier = fixture.runtime.output::<Facility>("supplier").unwrap().0;
             let consumer = fixture.runtime.output::<Facility>("consumer").unwrap().0;
-            supplier.close();
+            let host = fixture.runtime.host();
+            let supplier_closed = host.observe_instance(&supplier).unwrap();
+            let consumer_closed = host.observe_instance(&consumer).unwrap();
+            host.close_instance(&supplier).unwrap();
             let stopped = Ok(BTreeMap::from([
                 (
                     "consumer".into(),
@@ -1207,12 +1211,12 @@ async fn independent_stop_withdraws_dependents_but_does_not_restart_the_provider
                 .wait_for(|report| report == &stopped)
                 .await
                 .unwrap();
-            assert_eq!(supplier.close_reason(), Some(CloseReason::Requested));
+            assert_eq!(*supplier_closed.borrow(), Some(CloseReason::Requested));
             assert_eq!(
-                consumer.close_reason(),
+                *consumer_closed.borrow(),
                 Some(CloseReason::DependencyWithdrawn)
             );
-            assert_eq!(consumer.check(), Err(AccessError::Revoked));
+            assert_eq!(host.check(&consumer), Err(AccessError::Revoked));
             // Force another observation pass without changing the stopped instance's inputs.
             fixture.reports.borrow_and_update();
             fixture

@@ -463,7 +463,7 @@ mod tests {
             child_writers.borrow()[1].apply(&[]),
             Err(PresentationError::Revoked)
         );
-        assert_eq!(child.check(), Ok(()));
+        assert_eq!(host.check(&child), Ok(()));
         dom.wait_for_work().await;
         dom.render_immediate(&mut tree);
         assert_eq!(drops.get(), 2);
@@ -912,7 +912,7 @@ mod tests {
         assert_eq!(host_tree.text_content(), "1");
 
         // Closing the micro's Instance revokes the surface writer immediately.
-        micro.close();
+        host.close_instance(&micro).unwrap();
         let writer = writer_slot.borrow().clone().unwrap();
         assert_eq!(
             writer.apply(&counter_text_update_batch("2")),

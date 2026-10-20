@@ -6,7 +6,7 @@
 #[cfg(feature = "wit")]
 pub mod bindings {
     wit_bindgen::generate!({
-        path: "../clay_wit/wit",
+        path: "../clay_guest_session/wit",
         world: "micro-client",
         pub_export_macro: true,
     });

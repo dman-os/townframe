@@ -334,7 +334,7 @@ mod tests {
         );
         let sample = runtime.application.output::<SampleMicro>("sample").unwrap();
         let counter = runtime.application.output::<WasmMicro>("counter").unwrap();
-        assert!(counter.instance.check().is_ok());
+        assert!(runtime.application.host().check(&counter.instance).is_ok());
         let sections = runtime
             .application
             .output::<SettingsMicro>("settings")
@@ -445,9 +445,19 @@ mod tests {
             .host()
             .mount(&settings_instance, counter.surface())
             .unwrap();
-        settings_instance.close();
-        assert_eq!(sample.instance.check(), Err(AccessError::Revoked));
-        assert_eq!(counter.instance.check(), Err(AccessError::Revoked));
+        runtime
+            .application
+            .host()
+            .close_instance(&settings_instance)
+            .unwrap();
+        assert_eq!(
+            runtime.application.host().check(&sample.instance),
+            Err(AccessError::Revoked)
+        );
+        assert_eq!(
+            runtime.application.host().check(&counter.instance),
+            Err(AccessError::Revoked)
+        );
         assert!(!sample_mount.is_live());
         assert!(!counter_mount.is_live());
         assert!(runtime.application.roots().snapshot().unwrap().is_empty());

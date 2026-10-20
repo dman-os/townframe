@@ -105,7 +105,7 @@ fn multiple_document_mirrors_filter_warm_cache_and_follow_membership() {
     );
     assert!(!node.cached_routes().contains(&route("unrelated", "main")));
     let mut updates = mirror.subscribe().unwrap();
-    instance.close();
+    host.close_instance(&instance).unwrap();
     assert!(updates.borrow_and_update().revoked);
     assert!(updates.borrow().facets.is_empty());
     assert!(updates.has_changed().is_err());
@@ -231,7 +231,7 @@ fn held_refreshes_deduplicate_and_cannot_resurrect_removed_selections() {
         BTreeMap::from([(route("b", "main"), FacetValue::Present(json!(2)))])
     );
     mirror.select(selection(&["a"])).unwrap();
-    first.close();
+    host.close_instance(&first).unwrap();
     node.complete_refreshes();
     assert_eq!(node.reads(), vec![route("b", "main")]);
     host.close();
@@ -262,14 +262,14 @@ fn optimistic_overlays_are_shared_authorized_and_pinned_after_watch_closure() {
         FacetValue::Present(json!(3))
     );
     assert_eq!(other.current().unwrap().pending.len(), 2);
-    first.close();
+    host.close_instance(&first).unwrap();
     node.settle(/*accept*/ true);
     assert!(other.current().unwrap().pending.is_empty());
     assert_eq!(
         other.current().unwrap().facets[&route("a", "main")],
         FacetValue::Present(json!(3))
     );
-    second.close();
+    host.close_instance(&second).unwrap();
     assert!(node.cached_routes().contains(&route("a", "main")));
     host.close();
 }
@@ -385,6 +385,12 @@ fn document_ref_access_preserves_the_grant_and_its_revocation() {
     let host = Host::new();
     let service = DocumentService::new(32);
     let instance = host.start("reader");
+    let foreign_host = Host::new();
+    assert!(matches!(
+        service.grant_documents(&foreign_host, &instance, Vec::new()),
+        Err(AccessError::Denied)
+    ));
+    foreign_host.close();
     let access = service
         .grant_documents(
             &host,
@@ -444,7 +450,7 @@ fn document_ref_access_preserves_the_grant_and_its_revocation() {
             .unwrap_err(),
         AccessError::Denied
     );
-    instance.close();
+    host.close_instance(&instance).unwrap();
     assert!(matches!(cloned.watch(permitted), Err(AccessError::Revoked)));
     assert!(matches!(
         document
@@ -468,7 +474,7 @@ async fn operation_subscription_retains_the_receipt_before_and_after_owner_closu
         .unwrap();
     let mut updates = operation.subscribe();
     assert_eq!(*updates.borrow_and_update(), operation.current());
-    instance.close();
+    host.close_instance(&instance).unwrap();
     assert_eq!(operation.current().status, OperationStatus::LocallyApplied);
     node.complete(operation.id(), Ok(()));
     updates.changed().await.unwrap();
@@ -759,7 +765,7 @@ async fn owner_and_watch_closure_do_not_cancel_operations_or_erase_receipts() {
     let mut next = std::pin::pin!(operation.next(initial.revision));
     assert_pending(next.as_mut());
     mirror.close();
-    writer.close();
+    host.close_instance(&writer).unwrap();
     assert_eq!(operation.current(), initial);
     assert_pending(next.as_mut());
     node.complete(operation.id(), Ok(()));
@@ -792,7 +798,7 @@ fn dropping_an_operation_handle_does_not_cancel_source_completion() {
         .unwrap();
     let id = operation.id();
     drop(operation);
-    writer.close();
+    host.close_instance(&writer).unwrap();
     node.complete(id, Ok(()));
     let reader = host.start("reader");
     let mirror = grant(&service, &host, &reader, &["a"], Some("main"))
@@ -917,7 +923,7 @@ async fn document_next_rechecks_revocation_after_pending_or_ready_notifications(
         if ready_notification {
             node.external_change(route("a", "main"), Some(json!(1)));
         }
-        instance.close();
+        host.close_instance(&instance).unwrap();
         assert_eq!(next.await, Err(DocumentError::Access(AccessError::Revoked)));
         assert_eq!(
             mirror.next(revision).await,

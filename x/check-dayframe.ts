@@ -49,7 +49,7 @@ console.log(`DAYFRAME_SLOTS_COMPONENT=${slotsComponent}`);
 if (!prepareOnly) {
   const packages = [
     "clay_surface",
-    "clay_wit",
+    "clay_guest_session",
     "clay_host",
     "clay_data",
     "clay_compose",

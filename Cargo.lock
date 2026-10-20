@@ -2705,6 +2705,7 @@ name = "clay_engine_wasmtime"
 version = "0.1.0"
 dependencies = [
  "clay_data",
+ "clay_guest_session",
  "clay_host",
  "clay_surface",
  "daybook_types",
@@ -2713,6 +2714,17 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "wasmtime",
+]
+
+[[package]]
+name = "clay_guest_session"
+version = "0.1.0"
+dependencies = [
+ "clay_data",
+ "clay_host",
+ "daybook_types",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2754,10 +2766,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
 ]
-
-[[package]]
-name = "clay_wit"
-version = "0.1.0"
 
 [[package]]
 name = "clipboard-win"

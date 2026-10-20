@@ -27,8 +27,15 @@ use tokio::sync::watch;
 type LocalFuture = Pin<Box<dyn Future<Output = ()>>>;
 
 struct OwnedFuture {
+    host: Host,
     owner: Instance,
     future: LocalFuture,
+}
+
+struct FutureOwner {
+    host: Host,
+    instance: Instance,
+    slot: Weak<RefCell<Option<LocalFuture>>>,
 }
 
 /// Incarnation-owned futures, scheduled by a `FuturesUnordered` so a wake polls only the woken
@@ -38,13 +45,17 @@ struct OwnedFuture {
 struct OwnedFutures {
     incoming: tokio::sync::mpsc::UnboundedReceiver<OwnedFuture>,
     running: FuturesUnordered<LocalFuture>,
-    owners: Vec<(Instance, Weak<RefCell<Option<LocalFuture>>>)>,
+    owners: Vec<FutureOwner>,
 }
 
 impl OwnedFutures {
     fn admit(&mut self, owned: OwnedFuture) {
         let slot = Rc::new(RefCell::new(Some(owned.future)));
-        self.owners.push((owned.owner, Rc::downgrade(&slot)));
+        self.owners.push(FutureOwner {
+            host: owned.host,
+            instance: owned.owner,
+            slot: Rc::downgrade(&slot),
+        });
         self.running
             .push(Box::pin(std::future::poll_fn(move |context| {
                 let mut slot = slot.borrow_mut();
@@ -80,11 +91,11 @@ impl<'a> FutureDriver<'a> {
         while let Ok(owned) = futures.incoming.try_recv() {
             futures.admit(owned);
         }
-        futures.owners.retain(|(owner, slot)| {
-            let Some(slot) = slot.upgrade() else {
+        futures.owners.retain(|owner| {
+            let Some(slot) = owner.slot.upgrade() else {
                 return false;
             };
-            if owner.check().is_ok() {
+            if owner.host.check(&owner.instance).is_ok() {
                 return true;
             }
             let future = slot.borrow_mut().take();
@@ -193,7 +204,7 @@ impl MicroActivation {
     pub fn collection<T: Clone + Send + Sync + 'static>(
         &self,
     ) -> Result<HostedCollection<T>, AccessError> {
-        self.instance.check()?;
+        self.host.check(&self.instance)?;
         Ok(HostedCollection::new(&self.host, &self.instance))
     }
 
@@ -212,15 +223,17 @@ impl MicroActivation {
         &self,
         future: impl Future<Output = ()> + 'static,
     ) -> Result<(), AccessError> {
-        self.instance.check()?;
+        self.host.check(&self.instance)?;
         let instance = self.instance.clone();
+        let host = self.host.clone();
         self.owned_futures
             .send(OwnedFuture {
+                host: host.clone(),
                 owner: instance.clone(),
                 future: Box::pin(async move {
                     tokio::select! {
                         biased;
-                        _ = instance.closed() => {},
+                        _ = host.await_close(&instance) => {},
                         () = future => {},
                     }
                 }),
@@ -236,7 +249,7 @@ impl MicroActivation {
                 .any(|requirement| requirement.id == T::ID && requirement.version == T::VERSION),
             "adapter requested an undeclared requirement"
         );
-        self.instance.check()?;
+        self.host.check(&self.instance)?;
         self.requirements
             .get(T::ID)
             .ok_or(AccessError::Denied)?
@@ -244,8 +257,8 @@ impl MicroActivation {
     }
 
     pub fn publish<T: Provision>(&self, value: T) {
-        self.instance
-            .check()
+        self.host
+            .check(&self.instance)
             .expect("publication from a closed activation");
         assert!(
             self.descriptor
@@ -419,7 +432,9 @@ struct PreparedActivation {
 
 pub(super) struct PendingActivation {
     pub instance: Instance,
+    pub ended: watch::Receiver<Option<clay_host::CloseReason>>,
     host: Host,
+    closed: LocalFuture,
     future: Pin<Box<dyn Future<Output = Result<(), ActivationError>>>>,
     descriptor: MicroDescriptor,
     pending: Arc<Mutex<Option<PendingProvisions>>>,
@@ -433,18 +448,25 @@ impl PendingActivation {
         &mut self,
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), ActivationError>> {
+        let ended = self.ended.borrow().is_some();
+        if ended || self.closed.as_mut().poll(context).is_ready() {
+            return Poll::Ready(Err(AccessError::Revoked.into()));
+        }
+        if self.host.check(&self.instance).is_err() {
+            return Poll::Pending;
+        }
         self.future.as_mut().poll(context)
     }
 
-    pub fn commit(mut self) -> Result<Instance, MicroRegistryError> {
-        self.instance.check()?;
+    pub fn commit(&mut self) -> Result<Instance, MicroRegistryError> {
+        self.host.check(&self.instance)?;
         let values = self.pending.lock().unwrap().take().unwrap();
         if let Some(id) = unpublished(&self.descriptor, &values) {
             return Err(MicroRegistryError::MissingProvision(id.to_owned()));
         }
         self.live
             .commit(&self.host, &self.instance, values, &self.descriptor)?;
-        self.instance.check()?;
+        self.host.check(&self.instance)?;
         self.committed = true;
         Ok(self.instance.clone())
     }
@@ -454,7 +476,7 @@ impl Drop for PendingActivation {
     fn drop(&mut self) {
         self.pending.lock().unwrap().take();
         if !self.committed {
-            self.instance.close();
+            self.host.close_instance(&self.instance).unwrap();
             drop(FutureDriver::take(&self.future_driver));
         }
     }
@@ -574,11 +596,18 @@ impl MicroRegistry {
             descriptor,
             requirements,
         } = self.prepare_activation(provider, bindings)?;
-        let instance = host.activate(instance_name, Ok)?;
+        let instance = host.try_start(instance_name)?;
+        let ended = host.observe_instance(&instance)?;
         let pending = Arc::new(Mutex::new(Some(BTreeMap::new())));
         let mut activation = PendingActivation {
             instance: instance.clone(),
+            ended,
             host: host.clone(),
+            closed: {
+                let host = host.clone();
+                let instance = instance.clone();
+                Box::pin(async move { host.await_close(&instance).await })
+            },
             future: Box::pin(std::future::pending()),
             descriptor: descriptor.clone(),
             pending: pending.clone(),
@@ -587,7 +616,7 @@ impl MicroRegistry {
             committed: false,
         };
         for provision in requirements.values() {
-            provision.owner.check()?;
+            provision.host.check(&provision.owner)?;
             host.bind_dependency(&instance, &provision.owner)?;
         }
         let context = MicroActivation {
@@ -599,13 +628,7 @@ impl MicroRegistry {
             documents: self.documents.clone(),
             owned_futures: self.owned_futures.clone(),
         };
-        activation.future = Box::pin(async move {
-            tokio::select! {
-                biased;
-                _ = instance.closed() => Err(AccessError::Revoked.into()),
-                result = async move { provider.activate(context).await } => result,
-            }
-        });
+        activation.future = Box::pin(async move { provider.activate(context).await });
         Ok(activation)
     }
 
@@ -676,7 +699,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(other.name, "other-test");
-        other.close();
+        host.close_instance(&other).unwrap();
 
         let instance = registry
             .activate(&host, &provider_id, "configured-test", BTreeMap::new())
@@ -687,8 +710,8 @@ mod tests {
             vec!["other:other-test", "configured-test"]
         );
         assert_eq!(instance.name, "configured-test");
-        instance.close();
-        assert_eq!(instance.check(), Err(AccessError::Revoked));
+        host.close_instance(&instance).unwrap();
+        assert_eq!(host.check(&instance), Err(AccessError::Revoked));
         host.close();
     }
 
@@ -738,7 +761,10 @@ mod tests {
         let mut activation = registry
             .begin(&host, &id, "closed".into(), &BTreeMap::new())
             .unwrap();
-        activation.instance.close();
+        activation
+            .host
+            .close_instance(&activation.instance)
+            .unwrap();
         assert_eq!(
             std::future::poll_fn(|context| activation.poll(context)).await,
             Err(ActivationError::Access(AccessError::Revoked))
@@ -785,7 +811,7 @@ mod tests {
         })
         .await;
         assert_eq!(seen.get(), 1);
-        instance.close();
+        host.close_instance(&instance).unwrap();
         drop(driver);
         host.close();
     }
@@ -872,12 +898,12 @@ mod tests {
         let mut driver = registry.future_driver();
         driver.reap();
         assert!(!dropped.get());
-        first.close();
+        host.close_instance(&first).unwrap();
         driver.reap();
         assert!(dropped.get());
         assert_eq!(driver.futures.as_ref().unwrap().owners.len(), 1);
         drop(driver);
-        second.close();
+        host.close_instance(&second).unwrap();
         host.close();
     }
 
@@ -900,7 +926,7 @@ mod tests {
                 },
                 |context| async move {
                     tokio::task::yield_now().await;
-                    context.instance().check()?;
+                    context.host.check(&context.instance())?;
                     Ok(())
                 },
             ))
@@ -929,7 +955,7 @@ mod tests {
             .activate(&host, &ok_id, "async-ok", BTreeMap::new())
             .await
             .unwrap();
-        assert!(instance.check().is_ok());
+        assert!(host.check(&instance).is_ok());
         assert!(matches!(
             registry
                 .activate(&host, &fail_id, "async-fail", BTreeMap::new())
@@ -937,7 +963,7 @@ mod tests {
             Err(MicroRegistryError::Access(AccessError::Denied))
         ));
         let (failed_instance, _) = leaked.lock().unwrap().take().unwrap();
-        assert_eq!(failed_instance.check(), Err(AccessError::Revoked));
+        assert_eq!(host.check(&failed_instance), Err(AccessError::Revoked));
         host.close();
     }
 
@@ -973,7 +999,7 @@ mod tests {
             Err(MicroRegistryError::Access(AccessError::Denied))
         ));
         let (instance, component) = published.lock().unwrap().take().unwrap();
-        assert_eq!(instance.check(), Err(AccessError::Revoked));
+        assert_eq!(host.check(&instance), Err(AccessError::Revoked));
         assert!(matches!(
             host.mount(&root, component),
             Err(AccessError::Revoked)

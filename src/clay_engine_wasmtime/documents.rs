@@ -1,125 +1,34 @@
 use super::ActivationError;
 use super::{WasmIncarnation, WasmStoreState, bindings::townframe::dayframe::documents as wit};
 use clay_data::{
-    DocumentAccess, DocumentError, DocumentRef, DocumentSnapshot, DocumentWatch, FacetMutation,
-    FacetRoute, FacetSelection, FacetValue, Operation, OperationError, OperationReceipt,
-    OperationStatus, WatchSelection,
+    DocumentRef, DocumentSnapshot, FacetMutation, FacetRoute, FacetSelection, FacetValue,
+    OperationError, OperationReceipt, OperationStatus, WatchSelection,
 };
-use clay_host::{AccessError, Instance};
+pub use clay_guest_session::{
+    Access as WasmDocumentAccess, Operation as WasmOperation, Watch as WasmDocumentWatch,
+};
+use clay_guest_session::{Delivery, Work};
+use clay_host::{AccessError, Host, Instance};
 use futures::{StreamExt, stream::FuturesUnordered};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use wasmtime::component::Resource;
 
-pub struct WasmDocumentAccess(DocumentAccess);
-
-pub struct WasmDocumentWatch {
-    id: u64,
-    watch: DocumentWatch,
-    _cancel: watch::Sender<()>,
-}
-
-pub struct WasmOperation {
-    operation: Operation,
-    _cancel: watch::Sender<()>,
-}
-
-pub(super) enum Work {
-    Watch {
-        id: u64,
-        watch: DocumentWatch,
-        revision: u64,
-        cancel: watch::Receiver<()>,
-    },
-    Operation {
-        operation: Operation,
-        revision: u64,
-        cancel: watch::Receiver<()>,
-    },
-}
-
-enum Delivery {
-    Changed(wit::DocumentSnapshot),
-    Lagged(u64),
-    Completed(wit::OperationReceipt),
-}
-
-impl Work {
-    async fn wait(mut self) -> Option<(Self, Delivery)> {
-        let delivery = match &mut self {
-            Self::Watch {
-                id,
-                watch,
-                revision,
-                cancel,
-            } => {
-                let next = tokio::select! {
-                    biased;
-                    _ = cancel.changed() => return None,
-                    next = watch.next(*revision) => next,
-                };
-                match next {
-                    Ok(snapshot) => {
-                        *revision = snapshot.revision;
-                        Delivery::Changed(snapshot_to_wire(*id, snapshot))
-                    }
-                    Err(DocumentError::SubscriptionLagged) => {
-                        *revision = match watch.current() {
-                            Ok(snapshot) => snapshot.revision,
-                            Err(AccessError::Revoked) => return None,
-                            Err(AccessError::Denied) => {
-                                panic!("issued document watch lost its authority")
-                            }
-                        };
-                        Delivery::Lagged(*id)
-                    }
-                    Err(DocumentError::Access(AccessError::Revoked)) => return None,
-                    Err(DocumentError::Access(AccessError::Denied)) => {
-                        panic!("issued document watch lost its authority")
-                    }
-                }
-            }
-            Self::Operation {
-                operation,
-                revision,
-                cancel,
-            } => {
-                let next = tokio::select! {
-                    biased;
-                    _ = cancel.changed() => return None,
-                    next = operation.next(*revision) => next.unwrap(),
-                };
-                Delivery::Completed(receipt_to_wire(next?))
-            }
-        };
-        Some((self, delivery))
-    }
-
-    /// A guest resource handle owns the cancel sender. Dropping the handle after this work became
-    /// ready but before delivery must still suppress the callback, so the guest never receives a
-    /// snapshot or receipt for a handle it no longer holds.
-    fn released(&self) -> bool {
-        match self {
-            Self::Watch { cancel, .. } | Self::Operation { cancel, .. } => {
-                cancel.has_changed().is_err()
-            }
-        }
-    }
-}
-
 pub(super) async fn drive(
+    host: Host,
     instance: Instance,
     incarnation: Arc<Mutex<Option<WasmIncarnation>>>,
     mut incoming: mpsc::Receiver<Work>,
+    pending_limit: usize,
 ) {
     let mut pending = FuturesUnordered::new();
     loop {
         let ready = tokio::select! {
-            _ = instance.closed() => return,
-            work = incoming.recv(), if pending.len() < WasmStoreState::MAX_PENDING_DELIVERIES => {
+            _ = host.await_close(&instance) => return,
+            work = incoming.recv(), if pending.len() < pending_limit => {
                 let Some(work) = work else { return };
                 pending.push(work.wait());
                 continue;
@@ -129,21 +38,23 @@ pub(super) async fn drive(
         let Some((work, delivery)) = ready else {
             continue;
         };
-        if work.released() {
-            continue;
-        }
+        let repeat = !matches!(delivery, Delivery::Completed(_));
         let result = {
             let mut guard = incarnation.lock().unwrap();
-            if instance.check().is_err() {
-                return;
+            if work.released() {
+                continue;
             }
             let Some(active) = guard.as_mut() else { return };
             active.refuel();
             let events = active.client.townframe_dayframe_document_events();
             let result = match delivery {
-                Delivery::Changed(snapshot) => events.call_changed(&mut active.store, &snapshot),
+                Delivery::Changed { id, snapshot } => {
+                    events.call_changed(&mut active.store, &snapshot_to_wire(id, snapshot))
+                }
                 Delivery::Lagged(id) => events.call_lagged(&mut active.store, id),
-                Delivery::Completed(receipt) => events.call_completed(&mut active.store, &receipt),
+                Delivery::Completed(receipt) => {
+                    events.call_completed(&mut active.store, &receipt_to_wire(receipt))
+                }
             };
             if result.is_err() {
                 guard.take();
@@ -151,10 +62,10 @@ pub(super) async fn drive(
             result
         };
         if result.is_err() {
-            instance.close();
+            host.close_instance(&instance).unwrap();
             return;
         }
-        if matches!(work, Work::Watch { .. }) {
+        if repeat {
             pending.push(work.wait());
         }
     }
@@ -166,15 +77,15 @@ pub(super) fn activate(
 ) -> Result<(), ActivationError> {
     let mut bindings = Vec::with_capacity(configs.len());
     for (name, document) in configs {
+        let access = active.store.data().documents.grant(document.access())?;
         let access = active
             .store
             .data_mut()
             .table
-            .push(WasmDocumentAccess(document.access()))
+            .push(access)
             .map_err(|error| {
                 ActivationError::Initialization(format!("granting {name}: {error}"))
             })?;
-        active.store.data_mut().document_handles += 1;
         bindings.push(wit::DocumentBinding {
             name,
             document: document.document_id().into(),
@@ -283,40 +194,11 @@ impl wit::HostDocumentAccess for WasmStoreState {
         selection: wit::WatchSelection,
     ) -> wasmtime::Result<Result<Resource<WasmDocumentWatch>, wit::DocumentError>> {
         let access = self.table.get(&access)?;
-        if self.document_handles >= Self::MAX_DOCUMENT_HANDLES {
-            return Ok(Err(wit::DocumentError::Denied));
-        }
-        let permit = match self.work.clone().try_reserve_owned() {
-            Ok(permit) => permit,
-            Err(_) => return Ok(Err(wit::DocumentError::Denied)),
-        };
-        let watch = match access.0.watch(selection_from_wire(selection)) {
+        let watch = match access.watch(selection_from_wire(selection)) {
             Ok(watch) => watch,
             Err(error) => return Ok(Err(access_error(error))),
         };
-        let revision = match watch.current() {
-            Ok(snapshot) => snapshot.revision,
-            Err(error) => return Ok(Err(access_error(error))),
-        };
-        self.next_watch = self
-            .next_watch
-            .checked_add(1)
-            .expect("document watch identity overflow");
-        let id = self.next_watch;
-        let (cancel, cancelled) = watch::channel(());
-        let resource = self.table.push(WasmDocumentWatch {
-            id,
-            watch: watch.clone(),
-            _cancel: cancel,
-        })?;
-        self.document_handles += 1;
-        permit.send(Work::Watch {
-            id,
-            watch,
-            revision,
-            cancel: cancelled,
-        });
-        Ok(Ok(resource))
+        Ok(Ok(self.table.push(watch)?))
     }
 
     fn mutate(
@@ -325,6 +207,9 @@ impl wit::HostDocumentAccess for WasmStoreState {
         route: wit::FacetRoute,
         mutation: wit::FacetMutation,
     ) -> wasmtime::Result<Result<Resource<WasmOperation>, wit::DocumentError>> {
+        if let Err(error) = self.documents.check() {
+            return Ok(Err(access_error(error)));
+        }
         let parsed = match mutation {
             wit::FacetMutation::Update(value) => {
                 serde_json::from_str(&value).map(FacetMutation::Write)
@@ -339,34 +224,15 @@ impl wit::HostDocumentAccess for WasmStoreState {
             Err(error) => return Ok(Err(wit::DocumentError::InvalidValue(error.to_string()))),
         };
         let access = self.table.get(&access)?;
-        if self.document_handles >= Self::MAX_DOCUMENT_HANDLES {
-            return Ok(Err(wit::DocumentError::Denied));
-        }
-        let permit = match self.work.clone().try_reserve_owned() {
-            Ok(permit) => permit,
-            Err(_) => return Ok(Err(wit::DocumentError::Denied)),
-        };
-        let operation = match access.0.mutate(route_from_wire(route), mutation) {
+        let operation = match access.mutate(route_from_wire(route), mutation) {
             Ok(operation) => operation,
             Err(error) => return Ok(Err(access_error(error))),
         };
-        let (cancel, cancelled) = watch::channel(());
-        let resource = self.table.push(WasmOperation {
-            operation: operation.clone(),
-            _cancel: cancel,
-        })?;
-        self.document_handles += 1;
-        permit.send(Work::Operation {
-            operation,
-            revision: 0,
-            cancel: cancelled,
-        });
-        Ok(Ok(resource))
+        Ok(Ok(self.table.push(operation)?))
     }
 
     fn drop(&mut self, access: Resource<WasmDocumentAccess>) -> wasmtime::Result<()> {
         self.table.delete(access)?;
-        self.document_handles -= 1;
         Ok(())
     }
 }
@@ -378,9 +244,8 @@ impl wit::HostDocumentWatch for WasmStoreState {
     ) -> wasmtime::Result<Result<wit::DocumentSnapshot, wit::DocumentError>> {
         let entry = self.table.get(&resource)?;
         Ok(entry
-            .watch
             .current()
-            .map(|snapshot| snapshot_to_wire(entry.id, snapshot))
+            .map(|snapshot| snapshot_to_wire(entry.id(), snapshot))
             .map_err(access_error))
     }
 
@@ -392,7 +257,6 @@ impl wit::HostDocumentWatch for WasmStoreState {
         Ok(self
             .table
             .get(&resource)?
-            .watch
             .select(selection_from_wire(selection))
             .map_err(access_error))
     }
@@ -401,18 +265,11 @@ impl wit::HostDocumentWatch for WasmStoreState {
         &mut self,
         resource: Resource<WasmDocumentWatch>,
     ) -> wasmtime::Result<Result<(), wit::DocumentError>> {
-        Ok(self
-            .table
-            .get(&resource)?
-            .watch
-            .refresh()
-            .map(|_| ())
-            .map_err(access_error))
+        Ok(self.table.get(&resource)?.refresh().map_err(access_error))
     }
 
     fn drop(&mut self, resource: Resource<WasmDocumentWatch>) -> wasmtime::Result<()> {
-        self.table.delete(resource)?.watch.close();
-        self.document_handles -= 1;
+        self.table.delete(resource)?;
         Ok(())
     }
 }
@@ -422,17 +279,16 @@ impl wit::HostOperation for WasmStoreState {
         &mut self,
         resource: Resource<WasmOperation>,
     ) -> wasmtime::Result<Result<wit::OperationReceipt, wit::DocumentError>> {
-        if let Err(error) = self.instance.check() {
-            return Ok(Err(access_error(error)));
-        }
-        Ok(Ok(receipt_to_wire(
-            self.table.get(&resource)?.operation.current(),
-        )))
+        Ok(self
+            .table
+            .get(&resource)?
+            .current()
+            .map(receipt_to_wire)
+            .map_err(access_error))
     }
 
     fn drop(&mut self, resource: Resource<WasmOperation>) -> wasmtime::Result<()> {
         self.table.delete(resource)?;
-        self.document_handles -= 1;
         Ok(())
     }
 }
@@ -441,6 +297,7 @@ impl wit::HostOperation for WasmStoreState {
 mod tests {
     use super::*;
     use clay_data::{DocumentGrant, DocumentService};
+    use clay_guest_session::Limits;
     use clay_host::Host;
     use wit::{HostDocumentAccess, HostDocumentWatch, HostOperation};
 
@@ -477,9 +334,10 @@ mod tests {
                 }],
             )
             .unwrap();
-        let (work, mut incoming) = mpsc::channel(1024);
-        let mut state = WasmStoreState::new(instance.clone(), work);
-        let access = state.table.push(WasmDocumentAccess(access)).unwrap().rep();
+        let (mut state, mut incoming) =
+            WasmStoreState::new(host.clone(), instance.clone(), Limits::default()).unwrap();
+        let access = state.documents.grant(access).unwrap();
+        let access = state.table.push(access).unwrap().rep();
         let denied = HostDocumentAccess::mutate(
             &mut state,
             Resource::new_borrow(access),
@@ -561,22 +419,47 @@ mod tests {
                 outcome_unknown: true,
             }),
         );
-        let (_, delivery) = work.wait().await.unwrap();
-        assert!(
-            matches!(delivery, Delivery::Completed(wit::OperationReceipt {
+        let (_, Delivery::Completed(receipt)) = work.wait().await.unwrap() else {
+            panic!("operation must deliver a receipt");
+        };
+        assert!(matches!(receipt_to_wire(receipt), wit::OperationReceipt {
             id, revision: 1,
             status: wit::OperationStatus::RolledBack(wit::OperationFailure::Transport(wit::TransportFailure { outcome_unknown: true, .. })),
-        }) if id == pending.id)
-        );
+        } if id == pending.id));
         HostDocumentWatch::drop(&mut state, watch).unwrap();
+        assert!(HostDocumentWatch::current(&mut state, Resource::new_borrow(watch_rep)).is_err());
         assert!(watch_work.wait().await.is_none());
-        instance.close();
+        host.close_instance(&instance).unwrap();
         assert!(matches!(
             HostOperation::current(&mut state, Resource::new_borrow(operation_rep)).unwrap(),
             Err(wit::DocumentError::Revoked)
         ));
+        assert!(matches!(
+            HostDocumentAccess::mutate(
+                &mut state,
+                Resource::new_borrow(access),
+                route("allowed"),
+                wit::FacetMutation::Update("8".into()),
+            )
+            .unwrap(),
+            Err(wit::DocumentError::Revoked)
+        ));
+        assert!(matches!(
+            HostDocumentAccess::watch(
+                &mut state,
+                Resource::new_borrow(access),
+                wit::WatchSelection {
+                    documents: vec!["allowed".into()],
+                    branch: "main".into(),
+                    facets: wit::FacetSelection::Tags(vec!["config".into()]),
+                },
+            )
+            .unwrap(),
+            Err(wit::DocumentError::Revoked)
+        ));
         HostOperation::drop(&mut state, operation).unwrap();
-        assert_eq!(state.document_handles, 0);
+        HostDocumentAccess::drop(&mut state, Resource::new_own(access)).unwrap();
+        assert_eq!(state.documents.handle_count(), 0);
         host.close();
     }
 
@@ -600,10 +483,29 @@ mod tests {
                 }],
             )
             .unwrap();
-        let (work, mut incoming) = mpsc::channel(1);
-        let permit = work.clone().try_reserve_owned().unwrap();
-        let mut state = WasmStoreState::new(instance, work);
-        let access = state.table.push(WasmDocumentAccess(access)).unwrap().rep();
+        let (mut state, mut incoming) = WasmStoreState::new(
+            host.clone(),
+            instance,
+            Limits {
+                pending_deliveries: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let access = state.documents.grant(access).unwrap();
+        let access = state.table.push(access).unwrap().rep();
+        let first = HostDocumentAccess::mutate(
+            &mut state,
+            Resource::new_borrow(access),
+            route("allowed"),
+            wit::FacetMutation::Update("0".into()),
+        )
+        .unwrap()
+        .unwrap();
+        let first_receipt = HostOperation::current(&mut state, Resource::new_borrow(first.rep()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_receipt.id, 1);
         assert!(matches!(
             HostDocumentAccess::mutate(
                 &mut state,
@@ -614,8 +516,11 @@ mod tests {
             .unwrap(),
             Err(wit::DocumentError::Denied)
         ));
-        assert_eq!(state.document_handles, 0);
-        drop(permit);
+        assert_eq!(state.documents.handle_count(), 2);
+        let first_work = incoming.recv().await.unwrap();
+        HostOperation::drop(&mut state, first).unwrap();
+        assert!(first_work.wait().await.is_none());
+        service.mock_documents().complete(first_receipt.id, Ok(()));
         let operation = HostDocumentAccess::mutate(
             &mut state,
             Resource::new_borrow(access),
@@ -627,7 +532,7 @@ mod tests {
         let receipt = HostOperation::current(&mut state, Resource::new_borrow(operation.rep()))
             .unwrap()
             .unwrap();
-        assert_eq!(receipt.id, 1);
+        assert_eq!(receipt.id, first_receipt.id + 1);
         service.mock_documents().complete(receipt.id, Ok(()));
         let (work, _) = incoming.recv().await.unwrap().wait().await.unwrap();
         assert!(!work.released());

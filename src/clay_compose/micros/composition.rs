@@ -408,7 +408,9 @@ fn facet_configuration(
 
 struct Active {
     configuration: ConfiguredMicro,
+    host: Host,
     instance: Instance,
+    ended: watch::Receiver<Option<CloseReason>>,
 }
 
 struct Failed {
@@ -424,12 +426,19 @@ struct Pending {
     result: Option<Result<(), super::ActivationError>>,
 }
 
+struct Closing {
+    stop_if_unchanged: Option<ConfiguredMicro>,
+    ended: watch::Receiver<Option<CloseReason>>,
+    closed: super::LocalFuture,
+}
+
 #[derive(Default)]
 pub struct Composition {
     active: BTreeMap<String, Active>,
     failed: BTreeMap<String, Failed>,
     stopped: BTreeMap<String, ConfiguredMicro>,
     pending: BTreeMap<String, Pending>,
+    closing: BTreeMap<String, Closing>,
 }
 
 impl Composition {
@@ -444,12 +453,38 @@ impl Composition {
         activation_order(&definitions, desired).map(|_| ())
     }
 
+    fn retire(
+        &mut self,
+        name: String,
+        stop_if_unchanged: Option<ConfiguredMicro>,
+        ended: watch::Receiver<Option<CloseReason>>,
+    ) {
+        let mut observer = ended.clone();
+        assert!(
+            self.closing
+                .insert(
+                    name,
+                    Closing {
+                        stop_if_unchanged,
+                        ended,
+                        closed: Box::pin(async move {
+                            observer.wait_for(Option::is_some).await.unwrap();
+                        }),
+                    }
+                )
+                .is_none()
+        );
+    }
+
     pub fn cancel_pending(&mut self) {
-        self.pending.clear();
+        for (name, pending) in std::mem::take(&mut self.pending) {
+            self.retire(name, None, pending.activation.ended.clone());
+            drop(pending);
+        }
     }
 
     pub fn is_settled(&self) -> bool {
-        self.pending.is_empty()
+        self.pending.is_empty() && self.closing.is_empty()
     }
 
     pub fn update(
@@ -463,33 +498,60 @@ impl Composition {
             .map(|descriptor| (descriptor.id.clone(), descriptor))
             .collect();
         let order = activation_order(&definitions, desired)?;
-        for (name, active) in &self.active {
-            if desired.get(name) != Some(&active.configuration) {
-                active.instance.close();
+        let retiring = self
+            .active
+            .extract_if(.., |name, active| {
+                desired.get(name) != Some(&active.configuration)
+                    || active.host.check(&active.instance).is_err()
+            })
+            .collect::<Vec<_>>();
+        for (name, active) in retiring {
+            let changed = desired.get(&name) != Some(&active.configuration);
+            self.retire(
+                name,
+                (!changed).then_some(active.configuration),
+                active.ended,
+            );
+            if changed {
+                active.host.close_instance(&active.instance).unwrap();
             }
         }
-        self.pending
-            .retain(|name, pending| desired.get(name) == Some(&pending.configuration));
-        for (name, configuration, instance) in self
-            .active
-            .iter()
-            .map(|(name, active)| (name, &active.configuration, &active.instance))
-            .chain(self.pending.iter().map(|(name, pending)| {
-                (name, &pending.configuration, &pending.activation.instance)
-            }))
-        {
-            if instance.close_reason() == Some(CloseReason::Requested)
+        let cancelled = self
+            .pending
+            .extract_if(.., |name, pending| {
+                desired.get(name) != Some(&pending.configuration)
+            })
+            .collect::<Vec<_>>();
+        for (name, pending) in cancelled {
+            self.retire(name, None, pending.activation.ended.clone());
+            drop(pending);
+        }
+        self.closing.retain(|name, closing| {
+            let reason = *closing.ended.borrow();
+            if reason == Some(CloseReason::Requested)
+                && let Some(configuration) = &closing.stop_if_unchanged
                 && desired.get(name) == Some(configuration)
             {
                 self.stopped.insert(name.clone(), configuration.clone());
             }
-        }
+            reason.is_none()
+        });
+        let mut retain = |name: &String,
+                          configuration: &ConfiguredMicro,
+                          ended: &watch::Receiver<Option<CloseReason>>| {
+            let reason = *ended.borrow();
+            if reason == Some(CloseReason::Requested) && desired.get(name) == Some(configuration) {
+                self.stopped.insert(name.clone(), configuration.clone());
+            }
+            reason.is_none()
+        };
+        self.active
+            .retain(|name, active| retain(name, &active.configuration, &active.ended));
+        self.pending.retain(|name, pending| {
+            retain(name, &pending.configuration, &pending.activation.ended)
+        });
         self.stopped
             .retain(|name, configuration| desired.get(name) == Some(configuration));
-        self.active
-            .retain(|_, active| active.instance.check().is_ok());
-        self.pending
-            .retain(|_, pending| pending.activation.instance.check().is_ok());
         self.failed
             .retain(|name, failed| desired.get(name) == Some(&failed.configuration));
         let mut states: BTreeMap<_, _> = desired
@@ -528,6 +590,8 @@ impl Composition {
                         && failed.dependencies == dependencies
                     {
                         InstanceState::Failed(failed.error.clone())
+                    } else if self.closing.contains_key(&name) {
+                        InstanceState::Activating
                     } else {
                         match registry.begin(
                             host,
@@ -573,13 +637,28 @@ impl Composition {
 
     pub async fn next(&mut self) -> String {
         std::future::poll_fn(|context| {
+            for (name, closing) in &mut self.closing {
+                let ended = closing.ended.borrow().is_some();
+                if ended || closing.closed.as_mut().poll(context).is_ready() {
+                    return std::task::Poll::Ready(name.clone());
+                }
+            }
             for (name, pending) in &mut self.pending {
                 if pending.result.is_none()
                     && let std::task::Poll::Ready(result) = pending.activation.poll(context)
                 {
                     pending.result = Some(result);
                 }
-                if pending.result.is_some() {
+                let ended = pending.activation.ended.borrow().is_some();
+                if pending.result.is_some()
+                    && (ended
+                        || pending
+                            .activation
+                            .host
+                            .check(&pending.activation.instance)
+                            .is_ok()
+                        || pending.activation.closed.as_mut().poll(context).is_ready())
+                {
                     return std::task::Poll::Ready(name.clone());
                 }
             }
@@ -589,15 +668,40 @@ impl Composition {
     }
 
     pub fn complete(&mut self, name: String, desired: &BTreeMap<String, ConfiguredMicro>) {
+        if let Some(closing) = self.closing.remove(&name) {
+            let reason = closing
+                .ended
+                .borrow()
+                .expect("closure completed without a terminal reason");
+            if reason == CloseReason::Requested
+                && let Some(configuration) = closing.stop_if_unchanged
+                && desired.get(&name) == Some(&configuration)
+            {
+                self.stopped.insert(name, configuration);
+            }
+            return;
+        }
         let mut pending = self.pending.remove(&name).unwrap();
         let result = pending.result.take().unwrap();
         if desired.get(&name) != Some(&pending.configuration) {
+            self.retire(name, None, pending.activation.ended.clone());
             return;
         }
-        if pending.activation.instance.check().is_err() {
-            if pending.activation.instance.close_reason() == Some(CloseReason::Requested) {
+        let reason = *pending.activation.ended.borrow();
+        if let Some(reason) = reason {
+            if reason == CloseReason::Requested {
                 self.stopped.insert(name, pending.configuration);
             }
+            return;
+        }
+        if pending
+            .activation
+            .host
+            .check(&pending.activation.instance)
+            .is_err()
+        {
+            pending.result = Some(result);
+            assert!(self.pending.insert(name, pending).is_none());
             return;
         }
         let dependencies: Option<Vec<_>> = pending
@@ -614,10 +718,13 @@ impl Composition {
             || pending
                 .dependencies
                 .iter()
-                .any(|instance| instance.check().is_err())
+                .any(|instance| pending.activation.host.check(instance).is_err())
         {
+            self.retire(name, None, pending.activation.ended.clone());
             return;
         }
+        let host = pending.activation.host.clone();
+        let ended = pending.activation.ended.clone();
         match result
             .map_err(MicroRegistryError::from)
             .and_then(|()| pending.activation.commit())
@@ -630,13 +737,26 @@ impl Composition {
                             name,
                             Active {
                                 configuration: pending.configuration,
+                                host,
+                                ended,
                                 instance
                             }
                         )
                         .is_none()
                 );
             }
+            Err(MicroRegistryError::Access(AccessError::Revoked))
+                if pending
+                    .activation
+                    .host
+                    .check(&pending.activation.instance)
+                    .is_err() =>
+            {
+                pending.result = Some(Err(AccessError::Revoked.into()));
+                assert!(self.pending.insert(name, pending).is_none());
+            }
             Err(error) => {
+                self.retire(name.clone(), None, ended);
                 self.failed.insert(
                     name,
                     Failed {

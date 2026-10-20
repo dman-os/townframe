@@ -17,6 +17,7 @@ pub trait Provision: Clone + Send + Sync + 'static {
 
 #[derive(Clone)]
 pub(super) struct Published {
+    pub host: Host,
     pub owner: Instance,
     pub version: u32,
     value: Arc<dyn Any + Send + Sync>,
@@ -24,7 +25,7 @@ pub(super) struct Published {
 
 impl Published {
     pub fn get<T: Provision>(&self) -> Result<T, AccessError> {
-        self.owner.check()?;
+        self.host.check(&self.owner)?;
         assert_eq!(self.version, T::VERSION, "native contract version mismatch");
         Ok(self
             .value
@@ -43,7 +44,7 @@ impl Provisions {
         let record = records
             .get(&(instance.into(), contract.into()))
             .ok_or(AccessError::Revoked)?;
-        record.owner.check()?;
+        record.host.check(&record.owner)?;
         Ok(record.clone())
     }
 
@@ -94,6 +95,7 @@ impl Provisions {
                     .insert(
                         (owner.name.clone(), id),
                         Published {
+                            host: host.clone(),
                             owner: owner.clone(),
                             version,
                             value,

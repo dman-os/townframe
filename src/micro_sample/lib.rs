@@ -80,10 +80,6 @@ impl SampleMicro {
     pub fn edit(&self, value: SampleConfig) -> Result<Operation, AccessError> {
         self.config.write(value)
     }
-
-    pub fn close(&self) {
-        self.instance.close();
-    }
 }
 
 impl Provision for SampleMicro {

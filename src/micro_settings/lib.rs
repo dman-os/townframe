@@ -14,7 +14,6 @@ pub use micro_settings_manifest as contract;
 pub struct SettingsMicro {
     pub instance: Instance,
     pub sections: CollectionReader<SettingsSection>,
-    collection: HostedCollection<SettingsSection>,
 }
 
 /// Settings requires storage for its own vocabulary and a granted root-presentation writer.
@@ -34,7 +33,6 @@ impl SettingsMicro {
         let micro = Self {
             sections: context.sections.reader(&context.instance),
             instance: context.instance,
-            collection: context.sections,
         };
         let presentation = micro.clone();
         let root = native.publish(&micro.instance, move || {
@@ -46,11 +44,6 @@ impl SettingsMicro {
             content: root,
         })?;
         Ok(micro)
-    }
-
-    /// Publish the contribution facility separately from this micro's presentation controller.
-    pub fn sections_output(&self) -> SettingsSections {
-        SettingsSections::new(self.collection.clone(), self.instance.clone())
     }
 }
 
@@ -78,15 +71,17 @@ pub fn provider(native: NativeComponents, roots: HostedCollection<RootMount>) ->
         },
         move |activation| {
             let instance = activation.instance();
+            let sections = activation.collection()?;
+            let output = SettingsSections::new(sections.clone());
             let micro = SettingsMicro::activate(
                 SettingsContext {
-                    sections: activation.collection()?,
-                    roots: roots.writer(&instance),
+                    sections,
+                    roots: roots.writer(&instance)?,
                     instance,
                 },
                 &native,
             )?;
-            activation.publish(micro.sections_output());
+            activation.publish(output);
             activation.publish(micro);
             Ok(())
         },

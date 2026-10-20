@@ -107,12 +107,12 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
             ),
         ])
     );
-    assert_eq!(sample.check(), Err(AccessError::Revoked));
+    assert_eq!(host.check(&sample), Err(AccessError::Revoked));
     assert!(matches!(
         application.output::<SampleMicro>("sample"),
         Err(AccessError::Revoked)
     ));
-    assert_eq!(first.check(), Ok(()));
+    assert_eq!(host.check(&first), Ok(()));
     assert_eq!(application.roots().snapshot().unwrap().len(), 1);
     configuration.get_mut("second").unwrap().enablement = Enablement::Enabled;
     assert_eq!(
@@ -154,5 +154,19 @@ fn configured_binding_selects_a_live_settings_instance_not_a_captured_controller
             .len(),
         1
     );
+    let sample = application.output::<SampleMicro>("sample").unwrap();
+    application.host().close_instance(&sample.instance).unwrap();
+    assert_eq!(sample.watch().current().unwrap_err(), AccessError::Revoked);
+    assert!(
+        application
+            .output::<SettingsMicro>("second")
+            .unwrap()
+            .sections
+            .snapshot()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(host.check(&first), Ok(()));
+    assert_eq!(application.roots().snapshot().unwrap().len(), 2);
     host.close();
 }

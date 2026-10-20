@@ -475,8 +475,79 @@ To be fixed as the slices land, not all at once.
 8. (Resolved) `../dioxus` resolves through the shared symlink and WIT deps are fetched with
    `x/wit-fetch.ts` — all dayframe crates build in the arena. See "Arena and build constraints".
 
+## Operator FIXMEs, verbatim
+
+Turn 17 deleted these comments and ADR 015 §11 recorded paraphrases, which later turns audited
+against instead of the originals. Recovered from arena event logs (an `rg -n -A8 FIXME` run on
+the pre-split tree). Paths are pre-split. Status as of generation 30; "open" means the code still
+contradicts the comment.
+
+| Where (pre-split) | Verbatim | Status |
+| --- | --- | --- |
+| `app/micros.rs:59` | don't we have tokio? | done (turn 24, `FuturesUnordered`) |
+| `app/micros.rs:118` | I'm going to need a gloassary for everything | partial: ADR vocabulary table only |
+| `app/micros.rs:123` | another oddly OOP shaped thing I'm having a hard time understanding what it's doing (`MicroActivation`) | open: still a host-holding object handed to micro crates |
+| `app/micros.rs:255` | bruh (`AsyncMicroFactory`) | done (turn 24) |
+| `settings_contract/lib.rs:2` | I like this, we're actually adopting a similar pattern in another crate for plugs … adopt micro_xxx_manifest … adopt the manifest.rs design so that micro manifests are written in rust and a cargo x build-oci equivalent to package them up. | partial: crates renamed; `micro_settings_manifest` holds native host types, not a manifest; packaging deferred |
+| `app/lib.rs:3` | I don't really like the name of this crate nor that the dayframe_dx/ dir holds craets … `micro_settings` for micros … a name for the final app composition roots … a pattern for the host side supporting crates … call it clay_ | done (stage 1) |
+| `app/host.rs:2` | this layer is attempting to construct what wasmcloud does for wasmtime yeah? … we shouldn't mix "wasm composition and hosting" with "micro composition and hosting". Micros are not always in wasm | partial: document session extracted to engine-neutral clay_guest_session; presentation session and dispatch remain in Wasmtime |
+| `app/host.rs:133` | this one is named confusingly, it's not the instance itself but a reference to it yes? It's cloned around a lot? and the state exists eslwhere? | done: plain identity value, state and operations on Host |
+| `app/host.rs:136` | why have it own the Host? I feel like this kind of design is too oop, the better design is to have stateful services that have methods and then we have simple values travelling across stuff. We can have RAII for things too I guess. | done: `Instance` carries identity only; Host services check/close/observe; bounded in-flight terminal storage |
+| `app/host.rs:542` | the data layer as original discussed … is a major, major piece, I don't like how it's just randomly put in between host.rs or documents.rs. THIS STINKS! | done (clay_data) |
+| `app/host.rs:549` | what we want is a narrow waist that serves the HostedCollection thingy for the guests. The narrow waist can then be implemented over wit or natively. … properly specced out and then implemented by the guest and the host side | open: collections are native-only; no WIT interface; guests contribute only via a composition-root callback |
+| `settings/lib.rs:31` | how does this exactly work? who constructs SettingsContext? | open: the micro crate builds it from clay_compose/clay_host |
+| `app/documents.rs:5` | do we actually need a bespoke variant of our data plane for doucments? … what about how settings collections, how do they work? | answered in ADR 015 §4 |
+| `documents/collection.rs:1` | you must first underestand the orgin of this code. this is the initial sketch for our data layer. | partial |
+| `presentation/wit/documents.wit:1` | maybe we should have these in some other place … a crate somewhere to host the host side support for accessing different servies … or maybe this crate itself could grow to be that thing | superseded by `clay_wit/lib.rs:7` |
+| `guest/lib.rs:7` | this crate contains the major violation of the design. Some guests know and assume they're running natively and thus directly import everything from dayframe_app. … What we want is the guest stuff to be implemented once on a single interface and that then wlil be backed by either native or wasm. | open: MDK `native` is a re-export shim; micros import clay_compose and clay_dioxus |
+| `counter/lib.rs:5` | if counter is wasm, how is it importing dayframe_app? … WHY THE FUCK does a micro know about the engine? | done (stage 6) |
+| `desktop/main.rs:1` | remove the ./crate-name/src/ nesting | done |
+| `desktop/composition.rs:189` | this overtly references a native export; the moutning micros like the workspace layout micro and the canvas micro will need to be written for the most part a final runtime agnostic shape | partial: wire slots exist; native micros are still not runtime-agnostic |
+| `desktop/composition.rs:193` | maybe CompoentMount should read application runtime or components using Context | done (stage 7) |
+| `presentation/lib.rs:1` | this file is too large, let's break it up | done (turn 24) |
+| `clay_wit/lib.rs:7` | a whole arse crate for this is silly, the host crate should own the wits | done: WIT owned by clay_guest_session; empty crate removed; host and guest generate their own bindings |
+
 
 ## Turn log
+
+- **Generation 30 — boundary repair and independently verified integration.** `Instance` is now
+  a plain host/id/name value; Host services check, close and observe it. Terminal receivers survive
+  closure without permanent tombstones. Composition retains retiring incarnations until their
+  terminal notification, including cancellation before first poll; same-name replacements cannot
+  start early. Deterministic concurrent-cleanup tests cover settlement and wakeup ordering; the
+  old settlement predicate fails the regression. `HostedCollection::writer` is fallible and
+  validates/registers the dependency under the host lock; Settings no longer carries a separate
+  Host/provider pair. Foreign, closed and queued-for-close binding tests cover the boundary.
+  `clay_guest_session` now owns WIT and the engine-neutral document session: admission, handle
+  budgets, watch/operation disposal, cancellation and neutral delivery values. Wasmtime consumes
+  it directly while keeping ResourceTable, ABI conversion, callback scheduling and invocation.
+  Canonical WIT signatures matched before deleting `clay_wit`; MDK and test generators now read
+  the shared host's WIT directory. The checker includes the new package.
+  Guest `DocumentMirror` owns callback routing and retained local snapshots; `current()` performs
+  no host read. Availability, freshness, monotonic revisions, revocation and independent pending
+  receipts are preserved. Counter uses this API; its explicit post-write resync is still needed
+  because the WIT mutation result carries a receipt rather than an optimistic snapshot.
+  Parent verification: **176/176 scoped nextest tests passed**, including seven neutral-session
+  tests and the actual Counter document callback/trap test, through
+  `deno run --allow-all x/check-dayframe.ts --no-fail-fast --test-threads 2`; the same command's
+  all-target/all-feature Clippy passed. Engine-disabled Dioxus, MDK empty/native/WIT feature
+  checks, wasm32 core/adapter/shared-session/MDK/manifest/Counter Clippy, scoped Rust formatting,
+  and Deno check/fmt passed. Desktop-only formatting was corrected and Clippy rerun afterward.
+  Logs: session temp `dayframe-verified.log`, `dayframe-matrix.log`, `dayframe-format.log`.
+  All builds kept the configured target and jobs=2/incremental=0. Initial native diagnostics
+  referenced obsolete host/Settings signatures despite current sources; package-scoped cleanup
+  forced the successful rebuild. Cleanup itself stopped at the old
+  `debug/build/micro_sample/5a2a6f46199ae232/fingerprint/dep-lib-micro_sample` entry with EINVAL;
+  `ls` independently failed on that same entry. No broader deletion was attempted. The initial
+  WIT fetch also timed out on GHCR's unrelated daybook_core keyvalue package after the Clay
+  dependencies had been restored. Three Dioxus wasm32 unused-variable warnings remain at
+  `html/src/file_data.rs:167,190,218`. No Git commands or commits; this arena worktree has no jj
+  repository, so review used source inspection rather than a jj diff.
+  **Still open:** real native/WIT MDK parity, portable Settings/Sample and contract types,
+  generic collection query/replication interfaces, native local-only read semantics, Sample's
+  Loading/Absent and pending-refresh presentation, presentation-session extraction, and the
+  previously deferred production node/jco/OCI work. This increment does not close all original
+  operator FIXMEs or prove a browser adapter.
 
 - **Turn 1** — Recapped the 3148-entry pi transcript (5 compactions) into the settled rules above;
   located the session's work in the operator's checkout and confirmed the arena base did not contain

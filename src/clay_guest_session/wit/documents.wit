@@ -1,7 +1,3 @@
-// clay_wit owns every Dayframe WIT contract (ADR 015 §3): presentation, documents, and
-// lifecycle. Host-side support for these interfaces lives in clay_data; engine host functions
-// live in the engine crates; guest bindings are generated from this package by clay_mdk.
-
 package townframe:dayframe@0.1.0;
 
 interface documents {

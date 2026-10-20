@@ -55,12 +55,12 @@ async fn retained_activation_cannot_resolve_replacement_or_use_revoked_consumer(
         )
         .await
         .unwrap();
-    consumer.close();
+    host.close_instance(&consumer).unwrap();
     assert_eq!(
         retained.borrow().as_ref().unwrap().require::<Facility>(),
         Err(AccessError::Revoked)
     );
-    supplier.close();
+    host.close_instance(&supplier).unwrap();
     registry
         .activate(
             &host,
@@ -131,7 +131,7 @@ async fn supplier_withdrawal_cancels_awaiting_consumer_and_pins_its_context() {
         Poll::Ready(())
     })
     .await;
-    supplier.close();
+    host.close_instance(&supplier).unwrap();
     registry
         .activate(
             &host,
@@ -227,8 +227,8 @@ async fn live_provisions_bind_consumers_and_withdraw_on_provider_shutdown() {
         registry.output::<Facility>("supplier"),
         Ok(Facility("live"))
     );
-    supplier.close();
-    assert_eq!(consumer.check(), Err(AccessError::Revoked));
+    host.close_instance(&supplier).unwrap();
+    assert_eq!(host.check(&consumer), Err(AccessError::Revoked));
     assert_eq!(
         registry.output::<Facility>("supplier"),
         Err(AccessError::Revoked)
@@ -242,12 +242,12 @@ async fn live_provisions_bind_consumers_and_withdraw_on_provider_shutdown() {
         )
         .await
         .unwrap();
-    supplier.close();
+    host.close_instance(&supplier).unwrap();
     assert_eq!(
         registry.output::<Facility>("supplier"),
         Ok(Facility("live"))
     );
-    replacement.close();
+    host.close_instance(&replacement).unwrap();
     host.close();
 }
 

@@ -64,10 +64,6 @@ impl WasmMicro {
     pub fn exhaust_fuel(&self) {
         self.runtime.exhaust_fuel();
     }
-
-    pub fn close(&self) {
-        self.instance.close();
-    }
 }
 
 pub fn provider<C: 'static>(

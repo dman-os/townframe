@@ -44,18 +44,17 @@ struct InstanceRecord {
 struct Recovery {
     active: bool,
     closed: bool,
-    /// Requested closes registered but not yet driven (a nested `Instance::close` from inside
-    /// cleanup lands here; the active driver drains it before finishing).
     pending: BTreeSet<u64>,
 }
 struct ActivationGuard {
+    host: Host,
     instance: Instance,
     committed: bool,
 }
 impl Drop for ActivationGuard {
     fn drop(&mut self) {
         if !self.committed {
-            self.instance.close();
+            self.host.close_instance(&self.instance).unwrap();
         }
     }
 }
@@ -76,6 +75,7 @@ pub struct Host {
 pub(crate) struct State {
     next: u64,
     instances: BTreeMap<u64, InstanceRecord>,
+    ending: BTreeMap<u64, (watch::Sender<Option<CloseReason>>, CloseReason)>,
     dependencies: BTreeMap<u64, BTreeSet<u64>>,
     closing: BTreeSet<u64>,
     components: BTreeMap<ComponentRef, u64>,
@@ -91,17 +91,11 @@ struct MountRecord {
     live: watch::Sender<bool>,
 }
 
-/// Authority token naming one incarnation. The incarnation itself is host state; this token is
-/// a small cloneable handle, and cloning shares authority: `close` revokes the incarnation for
-/// every clone. Tokens carry no service authority beyond lifecycle operations on the named
-/// incarnation: holding one never yields the [`Host`], so host services stay with the
-/// composition root that constructed them (ADR 015 §6).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Instance {
-    host: Host,
+    host: u64,
     id: u64,
     pub name: String,
-    ended: watch::Receiver<Option<CloseReason>>,
 }
 
 /// Opaque transport value; only the host can issue a live component reference.
@@ -148,6 +142,7 @@ impl Host {
             inner: Arc::new(Mutex::new(State {
                 next: 0,
                 instances: BTreeMap::new(),
+                ending: BTreeMap::new(),
                 dependencies: BTreeMap::new(),
                 closing: BTreeSet::new(),
                 components: BTreeMap::new(),
@@ -168,14 +163,14 @@ impl Host {
             .expect("cannot start instances on a closed host")
     }
 
-    fn try_start(&self, name: impl Into<String>) -> Result<Instance, AccessError> {
+    pub fn try_start(&self, name: impl Into<String>) -> Result<Instance, AccessError> {
         let mut state = self.inner.lock().unwrap();
         if state.recovery.closed {
             return Err(AccessError::Revoked);
         }
         state.next += 1;
         let id = state.next;
-        let (ended, lifetime) = watch::channel(None);
+        let (ended, _) = watch::channel(None);
         assert!(
             state
                 .instances
@@ -190,10 +185,9 @@ impl Host {
         );
         state.changes.send_replace(HostStatus::Running);
         Ok(Instance {
-            host: self.clone(),
+            host: self.identity,
             id,
             name: name.into(),
-            ended: lifetime,
         })
     }
 
@@ -205,11 +199,12 @@ impl Host {
         activate: impl FnOnce(Instance) -> Result<T, AccessError>,
     ) -> Result<T, AccessError> {
         let mut guard = ActivationGuard {
+            host: self.clone(),
             instance: self.try_start(name)?,
             committed: false,
         };
         let result = activate(guard.instance.clone())?;
-        guard.instance.check()?;
+        self.check(&guard.instance)?;
         guard.committed = true;
         Ok(result)
     }
@@ -221,16 +216,17 @@ impl Host {
         activate: impl FnOnce(Instance) -> F,
     ) -> Result<T, AccessError> {
         let mut guard = ActivationGuard {
+            host: self.clone(),
             instance: self.try_start(name)?,
             committed: false,
         };
         let instance = guard.instance.clone();
         let result = tokio::select! {
             biased;
-            _ = instance.closed() => return Err(AccessError::Revoked),
+            _ = self.await_close(&instance) => return Err(AccessError::Revoked),
             result = async { activate(instance.clone()).await } => result?,
         };
-        instance.check()?;
+        self.check(&instance)?;
         guard.committed = true;
         Ok(result)
     }
@@ -312,14 +308,55 @@ impl Host {
     }
 
     pub fn check(&self, instance: &Instance) -> Result<(), AccessError> {
-        if self != &instance.host {
+        if self.identity != instance.host {
             return Err(AccessError::Denied);
         }
-        instance.check()
+        let state = self.inner.lock().unwrap();
+        if !state.instances.contains_key(&instance.id) || state.closing.contains(&instance.id) {
+            return Err(AccessError::Revoked);
+        }
+        Ok(())
+    }
+
+    pub fn observe_instance(
+        &self,
+        instance: &Instance,
+    ) -> Result<watch::Receiver<Option<CloseReason>>, AccessError> {
+        if self.identity != instance.host {
+            return Err(AccessError::Denied);
+        }
+        let state = self.inner.lock().unwrap();
+        if state.closing.contains(&instance.id) {
+            return Err(AccessError::Revoked);
+        }
+        Ok(state
+            .instances
+            .get(&instance.id)
+            .ok_or(AccessError::Revoked)?
+            .ended
+            .subscribe())
+    }
+
+    pub async fn await_close(&self, instance: &Instance) {
+        assert_eq!(
+            self.identity, instance.host,
+            "instance belongs to another host"
+        );
+        let mut ended = {
+            let state = self.inner.lock().unwrap();
+            match state.instances.get(&instance.id) {
+                Some(record) => record.ended.subscribe(),
+                None => match state.ending.get(&instance.id) {
+                    Some((ended, _)) => ended.subscribe(),
+                    None => return,
+                },
+            }
+        };
+        ended.wait_for(Option::is_some).await.unwrap();
     }
 
     pub fn own(&self, instance: &Instance, cleanup: Cleanup) -> Result<(), AccessError> {
-        if self != &instance.host {
+        if self.identity != instance.host {
             return Err(AccessError::Denied);
         }
         let mut state = self.inner.lock().unwrap();
@@ -354,16 +391,20 @@ impl Host {
         self.run_closes();
     }
 
-    fn close_instance(&self, id: u64) {
+    pub fn close_instance(&self, instance: &Instance) -> Result<(), AccessError> {
+        if self.identity != instance.host {
+            return Err(AccessError::Denied);
+        }
         {
             let mut state = self.inner.lock().unwrap();
-            if !state.instances.contains_key(&id) || state.closing.contains(&id) {
-                return;
+            if !state.instances.contains_key(&instance.id) || state.closing.contains(&instance.id) {
+                return Ok(());
             }
-            state.closing.insert(id);
-            state.recovery.pending.insert(id);
+            state.closing.insert(instance.id);
+            state.recovery.pending.insert(instance.id);
         }
         self.run_closes();
+        Ok(())
     }
 
     /// Drives close cascades until quiescent. Only one driver is active at a time; a close
@@ -387,9 +428,7 @@ impl Host {
                 let mut state = self.inner.lock().unwrap();
                 std::mem::take(&mut state.recovery.pending)
             };
-            let mut ran = false;
             for id in requested {
-                ran = true;
                 self.close_instance_inner(id, CloseReason::Requested);
             }
             // An adopted shutdown cascades over whatever remains.
@@ -404,29 +443,24 @@ impl Host {
                     .copied()
                     .collect::<Vec<_>>();
                 for id in ids {
-                    ran = true;
                     self.close_instance_inner(id, CloseReason::HostShutdown);
                 }
             }
-            let quiet = {
-                let state = self.inner.lock().unwrap();
-                state.recovery.pending.is_empty()
-                    && (!state.recovery.closed || state.instances.is_empty())
-            };
-            if quiet && !ran {
-                break;
-            }
-            if quiet {
-                break;
-            }
-        }
-        {
             let mut state = self.inner.lock().unwrap();
-            state.recovery.active = false;
-            if state.recovery.closed && state.instances.is_empty() && state.closing.is_empty() {
-                state.changes.send_replace(HostStatus::Closed);
-            } else if !state.recovery.closed {
-                state.changes.send_replace(HostStatus::Running);
+            if state.recovery.pending.is_empty()
+                && (!state.recovery.closed || state.instances.is_empty())
+            {
+                for (_, (ended, reason)) in std::mem::take(&mut state.ending) {
+                    ended.send_replace(Some(reason));
+                }
+                state.recovery.active = false;
+                if state.recovery.closed {
+                    assert!(state.closing.is_empty());
+                    state.changes.send_replace(HostStatus::Closed);
+                } else {
+                    state.changes.send_replace(HostStatus::Running);
+                }
+                break;
             }
         }
     }
@@ -436,8 +470,9 @@ impl Host {
         consumer: &Instance,
         provider: &Instance,
     ) -> Result<(), AccessError> {
-        self.check(consumer)?;
-        self.check(provider)?;
+        if consumer.host != self.identity || provider.host != self.identity {
+            return Err(AccessError::Denied);
+        }
         let mut state = self.inner.lock().unwrap();
         if !state.instances.contains_key(&consumer.id)
             || !state.instances.contains_key(&provider.id)
@@ -474,6 +509,7 @@ impl Host {
                 state.closing.remove(&id);
                 return false;
             }
+            state.closing.insert(id);
             state
                 .dependencies
                 .iter()
@@ -509,9 +545,10 @@ impl Host {
             state
                 .live_components
                 .send_replace(state.components.keys().copied().collect());
-            effects
+            assert!(state.ending.insert(id, (effects.ended, reason)).is_none());
+            effects.effects
         };
-        for cleanup in effects.effects.into_iter().rev() {
+        for cleanup in effects.into_iter().rev() {
             cleanup();
         }
         let mut state = self.inner.lock().unwrap();
@@ -520,39 +557,7 @@ impl Host {
             providers.remove(&id);
         }
         state.closing.remove(&id);
-        effects.ended.send_replace(Some(reason));
         true
-    }
-}
-
-impl Instance {
-    /// Terminal reason is published after this incarnation's recovery has completed.
-    pub fn close_reason(&self) -> Option<CloseReason> {
-        *self.ended.borrow()
-    }
-
-    pub fn check(&self) -> Result<(), AccessError> {
-        if self
-            .host
-            .inner
-            .lock()
-            .unwrap()
-            .instances
-            .contains_key(&self.id)
-        {
-            Ok(())
-        } else {
-            Err(AccessError::Revoked)
-        }
-    }
-    pub async fn closed(&self) -> CloseReason {
-        let mut ended = self.ended.clone();
-        let reason = ended.wait_for(Option::is_some).await.unwrap();
-        reason.unwrap()
-    }
-
-    pub fn close(&self) {
-        self.host.close_instance(self.id);
     }
 }
 
@@ -679,34 +684,31 @@ impl<T: Clone + Send + Sync + 'static> HostedCollection<T> {
             updates,
         }
     }
-    pub fn writer(&self, contributor: &Instance) -> CollectionWriter<T> {
-        self.host.check(contributor).unwrap();
-        self.host
-            .bind_dependency(contributor, &self.provider)
-            .unwrap();
-        CollectionWriter {
+    pub fn writer(&self, contributor: &Instance) -> Result<CollectionWriter<T>, AccessError> {
+        self.host.bind_dependency(contributor, &self.provider)?;
+        Ok(CollectionWriter {
             collection: self.clone(),
             contributor: contributor.clone(),
-        }
+        })
     }
 }
 
 impl<T: Clone + Send + Sync + 'static> CollectionReader<T> {
     pub fn snapshot(&self) -> Result<BTreeMap<u64, T>, AccessError> {
-        self.consumer.check()?;
-        self.collection.provider.check()?;
+        self.collection.host.check(&self.consumer)?;
+        self.collection.host.check(&self.collection.provider)?;
         Ok(self.collection.state.lock().unwrap().snapshot())
     }
     pub fn subscribe(&self) -> Result<watch::Receiver<BTreeMap<u64, T>>, AccessError> {
-        self.consumer.check()?;
-        self.collection.provider.check()?;
+        self.collection.host.check(&self.consumer)?;
+        self.collection.host.check(&self.collection.provider)?;
         Ok(self.updates.clone())
     }
 }
 impl<T: Clone + Send + Sync + 'static> CollectionWriter<T> {
     pub fn insert(&self, value: T) -> Result<Entry<T>, AccessError> {
-        self.contributor.check()?;
-        self.collection.provider.check()?;
+        self.collection.host.check(&self.contributor)?;
+        self.collection.host.check(&self.collection.provider)?;
         let mut state = self.collection.state.lock().unwrap();
         state.next += 1;
         let id = state.next;
@@ -745,8 +747,14 @@ impl<T: Clone + Send + Sync + 'static> Entry<T> {
     }
 
     pub fn update(&self, value: T) -> Result<(), AccessError> {
-        self.writer.contributor.check()?;
-        self.writer.collection.provider.check()?;
+        self.writer
+            .collection
+            .host
+            .check(&self.writer.contributor)?;
+        self.writer
+            .collection
+            .host
+            .check(&self.writer.collection.provider)?;
         let mut state = self.writer.collection.state.lock().unwrap();
         match state.entries.get_mut(&self.id) {
             Some((generation, entry)) if *generation == self.generation => {
@@ -795,6 +803,213 @@ mod tests {
     use super::*;
 
     #[test]
+    fn instance_values_do_not_retain_host_or_owned_services() {
+        let host = Host::new();
+        let state = Arc::downgrade(&host.inner);
+        let instance = host.start("retained");
+        let retained = instance.clone();
+        let service = Arc::new(());
+        let service_lifetime = Arc::downgrade(&service);
+        host.own(&instance, Box::new(move || drop(service)))
+            .unwrap();
+        assert_eq!(Arc::strong_count(&host.inner), 1);
+        drop(host);
+        assert!(state.upgrade().is_none());
+        assert!(service_lifetime.upgrade().is_none());
+        assert_eq!(instance, retained);
+        assert_eq!(retained.name, "retained");
+    }
+
+    #[test]
+    fn foreign_instance_with_colliding_id_is_denied() {
+        let host = Host::new();
+        let foreign_host = Host::new();
+        let local = host.start("same-name");
+        let foreign = foreign_host.start("same-name");
+        assert_eq!(local.id, foreign.id);
+        assert_ne!(local, foreign);
+        assert_eq!(host.check(&foreign), Err(AccessError::Denied));
+        assert_eq!(host.close_instance(&foreign), Err(AccessError::Denied));
+        assert!(matches!(
+            host.observe_instance(&foreign),
+            Err(AccessError::Denied)
+        ));
+        assert_eq!(host.check(&local), Ok(()));
+        assert_eq!(foreign_host.check(&foreign), Ok(()));
+        host.close();
+        assert_eq!(host.close_instance(&local), Ok(()));
+        assert_eq!(host.close_instance(&foreign), Err(AccessError::Denied));
+        foreign_host.close();
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "instance belongs to another host")]
+    async fn awaiting_a_foreign_instance_is_an_invariant_failure() {
+        let host = Host::new();
+        let foreign_host = Host::new();
+        let instance = foreign_host.start("foreign");
+        foreign_host.close();
+        host.await_close(&instance).await;
+    }
+
+    #[tokio::test]
+    async fn stale_identity_cannot_revoke_replacement_and_terminal_storage_is_drained() {
+        let host = Host::new();
+        let stale = host.start("same-name");
+        let terminal = host.observe_instance(&stale).unwrap();
+        host.close_instance(&stale).unwrap();
+        assert_eq!(*terminal.borrow(), Some(CloseReason::Requested));
+        assert!(matches!(
+            host.observe_instance(&stale),
+            Err(AccessError::Revoked)
+        ));
+        for _ in 0..128 {
+            let replacement = host.start("same-name");
+            let ended = host.observe_instance(&replacement).unwrap();
+            assert_ne!(stale, replacement);
+            host.close_instance(&stale).unwrap();
+            host.await_close(&stale).await;
+            assert_eq!(host.check(&stale), Err(AccessError::Revoked));
+            assert_eq!(host.check(&replacement), Ok(()));
+            assert_eq!(*ended.borrow(), None);
+            host.close_instance(&replacement).unwrap();
+            assert_eq!(*ended.borrow(), Some(CloseReason::Requested));
+            let state = host.inner.lock().unwrap();
+            assert!(state.instances.is_empty());
+            assert!(state.ending.is_empty());
+            assert!(state.closing.is_empty());
+            assert!(state.dependencies.is_empty());
+            assert!(state.recovery.pending.is_empty());
+        }
+        host.close();
+        assert_eq!(host.try_start("closed"), Err(AccessError::Revoked));
+    }
+
+    #[tokio::test]
+    async fn early_and_late_waiters_wait_for_terminal_cleanup() {
+        use std::{future::Future, task::Poll};
+
+        let host = Host::new();
+        let instance = host.start("owned");
+        let mut terminal = host.observe_instance(&instance).unwrap();
+        let mut early = Box::pin(host.await_close(&instance));
+        std::future::poll_fn(|context| {
+            assert!(early.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        host.own(
+            &instance,
+            Box::new(move || {
+                entered.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }),
+        )
+        .unwrap();
+        let closing_host = host.clone();
+        let closing_instance = instance.clone();
+        let closing = std::thread::spawn(move || {
+            closing_host.close_instance(&closing_instance).unwrap();
+        });
+        entered_rx.await.unwrap();
+        assert_eq!(host.check(&instance), Err(AccessError::Revoked));
+        assert!(matches!(
+            host.observe_instance(&instance),
+            Err(AccessError::Revoked)
+        ));
+        assert_eq!(*terminal.borrow(), None);
+        let mut late = Box::pin(host.await_close(&instance));
+        std::future::poll_fn(|context| {
+            assert!(early.as_mut().poll(context).is_pending());
+            assert!(late.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        release.send(()).unwrap();
+        early.await;
+        late.await;
+        terminal.changed().await.unwrap();
+        assert_eq!(*terminal.borrow(), Some(CloseReason::Requested));
+        closing.join().unwrap();
+        host.await_close(&instance).await;
+        assert!(host.inner.lock().unwrap().ending.is_empty());
+        host.close();
+    }
+
+    #[test]
+    fn collection_writer_binding_rejects_foreign_and_closed_authority() {
+        let host = Host::new();
+        let provider = host.start("provider");
+        let contributor = host.start("contributor");
+        let collection = HostedCollection::<String>::new(&host, &provider);
+        let foreign_host = Host::new();
+        let foreign = foreign_host.start("foreign");
+        assert!(matches!(
+            collection.writer(&foreign),
+            Err(AccessError::Denied)
+        ));
+        let writer = collection.writer(&contributor).unwrap();
+        let entry = writer.insert("live".into()).unwrap();
+        let closed = host.start("closed");
+        host.close_instance(&closed).unwrap();
+        assert!(matches!(
+            collection.writer(&closed),
+            Err(AccessError::Revoked)
+        ));
+        host.close_instance(&provider).unwrap();
+        assert_eq!(host.check(&contributor), Err(AccessError::Revoked));
+        assert_eq!(entry.update("stale".into()), Err(AccessError::Revoked));
+        let replacement = host.start("replacement");
+        assert!(matches!(
+            collection.writer(&replacement),
+            Err(AccessError::Revoked)
+        ));
+        assert_eq!(host.check(&replacement), Ok(()));
+        assert!(host.inner.lock().unwrap().dependencies.is_empty());
+        host.close();
+        foreign_host.close();
+    }
+
+    #[test]
+    fn collection_writer_binding_rejects_queued_closes() {
+        let host = Host::new();
+        let blocker = host.start("blocker");
+        let provider = host.start("provider");
+        let contributor = host.start("contributor");
+        let collection = HostedCollection::<String>::new(&host, &provider);
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        host.own(
+            &blocker,
+            Box::new(move || {
+                entered.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }),
+        )
+        .unwrap();
+        let closing_host = host.clone();
+        let closing = std::thread::spawn(move || {
+            closing_host.close_instance(&blocker).unwrap();
+        });
+        entered_rx.recv().unwrap();
+        host.close_instance(&contributor).unwrap();
+        let contributor_rejected =
+            matches!(collection.writer(&contributor), Err(AccessError::Revoked));
+        host.close_instance(&provider).unwrap();
+        let live = host.start("live");
+        let provider_rejected = matches!(collection.writer(&live), Err(AccessError::Revoked));
+        release.send(()).unwrap();
+        closing.join().unwrap();
+        assert!(contributor_rejected);
+        assert!(provider_rejected);
+        assert_eq!(host.check(&live), Ok(()));
+        assert!(host.inner.lock().unwrap().dependencies.is_empty());
+        host.close();
+    }
+
+    #[test]
     fn collection_entries_and_readers_follow_their_owned_lifetimes() {
         let host = Host::new();
         let provider = host.start("provider");
@@ -805,10 +1020,12 @@ mod tests {
         let reader = collection.reader(&consumer);
         let first = collection
             .writer(&first_contributor)
+            .unwrap()
             .insert("first".into())
             .unwrap();
         let second = collection
             .writer(&second_contributor)
+            .unwrap()
             .insert("second".into())
             .unwrap();
 
@@ -821,7 +1038,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "second"]
         );
-        first_contributor.close();
+        host.close_instance(&first_contributor).unwrap();
         assert_eq!(
             reader
                 .snapshot()
@@ -845,7 +1062,7 @@ mod tests {
             Some("updated")
         );
 
-        provider.close();
+        host.close_instance(&provider).unwrap();
         assert_eq!(reader.snapshot(), Err(AccessError::Revoked));
         assert_eq!(
             second.update("not retained".into()),
@@ -861,7 +1078,7 @@ mod tests {
         let contributor = host.start("contributor");
         let collection = HostedCollection::<String>::new(&host, &provider);
         let reader = collection.reader(&contributor);
-        let writer = collection.writer(&contributor);
+        let writer = collection.writer(&contributor).unwrap();
         let entry = writer.insert("live".into()).unwrap();
         entry.release();
         // Releasing again — and a stale handle to the same id — must not error and must not
@@ -917,7 +1134,7 @@ mod tests {
             Err(_) => panic!("activation exited before publishing its component"),
         };
         drop(activation);
-        assert_eq!(instance.check(), Err(AccessError::Revoked));
+        assert_eq!(host.check(&instance), Err(AccessError::Revoked));
         assert!(matches!(
             host.mount(&root, component),
             Err(AccessError::Revoked)
@@ -931,9 +1148,20 @@ mod tests {
         let provider = host.start("provider");
         let consumer = host.start("consumer");
         host.bind_dependency(&consumer, &provider).unwrap();
+        let provider_ended = host.observe_instance(&provider).unwrap();
+        let consumer_ended = host.observe_instance(&consumer).unwrap();
         let mut changes = host.changes();
-        for instance in [&provider, &consumer] {
+        let sibling = host.start("sibling");
+        host.bind_dependency(&sibling, &provider).unwrap();
+        let sibling_ended = host.observe_instance(&sibling).unwrap();
+        changes.borrow_and_update();
+        for instance in [&provider, &consumer, &sibling] {
             let observer = changes.clone();
+            let terminals = [
+                provider_ended.clone(),
+                consumer_ended.clone(),
+                sibling_ended.clone(),
+            ];
             host.own(
                 instance,
                 Box::new(move || {
@@ -941,19 +1169,22 @@ mod tests {
                         !observer.has_changed().unwrap(),
                         "closure notification overtook recovery"
                     );
+                    for terminal in terminals {
+                        assert_eq!(*terminal.borrow(), None);
+                    }
                 }),
             )
             .unwrap();
         }
-        provider.close();
+        host.close_instance(&provider).unwrap();
         assert!(changes.has_changed().unwrap());
         changes.borrow_and_update();
-        assert_eq!(provider.close_reason(), Some(CloseReason::Requested));
+        assert_eq!(*provider_ended.borrow(), Some(CloseReason::Requested));
         assert_eq!(
-            consumer.close_reason(),
+            *consumer_ended.borrow(),
             Some(CloseReason::DependencyWithdrawn)
         );
-        provider.close();
+        host.close_instance(&provider).unwrap();
         assert!(
             !changes.has_changed().unwrap(),
             "duplicate close emitted activity"
@@ -966,6 +1197,7 @@ mod tests {
     fn host_shutdown_is_not_reported_complete_before_recovery() {
         let host = Host::new();
         let instance = host.start("owned");
+        let ended = host.observe_instance(&instance).unwrap();
         let changes = host.changes();
         let during_cleanup = changes.clone();
         host.own(
@@ -977,7 +1209,7 @@ mod tests {
         .unwrap();
         host.close();
         assert_eq!(*changes.borrow(), HostStatus::Closed);
-        assert_eq!(instance.close_reason(), Some(CloseReason::HostShutdown));
+        assert_eq!(*ended.borrow(), Some(CloseReason::HostShutdown));
     }
 
     #[test]
@@ -989,6 +1221,8 @@ mod tests {
         let provider = host.start("provider");
         let consumer = host.start("consumer");
         host.bind_dependency(&consumer, &provider).unwrap();
+        let provider_ended = host.observe_instance(&provider).unwrap();
+        let consumer_ended = host.observe_instance(&consumer).unwrap();
         let changes = host.changes();
         let provider_for_cleanup = provider.clone();
         let host_in_cleanup = host.clone();
@@ -997,8 +1231,8 @@ mod tests {
         host.own(
             &consumer,
             Box::new(move || {
-                provider_for_cleanup
-                    .check()
+                host_in_cleanup
+                    .check(&provider_for_cleanup)
                     .expect("provider must outlive consumer cleanup");
                 host_in_cleanup.close();
                 consumer_recovered.lock().unwrap().push("consumer");
@@ -1006,22 +1240,27 @@ mod tests {
         )
         .unwrap();
         let provider_recovered = recovered.clone();
+        let consumer_terminal = consumer_ended.clone();
         host.own(
             &provider,
-            Box::new(move || provider_recovered.lock().unwrap().push("provider")),
+            Box::new(move || {
+                assert_eq!(*consumer_terminal.borrow(), None);
+                provider_recovered.lock().unwrap().push("provider");
+            }),
         )
         .unwrap();
-        consumer.close();
+        host.close_instance(&consumer).unwrap();
         assert_eq!(*recovered.lock().unwrap(), ["consumer", "provider"]);
         assert_eq!(*changes.borrow(), HostStatus::Closed);
-        assert_eq!(consumer.close_reason(), Some(CloseReason::Requested));
-        assert_eq!(provider.close_reason(), Some(CloseReason::HostShutdown));
+        assert_eq!(*consumer_ended.borrow(), Some(CloseReason::Requested));
+        assert_eq!(*provider_ended.borrow(), Some(CloseReason::HostShutdown));
     }
 
     #[test]
     fn reentrant_shutdown_does_not_publish_closed_before_current_cleanup() {
         let host = Host::new();
         let instance = host.start("owned");
+        let ended = host.observe_instance(&instance).unwrap();
         let changes = host.changes();
         let observer = changes.clone();
         let reentrant = host.clone();
@@ -1033,8 +1272,9 @@ mod tests {
             }),
         )
         .unwrap();
-        instance.close();
+        host.close_instance(&instance).unwrap();
         assert_eq!(*changes.borrow(), HostStatus::Closed);
+        assert_eq!(*ended.borrow(), Some(CloseReason::Requested));
     }
 
     #[tokio::test]
@@ -1052,7 +1292,7 @@ mod tests {
             Poll::Ready(())
         })
         .await;
-        started.await.unwrap().close();
+        host.close_instance(&started.await.unwrap()).unwrap();
         assert_eq!(activation.await, Err(AccessError::Revoked));
         host.close();
     }

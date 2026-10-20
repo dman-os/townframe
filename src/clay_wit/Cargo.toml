@@ -1,8 +1,0 @@
-[package]
-name = "clay_wit"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-
-[lib]
-path = "lib.rs"

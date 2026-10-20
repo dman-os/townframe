@@ -7,7 +7,7 @@
 //! disposal semantics instead of optimistic persistence or source cursors.
 //!
 //! Source cursors and cache policy remain host-owned. Native wrappers use these data values
-//! and handles; the WIT resources in `clay_wit` map the same watch/selection/mutation
+//! and handles; the WIT resources in `clay_guest_session` map the same watch/selection/mutation
 //! protocol without transporting callbacks or renderer state.
 mod collection;
 
@@ -185,6 +185,7 @@ struct Authority {
 #[derive(Clone)]
 pub struct DocumentAccess {
     service: DocumentService,
+    host: Host,
     instance: Instance,
     authority: Arc<Authority>,
 }
@@ -350,6 +351,7 @@ impl DocumentService {
         )?;
         Ok(DocumentAccess {
             service: self.clone(),
+            host: host.clone(),
             instance: instance.clone(),
             authority,
         })
@@ -357,7 +359,7 @@ impl DocumentService {
 }
 impl DocumentAccess {
     fn check(&self) -> Result<(), AccessError> {
-        self.instance.check()?;
+        self.host.check(&self.instance)?;
         if self.authority.revoked.load(Ordering::Acquire) {
             Err(AccessError::Revoked)
         } else {

@@ -19,7 +19,7 @@ use counter_fixture::counter_component;
 
 mod host_bindings {
     wasmtime::component::bindgen!({
-        path: "../clay_wit/wit",
+        path: "../clay_guest_session/wit",
         world: "micro-client",
         imports: { default: trappable },
         with: {

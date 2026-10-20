@@ -68,7 +68,7 @@ fn counter_manifest_contributes_live_settings_and_withdraws_on_trap_or_disableme
     );
     first.exhaust_fuel();
     click(&mut dom, &mut tree);
-    assert_eq!(first.instance.check(), Err(AccessError::Revoked));
+    assert_eq!(app.host().check(&first.instance), Err(AccessError::Revoked));
     assert_eq!(
         settings
             .sections

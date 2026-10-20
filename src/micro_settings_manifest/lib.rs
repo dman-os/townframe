@@ -20,7 +20,6 @@ pub struct SettingsSection {
 #[derive(Clone)]
 pub struct SettingsSections {
     collection: HostedCollection<SettingsSection>,
-    provider: Instance,
 }
 
 impl Provision for SettingsSections {
@@ -28,18 +27,13 @@ impl Provision for SettingsSections {
 }
 
 impl SettingsSections {
-    pub fn new(collection: HostedCollection<SettingsSection>, provider: Instance) -> Self {
-        Self {
-            collection,
-            provider,
-        }
+    pub fn new(collection: HostedCollection<SettingsSection>) -> Self {
+        Self { collection }
     }
 
     pub fn bind(&self, consumer: &Instance) -> Result<SettingsContribution, AccessError> {
-        self.provider.check()?;
-        consumer.check()?;
         Ok(SettingsContribution {
-            sections: self.collection.writer(consumer),
+            sections: self.collection.writer(consumer)?,
         })
     }
 }
@@ -68,7 +62,7 @@ mod tests {
         let first = host.start("first");
         let second = host.start("second");
         let collection = HostedCollection::new(&host, &provider);
-        let output = SettingsSections::new(collection.clone(), provider.clone());
+        let output = SettingsSections::new(collection.clone());
         let reader = collection.reader(&provider);
         let first_grant = output.bind(&first).unwrap();
         let second_grant = output.bind(&second).unwrap();
@@ -86,7 +80,16 @@ mod tests {
                 detail: second_detail,
             })
             .unwrap();
-        first.close();
+        host.close_instance(&first).unwrap();
+        assert!(matches!(output.bind(&first), Err(AccessError::Revoked)));
+        let foreign = Host::new();
+        let foreign_consumer = foreign.start("foreign");
+        assert!(matches!(
+            output.bind(&foreign_consumer),
+            Err(AccessError::Denied)
+        ));
+        assert_eq!(foreign.check(&foreign_consumer), Ok(()));
+        foreign.close();
         assert_eq!(
             reader.snapshot().unwrap().into_values().collect::<Vec<_>>(),
             vec![SettingsSection {
@@ -107,7 +110,7 @@ mod tests {
             }),
             Err(AccessError::Revoked)
         );
-        provider.close();
+        host.close_instance(&provider).unwrap();
         assert!(matches!(
             second_grant.insert(SettingsSection {
                 title: "Stale".into(),

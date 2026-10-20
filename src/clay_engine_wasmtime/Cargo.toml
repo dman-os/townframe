@@ -9,6 +9,7 @@ path = "lib.rs"
 
 [dependencies]
 clay_data = { path = "../clay_data" }
+clay_guest_session = { path = "../clay_guest_session" }
 clay_host = { path = "../clay_host" }
 clay_surface = { path = "../clay_surface" }
 wasmtime.workspace = true

@@ -116,11 +116,12 @@ the shipped composition; the framework is **clay**.
 
 ```text
 src/
-  clay_wit/          the WIT package (presentation, documents, lifecycle, future collection
-                     interfaces) plus generated host/guest bindings. Nothing else owns WIT.
+  clay_guest_session/  engine-neutral document host sessions: admission, resource lifetimes,
+                     cancellation and neutral deliveries. Owns the WIT sources; consumers
+                     generate their own bindings. No Wasmtime or Dioxus dependency.
   clay_surface/      the typed Mutation wire, replay, SurfaceTree. Depends on dioxus-core
                      (Element/WriteMutations) only; no Blitz, no Wasmtime, no host concepts.
-  clay_host/         the authority kernel: Host, Instance token + InstanceId, lifecycle and
+  clay_host/         the authority kernel: Host, plain Instance identity, lifecycle and
                      dependency edges, capability tokens, contribution collections (owned
                      entries + overrides), component refs and mount records, root window/mount
                      collections. No Dioxus, no documents, no engine.
@@ -135,11 +136,11 @@ src/
                      wasm provider wiring (feature `wasmtime` -> clay_engine_wasmtime).
   clay_engine_wasmtime/  the native component engine: store/instance per incarnation, fuel and
                      memory bounds, WIT host functions, document delivery pump. Depends on
-                     clay_wit, clay_surface, clay_host, clay_data — never on clay_compose
-                     vocabulary beyond activation handles.
+                     clay_guest_session, clay_surface, clay_host, clay_data — never on
+                     clay_compose. ResourceTable and generated ABI types remain here.
   clay_mdk/          the Micro Development Kit: the simple authoring API every micro uses
                      (§5). Feature `native` backs it with in-process clay_host/clay_data
-                     handles; feature `wit` backs it with clay_wit bindings for guest builds;
+                     handles; feature `wit` generates guest bindings from clay_guest_session/wit;
                      feature `dioxus` adds the guest VirtualDom adapter (GuestDom, WireMutations).
   micro_settings_manifest/   the Settings contribution contract (was settings_contract).
   micro_settings/    the Settings micro.
@@ -154,11 +155,13 @@ src/
   ui/                design-system tokens and presentational components (unchanged scope).
 ```
 
-Dependency direction is strictly downward: `clay_wit < clay_surface < clay_host < clay_data <
-clay_compose < clay_dioxus`; engines depend on host/data/surface/wit; `clay_mdk` depends on
-`clay_wit` (guest) or `clay_host`/`clay_data` (native) — never on `clay_compose` or an engine;
-micros depend on `clay_mdk` and contract crates; composition roots depend on everything they
-link. No crate above a micro may name a concrete micro (D3).
+The host/data dependency chain is `clay_host <- clay_data <- clay_guest_session`; the shared
+session layer must not depend on an engine or renderer. Engine adapters consume that layer and
+`clay_surface`. Guest MDK bindings read the shared WIT sources without linking the host
+implementation. The intended micro boundary remains `clay_mdk` plus portable contract crates,
+never `clay_compose` or an engine; the current native MDK re-exports and Settings/Sample imports
+do not yet satisfy it. Composition roots depend on everything they link. No crate above a micro
+may name a concrete micro (D3).
 
 ### 4. The data layer (clay_data), per the original discussion
 
@@ -240,7 +243,7 @@ let view = GuestDom::new_with_props(App, props);    // dioxus feature: guest VDO
 ```
 
 The MDK is one crate with backends: `native` (in-process handles over clay_host/clay_data) and
-`wit` (clay_wit bindings). The same micro source compiles to the host module or to a guest
+`wit` (guest-generated bindings from clay_guest_session/wit). The same micro source is intended to compile to the host module or to a guest
 component. Typed decoding, Dioxus signal adaptation, and closure-based mutation conveniences
 are MDK-local: a closure-based `update(|v| ...)` must lower to a defined patch or intent, never
 serialize a callback (`transcript:328` §4). Mediated values (an action a contributor hands to
@@ -250,11 +253,12 @@ semantics (D5).
 
 ### 6. clay_host shape: tokens, leases, collections
 
-- **`Instance` is a token, not the incarnation.** The incarnation is host state; the token is a
-  small cloneable handle (`Host` + `InstanceId` internally) whose operations are lifecycle-only:
-  `check`, `close`, `closed`, `name`, `id() -> InstanceId`. Equality compares host identity and
-  id. The token no longer exposes `host()` publicly: authority flows from the composition root
-  holding `Host`, not from holding a token. (`host.rs:133-136` FIXME; R2, R3.)
+- **`Instance` names an incarnation; it does not own or operate one.** It carries plain host and
+  incarnation identity plus descriptive metadata, not `Host` or watch channels. Services perform
+  liveness checks and closure. A terminal observer is explicitly acquired before closure and
+  receives its reason only after cleanup; retaining a reference alone neither retains service
+  state nor creates a historical-reason obligation. This supersedes the earlier `Host`-holding
+  token sketch (`host.rs:133-136` FIXME; R2, R3).
 - **Leases are once-only release handles** (`transcript:222`): `EntryLease<T>`,
   `WatchLease`, `MountLease`. Explicit release, scope closure, and `Drop` converge on the same
   once-only operation; `Drop` does not promise completed asynchronous cleanup. A lease that
@@ -303,7 +307,7 @@ semantics (D5).
   performs the ceremony dayframe_counter performs today: grant the declared facets, activate
   the component, insert declared contributions. A wasm micro needs no bespoke native crate.
 - Browser engine (`clay_engine_jco` or equivalent) is a future crate against the same
-  clay_wit/clay_surface contracts (D10); nothing in this ADR builds the abstraction early, but
+  clay_guest_session/clay_surface contracts (D10); nothing in this ADR builds the abstraction early, but
   R1/R6/R7 are what make it possible.
 
 ### 9. Micro manifests
@@ -334,10 +338,10 @@ obtain `NativeComponents` through Dioxus context instead of threading props
 | `guest/lib.rs:7` (native guests bypass the boundary) | §5 clay_mdk dual backends |
 | `host.rs:2` (is this wasmcloud?) | §8 engine seam; wasm-composition hosting ≠ micro-composition hosting, separate crates |
 | `host.rs:133/136` (Instance naming, owns Host) | §6 token semantics, `InstanceId`, authority removal |
-| `host.rs:542/549` (data layer placement, narrow waist) | §3 clay_data, §4 spec, clay_wit interfaces |
+| `host.rs:542/549` (data layer placement, narrow waist) | §3 clay_data, §4 spec, clay_guest_session interfaces |
 | `documents.rs:5` (bespoke data plane?) | §4: document mirrors and contribution collections are distinct mechanisms, both specced |
 | `documents/collection.rs:1` (understand the origin) | §4 quotes the transcript design it must grow into |
-| `documents.wit:1` (WIT placement) | §3 clay_wit |
+| `documents.wit:1` (WIT placement) | §3 clay_guest_session |
 | `presentation/lib.rs:1` (file too large) | clay_surface modules: `wire.rs`, `tree.rs`, `render.rs`, `replay.rs` |
 | `app/lib.rs:3` (crate/dir naming) | §3 layout |
 | `desktop/main.rs:1` (crate `src/` nesting) | §3 layout |
@@ -373,7 +377,7 @@ obtain `NativeComponents` through Dioxus context instead of threading props
 
 Ordered so every stage keeps the scoped suite green (the 8 core packages + desktop):
 
-1. **Crate split, no behavior change.** Extract `clay_surface` (presentation), `clay_wit` (WIT),
+1. **Crate split, no behavior change.** Extract `clay_surface` (presentation), `clay_guest_session` (WIT),
    `clay_host` (host.rs + contribution collections), `clay_data` (documents.rs + mock),
    `clay_compose` (micros + application + features), `clay_dioxus` (native.rs). Rename
    `dayframe_*` crates and micro crates per §3; flatten crate roots to `src/<crate>/`.
@@ -409,6 +413,37 @@ focused tests; no stage may weaken a settled semantic (D1–D13, ADR 014).
   designed; this is recorded, not discovered.
 - We accept a large mechanical rename as one PR stage rather than shimming old paths; the
   interface break is intentional (breaking changes are preferred over compatibility shims).
+
+## Boundary correction after implementation review
+
+The original migration checklist is not evidence of completion. The operator's recovered
+comments in `docs/scratch/dayframe-micros.md` and the following corrections supersede conflicting
+API sketches above:
+
+- An instance reference carries plain identity, not a `Host`, channel, or lifecycle methods.
+  Services validate and operate on it. Terminal observation is an explicitly acquired resource;
+  preserving an arbitrary old id must not require retaining all closed incarnations forever.
+- Micro source and portable contract crates must not depend on `clay_compose`, `clay_dioxus`,
+  or their privileged implementation types. Re-exporting those types from an MDK `native`
+  module does not satisfy this boundary. Native and WIT backends implement one authoring API.
+- The engine-neutral host implementation shared by Wasmtime and a future jco adapter owns the
+  WIT sources. Engine-specific generated bindings and resource tables stay in the engine
+  adapters; putting Wasmtime types in their common dependency would reverse the separation.
+- Node → Clay → guest uses query-driven partial replication. A query both requests hydration
+  and retains a stream of authorized changes. Consumer reads use their local reactive replica,
+  never an implicit synchronous remote read. Not-yet-loaded, known-absent, present, and revoked
+  remain distinguishable even when the convenient value accessor returns no value.
+- Snapshot and continuation belong to one subscription. Changes are filtered before delivery;
+  overlapping queries must not duplicate effects or withdraw data still retained by another
+  query. Releasing a query ends its delivery and retention. Late updates from a replaced query
+  cannot repopulate its successor.
+- Transient contributions and durable documents may share replication mechanics, not ownership
+  or persistence semantics. Optimistic operations have explicit acceptance/rollback outcomes;
+  closing a replica does not cancel a submitted durable write. IDs-only/host-backed value views
+  are deferred optimizations, not the initial contract.
+- A boundary is evaluated through actual Settings/Sample consumption and native/WIT parity
+  tests. Compiling host code for wasm32 alone proves neither guest portability nor browser
+  support. Each increment must state which consumers and engines it actually exercised.
 
 ## Deferred
 

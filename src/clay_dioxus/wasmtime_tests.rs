@@ -133,7 +133,7 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
     assert_eq!(tree.text_content(), "before0after");
     click(&mut dom, &mut tree);
     assert_eq!(tree.text_content(), "before1after");
-    child.close();
+    host.close_instance(&child).unwrap();
     assert!(matches!(
         runtime.mount(Arc::new(probe), &[child_reference]),
         Err(clay_surface::PresentationError::Revoked)
@@ -141,7 +141,7 @@ async fn wasm_layout_slots_compose_interactive_wasm_children_and_isolate_withdra
     dom.wait_for_work().await;
     dom.render_immediate(&mut tree);
     assert_eq!(tree.text_content(), "beforeComponent withdrawn.after");
-    assert_eq!(layout.check(), Ok(()));
+    assert_eq!(host.check(&layout), Ok(()));
     drop(dom);
     host.close();
     foreign.close();
@@ -179,7 +179,7 @@ async fn wasm_guest_trap_or_disablement_closes_instance_and_withdraws_owned_entr
         counter_package(),
         app.native(),
         move |activation, _, detail| {
-            entries.writer(&activation.instance()).insert(detail)?;
+            entries.writer(&activation.instance())?.insert(detail)?;
             Ok(())
         },
     ))
@@ -196,7 +196,7 @@ async fn wasm_guest_trap_or_disablement_closes_instance_and_withdraws_owned_entr
     assert_eq!(tree.text_content(), "0");
     first.exhaust_fuel();
     click(&mut dom, &mut tree);
-    assert_eq!(first.instance.check(), Err(AccessError::Revoked));
+    assert_eq!(app.host().check(&first.instance), Err(AccessError::Revoked));
     assert!(reader.snapshot().unwrap().is_empty());
     assert_eq!(
         app.configure(&config).await.unwrap()["counter"],
@@ -239,7 +239,7 @@ async fn failed_contribution_rolls_back_surfaces_entries_and_publications() {
                 return Err(AccessError::Denied);
             }
             let instance = activation.instance();
-            entries.writer(&instance).insert(detail)?;
+            entries.writer(&instance)?.insert(detail)?;
             *capture.borrow_mut() = Some((instance, detail));
             Ok(())
         },
@@ -248,7 +248,7 @@ async fn failed_contribution_rolls_back_surfaces_entries_and_publications() {
     let states = app.configure(&configuration()).await.unwrap();
     assert!(matches!(states["counter"], InstanceState::Failed(_)));
     let (instance, detail) = leaked.borrow_mut().take().unwrap();
-    assert_eq!(instance.check(), Err(AccessError::Revoked));
+    assert_eq!(app.host().check(&instance), Err(AccessError::Revoked));
     assert!(
         collection
             .reader(&app.root())
@@ -322,7 +322,7 @@ async fn manifest_read_only_grant_cannot_be_escalated_by_guest_mutation() {
         tree.text_content(),
         "0Pending counter writes: 0Write failed: DocumentError::DeniedRefresh counter"
     );
-    assert!(micro.instance.check().is_ok());
+    assert!(app.host().check(&micro.instance).is_ok());
     app.host().close();
 }
 
