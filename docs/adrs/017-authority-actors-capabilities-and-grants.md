@@ -125,7 +125,7 @@ produced.
 
 ## Composition
 
-The embedder opens each subsystem — DocumentsRepo, DrawerRepo, the runtime — from
+The embedder opens each subsystem — DocsRepo, DrawerRepo, the runtime — from
 the operator root and hands it its actor cap. A plug is an actor under the
 runtime (`rt/plugs/ocr`).
 
@@ -137,9 +137,9 @@ the cap it is shown is live and was issued by itself, and what rights it carries
 The domain object grammar lives in exactly one place, the service that named it.
 
 A facet write by a plug is signed as the plug. Guests never hold actor caps: the
-runtime holds the plug's actor cap and passes it with the dispatch, DocumentsRepo
+runtime holds the plug's actor cap and passes it with the dispatch, DocsRepo
 authorizes the write against the object cap the guest presented, and then signs
-with the plug's actor cap. The authority cannot tell DocumentsRepo from any other
+with the plug's actor cap. The authority cannot tell DocsRepo from any other
 holder of an actor cap and does not need to: holding an actor's cap is being that
 actor, so actor caps stay inside trusted subsystems. A dispatch is an object cap
 derived for that dispatch, not an actor.

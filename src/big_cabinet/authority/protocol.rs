@@ -336,7 +336,7 @@ operation!(CheckGrant => Rights, query, "checkGrant", "Rights");
 
 /// Sign a dmeta v2 facet claim as the actor `actor` is the capability of. Needs
 /// the actor's own capability with `use`, and the claim's `actorUuid` must be
-/// that actor. Which drawer authorizes the claim's document is DocumentsRepo's
+/// that actor. Which drawer authorizes the claim's document is DocsRepo's
 /// check, made before this call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

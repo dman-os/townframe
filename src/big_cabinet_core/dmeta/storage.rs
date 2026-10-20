@@ -324,7 +324,7 @@ mod tests {
         dmeta.facet_uuids.insert(Uuid7::new(), key);
         dmeta
             .branch_uuids
-            .insert(Uuid7::new(), crate::dmeta::DocumentId::new(b"doc"));
+            .insert(Uuid7::new(), crate::dmeta::DocId::new(b"doc"));
         let key = "org.example.note/main".parse().unwrap();
         dmeta.facets.insert(
             key,
@@ -351,7 +351,7 @@ mod tests {
             signature: SignatureBytes::try_from([byte; 64].as_slice()).unwrap(),
             message: Some(Bytes::from(vec![byte, 0])),
             inherited: Some(InheritedWitness {
-                origin_doc: crate::dmeta::DocumentId::new(vec![byte]),
+                origin_doc: crate::dmeta::DocId::new(vec![byte]),
                 message: Bytes::from(vec![byte, 1]),
                 value: Some(Bytes::from(vec![byte, 2])),
             }),
@@ -670,7 +670,7 @@ mod tests {
                     "actors" => MultibaseKey::try_from([byte; 32].as_slice())
                         .unwrap()
                         .to_string(),
-                    "branchUuids" => crate::dmeta::DocumentId::new([byte]).to_string(),
+                    "branchUuids" => crate::dmeta::DocId::new([byte]).to_string(),
                     _ => format!("org.example.other{byte}/main"),
                 };
                 let mut tx = branch.transaction();
@@ -717,7 +717,7 @@ mod tests {
                     ("branchUuids", true) => submitted.branch_uuids.clear(),
                     ("branchUuids", false) => {
                         *submitted.branch_uuids.values_mut().next().unwrap() =
-                            crate::dmeta::DocumentId::new(b"other");
+                            crate::dmeta::DocId::new(b"other");
                     }
                     (_, true) => submitted.facet_uuids.clear(),
                     (_, false) => {

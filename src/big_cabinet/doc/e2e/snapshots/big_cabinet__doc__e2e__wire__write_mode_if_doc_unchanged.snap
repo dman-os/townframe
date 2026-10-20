@@ -1,0 +1,10 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: mode
+---
+{
+  "mode": "ifDocUnchanged",
+  "heads": [
+    "0101010101010101010101010101010101010101010101010101010101010101"
+  ]
+}

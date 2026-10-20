@@ -1,5 +1,5 @@
 use automerge::ChangeHash;
-use big_cabinet_core::{DocumentId, FacetKey, FacetTag};
+use big_cabinet_core::{DocId, FacetKey, FacetTag};
 use big_sync::SqliteDeltaWalkerStateRepo;
 use big_sync::keyed_frontier::{SqliteFrontierCodec, SqliteFrontierSelector, SqliteKeyedFrontier};
 use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateRepo;
@@ -20,19 +20,19 @@ const FACET_SET_ID: &str = "big-cabinet-facet-set";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FacetSetInput {
     Snapshot {
-        document_id: DocumentId,
+        doc_id: DocId,
         heads: Vec<ChangeHash>,
         facet_keys: BTreeSet<FacetKey>,
     },
     Removed {
-        document_id: DocumentId,
+        doc_id: DocId,
     },
 }
 
 impl FacetSetInput {
-    fn document_id(&self) -> &DocumentId {
+    fn doc_id(&self) -> &DocId {
         match self {
-            Self::Snapshot { document_id, .. } | Self::Removed { document_id } => document_id,
+            Self::Snapshot { doc_id, .. } | Self::Removed { doc_id } => doc_id,
         }
     }
 }
@@ -40,7 +40,7 @@ impl FacetSetInput {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FacetRoute {
     pub facet_tag: FacetTag,
-    pub document_id: DocumentId,
+    pub doc_id: DocId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,7 +65,7 @@ pub struct FacetRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FacetSetQuery {
-    Document(DocumentId),
+    Doc(DocId),
     Tag(FacetTag),
 }
 
@@ -125,20 +125,20 @@ impl FacetSetStore {
     pub async fn new(sql: SqlCtx) -> Res<Self> {
         sqlx::query(
             r#"CREATE TABLE IF NOT EXISTS big_cabinet_facet_set_routes (
-                document_id TEXT NOT NULL
+                doc_id TEXT NOT NULL
                 , facet_tag TEXT NOT NULL
                 , heads_json TEXT NOT NULL
                 , matching_keys_json TEXT NOT NULL
                 , source_revision INTEGER NOT NULL
                 , output_revision INTEGER NOT NULL
-                , PRIMARY KEY (document_id, facet_tag)
+                , PRIMARY KEY (doc_id, facet_tag)
             ) STRICT"#,
         )
         .execute(&sql.write_pool)
         .await?;
         sqlx::query(
             r#"CREATE INDEX IF NOT EXISTS big_cabinet_facet_set_routes_tag_idx
-                 ON big_cabinet_facet_set_routes (facet_tag, document_id)"#,
+                 ON big_cabinet_facet_set_routes (facet_tag, doc_id)"#,
         )
         .execute(&sql.write_pool)
         .await?;
@@ -192,7 +192,7 @@ impl FacetSetStore {
 
     pub async fn query(&self, selector: FacetSetQuery) -> Res<Vec<FacetRecord>> {
         let mut query = QueryBuilder::<Sqlite>::new(
-            r#"SELECT document_id
+            r#"SELECT doc_id
                  , facet_tag
                  , heads_json
                  , matching_keys_json
@@ -202,16 +202,14 @@ impl FacetSetStore {
              WHERE "#,
         );
         match selector {
-            FacetSetQuery::Document(document_id) => {
-                query
-                    .push("document_id = ")
-                    .push_bind(document_id.to_string());
+            FacetSetQuery::Doc(doc_id) => {
+                query.push("doc_id = ").push_bind(doc_id.to_string());
             }
             FacetSetQuery::Tag(tag) => {
                 query.push("facet_tag = ").push_bind(tag.to_string());
             }
         }
-        query.push(" ORDER BY facet_tag, document_id");
+        query.push(" ORDER BY facet_tag, doc_id");
         query
             .build()
             .fetch_all(&self.sql.read_pool)
@@ -221,7 +219,7 @@ impl FacetSetStore {
                 Ok(FacetRecord {
                     route: FacetRoute {
                         facet_tag: FacetTag::new(row.get::<String, _>("facet_tag"))?,
-                        document_id: row.get::<String, _>("document_id").parse()?,
+                        doc_id: row.get::<String, _>("doc_id").parse()?,
                     },
                     heads: serde_json::from_str(row.get("heads_json"))?,
                     matching_keys: serde_json::from_str(row.get("matching_keys_json"))?,
@@ -242,15 +240,15 @@ impl FacetSetStore {
         let mut mutations = Vec::new();
         let mut records = Vec::new();
         for entry in entries {
-            let document_id = entry.document_id();
-            let document_key = document_id.to_string();
+            let doc_id = entry.doc_id();
+            let doc_key = doc_id.to_string();
             let old_tags: Vec<String> = sqlx::query_scalar(
                 r#"SELECT facet_tag
                      FROM big_cabinet_facet_set_routes
-                    WHERE document_id = ?
+                    WHERE doc_id = ?
                     ORDER BY facet_tag"#,
             )
-            .bind(&document_key)
+            .bind(&doc_key)
             .fetch_all(&mut **transaction)
             .await?;
             let mut current = BTreeMap::<FacetTag, BTreeSet<FacetKey>>::new();
@@ -266,13 +264,13 @@ impl FacetSetStore {
                 let facet_tag = FacetTag::new(old_tag)?;
                 if !current.contains_key(&facet_tag) {
                     let prior_heads = previous_heads
-                        .get(document_key.as_bytes())
+                        .get(doc_key.as_bytes())
                         .expect("indexed document has sparse accepted heads")
                         .clone();
                     mutations.push((
                         FacetRoute {
                             facet_tag,
-                            document_id: document_id.clone(),
+                            doc_id: doc_id.clone(),
                         },
                         Some(FacetMembership::Removed { prior_heads }),
                     ));
@@ -282,7 +280,7 @@ impl FacetSetStore {
                 for (facet_tag, matching_keys) in current {
                     let route = FacetRoute {
                         facet_tag,
-                        document_id: document_id.clone(),
+                        doc_id: doc_id.clone(),
                     };
                     mutations.push((
                         route.clone(),
@@ -302,16 +300,16 @@ impl FacetSetStore {
         for entry in entries {
             sqlx::query(
                 r#"DELETE FROM big_cabinet_facet_set_routes
-                    WHERE document_id = ?"#,
+                    WHERE doc_id = ?"#,
             )
-            .bind(entry.document_id().to_string())
+            .bind(entry.doc_id().to_string())
             .execute(&mut **transaction)
             .await?;
         }
         for (route, heads, matching_keys) in records {
             sqlx::query(
                 r#"INSERT INTO big_cabinet_facet_set_routes (
-                    document_id
+                    doc_id
                     , facet_tag
                     , heads_json
                     , matching_keys_json
@@ -319,7 +317,7 @@ impl FacetSetStore {
                     , output_revision
                 ) VALUES (?, ?, ?, ?, ?, ?)"#,
             )
-            .bind(route.document_id.to_string())
+            .bind(route.doc_id.to_string())
             .bind(route.facet_tag.as_str())
             .bind(serde_json::to_string(heads)?)
             .bind(serde_json::to_string(&matching_keys)?)
@@ -397,11 +395,11 @@ where
         let source_revision = *source_revision;
         let mut keys = BTreeSet::new();
         for entry in entries {
-            let key = entry.document_id().to_string().into_bytes();
+            let key = entry.doc_id().to_string().into_bytes();
             if !keys.insert(key) {
                 return Err(ferr!(
                     "duplicate document in accepted revision {source_revision}: {}",
-                    entry.document_id()
+                    entry.doc_id()
                 ));
             }
         }
@@ -424,7 +422,7 @@ where
             )
             .await?;
         for entry in entries {
-            let key = entry.document_id().to_string().into_bytes();
+            let key = entry.doc_id().to_string().into_bytes();
             match entry {
                 FacetSetInput::Snapshot { heads, .. } => {
                     settlement.put(key, serde_json::to_vec(heads)?).await?;
@@ -502,8 +500,8 @@ mod tests {
         }
     }
 
-    fn document(index: u8) -> DocumentId {
-        DocumentId::new([index; 32])
+    fn document(index: u8) -> DocId {
+        DocId::new([index; 32])
     }
 
     fn tag(name: &str) -> FacetTag {
@@ -526,7 +524,7 @@ mod tests {
 
     fn snapshot(index: u8, version: &[u8], facets: &[(&str, &str)]) -> FacetSetInput {
         FacetSetInput::Snapshot {
-            document_id: document(index),
+            doc_id: document(index),
             heads: heads(version),
             facet_keys: keys(facets),
         }
@@ -534,14 +532,14 @@ mod tests {
 
     fn removed(index: u8) -> FacetSetInput {
         FacetSetInput::Removed {
-            document_id: document(index),
+            doc_id: document(index),
         }
     }
 
     fn route(index: u8, name: &str) -> FacetRoute {
         FacetRoute {
             facet_tag: tag(name),
-            document_id: document(index),
+            doc_id: document(index),
         }
     }
 
@@ -609,7 +607,7 @@ mod tests {
             revisions: vec![(
                 10,
                 vec![FacetSetInput::Snapshot {
-                    document_id: document(1),
+                    doc_id: document(1),
                     heads: heads(&[2, 1, 2]),
                     facet_keys,
                 }],
@@ -636,7 +634,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            store.query(FacetSetQuery::Document(document(1))).await?,
+            store.query(FacetSetQuery::Doc(document(1))).await?,
             expected
         );
         assert_eq!(
@@ -713,7 +711,7 @@ mod tests {
             }
         );
         assert_eq!(
-            store.query(FacetSetQuery::Document(document(1))).await?,
+            store.query(FacetSetQuery::Doc(document(1))).await?,
             vec![FacetRecord {
                 route: route(1, "note"),
                 heads: heads(&[2]),
@@ -785,13 +783,10 @@ mod tests {
             reader.next(limits).await?,
             RevisionRead::ReplayComplete { through: 2 }
         );
-        assert_eq!(
-            store.query(FacetSetQuery::Document(document(2))).await?,
-            vec![]
-        );
+        assert_eq!(store.query(FacetSetQuery::Doc(document(2))).await?, vec![]);
         assert_eq!(sparse_heads(&store, 2).await, None);
         assert_eq!(
-            store.query(FacetSetQuery::Document(document(1))).await?,
+            store.query(FacetSetQuery::Doc(document(1))).await?,
             vec![
                 FacetRecord {
                     route: route(1, "archive"),
@@ -818,10 +813,7 @@ mod tests {
                 entries: vec![tombstone(1, "task", &[2], 3)]
             }
         );
-        assert_eq!(
-            store.query(FacetSetQuery::Document(document(1))).await?,
-            vec![]
-        );
+        assert_eq!(store.query(FacetSetQuery::Doc(document(1))).await?, vec![]);
         assert_eq!(sparse_heads(&store, 1).await, None);
         Ok(())
     }
@@ -852,10 +844,7 @@ mod tests {
         );
         assert_eq!(projector.next().await?, applied(11, 2));
         assert_eq!(sparse_heads(&store, 1).await, Some(heads(&[4])));
-        assert_eq!(
-            store.query(FacetSetQuery::Document(document(1))).await?,
-            vec![]
-        );
+        assert_eq!(store.query(FacetSetQuery::Doc(document(1))).await?, vec![]);
         assert_eq!(
             reader.next(RevisionReadLimits::default()).await?,
             RevisionRead::Entries {
@@ -1022,7 +1011,7 @@ mod tests {
         };
         let mut projector = store.projector(&source, ()).await?;
         assert_eq!(projector.next().await?, applied(4, 1));
-        let before = store.query(FacetSetQuery::Document(document(1))).await?;
+        let before = store.query(FacetSetQuery::Doc(document(1))).await?;
         sqlx::query(
             r#"CREATE TRIGGER fail_facet_set_cursor
                 BEFORE UPDATE ON delta_walker_progress
@@ -1039,14 +1028,8 @@ mod tests {
         assert!(format!("{error:?}").contains("injected facet-set settlement failure"));
         assert_eq!(store.source_revision().await?, 4);
         assert_eq!(store.latest_revision().await?, 1);
-        assert_eq!(
-            store.query(FacetSetQuery::Document(document(1))).await?,
-            before
-        );
-        assert_eq!(
-            store.query(FacetSetQuery::Document(document(2))).await?,
-            vec![]
-        );
+        assert_eq!(store.query(FacetSetQuery::Doc(document(1))).await?, before);
+        assert_eq!(store.query(FacetSetQuery::Doc(document(2))).await?, vec![]);
         assert_eq!(sparse_heads(&store, 1).await, Some(heads(&[1])));
         assert_eq!(sparse_heads(&store, 2).await, None);
         let mut reader = store.open(tag("note"), 1).await?;
@@ -1113,7 +1096,7 @@ mod tests {
         drop(walker);
         let mut projector = store.projector(&source, ()).await?;
         assert_eq!(projector.next().await?, applied(4, 1));
-        let before = store.query(FacetSetQuery::Document(document(1))).await?;
+        let before = store.query(FacetSetQuery::Doc(document(1))).await?;
         let error = projector.next().await.unwrap_err();
         assert!(matches!(
             error.downcast_ref::<SerialDeltaWalkerError<utils_rs::prelude::eyre::Report>>(),
@@ -1121,10 +1104,7 @@ mod tests {
         ));
         assert_eq!(store.source_revision().await?, 4);
         assert_eq!(store.latest_revision().await?, 1);
-        assert_eq!(
-            store.query(FacetSetQuery::Document(document(1))).await?,
-            before
-        );
+        assert_eq!(store.query(FacetSetQuery::Doc(document(1))).await?, before);
         Ok(())
     }
 
@@ -1149,10 +1129,7 @@ mod tests {
         );
         assert_eq!(store.source_revision().await?, 0);
         assert_eq!(store.latest_revision().await?, 0);
-        assert_eq!(
-            store.query(FacetSetQuery::Document(document(1))).await?,
-            vec![]
-        );
+        assert_eq!(store.query(FacetSetQuery::Doc(document(1))).await?, vec![]);
         assert_eq!(sparse_heads(&store, 1).await, None);
         Ok(())
     }

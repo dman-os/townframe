@@ -8,8 +8,8 @@ pub mod reference;
 pub mod schema_compat;
 
 pub use reference::{
-    DocumentId, FACET_REFERENCE_SCHEME, FacetKey, FacetReference, FacetTag, ReferenceDocumentId,
-    ReferenceError, SELF_DOCUMENT,
+    DocId, FACET_REFERENCE_SCHEME, FacetKey, FacetReference, FacetTag, ReferenceDocId,
+    ReferenceError, SELF_DOC,
 };
 
 #[cfg(test)]

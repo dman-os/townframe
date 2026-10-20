@@ -87,7 +87,7 @@ capability from its own actor capability:
 ```rust
 use big_cabinet::authority::{CheckGrant, MintCapability, ResolveActor, Rights};
 
-// inside DocumentsRepo, holding `authority: Client<AuthorityProtocol>` and its
+// inside DocsRepo, holding `authority: Client<AuthorityProtocol>` and its
 // own actor capability `docs`:
 let caller = authority.call(ctx.child(), ResolveActor { capability: presented }).await?;
 let held = authority
@@ -100,7 +100,7 @@ let held = authority
 if !held.contains(Rights::USE) {
     return Err(/* unauthorized */);
 }
-// DocumentsRepo knows the doc is in the drawer; the authority never does.
+// DocsRepo knows the doc is in the drawer; the authority never does.
 let edit = authority
     .call(ctx.child(), MintCapability {
         issuer: docs,
@@ -111,7 +111,7 @@ let edit = authority
 ```
 
 When the cap comes back, `InspectCapability` reports its object, rights, and
-`issuer` namespace UUID; DocumentsRepo accepts it only if that UUID is its own.
+`issuer` namespace UUID; DocsRepo accepts it only if that UUID is its own.
 The namespace UUID grants nothing by itself. Inspection does not disclose the
 parent handle, which would give the caller broader authority.
 
@@ -151,7 +151,7 @@ authority
 
 ## Signing a facet claim
 
-DocumentsRepo authorizes the write against the object capability it was shown,
+DocsRepo authorizes the write against the object capability it was shown,
 then signs as the acting actor with that actor's own capability:
 
 ```rust
