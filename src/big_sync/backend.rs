@@ -1,6 +1,8 @@
 use crate::interlude::*;
+use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
+use big_sync_core::PeerKey;
 use big_sync_core::part_store::ObjPayload;
-use big_sync_core::{ObjKey, PartKey, PeerKey};
 
 #[async_trait]
 pub trait SyncBackend: Send + Sync + 'static {

@@ -4,18 +4,26 @@ use crate::interlude::*;
 
 use crate::DocumentId;
 use crate::changes::BigRepoChangeOrigin;
+use crate::runtime2::DocIo;
+use crate::runtime2::DocWorkerHandle;
+use crate::runtime2::DocWorkerInternalLease;
+use crate::runtime2::DocWorkerStopToken;
+use crate::runtime2::MaterializationBlocker;
+use crate::runtime2::MaterializationStatus;
 use crate::runtime2::Runtime2Evt;
-use crate::runtime2::support::{
-    BigRepoCiphertextKind, BigRepoCiphertextLocator, CausalCheckpoint, causal_checkpoint_id,
-    is_causal_checkpoint_id, stage_automerge_ingest,
-};
-use crate::runtime2::types::{
-    BrokenReason, DocLookup, LiveDocBundle, LiveDocHandle, handle_validity, invalid_handle_message,
-};
-use crate::runtime2::{
-    DocIo, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken, MaterializationBlocker,
-    MaterializationStatus, messages::DocWorkerMsg,
-};
+use crate::runtime2::messages::DocWorkerMsg;
+use crate::runtime2::support::BigRepoCiphertextKind;
+use crate::runtime2::support::BigRepoCiphertextLocator;
+use crate::runtime2::support::CausalCheckpoint;
+use crate::runtime2::support::causal_checkpoint_id;
+use crate::runtime2::support::is_causal_checkpoint_id;
+use crate::runtime2::support::stage_automerge_ingest;
+use crate::runtime2::types::BrokenReason;
+use crate::runtime2::types::DocLookup;
+use crate::runtime2::types::LiveDocBundle;
+use crate::runtime2::types::LiveDocHandle;
+use crate::runtime2::types::handle_validity;
+use crate::runtime2::types::invalid_handle_message;
 use big_sync_core::PeerKey;
 use futures::future::AbortRegistration;
 use sedimentree_core::loose_commit::id::CommitId;
@@ -2274,14 +2282,15 @@ mod tests {
 
     #[test]
     fn non_automerge_shadow_node_contracts_out_of_materialized_history() {
-        use automerge::{ReadDoc, transaction::Transactable};
-        use sedimentree_core::{
-            blob::{Blob, BlobMeta},
-            depth::CountLeadingZeroBytes,
-            id::SedimentreeId,
-            loose_commit::LooseCommit,
-            sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
-        };
+        use automerge::ReadDoc;
+        use automerge::transaction::Transactable;
+        use sedimentree_core::blob::Blob;
+        use sedimentree_core::blob::BlobMeta;
+        use sedimentree_core::depth::CountLeadingZeroBytes;
+        use sedimentree_core::id::SedimentreeId;
+        use sedimentree_core::loose_commit::LooseCommit;
+        use sedimentree_core::sedimentree::Sedimentree;
+        use sedimentree_core::sedimentree::minimized::MinimizedSedimentree;
 
         let mut base = automerge::Automerge::new();
         base.transact(|tx| tx.put(automerge::ROOT, "base", 1))
@@ -2437,11 +2446,10 @@ mod tests {
 
     impl FakeRecoveryDocIo {
         fn tree(&self) -> sedimentree_core::sedimentree::minimized::MinimizedSedimentree {
-            use sedimentree_core::{
-                blob::{Blob, BlobMeta},
-                loose_commit::LooseCommit,
-                sedimentree::Sedimentree,
-            };
+            use sedimentree_core::blob::Blob;
+            use sedimentree_core::blob::BlobMeta;
+            use sedimentree_core::loose_commit::LooseCommit;
+            use sedimentree_core::sedimentree::Sedimentree;
             let mut tree = Sedimentree::new(Vec::new(), Vec::new());
             let blob_meta = BlobMeta::new(&Blob::new(Vec::new()));
             tree.add_commit(LooseCommit::new(

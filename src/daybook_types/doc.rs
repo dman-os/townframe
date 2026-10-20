@@ -961,9 +961,12 @@ mod ord {
 mod ser_de {
     use super::*;
 
-    use std::{borrow::Cow, fmt};
+    use std::borrow::Cow;
+    use std::fmt;
 
-    use serde::{Deserializer, Serializer, de::Visitor};
+    use serde::Deserializer;
+    use serde::Serializer;
+    use serde::de::Visitor;
 
     // impl FromStr for FacetTag {
     //     type Err = FacetTagParseError;
@@ -1433,7 +1436,8 @@ mod ser_de {
 mod tests {
     use super::*;
     use automerge::transaction::Transactable;
-    use autosurgeon::{hydrate_prop, reconcile_prop};
+    use autosurgeon::hydrate_prop;
+    use autosurgeon::reconcile_prop;
 
     #[test]
     fn branch_facets_round_trip_and_are_system_managed() {

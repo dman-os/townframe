@@ -22,7 +22,10 @@ mod sleep_then_effect;
 #[cfg(test)]
 mod sleep_then_succeed;
 
-use wash_runtime::{host::HostApi, plugin, types, wit::WitInterface};
+use wash_runtime::host::HostApi;
+use wash_runtime::plugin;
+use wash_runtime::types;
+use wash_runtime::wit::WitInterface;
 use wflow_core::kvstore::log::KvStoreLog;
 use wflow_core::kvstore::metastore::KvStoreMetadtaStore;
 use wflow_core::kvstore::snapstore::KvSnapStore;
@@ -323,7 +326,8 @@ impl WflowTestContext {
 
     /// Wait until there are no active jobs, with a timeout
     pub async fn wait_until_no_active_jobs(&self, timeout_secs: u64) -> Res<()> {
-        use tokio::time::{Duration, Instant};
+        use tokio::time::Duration;
+        use tokio::time::Instant;
 
         let start = Instant::now();
         let timeout_duration = Duration::from_secs(timeout_secs);
@@ -410,7 +414,8 @@ impl WflowTestContext {
         F: FnMut(u64, &wflow_core::partition::log::PartitionLogEntry) -> bool,
     {
         use futures::StreamExt;
-        use tokio::time::{Duration, Instant};
+        use tokio::time::Duration;
+        use tokio::time::Instant;
 
         let start = Instant::now();
         let timeout_duration = Duration::from_secs(timeout_secs);
@@ -581,34 +586,15 @@ async fn register_workload_on_host(
 fn test_wflows_wasm_path() -> Res<String> {
     use std::path::PathBuf;
 
-    let mut candidates = Vec::<PathBuf>::new();
-    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
-        candidates.push(
-            PathBuf::from(target_dir)
-                .join("wasm32-wasip2")
-                .join("debug")
-                .join("test_wflows.wasm"),
-        );
-    }
-
-    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = crate_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("wflow crate should live under repo/src/wflow");
-    candidates.push(
-        repo_root
-            .join("target")
-            .join("wasm32-wasip2")
-            .join("debug")
-            .join("test_wflows.wasm"),
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root.join("src/wasm_utils_rs/target"));
+    let path = target_dir.join("wasm32-wasip2/release/test_wflows.wasm");
+    eyre::ensure!(
+        path.is_file(),
+        "{} not found; build with `cargo build --locked --manifest-path src/wasm_utils_rs/Cargo.toml --release --target wasm32-wasip2 -p test_wflows`",
+        path.display()
     );
-
-    if let Some(path) = candidates.into_iter().find(|path| path.exists()) {
-        return Ok(path.to_string_lossy().to_string());
-    }
-
-    Err(ferr!(
-        "test_wflows.wasm not found; build it first with `cargo build --target wasm32-wasip2 -p test_wflows`"
-    ))
+    Ok(path.to_string_lossy().to_string())
 }

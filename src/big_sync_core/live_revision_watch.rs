@@ -12,9 +12,10 @@
 //! query). Keeping the sample-then-open order inside `open` is what makes the
 //! race guarantee un-botchable by callers.
 
-use crate::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use crate::revisioned_store::RevisionRead;
+use crate::revisioned_store::RevisionReadLimits;
+use crate::revisioned_store::RevisionedStore;
+use crate::revisioned_store::RevisionedStoreReader;
 use std::future::Future;
 
 pub struct LiveRevisionWatch<'a, S>

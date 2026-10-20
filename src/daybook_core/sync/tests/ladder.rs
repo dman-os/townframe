@@ -1,4 +1,5 @@
-use daybook_types::doc::{BranchPath, BranchPathBuf};
+use daybook_types::doc::BranchPath;
+use daybook_types::doc::BranchPathBuf;
 
 use super::*;
 

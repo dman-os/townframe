@@ -1,10 +1,12 @@
 //! SQLite row selection for the part-store frontier.
 
-use crate::keyed_frontier::{SqliteReadError, SqliteReadSource};
+use crate::keyed_frontier::SqliteReadError;
+use crate::keyed_frontier::SqliteReadSource;
 use big_sync_core::keyed_frontier::FrontierRevision;
 
 use super::sqlite_core::EVENT_REMOVED;
-use big_sync_core::{ObjKey, PartKey};
+use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
 use sqlite_rs::Sql;
 use std::collections::BTreeMap;
 

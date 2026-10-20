@@ -1,11 +1,14 @@
-use crate::ffi::{CloneTicketWithQr, FfiError, SharedFfiCtx};
+use crate::ffi::CloneTicketWithQr;
+use crate::ffi::FfiError;
+use crate::ffi::SharedFfiCtx;
 use crate::interlude::*;
 
 use crate::repos::blobs::BlobsRepoFfi;
 use crate::repos::config::ConfigRepoFfi;
 use crate::repos::progress::ProgressRepoFfi;
 
-use daybook_core::sync::{IrohSyncRepo, IrohSyncRepoStopToken};
+use daybook_core::sync::IrohSyncRepo;
+use daybook_core::sync::IrohSyncRepoStopToken;
 use qrcode::QrCode;
 
 #[derive(uniffi::Object)]

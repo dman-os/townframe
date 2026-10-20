@@ -25,12 +25,38 @@ env:
   CARGO_TERM_COLOR: always
   NEXTEST_COLOR: always
   TEST_SEED: rand
+  # Scheduled runs use the `nightly` nextest profile (`flaky-result = "fail"`) so flakes
+  # surface as failures; PR/push runs keep `ci`, where a test that passes on retry is green.
+  NEXTEST_PROFILE: ${{ github.event_name == 'schedule' && 'nightly' || 'ci' }}
   OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
   OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}
   OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
 jobs:
+  rust-target-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [native, wasm32-wasip2, wasm32-unknown-unknown]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            src/wasm_utils_rs -> target
+      - uses: wasmCloud/setup-wash-action@v2.1.0
+        with:
+          wash-version: v2.6.1
+      - run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
+      - run: nix develop .#ci-rust --command cargo x lint
+      - run: nix develop .#ci-rust --command cargo x check-matrix --target "${{ matrix.target }}"
+      - run: nix develop .#ci-rust --command cargo fmt --manifest-path src/wasm_utils_rs/Cargo.toml --all -- --check
   pre-commit:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -85,13 +111,13 @@ jobs:
         run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
 
       - name: build test plug OCI artifact
-        run: nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test
+        run: nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test_manifest
 
       - name: build daybook_cli
         run: nix develop .#ci-rust --command cargo --color=always build -p daybook_cli
 
       - name: CLI E2E tests
-        run: nix develop .#ci-rust --command cargo nextest run --color=always --profile ci -p daybook_cli
+        run: nix develop .#ci-rust --command cargo nextest run --color=always --profile "$NEXTEST_PROFILE" -p daybook_cli
         env:
           UTILS_RS_TIMEOUT_MULTIPLIER: 3
 
@@ -147,13 +173,13 @@ jobs:
         run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       - name: builds
         run: |
-          nix develop .#ci-rust --command cargo --color=always build -p test_wflows --target wasm32-wasip2
+          nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_wflows --target wasm32-wasip2 --release
 
       - name: build plug OCI artifacts
         run: |
-          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test
-          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_plabels
-          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test_manifest
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_plabels_manifest
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger_manifest
 
 
       - name: rust tests
@@ -165,13 +191,13 @@ jobs:
           # implies `--no-clean`, so the earlier run's data survives) and the final `report`
           # invocation turns the whole lot into a single lcov file.
           nix develop .#ci-rust --command cargo llvm-cov --no-report nextest \
-            --color=always --workspace --all-targets --profile ci \
+            --color=always --workspace --all-targets --profile "$NEXTEST_PROFILE" \
             --user-config-file .config/nextest-user-ci.toml \
-            --exclude daybook_cli --exclude plug_test --exclude plug_dayledger --exclude plug_plabels
+            --exclude daybook_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
           # nextest cannot run doctests, so they go through `cargo test --doc`. `--doc` implies
           # `--doctests`, which persists the doctest binaries the coverage report needs.
           nix develop .#ci-rust --command cargo llvm-cov --no-report --doc --workspace \
-            --exclude daybook_cli --exclude plug_test --exclude plug_dayledger --exclude plug_plabels
+            --exclude daybook_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
           # `report` only merges the collected profile data and writes lcov; it runs no tests.
           # `--doctests` is what lets the persisted doctest binaries be attributed to their sources.
           nix develop .#ci-rust --command cargo llvm-cov report --doctests --lcov --output-path lcov.info
@@ -279,8 +305,8 @@ jobs:
         run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       - name: build plug OCI artifacts
         run: |
-          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test
-          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test_manifest
+          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger_manifest
 
       - name: kotlin tests
         run: |

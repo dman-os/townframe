@@ -8,9 +8,10 @@
 
 use crate::interlude::*;
 
+use super::DrawerRepo;
+use super::meta;
 use super::mutations::StagedAdd;
 use super::outbox;
-use super::{DrawerRepo, meta};
 
 impl DrawerRepo {
     pub(crate) async fn reconcile_add_outbox_at_boot(&self) -> Res<()> {

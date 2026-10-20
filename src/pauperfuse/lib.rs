@@ -39,8 +39,10 @@ What is left to do:
 */
 
 pub(crate) mod interlude {
-    pub use std::collections::{BTreeMap, VecDeque};
-    pub use std::path::{Path, PathBuf};
+    pub use std::collections::BTreeMap;
+    pub use std::collections::VecDeque;
+    pub use std::path::Path;
+    pub use std::path::PathBuf;
     pub use utils_rs::prelude::*;
 }
 

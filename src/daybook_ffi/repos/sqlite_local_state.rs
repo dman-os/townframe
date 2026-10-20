@@ -1,8 +1,10 @@
 use crate::interlude::*;
 
-use crate::ffi::{FfiError, SharedFfiCtx};
+use crate::ffi::FfiError;
+use crate::ffi::SharedFfiCtx;
 
-use daybook_core::local_state::{LocalStateEvent, SqliteLocalStateRepo};
+use daybook_core::local_state::LocalStateEvent;
+use daybook_core::local_state::SqliteLocalStateRepo;
 
 #[derive(uniffi::Object)]
 pub struct SqliteLocalStateRepoFfi {

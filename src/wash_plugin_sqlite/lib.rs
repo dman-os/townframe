@@ -4,13 +4,20 @@ mod interlude {
 
 use crate::interlude::*;
 
-use sqlite_rs::{Database, ExecuteResult, SqlError, SqlValue, Tx};
+use sqlite_rs::Database;
+use sqlite_rs::ExecuteResult;
+use sqlite_rs::SqlError;
+use sqlite_rs::SqlValue;
+use sqlite_rs::Tx;
 use std::collections::HashSet;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::engine::workload::WorkloadItem;
-use wash_runtime::plugin::{HostPlugin, WitInterfaces};
-use wash_runtime::wit::{WitInterface, WitWorld};
-use wasmtime::component::{HasSelf, Resource};
+use wash_runtime::plugin::HostPlugin;
+use wash_runtime::plugin::WitInterfaces;
+use wash_runtime::wit::WitInterface;
+use wash_runtime::wit::WitWorld;
+use wasmtime::component::HasSelf;
+use wasmtime::component::Resource;
 
 pub mod binds_host {
     wash_runtime::wasmtime::component::bindgen!({

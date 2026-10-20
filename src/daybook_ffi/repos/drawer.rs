@@ -1,11 +1,20 @@
 use crate::interlude::*;
 
-use crate::ffi::{FfiError, SharedFfiCtx};
+use crate::ffi::FfiError;
+use crate::ffi::SharedFfiCtx;
 use crate::repos::plugs::PlugsRepoFfi;
 
+use daybook_core::drawer::DocBundle;
+use daybook_core::drawer::DocEntry;
+use daybook_core::drawer::DocNBranches;
+use daybook_core::drawer::DrawerEvent;
+use daybook_core::drawer::DrawerRepo;
 use daybook_core::drawer::types::UpdateDocArgsV2 as UpdateDocArgs;
-use daybook_core::drawer::{DocBundle, DocEntry, DocNBranches, DrawerEvent, DrawerRepo};
-use daybook_types::doc::{AddDocArgs, ChangeHashSet, Doc, DocId, DocPatch};
+use daybook_types::doc::AddDocArgs;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::Doc;
+use daybook_types::doc::DocId;
+use daybook_types::doc::DocPatch;
 
 #[derive(uniffi::Object)]
 pub struct DrawerRepoFfi {

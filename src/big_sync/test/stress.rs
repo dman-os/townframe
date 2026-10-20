@@ -1,7 +1,8 @@
 use super::*;
 
 use crate::part_store::sqlite::SqlitePartStore;
-use crate::stress_support::{self, StressFixture};
+use crate::stress_support::StressFixture;
+use crate::stress_support::{self};
 use crate::worker::WorkerSnapshot;
 use std::fmt::Write as _;
 

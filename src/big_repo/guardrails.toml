@@ -1,0 +1,539 @@
+version = 1
+role = "runtime"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = [
+    "am_utils_rs",
+    "big_sync",
+    "big_sync_core",
+    "secrets_rs",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_ALLOW_ATTRIBUTE"
+path = "src/big_repo/runtime2/native.rs"
+symbol = "module::spawn_native_runtime2"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = 'initial guardrail baseline: use a narrow #[expect(..., reason = "...")] so obsolete suppressions fail'
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_ALLOW_ATTRIBUTE"
+path = "src/big_repo/store/sqlite/secret_blobs.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = 'initial guardrail baseline: use a narrow #[expect(..., reason = "...")] so obsolete suppressions fail'
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_ALLOW_ATTRIBUTE"
+path = "src/big_repo/store/sqlite/secret_blobs.rs"
+symbol = "module::SecretBlobKind::from_i64"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = 'initial guardrail baseline: use a narrow #[expect(..., reason = "...")] so obsolete suppressions fail'
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_ALLOW_ATTRIBUTE"
+path = "src/big_repo/store/sqlite/secret_blobs.rs"
+symbol = "module::SqliteBigRepoStore::load_dek"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = 'initial guardrail baseline: use a narrow #[expect(..., reason = "...")] so obsolete suppressions fail'
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/backend.rs"
+symbol = "module::BigRepoSyncBackend as big_sync :: SyncBackend::sync_obj"
+ceiling = 233
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/changes.rs"
+symbol = "module::ChangeListenerManager::spawn_switchboard"
+ceiling = 251
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/runtime2/doc_worker.rs"
+symbol = "module::DocWorker2 < F >::commit_delta"
+ceiling = 163
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/runtime2/doc_worker.rs"
+symbol = "module::DocWorker2 < F >::load_doc_snapshot"
+ceiling = 164
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/runtime2/hub.rs"
+symbol = "module::Runtime2Hub < F , R >::handle_cmd"
+ceiling = 461
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/runtime2/hub.rs"
+symbol = "module::Runtime2Hub < F , R >::handle_evt"
+ceiling = 420
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/runtime2/keyhive_dispatcher.rs"
+symbol = "module::classify_rows"
+ceiling = 189
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/runtime2/native.rs"
+symbol = "module::NativeBigRepoIo < S > as DocIo < Sendable >::try_causal_decrypt"
+ceiling = 223
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/runtime2/native.rs"
+symbol = "module::spawn_native_runtime2"
+ceiling = 409
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/store/sqlite/parts_cursors.rs"
+symbol = "module::SqliteBigRepoStore as HostPartStore::leaf_buckets"
+ceiling = 166
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/store/sqlite/sedimentree.rs"
+symbol = "module::SqliteBigRepoStore::mutate_tree_in_tx"
+ceiling = 171
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/store/sqlite/sedimentree.rs"
+symbol = "module::SqliteBigRepoStore::reconcile_group_part_batch"
+ceiling = 241
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_repo/test2/stress.rs"
+symbol = "module::BigRepoStressFixture as StressFixture::assert_cluster_alignment"
+ceiling = 453
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/big_repo/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_repo/changes.rs"
+symbol = "module::tests"
+ceiling = 458
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_repo/keyhive_storage.rs"
+symbol = "module::tests"
+ceiling = 447
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_repo/runtime2/doc_revision_store.rs"
+symbol = "module::tests"
+ceiling = 384
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_repo/runtime2/doc_worker.rs"
+symbol = "module::tests"
+ceiling = 752
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_repo/runtime2/hub.rs"
+symbol = "module::tests"
+ceiling = 384
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_repo/runtime2/keyhive_access_stream.rs"
+symbol = "module::tests"
+ceiling = 891
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_repo/runtime2/prekey_janitor_worker.rs"
+symbol = "module::tests"
+ceiling = 317
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/lib.rs"
+symbol = "module::changes"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/lib.rs"
+symbol = "module::sqlite::queries"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/runtime2/automerge_frontier_worker.rs"
+symbol = "module::spawn_automerge_frontier_worker"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/runtime2/doc_worker.rs"
+symbol = "module"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/runtime2/doc_worker.rs"
+symbol = "module::F as DocWorkerLoop < F >::mailbox_loop"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/runtime2/hub.rs"
+symbol = "module"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/runtime2/io.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/runtime2/mod.rs"
+symbol = "module"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/runtime2/native.rs"
+symbol = "module"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/runtime2/native.rs"
+symbol = "module::NativeBigRepoIo < S >::durable_sedimentree_heads_full"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/runtime2/native.rs"
+symbol = "module::spawn_native_runtime2"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/test.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/test2/harness/log_nickname.rs"
+symbol = "module::clear"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/test2/harness/topo.rs"
+symbol = "module::Pair::nodes_mut"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/test2/harness/topo.rs"
+symbol = "module::ShutdownGuard::boot"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/test2/harness/topo.rs"
+symbol = "module::ShutdownGuard::take"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_repo/test2/harness/topo.rs"
+symbol = "module::TopoData3::from"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MATCH_ARM_LENGTH"
+path = "src/big_repo/backend.rs"
+symbol = "module::BigRepoSyncBackend as big_sync :: SyncBackend::sync_obj::match(Ok (Err (crate :: SyncDocError :: Unauthorized)))"
+ceiling = 132
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: delegate large match arms to dedicated handlers to avoid dispatch-hub merge conflicts"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SEND_DISCARDED"
+path = "src/big_repo/lib.rs"
+symbol = "module::watch_connection_end"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: handle send failure; broadcast with zero listeners needs a specific exemption"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SEND_DISCARDED"
+path = "src/big_repo/runtime2/doc_worker.rs"
+symbol = "module::tests::spawn_fake_hub_ack"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: handle send failure; broadcast with zero listeners needs a specific exemption"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SEND_DISCARDED"
+path = "src/big_repo/runtime2/hub.rs"
+symbol = "module::F as HubIoFutures < F , Tasks >::accept_connection_and_watch"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: handle send failure; broadcast with zero listeners needs a specific exemption"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SEND_DISCARDED"
+path = "src/big_repo/runtime2/hub.rs"
+symbol = "module::F as HubIoFutures < F , Tasks >::open_connection_and_watch"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: handle send failure; broadcast with zero listeners needs a specific exemption"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/big_repo/ephemeral.rs"
+symbol = "module::tests"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/big_repo/runtime2/group_part_worker.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/big_repo/runtime2/native.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/big_repo/store/sqlite/tests.rs"
+symbol = "module"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/big_repo/test.rs"
+symbol = "module"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/big_repo/test2/harness/topo.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/big_repo/test2/stress.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_TYPE_ITEMS"
+path = "src/big_repo/keyhive.rs"
+symbol = "module::BigKeyhiveHandle"
+ceiling = 41
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: reduce the type/trait surface, not just the number of impl blocks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_TYPE_ITEMS"
+path = "src/big_repo/keyhive_storage.rs"
+symbol = "module::FsKeyhiveStorage"
+ceiling = 44
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: reduce the type/trait surface, not just the number of impl blocks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_TYPE_ITEMS"
+path = "src/big_repo/lib.rs"
+symbol = "module::BigRepo"
+ceiling = 64
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: reduce the type/trait surface, not just the number of impl blocks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_TYPE_ITEMS"
+path = "src/big_repo/store/sqlite/sedimentree.rs"
+symbol = "module::SqliteBigRepoStore"
+ceiling = 49
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: reduce the type/trait surface, not just the number of impl blocks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[migrations]
+"src/big_repo/sqlite/migrations/002_big_repo_init.sql" = "fe1670884088ff0551b1006d412f841b6b9e0ab07a4d0f6afd528ef30db108f5"
+"src/big_repo/sqlite/migrations/003_secret_blobs.sql" = "fc3be9c97e370e15241d21eef604a6ec59e26c8bab23e3a560303e84ac5331d2"
+"src/big_repo/sqlite/migrations/004_single_consumer_watermark.sql" = "036383fda79a7d730181be21ce7081cf866a99a7a0dfd7dd172740ed33ad1538"

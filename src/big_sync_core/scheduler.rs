@@ -23,8 +23,11 @@
 //! - `Instant::now()` calls inside `Tasks::spawn_task/spawn_delayed_task`
 //!   become explicit `now: Instant` parameters (sans-io / determinism).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::time::Duration;
+use std::time::Instant;
 
 pub type TaskId = u64;
 

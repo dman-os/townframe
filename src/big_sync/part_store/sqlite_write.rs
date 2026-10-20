@@ -5,16 +5,19 @@
 //! finalized before the notification callback is invoked.
 
 use crate::sqlite::queries;
-use big_sync_core::keyed_frontier::{
-    FrontierRevision, KeyedFrontierError, KeyedFrontierResult, KeyedFrontierTransaction,
-    TransactionIsolation,
-};
+use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
+use big_sync_core::keyed_frontier::FrontierRevision;
+use big_sync_core::keyed_frontier::KeyedFrontierError;
+use big_sync_core::keyed_frontier::KeyedFrontierResult;
+use big_sync_core::keyed_frontier::KeyedFrontierTransaction;
+use big_sync_core::keyed_frontier::TransactionIsolation;
 use big_sync_core::rpc::PartEvent;
-use big_sync_core::{ObjKey, PartKey};
 use sqlite_rs::Tx;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use utils_rs::prelude::{async_trait, serde_json};
+use utils_rs::prelude::async_trait;
+use utils_rs::prelude::serde_json;
 
 use super::PartFrontierKey;
 

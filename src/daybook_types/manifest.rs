@@ -6,7 +6,8 @@ use crate::interlude::*;
 use crate::doc::FacetRef;
 use crate::reference::select_json_path_values;
 
-use autosurgeon::{Hydrate, Reconcile};
+use autosurgeon::Hydrate;
+use autosurgeon::Reconcile;
 
 use garde::Validate;
 
@@ -427,7 +428,8 @@ impl RoutineManifest {
         std::collections::HashSet<String>,
         std::collections::HashSet<crate::doc::FacetKey>,
     ) {
-        use crate::doc::{FacetKey, FacetTag};
+        use crate::doc::FacetKey;
+        use crate::doc::FacetTag;
         let mut read_tags = std::collections::HashSet::new();
         let mut read_keys = std::collections::HashSet::new();
         for doc_acl in &self.doc_acls {

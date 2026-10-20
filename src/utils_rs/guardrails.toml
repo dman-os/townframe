@@ -1,0 +1,65 @@
+version = 1
+role = "foundation"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = []
+allow_external_api_types = true
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/utils_rs/lib.rs"
+symbol = "module::interlude"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/utils_rs/lib.rs"
+symbol = "module::prelude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MODULE_ITEMS"
+path = "src/utils_rs/lib.rs"
+symbol = "module"
+ceiling = 43
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: split responsibilities; imports and impl blocks do not count"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SEND_DISCARDED"
+path = "src/utils_rs/lib.rs"
+symbol = "module::AbortableJoinSet::spawn"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: handle send failure; broadcast with zero listeners needs a specific exemption"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/utils_rs/lib.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[builds.native]
+features = ["hash"]
+required_features = []
+default_features = true
+
+[builds.wasm32-unknown-unknown]
+features = ["hash"]
+required_features = []
+default_features = true
+
+[builds.wasm32-wasip2]
+features = ["hash"]
+required_features = []
+default_features = true

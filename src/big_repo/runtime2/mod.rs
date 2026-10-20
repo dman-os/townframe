@@ -8,17 +8,17 @@ mod group_part_worker;
 pub mod keyhive_access_stream;
 pub(crate) mod keyhive_admission;
 
-pub use automerge_frontier_worker::{
-    AutomergeFrontierWorkerStopToken, automerge_doc_obj_id, automerge_obj_to_doc_id,
-    spawn_automerge_frontier_worker,
-};
-pub(crate) use causal_checkpoint_worker::{
-    CausalCheckpointWorkerStopToken, spawn_causal_checkpoint_worker,
-};
-pub(crate) use group_part_worker::{
-    GroupPartWorkerStopToken, group_part_id, spawn_group_part_worker,
-};
-pub(crate) use prekey_janitor_worker::{PrekeyJanitorWorkerStopToken, spawn_prekey_janitor_worker};
+pub use automerge_frontier_worker::AutomergeFrontierWorkerStopToken;
+pub use automerge_frontier_worker::automerge_doc_obj_id;
+pub use automerge_frontier_worker::automerge_obj_to_doc_id;
+pub use automerge_frontier_worker::spawn_automerge_frontier_worker;
+pub(crate) use causal_checkpoint_worker::CausalCheckpointWorkerStopToken;
+pub(crate) use causal_checkpoint_worker::spawn_causal_checkpoint_worker;
+pub(crate) use group_part_worker::GroupPartWorkerStopToken;
+pub(crate) use group_part_worker::group_part_id;
+pub(crate) use group_part_worker::spawn_group_part_worker;
+pub(crate) use prekey_janitor_worker::PrekeyJanitorWorkerStopToken;
+pub(crate) use prekey_janitor_worker::spawn_prekey_janitor_worker;
 mod io;
 pub(crate) mod keyhive_dispatcher;
 mod lease;
@@ -34,24 +34,39 @@ pub(crate) mod types;
 mod test_support;
 
 pub use doc_worker::spawn_doc_worker;
-pub use io::{
-    CausalDecryptResult, Clock, DocIo, KeyhiveSyncOutcome, MaterializationBlocker,
-    MaterializationStatus, RuntimeIo, SyncDocAttempt, Timer,
-};
-pub use lease::{
-    DocLease, DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, DocWorkerStopToken,
-    TrackedWorkGuard,
-};
-pub use messages::{Runtime2Cmd, Runtime2Evt, TrackedWorkKind};
-pub use tasks::{TaskRuntime, TaskSet, TokioTaskRuntime, TokioTimer};
-pub use types::{DocLeaseKind, GroupScopeHandle, WorkerGroupScope};
+pub use io::CausalDecryptResult;
+pub use io::Clock;
+pub use io::DocIo;
+pub use io::KeyhiveSyncOutcome;
+pub use io::MaterializationBlocker;
+pub use io::MaterializationStatus;
+pub use io::RuntimeIo;
+pub use io::SyncDocAttempt;
+pub use io::Timer;
+pub use lease::DocLease;
+pub use lease::DocWorkerEntry;
+pub use lease::DocWorkerHandle;
+pub use lease::DocWorkerInternalLease;
+pub use lease::DocWorkerStopToken;
+pub use lease::TrackedWorkGuard;
+pub use messages::Runtime2Cmd;
+pub use messages::Runtime2Evt;
+pub use messages::TrackedWorkKind;
+pub use tasks::TaskRuntime;
+pub use tasks::TaskSet;
+pub use tasks::TokioTaskRuntime;
+pub use tasks::TokioTimer;
+pub use types::DocLeaseKind;
+pub use types::GroupScopeHandle;
+pub use types::WorkerGroupScope;
 
 mod doc_worker;
 mod handle;
 mod hub;
 
 pub use handle::Runtime2Handle;
-pub use hub::{Runtime2StopToken, spawn_runtime2};
+pub use hub::Runtime2StopToken;
+pub use hub::spawn_runtime2;
 
 /// Generic over `F: FutureForm` (Sendable native, Local wasm) and the task
 /// runtime `R`. Concrete storage, keyhive, and transport are behind the

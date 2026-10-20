@@ -1,7 +1,9 @@
 use crate::interlude::*;
 
-use sqlite_rs::{Database, Sql};
-use tokio::sync::{mpsc, oneshot};
+use sqlite_rs::Database;
+use sqlite_rs::Sql;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use wflow_core::kvstore::*;
 
 enum KvMsg {
@@ -533,7 +535,8 @@ impl KvStore for SqliteKvStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wflow_core::kvstore::tests::{test_kv_store_concurrency, test_kv_store_impl};
+    use wflow_core::kvstore::tests::test_kv_store_concurrency;
+    use wflow_core::kvstore::tests::test_kv_store_impl;
 
     #[tokio::test]
     async fn test_sqlite_kvstore() -> Res<()> {

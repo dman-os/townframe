@@ -358,7 +358,8 @@ mod tests {
     use daybook_core::local_state::SqliteLocalStateRepo;
     use daybook_core::plugs::PlugsRepo;
     use daybook_core::progress::ProgressRepo;
-    use daybook_core::repo::{RepoCtx, RepoOpenOptions};
+    use daybook_core::repo::RepoCtx;
+    use daybook_core::repo::RepoOpenOptions;
     use daybook_core::repos::RepoStopToken;
     use daybook_core::sync::IrohSyncRepo;
     use std::collections::HashSet;

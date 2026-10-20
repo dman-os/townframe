@@ -1,0 +1,527 @@
+version = 1
+role = "tooling"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = []
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_ADR_ID"
+path = "docs/adrs"
+symbol = "007"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: duplicate ADR identity: docs/adrs/007-doc-branch-identity.md, docs/adrs/007-plug-manifests-as-drawer-docs.md; do not rename accepted identities silently"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_LINK"
+path = "docs/adrs/001-blob-inventories.md"
+symbol = "../../src/daybook_core/index/doc_blobs.rs"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: relative link target does not exist; fix it or explicitly classify historical debt"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_LINK"
+path = "docs/scratch/bigsync-reconciliation-open-items.md"
+symbol = "./adrs/012-bigsync-reconciliation-strategy.md"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: relative link target does not exist; fix it or explicitly classify historical debt"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_LINK"
+path = "docs/wiki/big_sync.md"
+symbol = "./big_repo.md"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: relative link target does not exist; fix it or explicitly classify historical debt"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_LINK"
+path = "docs/wiki/big_sync.md"
+symbol = "./subduction.md"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: relative link target does not exist; fix it or explicitly classify historical debt"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_LINK"
+path = "docs/wiki/dict.md"
+symbol = "../src/daybook_core/plugs/manifest.rs"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: relative link target does not exist; fix it or explicitly classify historical debt"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/big-repo-test-trim.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/big-repo-test-trim.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/big-repo-test-trim.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/big-repo-test-trim.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/bigsync-reconciliation-open-items.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/bigsync-reconciliation-open-items.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/bigsync-reconciliation-open-items.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/bigsync-reconciliation-open-items.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/fork-rebase-handoff.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/fork-rebase-handoff.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/fork-rebase-handoff.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/fork-rebase-handoff.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/green-core-big-repo-memory.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/green-core-big-repo-memory.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/green-core-big-repo-memory.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/green-core-big-repo-memory.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/green-core-big-repo.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/green-core-big-repo.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/green-core-big-repo.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/green-core-big-repo.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/keyhive-sync-stall-hunt11.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/keyhive-sync-stall-hunt11.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/keyhive-sync-stall-hunt11.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/keyhive-sync-stall-hunt11.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/perf-attribution-plan.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/perf-attribution-plan.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/perf-attribution-plan.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/perf-attribution-plan.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr49-open-items.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr49-open-items.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr49-open-items.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr49-open-items.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr49-replies.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr49-replies.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr49-replies.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr49-replies.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr51-review-responses.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr51-review-responses.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr51-review-responses.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/pr51-review-responses.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/retry-cadence-map.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/retry-cadence-map.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/retry-cadence-map.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/retry-cadence-map.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/single-writer-watermark-audit.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/single-writer-watermark-audit.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/single-writer-watermark-audit.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/single-writer-watermark-audit.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/task-attribution-conventions.md"
+symbol = "Owner:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Owner: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/task-attribution-conventions.md"
+symbol = "Scope:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Scope: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/task-attribution-conventions.md"
+symbol = "Status:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Status: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_DOC_METADATA"
+path = "docs/scratch/task-attribution-conventions.md"
+symbol = "Updated:"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: scratch notes need Updated: in the first 25 lines; distinguish decisions from proposals"
+reference = "docs/scratch/agent-guardrails-open-items.md"

@@ -921,7 +921,8 @@ mod tests {
     use automerge::transaction::Transactable;
 
     use super::*;
-    use crate::repos::{Repo, SubscribeOpts};
+    use crate::repos::Repo;
+    use crate::repos::SubscribeOpts;
 
     async fn setup_repo_with_sql(
         repo_sql: Database,

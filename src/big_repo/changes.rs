@@ -13,10 +13,9 @@ use crate::DocumentId;
 use automerge::ChangeHash;
 use autosurgeon::Prop;
 use std::sync::Mutex;
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::JoinHandle,
-};
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1292,7 +1291,8 @@ mod tests {
     use super::*;
     use automerge::transaction::Transactable;
     use std::sync::Arc;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::Duration;
+    use tokio::time::timeout;
 
     fn make_change_fixture() -> (DocumentId, Arc<[ChangeHash]>, Arc<automerge::Patch>) {
         let doc_id = DocumentId::random();

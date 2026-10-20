@@ -1,11 +1,18 @@
 use crate::interlude::*;
 
-use big_sync_core::{ByteKey, ObjKey, PartKey, PeerKey};
+use big_sync_core::ByteKey;
+use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
+use big_sync_core::PeerKey;
+use rand::Rng;
+use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng, seq::SliceRandom};
-use serde::{Deserialize, Serialize};
+use rand::seq::SliceRandom;
+use serde::Deserialize;
+use serde::Serialize;
 use std::sync::Mutex;
-use tracing::{info, warn};
+use tracing::info;
+use tracing::warn;
 
 pub const STRESS_NODE_COUNT: usize = 4;
 pub const PHASE1_MUTATIONS: usize = 48;

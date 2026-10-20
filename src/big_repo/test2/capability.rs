@@ -16,8 +16,14 @@
 //! leave effective access unchanged. Every positive operation is verified
 //! through the network sync layer (keyhive + doc sync).
 
-use super::harness::{Node, Pair, fixtures, keyhive as kh_snap, topo::ShutdownGuard};
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use super::harness::Node;
+use super::harness::Pair;
+use super::harness::fixtures;
+use super::harness::keyhive as kh_snap;
+use super::harness::topo::ShutdownGuard;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::transaction::Transactable;
 use keyhive_core::access::Access;
 use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 

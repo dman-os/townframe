@@ -1,27 +1,27 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use async_channel::Receiver as AsyncReceiver;
 use futures::future::BoxFuture;
 use subduction_core::peer::id::PeerId;
-use subduction_crypto::{signed::Signed, signer::memory::MemorySigner};
-use subduction_ephemeral::{
-    clock::{Clock, std_clock::StdClock},
-    config::EphemeralEvent,
-    handler::EphemeralHandler,
-    message::{EphemeralMessage, EphemeralPayload},
-    policy::OpenEphemeralPolicy,
-    topic::Topic,
-};
-use tokio::sync::{mpsc, oneshot};
+use subduction_crypto::signed::Signed;
+use subduction_crypto::signer::memory::MemorySigner;
+use subduction_ephemeral::clock::Clock;
+use subduction_ephemeral::clock::std_clock::StdClock;
+use subduction_ephemeral::config::EphemeralEvent;
+use subduction_ephemeral::handler::EphemeralHandler;
+use subduction_ephemeral::message::EphemeralMessage;
+use subduction_ephemeral::message::EphemeralPayload;
+use subduction_ephemeral::policy::OpenEphemeralPolicy;
+use subduction_ephemeral::topic::Topic;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::{interlude::*, runtime2::support::BigRepoIrohTransport};
+use crate::interlude::*;
+use crate::runtime2::support::BigRepoIrohTransport;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BigEphemeralTopic([u8; 32]);
@@ -423,7 +423,8 @@ impl SwitchboardState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use tokio::time::timeout;
 
     #[derive(Debug, Default)]

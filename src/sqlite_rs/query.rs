@@ -1,4 +1,11 @@
-use crate::{ExecuteResult, FromValue, IntoValue, ResultSet, Row, SqlError, SqlResult, SqlValue};
+use crate::ExecuteResult;
+use crate::FromValue;
+use crate::IntoValue;
+use crate::ResultSet;
+use crate::Row;
+use crate::SqlError;
+use crate::SqlResult;
+use crate::SqlValue;
 
 pub trait IntoParams: Send {
     fn into_params(self) -> Vec<SqlValue>;

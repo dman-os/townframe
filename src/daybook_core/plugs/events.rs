@@ -15,17 +15,22 @@
 
 use super::*;
 
-use crate::drawer::{DrawerRepo, MaterializationChange};
+use crate::drawer::DrawerRepo;
+use crate::drawer::MaterializationChange;
 use crate::index::facet_delta::FacetDelta;
-use crate::index::facet_set::{FacetSetReader, FacetSetRevisionStore, FacetSetSelector};
+use crate::index::facet_set::FacetSetReader;
+use crate::index::facet_set::FacetSetRevisionStore;
+use crate::index::facet_set::FacetSetSelector;
 use crate::stores::FacetStore;
 use big_sync::SqliteDeltaWalkerStateRepo;
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo as _;
-use big_sync_core::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStore;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
-use daybook_types::doc::{FacetKey, WellKnownFacetTag};
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::WellKnownFacetTag;
 
 pub(crate) const PLUGS_CONFIG_CONSUMER_STATE_ID: &str = "@daybook/core/plugs-config-facet-set";
 

@@ -9,12 +9,13 @@
 //! compiled into the store's query) and hands the opened reader to
 //! [`ConcurrentDeltaWalker::open`].
 
-use crate::delta_walker_state::{
-    DeltaWalkerStateError, DeltaWalkerStateRepo, DeltaWalkerStateTransaction,
-};
-use crate::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use crate::delta_walker_state::DeltaWalkerStateError;
+use crate::delta_walker_state::DeltaWalkerStateRepo;
+use crate::delta_walker_state::DeltaWalkerStateTransaction;
+use crate::revisioned_store::RevisionRead;
+use crate::revisioned_store::RevisionReadLimits;
+use crate::revisioned_store::RevisionedStore;
+use crate::revisioned_store::RevisionedStoreReader;
 use crate::watermark::WatermarkMachine;
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
@@ -266,11 +267,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta_walker_state::{
-        DeltaWalkerProgress, DeltaWalkerStateError, DeltaWalkerStateRepo,
-        DeltaWalkerStateTransaction,
-    };
-    use std::sync::{Arc, Mutex};
+    use crate::delta_walker_state::DeltaWalkerProgress;
+    use crate::delta_walker_state::DeltaWalkerStateError;
+    use crate::delta_walker_state::DeltaWalkerStateRepo;
+    use crate::delta_walker_state::DeltaWalkerStateTransaction;
+    use std::sync::Arc;
+    use std::sync::Mutex;
 
     const TEST_BATCH_LIMIT: NonZeroUsize = NonZeroUsize::new(10).expect("literal is non-zero");
 

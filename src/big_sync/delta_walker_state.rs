@@ -1,14 +1,16 @@
 //! SQLite state for one embedder-owned delta walker.
 
 use crate::sqlite::queries;
-use big_sync_core::delta_walker_sparse_state::{
-    DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
-};
-use big_sync_core::delta_walker_state::{
-    DeltaWalkerProgress, DeltaWalkerStateError, DeltaWalkerStateRepo, DeltaWalkerStateResult,
-    DeltaWalkerStateTransaction,
-};
-use sqlite_rs::{Database, Sql, Tx};
+use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateRepo;
+use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateTransaction;
+use big_sync_core::delta_walker_state::DeltaWalkerProgress;
+use big_sync_core::delta_walker_state::DeltaWalkerStateError;
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
+use big_sync_core::delta_walker_state::DeltaWalkerStateResult;
+use big_sync_core::delta_walker_state::DeltaWalkerStateTransaction;
+use sqlite_rs::Database;
+use sqlite_rs::Sql;
+use sqlite_rs::Tx;
 use std::sync::Arc;
 use utils_rs::prelude::async_trait;
 
@@ -274,9 +276,8 @@ fn backend<E: std::error::Error + Send + Sync + 'static>(error: E) -> DeltaWalke
 #[cfg(test)]
 mod tests {
     use super::*;
-    use big_sync_core::delta_walker_state::contract::{
-        DeltaWalkerStateContractHarness, assert_delta_walker_state_contract,
-    };
+    use big_sync_core::delta_walker_state::contract::DeltaWalkerStateContractHarness;
+    use big_sync_core::delta_walker_state::contract::assert_delta_walker_state_contract;
     use sqlite_rs::SqliteRuntime;
 
     struct SqliteContractHarness {

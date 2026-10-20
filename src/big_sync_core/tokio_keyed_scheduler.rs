@@ -5,12 +5,16 @@
 //! externally parked work.
 
 use crate::interlude::*;
-use crate::scheduler::{KeyedScheduler, Retry, SpawnedTask, TaskId};
+use crate::scheduler::KeyedScheduler;
+use crate::scheduler::Retry;
+use crate::scheduler::SpawnedTask;
+use crate::scheduler::TaskId;
 use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
 type TaskFuture<O> = Pin<Box<dyn Future<Output = Res<O>> + Send + 'static>>;
 

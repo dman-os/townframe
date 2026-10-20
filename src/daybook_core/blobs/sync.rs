@@ -1,10 +1,16 @@
 use crate::interlude::*;
 
-use crate::blobs::{BlobId, BlobsRepo, blob_id_to_iroh_hash};
+use crate::blobs::BlobId;
+use crate::blobs::BlobsRepo;
+use crate::blobs::blob_id_to_iroh_hash;
 use big_repo::SharedPartStore;
 
-use big_sync::{SyncBackend, SyncTaskRunOutcome};
-use big_sync_core::{ObjKey, PeerKey, SyncCompletionDeets, SyncTaskCompletion};
+use big_sync::SyncBackend;
+use big_sync::SyncTaskRunOutcome;
+use big_sync_core::ObjKey;
+use big_sync_core::PeerKey;
+use big_sync_core::SyncCompletionDeets;
+use big_sync_core::SyncTaskCompletion;
 
 #[derive(Clone)]
 pub struct BlobSyncBackend {
@@ -207,9 +213,10 @@ mod tests {
 
     use big_sync::HostPartStore;
     use big_sync::MemoryPartStore;
-    use big_sync::backend::contract::{
-        self, SyncBackendHarness, SyncBackendOutcome, SyncBackendScenario,
-    };
+    use big_sync::backend::contract::SyncBackendHarness;
+    use big_sync::backend::contract::SyncBackendOutcome;
+    use big_sync::backend::contract::SyncBackendScenario;
+    use big_sync::backend::contract::{self};
     use tempfile::tempdir;
 
     fn test_part() -> PartKey {

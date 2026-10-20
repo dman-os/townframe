@@ -1,13 +1,16 @@
 use crate::interlude::*;
 
-use super::{CLONE_PROVISION_ALPN, IROH_CLONE_URL_SCHEME, IrohSyncRepo};
+use super::CLONE_PROVISION_ALPN;
+use super::IROH_CLONE_URL_SCHEME;
+use super::IrohSyncRepo;
 
 use std::str::FromStr;
 
 use big_repo::SharedPartStore;
 use iroh::EndpointId;
 use iroh_tickets::endpoint::EndpointTicket;
-use irpc::{channel, rpc_requests};
+use irpc::channel;
+use irpc::rpc_requests;
 #[cfg(test)]
 use tokio::sync::RwLock;
 

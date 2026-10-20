@@ -216,20 +216,38 @@
 mod migrations;
 mod query;
 mod transaction;
-pub use migrations::{MigrationState, migration_status, run_migrations};
-pub use query::{BindTuple, Executor, FromRow, IntoParams, Json, QueryExecutor, Sql};
-pub use transaction::{ReadTx, Savepoint, Tx};
+pub use migrations::MigrationState;
+pub use migrations::migration_status;
+pub use migrations::run_migrations;
+pub use query::BindTuple;
+pub use query::Executor;
+pub use query::FromRow;
+pub use query::IntoParams;
+pub use query::Json;
+pub use query::QueryExecutor;
+pub use query::Sql;
+pub use transaction::ReadTx;
+pub use transaction::Savepoint;
+pub use transaction::Tx;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
-use color_eyre::eyre::{Result as Res, WrapErr};
+use color_eyre::eyre::Result as Res;
+use color_eyre::eyre::WrapErr;
 use rusqlite::Connection as RusConnection;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, oneshot};
-use utils_rs::expect_tags::{ERROR_CHANNEL, ERROR_MUTEX};
+use tokio::sync::Mutex;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
+use tokio::sync::oneshot;
+use utils_rs::expect_tags::ERROR_CHANNEL;
+use utils_rs::expect_tags::ERROR_MUTEX;
 
 // ---------------------------------------------------------------------------
 // Values, rows, errors: the wire shape shared with townframe:sqlite.
@@ -1039,7 +1057,9 @@ impl SqliteRuntime {
 // ---------------------------------------------------------------------------
 
 fn authorize(connection: &RusConnection, readonly: bool) {
-    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use rusqlite::hooks::AuthAction;
+    use rusqlite::hooks::AuthContext;
+    use rusqlite::hooks::Authorization;
     connection.authorizer(Some(move |context: AuthContext<'_>| match context.action {
         AuthAction::Transaction { .. } | AuthAction::Savepoint { .. } => Authorization::Deny,
         AuthAction::Pragma { pragma_name, .. }

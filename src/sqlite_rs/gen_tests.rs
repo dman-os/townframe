@@ -15,7 +15,8 @@ pub mod queries {
 
 #[tokio::test]
 async fn all_query_destinations_and_row_shapes() -> crate::SqlResult<()> {
-    use crate::{Json, Sql};
+    use crate::Json;
+    use crate::Sql;
     use queries::*;
     let database = crate::test_support::db(MIGRATIONS).expect("test database");
     // The derived history table name is what a unit applies itself under

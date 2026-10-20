@@ -1,8 +1,10 @@
 use crate::interlude::*;
 
+use crate::partition::effects;
 use crate::partition::effects::PartitionEffect;
+use crate::partition::job_events;
 use crate::partition::job_events::JobError;
-use crate::partition::{effects, job_events, state};
+use crate::partition::state;
 
 pub fn reduce_job_init_event(
     state: &mut state::PartitionJobsState,

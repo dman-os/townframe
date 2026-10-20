@@ -1,15 +1,29 @@
 use crate::interlude::*;
 
-use crate::drawer::{DrawerRepo, cache::FacetCacheState, facet_recovery, types::*};
+use crate::drawer::DrawerRepo;
+use crate::drawer::cache::FacetCacheState;
+use crate::drawer::facet_recovery;
+use crate::drawer::types::*;
 use crate::repos::Repo;
-use crate::test_support::{boot_disk_repo, boot_repo};
+use crate::test_support::boot_disk_repo;
+use crate::test_support::boot_repo;
 use utils_rs::lru::KeyedLruPool;
 
 use automerge::transaction::Transactable;
-use daybook_types::doc::{
-    AddDocArgs, AuthorityScope, Body, BranchId, BranchPath, BranchPathBuf, BranchPublication,
-    ChangeHashSet, DocId, DocPatch, FacetKey, UserPathBuf, WellKnownFacet, WellKnownFacetTag,
-};
+use daybook_types::doc::AddDocArgs;
+use daybook_types::doc::AuthorityScope;
+use daybook_types::doc::Body;
+use daybook_types::doc::BranchId;
+use daybook_types::doc::BranchPath;
+use daybook_types::doc::BranchPathBuf;
+use daybook_types::doc::BranchPublication;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::DocPatch;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::UserPathBuf;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
 use daybook_types::url::build_facet_ref;
 
 use automerge::ReadDoc;

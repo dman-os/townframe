@@ -1,11 +1,15 @@
 use crate::interlude::*;
 
-use daybook_pdk::{InvokeCommandAccepted, InvokeCommandRequest};
+use daybook_pdk::InvokeCommandAccepted;
+use daybook_pdk::InvokeCommandRequest;
 use daybook_types::doc::ChangeHashSet;
 use daybook_types::doc::DocId;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
-use super::{DaybookPlugin, capabilities, root_doc, wit_doc};
+use super::DaybookPlugin;
+use super::capabilities;
+use super::root_doc;
+use super::wit_doc;
 
 fn wasmtime_err(msg: impl std::fmt::Display) -> wasmtime::Error {
     wasmtime::Error::msg(msg.to_string())

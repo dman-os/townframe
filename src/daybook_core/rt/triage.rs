@@ -1,21 +1,36 @@
 use crate::interlude::*;
 
-use crate::index::facet_delta::{FacetDelta, FacetRouteKey, FacetSnapshot};
-use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
+use crate::index::facet_delta::FacetDelta;
+use crate::index::facet_delta::FacetRouteKey;
+use crate::index::facet_delta::FacetSnapshot;
+use crate::index::facet_set::FacetSetRevisionStore;
+use crate::index::facet_set::FacetSetSelector;
 use crate::plugs::PlugsRepo;
+use crate::rt::DispatchArgs;
+use crate::rt::Rt;
 use crate::rt::dispatch::DispatchOnSuccessHook;
-use crate::rt::{DispatchArgs, Rt};
 use big_sync::DeltaWalkerStateRepo as _;
 use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionedStore as _;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
-use daybook_types::doc::{BranchId, BranchPathBuf, ChangeHashSet, Doc, DocId, FacetKey};
+use daybook_types::doc::BranchId;
+use daybook_types::doc::BranchPathBuf;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::Doc;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
 
-use daybook_types::manifest::{
-    ChangeOriginDeets, DocChangeKind, DocPredicateEvalMode, DocPredicateEvalRequirement,
-    DocPredicateEvalResolved, FacetReferenceManifest, KeyGeneric, NodePredicate, ProcessorDeets,
-    ProcessorEventPredicate, ProcessorManifest,
-};
+use daybook_types::manifest::ChangeOriginDeets;
+use daybook_types::manifest::DocChangeKind;
+use daybook_types::manifest::DocPredicateEvalMode;
+use daybook_types::manifest::DocPredicateEvalRequirement;
+use daybook_types::manifest::DocPredicateEvalResolved;
+use daybook_types::manifest::FacetReferenceManifest;
+use daybook_types::manifest::KeyGeneric;
+use daybook_types::manifest::NodePredicate;
+use daybook_types::manifest::ProcessorDeets;
+use daybook_types::manifest::ProcessorEventPredicate;
+use daybook_types::manifest::ProcessorManifest;
 use std::collections::BTreeMap;
 use tokio_util::sync::CancellationToken;
 
@@ -857,7 +872,8 @@ mod tests {
 
     #[test]
     fn doc_change_predicate_changed_facet_tags() {
-        use daybook_types::manifest::{DocChangeKind, DocChangePredicate};
+        use daybook_types::manifest::DocChangeKind;
+        use daybook_types::manifest::DocChangePredicate;
         let mut changed = HashSet::new();
         changed.insert(FacetKey {
             tag: "org.example.note".into(),
@@ -876,7 +892,8 @@ mod tests {
 
     #[test]
     fn doc_change_predicate_added_deleted_and_removed_tags() {
-        use daybook_types::manifest::{DocChangeKind, DocChangePredicate};
+        use daybook_types::manifest::DocChangeKind;
+        use daybook_types::manifest::DocChangePredicate;
         let mut removed = HashSet::new();
         removed.insert(FacetKey {
             tag: "org.example.note".into(),

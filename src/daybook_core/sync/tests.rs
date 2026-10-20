@@ -2,17 +2,27 @@ use super::*;
 mod ladder;
 mod stress;
 
-use crate::blobs::{BlobId, BlobsRepo};
-use crate::drawer::{DrawerRepo, types::DrawerError};
+use crate::blobs::BlobId;
+use crate::blobs::BlobsRepo;
+use crate::drawer::DrawerRepo;
+use crate::drawer::types::DrawerError;
 use crate::local_state::SqliteLocalStateRepo;
 use crate::plugs::PlugsRepo;
 use crate::progress::ProgressRepo;
-use crate::repo::{RepoCtx, RepoOpenOptions};
-use crate::repos::{Repo, SubscribeOpts};
-use daybook_types::doc::{
-    AddDocArgs, BlobPin, BranchPath, BranchPathBuf, DocId, DocPatch, FacetKey, FacetRaw,
-    WellKnownFacet, WellKnownFacetTag,
-};
+use crate::repo::RepoCtx;
+use crate::repo::RepoOpenOptions;
+use crate::repos::Repo;
+use crate::repos::SubscribeOpts;
+use daybook_types::doc::AddDocArgs;
+use daybook_types::doc::BlobPin;
+use daybook_types::doc::BranchPath;
+use daybook_types::doc::BranchPathBuf;
+use daybook_types::doc::DocId;
+use daybook_types::doc::DocPatch;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetRaw;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
 
 async fn facet_set_hash_rows(sql: &Database, doc_id: &DocId, facet_tag: &str) -> Res<Vec<String>> {
     Ok(sql

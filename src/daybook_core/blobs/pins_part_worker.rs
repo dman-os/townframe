@@ -1,6 +1,7 @@
 use crate::drawer::DrawerRepo;
 use crate::index::facet_delta::FacetDelta;
-use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
+use crate::index::facet_set::FacetSetRevisionStore;
+use crate::index::facet_set::FacetSetSelector;
 use crate::interlude::*;
 use big_repo::SharedPartStore;
 
@@ -13,16 +14,23 @@ pub(crate) mod sqlite {
         include!("pins_part_worker/sqlite/gen.rs");
     }
 }
-use big_sync::{DeltaWalkerStateRepo as _, DeltaWalkerStateTransaction};
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
-};
+use big_sync::DeltaWalkerStateRepo as _;
+use big_sync::DeltaWalkerStateTransaction;
+use big_sync_core::concurrent_delta_walker::ConcurrentDelta;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
 use big_sync_core::revisioned_store::RevisionedStore as _;
-use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
-use daybook_types::doc::{BranchId, ChangeHashSet, DocId, WellKnownFacetTag};
+use big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler;
+use big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion;
+use daybook_types::doc::BranchId;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::WellKnownFacetTag;
 use sqlite::queries;
-use sqlite_rs::{Sql, Tx};
-use std::collections::{BTreeMap, BTreeSet};
+use sqlite_rs::Sql;
+use sqlite_rs::Tx;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
@@ -434,7 +442,8 @@ const BLOB_PINS_PART_TASK_BUDGET: usize = 64;
 struct BlobPinsPartKey(u64);
 
 fn blob_pins_part_key(branch_id: &BranchId) -> BlobPinsPartKey {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     branch_id.0.hash(&mut hasher);
     BlobPinsPartKey(hasher.finish())
@@ -692,9 +701,15 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::facet_delta::{FacetRouteKey, FacetSnapshot};
+    use crate::index::facet_delta::FacetRouteKey;
+    use crate::index::facet_delta::FacetSnapshot;
     use crate::test_support::test_cx;
-    use daybook_types::doc::{AddDocArgs, BlobPin, BranchPath, DocPatch, FacetRaw, WellKnownFacet};
+    use daybook_types::doc::AddDocArgs;
+    use daybook_types::doc::BlobPin;
+    use daybook_types::doc::BranchPath;
+    use daybook_types::doc::DocPatch;
+    use daybook_types::doc::FacetRaw;
+    use daybook_types::doc::WellKnownFacet;
 
     /// Distinct blob hashes pinned for one document (the machine's
     /// `doc_blob_pins` SQLite projection).

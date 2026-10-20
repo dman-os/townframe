@@ -9,16 +9,17 @@
 //! [`MemorySigner`]: subduction_crypto::signer::memory::MemorySigner
 
 use crate::interlude::*;
-use future_form::{FutureForm, Sendable};
+use future_form::FutureForm;
+use future_form::Sendable;
 
-use subduction_core::{
-    handshake::audience::Audience,
-    handshake::{self, Handshake},
-    nonce_cache::NonceCache,
-    peer::id::PeerId as SubductionPeerId,
-    timestamp::TimestampSeconds,
-};
-use subduction_crypto::{nonce::Nonce, signer::memory::MemorySigner};
+use subduction_core::handshake::Handshake;
+use subduction_core::handshake::audience::Audience;
+use subduction_core::handshake::{self};
+use subduction_core::nonce_cache::NonceCache;
+use subduction_core::peer::id::PeerId as SubductionPeerId;
+use subduction_core::timestamp::TimestampSeconds;
+use subduction_crypto::nonce::Nonce;
+use subduction_crypto::signer::memory::MemorySigner;
 
 // ─── Error type ────────────────────────────────────────────────────────────
 

@@ -1,0 +1,40 @@
+version = 1
+role = "application"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = [
+    "am_utils_rs",
+    "big_sync_core",
+    "daybook_core",
+    "daybook_types",
+    "sqlite_rs",
+    "utils_rs",
+    "wash_plugin_sqlite",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_cli/cmds/server.rs"
+symbol = "module::run_inner"
+ceiling = 163
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/daybook_cli/main.rs"
+symbol = "module::interlude"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_cli/cmds/server/plugins.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"

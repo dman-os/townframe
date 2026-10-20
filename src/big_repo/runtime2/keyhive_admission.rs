@@ -2,9 +2,10 @@
 
 use crate::runtime2::Timer;
 use crate::store::sqlite::SqliteBigRepoStore;
-use big_sync_core::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStore;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
 use future_form::Sendable;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -137,9 +138,8 @@ mod tests {
     use crate::runtime2::tasks::TokioTimer;
     use crate::store::sqlite::SqliteBigRepoStore;
     use big_sync_core::BuckId;
-    use big_sync_core::revisioned_store::contract::{
-        RevisionedStoreContractHarness, assert_revisioned_store_contract,
-    };
+    use big_sync_core::revisioned_store::contract::RevisionedStoreContractHarness;
+    use big_sync_core::revisioned_store::contract::assert_revisioned_store_contract;
     use sqlite_rs::Database;
     use subduction_keyhive::storage::StorageHash;
     use utils_rs::prelude::async_trait;

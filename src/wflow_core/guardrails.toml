@@ -1,0 +1,104 @@
+version = 1
+role = "domain"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = ["utils_rs"]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/wflow_core/partition/reduce.rs"
+symbol = "module::reduce_job_run_event"
+ceiling = 178
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/wflow_core/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/wflow_core/metastore.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/wflow_core/kvstore.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/wflow_core/kvstore.rs"
+symbol = "module::make_dhashmap_cas_guard"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/wflow_core/kvstore.rs"
+symbol = "module::tests::test_dhashmap_kvstore"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/wflow_core/kvstore.rs"
+symbol = "module::tests::test_kv_store_concurrency_loom"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/wflow_core/kvstore/snapstore.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/wflow_core/lib.rs"
+symbol = "module::r#gen"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/wflow_core/kvstore.rs"
+symbol = "module::tests::test_dhashmap_kvstore"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/wflow_core/kvstore.rs"
+symbol = "module::tests::test_kv_store_concurrency_loom"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"

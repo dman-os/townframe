@@ -1,23 +1,31 @@
 //! SQLite facade joining the keyed-frontier read and write halves.
 
 use super::PartFrontierKey;
-use super::sqlite_read::{
-    SqliteFrontierRow, SqlitePartSelector, part_query_rows, part_query_rows_with_byte_budget,
-};
+use super::sqlite_read::SqliteFrontierRow;
+use super::sqlite_read::SqlitePartSelector;
+use super::sqlite_read::part_query_rows;
+use super::sqlite_read::part_query_rows_with_byte_budget;
 use super::sqlite_write::SqliteFrontierWrite;
-use crate::keyed_frontier::{SqliteReadError, SqliteReadSource, open_sqlite_reader};
+use crate::keyed_frontier::SqliteReadError;
+use crate::keyed_frontier::SqliteReadSource;
+use crate::keyed_frontier::open_sqlite_reader;
 use crate::sqlite::queries;
-use big_sync_core::keyed_frontier::{
-    FrontierEntry, FrontierRevision, KeyedFrontier, KeyedFrontierError, KeyedFrontierReader,
-    KeyedFrontierResult,
-};
-use big_sync_core::rpc::{ObjChanged, PartEvent};
-use sqlite_rs::{Database, Tx};
+use big_sync_core::keyed_frontier::FrontierEntry;
+use big_sync_core::keyed_frontier::FrontierRevision;
+use big_sync_core::keyed_frontier::KeyedFrontier;
+use big_sync_core::keyed_frontier::KeyedFrontierError;
+use big_sync_core::keyed_frontier::KeyedFrontierReader;
+use big_sync_core::keyed_frontier::KeyedFrontierResult;
+use big_sync_core::rpc::ObjChanged;
+use big_sync_core::rpc::PartEvent;
+use sqlite_rs::Database;
+use sqlite_rs::Tx;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Notify;
-use utils_rs::prelude::{async_trait, serde_json};
+use utils_rs::prelude::async_trait;
+use utils_rs::prelude::serde_json;
 
 const EVENT_CHANGED: i64 = 1;
 const EVENT_REMOVED: i64 = 2;
@@ -226,9 +234,12 @@ impl KeyedFrontier<PartFrontierKey, PartEvent> for SqlitePartFrontier {
 mod tests {
     use super::*;
     use crate::keyed_frontier::contract;
+    use big_sync_core::BuckId;
+    use big_sync_core::ObjKey;
+    use big_sync_core::PartKey;
     use big_sync_core::keyed_frontier::FrontierRevision;
-    use big_sync_core::rpc::{ObjChanged, PartEvent};
-    use big_sync_core::{BuckId, ObjKey, PartKey};
+    use big_sync_core::rpc::ObjChanged;
+    use big_sync_core::rpc::PartEvent;
     use sqlite_rs::SqliteRuntime;
     use std::collections::BTreeMap;
     use std::sync::Arc;

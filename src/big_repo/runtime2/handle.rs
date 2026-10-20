@@ -12,7 +12,8 @@ use crate::DocumentId;
 use crate::interlude::*;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime2::Timer;
-use crate::runtime2::messages::{Runtime2Cmd, fresh_waiter_id};
+use crate::runtime2::messages::Runtime2Cmd;
+use crate::runtime2::messages::fresh_waiter_id;
 use big_sync_core::PeerKey;
 use future_form::FutureForm;
 use std::sync::Arc;
@@ -729,7 +730,8 @@ impl<F: FutureForm> Runtime2Handle<F> {
         rx: futures::channel::oneshot::Receiver<T>,
         duration: std::time::Duration,
     ) -> Result<Result<T, futures::channel::oneshot::Canceled>, ()> {
-        use futures::future::{Either, select};
+        use futures::future::Either;
+        use futures::future::select;
         let sleep = Box::pin(self.timer.sleep(duration));
         match select(sleep, rx).await {
             Either::Left(_) => Err(()),

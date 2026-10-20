@@ -35,19 +35,27 @@ pub mod doc_version_updates {
     }
 }
 
+use super::BranchKind;
+use super::BranchRefRow;
 #[cfg(test)]
 use super::BranchStateRow;
-use super::{BranchKind, BranchRefRow, DrawerRepo};
+use super::DrawerRepo;
 use crate::drawer::sqlite::queries;
-use crate::drawer::types::{DocEntry, DocNBranches, StoredBranchRef};
+use crate::drawer::types::DocEntry;
+use crate::drawer::types::DocNBranches;
+use crate::drawer::types::StoredBranchRef;
 use crate::stores::VersionTag;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use daybook_types::doc::{
-    ChangeHashSet, DocId, FacetKey, FacetTag, WellKnownFacet, WellKnownFacetTag,
-};
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetTag;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
 use daybook_types::url::parse_facet_ref;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Apply the drawer's SQLite unit (local branch refs, tombstones and the add
 /// outbox) to the repository database. Idempotent; called at drawer boot and

@@ -24,13 +24,20 @@ use super::log_nickname;
 /// for a short hold of its own — a client-side pacing choice the responder honours —
 /// instead of having a test double ignore the request.
 const REPLAY_HOLD_MS: u32 = 200;
-use crate::{
-    BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerKey, SqliteBigRepoStore,
-    StorageConfig, WorkerGroupScope,
-};
-use big_sync::{HostPartStore, stress_support};
+use crate::BigRepo;
+use crate::BigRepoConnection;
+use crate::BigRepoStopToken;
+use crate::Config;
+use crate::DocumentId;
+use crate::PeerKey;
+use crate::SqliteBigRepoStore;
+use crate::StorageConfig;
+use crate::WorkerGroupScope;
+use big_sync::HostPartStore;
+use big_sync::stress_support;
 use sqlite_rs::SqliteRuntime;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::time::timeout;
 
 /// A single booted BigRepo node with an Iroh endpoint + big-sync worker.

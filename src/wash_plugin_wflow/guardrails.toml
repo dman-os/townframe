@@ -1,0 +1,27 @@
+version = 1
+role = "runtime"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = [
+    "utils_rs",
+    "wflow_core",
+    "wflow_tokio",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/wash_plugin_wflow/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/wash_plugin_wflow/lib.rs"
+symbol = "module"
+ceiling = 4
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"

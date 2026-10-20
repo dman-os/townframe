@@ -29,7 +29,8 @@ use crate::runtime2::keyhive_admission;
 use crate::store::sqlite::SqliteBigRepoStore;
 use big_sync::SqliteDeltaWalkerStateRepo;
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
-use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore};
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionedStore;
 use big_sync_core::serial_delta_walker::SerialDeltaWalker;
 use keyhive_core::event::static_event::StaticEvent;
 
@@ -135,7 +136,8 @@ mod tests {
     use super::*;
     use crate::keyhive_listener::BigRepoKeyhiveListener;
     use crate::keyhive_storage::BigRepoKeyhiveStorage;
-    use beekem::id::{MemberId, TreeId};
+    use beekem::id::MemberId;
+    use beekem::id::TreeId;
     use beekem::operation::CgkaOperation;
     use keyhive_core::principal::individual::op::rotate_key::RotateKeyOp;
     use keyhive_crypto::share_key::ShareKey;

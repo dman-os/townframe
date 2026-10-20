@@ -1,7 +1,10 @@
 use crate::interlude::*;
 use crate::sqlite::queries as q;
-use crate::store::{PersistedObjectState, PersistedState, StateStore};
-use sqlite_rs::{Database, SqliteRuntime};
+use crate::store::PersistedObjectState;
+use crate::store::PersistedState;
+use crate::store::StateStore;
+use sqlite_rs::Database;
+use sqlite_rs::SqliteRuntime;
 
 pub struct SqliteStateStore {
     _runtime: Arc<SqliteRuntime>,

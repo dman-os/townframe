@@ -1,0 +1,310 @@
+version = 1
+role = "runtime"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = [
+    "big_sync_core",
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_ALLOW_ATTRIBUTE"
+path = "src/big_sync/keyed_frontier/sqlite_generic.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = 'initial guardrail baseline: use a narrow #[expect(..., reason = "...")] so obsolete suppressions fail'
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/keyed_frontier.rs"
+symbol = "module::contract::assert_keyed_frontier_contract"
+ceiling = 400
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/part_store/host_contract.rs"
+symbol = "module::assert_changed_buckets_contract"
+ceiling = 190
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/part_store/host_contract.rs"
+symbol = "module::assert_leaf_buckets_contract"
+ceiling = 210
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/part_store/host_contract.rs"
+symbol = "module::assert_leaf_page_byte_budget_contract"
+ceiling = 239
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/part_store/host_contract.rs"
+symbol = "module::assert_local_revision_reader_contract"
+ceiling = 231
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/part_store/host_contract.rs"
+symbol = "module::assert_page_outcome_contract"
+ceiling = 183
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/part_store/host_contract.rs"
+symbol = "module::assert_payload_can_trail_membership_contract"
+ceiling = 164
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/part_store/host_contract.rs"
+symbol = "module::assert_subscription_semantics_contract"
+ceiling = 666
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/part_store/sqlite.rs"
+symbol = "module::SqlitePartStore as HostPartStore::leaf_buckets"
+ceiling = 185
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/rpc.rs"
+symbol = "module::BigSyncRpcWorker::handle_replay_subscription"
+ceiling = 180
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/rpc.rs"
+symbol = "module::BigSyncRpcWorker::handle_rpc_message"
+ceiling = 308
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync/stress_support.rs"
+symbol = "module::run_randomized_stress"
+ceiling = 181
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/big_sync/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync/keyed_frontier.rs"
+symbol = "module::contract"
+ceiling = 528
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync/keyed_frontier.rs"
+symbol = "module::tests"
+ceiling = 434
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync/keyed_frontier/sqlite_generic.rs"
+symbol = "module::tests"
+ceiling = 428
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync/part_store/memory.rs"
+symbol = "module::tests"
+ceiling = 657
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync/part_store/sqlite.rs"
+symbol = "module::tests"
+ceiling = 1577
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync/rpc.rs"
+symbol = "module::tests"
+ceiling = 1549
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_sync/keyed_frontier/sqlite_read.rs"
+symbol = "module"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_sync/part_store/host_contract.rs"
+symbol = "module::assert_subscription_semantics_contract::run_case"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_sync/stress_support.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_sync/stress_support.rs"
+symbol = "module::run_phase"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_sync/stress_support.rs"
+symbol = "module::run_randomized_stress"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MATCH_ARM_LENGTH"
+path = "src/big_sync/rpc.rs"
+symbol = "module::BigSyncRpcWorker::handle_replay_subscription::match(ReplaySubscriptionRequest :: Next { session_id ,)"
+ceiling = 138
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: delegate large match arms to dedicated handlers to avoid dispatch-hub merge conflicts"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MATCH_ARM_LENGTH"
+path = "src/big_sync/rpc.rs"
+symbol = "module::BigSyncRpcWorker::handle_rpc_message::match(BigSyncRpcMessage :: PeerSummary (req))"
+ceiling = 111
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: delegate large match arms to dedicated handlers to avoid dispatch-hub merge conflicts"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MATCH_ARM_LENGTH"
+path = "src/big_sync/rpc.rs"
+symbol = "module::BigSyncRpcWorker::handle_rpc_message::match(BigSyncRpcMessage :: ReplayPage (req))"
+ceiling = 108
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: delegate large match arms to dedicated handlers to avoid dispatch-hub merge conflicts"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MODULE_ITEMS"
+path = "src/big_sync/part_store/host_contract.rs"
+symbol = "module"
+ceiling = 59
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: split responsibilities; imports and impl blocks do not count"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SEND_DISCARDED"
+path = "src/big_sync/worker.rs"
+symbol = "module::BigSyncWorker::machine_loop"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: handle send failure; broadcast with zero listeners needs a specific exemption"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/big_sync/keyed_frontier/memory.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/big_sync/part_store/host_contract.rs"
+symbol = "module"
+ceiling = 3
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_TYPE_ITEMS"
+path = "src/big_sync/part_store/sqlite.rs"
+symbol = "module::SqlitePartStore"
+ceiling = 51
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: reduce the type/trait surface, not just the number of impl blocks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[migrations]
+"src/big_sync/sqlite/migrations/001_init.sql" = "5e8db17e6d0bd5e1ad0ac95d18b0954401f9674c020bbf4fea395bf709532f4d"
+"src/big_sync/sqlite/migrations/002_frontier_state.sql" = "f1cd0e575d2303233ea0a9ff976fe721fd34417dad46c7a6b561fa53c4875765"

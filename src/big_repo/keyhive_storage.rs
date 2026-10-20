@@ -13,20 +13,29 @@
 
 use crate::interlude::*;
 
-use crate::store::sqlite::{SecretBlobKind, SqliteBigRepoStore, SqliteBigRepoStoreError};
-use std::collections::{HashMap, HashSet};
+use crate::store::sqlite::SecretBlobKind;
+use crate::store::sqlite::SqliteBigRepoStore;
+use crate::store::sqlite::SqliteBigRepoStoreError;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use futures::lock::Mutex;
 
-use futures::{FutureExt, future::BoxFuture};
+use futures::FutureExt;
+use futures::future::BoxFuture;
 use rand::RngCore;
-use secrets_rs::{SecretStore, decrypt_blob, encrypt_blob};
-use subduction_keyhive::storage::{KeyhiveStorage, MemoryKeyhiveStorage, StorageHash};
+use secrets_rs::SecretStore;
+use secrets_rs::decrypt_blob;
+use secrets_rs::encrypt_blob;
+use subduction_keyhive::storage::KeyhiveStorage;
+use subduction_keyhive::storage::MemoryKeyhiveStorage;
+use subduction_keyhive::storage::StorageHash;
 use utils_rs::prelude::eyre;
 
 /// Subdirectory of the repo data dir holding keyhive state.

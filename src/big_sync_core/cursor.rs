@@ -3,8 +3,10 @@
 
 use crate::interlude::*;
 
-use crate::part_store::{CursorIndex, ObjPayload};
-use crate::watermark::{StreamDrop, WatermarkMachine};
+use crate::part_store::CursorIndex;
+use crate::part_store::ObjPayload;
+use crate::watermark::StreamDrop;
+use crate::watermark::WatermarkMachine;
 
 use std::collections::HashMap;
 
@@ -433,7 +435,9 @@ impl CursorSyncMachine {
 mod tests {
     use super::*;
     use crate::ByteKey;
-    use crate::rpc::{ObjChanged, ObjRemovedFromPart, PartEvent};
+    use crate::rpc::ObjChanged;
+    use crate::rpc::ObjRemovedFromPart;
+    use crate::rpc::PartEvent;
 
     fn obj(seed: u8) -> ObjKey {
         ObjKey(ByteKey::new([seed; 32]))

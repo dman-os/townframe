@@ -3,13 +3,20 @@ use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 use crate::encrypted_blob::decode_encrypted_blob;
 use am_utils_rs::codecs::ThroughJson;
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
-use big_sync::backend::contract::{
-    self, SyncBackendHarness, SyncBackendOutcome, SyncBackendScenario,
-};
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::transaction::Transactable;
+use big_sync::HostPartStore;
+use big_sync::SyncBackend;
+use big_sync::backend::contract::SyncBackendHarness;
+use big_sync::backend::contract::SyncBackendOutcome;
+use big_sync::backend::contract::SyncBackendScenario;
+use big_sync::backend::contract::{self};
 use big_sync::stress_support;
-use big_sync::{HostPartStore, SyncBackend};
-use big_sync_core::{ByteKey, PartKey, PeerKey, SyncCompletionDeets};
+use big_sync_core::ByteKey;
+use big_sync_core::PartKey;
+use big_sync_core::PeerKey;
+use big_sync_core::SyncCompletionDeets;
 
 /// The band these harnesses run: the one the embedder ships, so big_repo's tests exercise
 /// bucket-diff. The offline-reopen stall this used to opt out for is covered by
@@ -26,10 +33,12 @@ const HARNESS_REPLAY_HOLD_MS: u32 = 50;
 use nonempty::NonEmpty;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use subduction_keyhive::KeyhivePeerId;
 use tempfile::tempdir;
-use tokio::{sync::Notify, time::timeout};
+use tokio::sync::Notify;
+use tokio::time::timeout;
 
 pub async fn boot_repo() -> Res<(
     Arc<BigRepo>,

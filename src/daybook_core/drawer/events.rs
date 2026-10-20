@@ -1,11 +1,17 @@
 use crate::interlude::*;
 
-use super::{BranchKind, DrawerRepo};
+use super::BranchKind;
+use super::DrawerRepo;
 
-use crate::drawer::types::{DocEntry, DrawerEvent};
+use crate::drawer::types::DocEntry;
+use crate::drawer::types::DrawerEvent;
 
-use big_repo::{BigRepoChangeNotification, BigRepoChangeOrigin};
-use daybook_types::doc::{BranchPathBuf, ChangeHashSet, DocId, FacetKey};
+use big_repo::BigRepoChangeNotification;
+use big_repo::BigRepoChangeOrigin;
+use daybook_types::doc::BranchPathBuf;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
 

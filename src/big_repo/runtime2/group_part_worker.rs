@@ -6,19 +6,23 @@
 //! derived work has completed successfully.
 
 use crate::interlude::*;
-use crate::keyhive::{BigKeyhiveHandle, EventSubject};
-use crate::runtime2::{WorkerGroupScope, keyhive_admission};
-use crate::store::sqlite::{GroupPartReconciliation, SqliteBigRepoStore};
+use crate::keyhive::BigKeyhiveHandle;
+use crate::keyhive::EventSubject;
+use crate::runtime2::WorkerGroupScope;
+use crate::runtime2::keyhive_admission;
+use crate::store::sqlite::GroupPartReconciliation;
+use crate::store::sqlite::SqliteBigRepoStore;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDeltaRead, ConcurrentDeltaWalker, DeltaAck,
-};
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
+use big_sync_core::concurrent_delta_walker::DeltaAck;
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
 use big_sync_core::outbox::Outbox;
 use big_sync_core::revisioned_store::RevisionedStore;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const CONCURRENT_TASK_BUDGET: usize = 64;
@@ -939,9 +943,9 @@ mod tests {
     use crate::keyhive_listener::BigRepoKeyhiveListener;
     use crate::keyhive_storage::BigRepoKeyhiveStorage;
     use big_sync_core::BuckId;
-    use big_sync_core::revisioned_store::{
-        RevisionRead, RevisionReadLimits, RevisionedStoreReader,
-    };
+    use big_sync_core::revisioned_store::RevisionRead;
+    use big_sync_core::revisioned_store::RevisionReadLimits;
+    use big_sync_core::revisioned_store::RevisionedStoreReader;
     use keyhive_core::access::Access;
     use keyhive_core::event::Event;
     use keyhive_core::principal::group::id::GroupId as KhGroupId;

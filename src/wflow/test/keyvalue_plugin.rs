@@ -5,20 +5,22 @@
 //! providing the `wasi:keyvalue@0.2.0-draft` interfaces for development and testing scenarios.
 
 use crate::interlude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 const WASI_KEYVALUE_ID: &str = "wasi-keyvalue";
 use tokio::sync::RwLock;
 use wash_runtime::engine::workload::WorkloadItem;
 use wash_runtime::plugin::WitInterfaces;
-use wasmtime::component::{HasSelf, Resource};
+use wasmtime::component::HasSelf;
+use wasmtime::component::Resource;
 
-use wash_runtime::engine::ctx::{Ctx as WashCtx, SharedCtx as SharedWashCtx};
-use wash_runtime::{
-    engine::workload::WorkloadComponent,
-    plugin::HostPlugin,
-    wit::{WitInterface, WitWorld},
-};
+use wash_runtime::engine::ctx::Ctx as WashCtx;
+use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
+use wash_runtime::engine::workload::WorkloadComponent;
+use wash_runtime::plugin::HostPlugin;
+use wash_runtime::wit::WitInterface;
+use wash_runtime::wit::WitWorld;
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -31,7 +33,8 @@ mod bindings {
     });
 }
 
-use bindings::wasi::keyvalue::store::{Error as StoreError, KeyResponse};
+use bindings::wasi::keyvalue::store::Error as StoreError;
+use bindings::wasi::keyvalue::store::KeyResponse;
 
 /// In-memory bucket representation
 #[derive(Clone, Debug)]

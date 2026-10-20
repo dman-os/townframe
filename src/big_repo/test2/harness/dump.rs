@@ -10,7 +10,8 @@
 use super::heads::state_summary;
 use super::log_nickname;
 use super::topo::Pair;
-use crate::{DocumentId, Res};
+use crate::DocumentId;
+use crate::Res;
 use std::sync::Arc;
 
 /// Dump a per-node diagnostic snapshot of `doc_id` across the pair.

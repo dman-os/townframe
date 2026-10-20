@@ -1,0 +1,17 @@
+version = 1
+role = "runtime"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = [
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/wash_plugin_sqlite/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"

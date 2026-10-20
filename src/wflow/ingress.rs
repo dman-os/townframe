@@ -1,7 +1,9 @@
 use crate::interlude::*;
 
 use wflow_core::metastore;
-use wflow_core::partition::job_events::{JobCancelEvent, JobInitEvent, JobMessageEvent};
+use wflow_core::partition::job_events::JobCancelEvent;
+use wflow_core::partition::job_events::JobInitEvent;
+use wflow_core::partition::job_events::JobMessageEvent;
 use wflow_core::partition::log::PartitionLogEntry;
 use wflow_tokio::partition::PartitionLogRef;
 
