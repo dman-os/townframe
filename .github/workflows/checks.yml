@@ -35,7 +35,7 @@ env:
 
 jobs:
   nix-packages:
-    name: Nix CLI package and Linux container
+    name: Nix CLI package
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -56,19 +56,6 @@ jobs:
       # pre-commit hook in the lint job. This job owns the package outputs.
       - name: Build CLI and run its packaged round-trip test
         run: nix build --print-build-logs --no-link .#daybook-cli.tests.round-trip
-      - name: Build Linux container archive
-        run: nix build --print-build-logs .#daybook-cli-container --out-link result-container
-      # The runtime round-trip is intentionally absent: `init` inside the
-      # container fails on the missing OS keyring (no Secret Service bus, and
-      # the kernel-keyring fallback cannot store under the container's
-      # isolation). Tracked in docs/scratch/agent-guardrails-open-items.md
-      # (GR-24 scope update); re-add once container secret storage is decided.
-      - name: Load container archive and verify image config
-        run: |
-          docker load --input result-container
-          image="daybook-cli:$(nix eval --raw .#daybook-cli.version)"
-          test "$(docker image inspect --format '{{.Config.User}}' "$image")" = '65534:65534'
-          test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" != 'null'
   rust-target-matrix:
     runs-on: ubuntu-latest
     timeout-minutes: 60

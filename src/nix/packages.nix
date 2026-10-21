@@ -268,46 +268,12 @@
           '';
         };
       });
-      container = pkgs.dockerTools.buildLayeredImage {
-        name = "daybook-cli";
-        tag = version;
-        created = "1970-01-01T00:00:01Z";
-        contents = [
-          daybook-cli
-          pkgs.cacert
-          pkgs.dockerTools.fakeNss
-        ];
-        fakeRootCommands = ''
-          mkdir -p ./data ./tmp
-          chmod 1777 ./tmp
-          chown 65534:65534 ./data
-        '';
-        config = {
-          User = "65534:65534";
-          WorkingDir = "/data";
-          Entrypoint = [ "${daybook-cli}/bin/daybook_cli" ];
-          Cmd = [ "--help" ];
-          Env = [
-            "HOME=/data"
-            "DAYB_REPO_PATH=/data/repo"
-            "XDG_CACHE_HOME=/data/cache"
-            "XDG_CONFIG_HOME=/data/config"
-            "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
-            "RUST_LOG=error,wflow::kvstore=off"
-            "NO_COLOR=1"
-          ];
-          Volumes."/data" = { };
-        };
-      };
     in
     {
       packages = {
         inherit daybook-cli;
         wit-deps = witDeps;
         cargo-vendor-dir = cargoVendorDir;
-      }
-      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-        daybook-cli-container = container;
       };
       apps.daybook-cli = {
         type = "app";

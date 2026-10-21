@@ -178,7 +178,7 @@ splitting work into issues or PRs. Do not delete unfinished rows during a handof
 | GR-21 | **Open proposals**: transferable failures and exercised races | §5.7/§10. Repro bundle/capsule, `sometimes!` reachability assertions, seeded Tokio choices and production-logic model tests remain. Prove replay inputs and that a test entered its declared race window; seeded choices are not deterministic OS scheduling. Rewind remains a bounded experiment, not a CI mandate. Nightly flake-fail policy already landed; automatic failing-seed filing did not. |
 | GR-22 | **Open proposals**: dependency, test and performance hygiene | §9.5. Machete is installed, not gated; cargo-deny, zizmor ratchet, targeted mutation tests, bounded-work/allocation/query assertions and dead-file cleanup remain. Choose one affected area at a time and preserve test intent. No blanket exemption burn-down or whole-repo cleanup is authorized by this ledger. |
 | GR-23 | **Partial**: parallel runtime/test isolation | §5.6. Hardcoded-string checks landed; ephemeral test resources, dev port allocation, nextest weights/groups where justified and service ownership/cleanup enforcement remain. Verify simultaneous worktrees cannot overwrite databases or stop each other's services. |
-| GR-24 | **In progress — first slice implemented and verified (2026-10-21)**: Nix CLI package | `packages.daybook-cli` + `apps.daybook-cli` via Crane, flake split into `src/nix/{toolchains,devshells,wit-deps,packages}.nix`, `packages.wit-deps` FOD vendors gitignored `wit/deps` (pinned wash 2.6.1, refresh recipe in `src/nix/wit-deps.nix`), `outputHashes` route five Cargo git deps through `fetchgit` (their revs are orphaned commits Nix's `fetchGit` refuses). `wash-runtime`'s build.rs locates the wasmCloud repo root by walking up to the first `Cargo.lock` and compiles `proto/` from there; crane's per-crate git vendoring strips both, so they are restored by `overrideVendorGitCheckout` and a materialized group directory (`packages.cargo-vendor-dir`, exposed for inspection; its `config.toml` is retargeted at the copy). OLLAMA `env!` defaults baked empty (no credentials in the store), ORT linked dynamically from nixpkgs `onnxruntime` (ort-sys defaults to a static archive nixpkgs does not ship, and its copy-dylibs step needs `target/release/build/{examples,deps}` to pre-exist). Verified: sandboxed `nix build …#daybook-cli` produced a binary that prints `--help` under `env -i` outside any devshell; closure is 19 paths with no vendor-dir or credential references; `cargo x lint`/`api`/`doctor` stayed green. Evaluation of the real worktree path requires the new `src/nix/*.nix` files to be tracked in the VCS first (jj-only policy here), so verification used a `path:` copy of the tree. Remaining for GR-24: CI job building the package (stack follow-up), `init`/document round-trip and server-resource smoke tests (§0.5 item 4), Linux container image, plug-OCI packaging after GR-01. `x86_64-darwin` dropped from `systems` (nixpkgs 26.11 removed support). |
+| GR-24 | **In progress — first slice implemented and verified (2026-10-21)**: Nix CLI package | `packages.daybook-cli` + `apps.daybook-cli` via Crane, flake split into `src/nix/{toolchains,devshells,wit-deps,packages}.nix`, `packages.wit-deps` FOD vendors gitignored `wit/deps` (pinned wash 2.6.1, refresh recipe in `src/nix/wit-deps.nix`), `outputHashes` route five Cargo git deps through `fetchgit` (their revs are orphaned commits Nix's `fetchGit` refuses). `wash-runtime`'s build.rs locates the wasmCloud repo root by walking up to the first `Cargo.lock` and compiles `proto/` from there; crane's per-crate git vendoring strips both, so they are restored by `overrideVendorGitCheckout` and a materialized group directory (`packages.cargo-vendor-dir`, exposed for inspection; its `config.toml` is retargeted at the copy). OLLAMA `env!` defaults baked empty (no credentials in the store), ORT linked dynamically from nixpkgs `onnxruntime` (ort-sys defaults to a static archive nixpkgs does not ship, and its copy-dylibs step needs `target/release/build/{examples,deps}` to pre-exist). Verified: sandboxed `nix build …#daybook-cli` produced a binary that prints `--help` under `env -i` outside any devshell; closure is 19 paths with no vendor-dir or credential references; `cargo x lint`/`api`/`doctor` stayed green. Evaluation of the real worktree path requires the new `src/nix/*.nix` files to be tracked in the VCS first (jj-only policy here), so verification used a `path:` copy of the tree. Remaining for GR-24: server-resource smoke tests (§0.5 item 4), plug-OCI packaging after GR-01. `x86_64-darwin` dropped from `systems` (nixpkgs 26.11 removed support). |
 | GR-25 | **Partial**: Nix checks and reusable build graph | §10. Source-only checks landed (2026-10-21): nixfmt, statix/deadnix, rustfmt on all three workspaces, deno fmt/lint/check with a fixed-output `DENO_DIR`, biome, and JSON/TOML/YAML/case-collision, each on a narrow fileset — see the GR-24 scope-update note for details. Open: a packaged lightweight xtask so `cargo x lint/api/sql-gen` can become checks without discarding the warm `./target` (operator-deferred 2026-10-21), clippy/check-matrix/nextest derivations that respect the agent-build jobserver and cgroups, separate native/guest/btress resolutions, and proof that identical inputs across worktrees reuse store outputs. No unconditional per-crate cache-hit guarantee. |
 | GR-26 | **Shelved by operator**: further cross-worktree sccache work | Turn 13 (line 1467), Q7. Keep stock opt-in. No patched binary, wrapper or trim-paths adoption without reopening and completing correctness/resource acceptance. Hakari measurement remains optional; feature-unification already landed. |
 | GR-27 | **Open**: evidence of improved throughput | §12. Record feedback latency, integration repair time, duplicate compilation, reproduction success, exception burn-down and missed contract changes before/after selected work. Counting enabled lints is not an outcome metric. |
@@ -207,27 +207,15 @@ The first GR-24 slice landed the same day this ledger was reconciled; its propos
 output names are now `packages.daybook-cli`, `apps.daybook-cli`, `packages.wit-deps`
 and `packages.cargo-vendor-dir`, with per-item status below.
 
-Scope update (operator, 2026-10-21): all CLI Nix packaging, checks/CI, and the Linux
-container belong in this PR; plug OCI remains for later. `checks.daybook-cli` runs
-`init`, creates two distinct documents, reopens/lists/reads them, reinitializes without
-losing them, dumps the repo, and checks missing-document failure under `env -i` in the
-Nix sandbox. The shared smoke script is also ShellCheck-validated by `writeShellApplication`.
-`packages.daybook-cli-container` builds and loads as a Docker-compatible archive with
-UID/GID 65534, CA certificates, a writable `/data` volume, and a fixed creation timestamp.
-`.github/workflows/checks.yml` builds the archive and asserts the non-root config, but does
-**not** run the container: the runtime round-trip fails at `init` with
-`keyring error: Platform failure: Unknown(38)` at `src/daybook_core/secrets.rs:41` under
-normal container isolation (read-only root, no network, default seccomp, no capabilities).
-`secrets_rs` requires an OS keyring: the image has no Secret Service session bus, and its
-kernel-keyring fallback cannot store the identity in this container. The native sandbox
-round-trip has a working host kernel keyring; it does not prove container keyring support.
-Container secret storage needs an operator decision before completion: integrate an external
-Secret Service or explicitly add a container-compatible persistent secret backend. Do not
-turn off seccomp, enable the in-memory test backend, or silently store plaintext secrets to
-make the test pass. The `server` playground also remains unsupported by this package: its
-btress components/site assets are not packaged, and its paths still point into build trees.
-`cargo x lint` (0 diagnostics/602 modules), `cargo x api --all --check` (five snapshots),
-and `cargo x doctor` passed again in this worktree.
+Scope update (operator, 2026-10-21): CLI Nix packaging and source checks belong in this
+PR; plug OCI remains for later. `packages.daybook-cli` and its passthru round-trip test
+run `init`, create two distinct documents, reopen/list/read them, reinitialize without
+losing them, dump the repo, and check missing-document failure under `env -i` in the Nix
+sandbox. The shared smoke script is ShellCheck-validated by `writeShellApplication`.
+The `server` playground remains unsupported by this package: its btress components/site
+assets are not packaged, and its paths still point into build trees. `cargo x lint`
+(0 diagnostics/602 modules), `cargo x api --all --check` (five snapshots), and
+`cargo x doctor` passed again in this worktree.
 
 Hermetic source checks (landed 2026-10-21, `src/nix/checks.nix`, all green on
 x86_64-linux): `checks.nix-format` (nixfmt), `checks.nix-lint` (statix + deadnix),
@@ -250,7 +238,7 @@ check-case-conflict, deno fmt/lint/check, biome format/check/lint, rustfmt; chec
 no-op with no Python files). The rust-target-matrix job no longer reruns guardrail lint or
 guest-workspace rustfmt. The packaged-CLI round-trip moved from `checks` to
 `packages.daybook-cli.passthru.tests.round-trip` so the lint hook never builds the CLI; the
-Nix packaging job builds that test and the container. `nix fmt` now applies every enforced
+Nix packaging job builds that test. `nix fmt` now applies every enforced
 format (nixfmt, rustfmt per file, deno fmt, `biome check --write` as the old `pnpm check`
 hook did). `cargo x sql gen --check` and `cargo x guardrails lint|api|doctor` stay
 pre-commit hooks: building xtask in the store discards the warm `./target` (operator,
@@ -313,15 +301,7 @@ not be reported as an all-platform package check.
    was measured rather than assumed: 19 paths, ~436 MiB total, the `daybook_cli` store
    path itself 164 MiB (the heavy members are `onnxruntime` and its `openvino`/
    `protobuf` dependencies).
-5. **GR-24, follow-up Linux CLI container:** compose the tested binary/runtime closure into
-   a daemonless `dockerTools.buildLayeredImage`, with non-root execution, CA certificates,
-   writable data outside the immutable image, and runtime-supplied secrets. This produces a
-   Docker-compatible archive; if an OCI-layout artifact is required, explicitly convert and
-   verify that format rather than calling the tarball an OCI layout. Keep timestamps stable.
-   `streamLayeredImage` is an alternative when avoiding a second stored archive matters.
-   Container execution tests use a Linux runner; a Darwin binary cannot simply be relabeled
-   as a Linux image. Verify loading/running separately from image construction.
-6. **GR-01 then GR-24, follow-up Wasm plug OCI:** resolve the approved component-manifest
+5. **GR-01 then GR-24, follow-up Wasm plug OCI:** resolve the approved component-manifest
    reversal before standardizing the new packaging contract. Build the optimized routines
    component, extract its manifest using an opt-in runner, and assemble the existing custom
    OCI artifact format in a Nix derivation. `src/xtask/main.rs:233` already writes an OCI
@@ -341,7 +321,6 @@ scaffolding). None requires un-shelving sccache or a whole-workspace lint cleanu
 
 References read for this proposal on 2026-10-21:
 - [Crane quick start: reusable dependency artifacts, packages, apps and checks](https://crane.dev/examples/quick-start.html).
-- [Nixpkgs dockerTools documentation: daemonless image builds and archive/stream outputs](https://github.com/NixOS/nixpkgs/blob/master/doc/build-helpers/images/dockertools.section.md).
 - [ORAS copy: OCI layout import/export and registry upload](https://oras.land/docs/commands/oras_cp/).
 
 ## 1. Decisions locked by the operator
