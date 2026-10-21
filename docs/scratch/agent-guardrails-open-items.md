@@ -179,7 +179,7 @@ splitting work into issues or PRs. Do not delete unfinished rows during a handof
 | GR-22 | **Open proposals**: dependency, test and performance hygiene | §9.5. Machete is installed, not gated; cargo-deny, zizmor ratchet, targeted mutation tests, bounded-work/allocation/query assertions and dead-file cleanup remain. Choose one affected area at a time and preserve test intent. No blanket exemption burn-down or whole-repo cleanup is authorized by this ledger. |
 | GR-23 | **Partial**: parallel runtime/test isolation | §5.6. Hardcoded-string checks landed; ephemeral test resources, dev port allocation, nextest weights/groups where justified and service ownership/cleanup enforcement remain. Verify simultaneous worktrees cannot overwrite databases or stop each other's services. |
 | GR-24 | **In progress — first slice implemented and verified (2026-10-21)**: Nix CLI package | `packages.daybook-cli` + `apps.daybook-cli` via Crane, flake split into `src/nix/{toolchains,devshells,wit-deps,packages}.nix`, `packages.wit-deps` FOD vendors gitignored `wit/deps` (pinned wash 2.6.1, refresh recipe in `src/nix/wit-deps.nix`), `outputHashes` route five Cargo git deps through `fetchgit` (their revs are orphaned commits Nix's `fetchGit` refuses). `wash-runtime`'s build.rs locates the wasmCloud repo root by walking up to the first `Cargo.lock` and compiles `proto/` from there; crane's per-crate git vendoring strips both, so they are restored by `overrideVendorGitCheckout` and a materialized group directory (`packages.cargo-vendor-dir`, exposed for inspection; its `config.toml` is retargeted at the copy). OLLAMA `env!` defaults baked empty (no credentials in the store), ORT linked dynamically from nixpkgs `onnxruntime` (ort-sys defaults to a static archive nixpkgs does not ship, and its copy-dylibs step needs `target/release/build/{examples,deps}` to pre-exist). Verified: sandboxed `nix build …#daybook-cli` produced a binary that prints `--help` under `env -i` outside any devshell; closure is 19 paths with no vendor-dir or credential references; `cargo x lint`/`api`/`doctor` stayed green. Evaluation of the real worktree path requires the new `src/nix/*.nix` files to be tracked in the VCS first (jj-only policy here), so verification used a `path:` copy of the tree. Remaining for GR-24: server-resource smoke tests (§0.5 item 4), plug-OCI packaging after GR-01. `x86_64-darwin` dropped from `systems` (nixpkgs 26.11 removed support). |
-| GR-25 | **Partial**: Nix checks and reusable build graph | §10. Source-only checks landed (2026-10-21): nixfmt, statix/deadnix, rustfmt on all three workspaces, deno fmt/lint/check with a fixed-output `DENO_DIR`, biome, and JSON/TOML/YAML/case-collision, each on a narrow fileset — see the GR-24 scope-update note for details. Open: a packaged lightweight xtask so `cargo x lint/api/sql-gen` can become checks without discarding the warm `./target` (operator-deferred 2026-10-21), clippy/check-matrix/nextest derivations that respect the agent-build jobserver and cgroups, separate native/guest/btress resolutions, and proof that identical inputs across worktrees reuse store outputs. No unconditional per-crate cache-hit guarantee. |
+| GR-25 | **Partial**: Nix checks and reusable build graph | §10. Source-only checks landed (2026-10-21): nixfmt, statix/deadnix, rustfmt on all three workspaces, deno fmt/lint/check with fixed-output vendored dependencies and a disposable `DENO_DIR`, biome, and JSON/TOML/YAML/case-collision, each on a narrow fileset — see the GR-24 scope-update note for details. Open: a packaged lightweight xtask so `cargo x lint/api/sql-gen` can become checks without discarding the warm `./target` (operator-deferred 2026-10-21), clippy/check-matrix/nextest derivations that respect the agent-build jobserver and cgroups, separate native/guest/btress resolutions, and proof that identical inputs across worktrees reuse store outputs. No unconditional per-crate cache-hit guarantee. |
 | GR-26 | **Shelved by operator**: further cross-worktree sccache work | Turn 13 (line 1467), Q7. Keep stock opt-in. No patched binary, wrapper or trim-paths adoption without reopening and completing correctness/resource acceptance. Hakari measurement remains optional; feature-unification already landed. |
 | GR-27 | **Open**: evidence of improved throughput | §12. Record feedback latency, integration repair time, duplicate compilation, reproduction success, exception burn-down and missed contract changes before/after selected work. Counting enabled lints is not an outcome metric. |
 | GR-28 | **Open proposals**: non-Rust contract coverage | Turns 0–2, §9.5. WIT, persisted serialization fixtures, hash/domain separators and ordering/cancellation/durability contracts need explicit tests/snapshots. Migration checks alone do not cover these contracts; Rust signatures do not prove behavioral compatibility. |
@@ -221,9 +221,10 @@ Hermetic source checks (landed 2026-10-21, `src/nix/checks.nix`, all green on
 x86_64-linux): `checks.nix-format` (nixfmt), `checks.nix-lint` (statix + deadnix),
 `checks.rust-fmt` (`rustfmt --check` on every `.rs` file except `include!`d
 `sqlite/gen.rs`, so orphan files outside module trees stay covered exactly as the old
-per-file pre-commit hook did — see §0.3), `checks.deno` (fmt/lint/check of `x/` against a
-fixed-output `DENO_DIR`; `deno.lock`'s `workspace.packageJson` section forces
-`package.json` into the source and a writable workdir for `node_modules`), `checks.biome`
+per-file pre-commit hook did — see §0.3), `checks.deno` (fmt/lint/check of `x/` against
+fixed-output vendored dependencies with a disposable `DENO_DIR`;
+`deno.lock`'s `workspace.packageJson` section forces `package.json` into the source
+and a writable workdir for `node_modules`), `checks.biome`
 (read-only `biome check` with VCS mode disabled — the tracked-only sandbox source already
 excludes what `.gitignore` would), `checks.repo-files` (JSON/TOML/YAML validity plus
 case-insensitive path collisions, `.vscode` JSON exempted like pre-commit's check-json).
@@ -231,6 +232,19 @@ Each check consumes the narrowest fileset that can change its verdict. Negative 
 were run: a misformatted orphan `.rs` file, a misindented Nix file, a misformatted `x/`
 script and a broken `package.json` each failed their check; restoring them passed. Warm
 `nix flake check` takes ~13s.
+
+PR #71 CI failure (2026-10-21, run 39548181110): the lint hook failed on the
+`townframe-deno-cache` fixed-output hash, not a source diagnostic. Two independent
+fetches changed 162 cache files: SQLite analysis state and HTTP cache entries containing
+`denoCacheMetadata` with fetch times and response headers (`date`, `age`, `cf-ray`,
+`report-to`, `set-cookie`); the sampled module source itself was identical. Hashing the
+whole `DENO_DIR` therefore cannot give a reproducible dependency input. The replacement
+exports only `deno cache --frozen --vendor x/*.ts`'s `vendor/` tree and checks with a fresh
+writable cache using `deno check --frozen --vendor --cached-only ./x/`. A forced cold
+`nix build --rebuild` reproduced `sha256-G8C0kgL1QI1Gus08POi6La/aTcpnBI6EVFbZ9aEwsw4=`;
+all 37 scripts passed fmt/lint/typechecking in the sandbox. Removing the vendored tree
+in a scratch override failed on the missing JSR manifest, and `nix flake check` passed
+locally. The fix still needs a remote CI run after publication.
 
 CI/pre-commit consolidation (operator, 2026-10-21): one lint job. Pre-commit gained a single
 `nix flake check` hook and dropped the hooks it replaces (check-json/toml/yaml,

@@ -106,29 +106,23 @@ _: {
         ]) repoRoot
       );
 
-      # The x/ scripts import jsr: modules (dax, std). A sandboxed `deno
-      # check` has no network, so the module cache is materialised here as a
-      # fixed-output derivation keyed on deno.lock via --frozen.
-      # Refresh: set outputHash to lib.fakeHash, build `checks.<system>.deno`,
-      # and copy the "got" hash from the failing deno-cache build.
-      denoCache =
-        pkgs.runCommand "townframe-deno-cache"
+      denoVendor =
+        pkgs.runCommand "townframe-deno-vendor"
           {
             outputHashMode = "recursive";
             outputHashAlgo = "sha256";
-            outputHash = "sha256-cYwVeSvdTzRGZmJigrDe5DHj1mhwJ3Atfima69M8uFE=";
+            outputHash = "sha256-G8C0kgL1QI1Gus08POi6La/aTcpnBI6EVFbZ9aEwsw4=";
             nativeBuildInputs = [ pkgs.deno ];
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           }
           ''
-            export DENO_DIR=$out
-            mkdir -p $out
+            export DENO_DIR="$TMPDIR/deno-cache"
+            export HOME="$TMPDIR/home"
             cp -r ${denoSrc} work
             chmod -R u+w work
             cd work
-            for f in x/*.ts; do
-              deno cache --frozen "$f"
-            done
+            deno cache --frozen --vendor x/*.ts
+            cp -r vendor $out
           '';
 
       repoFilesCheck =
@@ -237,14 +231,16 @@ _: {
         '';
 
         deno = pkgs.runCommand "townframe-deno-check" { nativeBuildInputs = [ pkgs.deno ]; } ''
-          export DENO_DIR=${denoCache}
-          export HOME=$TMPDIR
+          export DENO_DIR="$TMPDIR/deno-cache"
+          export HOME="$TMPDIR/home"
           cp -r ${denoSrc} work
           chmod -R u+w work
+          cp -r ${denoVendor} work/vendor
+          chmod -R u+w work/vendor
           cd work
           deno fmt --check ./x/
           deno lint ./x/
-          deno check --frozen ./x/
+          deno check --frozen --vendor --cached-only ./x/
           touch $out
         '';
 
