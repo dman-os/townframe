@@ -18,6 +18,10 @@ DAYB_REPO_PATH=/tmp/repo1 cargo r -p daybook_cli -- --help
 # run the xtask CLI
 cargo x --help
 
+# build the daybook CLI as a sandboxed Nix package (no devshell, no .env)
+nix build .#daybook-cli
+./result/bin/daybook_cli --help
+
 # test rust code
 # CRITICAL: nextest is preferred test runner
 RUST_LOG_TEST=info cargo nextest run

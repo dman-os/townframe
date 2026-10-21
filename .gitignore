@@ -53,3 +53,5 @@ generated/**
 *.tgz
 
 **/wit/deps/
+
+result
