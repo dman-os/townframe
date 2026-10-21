@@ -9,8 +9,8 @@ allow_external_api_types = false
 
 [[exemptions]]
 code = "ERROR_FN_LENGTH"
-path = "src/xtask/main.rs"
-symbol = "module::build_plug_oci"
+path = "src/xtask/plug.rs"
+symbol = "module::build_oci"
 ceiling = 194
 class = "LEGACY_DEBT"
 reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"

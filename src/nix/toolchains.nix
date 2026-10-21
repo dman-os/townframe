@@ -10,21 +10,23 @@ in
 
   # Rust toolchain for CI and packaged builds (wasm32 + native Linux targets)
   rustRust = pkgs.rust-bin.nightly.${rustVersion}.default.override {
-    extensions = [ "rust-src" "llvm-tools-preview" ];
-    targets =
-      [
-        "wasm32-unknown-unknown"
-        "wasm32-wasip2"
-      ]
-      ++ (
-        if pkgs.stdenv.hostPlatform.isLinux then
-          [
-            "x86_64-unknown-linux-gnu"
-            "aarch64-unknown-linux-gnu"
-          ]
-        else
-          [ ]
-      );
+    extensions = [
+      "rust-src"
+      "llvm-tools-preview"
+    ];
+    targets = [
+      "wasm32-unknown-unknown"
+      "wasm32-wasip2"
+    ]
+    ++ (
+      if pkgs.stdenv.hostPlatform.isLinux then
+        [
+          "x86_64-unknown-linux-gnu"
+          "aarch64-unknown-linux-gnu"
+        ]
+      else
+        [ ]
+    );
   };
 
   # Rust toolchain for Android CI (wasm32 + Android targets)

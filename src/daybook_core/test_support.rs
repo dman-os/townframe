@@ -625,7 +625,7 @@ pub async fn import_test_plug_oci(test_cx: &DaybookTestContext) -> Res<crate::pl
     let artifact_path = plug_oci_root("@daybook/test");
     eyre::ensure!(
         artifact_path.exists(),
-        "missing OCI plug artifact at '{}'. Build it first with: cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test_manifest",
+        "missing OCI plug artifact at '{}'. Build it first with: cargo x plug build-oci --plug-root ./src/plug_test_manifest",
         artifact_path.display()
     );
     test_cx

@@ -10,7 +10,6 @@
 
   outputs =
     inputs@{
-      self,
       flake-parts,
       nixpkgs,
       rust-overlay,
@@ -18,6 +17,7 @@
     }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
+        ./src/nix/checks.nix
         ./src/nix/devshells.nix
         ./src/nix/packages.nix
       ];

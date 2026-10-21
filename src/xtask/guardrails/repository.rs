@@ -459,6 +459,7 @@ impl Repository {
                 commands.push(vec![
                     "cargo".into(),
                     "x".into(),
+                    "guardrails".into(),
                     "check-matrix".into(),
                     "--package".into(),
                     package.clone(),

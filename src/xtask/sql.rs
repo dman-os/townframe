@@ -1,4 +1,4 @@
-//! `cargo x sql-check|sql-gen [--check] <unit-dir>...`, or `--all`.
+//! `cargo x sql check|gen [--check]|migrate`, over `<unit-dir>...` or `--all`.
 //!
 //! The replacement for `cargo sqlx prepare`: instead of discovering
 //! queries by compiling the workspace, it discovers `.sql` files.
@@ -63,8 +63,72 @@ use crate::interlude::*;
 
 use rusqlite::Connection as RusqliteConnection;
 
+#[derive(Debug, clap::Subcommand)]
+pub enum SqlCmd {
+    /// Validate `sqlite/{migrations,queries}` for units by preparing every
+    /// query against a freshly migrated temporary database.
+    Check {
+        #[command(flatten)]
+        units: Units,
+    },
+    /// Generate (or with `--check`, verify) `sqlite/gen.rs` for units.
+    Gen {
+        #[arg(long)]
+        check: bool,
+        #[command(flatten)]
+        units: Units,
+    },
+    /// Apply (or with `--status`/`--dry-run`, inspect) a unit's migrations
+    /// against a database file. The history table defaults to the unit's
+    /// derived `MIGRATION_TABLE`.
+    Migrate {
+        dir: PathBuf,
+        database: PathBuf,
+        #[arg(long)]
+        table: Option<String>,
+        #[arg(long, conflicts_with = "dry_run")]
+        status: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+/// Units to operate on: explicit directories, or every directory below `src/`
+/// owning `sqlite/migrations/`.
+#[derive(Debug, clap::Args)]
+pub struct Units {
+    #[arg(required_unless_present = "all")]
+    dirs: Vec<PathBuf>,
+    #[arg(long, conflicts_with = "dirs")]
+    all: bool,
+}
+
+pub async fn dispatch(root: &Path, cmd: SqlCmd) -> Res<()> {
+    let resolve = |units: Units| -> Res<Vec<PathBuf>> {
+        if units.all {
+            discover_dirs(root)
+        } else {
+            Ok(units.dirs)
+        }
+    };
+    match cmd {
+        SqlCmd::Check { units } => cli(Mode::Check, root, resolve(units)?).await,
+        SqlCmd::Gen { check, units } => {
+            let mode = if check { Mode::GenCheck } else { Mode::Gen };
+            cli(mode, root, resolve(units)?).await
+        }
+        SqlCmd::Migrate {
+            dir,
+            database,
+            table,
+            status,
+            dry_run,
+        } => migrate(root, &dir, &database, table.as_deref(), status || dry_run),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
+enum Mode {
     Check,
     Gen,
     GenCheck,
@@ -101,7 +165,7 @@ struct QuerySpec {
 /// `sqlite/migrations` directory; the walk descends into subdirectories so
 /// `src/<crate>/<module>/sqlite/` units are found too, but never descends
 /// into a `sqlite/` directory itself, since nothing below it can be a unit.
-pub fn discover_dirs(root: &Path) -> Res<Vec<PathBuf>> {
+fn discover_dirs(root: &Path) -> Res<Vec<PathBuf>> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Res<()> {
         if dir.join("sqlite/migrations").is_dir() {
             out.push(dir.to_path_buf());
@@ -124,24 +188,6 @@ pub fn discover_dirs(root: &Path) -> Res<Vec<PathBuf>> {
     walk(&root.join("src"), &mut dirs)?;
     dirs.sort();
     Ok(dirs)
-}
-
-pub async fn workspace_root() -> Res<PathBuf> {
-    let output = tokio::process::Command::new("cargo")
-        .args(["locate-project", "--workspace", "--message-format", "plain"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .await?;
-    eyre::ensure!(
-        output.status.success(),
-        "cargo locate-project failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let manifest = PathBuf::from(String::from_utf8(output.stdout)?.trim());
-    Ok(manifest
-        .parent()
-        .ok_or_eyre("workspace manifest has no parent")?
-        .to_path_buf())
 }
 
 /// The history table a unit records its applied migrations in. Derived from
@@ -170,7 +216,7 @@ fn migration_table(root: &Path, dir: &Path) -> Res<String> {
     Ok(name)
 }
 
-pub fn migrate(
+fn migrate(
     root: &Path,
     dir: &Path,
     database: &Path,
@@ -215,7 +261,7 @@ pub fn migrate(
     Ok(())
 }
 
-pub async fn cli(mode: Mode, root: &Path, dirs: Vec<PathBuf>) -> Res<()> {
+async fn cli(mode: Mode, root: &Path, dirs: Vec<PathBuf>) -> Res<()> {
     if dirs.is_empty() {
         eyre::bail!("usage: cargo xtask sql check|gen [--check] <unit-dir>...");
     }
@@ -298,7 +344,7 @@ fn process_unit(mode: Mode, root: &Path, dir: &Path) -> Res<()> {
                 let existing = std::fs::read_to_string(&gen_path).unwrap_or_default();
                 if existing != generated {
                     eyre::bail!(
-                        "{} is out of date; run `cargo x sql-gen {}`",
+                        "{} is out of date; run `cargo x sql gen {}`",
                         gen_path.display(),
                         dir.display()
                     );
@@ -658,7 +704,7 @@ fn row_return_ty(query: &QuerySpec) -> String {
 
 fn generate(table: &str, migrations: &[MigrationSpec], queries: &[QuerySpec]) -> String {
     let mut out = String::from(
-        "// @generated by `cargo x sql-gen`. Do not edit by hand.\nuse crate::sqlite_rs_alias::Migration;\n",
+        "// @generated by `cargo x sql gen`. Do not edit by hand.\nuse crate::sqlite_rs_alias::Migration;\n",
     );
     if !queries.is_empty() {
         out.push_str("use crate::sqlite_rs_alias::SqlResult;\n");

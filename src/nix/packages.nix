@@ -23,7 +23,8 @@
       # only source of those files. fileset.fileFilter predicates only see
       # name/type/hasExt, so the deps directories are removed with difference.
       srcDir = repoRoot + "/src";
-      srcExtensions = file:
+      srcExtensions =
+        file:
         file.hasExt "rs"
         || file.hasExt "wit"
         || file.hasExt "toml"
@@ -38,7 +39,8 @@
         )
       );
       srcWithoutWitDeps =
-        let base = lib.fileset.fileFilter srcExtensions srcDir;
+        let
+          base = lib.fileset.fileFilter srcExtensions srcDir;
         in
         if witDepsDirs == [ ] then base else lib.fileset.difference base (lib.fileset.unions witDepsDirs);
       src = lib.fileset.toSource {
@@ -63,6 +65,7 @@
       # (plain `git fetch <rev>`), which accepts them; the hashes were obtained
       # by building each fetchgit call with lib.fakeHash and recording `got`.
       # Refresh: fakeHash one of these, rebuild, copy the new value back.
+      # FIXME: consider extracting this from the cargo.toml file
       outputHashes = {
         "git+https://github.com/dman-os/autosurgeon?rev=6a1df66f667667f1d14bc2272c4d426815de66b8#6a1df66f667667f1d14bc2272c4d426815de66b8" =
           "sha256-dIhUdjaf/dlWufOu6X7694DqP7MHRpvOBdzXx6HFOi4=";
@@ -84,7 +87,8 @@
       craneVendorDir = craneLib.vendorCargoDeps {
         src = srcWithWit;
         inherit outputHashes;
-        overrideVendorGitCheckout = ps: drv:
+        overrideVendorGitCheckout =
+          ps: drv:
           if lib.any (p: lib.hasPrefix "git+https://github.com/wasmCloud/wasmCloud" p.source) ps then
             drv.overrideAttrs (_: {
               postInstall = ''
@@ -190,25 +194,125 @@
       };
 
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
-      daybook-cli = craneLib.buildPackage (
+      cliBuild = craneLib.buildPackage (
         commonArgs
         // {
           inherit cargoArtifacts;
           meta.mainProgram = "daybook_cli";
         }
       );
+      # Exercises the installed binary end to end in an isolated HOME and
+      # repo with an empty environment: init, two documents, persistence across
+      # invocations and re-init, dump, and the uninitialized/missing-document
+      # failures. Lives in passthru.tests rather than `checks` so the
+      # `nix flake check` lint hook does not have to build the whole CLI; CI
+      # builds it with `nix build .#daybook-cli.tests.round-trip`.
+      roundTrip = pkgs.writeShellApplication {
+        name = "daybook-cli-round-trip";
+        runtimeInputs = [
+          pkgs.coreutils
+          pkgs.gnugrep
+          cliBuild
+        ];
+        text = ''
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          export HOME="$work/home"
+          export XDG_CONFIG_HOME="$HOME/config"
+          export XDG_CACHE_HOME="$HOME/cache"
+          export DAYB_REPO_PATH="$work/repo"
+          export RUST_LOG=error,wflow::kvstore=off
+          export NO_COLOR=1
+          mkdir -p "$HOME"
+          cd "$work"
+
+          daybook_cli --help > help.txt
+          grep -F 'Usage: daybook_cli' help.txt
+          if daybook_cli ls > uninitialized.txt 2>&1; then
+            echo 'ls unexpectedly succeeded before initialization' >&2
+            exit 1
+          fi
+          daybook_cli init
+          daybook_cli ls > empty.txt
+          if grep -F 'Untitled' empty.txt; then
+            echo 'fresh repository contains a document' >&2
+            exit 1
+          fi
+          first=$(daybook_cli touch)
+          second=$(daybook_cli touch)
+          test -n "$first"
+          test -n "$second"
+          test "$first" != "$second"
+          daybook_cli init
+          daybook_cli ls > list.txt
+          grep -F -- "$first" list.txt
+          grep -F -- "$second" list.txt
+          for id in "$first" "$second"; do
+            daybook_cli cat "$id" > doc.txt
+            grep -F -- "$id" doc.txt
+            grep -F 'Untitled' doc.txt
+          done
+          daybook_cli dump > dump.txt
+          test -s dump.txt
+          if daybook_cli cat nonexistent-document > missing.txt 2>&1; then
+            echo 'cat unexpectedly succeeded for a missing document' >&2
+            exit 1
+          fi
+        '';
+      };
+      daybook-cli = cliBuild.overrideAttrs (prev: {
+        passthru = (prev.passthru or { }) // {
+          tests.round-trip = pkgs.runCommand "daybook-cli-round-trip" { } ''
+            ${pkgs.coreutils}/bin/env -i ${lib.getExe roundTrip}
+            touch $out
+          '';
+        };
+      });
+      container = pkgs.dockerTools.buildLayeredImage {
+        name = "daybook-cli";
+        tag = version;
+        created = "1970-01-01T00:00:01Z";
+        contents = [
+          daybook-cli
+          pkgs.cacert
+          pkgs.dockerTools.fakeNss
+        ];
+        fakeRootCommands = ''
+          mkdir -p ./data ./tmp
+          chmod 1777 ./tmp
+          chown 65534:65534 ./data
+        '';
+        config = {
+          User = "65534:65534";
+          WorkingDir = "/data";
+          Entrypoint = [ "${daybook-cli}/bin/daybook_cli" ];
+          Cmd = [ "--help" ];
+          Env = [
+            "HOME=/data"
+            "DAYB_REPO_PATH=/data/repo"
+            "XDG_CACHE_HOME=/data/cache"
+            "XDG_CONFIG_HOME=/data/config"
+            "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+            "RUST_LOG=error,wflow::kvstore=off"
+            "NO_COLOR=1"
+          ];
+          Volumes."/data" = { };
+        };
+      };
     in
     {
-      packages.daybook-cli = daybook-cli;
-      # Exposed so the refresh procedure in wit-deps.nix (`nix build .#wit-deps`)
-      # works as documented; not a user-facing package.
-      packages.wit-deps = witDeps;
-      # Exposed so the vendored source tree (including the wash-runtime repo-root
-      # restoration above) can be inspected without building the whole package.
-      packages.cargo-vendor-dir = cargoVendorDir;
+      packages = {
+        inherit daybook-cli;
+        wit-deps = witDeps;
+        cargo-vendor-dir = cargoVendorDir;
+      }
+      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+        daybook-cli-container = container;
+      };
       apps.daybook-cli = {
         type = "app";
         program = lib.getExe daybook-cli;
+        meta.description = "Daybook local-first document CLI";
       };
     };
 }

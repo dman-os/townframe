@@ -1,7 +1,6 @@
 # Dev shells and CI shells. Shared Rust toolchains come from ./toolchains.nix;
 # packaged outputs live in ./packages.nix.
-{ ... }:
-{
+_: {
   perSystem =
     { pkgs, ... }:
     let
@@ -26,7 +25,7 @@
       # lists libmanette, so it can be deleted at any point after that.
       playwrightBrowsers =
         let
-          playwright-driver = pkgs.playwright-driver;
+          inherit (pkgs) playwright-driver;
           webkit = playwright-driver.passthru.components.webkit;
         in
         if
@@ -68,8 +67,15 @@
       androidSdkOnly = pkgs.androidenv.composeAndroidPackages {
         includeNDK = true;
         platformToolsVersion = "37.0.1";
-        buildToolsVersions = [ androidBuildToolsVersion "36.0.0" "34.0.0" ];
-        platformVersions = [ "35" "36" ];
+        buildToolsVersions = [
+          androidBuildToolsVersion
+          "36.0.0"
+          "34.0.0"
+        ];
+        platformVersions = [
+          "35"
+          "36"
+        ];
       };
 
       # Android SDK/NDK with Studio (for dev)
@@ -78,18 +84,10 @@
       ndkHostTag =
         if pkgs.stdenv.hostPlatform.isDarwin then
           (
-            if pkgs.stdenv.hostPlatform.parsed.cpu.name == "aarch64" then
-              "darwin-aarch64"
-            else
-              "darwin-x86_64"
+            if pkgs.stdenv.hostPlatform.parsed.cpu.name == "aarch64" then "darwin-aarch64" else "darwin-x86_64"
           )
         else
-          (
-            if pkgs.stdenv.hostPlatform.parsed.cpu.name == "aarch64" then
-              "linux-aarch64"
-            else
-              "linux-x86_64"
-          );
+          (if pkgs.stdenv.hostPlatform.parsed.cpu.name == "aarch64" then "linux-aarch64" else "linux-x86_64");
 
       dioxusBuildInputs = with pkgs; [
         python314
@@ -114,7 +112,7 @@
       androidEnvVars =
         { androidSdk }:
         let
-          sdkPath = if androidSdk ? sdk then androidSdk.sdk else androidSdk;
+          sdkPath = androidSdk.sdk or androidSdk;
         in
         {
           ANDROID_SDK_ROOT = "${sdkPath}/libexec/android-sdk";
@@ -271,44 +269,50 @@
         ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.linuxHeaders ]
         ++ [ rustFull ];
 
-      ciRustShell = pkgs.mkShell ({
-        name = "ci-rust";
-        buildInputs =
-          baseBuildInputs
-          ++ rustLintInputs
-          ++ [
-            rustRust
-            pkgs.llvmPackages.clang
-            pkgs.llvmPackages.libclang
-            pkgs.stdenv.cc.cc.lib
-            pkgs.sccache
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.linuxHeaders ];
-        shellHook = ''
-          export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
-          ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-            export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.linuxHeaders}/include -idirafter ${pkgs.stdenv.cc.libc.dev}/include"
-          ''}
-          export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${
-            pkgs.lib.makeLibraryPath [
-              (pkgs.lib.getLib pkgs.llvmPackages.libclang)
+      ciRustShell = pkgs.mkShell (
+        {
+          name = "ci-rust";
+          buildInputs =
+            baseBuildInputs
+            ++ rustLintInputs
+            ++ [
+              rustRust
+              pkgs.llvmPackages.clang
+              pkgs.llvmPackages.libclang
               pkgs.stdenv.cc.cc.lib
+              pkgs.sccache
             ]
-          }"
-          if [ -e .env ]; then
-            source "$PWD/x/load-dotenv-safe.sh" .env
-          fi
-        '';
-      } // ghjkMainEnv);
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.linuxHeaders ];
+          shellHook = ''
+            export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.linuxHeaders}/include -idirafter ${pkgs.stdenv.cc.libc.dev}/include"
+            ''}
+            export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${
+              pkgs.lib.makeLibraryPath [
+                (pkgs.lib.getLib pkgs.llvmPackages.libclang)
+                pkgs.stdenv.cc.cc.lib
+              ]
+            }"
+            if [ -e .env ]; then
+              source "$PWD/x/load-dotenv-safe.sh" .env
+            fi
+          '';
+        }
+        // ghjkMainEnv
+      );
 
-      ciAndroidShell =
-        pkgs.mkShell ({
+      ciAndroidShell = pkgs.mkShell (
+        {
           name = "ci-android";
           buildInputs = baseBuildInputs ++ androidBuildInputs ++ [ rustAndroid ];
-        } // ghjkMainEnv // androidEnvVars { androidSdk = androidSdkOnly.androidsdk; });
+        }
+        // ghjkMainEnv
+        // androidEnvVars { androidSdk = androidSdkOnly.androidsdk; }
+      );
 
-      ciDesktopShell =
-        pkgs.mkShell ({
+      ciDesktopShell = pkgs.mkShell (
+        {
           name = "ci-desktop";
           buildInputs = baseBuildInputs ++ dioxusBuildInputs ++ desktopBuildInputs ++ [ rustRust ];
           shellHook = ''
@@ -317,16 +321,23 @@
               export DYLD_LIBRARY_PATH="$LD_LIBRARY_PATH"
             fi
           '';
-        } // ghjkMainEnv);
+        }
+        // ghjkMainEnv
+      );
 
-      ciComposeShell =
-        pkgs.mkShell ({
+      ciComposeShell = pkgs.mkShell (
+        {
           name = "ci-compose";
-          buildInputs = baseBuildInputs ++ [ pkgs.openjdk21 rustRust ];
-        } // ghjkMainEnv);
+          buildInputs = baseBuildInputs ++ [
+            pkgs.openjdk21
+            rustRust
+          ];
+        }
+        // ghjkMainEnv
+      );
 
-      devShell =
-        pkgs.mkShell ({
+      devShell = pkgs.mkShell (
+        {
           name = "dev";
 
           buildInputs = devShellBuildInputs;
@@ -354,7 +365,11 @@
               exec $(getent passwd $USER | cut -d: -f7)
             fi
           '';
-        } // ghjkMainEnv // ghjkDevEnv // (androidEnvVars { androidSdk = androidSdkOnly.androidsdk; }));
+        }
+        // ghjkMainEnv
+        // ghjkDevEnv
+        // (androidEnvVars { androidSdk = androidSdkOnly.androidsdk; })
+      );
 
     in
     {

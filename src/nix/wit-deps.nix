@@ -35,7 +35,8 @@ let
   };
   system = pkgs.stdenv.hostPlatform.system;
   asset =
-    washAsset.${system} or (throw "no pinned wash asset for system ${system}; add one to src/nix/wit-deps.nix");
+    washAsset.${system}
+      or (throw "no pinned wash asset for system ${system}; add one to src/nix/wit-deps.nix");
   washFile = pkgs.fetchurl {
     url = "https://github.com/wasmCloud/wasmCloud/releases/download/${washRelease}/${asset.name}";
     inherit (asset) hash;

@@ -179,7 +179,7 @@ splitting work into issues or PRs. Do not delete unfinished rows during a handof
 | GR-22 | **Open proposals**: dependency, test and performance hygiene | §9.5. Machete is installed, not gated; cargo-deny, zizmor ratchet, targeted mutation tests, bounded-work/allocation/query assertions and dead-file cleanup remain. Choose one affected area at a time and preserve test intent. No blanket exemption burn-down or whole-repo cleanup is authorized by this ledger. |
 | GR-23 | **Partial**: parallel runtime/test isolation | §5.6. Hardcoded-string checks landed; ephemeral test resources, dev port allocation, nextest weights/groups where justified and service ownership/cleanup enforcement remain. Verify simultaneous worktrees cannot overwrite databases or stop each other's services. |
 | GR-24 | **In progress — first slice implemented and verified (2026-10-21)**: Nix CLI package | `packages.daybook-cli` + `apps.daybook-cli` via Crane, flake split into `src/nix/{toolchains,devshells,wit-deps,packages}.nix`, `packages.wit-deps` FOD vendors gitignored `wit/deps` (pinned wash 2.6.1, refresh recipe in `src/nix/wit-deps.nix`), `outputHashes` route five Cargo git deps through `fetchgit` (their revs are orphaned commits Nix's `fetchGit` refuses). `wash-runtime`'s build.rs locates the wasmCloud repo root by walking up to the first `Cargo.lock` and compiles `proto/` from there; crane's per-crate git vendoring strips both, so they are restored by `overrideVendorGitCheckout` and a materialized group directory (`packages.cargo-vendor-dir`, exposed for inspection; its `config.toml` is retargeted at the copy). OLLAMA `env!` defaults baked empty (no credentials in the store), ORT linked dynamically from nixpkgs `onnxruntime` (ort-sys defaults to a static archive nixpkgs does not ship, and its copy-dylibs step needs `target/release/build/{examples,deps}` to pre-exist). Verified: sandboxed `nix build …#daybook-cli` produced a binary that prints `--help` under `env -i` outside any devshell; closure is 19 paths with no vendor-dir or credential references; `cargo x lint`/`api`/`doctor` stayed green. Evaluation of the real worktree path requires the new `src/nix/*.nix` files to be tracked in the VCS first (jj-only policy here), so verification used a `path:` copy of the tree. Remaining for GR-24: CI job building the package (stack follow-up), `init`/document round-trip and server-resource smoke tests (§0.5 item 4), Linux container image, plug-OCI packaging after GR-01. `x86_64-darwin` dropped from `systems` (nixpkgs 26.11 removed support). |
-| GR-25 | **Open proposal**: Nix checks and reusable build graph | §10. Add packaged lightweight xtask and `checks` using the same inputs as packages, with separate native/guest/btress resolutions and source filtering. Reuse dependency derivations where flags/targets/features match; prove identical inputs across worktrees reuse store outputs. No unconditional per-crate cache-hit guarantee. |
+| GR-25 | **Partial**: Nix checks and reusable build graph | §10. Source-only checks landed (2026-10-21): nixfmt, statix/deadnix, rustfmt on all three workspaces, deno fmt/lint/check with a fixed-output `DENO_DIR`, biome, and JSON/TOML/YAML/case-collision, each on a narrow fileset — see the GR-24 scope-update note for details. Open: a packaged lightweight xtask so `cargo x lint/api/sql-gen` can become checks without discarding the warm `./target` (operator-deferred 2026-10-21), clippy/check-matrix/nextest derivations that respect the agent-build jobserver and cgroups, separate native/guest/btress resolutions, and proof that identical inputs across worktrees reuse store outputs. No unconditional per-crate cache-hit guarantee. |
 | GR-26 | **Shelved by operator**: further cross-worktree sccache work | Turn 13 (line 1467), Q7. Keep stock opt-in. No patched binary, wrapper or trim-paths adoption without reopening and completing correctness/resource acceptance. Hakari measurement remains optional; feature-unification already landed. |
 | GR-27 | **Open**: evidence of improved throughput | §12. Record feedback latency, integration repair time, duplicate compilation, reproduction success, exception burn-down and missed contract changes before/after selected work. Counting enabled lints is not an outcome metric. |
 | GR-28 | **Open proposals**: non-Rust contract coverage | Turns 0–2, §9.5. WIT, persisted serialization fixtures, hash/domain separators and ordering/cancellation/durability contracts need explicit tests/snapshots. Migration checks alone do not cover these contracts; Rust signatures do not prove behavioral compatibility. |
@@ -206,6 +206,76 @@ commands, evidence, and what remains.
 The first GR-24 slice landed the same day this ledger was reconciled; its proposed
 output names are now `packages.daybook-cli`, `apps.daybook-cli`, `packages.wit-deps`
 and `packages.cargo-vendor-dir`, with per-item status below.
+
+Scope update (operator, 2026-10-21): all CLI Nix packaging, checks/CI, and the Linux
+container belong in this PR; plug OCI remains for later. `checks.daybook-cli` runs
+`init`, creates two distinct documents, reopens/lists/reads them, reinitializes without
+losing them, dumps the repo, and checks missing-document failure under `env -i` in the
+Nix sandbox. The shared smoke script is also ShellCheck-validated by `writeShellApplication`.
+`packages.daybook-cli-container` builds and loads as a Docker-compatible archive with
+UID/GID 65534, CA certificates, a writable `/data` volume, and a fixed creation timestamp.
+`.github/workflows/checks.yml` builds the archive and asserts the non-root config, but does
+**not** run the container: the runtime round-trip fails at `init` with
+`keyring error: Platform failure: Unknown(38)` at `src/daybook_core/secrets.rs:41` under
+normal container isolation (read-only root, no network, default seccomp, no capabilities).
+`secrets_rs` requires an OS keyring: the image has no Secret Service session bus, and its
+kernel-keyring fallback cannot store the identity in this container. The native sandbox
+round-trip has a working host kernel keyring; it does not prove container keyring support.
+Container secret storage needs an operator decision before completion: integrate an external
+Secret Service or explicitly add a container-compatible persistent secret backend. Do not
+turn off seccomp, enable the in-memory test backend, or silently store plaintext secrets to
+make the test pass. The `server` playground also remains unsupported by this package: its
+btress components/site assets are not packaged, and its paths still point into build trees.
+`cargo x lint` (0 diagnostics/602 modules), `cargo x api --all --check` (five snapshots),
+and `cargo x doctor` passed again in this worktree.
+
+Hermetic source checks (landed 2026-10-21, `src/nix/checks.nix`, all green on
+x86_64-linux): `checks.nix-format` (nixfmt), `checks.nix-lint` (statix + deadnix),
+`checks.rust-fmt` (`rustfmt --check` on every `.rs` file except `include!`d
+`sqlite/gen.rs`, so orphan files outside module trees stay covered exactly as the old
+per-file pre-commit hook did — see §0.3), `checks.deno` (fmt/lint/check of `x/` against a
+fixed-output `DENO_DIR`; `deno.lock`'s `workspace.packageJson` section forces
+`package.json` into the source and a writable workdir for `node_modules`), `checks.biome`
+(read-only `biome check` with VCS mode disabled — the tracked-only sandbox source already
+excludes what `.gitignore` would), `checks.repo-files` (JSON/TOML/YAML validity plus
+case-insensitive path collisions, `.vscode` JSON exempted like pre-commit's check-json).
+Each check consumes the narrowest fileset that can change its verdict. Negative controls
+were run: a misformatted orphan `.rs` file, a misindented Nix file, a misformatted `x/`
+script and a broken `package.json` each failed their check; restoring them passed. Warm
+`nix flake check` takes ~13s.
+
+CI/pre-commit consolidation (operator, 2026-10-21): one lint job. Pre-commit gained a single
+`nix flake check` hook and dropped the hooks it replaces (check-json/toml/yaml,
+check-case-conflict, deno fmt/lint/check, biome format/check/lint, rustfmt; check-ast was a
+no-op with no Python files). The rust-target-matrix job no longer reruns guardrail lint or
+guest-workspace rustfmt. The packaged-CLI round-trip moved from `checks` to
+`packages.daybook-cli.passthru.tests.round-trip` so the lint hook never builds the CLI; the
+Nix packaging job builds that test and the container. `nix fmt` now applies every enforced
+format (nixfmt, rustfmt per file, deno fmt, `biome check --write` as the old `pnpm check`
+hook did). `cargo x sql gen --check` and `cargo x guardrails lint|api|doctor` stay
+pre-commit hooks: building xtask in the store discards the warm `./target` (operator,
+2026-10-21); clippy/nextest/llvm-cov additionally need the agent-build jobserver and cgroup
+limits. zizmor stays manual-stage (154 findings). The guardrail hooks route through
+`./x/agent-build.ts` (the plain `cargo x doctor` entry failed `ERROR_BUILD_FLAGS` on the
+shared target dir).
+
+xtask CLI regrouped (operator, 2026-10-21): `cargo x sql check|gen|migrate`,
+`cargo x plug build-oci` (plug OCI code moved from `main.rs` to `plug.rs`), and
+`cargo x guardrails lint|check-matrix|api|doctor|plan|overlap|record|verify|inventory|adopt|bless`.
+The duplicated top-level `lint/api/doctor/check-matrix/plan/overlap/record/verify` aliases and
+`lint --format` (a second spelling of `--json`) were removed; `guardrails check` is now
+`guardrails lint`. Generated `sqlite/gen.rs` and `public-api.txt` headers were regenerated.
+The `ERROR_FN_LENGTH` exemption followed the moved `build_plug_oci` → `plug.rs:build_oci`
+at the same ceiling (194). Command names quoted elsewhere in this ledger are historical
+records of what was run at the time.
+
+Stronger all-system validation remains open: `nix flake check --all-systems --no-build`
+fails evaluating `apps.aarch64-linux.daybook-cli.program` with
+`path '9dmdmdg45pr1snlkqkcyp2cw4cj7w1rb-townframe-src-with-wit-deps.drv' is not valid`.
+Cause: crane reads `Cargo.toml`/`Cargo.lock` from `srcWithWit`, a derivation, so evaluating
+the package is import-from-derivation (current-system evaluation builds the `wit-deps` FOD
+and the source overlay first). Earlier `flake show` evaluation was weaker evidence and must
+not be reported as an all-platform package check.
 
 1. **Landed (2026-10-21); CI check still open:** `packages.<system>.daybook-cli` and
    `apps.<system>.daybook-cli` are built with Crane's `buildDepsOnly` / `buildPackage`

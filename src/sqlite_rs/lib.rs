@@ -154,7 +154,7 @@
 //! # Checked-in SQL and generated rows
 //!
 //! Put migrations in `sqlite/migrations/NNN_name.sql`, queries in `sqlite/queries/`,
-//! then run `cargo x sql-gen <crate-dir>`. The generated `sqlite/gen.rs` contains
+//! then run `cargo x sql gen <crate-dir>`. The generated `sqlite/gen.rs` contains
 //! embedded `MIGRATIONS` and functions generic over `QueryExecutor` or `Executor`:
 //! the same function accepts a database, transaction, savepoint, or (for reads) snapshot.
 //!
@@ -203,11 +203,11 @@
 //! use the writer connection and return decoded rows; `:exec` returns `ExecuteResult`.
 //!
 //! ```text
-//! cargo x sql-check --all
-//! cargo x sql-gen --check --all
-//! cargo x sql-migrate src/app state.sqlite --table _app_migrations --status
-//! cargo x sql-migrate src/app state.sqlite --table _app_migrations --dry-run
-//! cargo x sql-migrate src/app state.sqlite --table _app_migrations
+//! cargo x sql check --all
+//! cargo x sql gen --check --all
+//! cargo x sql migrate src/app state.sqlite --table _app_migrations --status
+//! cargo x sql migrate src/app state.sqlite --table _app_migrations --dry-run
+//! cargo x sql migrate src/app state.sqlite --table _app_migrations
 //! ```
 //!
 //! `--dry-run` reports the pending plan without executing migration SQL. It is not
