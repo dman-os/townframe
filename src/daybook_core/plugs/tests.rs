@@ -6,7 +6,7 @@ async fn inspect_test_plug_oci_layout() -> Res<()> {
     let artifact_path = crate::test_support::plug_oci_root("@daybook/test");
     eyre::ensure!(
         artifact_path.exists(),
-        "missing OCI plug artifact at '{}'. Build it first with: cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test_manifest",
+        "missing OCI plug artifact at '{}'. Build it first with: cargo x plug build-oci --plug-root ./src/plug_test_manifest",
         artifact_path.display()
     );
 

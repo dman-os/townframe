@@ -34,6 +34,28 @@ env:
   GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
 jobs:
+  nix-packages:
+    name: Nix CLI package
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      OLLAMA_URL: ""
+      OLLAMA_USERNAME: ""
+      OLLAMA_PASSWORD: ""
+      GEMINI_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            sandbox = true
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+      # Source-only lint is not repeated here: `nix flake check` runs as a
+      # pre-commit hook in the lint job. This job owns the package outputs.
+      - name: Build CLI and run its packaged round-trip test
+        run: nix build --print-build-logs --no-link .#daybook-cli.tests.round-trip
   rust-target-matrix:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -54,12 +76,16 @@ jobs:
         with:
           wash-version: v2.6.1
       - run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
-      - run: nix develop .#ci-rust --command cargo x lint
-      - run: nix develop .#ci-rust --command cargo x check-matrix --target "${{ matrix.target }}"
-      - run: nix develop .#ci-rust --command cargo fmt --manifest-path src/wasm_utils_rs/Cargo.toml --all -- --check
+      # Guardrail lint and formatting (all three workspaces) run once, in the
+      # lint job; this matrix only compiles the per-target build contracts.
+      - run: nix develop .#ci-rust --command cargo x guardrails check-matrix --target "${{ matrix.target }}"
+  # The single lint job. Hooks that only read sources delegate to the
+  # hermetic `nix flake check` hook (cache hits make an unchanged tree free);
+  # the remaining hooks need ./target, node_modules or git state.
   pre-commit:
+    name: Lint (pre-commit + nix checks)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,7 +137,7 @@ jobs:
         run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
 
       - name: build test plug OCI artifact
-        run: nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test_manifest
+        run: nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_test_manifest
 
       - name: build daybook_cli
         run: nix develop .#ci-rust --command cargo --color=always build -p daybook_cli
@@ -177,9 +203,9 @@ jobs:
 
       - name: build plug OCI artifacts
         run: |
-          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test_manifest
-          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_plabels_manifest
-          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger_manifest
+          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_test_manifest
+          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_plabels_manifest
+          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_dayledger_manifest
 
 
       - name: rust tests
@@ -305,8 +331,8 @@ jobs:
         run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       - name: build plug OCI artifacts
         run: |
-          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_test_manifest
-          nix develop .#ci-rust --command cargo --color=always run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger_manifest
+          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_test_manifest
+          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_dayledger_manifest
 
       - name: kotlin tests
         run: |

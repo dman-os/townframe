@@ -6,7 +6,7 @@ pub async fn import_dayledger_oci(
     let artifact_path = daybook_core::test_support::plug_oci_root(&crate::plug_manifest().id());
     eyre::ensure!(
         artifact_path.exists(),
-        "missing OCI plug artifact at '{}'. Build it first with: cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_dayledger_manifest",
+        "missing OCI plug artifact at '{}'. Build it first with: cargo x plug build-oci --plug-root ./src/plug_dayledger_manifest",
         artifact_path.display()
     );
 

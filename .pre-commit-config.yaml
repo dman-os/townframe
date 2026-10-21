@@ -4,12 +4,6 @@ repos:
     hooks:
       - id: check-added-large-files
         exclude: gh_action/dist/.*.js
-      - id: check-ast
-      - id: check-json
-        exclude: .vscode/.*\.json
-      - id: check-toml
-      - id: check-yaml
-      - id: check-case-conflict
       - id: check-executables-have-shebangs
       - id: check-merge-conflict
       # - id: end-of-file-fixer
@@ -32,24 +26,6 @@ repos:
           - commit-msg
   - repo: local
     hooks:
-      - id: deno-fmt-x
-        name: format scripts
-        language: system
-        entry: deno fmt ./x/
-        files: ^x/
-        pass_filenames: false
-      - id: deno-lint-x
-        name: lint scripts
-        language: system
-        entry: deno lint ./x/
-        pass_filenames: false
-        files: ^x/
-      - id: deno-check-x
-        name: check scripts
-        language: system
-        entry: deno check ./x/
-        pass_filenames: false
-        files: ^x/
       - id: zizmor 
         name: check CI config
         language: system
@@ -87,28 +63,9 @@ repos:
         language: system
         entry: deno run -A ./x/check-tsc.ts
         pass_filenames: false
-      - id: biome-fmt
-        name: biome format
-        language: system
-        entry: pnpm format
-        pass_filenames: false
-      - id: biome-check
-        name: biome check
-        language: system
-        entry: pnpm check
-      - id: biome-lint
-        name: biome lint
-        language: system
-        entry: pnpm lint
-        pass_filenames: false
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
     hooks:
-      - id: fmt
-        # `sqlite/gen.rs` is `include!`d, so `cargo fmt` never reaches it on
-        # its own; this hook passes changed files explicitly and would reformat
-        # the generator's output, which `sqlite-gen` below then rejects.
-        exclude: 'sqlite/gen\.rs$'
       - id: clippy
         args:
           - "--locked"
@@ -119,23 +76,32 @@ repos:
           - "warnings"
   - repo: local
     hooks:
+      # Every source-only check (nixfmt/statix/deadnix, rustfmt incl. orphan
+      # files, deno fmt/lint/check of x/, biome, JSON/TOML/YAML validity and
+      # case collisions) lives in src/nix/checks.nix. Fix formatting with
+      # `nix fmt`. Unchanged inputs are cache hits, so this is cheap to rerun.
+      - id: nix-flake-check
+        name: hermetic source checks (nix flake check)
+        language: system
+        entry: nix flake check --print-build-logs
+        pass_filenames: false
       - id: sqlite-gen
         name: check generated SQLite queries and embedded migrations
         language: system
-        entry: cargo x sql-gen --check --all
+        entry: ./x/agent-build.ts -- cargo x sql gen --check --all
         pass_filenames: false
       - id: guardrails-lint
         name: check AST, architecture, migration-identity, and doc guardrails
         language: system
-        entry: cargo x lint
+        entry: ./x/agent-build.ts -- cargo x guardrails lint
         pass_filenames: false
       - id: guardrails-api
         name: check boundary crate public API snapshots
         language: system
-        entry: cargo x api --all --check
+        entry: ./x/agent-build.ts -- cargo x guardrails api --all --check
         pass_filenames: false
       - id: guardrails-doctor
         name: check build flags and toolchain configuration
         language: system
-        entry: cargo x doctor
+        entry: ./x/agent-build.ts -- cargo x guardrails doctor
         pass_filenames: false

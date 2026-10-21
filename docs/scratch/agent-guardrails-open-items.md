@@ -1,8 +1,8 @@
 # Agent engineering guardrails — open items
 
-Status: PR preparation (guardrail tooling and wasm/native split implemented; follow-ups below)
+Status: PR #70 merged; post-merge reconciliation and follow-up planning (see §0.4–0.5)
 Owner: operator + agent engineering track
-Updated: 2026-10-20 (tracker reconciliation; cross-worktree sccache adoption shelved)
+Updated: 2026-10-21 (shakeout and source audit; approval provenance restored)
 Scope: Rust workspace only. The Kotlin/Compose app (`src/daybook_compose`) is being
 deleted and replaced with Rust, so every Kotlin item (detekt thresholds,
 `ForbiddenImport`, the generated `uniffi/*.kt`) is explicitly out of scope.
@@ -15,7 +15,8 @@ many branches of one repo at once.
 
 All in `src/xtask/` (`cargo x …`), no separate checker crate:
 
-- `cargo x lint` — `syn`-based inventory of every workspace crate (~0.3s, no compile):
+- `cargo x lint` — `syn`-based inventory of every workspace crate (~0.3s after building
+  xtask; scanning does not compile application crates):
   authored definitions per module, methods per type/trait, longest fn, longest match arm,
   inline `#[cfg(test)]` size, plus pattern rules (`ERROR_SHARED_ASYNC_STATE`,
   `ERROR_ALLOW_ATTRIBUTE`, `ERROR_LINT_REASON`, `ERROR_GLOB_EXPORT`, `ERROR_SEND_DISCARDED`,
@@ -24,8 +25,9 @@ All in `src/xtask/` (`cargo x …`), no separate checker crate:
   §6.4) and docs (`ERROR_DOC_LINK`, `ERROR_ADR_ID`, `ERROR_ADR_STATUS`, `ERROR_DOC_METADATA`,
   `ERROR_SKILL_DOC`). `@generated` files are skipped.
 - Crate-local `guardrails.toml` next to each `Cargo.toml` (+ `docs/guardrails.toml`):
-  role, allowed workspace deps, per-symbol exemptions with `class`/`reason`/`reference`,
-  migration hashes. Exemptions are ceilings: an improved site is `ERROR_STALE_EXEMPTION`
+  allowed workspace deps, per-symbol exemptions with `class`/`reason`/`reference`,
+  migration hashes. `role` and `allow_external_api_types` are stored but not enforced (GR-03).
+  Exemptions are ceilings: an improved site is `ERROR_STALE_EXEMPTION`
   until `cargo x guardrails bless` lowers it. `bless` never raises or adds. `adopt` refuses
   to run when a policy already exists.
 - `cargo x api --all --check|--bless` — `public-api.txt` per pilot crate (`big_sync_core`,
@@ -35,20 +37,21 @@ All in `src/xtask/` (`cargo x …`), no separate checker crate:
 - `cargo x plan <files>`, `cargo x overlap --base <trunk>`, `cargo x record/verify`
   (source-fingerprint receipts), `cargo x doctor` (flag drift, `rustfmt.toml`, profile).
 - `rustfmt.toml` `imports_granularity = "Item"` applied; `debug = "line-tables-only"`;
-  `flake.nix` rustflags now carry `--cfg tokio_unstable` (§6.1 fixed); `sccache` in the
-  dev shell; `x/agent-build.ts` (FIFO jobserver + `systemd-run` cgroup scope + sccache env).
+  `flake.nix` rustflags now carry `--cfg tokio_unstable` (flag loss fixed; consolidation
+  remains GR-12); `sccache` in the dev shell; `x/agent-build.ts` (FIFO jobserver +
+  `systemd-run` cgroup scope + sccache env).
 - nextest `nightly` profile (`flaky-result = "fail"`), selected by CI on the cron trigger.
 - Pre-commit: `cargo x lint`, `cargo x api --all --check`, `cargo x doctor`.
 - `xtask` slimmed: demo commands and the dead `cargo x gen` type generator (2.4k lines
   writing into four crates that no longer exist) removed; dep tree 1114 → 439 nodes.
   `wflow_core/gen/mod.rs` is now hand-maintained (path unchanged, 10 external uses).
 
-### 0.1 Wasm/native split (second PR)
+### 0.1 Wasm/native split (also merged in #70)
 
-- Two Cargo workspaces: root (native apps + portable libs) and `src/wasm_utils_rs`
-  (guest components/apps, `opt-level = 3` in dev and release, separate lockfile seeded from
-  the root one). Crate directories stay under `src/`; the guest workspace lists siblings as
-  members and the root workspace `exclude`s them.
+- Three Cargo workspaces: root (native apps + portable libs), `src/wasm_utils_rs`
+  (guest components, `opt-level = 3` in dev and release), and `src/btress_sysadmin`
+  (standalone browser/WASI application). Each has a lockfile. Crate directories stay under
+  `src/`; the guest workspace lists siblings as members and the root excludes them.
 - `utils_rs` is portable-only: `native`/`downloader`/`wasm` features deleted. `downloader`
   and `file_exists` moved to `native_utils_rs` (consumers: `mltools`, `daybook_core`);
   `uuid/js` plus both `getrandom` `wasm_js` backends are browser-target dependencies.
@@ -59,6 +62,8 @@ All in `src/xtask/` (`cargo x …`), no separate checker crate:
   `plug_*_routines` (WIT + workflows). `cargo x build-plug-oci --plug-root <manifest crate>`
   reads `[package.metadata.townframe] routines` and builds the sibling component; logical
   plug ids and bundle keys are unchanged, component filenames are `plug_*_routines.wasm`.
+  The approved component-exported manifest did not land; native extraction is the current
+  implementation, not an operator-approved replacement (GR-01).
 - `cargo x check-matrix` + `[builds.<target>]` contracts, with `ERROR_TARGET_BOUNDARY`,
   `ERROR_TARGET_CONTRACT`, `ERROR_FEATURE_CONTRACT`, `ERROR_PLATFORM_FEATURE` enforced by
   `cargo x lint` (no compilation).
@@ -105,7 +110,7 @@ Those are not implied by the checks above; their broader CI results still need r
 
 - **pre-commit `fmt` hook**: the hook runs `cargo fmt -- <each .rs file>`, which reaches files
   outside every crate module tree; `cargo fmt --all` never visits those. With the new
-  `imports_granularity`/`group_imports` options, three such files failed:
+  `imports_granularity` option, three such files failed (`group_imports` was not enabled):
   `src/daybook_core/gen/mod.rs` (PR-created, hand-maintained), `src/daybook_core/index/hydrate.rs`
   and `src/utils_rs/cheapstr.rs` (both pre-existing orphans; `cheapstr.rs` is a dead duplicate
   of the live inline `mod cheapstr` in `utils_rs/lib.rs:243`). Formatted all three with the
@@ -125,6 +130,212 @@ Those are not implied by the checks above; their broader CI results still need r
   `-D warnings`, nextest 18/18, guest workspace `cargo check --locked`, `daybook_cli` check,
   `cargo x api --all --check`, `cargo x doctor`, matrix `--dry-run`, and fmt checks across all
   three workspaces plus the repo-wide per-file hook form.
+
+### 0.4 Authoritative follow-up ledger (2026-10-21)
+
+Source: `history_shakeout_quality_gates_p3N-2.md`, session
+`ses_eb345f1c0ffe56cq2XpUo9l0OX`, Turns 0–16, supplied by the operator after merging #70.
+Unqualified line references below refer to that shakeout; `path:line` references identify
+source in the merged worktree. Historical command results above are not new verification.
+
+**Use this ledger for current status.** Sections 4–10 retain the detailed proposal inventory;
+their old checkboxes are not an independent completion record. Keep these stable IDs when
+splitting work into issues or PRs. Do not delete unfinished rows during a handoff.
+
+- Approval and implementation are separate: `approved` records an operator instruction;
+  `proposed` records an agent suggestion; `partial` never means the acceptance criteria passed.
+- Owner is the agent engineering track until a named implementer/issue is assigned. No
+  implementation is active merely because this reconciliation recommends it.
+- Close a row only with implementation references, exact checks/results and scope, and an
+  issue/PR reference. If only part lands, split the remaining work into a linked ID.
+- Deferral/rejection must cite who decided it and why. An agent's suggestion to defer is
+  not an operator rejection. New approvals update the ledger in the same turn.
+- At handoff, enumerate IDs completed, still open, blocked, and newly discovered. Preserve
+  acceptance criteria and dependencies, not just a shorter list of feature names.
+
+| ID | Approval / current state | Evidence and next acceptance criteria |
+|---|---|---|
+| GR-01 | **Approved, reversed without approval**: component-exported plug manifest | Turns 9–10; user explicitly approved WIT changes and opt-in Wasmtime (lines 931, 970). At lines 983–996 the unrelated “don't use offline eval” instruction was misread as dropping the runner. `src/xtask/main.rs:214` still runs native `--bin manifest`. Restore component export while preserving manifest/routines crates and native e2e tests; ordinary xtask builds must exclude Wasmtime. Verify the manifest extracted from the shipped component and OCI round-trip. No operator reversal is recorded. |
+| GR-02 | **Approved, partial; cleanup audit required**: retain only live `api_utils_rs` code | Turn 16 (lines 1836, 1863–1867, 1991). `src/daybook_types/wit.rs:47` and `:60` retain WIT `FacetMeta`/`Dmeta`, the codec moved to `wasm_utils_rs`, and `daybook_types/Cargo.toml:24` depends on it unconditionally. Recheck consumers including re-exports, macros and native tests; remove genuinely unused WIT types/codec/dependencies and recheck native/WASI contracts and API snapshots. Do not confuse these with live `daybook_types::doc` types of the same names. Audit `wflow_sdk`/`daybook_pdk` native consumers separately; root membership or native binding generation alone is not proof of a defect. |
+| GR-03 | **Partial**: architecture policy is narrower than its fields imply | Turns 1–3, §5.4. `Policy::role` and `allow_external_api_types` in `src/xtask/guardrails/policy.rs` are serialized but do not enforce layer direction or external-type restrictions. Dependency allowlists do work. Agree the role/edge semantics, then enforce or explicitly remove nonoperative policy fields, with negative tests. Network/fs/DB/spawn capability metadata remains proposed (already listed in §5.4), not implemented; static dependency checks cannot prove absence of effects. |
+| GR-04 | **Partial**: compiler-resolved API snapshots | Turns 0–3, §10. Current `syn` snapshots are useful but configuration is recorded in the header, not used to resolve the API. Add rustdoc-JSON extraction per supported target/features, public re-exports, bounds/auto traits and external types; pin tooling with the compiler and test a cfg-only and Send/Sync-only change. Keep intentional breaking changes reviewable, not forbidden. |
+| GR-05 | **Partial / calibration open**: public-surface and coupling metrics | Turn 2, §4.1. `Metric::public_items` is counted per module, not checked as a crate export budget. Define reachable authored exports and report per-crate API size, fan-out/reverse fan-out; calibrate before proposing new budgets. Existing module/type/function/match-arm/test-module gates are implemented. Do not invent a coupling gate or a new raw-file-length gate. |
+| GR-06 | **Approved, not run**: pedantic Clippy measurement | Turn 2 next steps, Turn 3 “let's do all of that” (lines 573–588). Q4 must not ask for the same measurement approval again. Measure the named candidate lints on `utils_rs`, `big_sync_core`, `daybook_types`; report counts/examples before enabling them. |
+| GR-07 | **Agent-deferred, not implemented**: compiler-level lint tier | §9.1/§11 preserve the deferral rationale; this was not completely untracked. Add reasoned legacy expectations for allow/disallowed-type rules, audited spawn helper + raw-spawn rule, wildcard-enum/send-result checks, unreachable public items, module layout, print/debug/unsafe rules and other §9.1 candidates in bounded batches. Verify aliases, legitimate exceptions and warning-free affected builds. Do not mechanically replace async locks with blocking locks. |
+| GR-08 | **Partial / policy choices open**: error classes and diagnostics | Turn 2, §9.4. Named `ERROR_*` diagnostics, JSON and exemption classes landed; tagged `expect` enforcement, `ERROR_UNRECONIZED` rename, numeric IDs and diagnostic snapshots did not. `ERROR_MUTEX` spelling is fixed. Decide `unwrap_used` and whether `INTENTIONAL_BREAK` is appropriate; absence from `Reason` is not evidence of operator rejection. Test enforcement and stale expectations without treating all panic reasons as interchangeable. |
+| GR-09 | **Open proposals**: remaining syntactic/type-aware rules | Turns 0–2, §8.2/§9.2–9.3. Catch-and-log, internal test timeouts/sleeps, progress/XXX comments, ADR-link-only docs, Cargo integration-test targets, numeric fixed ports, orphan Rust files and `run_until_cancelled`/alias analysis. Existing path-string, ignored-test and send-discard checks are only partial coverage. Use the cheapest adequate analyzer and rule fixtures with valid exceptions. Do not equate a proposed XXX blocker with permission to delete all TODO/FIXME comments. |
+| GR-10 | **Partial**: import formatting | Turns 1–3. `rustfmt.toml` enables `imports_granularity = "Item"`, not `group_imports`. Finish or explicitly decline the proposed grouping after assessing churn; the historical claim that both landed was incorrect. |
+| GR-11 | **Partial**: fast CI guardrail lane | Turn 8 promised adoption. API/doctor/SQL checks run through pre-commit, so they are not absent from CI. A dedicated early job was not added; matrix runs lint three times and explicitly formats only the guest workspace. Add the fast lane and coverage for all three workspaces, preserving per-file formatting coverage until orphan handling is settled. Verify workflow triggers and failures with minimal dependency setup. |
+| GR-12 | **Partial**: shared build admission and flag consistency | Turns 1–3 and 8. FIFO/cgroups work through `x/agent-build.ts`, not automatic devshell `MAKEFLAGS`. Finish safe shell participation and disk-watch coordination; audit `.env`/target-dir coverage too (`ci-desktop` currently lacks the loader). Separately evaluate nextest resource weights. The tokio flag-loss fix landed, but `append_tokio_unstable_rustflags` and pre-commit warning flags still need effective-invocation comparison before consolidation/`build.warnings` changes. Prove token sharing and flag parity; do not assume duplicate strings prove cache misses. |
+| GR-13 | **Promised, missing**: ADR/scratch templates | Turn 8 adoption list. Neither `docs/adrs/TEMPLATE.md` nor `docs/scratch/TEMPLATE.md` exists. Supply templates compatible with docs rules, decide naming/status lifecycle without renumbering accepted identities, and test new-doc scaffolding. CONTRIBUTING has documentation guardrails, but not the promised parallel-work guide. |
+| GR-14 | **Partial**: documentation QC beyond presence checks | §8. Relative targets, ADR identity/status presence, scratch metadata presence and skill discoverability landed. Root/skill/rustdoc/external/anchor checking (lychee was suggested), freshness/supersession, doc lint ratchets, glossary/wiki coverage and an AGENTS topic index remain open. Define scope and test real stale/broken examples; keep `log.md` and Kotlin untouched. |
+| GR-15 | **Recovered proposal**: SQL commas-first check | Turn 0 B.3 (line 76), absent from the previous tracker. Add a parser-aware check alongside `sql-gen --check`, with representative query fixtures; do not call current code-generation consistency a SQL-style check. Avoid unrelated runtime-query rewrites. |
+| GR-16 | **Partial + recovered proposal**: database contracts | Turn 0 C (line 80), §6.4, Q9/Q10. Migration path/hash checks landed; SQLite `.schema` snapshots did not appear in the tracker. Decide explicit persisted history identities and collision-resistant future migration/ADR naming; snapshot schema built from migrations deterministically. Never silently renumber applied migrations. |
+| GR-17 | **Open**: `ERROR_LOCK_DIVERGENCE` | §7.5. Compare shared path-dependency closures across all three lockfiles, not every unrelated version difference. Fixtures must distinguish genuine divergence from valid platform-only packages. |
+| GR-18 | **Partial**: merge-friendly tooling | §5.1. Regeneration policy is documented; `cargo x resolve-generated`, TOML sorting, a verified Mergiraf playbook and rerunnable codemods remain open. Preserve source intent and regenerate; do not turn lockfile conflict handling into automatic dependency upgrades. |
+| GR-19 | **Partial / proposals**: branch collaboration | §5.2–5.3. `overlap` landed; expiring advisory claims/change declarations, speculative integration, merge queue, and contract-first workflow guidance remain. Select a bounded pilot and measure integration repair time; claims must not become file locks. |
+| GR-20 | **Partial**: trustworthy validation evidence | §5.5/§9.4/§10. `plan` and `record/verify` landed but CI does not consume receipts. Review coverage of locks/flags/features/targets/artifacts and invalidation after edits; integrate a PR review card for API/dependency/exemption/test-removal/unsafe changes. `lint --changed` remains open and must conservatively expand for shared inputs. |
+| GR-21 | **Open proposals**: transferable failures and exercised races | §5.7/§10. Repro bundle/capsule, `sometimes!` reachability assertions, seeded Tokio choices and production-logic model tests remain. Prove replay inputs and that a test entered its declared race window; seeded choices are not deterministic OS scheduling. Rewind remains a bounded experiment, not a CI mandate. Nightly flake-fail policy already landed; automatic failing-seed filing did not. |
+| GR-22 | **Open proposals**: dependency, test and performance hygiene | §9.5. Machete is installed, not gated; cargo-deny, zizmor ratchet, targeted mutation tests, bounded-work/allocation/query assertions and dead-file cleanup remain. Choose one affected area at a time and preserve test intent. No blanket exemption burn-down or whole-repo cleanup is authorized by this ledger. |
+| GR-23 | **Partial**: parallel runtime/test isolation | §5.6. Hardcoded-string checks landed; ephemeral test resources, dev port allocation, nextest weights/groups where justified and service ownership/cleanup enforcement remain. Verify simultaneous worktrees cannot overwrite databases or stop each other's services. |
+| GR-24 | **In progress — first slice implemented and verified (2026-10-21)**: Nix CLI package | `packages.daybook-cli` + `apps.daybook-cli` via Crane, flake split into `src/nix/{toolchains,devshells,wit-deps,packages}.nix`, `packages.wit-deps` FOD vendors gitignored `wit/deps` (pinned wash 2.6.1, refresh recipe in `src/nix/wit-deps.nix`), `outputHashes` route five Cargo git deps through `fetchgit` (their revs are orphaned commits Nix's `fetchGit` refuses). `wash-runtime`'s build.rs locates the wasmCloud repo root by walking up to the first `Cargo.lock` and compiles `proto/` from there; crane's per-crate git vendoring strips both, so they are restored by `overrideVendorGitCheckout` and a materialized group directory (`packages.cargo-vendor-dir`, exposed for inspection; its `config.toml` is retargeted at the copy). OLLAMA `env!` defaults baked empty (no credentials in the store), ORT linked dynamically from nixpkgs `onnxruntime` (ort-sys defaults to a static archive nixpkgs does not ship, and its copy-dylibs step needs `target/release/build/{examples,deps}` to pre-exist). Verified: sandboxed `nix build …#daybook-cli` produced a binary that prints `--help` under `env -i` outside any devshell; closure is 19 paths with no vendor-dir or credential references; `cargo x lint`/`api`/`doctor` stayed green. Evaluation of the real worktree path requires the new `src/nix/*.nix` files to be tracked in the VCS first (jj-only policy here), so verification used a `path:` copy of the tree. Remaining for GR-24: server-resource smoke tests (§0.5 item 4), plug-OCI packaging after GR-01. `x86_64-darwin` dropped from `systems` (nixpkgs 26.11 removed support). |
+| GR-25 | **Partial**: Nix checks and reusable build graph | §10. Source-only checks landed (2026-10-21): nixfmt, statix/deadnix, rustfmt on all three workspaces, deno fmt/lint/check with fixed-output vendored dependencies and a disposable `DENO_DIR`, biome, and JSON/TOML/YAML/case-collision, each on a narrow fileset — see the GR-24 scope-update note for details. Open: a packaged lightweight xtask so `cargo x lint/api/sql-gen` can become checks without discarding the warm `./target` (operator-deferred 2026-10-21), clippy/check-matrix/nextest derivations that respect the agent-build jobserver and cgroups, separate native/guest/btress resolutions, and proof that identical inputs across worktrees reuse store outputs. No unconditional per-crate cache-hit guarantee. |
+| GR-26 | **Shelved by operator**: further cross-worktree sccache work | Turn 13 (line 1467), Q7. Keep stock opt-in. No patched binary, wrapper or trim-paths adoption without reopening and completing correctness/resource acceptance. Hakari measurement remains optional; feature-unification already landed. |
+| GR-27 | **Open**: evidence of improved throughput | §12. Record feedback latency, integration repair time, duplicate compilation, reproduction success, exception burn-down and missed contract changes before/after selected work. Counting enabled lints is not an outcome metric. |
+| GR-28 | **Open proposals**: non-Rust contract coverage | Turns 0–2, §9.5. WIT, persisted serialization fixtures, hash/domain separators and ordering/cancellation/durability contracts need explicit tests/snapshots. Migration checks alone do not cover these contracts; Rust signatures do not prove behavioral compatibility. |
+
+Corrections to the two post-merge audits: capability/effect metadata was already in §5.4;
+external-link checking was already in §8.2 although the tool name lychee was omitted;
+Clippy deferral was recorded in §11, and absence of `INTENTIONAL_BREAK` was not a recorded
+operator rejection. The Turn 11 shakeout also reports a native workspace Clippy run and
+target-matrix checks, and Turn 15 reports CI tests passing; “never run” was too strong.
+The narrower handoff did not rerun them. Do not promote historical claims into fresh proof.
+
+Reconciliation verification (documentation-only, 2026-10-21): ran
+`nix develop .#ci-rust --command ./x/agent-build.ts -- bash -c 'cargo clippy --locked --all-targets --all-features -p xtask -- -D warnings && cargo x lint && cargo x api --all --check && cargo x doctor'`.
+All passed: strict xtask Clippy, lint with 0 diagnostics/602 modules, all five API
+snapshots, and doctor. No application test suite, target matrix, or Nix package/image build
+was run for that documentation change. Update later the same day: the package design below
+was then implemented as GR-24's first slice and verified — see the GR-24 row for the
+commands, evidence, and what remains.
+
+### 0.5 Hermetic CLI package, then OCI (items 1–3 and part of 4 landed 2026-10-21)
+
+**#70 implemented no package outputs.** `flake.nix` exported dev shells only, and
+`nix develop` plus an ordinary Cargo invocation is not a sandboxed package build.
+The first GR-24 slice landed the same day this ledger was reconciled; its proposed
+output names are now `packages.daybook-cli`, `apps.daybook-cli`, `packages.wit-deps`
+and `packages.cargo-vendor-dir`, with per-item status below.
+
+Scope update (operator, 2026-10-21): CLI Nix packaging and source checks belong in this
+PR; plug OCI remains for later. `packages.daybook-cli` and its passthru round-trip test
+run `init`, create two distinct documents, reopen/list/read them, reinitialize without
+losing them, dump the repo, and check missing-document failure under `env -i` in the Nix
+sandbox. The shared smoke script is ShellCheck-validated by `writeShellApplication`.
+The `server` playground remains unsupported by this package: its btress components/site
+assets are not packaged, and its paths still point into build trees. `cargo x lint`
+(0 diagnostics/602 modules), `cargo x api --all --check` (five snapshots), and
+`cargo x doctor` passed again in this worktree.
+
+Hermetic source checks (landed 2026-10-21, `src/nix/checks.nix`, all green on
+x86_64-linux): `checks.nix-format` (nixfmt), `checks.nix-lint` (statix + deadnix),
+`checks.rust-fmt` (`rustfmt --check` on every `.rs` file except `include!`d
+`sqlite/gen.rs`, so orphan files outside module trees stay covered exactly as the old
+per-file pre-commit hook did — see §0.3), `checks.deno` (fmt/lint/check of `x/` against
+fixed-output vendored dependencies with a disposable `DENO_DIR`;
+`deno.lock`'s `workspace.packageJson` section forces `package.json` into the source
+and a writable workdir for `node_modules`), `checks.biome`
+(read-only `biome check` with VCS mode disabled — the tracked-only sandbox source already
+excludes what `.gitignore` would), `checks.repo-files` (JSON/TOML/YAML validity plus
+case-insensitive path collisions, `.vscode` JSON exempted like pre-commit's check-json).
+Each check consumes the narrowest fileset that can change its verdict. Negative controls
+were run: a misformatted orphan `.rs` file, a misindented Nix file, a misformatted `x/`
+script and a broken `package.json` each failed their check; restoring them passed. Warm
+`nix flake check` takes ~13s.
+
+PR #71 CI failure (2026-10-21, run 39548181110): the lint hook failed on the
+`townframe-deno-cache` fixed-output hash, not a source diagnostic. Two independent
+fetches changed 162 cache files: SQLite analysis state and HTTP cache entries containing
+`denoCacheMetadata` with fetch times and response headers (`date`, `age`, `cf-ray`,
+`report-to`, `set-cookie`); the sampled module source itself was identical. Hashing the
+whole `DENO_DIR` therefore cannot give a reproducible dependency input. The replacement
+exports only `deno cache --frozen --vendor x/*.ts`'s `vendor/` tree and checks with a fresh
+writable cache using `deno check --frozen --vendor --cached-only ./x/`. A forced cold
+`nix build --rebuild` reproduced `sha256-G8C0kgL1QI1Gus08POi6La/aTcpnBI6EVFbZ9aEwsw4=`;
+all 37 scripts passed fmt/lint/typechecking in the sandbox. Removing the vendored tree
+in a scratch override failed on the missing JSR manifest, and `nix flake check` passed
+locally. The fix still needs a remote CI run after publication.
+
+CI/pre-commit consolidation (operator, 2026-10-21): one lint job. Pre-commit gained a single
+`nix flake check` hook and dropped the hooks it replaces (check-json/toml/yaml,
+check-case-conflict, deno fmt/lint/check, biome format/check/lint, rustfmt; check-ast was a
+no-op with no Python files). The rust-target-matrix job no longer reruns guardrail lint or
+guest-workspace rustfmt. The packaged-CLI round-trip moved from `checks` to
+`packages.daybook-cli.passthru.tests.round-trip` so the lint hook never builds the CLI; the
+Nix packaging job builds that test. `nix fmt` now applies every enforced
+format (nixfmt, rustfmt per file, deno fmt, `biome check --write` as the old `pnpm check`
+hook did). `cargo x sql gen --check` and `cargo x guardrails lint|api|doctor` stay
+pre-commit hooks: building xtask in the store discards the warm `./target` (operator,
+2026-10-21); clippy/nextest/llvm-cov additionally need the agent-build jobserver and cgroup
+limits. zizmor stays manual-stage (154 findings). The guardrail hooks route through
+`./x/agent-build.ts` (the plain `cargo x doctor` entry failed `ERROR_BUILD_FLAGS` on the
+shared target dir).
+
+xtask CLI regrouped (operator, 2026-10-21): `cargo x sql check|gen|migrate`,
+`cargo x plug build-oci` (plug OCI code moved from `main.rs` to `plug.rs`), and
+`cargo x guardrails lint|check-matrix|api|doctor|plan|overlap|record|verify|inventory|adopt|bless`.
+The duplicated top-level `lint/api/doctor/check-matrix/plan/overlap/record/verify` aliases and
+`lint --format` (a second spelling of `--json`) were removed; `guardrails check` is now
+`guardrails lint`. Generated `sqlite/gen.rs` and `public-api.txt` headers were regenerated.
+The `ERROR_FN_LENGTH` exemption followed the moved `build_plug_oci` → `plug.rs:build_oci`
+at the same ceiling (194). Command names quoted elsewhere in this ledger are historical
+records of what was run at the time.
+
+Stronger all-system validation remains open: `nix flake check --all-systems --no-build`
+fails evaluating `apps.aarch64-linux.daybook-cli.program` with
+`path '9dmdmdg45pr1snlkqkcyp2cw4cj7w1rb-townframe-src-with-wit-deps.drv' is not valid`.
+Cause: crane reads `Cargo.toml`/`Cargo.lock` from `srcWithWit`, a derivation, so evaluating
+the package is import-from-derivation (current-system evaluation builds the `wit-deps` FOD
+and the source overlay first). Earlier `flake show` evaluation was weaker evidence and must
+not be reported as an all-platform package check.
+
+1. **Landed (2026-10-21); CI check still open:** `packages.<system>.daybook-cli` and
+   `apps.<system>.daybook-cli` are built with Crane's `buildDepsOnly` / `buildPackage`
+   against the existing pinned Rust toolchain (Crane is a new flake input that needs
+   review before merge). Validated by a sandboxed build and `--help` smoke test on
+   x86_64-linux; other platforms evaluate but have no build evidence yet — publish
+   those outputs only after their builds do. Native and guest configurations remain
+   separate (guests still build through `wasm_utils_rs`, not this package).
+   Packaging lightweight xtask for fast `checks` (GR-25) has not started.
+2. **Landed (2026-10-21):** the locked Cargo inputs are vendored by Crane with
+   `outputHashes` for the five git dependencies (orphaned revisions plain `fetchGit`
+   refuses); external WIT enters through the `wit-deps` fixed-output derivation, whose
+   wash 2.6.1 asset hashes and refresh recipe live in `src/nix/wit-deps.nix`. The
+   package `src` fileset is explicit — manifests, `.wit`, SQL, markdown and Rust under
+   `src/` — and subtracts the gitignored `wit/deps` directories so a local fetch cannot
+   change the derivation. Compilation runs with the sandbox's network disabled; only
+   the fixed-output fetches may touch the network.
+3. **Partially landed (2026-10-21):** Ollama URL/credentials from
+   `src/mltools/models.rs:23–25` are baked as empty strings in the derivation (they are
+   never derivation inputs and never enter the store), so a packaged binary must take
+   cloud config from the runtime environment. Open: `src/daybook_cli/cmds/server.rs:44–78`
+   locates server assets through Cargo targets/source paths. Package those assets or expose
+   an explicit runtime resource path; `--help` succeeding alone must not be reported as a
+   working packaged server.
+4. **Partially verified (2026-10-21), round-trip still open:** the build ran sandboxed with
+   no developer `.env`, no prepopulated target directory, and no local `wit/deps`; the
+   installed binary was run outside the checkout under `env -i` and printed `--help`; the
+   closure was inspected (19 paths, required shared libraries present, no credentials or
+   vendor-dir references). Open: an isolated writable repo/config exercising initialization
+   and a local document round-trip; packaged resource lookup for every supported server
+   command; recording any explicitly unsupported command rather than silently shipping
+   source-tree dependencies; focused tests and Clippy for the packaging change itself; a CI
+   job using the same derivation; dependency-output reuse between two identical worktree
+   inputs (build once, rebuild the second worktree and compare store paths). Closure size
+   was measured rather than assumed: 19 paths, ~436 MiB total, the `daybook_cli` store
+   path itself 164 MiB (the heavy members are `onnxruntime` and its `openvino`/
+   `protobuf` dependencies).
+5. **GR-01 then GR-24, follow-up Wasm plug OCI:** resolve the approved component-manifest
+   reversal before standardizing the new packaging contract. Build the optimized routines
+   component, extract its manifest using an opt-in runner, and assemble the existing custom
+   OCI artifact format in a Nix derivation. `src/xtask/main.rs:233` already writes an OCI
+   layout with Wasm and plug-manifest layers, but it currently also invokes Cargo. Separate
+   compilation from assembly with explicit artifact inputs, retaining one packaging
+   implementation; do not fork the format into Nix shell snippets. Check layer digests,
+   media types, manifest/component agreement and import through the real plug consumer.
+   Nix does not require freezing the output hash of every changing plug build.
+   A Wasm plug artifact is not a Linux root filesystem image and does not need Docker.
+7. **Publishing is separate:** outputs are immutable local artifacts. Registry upload,
+   authentication and signing happen in an explicit release step, never as side effects of
+   `nix build`. ORAS can copy the existing OCI layout to a registry without rebuilding it.
+
+After the package work, prioritize GR-02/03 (unnecessary native edges and nonoperative
+policy fields), GR-06 (already-approved measurement), and GR-11/13 (fast CI and doc
+scaffolding). None requires un-shelving sccache or a whole-workspace lint cleanup.
+
+References read for this proposal on 2026-10-21:
+- [Crane quick start: reusable dependency artifacts, packages, apps and checks](https://crane.dev/examples/quick-start.html).
+- [ORAS copy: OCI layout import/export and registry upload](https://oras.land/docs/commands/oras_cp/).
 
 ## 1. Decisions locked by the operator
 
@@ -164,8 +375,9 @@ Those are not implied by the checks above; their broader CI results still need r
       exempts, which is exactly the file two branches are already fighting over.
 - [x] **Q3 Which crates pilot public-API snapshots.** Done for `daybook_types`,
       `daybook_ffi`, `daybook_pdk`, `wflow_sdk`, `big_sync_core` (`[api]` in their policies).
-- [ ] **Q4 Pedantic clippy subset.** Approve a *measurement-only* pass on
-      `utils_rs`, `big_sync_core`, `daybook_types` so we choose by real counts.
+- [ ] **Q4 Pedantic clippy measurement — approved, not run (GR-06).** Turn 3 approved
+      the proposed measurement on `utils_rs`, `big_sync_core`, `daybook_types`.
+      Run it and report counts; selecting/enabling lints is the subsequent decision.
 - [ ] **Q5 `clippy::unwrap_used`** (forces `expect(ERROR_*)`) — in or out? 301 non-test
       `.unwrap()` sites today.
 - [x] **Q6 Disk layout.** Historical measurement: ntfs3 small-file create was ~16x slower
@@ -248,10 +460,10 @@ Those are not implied by the checks above; their broader CI results still need r
 - [x] **Q12 Validation receipts** — `cargo x record --output target/… -- <cmd>` and
       `cargo x verify <receipt>` landed (source fingerprint before/after, toolchain identity,
       flag env). Not yet consumed by anything; CI integration is a later item.
-- [ ] **Q13 `utils_rs::prelude` third-party re-exports.** Confirmed escape route
-      (§6). Do we (a) stop re-exporting `tokio`/`dashmap`/`futures`/`regex`/`bs58`,
-      (b) keep them but exempt `utils_rs` from the "no external types in public API"
-      rule, or (c) leave as-is and only *report*?
+- [ ] **Q13 `utils_rs::prelude` third-party re-exports — deferred by operator.**
+      Turn 8 explicitly said not to restrict it yet because of consumers. Preserve that
+      boundary for current work; report coupling and revisit restriction only as a
+      coordinated consumer change. GR-03 must not quietly remove the prelude.
 
 ---
 
@@ -428,10 +640,10 @@ depending on the implementation crate, or dumping another abstraction into `util
 - [ ] **Per-crate architectural metadata**: layer/role, allowed workspace deps,
       supported feature/target configs, whether it may do network/filesystem/DB/task-spawn,
       whether external library types may appear in its public interface.
-- [ ] **Layer file** (`tools/lint/layers.toml`) enforced against `cargo metadata`.
-      Stops upward or sideways deps. Use **guppy** for graph queries — it already provides
-      package and feature graph queries; we need policy and reporting around it, not a
-      homemade resolver.
+- **Superseded location / partial enforcement (GR-03):** crate-local `guardrails.toml`
+      replaced the proposed central `tools/lint/layers.toml`. Cargo metadata dependency
+      allowlists are enforced; role-based direction is not. Guppy was suggested for richer
+      package/feature graph queries, not adopted. Define the missing policy before gating it.
 - [ ] **`rust.unreachable_pub`** so `pub` actually means public.
 - [ ] **Ban `pub use x::*` re-exports** (4 today). Without the ban, a snapshot changes
       when an upstream crate changes, hiding provenance.
@@ -464,11 +676,10 @@ depending on the implementation crate, or dumping another abstraction into `util
 - [ ] An unchanged API does **not** justify skipping consumer tests — behavior can change
       without signatures changing. Changes to shared build config, generators, or
       dependency resolution must **conservatively expand** the selection.
-- [ ] **The fast checker must not sit behind xtask's dependency graph.** Confirmed:
-      `src/xtask/Cargo.toml` pulls `keyhive_core`, `subduction_core`, `subduction_crypto`,
-      `subduction_keyhive`, `beekem`, `sqlite_rs`, `rusqlite`, `daybook_types`.
-      The tool that explains why your branch is broken must still run when your branch
-      does not compile. Ship it as a **small independent crate, packaged through Nix**.
+- **Superseded design:** a separate lightweight checker crate was proposed because xtask
+      originally pulled application dependencies. Turns 5–6 instead chose to slim xtask;
+      demos and heavy dependencies were removed. Keep the checker in xtask and package
+      that lightweight tool through Nix (GR-25), not another `tools/` workspace.
 
 ### 5.6 Shared state between parallel runs
 
@@ -511,10 +722,10 @@ not a story about a run.**
 
 ### 5.8 Flake policy
 
-- [ ] `.config/nextest.toml` has `flaky-result = "fail"` **commented out**, and the CI
-      profile retries 3x. A flake is therefore invisible green.
-- [ ] Nightly cron: retries off + `flaky-result = "fail"` + file the failing seed.
-      PR runs keep retries.
+- [x] Nightly cron selects `profile.nightly` with `flaky-result = "fail"`, retaining
+      CI retries to capture the flake signal. PR runs retain `profile.ci`. This supersedes
+      the earlier retries-off proposal; do not reimplement it from the old checklist.
+- [ ] Automatic failing-seed filing remains open (GR-21).
 - [ ] 47 `sleep(` in test files, 32 `tokio::time::sleep` in prod code, 24 `timeout(` in
       test files — timing waits are the flake source.
 - [ ] For small algorithms, deterministic scheduling / model tests may be cheaper than
@@ -910,7 +1121,8 @@ Extend the existing `utils_rs::expect_tags` pattern in two directions.
 **(a) Panic reasons.** Lint that `expect(..)` cites an `expect_tags::ERROR_*` constant
 rather than a freeform string. Makes panic reasons greppable and classifiable, and turns
 the 301 non-test `.unwrap()` sites into tagged classes (this is what makes Q5 tractable).
-- [ ] Fix the two typos: `ERROR_UNRECONIZED`, `"poisioned mutex"`.
+- [x] Fixed `"poisioned mutex"` to `"poisoned mutex"`.
+- [ ] Rename `ERROR_UNRECONIZED` with its consumers (GR-08); deferred to avoid churn.
 - [ ] Decide whether new classes need an ADR line or just a comment.
 
 **(b) Lint diagnostic codes.**
