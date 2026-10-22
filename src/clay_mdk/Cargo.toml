@@ -18,7 +18,7 @@ clay_collection = { workspace = true }
 wit-bindgen.workspace = true
 serde_json.workspace = true
 serde = { workspace = true, features = ["derive"] }
-dioxus = { workspace = true, default-features = false, features = ["macro", "signals", "hooks", "html"], optional = true }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "signals", "hooks", "html"], optional = true }
 dioxus-core = { workspace = true, optional = true }
 dioxus-html = { workspace = true, optional = true }
 clay_host = { workspace = true, optional = true }

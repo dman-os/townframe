@@ -1044,9 +1044,15 @@ fn apply_edit(desired: &mut BTreeMap<String, ConfiguredMicro>, edit: &EditGen) {
             }
             let mut bindings = BTreeMap::new();
             let mut provider = "source";
-            // The fresh name has no inbound edges, so binding it to any existing name is
-            // acyclic by construction.
-            let candidates: Vec<String> = desired.keys().cloned().collect();
+            // A removed name can still be the target of dangling bindings (Remove leaves them,
+            // settling Blocked), so re-adding it does not guarantee acyclicity: binding the new
+            // node to a candidate that can already reach it through those edges closes a cycle.
+            // Exclude any candidate that can reach the fresh name, matching Rebind.
+            let candidates: Vec<String> = desired
+                .keys()
+                .filter(|candidate| !reachable(desired, candidate).contains(name))
+                .cloned()
+                .collect();
             if dependent && !candidates.is_empty() {
                 let supplier = candidates[bind_sel as usize % candidates.len()].clone();
                 bindings.insert(Facility::ID.to_owned(), supplier);

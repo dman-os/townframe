@@ -11,5 +11,5 @@ crate-type = ["cdylib", "rlib"]
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 clay_mdk = { workspace = true, features = ["wit", "dioxus"] }
 micro_counter_manifest = { workspace = true }
-dioxus = { workspace = true, default-features = false, features = ["macro", "signals", "hooks", "html"] }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a", default-features = false, features = ["macro", "signals", "hooks", "html"] }
 serde_json.workspace = true
