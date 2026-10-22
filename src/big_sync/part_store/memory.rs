@@ -1,25 +1,53 @@
 use crate::interlude::*;
 
-use big_sync_core::keyed_frontier::{FrontierMutation, FrontierRevision, KeyedFrontierResult};
-use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
-use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits};
-use big_sync_core::rpc::{
-    BucketMemberKind, BucketObjPageEntry, BucketSummary, BucketSummaryState,
-    GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult, LeafBucketsError,
-    LeafBucketsRequest, ListPartsError, ObjChanged, ObjRemovedFromPart, PartEvent, PartPage,
-    PartSummary, SubPartsRequest,
-};
-use big_sync_core::{BuckId, Fingerprint, ObjKey, PartKey, PeerKey};
+use big_sync_core::BuckId;
+use big_sync_core::Fingerprint;
+use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
+use big_sync_core::PeerKey;
+use big_sync_core::keyed_frontier::FrontierMutation;
+use big_sync_core::keyed_frontier::FrontierRevision;
+use big_sync_core::keyed_frontier::KeyedFrontierResult;
+use big_sync_core::part_store::CursorIndex;
+use big_sync_core::part_store::ObjPayload;
+use big_sync_core::part_store::PartDirtyCount;
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::rpc::BucketMemberKind;
+use big_sync_core::rpc::BucketObjPageEntry;
+use big_sync_core::rpc::BucketSummary;
+use big_sync_core::rpc::BucketSummaryState;
+use big_sync_core::rpc::GetChangedBucketsRequest;
+use big_sync_core::rpc::LeafBucketPage;
+use big_sync_core::rpc::LeafBucketResult;
+use big_sync_core::rpc::LeafBucketsError;
+use big_sync_core::rpc::LeafBucketsRequest;
+use big_sync_core::rpc::ListPartsError;
+use big_sync_core::rpc::ObjChanged;
+use big_sync_core::rpc::ObjRemovedFromPart;
+use big_sync_core::rpc::PartEvent;
+use big_sync_core::rpc::PartPage;
+use big_sync_core::rpc::PartSummary;
+use big_sync_core::rpc::SubPartsRequest;
 
+use super::HostPartStore;
+use super::LEAF_PAGE_BYTE_BUDGET;
 use super::PartFrontierKey;
-use super::{HostPartStore, PartScope, PartStoreStats, ReadTarget, bucket_index_bounds};
-use super::{LEAF_PAGE_BYTE_BUDGET, leaf_entry_wire_bytes};
-use crate::keyed_frontier::{
-    MemoryKeyedFrontierSelector, MemoryKeyedFrontierSource, MemoryKeyedFrontierTable,
-    MemoryKeyedFrontierView,
-};
+use super::PartScope;
+use super::PartStoreStats;
+use super::ReadTarget;
+use super::bucket_index_bounds;
+use super::leaf_entry_wire_bytes;
+use crate::keyed_frontier::MemoryKeyedFrontierSelector;
+use crate::keyed_frontier::MemoryKeyedFrontierSource;
+use crate::keyed_frontier::MemoryKeyedFrontierTable;
+use crate::keyed_frontier::MemoryKeyedFrontierView;
 #[cfg(test)]
-use crate::test_support::{ObservedObjSnapshot, ObservedStore, ObservedStoreSnapshot};
+use crate::test_support::ObservedObjSnapshot;
+#[cfg(test)]
+use crate::test_support::ObservedStore;
+#[cfg(test)]
+use crate::test_support::ObservedStoreSnapshot;
 
 use std::collections::BTreeMap;
 #[cfg(test)]
@@ -1748,12 +1776,16 @@ impl ObservedStore for MemoryPartStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::part_store::host_contract::{
-        self, HostPartStoreContractHarness, PageEventStore, SingleTargetPageStore,
-    };
+    use crate::part_store::host_contract::HostPartStoreContractHarness;
+    use crate::part_store::host_contract::PageEventStore;
+    use crate::part_store::host_contract::SingleTargetPageStore;
+    use crate::part_store::host_contract::{self};
     use big_sync_core::ByteKey;
-    use big_sync_core::rpc::{PartEvent, ReplayPage, TargetVerdict};
-    use std::{collections::HashSet, time::Duration};
+    use big_sync_core::rpc::PartEvent;
+    use big_sync_core::rpc::ReplayPage;
+    use big_sync_core::rpc::TargetVerdict;
+    use std::collections::HashSet;
+    use std::time::Duration;
 
     fn verdict(page: &ReplayPage) -> &TargetVerdict {
         assert_eq!(page.targets.len(), 1, "test page names one target");
@@ -1798,7 +1830,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn hidden_parts_are_invisible_to_bucket_walks() -> Res<()> {
         use big_sync_core::FingerprintSeed;
-        use big_sync_core::rpc::{GetChangedBucketsRequest, LeafBucketRequest, LeafBucketsRequest};
+        use big_sync_core::rpc::GetChangedBucketsRequest;
+        use big_sync_core::rpc::LeafBucketRequest;
+        use big_sync_core::rpc::LeafBucketsRequest;
 
         let hidden = PartKey(ByteKey::new([60u8; 32]));
         let visible = PartKey(ByteKey::new([61u8; 32]));

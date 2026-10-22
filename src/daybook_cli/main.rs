@@ -358,7 +358,8 @@ mod tests {
     use daybook_core::local_state::SqliteLocalStateRepo;
     use daybook_core::plugs::PlugsRepo;
     use daybook_core::progress::ProgressRepo;
-    use daybook_core::repo::{RepoCtx, RepoOpenOptions};
+    use daybook_core::repo::RepoCtx;
+    use daybook_core::repo::RepoOpenOptions;
     use daybook_core::repos::RepoStopToken;
     use daybook_core::sync::IrohSyncRepo;
     use std::collections::HashSet;
@@ -408,6 +409,7 @@ mod tests {
 
     async fn open_cli_sync_node(repo_root: &std::path::Path) -> Res<CliSyncNode> {
         let ctx = RepoCtx::open(
+            Arc::new(sqlite_rs::SqliteRuntime::new(default())),
             repo_root,
             RepoOpenOptions::default(),
             "cli-test-device".into(),
@@ -415,8 +417,11 @@ mod tests {
         .await?;
         let blobs_repo =
             BlobsRepo::new(ctx.layout.blobs_root.clone(), ctx.local_user_path.clone()).await?;
-        let (sqlite_local_state_repo, sqlite_local_state_stop) =
-            SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) = SqliteLocalStateRepo::boot(
+            Arc::clone(&ctx.sqlite_runtime),
+            ctx.layout.repo_root.join("local_state"),
+        )
+        .await?;
         let (plugs_repo, plugs_stop) = PlugsRepo::load(
             Arc::clone(&ctx.big_repo),
             Arc::clone(&blobs_repo),
@@ -484,6 +489,7 @@ mod tests {
 
         tokio::fs::create_dir_all(&repo_a_path).await?;
         let init = RepoCtx::init(
+            Arc::new(sqlite_rs::SqliteRuntime::new(default())),
             &repo_a_path,
             RepoOpenOptions::default(),
             "cli-test-repo".into(),

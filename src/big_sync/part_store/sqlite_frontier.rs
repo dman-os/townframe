@@ -1,44 +1,46 @@
 //! SQLite facade joining the keyed-frontier read and write halves.
 
 use super::PartFrontierKey;
-use super::sqlite_read::{
-    SqliteFrontierRow, SqlitePartSelector, part_query_rows, part_query_rows_with_byte_budget,
-};
+use super::sqlite_read::SqliteFrontierRow;
+use super::sqlite_read::SqlitePartSelector;
+use super::sqlite_read::part_query_rows;
+use super::sqlite_read::part_query_rows_with_byte_budget;
 use super::sqlite_write::SqliteFrontierWrite;
-use crate::keyed_frontier::{SqliteReadError, SqliteReadSource, open_sqlite_reader};
-use big_sync_core::keyed_frontier::{
-    FrontierEntry, FrontierRevision, KeyedFrontier, KeyedFrontierError, KeyedFrontierReader,
-    KeyedFrontierResult,
-};
-use big_sync_core::rpc::{ObjChanged, PartEvent};
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use crate::keyed_frontier::SqliteReadError;
+use crate::keyed_frontier::SqliteReadSource;
+use crate::keyed_frontier::open_sqlite_reader;
+use crate::sqlite::queries;
+use big_sync_core::keyed_frontier::FrontierEntry;
+use big_sync_core::keyed_frontier::FrontierRevision;
+use big_sync_core::keyed_frontier::KeyedFrontier;
+use big_sync_core::keyed_frontier::KeyedFrontierError;
+use big_sync_core::keyed_frontier::KeyedFrontierReader;
+use big_sync_core::keyed_frontier::KeyedFrontierResult;
+use big_sync_core::rpc::ObjChanged;
+use big_sync_core::rpc::PartEvent;
+use sqlite_rs::Database;
+use sqlite_rs::Tx;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Notify;
-use utils_rs::prelude::{async_trait, serde_json};
+use utils_rs::prelude::async_trait;
+use utils_rs::prelude::serde_json;
 
 const EVENT_CHANGED: i64 = 1;
 const EVENT_REMOVED: i64 = 2;
 
 #[derive(Clone)]
 pub(crate) struct SqlitePartFrontier {
-    read_pool: SqlitePool,
-    write_pool: SqlitePool,
+    sql: Database,
     scope_id: i64,
     changed: Arc<Notify>,
 }
 
 impl SqlitePartFrontier {
-    pub(crate) fn new(
-        read_pool: SqlitePool,
-        write_pool: SqlitePool,
-        scope_id: i64,
-        changed: Arc<Notify>,
-    ) -> Self {
+    pub(crate) fn new(database: Database, scope_id: i64, changed: Arc<Notify>) -> Self {
         Self {
-            read_pool,
-            write_pool,
+            sql: database,
             scope_id,
             changed,
         }
@@ -67,8 +69,8 @@ impl SqliteReadSource for SqlitePartFrontier {
     type Key = PartFrontierKey;
     type Value = PartEvent;
 
-    fn read_pool(&self) -> &SqlitePool {
-        &self.read_pool
+    fn database(&self) -> &Database {
+        &self.sql
     }
 
     fn changed(&self) -> &Notify {
@@ -108,10 +110,7 @@ impl SqliteReadSource for SqlitePartFrontier {
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<FrontierRevision, SqliteReadError>> + Send + '_>> {
         Box::pin(async move {
-            let revision: i64 =
-                sqlx::query_scalar("SELECT value FROM big_sync_meta WHERE key = 'global_cursor'")
-                    .fetch_one(&self.read_pool)
-                    .await?;
+            let revision = queries::global_cursor(&self.sql).await?;
             Ok(u64::try_from(revision).expect("SQLite frontier revision is non-negative"))
         })
     }
@@ -189,18 +188,18 @@ impl SqliteReadSource for SqlitePartFrontier {
 impl KeyedFrontier<PartFrontierKey, PartEvent> for SqlitePartFrontier {
     type Selector = SqlitePartSelector;
     type Context<'a>
-        = Transaction<'a, Sqlite>
+        = Tx
     where
         Self: 'a;
     type Transaction<'a>
-        = SqliteFrontierWrite<'a>
+        = SqliteFrontierWrite
     where
         Self: 'a;
 
     async fn begin<'a>(&'a self) -> KeyedFrontierResult<Self::Transaction<'a>> {
         let transaction = self
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
+            .sql
+            .begin_write()
             .await
             .map_err(|error| KeyedFrontierError::Backend(Box::new(error)))?;
         let changed = Arc::clone(&self.changed);
@@ -235,25 +234,28 @@ impl KeyedFrontier<PartFrontierKey, PartEvent> for SqlitePartFrontier {
 mod tests {
     use super::*;
     use crate::keyed_frontier::contract;
+    use big_sync_core::BuckId;
+    use big_sync_core::ObjKey;
+    use big_sync_core::PartKey;
     use big_sync_core::keyed_frontier::FrontierRevision;
-    use big_sync_core::rpc::{ObjChanged, PartEvent};
-    use big_sync_core::{BuckId, ObjKey, PartKey};
-    use sqlx_utils_rs::SqlCtx;
+    use big_sync_core::rpc::ObjChanged;
+    use big_sync_core::rpc::PartEvent;
+    use sqlite_rs::SqliteRuntime;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use tokio::sync::Notify;
 
     struct SqliteContractHarness {
-        _sql: SqlCtx,
+        _sql: Database,
         frontier: SqlitePartFrontier,
     }
 
     impl SqliteContractHarness {
         async fn new() -> Self {
-            let sql = SqlCtx::memory()
-                .await
+            let sql = SqliteRuntime::new(Default::default())
+                .ephemeral(&[])
                 .expect("create sqlite contract database");
-            crate::sqlite_core::SqliteCore::init_schema(&sql.write_pool, BuckId::MAX_LEVEL)
+            crate::sqlite_core::SqliteCore::init_schema(&sql, BuckId::MAX_LEVEL)
                 .await
                 .expect("initialize sqlite contract schema");
             let core = crate::sqlite_core::SqliteCore::new(
@@ -263,12 +265,8 @@ mod tests {
             )
             .await
             .expect("create sqlite contract core");
-            let frontier = SqlitePartFrontier::new(
-                sql.read_pool.clone(),
-                sql.write_pool.clone(),
-                core.scope_id,
-                Arc::new(Notify::new()),
-            );
+            let frontier =
+                SqlitePartFrontier::new(sql.clone(), core.scope_id, Arc::new(Notify::new()));
             Self {
                 _sql: sql,
                 frontier,

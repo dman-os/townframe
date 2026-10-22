@@ -1,5 +1,6 @@
 [package]
 name = "test_wflows"
+workspace = "../wasm_utils_rs"
 version.workspace = true
 edition.workspace = true
 
@@ -16,7 +17,8 @@ path = "lib.rs"
 [dependencies]
 #
 # internal
-api_utils_rs.workspace = true
+utils_rs.workspace = true
+wasm_utils_rs.workspace = true
 wflow_sdk.workspace = true
 
 #

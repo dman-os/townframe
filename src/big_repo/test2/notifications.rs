@@ -16,11 +16,15 @@
 //! | `noop_mutation_emits_nothing`             | Empty transaction produces no DocChanged.           |
 //! | `local_mutation_emits_doc_changed`        | Local write emits DocChanged with Local origin.     |
 
-use super::harness::{Pair, fixtures};
-use crate::changes::{
-    BigRepoChangeNotification, BigRepoChangeOrigin, ChangeFilter, DocIdFilter, OriginFilter,
-};
-use automerge::{ReadDoc, transaction::Transactable};
+use super::harness::Pair;
+use super::harness::fixtures;
+use crate::changes::BigRepoChangeNotification;
+use crate::changes::BigRepoChangeOrigin;
+use crate::changes::ChangeFilter;
+use crate::changes::DocIdFilter;
+use crate::changes::OriginFilter;
+use automerge::ReadDoc;
+use automerge::transaction::Transactable;
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use std::time::Duration;

@@ -307,7 +307,8 @@ impl PlugsRepo {
     }
 
     fn validate_sha256_digest(digest: &str, bytes: &[u8]) -> Res<()> {
-        use sha2::{Digest as _, Sha256};
+        use sha2::Digest as _;
+        use sha2::Sha256;
         let expected_hex = Self::sha256_hex_from_digest_str(digest)?;
         let actual_hex = format!("{:x}", Sha256::digest(bytes));
         eyre::ensure!(

@@ -249,8 +249,11 @@ pub async fn sqlite_local_state_repo() -> Res<Arc<SqliteLocalStateRepo>> {
     match SQLITE_LOCAL_STATE
         .get_or_try_init(|| async {
             let ctx = repo_ctx().await?;
-            let (repo, stop) =
-                SqliteLocalStateRepo::boot(ctx.layout.repo_root.join("local_state")).await?;
+            let (repo, stop) = SqliteLocalStateRepo::boot(
+                Arc::clone(&ctx.sqlite_runtime),
+                ctx.layout.repo_root.join("local_state"),
+            )
+            .await?;
             register_shutdown(move || async move { stop.stop().await });
             Ok(repo)
         })

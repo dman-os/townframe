@@ -16,9 +16,11 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
-use crate::keyed_frontier::{
-    FrontierEntry, FrontierRead, FrontierRevision, KeyedFrontierError, KeyedFrontierReader,
-};
+use crate::keyed_frontier::FrontierEntry;
+use crate::keyed_frontier::FrontierRead;
+use crate::keyed_frontier::FrontierRevision;
+use crate::keyed_frontier::KeyedFrontierError;
+use crate::keyed_frontier::KeyedFrontierReader;
 
 /// One reader result. `Entries` is one complete atomic revision; its entries
 /// may be empty when a projection advances progress without typed output.

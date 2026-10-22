@@ -10,13 +10,14 @@
 //! imposing `Send` or Tokio types on the actors.
 
 use crate::interlude::*;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use future_form::{FutureForm, Sendable};
-use futures::{
-    FutureExt,
-    future::{AbortHandle, Abortable},
-};
+use future_form::FutureForm;
+use future_form::Sendable;
+use futures::FutureExt;
+use futures::future::AbortHandle;
+use futures::future::Abortable;
 
 /// Platform capability for creating independent task ownership scopes.
 ///
@@ -144,11 +145,11 @@ impl TaskSet<Sendable> for TokioTaskSet {
 pub(crate) mod manual_time {
     use super::Sendable;
     use futures::FutureExt;
-    use std::{
-        sync::Arc,
-        time::{Duration, Instant},
-    };
-    use tokio::sync::{broadcast, watch};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use std::time::Instant;
+    use tokio::sync::broadcast;
+    use tokio::sync::watch;
 
     /// A clock and timer whose time only moves when a test moves it.
     #[derive(Debug)]
@@ -241,7 +242,8 @@ pub(crate) mod manual_time {
 
     mod tests {
         use super::ManualTime;
-        use crate::runtime2::{Clock, Timer};
+        use crate::runtime2::Clock;
+        use crate::runtime2::Timer;
         use future_form::Sendable;
         use std::time::Duration;
 

@@ -2,10 +2,13 @@ use crate::interlude::*;
 
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 
-use super::{
-    DaybookPlugin, binds_guest, capabilities, mltools_embed, mltools_image_tools, mltools_llm_chat,
-    mltools_ocr,
-};
+use super::DaybookPlugin;
+use super::binds_guest;
+use super::capabilities;
+use super::mltools_embed;
+use super::mltools_image_tools;
+use super::mltools_llm_chat;
+use super::mltools_ocr;
 
 async fn mltools_ctx_from_config_repo(plugin: &DaybookPlugin) -> mltools::Ctx {
     mltools::Ctx {

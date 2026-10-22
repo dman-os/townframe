@@ -6,9 +6,13 @@ mod interlude {
     pub use future_form::FutureForm;
 
     // FIXME: consider using indexed map instead
-    pub use std::collections::{HashMap as Map, HashSet as Set};
+    pub use std::collections::HashMap as Map;
+    pub use std::collections::HashSet as Set;
 
-    pub use crate::ids::{BuckId, ObjKey, PartKey, PeerKey};
+    pub use crate::ids::BuckId;
+    pub use crate::ids::ObjKey;
+    pub use crate::ids::PartKey;
+    pub use crate::ids::PeerKey;
 }
 
 /// Per-part sync mode: `CursorOnly` skips the bucket-diff path entirely;
@@ -59,20 +63,30 @@ use rpc::*;
 pub mod scheduler;
 mod tasks;
 pub mod watermark;
-use crate::scheduler::{Scheduler, SpawnedTask};
+use crate::scheduler::Scheduler;
+use crate::scheduler::SpawnedTask;
 use crate::tasks::leaf_buckets::*;
 use crate::tasks::list_bucket::*;
 use tasks::decide_peer_strat::*;
 use tasks::replay_page::*;
 use tasks::*;
 
-pub use fingerprint::{Fingerprint, FingerprintSeed};
-pub use ids::{BuckId, ByteKey, ObjKey, PartKey, PeerKey};
+pub use fingerprint::Fingerprint;
+pub use fingerprint::FingerprintSeed;
+pub use ids::BuckId;
+pub use ids::ByteKey;
+pub use ids::ObjKey;
+pub use ids::PartKey;
+pub use ids::PeerKey;
+pub use tasks::MachineTask;
+pub use tasks::MachineTaskMsg;
+pub use tasks::SyncTask;
+pub use tasks::SyncTaskDeets;
+pub use tasks::SyncTaskKind;
 #[cfg(any(test, feature = "test-support"))]
 pub use tasks::TaskCounts;
-pub use tasks::{
-    MachineTask, MachineTaskMsg, SyncTask, SyncTaskDeets, SyncTaskKind, TaskCtx, TaskId,
-};
+pub use tasks::TaskCtx;
+pub use tasks::TaskId;
 
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();

@@ -30,16 +30,17 @@
 //! the store's own GC, which reclaims exactly what nothing else roots.
 
 use crate::interlude::*;
+
+use crate::blobs::sqlite::queries;
 use daybook_types::doc::DocId;
 use iroh_blobs::Hash;
-use sqlx::Row;
 
 /// The durable root record for `ct:<C>`/`pt:<C>` pairs.
 ///
 /// Cheap to clone: it is the local-state SQL context, not a pool of its own.
 #[derive(Clone)]
 pub struct PairRoots {
-    sql: SqlCtx,
+    sql: Database,
 }
 
 /// One ledger row a boot has to resolve.
@@ -57,24 +58,15 @@ impl PairRoots {
     /// Open the record over a booted local-state database.
     ///
     /// Idempotent, so every component that roots or resolves pairs may call it
-    /// over the same `SqlCtx`.
-    pub(crate) async fn boot(sql: SqlCtx) -> Res<Self> {
+    /// over the same `Database`.
+    pub(crate) async fn boot(sql: Database) -> Res<Self> {
         Self::init_schema(&sql).await?;
         Ok(Self { sql })
     }
 
-    async fn init_schema(sql: &SqlCtx) -> Res<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS blob_pair_root (
-                cipher_hash TEXT NOT NULL PRIMARY KEY
-              , doc_id TEXT
-              , branch_path TEXT
-            ) STRICT
-            "#,
-        )
-        .execute(&sql.write_pool)
-        .await?;
+    async fn init_schema(sql: &Database) -> Res<()> {
+        sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+            .await?;
         Ok(())
     }
 
@@ -89,10 +81,7 @@ impl PairRoots {
     /// replays this on the next attempt, and the row it already has is the one
     /// that says the pair is still unresolved.
     pub(crate) async fn record_before_root(&self, c_hash: Hash) -> Res<()> {
-        sqlx::query("INSERT OR IGNORE INTO blob_pair_root (cipher_hash) VALUES (?)")
-            .bind(c_hash.to_hex())
-            .execute(&self.sql.write_pool)
-            .await?;
+        queries::pair_root_record(&self.sql, c_hash.to_hex().to_string()).await?;
         Ok(())
     }
 
@@ -108,21 +97,14 @@ impl PairRoots {
         doc_id: &DocId,
         branch_path: &str,
     ) -> Res<()> {
-        let mut tx = self.sql.write_pool.begin().await?;
-        sqlx::query("INSERT OR IGNORE INTO blob_pair_root (cipher_hash) VALUES (?)")
-            .bind(c_hash.to_hex())
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "UPDATE blob_pair_root
-                SET doc_id = ?
-                  , branch_path = ?
-              WHERE cipher_hash = ?",
+        let tx = self.sql.begin_write().await?;
+        queries::pair_root_record(&tx, c_hash.to_hex().to_string()).await?;
+        queries::pair_root_set_provenance(
+            &tx,
+            doc_id.clone(),
+            branch_path.to_owned(),
+            c_hash.to_hex().to_string(),
         )
-        .bind(doc_id)
-        .bind(branch_path)
-        .bind(c_hash.to_hex())
-        .execute(&mut *tx)
         .await?;
         tx.commit().await?;
         Ok(())
@@ -134,10 +116,7 @@ impl PairRoots {
     /// Deleting an absent row is a no-op, so both the boot drain and the pin
     /// worker may call this without coordinating.
     pub(crate) async fn clear(&self, c_hash: Hash) -> Res<()> {
-        sqlx::query("DELETE FROM blob_pair_root WHERE cipher_hash = ?")
-            .bind(c_hash.to_hex())
-            .execute(&self.sql.write_pool)
-            .await?;
+        queries::pair_root_clear(&self.sql, c_hash.to_hex().to_string()).await?;
         Ok(())
     }
 
@@ -147,12 +126,11 @@ impl PairRoots {
     /// The drain resolves rows independently and in any order, so no ordering is
     /// asked of the database here.
     pub(crate) async fn unresolved(&self) -> Res<Vec<UnresolvedPair>> {
-        let rows = sqlx::query("SELECT cipher_hash, doc_id, branch_path FROM blob_pair_root")
-            .fetch_all(&self.sql.read_pool)
-            .await?;
-        rows.into_iter()
+        queries::pair_roots_unresolved(&self.sql)
+            .await?
+            .into_iter()
             .map(|row| {
-                let hex: String = row.try_get("cipher_hash")?;
+                let hex = row.cipher_hash;
                 let cipher_hash = hex.parse::<Hash>().map_err(|err| {
                     // Only this module writes rows, and it writes canonical hex:
                     // a row we cannot parse means the table was tampered with,
@@ -160,8 +138,8 @@ impl PairRoots {
                     // would strand the pair's tags forever.
                     eyre::eyre!("blob_pair_root holds {hex}, not a content hash: {err}")
                 })?;
-                let doc_id: Option<DocId> = row.try_get("doc_id")?;
-                let branch_path: Option<String> = row.try_get("branch_path")?;
+                let doc_id: Option<DocId> = row.doc_id;
+                let branch_path = row.branch_path;
                 // Both columns come from one statement or neither does, so a
                 // half-filled provenance is not a state this table can be in.
                 // Treating it as absent costs only a conservative leave.
@@ -181,7 +159,8 @@ mod tests {
     /// A row survives a reboot with its provenance, and `clear` retires it.
     #[tokio::test]
     async fn provenance_round_trips_across_a_boot() -> Res<()> {
-        let sql = SqlCtx::memory().await?;
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+        let sql = runtime.ephemeral(&[])?;
         let roots = PairRoots::boot(sql.clone()).await?;
         let blob_id = crate::blobs::BlobId::new(*blake3::hash(b"pair root round trip").as_bytes());
         let c_hash = crate::blobs::blob_id_to_iroh_hash(blob_id);

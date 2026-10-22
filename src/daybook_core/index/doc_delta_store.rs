@@ -27,15 +27,21 @@
 //! because the Branch facet pins the branch name to the physical doc id.
 
 use crate::interlude::*;
-use big_repo::{AutomergeFrontierEvent, AutomergeFrontierSelector};
-use big_sync_core::delta_walker_sparse_state::{
-    DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
-};
-use big_sync_core::delta_walker_state::{DeltaWalkerStateRepo, DeltaWalkerStateTransaction};
-use big_sync_core::revisioned_store::{RevisionRead, RevisionedStore, RevisionedStoreReader};
-use daybook_types::doc::{BranchId, ChangeHashSet};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use big_repo::AutomergeFrontierEvent;
+use big_repo::AutomergeFrontierSelector;
+use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateRepo;
+use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateTransaction;
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
+use big_sync_core::delta_walker_state::DeltaWalkerStateTransaction;
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionedStore;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
+use daybook_types::doc::BranchId;
+use daybook_types::doc::ChangeHashSet;
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 
 /// Sparse per-site memory row for one physical branch.
 ///
@@ -409,10 +415,11 @@ fn memory_error(error: impl std::fmt::Display) -> eyre::Report {
 mod tests {
     use super::*;
     use big_repo::AutomergeFrontierTarget;
-    use big_sync_core::concurrent_delta_walker::{ConcurrentDeltaRead, ConcurrentDeltaWalker};
-    use big_sync_core::delta_walker_state::{
-        DeltaWalkerProgress, DeltaWalkerStateError, DeltaWalkerStateResult,
-    };
+    use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+    use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
+    use big_sync_core::delta_walker_state::DeltaWalkerProgress;
+    use big_sync_core::delta_walker_state::DeltaWalkerStateError;
+    use big_sync_core::delta_walker_state::DeltaWalkerStateResult;
     use big_sync_core::revisioned_store::RevisionReadLimits;
     use std::collections::VecDeque;
     use std::num::NonZeroUsize;

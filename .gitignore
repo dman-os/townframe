@@ -1,4 +1,5 @@
 /target
+/src/*/target
 *.env*
 !.env.example*
 .aider*
@@ -54,3 +55,4 @@ generated/**
 **/wit/deps/
 
 specs
+result

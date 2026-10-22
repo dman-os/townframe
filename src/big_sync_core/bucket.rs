@@ -5,11 +5,15 @@
 use crate::interlude::*;
 
 use crate::SyncJobEvt;
-use crate::fingerprint::{Fingerprint, FingerprintSeed};
-use crate::part_store::{CursorIndex, ObjPayload, PartStoreReadOnly};
-use crate::rpc::{
-    BuckLevel, BucketSummary, LeafBucketPage as RawLeafBucketPage, LeafBucketRequest,
-};
+use crate::fingerprint::Fingerprint;
+use crate::fingerprint::FingerprintSeed;
+use crate::part_store::CursorIndex;
+use crate::part_store::ObjPayload;
+use crate::part_store::PartStoreReadOnly;
+use crate::rpc::BuckLevel;
+use crate::rpc::BucketSummary;
+use crate::rpc::LeafBucketPage as RawLeafBucketPage;
+use crate::rpc::LeafBucketRequest;
 
 use std::collections::BTreeMap;
 

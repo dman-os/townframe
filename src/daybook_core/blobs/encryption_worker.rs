@@ -34,37 +34,58 @@
 use crate::blobs::pair_roots::PairRoots;
 use crate::interlude::*;
 
-use daybook_types::doc::{
-    AddDocArgs, Blob, BranchId, BranchPathBuf, ChangeHashSet, CipherBlob, DocId, DocPatch,
-    FacetKey, FacetRaw, FacetTag, Jwk, Representation, WellKnownFacet, WellKnownFacetTag,
-};
+use daybook_types::doc::AddDocArgs;
+use daybook_types::doc::Blob;
+use daybook_types::doc::BranchId;
+use daybook_types::doc::BranchPathBuf;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::CipherBlob;
+use daybook_types::doc::DocId;
+use daybook_types::doc::DocPatch;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetRaw;
+use daybook_types::doc::FacetTag;
+use daybook_types::doc::Jwk;
+use daybook_types::doc::Representation;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
 use tokio_util::sync::CancellationToken;
 
-use crate::blobs::encrypt::{
-    CONTENT_ENCODING_AES128GCM, CipherBlobProvider, CipherKeySource, EncodingParams, JwkOct,
-    MasterKey,
-};
+use crate::blobs::BlobId;
+use crate::blobs::blob_id_to_digest_str;
+use crate::blobs::digest_str_to_blob_id_lenient;
+use crate::blobs::encrypt::CONTENT_ENCODING_AES128GCM;
+use crate::blobs::encrypt::CipherBlobProvider;
+use crate::blobs::encrypt::CipherKeySource;
+use crate::blobs::encrypt::EncodingParams;
+use crate::blobs::encrypt::JwkOct;
+use crate::blobs::encrypt::MasterKey;
 use crate::blobs::key_source::DocKeySource;
-use crate::blobs::{BlobId, blob_id_to_digest_str, digest_str_to_blob_id_lenient};
-use crate::drawer::{DrawerRepo, FacetWriteScope};
+use crate::drawer::DrawerRepo;
+use crate::drawer::FacetWriteScope;
 use crate::index::facet_delta::FacetDelta;
-use crate::index::facet_set::{DocFacetSetIndexRepo, FacetSetRevisionStore, FacetSetSelector};
+use crate::index::facet_set::DocFacetSetIndexRepo;
+use crate::index::facet_set::FacetSetRevisionStore;
+use crate::index::facet_set::FacetSetSelector;
 use crate::repos::RepoStopToken;
 use big_repo::BigKeyhiveGroup;
 use big_repo::SharedPartStore;
+use big_sync::DeltaWalkerSparseStateRepo as _;
+use big_sync::DeltaWalkerSparseStateTransaction as _;
 use big_sync::DeltaWalkerStateRepo as _;
+use big_sync::DeltaWalkerStateTransaction as _;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
-use big_sync::{
-    DeltaWalkerSparseStateRepo as _, DeltaWalkerSparseStateTransaction as _,
-    DeltaWalkerStateTransaction as _,
-};
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
-};
-use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits, RevisionedStore as _};
+use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
+use big_sync_core::concurrent_delta_walker::ConcurrentDelta;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStore as _;
 use big_sync_core::rpc::PartEvent;
-use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
-use big_sync_core::{ObjKey, PartKey};
+use big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler;
+use big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion;
 use iroh_blobs::Hash;
 use iroh_blobs::api::proto::BlobStatus;
 
@@ -104,7 +125,43 @@ const ENCRYPTION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_se
 /// Production builds carry the zero-sized no-op impl below; the `Ctx` field,
 /// the feeder handle and the exec seams' call sites are identical in both.
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicBool;
+/// Test seam for the rescheduling contract. Every production failure this
+/// worker can see is either racy or needs a write to the document - and a
+/// document write would itself produce the delta the contract must be tested
+/// without.
+///
+/// State is per machine, never process-global: one instance is born with its
+/// worker's [`Ctx`] and the spawned feeder carries the same handle, so two
+/// concurrently running workers (and the tests that drive them) cannot
+/// cross-infect each other. Production builds compile a zero-sized no-op so
+/// the machine's plumbing is byte-for-byte the same in both builds.
+/// Fault-injection and attribution state, one instance per machine: test
+/// builds arm failures and count attempts on their own worker's handle, so
+/// concurrently running workers (and the tests that drive them) cannot
+/// cross-infect each other the way the previous process-global statics did.
+/// Production builds carry the zero-sized no-op impl below; the `Ctx` field,
+/// the feeder handle and the exec seams' call sites are identical in both.
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+/// Test seam for the rescheduling contract. Every production failure this
+/// worker can see is either racy or needs a write to the document - and a
+/// document write would itself produce the delta the contract must be tested
+/// without.
+///
+/// State is per machine, never process-global: one instance is born with its
+/// worker's [`Ctx`] and the spawned feeder carries the same handle, so two
+/// concurrently running workers (and the tests that drive them) cannot
+/// cross-infect each other. Production builds compile a zero-sized no-op so
+/// the machine's plumbing is byte-for-byte the same in both builds.
+/// Fault-injection and attribution state, one instance per machine: test
+/// builds arm failures and count attempts on their own worker's handle, so
+/// concurrently running workers (and the tests that drive them) cannot
+/// cross-infect each other the way the previous process-global statics did.
+/// Production builds carry the zero-sized no-op impl below; the `Ctx` field,
+/// the feeder handle and the exec seams' call sites are identical in both.
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 #[cfg(test)]
 pub(crate) struct Faults {
@@ -218,7 +275,7 @@ const MAIN_BRANCH: &str = "main";
 /// self-describing.
 pub(crate) struct BlobEncryptionWorkerArgs {
     pub drawer_repo: Arc<DrawerRepo>,
-    pub sql: SqlCtx,
+    pub sql: Database,
     pub blobs_repo: Arc<crate::blobs::BlobsRepo>,
     pub facet_set_store: Arc<FacetSetRevisionStore>,
     pub facet_index: Arc<DocFacetSetIndexRepo>,
@@ -270,7 +327,7 @@ pub(crate) struct EncryptionFeederArgs {
     /// blob-arrival plane.
     pub presence_store: SharedPartStore,
     pub facet_index: Arc<DocFacetSetIndexRepo>,
-    pub sql: SqlCtx,
+    pub sql: Database,
     pub trigger_tx: tokio::sync::mpsc::Sender<EncryptDocTrigger>,
     /// The worker machine's fault/attribution handle, shared with the feeder's
     /// presence line so `count_presence` lands on the same per-machine state.
@@ -314,8 +371,7 @@ pub(crate) async fn spawn_encryption_trigger_feeder(
         faults,
     } = args;
     let state_repo = big_sync::SqliteDeltaWalkerStateRepo::new(
-        sql.read_pool.clone(),
-        sql.write_pool.clone(),
+        sql.clone(),
         ENCRYPTION_WORKER_STATE_ID.to_string(),
         "presence-tail".to_string(),
     )
@@ -748,7 +804,8 @@ fn physical_doc_id(doc_id: &DocId) -> Res<big_repo::DocumentId> {
 struct EncryptionKey(u64);
 
 fn encryption_facet_key(branch_id: &BranchId) -> EncryptionKey {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     branch_id.0.hash(&mut hasher);
     EncryptionKey(hasher.finish())
@@ -793,7 +850,7 @@ fn resolves_through(blob: &Blob, cipher_key: &FacetKey) -> bool {
 /// Shared state: one domain, one inventory, one provider.
 struct Ctx {
     drawer_repo: Arc<DrawerRepo>,
-    sql: SqlCtx,
+    sql: Database,
     pair_roots: PairRoots,
     store: iroh_blobs::api::Store,
     provider: Arc<CipherBlobProvider>,
@@ -1045,14 +1102,12 @@ impl Worker {
         // eligibility before or after either), so no boot pass over the
         // corpus precedes the machine. See the feeder's state-id comment and
         // ADR 003 §13.
-        let state = SqliteDeltaWalkerStateRepo::new(
-            self.sql.read_pool.clone(),
-            self.sql.write_pool.clone(),
-            ENCRYPTION_WORKER_STATE_ID,
-            "facets",
-        )
-        .await
-        .map_err(|error| ferr!("initializing blob-encryption FacetSet walker state: {error}"))?;
+        let state =
+            SqliteDeltaWalkerStateRepo::new(self.sql.clone(), ENCRYPTION_WORKER_STATE_ID, "facets")
+                .await
+                .map_err(|error| {
+                    ferr!("initializing blob-encryption FacetSet walker state: {error}")
+                })?;
         let durable = state.progress().await?.upstream_revision;
         let reader = facet_set_store
             .open(

@@ -6,19 +6,23 @@
 //! derived work has completed successfully.
 
 use crate::interlude::*;
-use crate::keyhive::{BigKeyhiveHandle, EventSubject};
-use crate::runtime2::{WorkerGroupScope, keyhive_admission};
-use crate::store::sqlite::{GroupPartReconciliation, SqliteBigRepoStore};
+use crate::keyhive::BigKeyhiveHandle;
+use crate::keyhive::EventSubject;
+use crate::runtime2::WorkerGroupScope;
+use crate::runtime2::keyhive_admission;
+use crate::store::sqlite::GroupPartReconciliation;
+use crate::store::sqlite::SqliteBigRepoStore;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDeltaRead, ConcurrentDeltaWalker, DeltaAck,
-};
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
+use big_sync_core::concurrent_delta_walker::DeltaAck;
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
 use big_sync_core::outbox::Outbox;
 use big_sync_core::revisioned_store::RevisionedStore;
 use future_form::Sendable;
 use keyhive_core::event::static_event::StaticEvent;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const CONCURRENT_TASK_BUDGET: usize = 64;
@@ -53,13 +57,8 @@ pub fn spawn_group_part_worker(
     let run = Sendable::from_future(async move {
         let fut = async move {
             let identity = crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_GROUP_PART;
-            let state = SqliteDeltaWalkerStateRepo::new(
-                store.sql.read_pool.clone(),
-                store.sql.write_pool.clone(),
-                identity.0,
-                identity.1,
-            )
-            .await?;
+            let state =
+                SqliteDeltaWalkerStateRepo::new(store.sql.clone(), identity.0, identity.1).await?;
 
             // The walker's durable revision is the authority on what has been
             // reconciled: it advances only after every sink task for that prefix has
@@ -944,15 +943,14 @@ mod tests {
     use crate::keyhive_listener::BigRepoKeyhiveListener;
     use crate::keyhive_storage::BigRepoKeyhiveStorage;
     use big_sync_core::BuckId;
-    use big_sync_core::revisioned_store::{
-        RevisionRead, RevisionReadLimits, RevisionedStoreReader,
-    };
+    use big_sync_core::revisioned_store::RevisionRead;
+    use big_sync_core::revisioned_store::RevisionReadLimits;
+    use big_sync_core::revisioned_store::RevisionedStoreReader;
     use keyhive_core::access::Access;
     use keyhive_core::event::Event;
     use keyhive_core::principal::group::id::GroupId as KhGroupId;
     use keyhive_core::principal::identifier::Identifier;
     use keyhive_core::principal::membered::Membered;
-    use sqlx_utils_rs::SqlCtx;
     use std::collections::BTreeMap;
     use subduction_keyhive::storage::StorageHash;
 
@@ -1043,7 +1041,9 @@ mod tests {
     /// test timeout would be the only signal.
     #[tokio::test]
     async fn the_admission_read_waits_on_the_injected_timer_not_wall_clock() {
-        let sql = SqlCtx::memory().await.expect("create sqlite database");
+        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .expect("create sqlite database");
         let store = SqliteBigRepoStore::new(sql, "group-part-manual-time", BuckId::MAX_LEVEL)
             .await
             .expect("create sqlite big repo store");

@@ -10,8 +10,7 @@ workspace = true
 path = "lib.rs"
 
 [features]
-default = ["hash", "native", "downloader"]
-downloader = ["dep:reqwest", "tokio/fs", "tokio/io-util"]
+default = ["hash"]
 hash = [
     "dep:multihash",
     "dep:json-canon",
@@ -19,11 +18,6 @@ hash = [
     "tokio/io-util",
     "dep:blake3",
 ]
-native = [
-    "tokio/rt-multi-thread",
-    # "dep:ahash",
-]
-wasm = ["uuid/js"]
 
 [dependencies]
 #
@@ -31,7 +25,6 @@ wasm = ["uuid/js"]
 async-trait.workspace = true
 futures.workspace = true
 tokio = { workspace = true, features = ["sync", "macros", "rt", "time", "tracing"] }
-reqwest = { workspace = true, default-features = false, features = ["stream", "rustls-tls"], optional = true }
 
 #
 # encoding
@@ -82,6 +75,11 @@ tracing-futures.workspace = true
 color-eyre.workspace = true
 multibase = "0.9.2"
 
+
+[target.wasm32-unknown-unknown.dependencies]
+uuid = { version = "1", features = ["js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom-03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 tracing-android = "0.2"

@@ -9,13 +9,22 @@
 use crate::interlude::*;
 
 use crate::blobs::BlobId;
-use crate::blobs::encrypt::{CipherKeySource, EncodingParams, JwkOct, MasterKey};
+use crate::blobs::encrypt::CipherKeySource;
+use crate::blobs::encrypt::EncodingParams;
+use crate::blobs::encrypt::JwkOct;
+use crate::blobs::encrypt::MasterKey;
 use crate::drawer::DrawerRepo;
-use daybook_types::doc::{
-    BranchPathBuf, CipherBlob, DocId, FacetKey, FacetRaw, FacetTag, Jwk, WellKnownFacet,
-    WellKnownFacetTag,
-};
-use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
+use daybook_types::doc::BranchPathBuf;
+use daybook_types::doc::CipherBlob;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetRaw;
+use daybook_types::doc::FacetTag;
+use daybook_types::doc::Jwk;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
+use daybook_types::url::FACET_SELF_DOC_ID;
+use daybook_types::url::parse_facet_ref;
 use iroh_blobs::Hash;
 
 /// Resolves a representation's key through the document that names it.
@@ -255,21 +264,30 @@ fn master_key_from_jwk(jwk: &Jwk, ct_hash: &Hash) -> Res<MasterKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::SqlCtx;
-    use crate::blobs::encrypt::{
-        CONTENT_ENCODING_AES128GCM, CipherBlobProvider, Padding, add_encrypted, get_decrypted,
-    };
+    use crate::blobs::encrypt::CONTENT_ENCODING_AES128GCM;
+    use crate::blobs::encrypt::CipherBlobProvider;
+    use crate::blobs::encrypt::Padding;
+    use crate::blobs::encrypt::add_encrypted;
+    use crate::blobs::encrypt::get_decrypted;
     use crate::blobs::pair_roots::PairRoots;
-    use crate::test_support::{stage_key_doc, test_cx, write_jwk_facet};
-    use daybook_types::doc::{AddDocArgs, BranchPath, ChangeHashSet, DocPatch, Representation};
-    use iroh_blobs::api::{Store, proto::BlobStatus};
+    use crate::test_support::stage_key_doc;
+    use crate::test_support::test_cx;
+    use crate::test_support::write_jwk_facet;
+    use daybook_types::doc::AddDocArgs;
+    use daybook_types::doc::BranchPath;
+    use daybook_types::doc::ChangeHashSet;
+    use daybook_types::doc::DocPatch;
+    use daybook_types::doc::Representation;
+    use iroh_blobs::api::Store;
+    use iroh_blobs::api::proto::BlobStatus;
     use iroh_blobs::store::mem::MemStore;
 
     /// A throwaway root record: these tests exercise the store-level provider, so
     /// the record only has to exist because every rooting path writes it before
     /// the tags it guards.
     async fn test_pair_roots() -> Res<PairRoots> {
-        PairRoots::boot(SqlCtx::memory().await?).await
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+        PairRoots::boot(runtime.ephemeral(&[])?).await
     }
 
     /// ADR 003 §3 makes the multihash spelling canonical for a facet digest.

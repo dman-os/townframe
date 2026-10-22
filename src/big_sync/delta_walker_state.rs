@@ -1,67 +1,43 @@
 //! SQLite state for one embedder-owned delta walker.
 
-use big_sync_core::delta_walker_sparse_state::{
-    DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
-};
-use big_sync_core::delta_walker_state::{
-    DeltaWalkerProgress, DeltaWalkerStateError, DeltaWalkerStateRepo, DeltaWalkerStateResult,
-    DeltaWalkerStateTransaction,
-};
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use crate::sqlite::queries;
+use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateRepo;
+use big_sync_core::delta_walker_sparse_state::DeltaWalkerSparseStateTransaction;
+use big_sync_core::delta_walker_state::DeltaWalkerProgress;
+use big_sync_core::delta_walker_state::DeltaWalkerStateError;
+use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
+use big_sync_core::delta_walker_state::DeltaWalkerStateResult;
+use big_sync_core::delta_walker_state::DeltaWalkerStateTransaction;
+use sqlite_rs::Database;
+use sqlite_rs::Sql;
+use sqlite_rs::Tx;
 use std::sync::Arc;
 use utils_rs::prelude::async_trait;
 
 #[derive(Clone)]
 pub struct SqliteDeltaWalkerStateRepo {
-    read_pool: SqlitePool,
-    write_pool: SqlitePool,
+    sql: Database,
     namespace: Arc<str>,
     consumer_id: Arc<str>,
 }
 
 impl SqliteDeltaWalkerStateRepo {
     pub async fn new(
-        read_pool: SqlitePool,
-        write_pool: SqlitePool,
+        database: Database,
         namespace: impl Into<Arc<str>>,
         consumer_id: impl Into<Arc<str>>,
     ) -> DeltaWalkerStateResult<Self> {
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS delta_walker_progress (
-                namespace TEXT NOT NULL
-              , consumer_id TEXT NOT NULL
-              , upstream_revision INTEGER NOT NULL
-              , PRIMARY KEY(namespace, consumer_id)
-            ) STRICT"#,
-        )
-        .execute(&write_pool)
-        .await
-        .map_err(backend)?;
-        sqlx::query(
-            r#"CREATE TABLE IF NOT EXISTS delta_walker_key_state (
-                namespace TEXT NOT NULL
-              , consumer_id TEXT NOT NULL
-              , state_key BLOB NOT NULL
-              , state_value BLOB NOT NULL
-              , PRIMARY KEY(namespace, consumer_id, state_key)
-            ) STRICT"#,
-        )
-        .execute(&write_pool)
-        .await
-        .map_err(backend)?;
-        let namespace = namespace.into();
-        let consumer_id = consumer_id.into();
-        sqlx::query(
-            "INSERT OR IGNORE INTO delta_walker_progress(namespace, consumer_id, upstream_revision) VALUES (?, ?, 0)",
-        )
-        .bind(namespace.as_ref())
-        .bind(consumer_id.as_ref())
-        .execute(&write_pool)
-        .await
-        .map_err(backend)?;
+        database
+            .apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+            .await
+            .map_err(backend)?;
+        let namespace: Arc<str> = namespace.into();
+        let consumer_id: Arc<str> = consumer_id.into();
+        queries::walker_init_progress(&database, namespace.to_string(), consumer_id.to_string())
+            .await
+            .map_err(backend)?;
         Ok(Self {
-            read_pool,
-            write_pool,
+            sql: database,
             namespace,
             consumer_id,
         })
@@ -92,19 +68,12 @@ impl SqliteDeltaWalkerStateRepo {
         Self::retention_reader_id_of(self.namespace(), self.consumer_id())
     }
 
-    pub async fn begin(&self) -> DeltaWalkerStateResult<SqliteDeltaWalkerStateTransaction<'_>> {
-        let transaction = self
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(backend)?;
+    pub async fn begin(&self) -> DeltaWalkerStateResult<SqliteDeltaWalkerStateTransaction> {
+        let transaction = self.sql.begin_write().await.map_err(backend)?;
         Ok(self.begin_with_context(transaction))
     }
 
-    pub fn begin_with_context<'a>(
-        &'a self,
-        transaction: Transaction<'a, Sqlite>,
-    ) -> SqliteDeltaWalkerStateTransaction<'a> {
+    pub fn begin_with_context(&self, transaction: Tx) -> SqliteDeltaWalkerStateTransaction {
         SqliteDeltaWalkerStateTransaction {
             transaction: Some(transaction),
             namespace: Arc::clone(&self.namespace),
@@ -116,21 +85,20 @@ impl SqliteDeltaWalkerStateRepo {
 #[async_trait]
 impl DeltaWalkerStateRepo for SqliteDeltaWalkerStateRepo {
     type Context<'a>
-        = Transaction<'a, Sqlite>
+        = Tx
     where
         Self: 'a;
     type Transaction<'a>
-        = SqliteDeltaWalkerStateTransaction<'a>
+        = SqliteDeltaWalkerStateTransaction
     where
         Self: 'a;
 
     async fn progress(&self) -> DeltaWalkerStateResult<DeltaWalkerProgress> {
-        let revision: Option<i64> = sqlx::query_scalar(
-            "SELECT upstream_revision FROM delta_walker_progress WHERE namespace = ? AND consumer_id = ?",
+        let revision = queries::walker_progress(
+            &self.sql,
+            self.namespace.to_string(),
+            self.consumer_id.to_string(),
         )
-        .bind(self.namespace.as_ref())
-        .bind(self.consumer_id.as_ref())
-        .fetch_optional(&self.read_pool)
         .await
         .map_err(backend)?;
         Ok(DeltaWalkerProgress {
@@ -155,13 +123,12 @@ impl DeltaWalkerStateRepo for SqliteDeltaWalkerStateRepo {
 #[async_trait]
 impl DeltaWalkerSparseStateRepo for SqliteDeltaWalkerStateRepo {
     async fn get(&self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
-        sqlx::query_scalar(
-            "SELECT state_value FROM delta_walker_key_state WHERE namespace = ? AND consumer_id = ? AND state_key = ?",
+        queries::walker_state_value(
+            &self.sql,
+            self.namespace.to_string(),
+            self.consumer_id.to_string(),
+            key.to_vec(),
         )
-        .bind(self.namespace.as_ref())
-        .bind(self.consumer_id.as_ref())
-        .bind(key)
-        .fetch_optional(&self.read_pool)
         .await
         .map_err(backend)
     }
@@ -170,43 +137,30 @@ impl DeltaWalkerSparseStateRepo for SqliteDeltaWalkerStateRepo {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let mut query = sqlx::QueryBuilder::<Sqlite>::new(
+        let mut query = Sql::new(
             "SELECT state_key, state_value FROM delta_walker_key_state WHERE namespace = ",
         );
-        query.push_bind(self.namespace.as_ref());
+        query.bind(self.namespace.as_ref());
         query.push(" AND consumer_id = ");
-        query.push_bind(self.consumer_id.as_ref());
-        query.push(" AND state_key IN (");
-        let mut separated = query.separated(", ");
-        for key in keys {
-            separated.push_bind(key.as_slice());
-        }
-        separated.push_unseparated(")");
-        let rows = query
-            .build()
-            .fetch_all(&self.read_pool)
+        query.bind(self.consumer_id.as_ref());
+        query.push(" AND state_key IN ");
+        query.bind_list(keys.iter().map(Vec::as_slice));
+        query
+            .query(&self.sql)
             .await
-            .map_err(backend)?;
-        rows.into_iter()
-            .map(|row| {
-                use sqlx::Row;
-                Ok((
-                    row.try_get("state_key").map_err(backend)?,
-                    row.try_get("state_value").map_err(backend)?,
-                ))
-            })
-            .collect()
+            .and_then(sqlite_rs::ResultSet::all)
+            .map_err(backend)
     }
 }
 
-pub struct SqliteDeltaWalkerStateTransaction<'a> {
-    transaction: Option<Transaction<'a, Sqlite>>,
+pub struct SqliteDeltaWalkerStateTransaction {
+    transaction: Option<Tx>,
     namespace: Arc<str>,
     consumer_id: Arc<str>,
 }
 
-impl<'a> SqliteDeltaWalkerStateTransaction<'a> {
-    fn tx(&mut self) -> DeltaWalkerStateResult<&mut Transaction<'a, Sqlite>> {
+impl SqliteDeltaWalkerStateTransaction {
+    fn tx(&mut self) -> DeltaWalkerStateResult<&mut Tx> {
         self.transaction.as_mut().ok_or_else(|| {
             backend(std::io::Error::other(
                 "sqlite delta walker state transaction missing",
@@ -215,23 +169,20 @@ impl<'a> SqliteDeltaWalkerStateTransaction<'a> {
     }
 
     async fn current_revision(&mut self) -> DeltaWalkerStateResult<u64> {
-        let namespace = Arc::clone(&self.namespace);
-        let consumer_id = Arc::clone(&self.consumer_id);
-        let revision: i64 = sqlx::query_scalar(
-            "SELECT upstream_revision FROM delta_walker_progress WHERE namespace = ? AND consumer_id = ?",
-        )
-        .bind(namespace.as_ref())
-        .bind(consumer_id.as_ref())
-        .fetch_one(&mut **self.tx()?)
-        .await
-        .map_err(backend)?;
+        let namespace = self.namespace.to_string();
+        let consumer_id = self.consumer_id.to_string();
+        let revision = queries::walker_progress(self.tx()?, namespace, consumer_id)
+            .await
+            .map_err(backend)?
+            // `new` seeds the progress row before any transaction can start.
+            .expect("delta walker progress row present");
         revision.try_into().map_err(backend)
     }
 }
 
 #[async_trait]
-impl<'a> DeltaWalkerStateTransaction for SqliteDeltaWalkerStateTransaction<'a> {
-    type Context = Transaction<'a, Sqlite>;
+impl DeltaWalkerStateTransaction for SqliteDeltaWalkerStateTransaction {
+    type Context = Tx;
 
     fn context_mut(&mut self) -> &mut Self::Context {
         self.transaction
@@ -252,17 +203,18 @@ impl<'a> DeltaWalkerStateTransaction for SqliteDeltaWalkerStateTransaction<'a> {
                 next,
             });
         }
-        let changed = sqlx::query(
-            "UPDATE delta_walker_progress SET upstream_revision = ? WHERE namespace = ? AND consumer_id = ? AND upstream_revision = ?",
+        let namespace = self.namespace.to_string();
+        let consumer_id = self.consumer_id.to_string();
+        let changed = queries::walker_advance_progress(
+            self.tx()?,
+            i64::try_from(next).map_err(backend)?,
+            namespace,
+            consumer_id,
+            i64::try_from(expected).map_err(backend)?,
         )
-        .bind(i64::try_from(next).map_err(backend)?)
-        .bind(self.namespace.as_ref())
-        .bind(self.consumer_id.as_ref())
-        .bind(i64::try_from(expected).map_err(backend)?)
-        .execute(&mut **self.tx()?)
         .await
         .map_err(backend)?
-        .rows_affected();
+        .rows_affected;
         if changed != 1 {
             return Err(DeltaWalkerStateError::StaleProgress { expected });
         }
@@ -289,45 +241,30 @@ impl<'a> DeltaWalkerStateTransaction for SqliteDeltaWalkerStateTransaction<'a> {
 }
 
 #[async_trait]
-impl<'a> DeltaWalkerSparseStateTransaction for SqliteDeltaWalkerStateTransaction<'a> {
+impl DeltaWalkerSparseStateTransaction for SqliteDeltaWalkerStateTransaction {
     async fn get(&mut self, key: &[u8]) -> DeltaWalkerStateResult<Option<Vec<u8>>> {
-        let namespace = Arc::clone(&self.namespace);
-        let consumer_id = Arc::clone(&self.consumer_id);
-        sqlx::query_scalar(
-            "SELECT state_value FROM delta_walker_key_state WHERE namespace = ? AND consumer_id = ? AND state_key = ?",
-        )
-        .bind(namespace.as_ref())
-        .bind(consumer_id.as_ref())
-        .bind(key)
-        .fetch_optional(&mut **self.tx()?)
-        .await
-        .map_err(backend)
+        let namespace = self.namespace.to_string();
+        let consumer_id = self.consumer_id.to_string();
+        queries::walker_state_value(self.tx()?, namespace, consumer_id, key.to_vec())
+            .await
+            .map_err(backend)
     }
 
     async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> DeltaWalkerStateResult<()> {
-        sqlx::query(
-            "INSERT INTO delta_walker_key_state(namespace, consumer_id, state_key, state_value) VALUES (?, ?, ?, ?) ON CONFLICT(namespace, consumer_id, state_key) DO UPDATE SET state_value = excluded.state_value",
-        )
-        .bind(self.namespace.as_ref())
-        .bind(self.consumer_id.as_ref())
-        .bind(key)
-        .bind(value)
-        .execute(&mut **self.tx()?)
-        .await
-        .map_err(backend)?;
+        let namespace = self.namespace.to_string();
+        let consumer_id = self.consumer_id.to_string();
+        queries::walker_put_state(self.tx()?, namespace, consumer_id, key, value)
+            .await
+            .map_err(backend)?;
         Ok(())
     }
 
     async fn delete(&mut self, key: &[u8]) -> DeltaWalkerStateResult<()> {
-        sqlx::query(
-            "DELETE FROM delta_walker_key_state WHERE namespace = ? AND consumer_id = ? AND state_key = ?",
-        )
-        .bind(self.namespace.as_ref())
-        .bind(self.consumer_id.as_ref())
-        .bind(key)
-        .execute(&mut **self.tx()?)
-        .await
-        .map_err(backend)?;
+        let namespace = self.namespace.to_string();
+        let consumer_id = self.consumer_id.to_string();
+        queries::walker_delete_state(self.tx()?, namespace, consumer_id, key.to_vec())
+            .await
+            .map_err(backend)?;
         Ok(())
     }
 }
@@ -339,24 +276,22 @@ fn backend<E: std::error::Error + Send + Sync + 'static>(error: E) -> DeltaWalke
 #[cfg(test)]
 mod tests {
     use super::*;
-    use big_sync_core::delta_walker_state::contract::{
-        DeltaWalkerStateContractHarness, assert_delta_walker_state_contract,
-    };
-    use sqlx_utils_rs::SqlCtx;
+    use big_sync_core::delta_walker_state::contract::DeltaWalkerStateContractHarness;
+    use big_sync_core::delta_walker_state::contract::assert_delta_walker_state_contract;
+    use sqlite_rs::SqliteRuntime;
 
     struct SqliteContractHarness {
-        _sql: SqlCtx,
+        _sql: Database,
         repo: SqliteDeltaWalkerStateRepo,
     }
 
     impl SqliteContractHarness {
         async fn new() -> Self {
-            let sql = SqlCtx::memory()
-                .await
+            let sql = SqliteRuntime::new(Default::default())
+                .ephemeral(&[])
                 .expect("create sqlite contract database");
             let repo = SqliteDeltaWalkerStateRepo::new(
-                sql.read_pool.clone(),
-                sql.write_pool.clone(),
+                sql.clone(),
                 "contract-namespace",
                 "contract-consumer",
             )
@@ -389,23 +324,15 @@ mod tests {
 
     #[tokio::test]
     async fn namespaces_and_consumers_are_isolated() {
-        let sql = SqlCtx::memory().await.expect("create sqlite database");
-        let repo_a = SqliteDeltaWalkerStateRepo::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
-            "ns-a",
-            "consumer-a",
-        )
-        .await
-        .expect("create repo a");
-        let repo_b = SqliteDeltaWalkerStateRepo::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
-            "ns-b",
-            "consumer-b",
-        )
-        .await
-        .expect("create repo b");
+        let sql = SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .expect("create sqlite database");
+        let repo_a = SqliteDeltaWalkerStateRepo::new(sql.clone(), "ns-a", "consumer-a")
+            .await
+            .expect("create repo a");
+        let repo_b = SqliteDeltaWalkerStateRepo::new(sql.clone(), "ns-b", "consumer-b")
+            .await
+            .expect("create repo b");
 
         let mut tx = repo_a.begin().await.expect("begin repo a transaction");
         tx.put(b"key".to_vec(), b"value-a".to_vec())
@@ -432,24 +359,17 @@ mod tests {
 
     #[tokio::test]
     async fn begin_with_context_round_trips_a_caller_owned_transaction() {
-        let sql = SqlCtx::memory().await.expect("create sqlite database");
-        let repo = SqliteDeltaWalkerStateRepo::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
-            "ctx-namespace",
-            "ctx-consumer",
-        )
-        .await
-        .expect("create sqlite delta walker state repo");
+        let sql = SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .expect("create sqlite database");
+        let repo = SqliteDeltaWalkerStateRepo::new(sql.clone(), "ctx-namespace", "ctx-consumer")
+            .await
+            .expect("create sqlite delta walker state repo");
 
         // The settlement path: the consumer's effect and the walker state
         // advance share one caller-owned transaction, so a rollback discards
         // both.
-        let outer = sql
-            .write_pool
-            .begin()
-            .await
-            .expect("begin outer transaction");
+        let outer = sql.begin_write().await.expect("begin outer transaction");
         let mut tx = repo.begin_with_context(outer);
         tx.put(b"branch-1".to_vec(), b"heads-1".to_vec())
             .await
@@ -476,11 +396,7 @@ mod tests {
         );
 
         // A committed caller-owned transaction persists both.
-        let outer = sql
-            .write_pool
-            .begin()
-            .await
-            .expect("begin outer transaction");
+        let outer = sql.begin_write().await.expect("begin outer transaction");
         let mut tx = repo.begin_with_context(outer);
         tx.put(b"branch-1".to_vec(), b"heads-1".to_vec())
             .await

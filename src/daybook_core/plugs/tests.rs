@@ -3,12 +3,10 @@ use super::*;
 async fn inspect_test_plug_oci_layout() -> Res<()> {
     let ctx = crate::test_support::test_cx("plugs_inspect_test_plug_oci_layout").await?;
     let repo = Arc::clone(&ctx.rt.plugs_repo);
-    let artifact_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/oci")
-        .join("@daybook/test");
+    let artifact_path = crate::test_support::plug_oci_root("@daybook/test");
     eyre::ensure!(
         artifact_path.exists(),
-        "missing OCI plug artifact at '{}'. Build it first with: cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test",
+        "missing OCI plug artifact at '{}'. Build it first with: cargo x plug build-oci --plug-root ./src/plug_test_manifest",
         artifact_path.display()
     );
 

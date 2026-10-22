@@ -13,20 +13,29 @@
 
 use crate::interlude::*;
 
-use crate::store::sqlite::{SecretBlobKind, SqliteBigRepoStore, SqliteBigRepoStoreError};
-use std::collections::{HashMap, HashSet};
+use crate::store::sqlite::SecretBlobKind;
+use crate::store::sqlite::SqliteBigRepoStore;
+use crate::store::sqlite::SqliteBigRepoStoreError;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use futures::lock::Mutex;
 
-use futures::{FutureExt, future::BoxFuture};
+use futures::FutureExt;
+use futures::future::BoxFuture;
 use rand::RngCore;
-use secrets_rs::{SecretStore, decrypt_blob, encrypt_blob};
-use subduction_keyhive::storage::{KeyhiveStorage, MemoryKeyhiveStorage, StorageHash};
+use secrets_rs::SecretStore;
+use secrets_rs::decrypt_blob;
+use secrets_rs::encrypt_blob;
+use subduction_keyhive::storage::KeyhiveStorage;
+use subduction_keyhive::storage::MemoryKeyhiveStorage;
+use subduction_keyhive::storage::StorageHash;
 use utils_rs::prelude::eyre;
 
 /// Subdirectory of the repo data dir holding keyhive state.
@@ -1412,15 +1421,18 @@ mod tests {
     use super::*;
 
     use big_sync_core::BuckId;
-    use sqlx_utils_rs::SqlCtx;
+    use sqlite_rs::SqliteRuntime;
 
     #[tokio::test]
     async fn save_file_if_absent_writes_exact_bytes_and_is_idempotent() -> Res<()> {
         let temp_dir = tempfile::tempdir()?;
         let root = temp_dir.path().to_path_buf();
-        let store =
-            SqliteBigRepoStore::new(SqlCtx::memory().await?, "file-if-absent", BuckId::MAX_LEVEL)
-                .await?;
+        let store = SqliteBigRepoStore::new(
+            SqliteRuntime::new(Default::default()).ephemeral(&[])?,
+            "file-if-absent",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
         let storage = FsKeyhiveStorage::new(root.clone(), store)?;
         let parent_dir = root.join(LOCAL_SECRETS_SUBDIR);
         let hash = StorageHash::new([42u8; 32]);
@@ -1467,7 +1479,7 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let root = temp_dir.path().to_path_buf();
         let store = SqliteBigRepoStore::new(
-            SqlCtx::memory().await?,
+            SqliteRuntime::new(Default::default()).ephemeral(&[])?,
             format!("keyhive-storage-test-{label}"),
             BuckId::MAX_LEVEL,
         )
@@ -1538,9 +1550,12 @@ mod tests {
     async fn file_mode_round_trips_prekey_secrets_via_sqlite() -> Res<()> {
         let temp_dir = tempfile::tempdir()?;
         let root = temp_dir.path().to_path_buf();
-        let store =
-            SqliteBigRepoStore::new(SqlCtx::memory().await?, "prekey-file", BuckId::MAX_LEVEL)
-                .await?;
+        let store = SqliteBigRepoStore::new(
+            SqliteRuntime::new(Default::default()).ephemeral(&[])?,
+            "prekey-file",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
         let storage = FsKeyhiveStorage::new(root.clone(), store)?;
         assert!(!storage.uses_keyring_secrets());
 
@@ -1589,9 +1604,12 @@ mod tests {
         )
         .await?;
 
-        let store =
-            SqliteBigRepoStore::new(SqlCtx::memory().await?, "legacy-import", BuckId::MAX_LEVEL)
-                .await?;
+        let store = SqliteBigRepoStore::new(
+            SqliteRuntime::new(Default::default()).ephemeral(&[])?,
+            "legacy-import",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
         let storage = BigRepoKeyhiveStorage::fs(store.clone(), root.clone()).await?;
 
         // Local secrets round-trip through the sqlite blob store.
@@ -1637,7 +1655,8 @@ mod tests {
         let db_path = root.join("sqlite.db");
 
         // First "boot": file-backed sqlite, file-fallback DEKs.
-        let sql1 = SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?;
+        let sql1 =
+            SqliteRuntime::new(Default::default()).database(&db_path, &[], "_sqlite_rs_migrations");
         let store1 = SqliteBigRepoStore::new(sql1, "restart", BuckId::MAX_LEVEL).await?;
         let storage1 = FsKeyhiveStorage::new(root.clone(), store1)?;
         let hash = StorageHash::new([31u8; 32]);
@@ -1651,7 +1670,8 @@ mod tests {
 
         // Second "boot": reopen the same sqlite file with a fresh store; the
         // blobs must decrypt under the DEKs read back from the deks/ files.
-        let sql2 = SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?;
+        let sql2 =
+            SqliteRuntime::new(Default::default()).database(&db_path, &[], "_sqlite_rs_migrations");
         let store2 = SqliteBigRepoStore::new(sql2, "restart", BuckId::MAX_LEVEL).await?;
         let storage2 = FsKeyhiveStorage::new(root.clone(), store2)?;
         assert_eq!(
@@ -1685,8 +1705,12 @@ mod tests {
     async fn envelope_row_records_metadata_not_the_dek() -> Res<()> {
         let temp_dir = tempfile::tempdir()?;
         let root = temp_dir.path().to_path_buf();
-        let store =
-            SqliteBigRepoStore::new(SqlCtx::memory().await?, "envelope", BuckId::MAX_LEVEL).await?;
+        let store = SqliteBigRepoStore::new(
+            SqliteRuntime::new(Default::default()).ephemeral(&[])?,
+            "envelope",
+            BuckId::MAX_LEVEL,
+        )
+        .await?;
         let secret_store = SecretStore::boot().await.expect("mock keyring boot");
         let storage =
             FsKeyhiveStorage::with_secret_store(root, store.clone(), Arc::new(secret_store))?;
@@ -1713,7 +1737,7 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let root = temp_dir.path().to_path_buf();
         let store = SqliteBigRepoStore::new(
-            SqlCtx::memory().await?,
+            SqliteRuntime::new(Default::default()).ephemeral(&[])?,
             "reservation-live",
             BuckId::MAX_LEVEL,
         )
@@ -1750,7 +1774,8 @@ mod tests {
         let root = temp_dir.path().to_path_buf();
         tokio::fs::create_dir_all(&root).await?;
         let db_path = root.join("sqlite.db");
-        let sql = SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?;
+        let sql =
+            SqliteRuntime::new(Default::default()).database(&db_path, &[], "_sqlite_rs_migrations");
         let store = SqliteBigRepoStore::new(sql, "corrupt", BuckId::MAX_LEVEL).await?;
         let storage = FsKeyhiveStorage::new(root.clone(), store.clone())?;
 

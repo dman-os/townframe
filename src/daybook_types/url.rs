@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
-use crate::doc::{DocId, FacetKey};
+use crate::doc::DocId;
+use crate::doc::FacetKey;
 
 pub const FACET_SCHEME: &str = "db+facet";
 pub const FACET_SELF_DOC_ID: &str = "self";
@@ -91,7 +92,8 @@ pub fn facet_ref_str_targets_tag(url: &str, target_tag: &crate::doc::FacetTag) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::{FacetTag, WellKnownFacetTag};
+    use crate::doc::FacetTag;
+    use crate::doc::WellKnownFacetTag;
 
     #[test]
     fn parses_facet_ref_str() {

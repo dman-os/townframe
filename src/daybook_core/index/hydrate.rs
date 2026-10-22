@@ -1,6 +1,10 @@
 use crate::drawer::DrawerRepo;
 use crate::interlude::*;
-use daybook_types::doc::{ChangeHashSet, DocId, FacetKey, WellKnownFacet, WellKnownFacetTag};
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
 
 /// The exact facet transition between two revisions of a logical branch.
 ///

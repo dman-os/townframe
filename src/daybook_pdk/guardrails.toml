@@ -1,0 +1,23 @@
+version = 1
+role = "interface"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = ["wflow_sdk"]
+allow_external_api_types = false
+
+[builds.native]
+
+[builds.wasm32-wasip2]
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_pdk/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"

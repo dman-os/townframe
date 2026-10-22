@@ -23,8 +23,14 @@
 //! | `triangle_replication`       | A↔B, B↔C, C↔A      | 3               |
 //! | `partition_then_heal`        | A↔B, partition, heal | 2               |
 
-use super::harness::{Node, Topo, fixtures, keyhive as kh_snap, topo::ShutdownGuard};
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use super::harness::Node;
+use super::harness::Topo;
+use super::harness::fixtures;
+use super::harness::keyhive as kh_snap;
+use super::harness::topo::ShutdownGuard;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::transaction::Transactable;
 use keyhive_core::access::Access;
 use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 // ─── Read helpers ───────────────────────────────────────────────────────────
@@ -637,7 +643,8 @@ async fn tier3_partition_then_heal() -> crate::Res<()> {
     // Start:  A(owner) ↔ B(reader)  (248, 249)
     // Partition:  A    ‖    B  (remove big_sync routes, close conn)
     // Owner writes offline, heal: reconnect, verify convergence.
-    use crate::test2::harness::topo::{Node, ShutdownGuard};
+    use crate::test2::harness::topo::Node;
+    use crate::test2::harness::topo::ShutdownGuard;
 
     let guard = ShutdownGuard::from(vec![
         Node::boot(248, "Alice").await?,

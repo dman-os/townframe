@@ -27,7 +27,8 @@
 //!   when the last tracked waiter is released, so settling one job never
 //!   durably advances the stream past its unsettled siblings.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 /// Per-stream slot bookkeeping: which cursors are pending work and where the
 /// emitted watermark stands. Direct extraction of `CursorStreamState`.

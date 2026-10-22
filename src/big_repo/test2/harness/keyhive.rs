@@ -6,9 +6,12 @@
 //! transitive access.
 
 use super::log_nickname;
-use crate::{BigRepo, DocumentId, Res};
+use crate::BigRepo;
+use crate::DocumentId;
+use crate::Res;
 use keyhive_crypto::digest::Digest;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +225,8 @@ pub(crate) async fn assert_document_snapshot_equal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test2::harness::{Pair, fixtures};
+    use crate::test2::harness::Pair;
+    use crate::test2::harness::fixtures;
     use automerge::transaction::Transactable;
     use keyhive_core::access::Access;
 

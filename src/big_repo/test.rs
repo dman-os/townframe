@@ -3,13 +3,20 @@ use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
 
 use crate::encrypted_blob::decode_encrypted_blob;
 use am_utils_rs::codecs::ThroughJson;
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
-use big_sync::backend::contract::{
-    self, SyncBackendHarness, SyncBackendOutcome, SyncBackendScenario,
-};
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::transaction::Transactable;
+use big_sync::HostPartStore;
+use big_sync::SyncBackend;
+use big_sync::backend::contract::SyncBackendHarness;
+use big_sync::backend::contract::SyncBackendOutcome;
+use big_sync::backend::contract::SyncBackendScenario;
+use big_sync::backend::contract::{self};
 use big_sync::stress_support;
-use big_sync::{HostPartStore, SyncBackend};
-use big_sync_core::{ByteKey, PartKey, PeerKey, SyncCompletionDeets};
+use big_sync_core::ByteKey;
+use big_sync_core::PartKey;
+use big_sync_core::PeerKey;
+use big_sync_core::SyncCompletionDeets;
 
 /// The band these harnesses run: the one the embedder ships, so big_repo's tests exercise
 /// bucket-diff. The offline-reopen stall this used to opt out for is covered by
@@ -26,10 +33,12 @@ const HARNESS_REPLAY_HOLD_MS: u32 = 50;
 use nonempty::NonEmpty;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use subduction_keyhive::KeyhivePeerId;
 use tempfile::tempdir;
-use tokio::{sync::Notify, time::timeout};
+use tokio::sync::Notify;
+use tokio::time::timeout;
 
 pub async fn boot_repo() -> Res<(
     Arc<BigRepo>,
@@ -37,16 +46,19 @@ pub async fn boot_repo() -> Res<(
     Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Res<()>>>,
 )> {
     utils_rs::testing::setup_tracing_once();
-    let (repo, stop) = BigRepo::boot(Config {
-        node_identity_seed: [7_u8; 32],
-        storage: StorageConfig::Memory,
-        scope_key: Arc::from("big-repo-test"),
-        hidden_parts: HashSet::new(),
-        automerge_frontier_group_scope: Default::default(),
-        causal_checkpoint_group_scope: Default::default(),
-        group_part_group_scope: Default::default(),
-        keyhive_change_notifs: true,
-    })
+    let (repo, stop) = BigRepo::boot(
+        Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
+        Config {
+            node_identity_seed: [7_u8; 32],
+            storage: StorageConfig::Memory,
+            scope_key: Arc::from("big-repo-test"),
+            hidden_parts: HashSet::new(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+            keyhive_change_notifs: true,
+        },
+    )
     .await?;
     let shared_store = repo.shared_part_store();
     let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
@@ -84,16 +96,19 @@ pub async fn _boot_disk_repo(
 )> {
     std::fs::create_dir_all(&path)
         .wrap_err_with(|| format!("failed creating disk repo path: {}", path.display()))?;
-    let (repo, stop) = BigRepo::boot(Config {
-        node_identity_seed: [7_u8; 32],
-        storage: StorageConfig::Disk { path },
-        scope_key: Arc::from("big-repo-test"),
-        hidden_parts: HashSet::new(),
-        automerge_frontier_group_scope: Default::default(),
-        causal_checkpoint_group_scope: Default::default(),
-        group_part_group_scope: Default::default(),
-        keyhive_change_notifs: true,
-    })
+    let (repo, stop) = BigRepo::boot(
+        Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
+        Config {
+            node_identity_seed: [7_u8; 32],
+            storage: StorageConfig::Disk { path },
+            scope_key: Arc::from("big-repo-test"),
+            hidden_parts: HashSet::new(),
+            automerge_frontier_group_scope: Default::default(),
+            causal_checkpoint_group_scope: Default::default(),
+            group_part_group_scope: Default::default(),
+            keyhive_change_notifs: true,
+        },
+    )
     .await?;
     let shared_store = repo.shared_part_store();
     let (worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(
@@ -2150,16 +2165,19 @@ impl SyncRepoNode {
             .await
             .wrap_err_with(|| format!("failed creating sync repo path: {}", path.display()))?;
         let node_identity_seed = [seed; 32];
-        let (repo, stop_token) = BigRepo::boot(Config {
-            node_identity_seed,
-            storage: StorageConfig::Disk { path: path.clone() },
-            scope_key: Arc::from("big-repo-sync-test"),
-            hidden_parts: HashSet::new(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-            keyhive_change_notifs: true,
-        })
+        let (repo, stop_token) = BigRepo::boot(
+            Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
+            Config {
+                node_identity_seed,
+                storage: StorageConfig::Disk { path: path.clone() },
+                scope_key: Arc::from("big-repo-sync-test"),
+                hidden_parts: HashSet::new(),
+                automerge_frontier_group_scope: Default::default(),
+                causal_checkpoint_group_scope: Default::default(),
+                group_part_group_scope: Default::default(),
+                keyhive_change_notifs: true,
+            },
+        )
         .await?;
         let shared_store = repo.shared_part_store();
         let (initial_worker, big_sync_stop) = big_sync::spawn_big_sync_worker_with_options(

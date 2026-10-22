@@ -1,5 +1,11 @@
 use super::ids::IdCodec;
 use super::*;
+
+pub(crate) struct SignedBlobRow {
+    pub(crate) signed: Vec<u8>,
+    pub(crate) blob: Vec<u8>,
+}
+
 /// A replay page covers at most this many rows per part: the backlog a page must be
 /// able to describe before it can claim the part is caught up.
 #[cfg(test)]
@@ -11,61 +17,29 @@ impl SqliteBigRepoStore {
     /// crate-private trait in scope — a part is advertiseable once its row
     /// exists.
     pub(crate) async fn ensure_part(&self, part_id: PartKey) -> Res<()> {
-        sqlx::query!(
-            "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-             VALUES (?1, ?2, 0)
-             ON CONFLICT(scope_id, part_id) DO NOTHING",
-            self.scope().id(),
-            Self::part_blob(part_id)
-        )
-        .execute(&self.sql.write_pool)
-        .await?;
+        queries::ensure_part(&self.sql, self.scope().id(), Self::part_blob(part_id)).await?;
         Ok(())
     }
 
     pub(crate) async fn set_obj_payload_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         obj_id: ObjKey,
         payload: ObjPayload,
     ) -> Res<Vec<PartEvent>> {
         let payload_json = serde_json::to_string(&payload).wrap_err(ERROR_JSON)?;
         let obj_ref = self.core.ensure_obj_ref(tx, obj_id.clone()).await?;
-        let old_payload_json: Option<String> = sqlx::query_scalar!(
-            "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
-            obj_ref
-        )
-        .fetch_optional(&mut **tx)
-        .await?
-        .flatten();
-        sqlx::query!(
-            "UPDATE big_sync_objs SET payload_json = ?1 WHERE obj_ref = ?2",
-            &payload_json,
-            obj_ref
-        )
-        .execute(&mut **tx)
-        .await?;
+        let old_payload_json = queries::obj_payload_by_ref(tx, obj_ref).await?.flatten();
+        queries::set_obj_payload(tx, payload_json, obj_ref).await?;
         let old_payload: ObjPayload = old_payload_json
             .as_deref()
             .filter(|str| !str.is_empty())
             .map(|str| serde_json::from_str(str).wrap_err(ERROR_JSON))
             .transpose()?
             .unwrap_or(serde_json::Value::Null);
-        let parts = sqlx::query!(
-            "SELECT m.maybe_part_ref, p.part_id
-             FROM big_sync_members m JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-             WHERE m.scope_id = ?1 AND m.obj_ref = ?2 AND m.maybe_part_ref > 0 AND m.event_type != ?3",
-            self.scope().id(), obj_ref, EVENT_REMOVED
-        ).fetch_all(&mut **tx).await?;
-        let pending_parts = sqlx::query!(
-            "SELECT m.part_ref, p.part_id
-             FROM big_sync_pending_members m JOIN big_sync_parts p ON p.part_ref = m.part_ref
-             WHERE m.scope_id = ?1 AND m.obj_ref = ?2",
-            self.scope().id(),
-            obj_ref
-        )
-        .fetch_all(&mut **tx)
-        .await?;
+        let parts =
+            queries::live_member_parts(tx, self.scope().id(), obj_ref, EVENT_REMOVED).await?;
+        let pending_parts = queries::pending_member_parts(tx, self.scope().id(), obj_ref).await?;
         // Re-writing the payload an object already holds, with its membership already live and
         // no membership transition riding along, is not a change. `next_cursor` reserves the
         // next cursor, so a repeat that got past this point would restamp every live part's
@@ -92,23 +66,15 @@ impl SqliteBigRepoStore {
         if parts.is_empty() {
             // Stamp `added_at` on a row that becomes present; preserve it when the row was
             // already present, so a touch is not a new add.
-            sqlx::query!(
-                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid, added_at)
-                 VALUES (?1, ?2, 0, ?3, ?4, ?4)
-                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
-                     event_type = excluded.event_type
-                   , txid = excluded.txid
-                   , added_at = CASE
-                         WHEN big_sync_members.event_type = ?5 THEN excluded.added_at
-                         ELSE big_sync_members.added_at
-                     END",
+            queries::insert_live_member(
+                tx,
                 self.scope().id(),
                 obj_ref,
+                0,
                 EVENT_CHANGED,
                 i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-                EVENT_REMOVED
+                EVENT_REMOVED,
             )
-            .execute(&mut **tx)
             .await?;
         }
         let mut changed_part_ids = Vec::new();
@@ -116,7 +82,15 @@ impl SqliteBigRepoStore {
         for row in &parts {
             let part_id = Self::part_from_blob(row.part_id.clone());
             changed_part_ids.push(part_id.clone());
-            sqlx::query!("UPDATE big_sync_members SET event_type = ?1, txid = ?2 WHERE scope_id = ?3 AND obj_ref = ?4 AND maybe_part_ref = ?5", EVENT_CHANGED, i64::try_from(cursor).expect(ERROR_IMPOSSIBLE), self.scope().id(), obj_ref, row.maybe_part_ref).execute(&mut **tx).await?;
+            queries::touch_member(
+                tx,
+                EVENT_CHANGED,
+                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
+                self.scope().id(),
+                obj_ref,
+                row.maybe_part_ref,
+            )
+            .await?;
             self.core
                 .apply_bucket_transition(
                     tx,
@@ -127,33 +101,28 @@ impl SqliteBigRepoStore {
                     &MemberState::Live(payload.clone()),
                 )
                 .await?;
-            sqlx::query!("UPDATE big_sync_parts SET latest_cursor = MAX(latest_cursor, ?1) WHERE scope_id = ?2 AND part_ref = ?3", i64::try_from(cursor).expect(ERROR_IMPOSSIBLE), self.scope().id(), row.maybe_part_ref).execute(&mut **tx).await?;
+            queries::advance_part_cursor(
+                tx,
+                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
+                self.scope().id(),
+                row.maybe_part_ref,
+            )
+            .await?;
         }
         for row in pending_parts {
             let part_id = Self::part_from_blob(row.part_id);
             let part_ref = row.part_ref;
-            sqlx::query!(
-                "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid, added_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-                 ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
-                     event_type = excluded.event_type
-                   , txid = excluded.txid
-                   , added_at = CASE
-                         WHEN big_sync_members.event_type = ?6 THEN excluded.added_at
-                         ELSE big_sync_members.added_at
-                     END",
-                self.scope().id(), obj_ref, part_ref, EVENT_CHANGED,
+            queries::insert_live_member(
+                tx,
+                self.scope().id(),
+                obj_ref,
+                part_ref,
+                EVENT_CHANGED,
                 i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
-                EVENT_REMOVED
+                EVENT_REMOVED,
             )
-            .execute(&mut **tx)
             .await?;
-            sqlx::query!(
-                "DELETE FROM big_sync_pending_members WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
-                self.scope().id(), obj_ref, part_ref
-            )
-            .execute(&mut **tx)
-            .await?;
+            queries::delete_pending_member(tx, self.scope().id(), obj_ref, part_ref).await?;
             self.core
                 .apply_bucket_transition(
                     tx,
@@ -164,10 +133,13 @@ impl SqliteBigRepoStore {
                     &MemberState::Live(payload.clone()),
                 )
                 .await?;
-            sqlx::query!(
-                "UPDATE big_sync_parts SET latest_cursor = MAX(latest_cursor, ?1) WHERE scope_id = ?2 AND part_ref = ?3",
-                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE), self.scope().id(), part_ref
-            ).execute(&mut **tx).await?;
+            queries::advance_part_cursor(
+                tx,
+                i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
+                self.scope().id(),
+                part_ref,
+            )
+            .await?;
             added_events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                 cursor,
                 part_ids: vec![part_id],
@@ -200,7 +172,7 @@ impl SqliteBigRepoStore {
         &self,
         mutations: &[GroupPartReconciliation],
     ) -> Res<()> {
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.sql.begin_write().await?;
         let mut transitions = Vec::new();
         let mut transition_event_payloads = HashMap::new();
 
@@ -209,58 +181,27 @@ impl SqliteBigRepoStore {
                 .core
                 .ensure_obj_ref(&mut tx, mutation.doc.clone())
                 .await?;
-            let payload_json = sqlx::query_scalar!(
-                "SELECT payload_json FROM big_sync_objs WHERE obj_ref = ?1",
-                obj_ref
-            )
-            .fetch_one(&mut *tx)
-            .await?;
+            let payload_json = queries::obj_payload_by_ref(&tx, obj_ref)
+                .await?
+                .expect(ERROR_IMPOSSIBLE);
             let payload_json = payload_json.filter(|value| !value.is_empty());
             let event_payload: Option<ObjPayload> = payload_json
                 .as_deref()
                 .filter(|value| !value.is_empty())
                 .map(|value| serde_json::from_str(value).wrap_err(ERROR_JSON))
                 .transpose()?;
-            sqlx::query!(
-                "UPDATE big_sync_objs SET payload_json = COALESCE(payload_json, ?1) WHERE obj_ref = ?2",
-                payload_json.as_deref(),
-                obj_ref
-            )
-            .execute(&mut *tx)
-            .await?;
+            queries::coalesce_obj_payload(&tx, payload_json, obj_ref).await?;
 
             // Rows are per part, so "prior" is the union over the parts this doc
             // currently resides in — the same shape the grant re-emit below compares.
-            let prior_agent_ids: HashSet<Vec<u8>> = sqlx::query_scalar!(
-                "SELECT DISTINCT s.principal_id FROM big_sync_syncable s
-                  WHERE s.scope_id = ?1
-                    AND s.part_ref IN (
-                        SELECT m.maybe_part_ref FROM big_sync_members m
-                         WHERE m.scope_id = ?1 AND m.obj_ref = ?2
-                           AND m.maybe_part_ref > 0 AND m.event_type != 2
-                    )",
-                self.scope().id(),
-                obj_ref
-            )
-            .fetch_all(&mut *tx)
-            .await?
-            .into_iter()
-            .collect();
+            let prior_agent_ids: HashSet<Vec<u8>> =
+                queries::prior_agent_ids(&tx, self.scope().id(), obj_ref)
+                    .await?
+                    .into_iter()
+                    .collect();
 
-            let current_rows: Vec<Vec<u8>> = sqlx::query_scalar!(
-                "SELECT p.part_id AS 'part_id: Vec<u8>' FROM big_sync_members m
-                 JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-                 WHERE m.scope_id = ?1 AND m.obj_ref = ?2
-                   AND m.maybe_part_ref > 0 AND m.event_type != 2
-                 UNION
-                 SELECT p.part_id FROM big_sync_pending_members m
-                 JOIN big_sync_parts p ON p.part_ref = m.part_ref
-                 WHERE m.scope_id = ?1 AND m.obj_ref = ?2",
-                self.scope().id(),
-                obj_ref
-            )
-            .fetch_all(&mut *tx)
-            .await?;
+            let current_rows =
+                queries::current_member_parts(&tx, self.scope().id(), obj_ref).await?;
             let current_parts: HashSet<PartKey> =
                 current_rows.into_iter().map(Self::part_from_blob).collect();
             let desired_parts = mutation.desired_group_parts.clone();
@@ -272,14 +213,8 @@ impl SqliteBigRepoStore {
             let additions = desired_parts.difference(&current_parts).cloned();
 
             for part_id in stale.into_iter().chain(additions) {
-                sqlx::query!(
-                    "INSERT OR IGNORE INTO big_sync_parts(scope_id, part_id, latest_cursor)
-                             VALUES (?1, ?2, 0)",
-                    self.scope().id(),
-                    Self::part_blob(part_id.clone())
-                )
-                .execute(&mut *tx)
-                .await?;
+                queries::ensure_part(&tx, self.scope().id(), Self::part_blob(part_id.clone()))
+                    .await?;
                 let old = self
                     .load_member_state(&mut tx, part_id.clone(), mutation.doc.clone())
                     .await?;
@@ -291,23 +226,9 @@ impl SqliteBigRepoStore {
                         // access, and the part must be advertiseable
                         // (`summarize_parts` succeeds) so a sync route can be
                         // established and the first pull promotes the member.
-                        sqlx::query!(
-                            "INSERT OR IGNORE INTO big_sync_parts(scope_id, part_id, latest_cursor)
-                             VALUES (?1, ?2, 0)",
-                            self.scope().id(),
-                            Self::part_blob(part_id.clone())
-                        )
-                        .execute(&mut *tx)
-                        .await?;
-                        sqlx::query!(
-                            "INSERT OR IGNORE INTO big_sync_pending_members(scope_id, obj_ref, part_ref)
-                             VALUES (?1, ?2, ?3)",
-            self.scope().id(),
-            obj_ref,
-            self.core.ensure_part_ref(&mut tx, part_id).await?
-        )
-                        .execute(&mut *tx)
-                        .await?;
+                        let part_ref = self.core.ensure_part_ref(&mut tx, part_id).await?;
+                        queries::insert_pending_member(&tx, self.scope().id(), obj_ref, part_ref)
+                            .await?;
                         continue;
                     };
                     transition_event_payloads
@@ -319,15 +240,9 @@ impl SqliteBigRepoStore {
                         MemberState::Live(payload),
                     ));
                 } else {
-                    sqlx::query!(
-                        "DELETE FROM big_sync_pending_members
-                                     WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
-                        self.scope().id(),
-                        obj_ref,
-                        self.core.ensure_part_ref(&mut tx, part_id.clone()).await?
-                    )
-                    .execute(&mut *tx)
-                    .await?;
+                    let part_ref = self.core.ensure_part_ref(&mut tx, part_id.clone()).await?;
+                    queries::delete_pending_member(&tx, self.scope().id(), obj_ref, part_ref)
+                        .await?;
                     if !matches!(old, MemberState::Absent) {
                         transitions.push((part_id, mutation.doc.clone(), old, MemberState::Dead));
                     }
@@ -352,24 +267,16 @@ impl SqliteBigRepoStore {
                     continue;
                 };
                 let part_ref = self.core.ensure_part_ref(&mut tx, part_id.clone()).await?;
-                sqlx::query!(
-                    "DELETE FROM big_sync_syncable WHERE scope_id = ?1 AND part_ref = ?2",
-                    self.scope().id(),
-                    part_ref
-                )
-                .execute(&mut *tx)
-                .await?;
+                queries::delete_part_members(&tx, self.scope().id(), part_ref).await?;
                 for (principal, access) in agents.iter() {
-                    sqlx::query!(
-                        "INSERT INTO big_sync_syncable(scope_id, part_ref, principal_id, access_level, changed_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                    queries::insert_part_member(
+                        &tx,
                         self.scope().id(),
                         part_ref,
                         Self::peer_blob(principal.clone()),
                         encode_access(access),
-                        changed_at
+                        changed_at,
                     )
-                    .execute(&mut *tx)
                     .await?;
                 }
             }
@@ -387,18 +294,11 @@ impl SqliteBigRepoStore {
                 .any(|principal| !prior_agent_ids.contains(&Self::peer_blob(principal.clone())))
                 && let Some(payload) = event_payload.clone()
             {
-                let live_part_rows = sqlx::query_scalar!(
-                    "SELECT p.part_id FROM big_sync_members m
-                     JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-                     WHERE m.scope_id = ?1 AND m.obj_ref = ?2
-                       AND m.maybe_part_ref > 0 AND m.event_type != 2",
-                    self.scope().id(),
-                    obj_ref
-                )
-                .fetch_all(&mut *tx)
-                .await?;
-                for part_blob in live_part_rows {
-                    let part_id = Self::part_from_blob(part_blob);
+                let live_part_rows =
+                    queries::live_member_parts(&tx, self.scope().id(), obj_ref, EVENT_REMOVED)
+                        .await?;
+                for row in live_part_rows {
+                    let part_id = Self::part_from_blob(row.part_id);
                     if !desired_parts.contains(&part_id)
                         || transitions
                             .iter()
@@ -428,36 +328,24 @@ impl SqliteBigRepoStore {
             // between sibling transitions would let acknowledging either
             // sibling permanently skip the others.
             let cursor = Self::next_cursor(&mut tx).await?;
-            sqlx::query!(
-                "INSERT INTO big_sync_parts(scope_id, part_id, latest_cursor)
-                     VALUES (?1, ?2, 0)
-                     ON CONFLICT(scope_id, part_id) DO NOTHING",
-                self.scope().id(),
-                Self::part_blob(part_id.clone())
-            )
-            .execute(&mut *tx)
-            .await?;
+            let part_ref = self.core.ensure_part_ref(&mut tx, part_id.clone()).await?;
+            let obj_ref =
+                queries::find_obj_ref(&tx, self.scope().id(), Self::obj_blob(doc.clone()))
+                    .await?
+                    .expect(ERROR_IMPOSSIBLE);
             match &new {
                 MemberState::Live(_) => {
                     // The transition becomes present now (or was already present and is being
                     // re-emitted): only a row that was absent takes the new add cursor.
-                    sqlx::query!(
-                        "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid, added_at)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-                             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
-                               event_type = excluded.event_type, txid = excluded.txid
-                             , added_at = CASE
-                                   WHEN big_sync_members.event_type = ?6 THEN excluded.added_at
-                                   ELSE big_sync_members.added_at
-                               END",
+                    queries::insert_live_member(
+                        &tx,
                         self.scope().id(),
-                        self.core.find_obj_ref(doc.clone()).await?.expect(ERROR_IMPOSSIBLE),
-                        self.core.ensure_part_ref(&mut tx, part_id.clone()).await?,
+                        obj_ref,
+                        part_ref,
                         EVENT_CHANGED,
                         i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
                         EVENT_REMOVED,
                     )
-                    .execute(&mut *tx)
                     .await?;
                     self.apply_bucket_transition(
                         &mut tx,
@@ -468,18 +356,8 @@ impl SqliteBigRepoStore {
                         &new,
                     )
                     .await?;
-                    sqlx::query!(
-                        "DELETE FROM big_sync_pending_members
-                                         WHERE scope_id = ?1 AND obj_ref = ?2 AND part_ref = ?3",
-                        self.scope().id(),
-                        self.core
-                            .find_obj_ref(doc.clone())
-                            .await?
-                            .expect(ERROR_IMPOSSIBLE),
-                        self.core.ensure_part_ref(&mut tx, part_id.clone()).await?
-                    )
-                    .execute(&mut *tx)
-                    .await?;
+                    queries::delete_pending_member(&tx, self.scope().id(), obj_ref, part_ref)
+                        .await?;
                     events.push(PartEvent::Changed(big_sync_core::rpc::ObjChanged {
                         cursor,
                         part_ids: vec![part_id.clone()],
@@ -491,18 +369,14 @@ impl SqliteBigRepoStore {
                     }));
                 }
                 MemberState::Dead => {
-                    sqlx::query!(
-                        "INSERT INTO big_sync_members(scope_id, obj_ref, maybe_part_ref, event_type, txid)
-                             VALUES (?1, ?2, ?3, ?4, ?5)
-                             ON CONFLICT(obj_ref, maybe_part_ref) DO UPDATE SET
-                               event_type = excluded.event_type, txid = excluded.txid",
+                    queries::insert_dead_member(
+                        &tx,
                         self.scope().id(),
-                        self.core.find_obj_ref(doc.clone()).await?.expect(ERROR_IMPOSSIBLE),
-                        self.core.ensure_part_ref(&mut tx, part_id.clone()).await?,
+                        obj_ref,
+                        part_ref,
                         EVENT_REMOVED,
-                        i64::try_from(cursor).expect(ERROR_IMPOSSIBLE)
+                        i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
                     )
-                    .execute(&mut *tx)
                     .await?;
                     self.apply_bucket_transition(
                         &mut tx,
@@ -523,14 +397,12 @@ impl SqliteBigRepoStore {
                     unreachable!("reconciliation cannot target absent state")
                 }
             }
-            sqlx::query!(
-                "UPDATE big_sync_parts SET latest_cursor = ?1
-                         WHERE scope_id = ?2 AND part_ref = ?3",
+            queries::set_part_cursor(
+                &tx,
                 i64::try_from(cursor).expect(ERROR_IMPOSSIBLE),
                 self.scope().id(),
-                self.core.ensure_part_ref(&mut tx, part_id).await?
+                part_ref,
             )
-            .execute(&mut *tx)
             .await?;
         }
         tx.commit().await?;
@@ -593,50 +465,31 @@ impl SqliteBigRepoStore {
 
     pub(crate) async fn save_tree(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         id: SedimentreeId,
     ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query!(
-            "INSERT OR IGNORE INTO big_repo_subduction_trees(scope_id, sedimentree_id)
-             VALUES (?1, ?2)",
-            self.scope().id(),
-            Self::tree_blob(id)
-        )
-        .execute(&mut **tx)
-        .await?;
+        queries::save_tree(tx, self.scope().id(), Self::tree_blob(id)).await?;
         Ok(())
     }
 
     pub(crate) async fn backfill_causal_ciphertext_index(
         &self,
     ) -> Result<(), SqliteBigRepoStoreError> {
-        let rows = sqlx::query!(
-            "SELECT sedimentree_id, commit_id AS content_ref, digest, 0 AS kind, blob
-             FROM big_repo_subduction_commits WHERE scope_id = ?1
-             UNION ALL
-             SELECT sedimentree_id, head_id AS content_ref, digest, 1 AS kind, blob
-             FROM big_repo_subduction_fragments WHERE scope_id = ?1",
-            self.scope().id()
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+        let rows = queries::ciphertext_backfill_rows(&self.sql, self.scope().id()).await?;
+        let tx = self.sql.begin_write().await?;
         for row in rows {
             let Ok(encrypted) = crate::encrypted_blob::decode_encrypted_blob(&row.blob) else {
                 continue;
             };
-            sqlx::query!(
-                "INSERT OR IGNORE INTO big_repo_causal_ciphertext_index(
-                    scope_id, sedimentree_id, content_ref, digest, kind, pcs_update_hash
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            queries::index_causal_ciphertext(
+                &tx,
                 self.scope().id(),
                 row.sedimentree_id,
                 row.content_ref,
                 row.digest,
                 row.kind,
-                encrypted.pcs_update_op_hash.raw.as_bytes().as_slice()
+                encrypted.pcs_update_op_hash.raw.as_bytes().to_vec(),
             )
-            .execute(&mut *tx)
             .await?;
         }
         tx.commit().await?;
@@ -648,38 +501,18 @@ impl SqliteBigRepoStore {
         sedimentree_id: SedimentreeId,
         pcs_update_hash: &[u8; 32],
     ) -> Result<Vec<Vec<u8>>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query!(
-            "SELECT commits.blob
-             FROM big_repo_causal_ciphertext_index AS causal
-             JOIN big_repo_subduction_commits AS commits
-               ON commits.scope_id = causal.scope_id
-              AND commits.sedimentree_id = causal.sedimentree_id
-              AND commits.commit_id = causal.content_ref
-              AND commits.digest = causal.digest
-             WHERE causal.scope_id = ?1 AND causal.sedimentree_id = ?2
-               AND causal.pcs_update_hash = ?3 AND causal.kind = 0
-             UNION ALL
-             SELECT fragments.blob
-             FROM big_repo_causal_ciphertext_index AS causal
-             JOIN big_repo_subduction_fragments AS fragments
-               ON fragments.scope_id = causal.scope_id
-              AND fragments.sedimentree_id = causal.sedimentree_id
-              AND fragments.head_id = causal.content_ref
-              AND fragments.digest = causal.digest
-             WHERE causal.scope_id = ?1 AND causal.sedimentree_id = ?2
-               AND causal.pcs_update_hash = ?3 AND causal.kind = 1",
+        Ok(queries::causal_ciphertexts_by_pcs_update(
+            &self.sql,
             self.scope().id(),
             Self::tree_blob(sedimentree_id),
-            pcs_update_hash.as_slice()
+            pcs_update_hash.to_vec(),
         )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        rows.into_iter().map(|row| Ok(row.blob)).collect()
+        .await?)
     }
 
     pub(crate) async fn index_causal_ciphertext(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         sedimentree_id: SedimentreeId,
         content_ref: CommitId,
         digest: Vec<u8>,
@@ -689,18 +522,15 @@ impl SqliteBigRepoStore {
         let Ok(encrypted) = crate::encrypted_blob::decode_encrypted_blob(blob) else {
             return Ok(());
         };
-        sqlx::query!(
-            "INSERT OR IGNORE INTO big_repo_causal_ciphertext_index(
-                scope_id, sedimentree_id, content_ref, digest, kind, pcs_update_hash
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        queries::index_causal_ciphertext(
+            tx,
             self.scope().id(),
             Self::tree_blob(sedimentree_id),
             Self::commit_blob(content_ref),
             digest,
             kind,
-            encrypted.pcs_update_op_hash.raw.as_bytes().as_slice()
+            encrypted.pcs_update_op_hash.raw.as_bytes().to_vec(),
         )
-        .execute(&mut **tx)
         .await?;
         Ok(())
     }
@@ -710,36 +540,19 @@ impl SqliteBigRepoStore {
         id: SedimentreeId,
         commit_id: Option<CommitId>,
     ) -> Result<Vec<(Signed<LooseCommit>, Blob)>, SqliteBigRepoStoreError> {
-        let rows: Vec<(Vec<u8>, Vec<u8>)> = if let Some(commit_id) = commit_id {
-            sqlx::query!(
-                "SELECT signed, blob FROM big_repo_subduction_commits
-                 WHERE scope_id = ?1 AND sedimentree_id = ?2 AND commit_id = ?3
-                 ORDER BY digest",
+        let rows = if let Some(commit_id) = commit_id {
+            queries::commit_rows_by_id(
+                &self.sql,
                 self.scope().id(),
                 Self::tree_blob(id),
-                Self::commit_blob(commit_id)
+                Self::commit_blob(commit_id),
             )
-            .fetch_all(&self.sql.read_pool)
             .await?
-            .into_iter()
-            .map(|row| (row.signed, row.blob))
-            .collect()
         } else {
-            sqlx::query!(
-                "SELECT signed, blob FROM big_repo_subduction_commits
-                 WHERE scope_id = ?1 AND sedimentree_id = ?2
-                 ORDER BY commit_id, digest",
-                self.scope().id(),
-                Self::tree_blob(id)
-            )
-            .fetch_all(&self.sql.read_pool)
-            .await?
-            .into_iter()
-            .map(|row| (row.signed, row.blob))
-            .collect()
+            queries::commit_rows(&self.sql, self.scope().id(), Self::tree_blob(id)).await?
         };
         rows.into_iter()
-            .map(|(signed, blob)| Ok((Signed::try_decode(&signed)?, Blob::new(blob))))
+            .map(|row| Ok((Signed::try_decode(&row.signed)?, Blob::new(row.blob))))
             .collect()
     }
 
@@ -748,36 +561,19 @@ impl SqliteBigRepoStore {
         id: SedimentreeId,
         head_id: Option<CommitId>,
     ) -> Result<Vec<(Signed<Fragment>, Blob)>, SqliteBigRepoStoreError> {
-        let rows: Vec<(Vec<u8>, Vec<u8>)> = if let Some(head_id) = head_id {
-            sqlx::query!(
-                "SELECT signed, blob FROM big_repo_subduction_fragments
-                 WHERE scope_id = ?1 AND sedimentree_id = ?2 AND head_id = ?3
-                 ORDER BY digest",
+        let rows = if let Some(head_id) = head_id {
+            queries::fragment_rows_by_id(
+                &self.sql,
                 self.scope().id(),
                 Self::tree_blob(id),
-                Self::commit_blob(head_id)
+                Self::commit_blob(head_id),
             )
-            .fetch_all(&self.sql.read_pool)
             .await?
-            .into_iter()
-            .map(|row| (row.signed, row.blob))
-            .collect()
         } else {
-            sqlx::query!(
-                "SELECT signed, blob FROM big_repo_subduction_fragments
-                 WHERE scope_id = ?1 AND sedimentree_id = ?2
-                 ORDER BY head_id, digest",
-                self.scope().id(),
-                Self::tree_blob(id)
-            )
-            .fetch_all(&self.sql.read_pool)
-            .await?
-            .into_iter()
-            .map(|row| (row.signed, row.blob))
-            .collect()
+            queries::fragment_rows(&self.sql, self.scope().id(), Self::tree_blob(id)).await?
         };
         rows.into_iter()
-            .map(|(signed, blob)| Ok((Signed::try_decode(&signed)?, Blob::new(blob))))
+            .map(|row| Ok((Signed::try_decode(&row.signed)?, Blob::new(row.blob))))
             .collect()
     }
 
@@ -785,56 +581,50 @@ impl SqliteBigRepoStore {
     /// index). Graph semantics live in the cached projection, not here.
     pub(crate) async fn insert_commit_rows(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         id: SedimentreeId,
         verified: VerifiedMeta<LooseCommit>,
     ) -> Result<(), SqliteBigRepoStoreError> {
         let (signed, payload, blob) = verified.into_full_parts();
         let digest = Self::digest_blob(&payload);
         let blob = blob.into_contents();
-        sqlx::query!(
-            "INSERT OR IGNORE INTO big_repo_subduction_commits
-             (scope_id, sedimentree_id, commit_id, digest, signed, blob)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        self.index_causal_ciphertext(tx, id, payload.head(), digest.clone(), 0, &blob)
+            .await?;
+        queries::insert_commit(
+            tx,
             self.scope().id(),
             Self::tree_blob(id),
             Self::commit_blob(payload.head()),
-            &digest,
-            signed.as_bytes(),
-            &blob
+            digest,
+            signed.as_bytes().to_vec(),
+            blob,
         )
-        .execute(&mut **tx)
         .await?;
-        self.index_causal_ciphertext(tx, id, payload.head(), digest, 0, &blob)
-            .await?;
         Ok(())
     }
 
     /// Raw SQL row insert for a fragment (plus its causal ciphertext index).
     pub(crate) async fn insert_fragment_rows(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         id: SedimentreeId,
         verified: VerifiedMeta<Fragment>,
     ) -> Result<(), SqliteBigRepoStoreError> {
         let (signed, payload, blob) = verified.into_full_parts();
         let digest = Self::digest_blob(&payload);
         let blob = blob.into_contents();
-        sqlx::query!(
-            "INSERT OR IGNORE INTO big_repo_subduction_fragments
-             (scope_id, sedimentree_id, head_id, digest, signed, blob)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        self.index_causal_ciphertext(tx, id, payload.head(), digest.clone(), 1, &blob)
+            .await?;
+        queries::insert_fragment(
+            tx,
             self.scope().id(),
             Self::tree_blob(id),
             Self::commit_blob(payload.head()),
-            &digest,
-            signed.as_bytes(),
-            &blob
+            digest,
+            signed.as_bytes().to_vec(),
+            blob,
         )
-        .execute(&mut **tx)
         .await?;
-        self.index_causal_ciphertext(tx, id, payload.head(), digest, 1, &blob)
-            .await?;
         Ok(())
     }
 }
@@ -851,7 +641,7 @@ impl SqliteBigRepoStore {
     /// caller commits and disarms it.
     pub(crate) async fn mutate_tree_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         id: SedimentreeId,
         mutation: TreeStorageMutation,
     ) -> Result<(Vec<PartEvent>, TreeCacheGuard<'_>), SqliteBigRepoStoreError> {
@@ -869,16 +659,13 @@ impl SqliteBigRepoStore {
             TreeStorageMutation::InsertCommit(_)
             | TreeStorageMutation::InsertFragment(_)
             | TreeStorageMutation::InsertBatch { .. } => {
-                // Inserts: adopt the cached entry or hydrate it from the
-                // transaction's view of durable storage.
-                let maybe_epoch = {
-                    let mut cache = self.tree_cache.lock().expect(ERROR_MUTEX);
-                    if cache.get(&id).is_some() {
-                        Some(cache.current_epoch(&id).unwrap_or(0))
-                    } else {
-                        None
-                    }
-                };
+                // Inserts: adopt only a committed cached entry or hydrate
+                // from the transaction's view of durable storage.
+                let maybe_epoch = self
+                    .tree_cache
+                    .lock()
+                    .expect(ERROR_MUTEX)
+                    .adopt_committed(&id);
                 let epoch = match maybe_epoch {
                     Some(epoch) => epoch,
                     None => {
@@ -1034,7 +821,7 @@ impl SqliteBigRepoStore {
     /// mutated.
     pub(crate) async fn hydrate_tree_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         id: SedimentreeId,
     ) -> Result<MinimizedSedimentree, SqliteBigRepoStoreError> {
         let commits = self.commit_meta_rows_in_tx(tx, id).await?;
@@ -1046,41 +833,23 @@ impl SqliteBigRepoStore {
 
     pub(crate) async fn commit_meta_rows_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         id: SedimentreeId,
     ) -> Result<Vec<LooseCommit>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query!(
-            "SELECT signed FROM big_repo_subduction_commits
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id, digest",
-            self.scope().id(),
-            Self::tree_blob(id)
-        )
-        .fetch_all(&mut **tx)
-        .await?;
+        let rows = queries::commit_meta_rows(tx, self.scope().id(), Self::tree_blob(id)).await?;
         rows.into_iter()
-            .map(|row| {
-                Ok(Signed::<LooseCommit>::try_decode(&row.signed)?.try_decode_trusted_payload()?)
-            })
+            .map(|row| Ok(Signed::<LooseCommit>::try_decode(&row)?.try_decode_trusted_payload()?))
             .collect()
     }
 
     pub(crate) async fn fragment_meta_rows_in_tx(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         id: SedimentreeId,
     ) -> Result<Vec<Fragment>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query!(
-            "SELECT signed FROM big_repo_subduction_fragments
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id, digest",
-            self.scope().id(),
-            Self::tree_blob(id)
-        )
-        .fetch_all(&mut **tx)
-        .await?;
+        let rows = queries::fragment_meta_rows(tx, self.scope().id(), Self::tree_blob(id)).await?;
         rows.into_iter()
-            .map(|row| {
-                Ok(Signed::<Fragment>::try_decode(&row.signed)?.try_decode_trusted_payload()?)
-            })
+            .map(|row| Ok(Signed::<Fragment>::try_decode(&row)?.try_decode_trusted_payload()?))
             .collect()
     }
 
@@ -1088,84 +857,72 @@ impl SqliteBigRepoStore {
     /// index). The cached projection is rebuilt by the caller.
     pub(crate) async fn delete_commit_rows(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         id: SedimentreeId,
         commit_id: CommitId,
     ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query!("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND content_ref = ?3 AND kind = 0",
+        queries::delete_causal_ciphertext(
+            tx,
             self.scope().id(),
             Self::tree_blob(id),
-            Self::commit_blob(commit_id)
+            Self::commit_blob(commit_id),
+            0,
         )
-            .execute(&mut **tx).await?;
-        sqlx::query!("DELETE FROM big_repo_subduction_commits WHERE scope_id = ?1 AND sedimentree_id = ?2 AND commit_id = ?3",
+        .await?;
+        queries::delete_commit(
+            tx,
             self.scope().id(),
             Self::tree_blob(id),
-            Self::commit_blob(commit_id)
+            Self::commit_blob(commit_id),
         )
-            .execute(&mut **tx).await?;
+        .await?;
         Ok(())
     }
 
     /// Raw SQL row delete for a fragment (plus its causal ciphertext index).
     pub(crate) async fn delete_fragment_rows(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         id: SedimentreeId,
         head_id: CommitId,
     ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query!("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND content_ref = ?3 AND kind = 1",
+        queries::delete_causal_ciphertext(
+            tx,
             self.scope().id(),
             Self::tree_blob(id),
-            Self::commit_blob(head_id)
+            Self::commit_blob(head_id),
+            1,
         )
-            .execute(&mut **tx).await?;
-        sqlx::query!("DELETE FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2 AND head_id = ?3",
+        .await?;
+        queries::delete_fragment(
+            tx,
             self.scope().id(),
             Self::tree_blob(id),
-            Self::commit_blob(head_id)
+            Self::commit_blob(head_id),
         )
-            .execute(&mut **tx).await?;
+        .await?;
         Ok(())
     }
 
     /// Raw SQL row delete for all loose commits of a tree.
     pub(crate) async fn delete_all_commit_rows(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         id: SedimentreeId,
     ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query!("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 0",
-            self.scope().id(),
-            Self::tree_blob(id)
-        ).execute(&mut **tx).await?;
-        sqlx::query!(
-            "DELETE FROM big_repo_subduction_commits WHERE scope_id = ?1 AND sedimentree_id = ?2",
-            self.scope().id(),
-            Self::tree_blob(id)
-        )
-        .execute(&mut **tx)
-        .await?;
+        queries::delete_causal_ciphertexts(tx, self.scope().id(), Self::tree_blob(id), 0).await?;
+        queries::delete_all_commits(tx, self.scope().id(), Self::tree_blob(id)).await?;
         Ok(())
     }
 
     /// Raw SQL row delete for all fragments of a tree.
     pub(crate) async fn delete_all_fragment_rows(
         &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut Tx,
         id: SedimentreeId,
     ) -> Result<(), SqliteBigRepoStoreError> {
-        sqlx::query!("DELETE FROM big_repo_causal_ciphertext_index WHERE scope_id = ?1 AND sedimentree_id = ?2 AND kind = 1",
-            self.scope().id(),
-            Self::tree_blob(id)
-        ).execute(&mut **tx).await?;
-        sqlx::query!(
-            "DELETE FROM big_repo_subduction_fragments WHERE scope_id = ?1 AND sedimentree_id = ?2",
-            self.scope().id(),
-            Self::tree_blob(id)
-        )
-        .execute(&mut **tx)
-        .await?;
+        queries::delete_causal_ciphertexts(tx, self.scope().id(), Self::tree_blob(id), 1).await?;
+        queries::delete_all_fragments(tx, self.scope().id(), Self::tree_blob(id)).await?;
         Ok(())
     }
 
@@ -1173,18 +930,10 @@ impl SqliteBigRepoStore {
         &self,
         id: SedimentreeId,
     ) -> Result<Vec<LooseCommit>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query!(
-            "SELECT signed FROM big_repo_subduction_commits
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id, digest",
-            self.scope().id(),
-            Self::tree_blob(id)
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let rows =
+            queries::commit_meta_rows(&self.sql, self.scope().id(), Self::tree_blob(id)).await?;
         rows.into_iter()
-            .map(|row| {
-                Ok(Signed::<LooseCommit>::try_decode(&row.signed)?.try_decode_trusted_payload()?)
-            })
+            .map(|row| Ok(Signed::<LooseCommit>::try_decode(&row)?.try_decode_trusted_payload()?))
             .collect()
     }
 
@@ -1192,18 +941,10 @@ impl SqliteBigRepoStore {
         &self,
         id: SedimentreeId,
     ) -> Result<Vec<Fragment>, SqliteBigRepoStoreError> {
-        let rows = sqlx::query!(
-            "SELECT signed FROM big_repo_subduction_fragments
-             WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id, digest",
-            self.scope().id(),
-            Self::tree_blob(id)
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let rows =
+            queries::fragment_meta_rows(&self.sql, self.scope().id(), Self::tree_blob(id)).await?;
         rows.into_iter()
-            .map(|row| {
-                Ok(Signed::<Fragment>::try_decode(&row.signed)?.try_decode_trusted_payload()?)
-            })
+            .map(|row| Ok(Signed::<Fragment>::try_decode(&row)?.try_decode_trusted_payload()?))
             .collect()
     }
 
@@ -1231,7 +972,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
 
     fn save_sedimentree_id(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = self.sql.begin_write().await?;
             self.save_tree(&mut tx, id).await?;
             // The tree exists in this store now, which is exactly what `/seds` lists: this
             // node's local index of the sedimentrees it has saved. This is the only place that
@@ -1257,33 +998,12 @@ impl Storage<Sendable> for SqliteBigRepoStore {
             // writer slot no other writer can be mid-transaction, so the
             // eviction is safe; leaving the entry evicted on rollback is also
             // safe (the next write rehydrates).
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = self.sql.begin_write().await?;
             self.tree_cache.lock().expect(ERROR_MUTEX).remove(&id);
             let tree = Self::tree_blob(id);
-            sqlx::query!(
-                "DELETE FROM big_repo_subduction_commits
-                     WHERE scope_id = ?1 AND sedimentree_id = ?2",
-                self.scope().id(),
-                &tree
-            )
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query!(
-                "DELETE FROM big_repo_subduction_fragments
-                     WHERE scope_id = ?1 AND sedimentree_id = ?2",
-                self.scope().id(),
-                &tree
-            )
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query!(
-                "DELETE FROM big_repo_subduction_trees
-                     WHERE scope_id = ?1 AND sedimentree_id = ?2",
-                self.scope().id(),
-                tree
-            )
-            .execute(&mut *tx)
-            .await?;
+            queries::delete_all_commits(&tx, self.scope().id(), tree.clone()).await?;
+            queries::delete_all_fragments(&tx, self.scope().id(), tree.clone()).await?;
+            queries::delete_tree(&tx, self.scope().id(), tree).await?;
             // The tree is gone, so the sedimentree is no longer one this node holds, and its
             // membership of `/seds` goes with it. Publish after committing, like any other
             // membership change.
@@ -1300,15 +1020,9 @@ impl Storage<Sendable> for SqliteBigRepoStore {
 
     fn load_all_sedimentree_ids(&self) -> BoxFuture<'_, Result<Set<SedimentreeId>, Self::Error>> {
         Sendable::from_future(async move {
-            let rows = sqlx::query!(
-                "SELECT sedimentree_id FROM big_repo_subduction_trees
-                 WHERE scope_id = ?1 ORDER BY sedimentree_id",
-                self.scope().id()
-            )
-            .fetch_all(&self.sql.read_pool)
-            .await?;
+            let rows = queries::load_all_sedimentree_ids(&self.sql, self.scope().id()).await?;
             rows.into_iter()
-                .map(|row| Ok(SedimentreeId::new(Self::decode_id(row.sedimentree_id)?)))
+                .map(|row| Ok(SedimentreeId::new(Self::decode_id(row)?)))
                 .collect()
         })
     }
@@ -1318,14 +1032,9 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         id: SedimentreeId,
     ) -> BoxFuture<'_, Result<bool, Self::Error>> {
         Sendable::from_future(async move {
-            let found: Option<i64> = sqlx::query_scalar!(
-                "SELECT 1 AS \"found!: i64\" FROM big_repo_subduction_trees
-                     WHERE scope_id = ?1 AND sedimentree_id = ?2",
-                self.scope().id(),
-                Self::tree_blob(id),
-            )
-            .fetch_optional(&self.sql.read_pool)
-            .await?;
+            let found =
+                queries::contains_sedimentree_id(&self.sql, self.scope().id(), Self::tree_blob(id))
+                    .await?;
             Ok(found.is_some())
         })
     }
@@ -1336,7 +1045,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         verified: VerifiedMeta<LooseCommit>,
     ) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = self.sql.begin_write().await?;
             self.save_tree(&mut tx, id).await?;
             let (events, guard) = self
                 .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::InsertCommit(verified))
@@ -1353,16 +1062,10 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         id: SedimentreeId,
     ) -> BoxFuture<'_, Result<Set<CommitId>, Self::Error>> {
         Sendable::from_future(async move {
-            let rows = sqlx::query!(
-                "SELECT DISTINCT commit_id FROM big_repo_subduction_commits
-                 WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY commit_id",
-                self.scope().id(),
-                Self::tree_blob(id)
-            )
-            .fetch_all(&self.sql.read_pool)
-            .await?;
+            let rows =
+                queries::list_commit_ids(&self.sql, self.scope().id(), Self::tree_blob(id)).await?;
             rows.into_iter()
-                .map(|row| Ok(CommitId::new(Self::decode_id(row.commit_id)?)))
+                .map(|row| Ok(CommitId::new(Self::decode_id(row)?)))
                 .collect()
         })
     }
@@ -1408,7 +1111,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         commit_id: CommitId,
     ) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = self.sql.begin_write().await?;
             let (events, guard) = self
                 .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteCommit(commit_id))
                 .await?;
@@ -1421,7 +1124,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
 
     fn delete_loose_commits(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = self.sql.begin_write().await?;
             let (events, guard) = self
                 .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteAllCommits)
                 .await?;
@@ -1438,7 +1141,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         verified: VerifiedMeta<Fragment>,
     ) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = self.sql.begin_write().await?;
             self.save_tree(&mut tx, id).await?;
             let (events, guard) = self
                 .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::InsertFragment(verified))
@@ -1470,16 +1173,11 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         id: SedimentreeId,
     ) -> BoxFuture<'_, Result<Set<CommitId>, Self::Error>> {
         Sendable::from_future(async move {
-            let rows = sqlx::query!(
-                "SELECT DISTINCT head_id FROM big_repo_subduction_fragments
-                 WHERE scope_id = ?1 AND sedimentree_id = ?2 ORDER BY head_id",
-                self.scope().id(),
-                Self::tree_blob(id)
-            )
-            .fetch_all(&self.sql.read_pool)
-            .await?;
+            let rows =
+                queries::list_fragment_ids(&self.sql, self.scope().id(), Self::tree_blob(id))
+                    .await?;
             rows.into_iter()
-                .map(|row| Ok(CommitId::new(Self::decode_id(row.head_id)?)))
+                .map(|row| Ok(CommitId::new(Self::decode_id(row)?)))
                 .collect()
         })
     }
@@ -1510,7 +1208,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
         head_id: CommitId,
     ) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = self.sql.begin_write().await?;
             let (events, guard) = self
                 .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteFragment(head_id))
                 .await?;
@@ -1523,7 +1221,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
 
     fn delete_fragments(&self, id: SedimentreeId) -> BoxFuture<'_, Result<(), Self::Error>> {
         Sendable::from_future(async move {
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = self.sql.begin_write().await?;
             let (events, guard) = self
                 .mutate_tree_in_tx(&mut tx, id, TreeStorageMutation::DeleteAllFragments)
                 .await?;
@@ -1542,24 +1240,19 @@ impl Storage<Sendable> for SqliteBigRepoStore {
     ) -> BoxFuture<'_, Result<usize, Self::Error>> {
         Sendable::from_future(async move {
             let count = commits.len() + fragments.len();
-            let mut tx = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = self.sql.begin_write().await?;
             self.save_tree(&mut tx, id).await?;
-            let (events, guard) = if count == 0 {
-                let epoch = self
-                    .tree_cache
-                    .lock()
-                    .expect(ERROR_MUTEX)
-                    .current_epoch(&id)
-                    .unwrap_or(0);
-                (Vec::new(), TreeCacheGuard::arm(&self.tree_cache, id, epoch))
-            } else {
-                self.mutate_tree_in_tx(
+            if count == 0 {
+                tx.commit().await?;
+                return Ok(count);
+            }
+            let (events, guard) = self
+                .mutate_tree_in_tx(
                     &mut tx,
                     id,
                     TreeStorageMutation::InsertBatch { commits, fragments },
                 )
-                .await?
-            };
+                .await?;
             tx.commit().await?;
             guard.disarm();
             self.publish(events).await?;
@@ -1571,6 +1264,7 @@ impl Storage<Sendable> for SqliteBigRepoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use big_sync_core::rpc::SubscriptionTarget;
 
     /// A replay page covers at most [`REPLAY_RAW_BATCH_SIZE`] rows *per part*, and each part's
@@ -1582,7 +1276,7 @@ mod tests {
     #[tokio::test]
     async fn replay_advances_each_part_from_its_own_page() -> Res<()> {
         let store = SqliteBigRepoStore::new(
-            SqlCtx::memory().await?,
+            sqlite_rs::SqliteRuntime::new(Default::default()).ephemeral(&[])?,
             "big-repo-sqlite-replay-per-part-page",
             BuckId::MAX_LEVEL,
         )

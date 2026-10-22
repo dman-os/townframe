@@ -12,7 +12,6 @@
       "**",
       // Build artifacts
       "!node_modules",
-      "!.sqlx",
       "!**/.expo",
       "!**/dist",
       "!**/.next",

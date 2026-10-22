@@ -1,0 +1,74 @@
+version = 1
+role = "runtime"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = [
+    "sqlite_rs",
+    "utils_rs",
+    "wash_plugin_wflow",
+    "wflow_core",
+    "wflow_tokio",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/wflow/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/wflow/kvstore.rs"
+symbol = "module"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/wflow/test.rs"
+symbol = "module::keyvalue_plugin"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/wflow/test.rs"
+symbol = "module::new_in_memory_kv_store"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/wflow/test/keyvalue_plugin.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/wflow/test.rs"
+symbol = "module::new_in_memory_kv_store"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/wflow/test/keyvalue_plugin.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"

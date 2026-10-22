@@ -47,8 +47,14 @@
 > Don't be lazy with solutions, you really are better than that.
 
 - To type check the ./src/daybook_compose multiplatform app, use `./x/check-dayb.ts`.
+- Source-only checks (nixfmt/statix/deadnix, rustfmt on every `.rs` file, deno fmt/lint/check of `x/`, biome, JSON/TOML/YAML validity) are hermetic Nix checks: run `nix flake check`, fix formatting with `nix fmt`. New files are invisible to the flake until tracked.
+- xtask groups its subcommands: `cargo x sql check|gen|migrate`, `cargo x plug build-oci`, `cargo x guardrails lint|api|doctor|check-matrix|plan|overlap|bless|...`.
 - Prefer `cargo clippy --all-targets --all-features -p myCrate` over `cargo check`.
 - When working with rust, in addition to `cargo clippy`, small tests can be used to validate ideas.
+- Run `cargo x guardrails lint` (and `cargo x guardrails api --all --check`, `cargo x guardrails doctor`) to verify module/symbol budgets, crate-local `guardrails.toml` dependency & exemption policies, migration-history identities, documentation links/metadata, and public-API contracts.
+- Use `cargo x guardrails plan <files...>` to compute affected consumer crates, `cargo x guardrails overlap` to inspect symbol/migration/API interference across sibling worktrees, and `./x/agent-build.ts -- <cmd...>` to run builds under the host-wide FIFO jobserver and per-worktree cgroup memory limits.
+- Run `cargo x guardrails check-matrix` to compile every crate against its declared `[builds.<target>]` contract in `guardrails.toml` (native, `wasm32-wasip2`, `wasm32-unknown-unknown`); `--dry-run` prints the commands. Wasm guests live in the `src/wasm_utils_rs/Cargo.toml` workspace, so pass `--manifest-path src/wasm_utils_rs/Cargo.toml` for guest builds and keep all three lockfiles in sync (root, `src/wasm_utils_rs`, and the single-crate `src/btress_sysadmin` workspace; seed guest locks from the root one).
+- Keep `CARGO_TARGET_DIR` outside the checkout and scoped per worktree; the dev shells and `./x/agent-build.ts` do this automatically. A shared target dir makes `<target>/debug/xtask` whichever sibling worktree linked last, so `cargo x` can run foreign code. Use sccache for shared compiler caching: `TOWNFRAME_SCCACHE=1` or `./x/agent-build.ts --sccache -- <cmd...>`; `CARGO_INCREMENTAL=0` is required. The local benchmark showed same-path rebuild hits and warm-concurrency hits, but no Rust hits across different worktree paths. Never use `nix develop path:.` here: it copies untracked build output into the store and rebuilds the toolchain from source. Use `nix develop .#ci-rust`.
 - `./x/disk-watch.ts` is a non-LLM daemon (5s loop) that auto-runs `./x/clean-rust.ts` when free space on the repo FS drops below 4 GiB (skips if a `cargo`/`rustc`/`clippy` build is running), removes `<cargo target>/debug` if clean-rust doesn't recover to ≥10 GiB, and errors out (non-zero exit) if still <10 GiB. Run it in the background: `setsid deno run --allow-all x/disk-watch.ts >/tmp/disk-watch.log 2>&1 </dev/null & disown`. `./x/clean-rust.ts` runs `cargo clean -p <each workspace pkg>` to free target-dir space.
 
 ## Comments
@@ -80,7 +86,7 @@ Diagnose the keyhive pull pipeline first; the worker-side retry storm is only th
 
 - Use RUST_LOG_TEST env var for controlling log levels during testing.
 - `printf` and experimental debugging is always quicker than trying to come up with premature hypothesis.
-  - Need to prove/demo a hypothesis, throw together a quick commaind in ./src/xtask/ cli.
+  - Need to prove/demo a hypothesis? Write a targeted unit test in the relevant crate using `[dev-dependencies]` — do not add demo commands or heavy dependencies to `./src/xtask/`, which must compile fast for guardrails and CI.
 
 - Every failure a run surfaces is pinned or instrumented in the same turn. "Pre-existing", "unrelated", and "my change didn't cause it" are not findings, and neither are two clean runs after a change.
 - `../keyhive` and `../subduction` are ours to instrument. Ask before *concluding* a bug is upstream, not before adding a log line.

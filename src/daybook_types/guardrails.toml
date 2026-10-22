@@ -1,0 +1,56 @@
+version = 1
+role = "domain"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = [
+    "am_utils_rs",
+    "utils_rs",
+    "wasm_utils_rs",
+]
+allow_external_api_types = false
+
+[builds.native]
+required_features = ["uniffi", "wit", "schemars", "manifest"]
+
+[builds.wasm32-wasip2]
+required_features = ["wit", "schemars", "manifest"]
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/daybook_types/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/daybook_types/manifest.rs"
+symbol = "module::tests"
+ceiling = 574
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MODULE_ITEMS"
+path = "src/daybook_types/doc.rs"
+symbol = "module"
+ceiling = 53
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: split responsibilities; imports and impl blocks do not count"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MODULE_ITEMS"
+path = "src/daybook_types/manifest.rs"
+symbol = "module"
+ceiling = 54
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: split responsibilities; imports and impl blocks do not count"
+reference = "docs/scratch/agent-guardrails-open-items.md"

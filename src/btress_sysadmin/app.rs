@@ -2,14 +2,20 @@ use crate::interlude::*;
 
 mod theme;
 
-use leptos_meta::{MetaTags, Stylesheet, Title};
+#[cfg(feature = "ssr")]
+use leptos_meta::MetaTags;
+use leptos_meta::Stylesheet;
+use leptos_meta::Title;
 
 // Auth component base (hosted on its own port; the session cookie is
 // host-scoped so the sysadmin's localhost origin shares it).
+#[cfg(feature = "hydrate")]
 const AUTH_BASE: &str = "http://localhost:8071";
 // Where the magic-link verify should redirect back to (this app).
+#[cfg(feature = "hydrate")]
 const SELF_URL: &str = "http://localhost:3000/";
 
+#[cfg(feature = "ssr")]
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>
@@ -86,7 +92,21 @@ fn session_email(json_text: &str) -> Option<String> {
 
 #[component]
 fn LoginCard() -> impl IntoView {
+    #[cfg_attr(
+        not(feature = "hydrate"),
+        expect(
+            unused_variables,
+            reason = "the login effects that drive these setters only run in the browser build"
+        )
+    )]
     let (logged_in_as, set_logged_in_as) = signal(None::<String>);
+    #[cfg_attr(
+        not(feature = "hydrate"),
+        expect(
+            unused_variables,
+            reason = "the login effects that drive these setters only run in the browser build"
+        )
+    )]
     let (notice, set_notice) = signal(String::new());
 
     // Client-side session check (mirrors gursha: the app never does server-side

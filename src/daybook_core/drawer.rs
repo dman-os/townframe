@@ -2,7 +2,7 @@
 // FIXME: use ensure_alive method for cancellation checks
 // FIXME: is validating facet references on entry useful? Would that not race?
 
-use crate::app::SqlCtx;
+use crate::app::Database;
 use crate::interlude::*;
 use crate::plugs::PlugsRepo;
 
@@ -14,28 +14,47 @@ mod meta;
 mod mutations;
 mod outbox;
 mod queries;
+/// Repository-database tables owned by the drawer: local branch refs and
+/// tombstones (`meta`) and the add write-ahead outbox (`outbox`).
+pub(crate) mod sqlite {
+    pub(crate) mod queries {
+        include!("drawer/sqlite/gen.rs");
+    }
+}
 mod reconciliation;
 #[cfg(test)]
 mod tests;
 pub mod types;
 
-pub use crate::drawer::types::{DocBundle, DocEntry, DocEntryDiff, DocNBranches, DrawerEvent};
+pub use crate::drawer::types::DocBundle;
+pub use crate::drawer::types::DocEntry;
+pub use crate::drawer::types::DocEntryDiff;
+pub use crate::drawer::types::DocNBranches;
+pub use crate::drawer::types::DrawerEvent;
 pub use meta::doc_version_updates;
 pub use meta::version_updates;
 pub use mutations::StagedAdd;
 
-use big_repo::{
-    BigKeyhiveGroup, BigRepoLocalListenerRegistration, BigRepoLocalNotification, SharedBigRepo,
-    SharedPartStore,
-};
+use big_repo::BigKeyhiveGroup;
+use big_repo::BigRepoLocalListenerRegistration;
+use big_repo::BigRepoLocalNotification;
+use big_repo::SharedBigRepo;
+use big_repo::SharedPartStore;
 use cache::FacetCacheKey;
 use cache::*;
-use types::{BranchSnapshot, DocDeleteTombstone};
+use types::BranchSnapshot;
+use types::DocDeleteTombstone;
 use utils_rs::lru::SharedKeyedLruPool;
 
 use automerge::ReadDoc;
-use daybook_types::doc::{BranchId, ChangeHashSet, DocId, FacetKey, FacetRaw, FacetRef};
-use daybook_types::url::{FACET_SELF_DOC_ID, parse_facet_ref};
+use daybook_types::doc::BranchId;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetRaw;
+use daybook_types::doc::FacetRef;
+use daybook_types::url::FACET_SELF_DOC_ID;
+use daybook_types::url::parse_facet_ref;
 
 use tokio_util::sync::CancellationToken;
 
@@ -198,7 +217,7 @@ pub struct DrawerRepo {
     _change_listener_tickets: Vec<big_repo::BigRepoChangeListenerRegistration>,
     current_heads: surelock::mutex::Mutex<ChangeHashSet>,
     drawer_doc_handle: big_repo::BigDocHandle,
-    meta_store_sql: SqlCtx,
+    meta_store_sql: Database,
     /// Test-only: fail the next `delete_branch` drawer-document commit before the
     /// tombstone reaches the drawer doc. Deleting a replicated branch applies the
     /// keyhive-channel revocation (`remove_branch_from_partitions_if_needed`) and
@@ -240,7 +259,7 @@ impl DrawerRepo {
         &self.drawer_doc_id
     }
 
-    pub fn meta_store_sql(&self) -> &SqlCtx {
+    pub fn meta_store_sql(&self) -> &Database {
         &self.meta_store_sql
     }
 
@@ -276,7 +295,7 @@ impl DrawerRepo {
         partition_store: SharedPartStore,
         drawer_doc_id: DocumentId,
         local_user_path: daybook_types::doc::UserPathBuf,
-        meta_db_pool: SqlCtx,
+        meta_db_pool: Database,
         _local_state_root: PathBuf,
         entry_pool: SharedKeyedLruPool<DocId>,
         doc_pool: SharedKeyedLruPool<FacetCacheKey>,
@@ -344,8 +363,7 @@ impl DrawerRepo {
         // drawer_add_outbox. Both writes are bookkeeping-only here; the
         // outbox's row *replay* runs after attach, below, so that
         // possibly-half-registered entries never boot other machinery.
-        repo.ensure_local_branch_schema().await?;
-        outbox::ensure_outbox_schema(&repo.meta_store_sql).await?;
+        meta::ensure_schema(&repo.meta_store_sql).await?;
         // ADR 007 §2: the plugs repo is loaded before the drawer (the drawer
         // needs it for facet validation); attach the drawer back so the plugs
         // repo can read manifest docs and write the plugg config facet through
@@ -478,7 +496,8 @@ impl DrawerRepo {
     /// branch. Presenting or using a branch must consult this, so the two channels
     /// cannot produce a branch that is listed and unwritable.
     pub(crate) async fn branch_doc_reachable(&self, branch_doc_id: &DocumentId) -> Res<bool> {
-        use big_repo::keyhive_core::principal::{identifier::Identifier, public::Public};
+        use big_repo::keyhive_core::principal::identifier::Identifier;
+        use big_repo::keyhive_core::principal::public::Public;
 
         // The write gate (`NativeBigRepoIo::has_doc_write_access`) derives its
         // local identifier from this repo's peer key, and the local keyhive agent

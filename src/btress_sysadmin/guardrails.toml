@@ -1,0 +1,40 @@
+version = 1
+role = "application"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = ["utils_rs"]
+allow_external_api_types = false
+
+[builds.wasm32-wasip2]
+required_features = ["ssr"]
+default_features = false
+
+[builds.wasm32-unknown-unknown]
+required_features = ["hydrate"]
+default_features = false
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/btress_sysadmin/lib.rs"
+symbol = "module::interlude"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/btress_sysadmin/app/theme.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/btress_sysadmin/server/session.rs"
+symbol = "module"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"

@@ -23,9 +23,12 @@ use std::io::Write;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use tracing::field::{Field, Visit};
-use tracing::{Id, Subscriber};
-use tracing_subscriber::layer::{Context, Layer};
+use tracing::Id;
+use tracing::Subscriber;
+use tracing::field::Field;
+use tracing::field::Visit;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::layer::Layer;
 use tracing_subscriber::registry::LookupSpan;
 
 pub struct CensusLayer {

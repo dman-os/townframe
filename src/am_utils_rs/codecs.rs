@@ -2,7 +2,9 @@ use crate::interlude::*;
 
 use automerge::ObjId;
 
-use autosurgeon::{HydrateError, ReadDoc, Reconciler};
+use autosurgeon::HydrateError;
+use autosurgeon::ReadDoc;
+use autosurgeon::Reconciler;
 
 pub mod json;
 pub use json::ThroughJson;
@@ -22,7 +24,8 @@ pub mod date {
         obj: &ObjId,
         prop: autosurgeon::Prop<'a>,
     ) -> Result<Timestamp, autosurgeon::HydrateError> {
-        use automerge::{ScalarValue, Value};
+        use automerge::ScalarValue;
+        use automerge::Value;
 
         match doc.get(obj, &prop)? {
             Some((Value::Scalar(scalar), _)) => match scalar.as_ref() {
@@ -88,7 +91,8 @@ pub mod through_str {
         obj: &ObjId,
         prop: autosurgeon::Prop<'a>,
     ) -> Result<T, HydrateError> {
-        use automerge::{ScalarValue, Value};
+        use automerge::ScalarValue;
+        use automerge::Value;
         let string = match doc.get(obj, &prop)? {
             Some((Value::Scalar(scalar), _)) => {
                 match scalar.as_ref() {
@@ -136,7 +140,8 @@ pub mod path {
         obj: &ObjId,
         prop: autosurgeon::Prop<'a>,
     ) -> Result<PathBuf, HydrateError> {
-        use automerge::{ScalarValue, Value};
+        use automerge::ScalarValue;
+        use automerge::Value;
         let string = match doc.get(obj, &prop)? {
             Some((Value::Scalar(scalar), _)) => match scalar.as_ref() {
                 ScalarValue::Str(str_val) => str_val.to_string(),
@@ -171,7 +176,8 @@ pub mod utf8_path {
         obj: &ObjId,
         prop: autosurgeon::Prop<'a>,
     ) -> Result<Utf8PathBuf, HydrateError> {
-        use automerge::{ScalarValue, Value};
+        use automerge::ScalarValue;
+        use automerge::Value;
         let string = match doc.get(obj, &prop)? {
             Some((Value::Scalar(scalar), _)) => match scalar.as_ref() {
                 ScalarValue::Str(str_val) => str_val.to_string(),

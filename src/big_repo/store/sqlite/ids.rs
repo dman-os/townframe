@@ -101,6 +101,8 @@ mod tests {
         let buck = BuckId::new(3, 17);
         assert_eq!(IdCodec::buck_id(IdCodec::buck_i64(buck)), buck);
         assert_eq!(IdCodec::u64_from_db(42), 42);
+        assert_eq!(IdCodec::u64_from_db(-1), u64::MAX);
+        assert_eq!(IdCodec::u64_from_db(i64::MIN), 1_u64 << 63);
     }
 
     #[test]

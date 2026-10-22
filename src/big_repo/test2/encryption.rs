@@ -16,9 +16,15 @@
 //! | `decrypt_after_fork_and_merge`                            | Forked-then-merged content is decryptable by both participants. |
 //! | `decrypt_after_archive_roundtrip`                         | After process restart (keyhive archive restore), decryptability is preserved. |
 
-use super::harness::{Node, Pair, fixtures, heads, topo::ShutdownGuard};
+use super::harness::Node;
+use super::harness::Pair;
+use super::harness::fixtures;
+use super::harness::heads;
+use super::harness::topo::ShutdownGuard;
 use crate::encrypted_blob::decode_encrypted_blob;
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::transaction::Transactable;
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use utils_rs::expect_tags::ERROR_IMPOSSIBLE;

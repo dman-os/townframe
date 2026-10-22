@@ -12,7 +12,8 @@ path = "lib.rs"
 [dependencies]
 #
 # internal
-api_utils_rs.workspace = true
+utils_rs.workspace = true
+wasm_utils_rs.workspace = true
 
 #
 # encoding

@@ -15,7 +15,7 @@ import type {
   Connection,
   Transaction,
 } from "townframe:sqlite/sqlite-connection";
-import type { ResultRow, SqlValue } from "townframe:sqlite/types";
+import type { ResultSet, SqlValue } from "townframe:sqlite/types";
 import {
   type CompiledQuery,
   type DatabaseConnection,
@@ -66,13 +66,16 @@ function fromSqlValue(value: SqlValue): unknown {
   }
 }
 
-/** A `result-row` (list of column-name/value entries) -> a Kysely row object. */
-function rowToRecord(row: ResultRow): Record<string, unknown> {
-  const record: Record<string, unknown> = {};
-  for (const entry of row) {
-    record[entry.columnName] = fromSqlValue(entry.value);
-  }
-  return record;
+/** A `result-set` (columns once + positional rows) -> Kysely row objects. */
+function setToRecords(set: ResultSet): Record<string, unknown>[] {
+  return set.rows.map((row) => {
+    if (row.length !== set.columns.length) {
+      throw new Error("SQLite result row does not match its columns");
+    }
+    return Object.fromEntries(
+      set.columns.map((column, index) => [column, fromSqlValue(row[index])]),
+    );
+  });
 }
 
 class WitsqlConnection implements DatabaseConnection {
@@ -83,9 +86,11 @@ class WitsqlConnection implements DatabaseConnection {
   async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
     const { sql, parameters } = compiledQuery;
     const target: Connection | Transaction = this.tx ?? this.conn;
-    const rows = target.query(sql, parameters.map(toSqlValue));
+    const out = target.execute(sql, parameters.map(toSqlValue));
     return {
-      rows: rows.map(rowToRecord) as R[],
+      rows: setToRecords(out.resultSet) as R[],
+      numAffectedRows: out.rowsAffected,
+      insertId: out.lastInsertRowid,
     };
   }
 
@@ -104,15 +109,25 @@ class WitsqlConnection implements DatabaseConnection {
   }
 
   async commitTransaction(): Promise<void> {
-    if (!this.tx) throw new Error("commitTransaction: no active transaction");
-    this.tx.commit();
+    const tx = this.tx;
+    if (!tx) throw new Error("commitTransaction: no active transaction");
     this.tx = null;
+    try {
+      tx.commit();
+    } finally {
+      tx[Symbol.dispose]();
+    }
   }
 
   async rollbackTransaction(): Promise<void> {
-    if (!this.tx) throw new Error("rollbackTransaction: no active transaction");
-    this.tx.rollback();
+    const tx = this.tx;
+    if (!tx) throw new Error("rollbackTransaction: no active transaction");
     this.tx = null;
+    try {
+      tx.rollback();
+    } finally {
+      tx[Symbol.dispose]();
+    }
   }
 
   async destroy(): Promise<void> {

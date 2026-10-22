@@ -3,7 +3,8 @@
 use crate::interlude::*;
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 pub fn register_uniffi_listener<R, E, F>(
     repo: &R,

@@ -40,7 +40,9 @@ pub(crate) fn decode_encrypted_blob(raw_bytes: &[u8]) -> Res<EncryptedContent<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keyhive_crypto::{digest::Digest, signed::Signed, siv::Siv};
+    use keyhive_crypto::digest::Digest;
+    use keyhive_crypto::signed::Signed;
+    use keyhive_crypto::siv::Siv;
     use serde::Serialize;
     use std::marker::PhantomData;
 

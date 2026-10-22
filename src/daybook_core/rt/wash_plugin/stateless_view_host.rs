@@ -3,9 +3,12 @@ use crate::interlude::*;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::plugin::HostPlugin;
 use wash_runtime::plugin::WitInterfaces;
-use wash_runtime::wit::{WitInterface, WitWorld};
+use wash_runtime::wit::WitInterface;
+use wash_runtime::wit::WitWorld;
 
-use wash_plugin_wflow::{service_host, service_metastore, service_partition_host};
+use wash_plugin_wflow::service_host;
+use wash_plugin_wflow::service_metastore;
+use wash_plugin_wflow::service_partition_host;
 
 #[derive(Default)]
 pub struct StatelessViewPlugin;

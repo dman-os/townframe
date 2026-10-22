@@ -29,11 +29,17 @@
 use crate::blobs::pair_roots::PairRoots;
 use crate::interlude::*;
 
-use iroh_blobs::{BlobFormat, Hash, HashAndFormat, api::Store};
+use iroh_blobs::BlobFormat;
+use iroh_blobs::Hash;
+use iroh_blobs::HashAndFormat;
+use iroh_blobs::api::Store;
 
 use super::Res;
-use super::codec::{RecordEncryptor, StreamDecryptor, ciphertext_len};
-use super::keys::{CipherKeySource, MasterKey};
+use super::codec::RecordEncryptor;
+use super::codec::StreamDecryptor;
+use super::codec::ciphertext_len;
+use super::keys::CipherKeySource;
+use super::keys::MasterKey;
 use super::params::EncodingParams;
 use super::serve::CipherBlobProvider;
 
@@ -346,7 +352,8 @@ mod tests {
 
     use bao_tree::io::mixed::ReadBytesAt;
     use bao_tree::io::outboard::PreOrderMemOutboard;
-    use iroh_blobs::store::virtual_blob::{DynVirtualSource, Provider};
+    use iroh_blobs::store::virtual_blob::DynVirtualSource;
+    use iroh_blobs::store::virtual_blob::Provider;
 
     /// Provider name for the mid-stream-error source below. Deliberately not
     /// [`PROVIDER_NAME`] so this test's entry can never be served by real

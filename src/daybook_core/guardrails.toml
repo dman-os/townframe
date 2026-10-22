@@ -1,0 +1,741 @@
+version = 1
+role = "runtime"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = [
+    "am_utils_rs",
+    "big_repo",
+    "big_sync",
+    "big_sync_core",
+    "daybook_pdk",
+    "daybook_types",
+    "mltools",
+    "native_utils_rs",
+    "secrets_rs",
+    "sqlite_rs",
+    "utils_rs",
+    "wash_plugin_sqlite",
+    "wash_plugin_wflow",
+    "wflow",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_ALLOW_ATTRIBUTE"
+path = "src/daybook_core/blobs/encrypt/download.rs"
+symbol = "module::consume_decrypted"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = 'initial guardrail baseline: use a narrow #[expect(..., reason = "...")] so obsolete suppressions fail'
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_ALLOW_ATTRIBUTE"
+path = "src/daybook_core/index/facet_delta.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = 'initial guardrail baseline: use a narrow #[expect(..., reason = "...")] so obsolete suppressions fail'
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/daybook_core/drawer/tests.rs"
+symbol = "module::test_partitions_track_non_tmp_branches"
+ceiling = 6
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/daybook_core/rt.rs"
+symbol = "module::Rt::dispatch_no_gate_internal"
+ceiling = 4
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/daybook_core/rt/dispatch.rs"
+symbol = "module::tests::active_dispatch"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/daybook_core/rt/dispatch.rs"
+symbol = "module::tests::facet_routine_args_fingerprint_is_stable_for_same_input"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/daybook_core/rt/dispatch.rs"
+symbol = "module::tests::waiting_dispatch"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/daybook_core/sync/tests/ladder.rs"
+symbol = "module::iroh_sync_offline_divergent_branch_merge_converges"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/blobs/encrypt/download.rs"
+symbol = "module::download_encrypted"
+ceiling = 186
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/drawer.rs"
+symbol = "module::DrawerRepo::validate_facet_reference"
+ceiling = 173
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/drawer/mutations.rs"
+symbol = "module::DrawerRepo::create_branch_at_heads_from_branch"
+ceiling = 344
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/drawer/mutations.rs"
+symbol = "module::DrawerRepo::merge_from_heads"
+ceiling = 239
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/drawer/mutations.rs"
+symbol = "module::DrawerRepo::prepare_add_doc"
+ceiling = 169
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/drawer/tests.rs"
+symbol = "module::test_partitions_track_non_tmp_branches"
+ceiling = 280
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/index/facet_set.rs"
+symbol = "module::FacetSetRevisionStore::prepare_projection"
+ceiling = 189
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/plugs.rs"
+symbol = "module::system_plugs"
+ceiling = 182
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/plugs/validation.rs"
+symbol = "module::PlugsRepo::validate_structure"
+ceiling = 483
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/repo.rs"
+symbol = "module::RepoCtx::open_inner"
+ceiling = 241
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/repo.rs"
+symbol = "module::RepoCtx::run_repo_init_dance"
+ceiling = 347
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/rt.rs"
+symbol = "module::Rt::boot"
+ceiling = 388
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/rt.rs"
+symbol = "module::Rt::dispatch_no_gate_internal"
+ceiling = 458
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/rt.rs"
+symbol = "module::Rt::handle_wflow_entry"
+ceiling = 360
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/rt.rs"
+symbol = "module::Rt::render_facet_view"
+ceiling = 207
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/rt/triage.rs"
+symbol = "module::DocProcessorTriageListener::plan_doc"
+ceiling = 172
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/rt/wash_plugin.rs"
+symbol = "module::SharedWashCtx as facet_routine :: Host::get_args"
+ceiling = 163
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/sync.rs"
+symbol = "module::IrohSyncRepo::boot"
+ceiling = 186
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/sync/bootstrap.rs"
+symbol = "module::clone_repo_init_from_url"
+ceiling = 239
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/sync/bootstrap.rs"
+symbol = "module::pull_required_partitions_via_big_sync_worker"
+ceiling = 200
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/sync/tests.rs"
+symbol = "module::iroh_clone_bootstrap_syncs_encrypted_representation_inventory"
+ceiling = 274
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/sync/tests.rs"
+symbol = "module::long_test_told_not_cloned_inventory_part_is_refused_until_the_inventory_document_is_granted"
+ceiling = 389
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/sync/tests.rs"
+symbol = "module::relay_granted_only_the_encrypted_inventory_cannot_decrypt_but_retains_and_re_serves_ciphertext"
+ceiling = 470
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/sync/tests/stress.rs"
+symbol = "module::apply_event"
+ceiling = 267
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/tables.rs"
+symbol = "module::TablesRepo::notifs_loop"
+ceiling = 203
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/daybook_core/test_support.rs"
+symbol = "module::test_cx_with_options"
+ceiling = 390
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/daybook_core/lib.rs"
+symbol = "module::interlude"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/daybook_core/sync.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/daybook_core/blobs.rs"
+symbol = "module::tests"
+ceiling = 470
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/daybook_core/blobs/key_source.rs"
+symbol = "module::tests"
+ceiling = 486
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/daybook_core/blobs/permission_writer.rs"
+symbol = "module::tests"
+ceiling = 875
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/daybook_core/blobs/pin_worker.rs"
+symbol = "module::tests"
+ceiling = 1149
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/daybook_core/blobs/pins_part_worker.rs"
+symbol = "module::tests"
+ceiling = 539
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/daybook_core/blobs/sync.rs"
+symbol = "module::tests"
+ceiling = 719
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/daybook_core/index/doc_delta_store.rs"
+symbol = "module::tests"
+ceiling = 719
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/daybook_core/index/facet_set.rs"
+symbol = "module::tests"
+ceiling = 388
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/authority.rs"
+symbol = "module::RepoAuthority::blob_inventories_parent"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/blobs/encrypt/serve.rs"
+symbol = "module::CipherBlobProvider::install_with_provenance"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/blobs/encrypt/serve.rs"
+symbol = "module::CipherBlobProvider::register_pair_with_provenance"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/blobs/encryption_worker.rs"
+symbol = "module::Ctx::write_cipher_facet"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/drawer.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/drawer.rs"
+symbol = "module::DrawerRepo::load"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/index/facet_set.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/lib.rs"
+symbol = "module::repos"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/plugs.rs"
+symbol = "module::PlugsRepo"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/repo.rs"
+symbol = "module::RepoCtx::run_repo_init_dance"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/rt.rs"
+symbol = "module::Rt::boot"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/rt.rs"
+symbol = "module::Rt::dispatch_no_gate_internal"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/rt/triage.rs"
+symbol = "module::DocProcessorTriageListener::plan_doc"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/rt/triage.rs"
+symbol = "module::should_processor_run_for_event"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/daybook_core/sync/bootstrap.rs"
+symbol = "module::pull_required_partitions_via_big_sync_worker"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MODULE_ITEMS"
+path = "src/daybook_core/blobs/encryption_worker.rs"
+symbol = "module"
+ceiling = 43
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: split responsibilities; imports and impl blocks do not count"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SEND_DISCARDED"
+path = "src/daybook_core/progress.rs"
+symbol = "module::ProgressWorker::handle_msg"
+ceiling = 10
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: handle send failure; broadcast with zero listeners needs a specific exemption"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SEND_DISCARDED"
+path = "src/daybook_core/sync.rs"
+symbol = "module::SubductionProtocolHandler as ProtocolHandler::accept"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: handle send failure; broadcast with zero listeners needs a specific exemption"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/blobs.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/blobs.rs"
+symbol = "module::BlobsRepo::lock_for_hash"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/blobs/pin_worker.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/blobs/pins_part_worker.rs"
+symbol = "module::Worker::on_delta"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/blobs/pins_part_worker.rs"
+symbol = "module::Worker::start_task"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/blobs/pins_part_worker.rs"
+symbol = "module::run_blob_pins_part_task"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/config.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/index/facet_ref.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/local_state.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/plugs.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/rt/dispatch.rs"
+symbol = "module"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/rt/init.rs"
+symbol = "module"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/stores.rs"
+symbol = "module"
+ceiling = 2
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/stores.rs"
+symbol = "module::FacetStoreHandle < S >::reload_inner"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/sync.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/daybook_core/sync/bootstrap.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[migrations]
+"src/daybook_core/blobs/pins_part_worker/sqlite/migrations/001_doc_blob_pins.sql" = "d662575b82307bc8730e7b444d4b9a20f4e9f64a343768e448c976f9ce05cb80"
+"src/daybook_core/blobs/sqlite/migrations/001_blob_pins.sql" = "86207a76e58955d0e302f4b92e1759aa9c4076e4f6c2999ea8df958a982313c0"
+"src/daybook_core/drawer/sqlite/migrations/001_local_branches_outbox.sql" = "a5ba768c960ea52e34bf49e1a2a33fa17b9a343ded963ab9f70a9b7147d15f16"
+"src/daybook_core/index/facet_ref/sqlite/migrations/001_facet_ref_edges.sql" = "3edb680c9d9bd7f5eda9c36cfeec6640b6e8d693ddedfa8dc1805ea6910b50a2"
+"src/daybook_core/index/facet_set/sqlite/migrations/001_facet_set.sql" = "2ff482c6c4d99a10a9e1b6cf294186a8f9ec639c47be04a0b4a829a5a9ee7968"
+"src/daybook_core/progress/sqlite/migrations/001_progress.sql" = "b5a44f62a6e73cb6c95724498132d79b47e77dda8b356f2869fd0e4629e8aac7"
+"src/daybook_core/rt/sqlite/migrations/001_dispatch_init.sql" = "d9aa0c7bfc351de816f375ed45cee0d9574935a104be4f888db9d3ae36bc2c2b"
+"src/daybook_core/sqlite/migrations/001_kvstore.sql" = "779cb26b883b8ae107f1046566639a82cc98ab44706631aecc7583d623e6d061"

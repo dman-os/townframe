@@ -1,0 +1,43 @@
+[package]
+name = "plug_dayledger_manifest"
+version.workspace = true
+edition.workspace = true
+
+[package.metadata.townframe]
+routines = "../plug_dayledger_routines"
+
+[package.metadata.cargo-machete]
+ignored = ["serde", "pastey"]
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[[bin]]
+name = "manifest"
+path = "manifest.rs"
+
+[dependencies]
+utils_rs = { workspace = true, default-features = false, features = ["hash"] }
+daybook_types = { workspace = true, default-features = false, features = ["manifest", "schemars"] }
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+schemars = { version = "1.2", features = [
+    "uuid1",
+    "semver1",
+    "url2",
+    "jiff02",
+    "indexmap2",
+] }
+chumsky = "0.12.0"
+jiff = { version = "0.2.24", features = ["serde"] }
+rust_decimal = "1.41.0"
+blake3.workspace = true
+pastey.workspace = true
+
+[dev-dependencies]
+automerge.workspace = true
+daybook_core = { workspace = true, features = ["test-support"] }

@@ -34,7 +34,7 @@ async function buildAuth(
     const conn = entry[1];
 
     // The component owns its schema: ensure better-auth's tables exist.
-    conn.queryBatch(AUTH_SCHEMA_DDL);
+    conn.executeBatch(AUTH_SCHEMA_DDL);
 
     const dialect = new WitsqlDialect(conn);
     const options: BetterAuthOptions = {

@@ -23,8 +23,14 @@
 //! | `group_add_checkpoint`                        | BigRepo emits CGKA membership plus a history checkpoint |
 //! |                                               | for a group member added after document creation.       |
 
-use super::harness::{Node, Pair, Topo, fixtures, keyhive as kh_snap};
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use super::harness::Node;
+use super::harness::Pair;
+use super::harness::Topo;
+use super::harness::fixtures;
+use super::harness::keyhive as kh_snap;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::transaction::Transactable;
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;
 use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
@@ -1317,7 +1323,8 @@ async fn tier6_grant_after_content_explicit_frontier() -> crate::Res<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn tier6_prekey_janitor_rotates_consumed_prekey_and_refills_pool() -> crate::Res<()> {
     use keyhive_core::access::Access;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use std::time::Instant;
 
     use std::collections::HashSet;
 
@@ -1604,7 +1611,8 @@ fn synthetic_join_add_event(
 /// source of truth for the missed-add window.
 #[tokio::test(flavor = "multi_thread")]
 async fn tier6_prekey_janitor_survives_missed_add_window() -> crate::Res<()> {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use std::time::Instant;
 
     // joiner identity derives deterministically from its node seed; re-derive
     // it here to address the joiner's keyhive state directly (compaction).

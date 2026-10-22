@@ -1,7 +1,9 @@
 use super::*;
 use keyhive_core::access::Access;
-use keyhive_core::principal::individual::{Individual, op::KeyOp};
-use keyhive_crypto::{share_key::ShareKey, share_key::ShareSecretKey};
+use keyhive_core::principal::individual::Individual;
+use keyhive_core::principal::individual::op::KeyOp;
+use keyhive_crypto::share_key::ShareKey;
+use keyhive_crypto::share_key::ShareSecretKey;
 use nonempty::nonempty;
 
 #[tokio::test]

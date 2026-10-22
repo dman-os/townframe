@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
-use daybook_core::app::{AppCtx, globals::KnownRepoEntry};
+use daybook_core::app::AppCtx;
+use daybook_core::app::globals::KnownRepoEntry;
 use tokio::sync::oneshot;
 
 daybook_types::custom_type_set!();
@@ -265,9 +266,9 @@ impl AppFfiCtx {
         self: Arc<Self>,
     ) -> Result<daybook_core::app::globals::RepoConfig, FfiError> {
         let this = Arc::clone(&self);
-        self.do_on_rt(async move {
-            daybook_core::app::globals::get_repo_config(&this.inner.sql.write_pool).await
-        })
+        self.do_on_rt(
+            async move { daybook_core::app::globals::get_repo_config(&this.inner.sql).await },
+        )
         .await
         .map_err(Into::into)
     }
@@ -290,8 +291,7 @@ impl AppFfiCtx {
                 )
                 .await?;
             let entry =
-                daybook_core::app::globals::upsert_known_repo(&this.inner.sql.write_pool, &rcx)
-                    .await?;
+                daybook_core::app::globals::upsert_known_repo(&this.inner.sql, &rcx).await?;
             rcx.shutdown().await?;
             eyre::Ok(entry)
         })
@@ -304,13 +304,12 @@ impl AppFfiCtx {
         let this = Arc::clone(&self);
         self.do_on_rt(async move {
             let mut repo_config =
-                daybook_core::app::globals::get_repo_config(&this.inner.sql.write_pool).await?;
+                daybook_core::app::globals::get_repo_config(&this.inner.sql).await?;
             repo_config.known_repos.retain(|repo| repo.id != repo_id);
             if repo_config.last_used_repo_id.as_deref() == Some(repo_id.as_str()) {
                 repo_config.last_used_repo_id = None;
             }
-            daybook_core::app::globals::set_repo_config(&this.inner.sql.write_pool, &repo_config)
-                .await?;
+            daybook_core::app::globals::set_repo_config(&this.inner.sql, &repo_config).await?;
             Ok::<(), eyre::Report>(())
         })
         .await
@@ -320,11 +319,12 @@ impl AppFfiCtx {
     #[tracing::instrument(err, skip(self))]
     async fn is_repo_usable(self: Arc<Self>, repo_root: String) -> Result<bool, FfiError> {
         let repo_root = std::path::PathBuf::from(repo_root);
+        let runtime = Arc::clone(&self.inner.sqlite_runtime);
         self.do_on_rt(async move {
             if !repo_root.exists() {
                 return Ok::<bool, eyre::Report>(false);
             }
-            daybook_core::repo::is_repo_bootstrapped(&repo_root).await
+            daybook_core::repo::is_repo_bootstrapped(&runtime, &repo_root).await
         })
         .await
         .map_err(Into::into)
@@ -367,6 +367,7 @@ impl AppFfiCtx {
         self.do_on_rt(async move {
             let destination = resolve_clone_destination_for_app(&this.inner, &destination)?;
             let out = daybook_core::sync::clone_repo_init_from_url(
+                Arc::clone(&this.inner.sqlite_runtime),
                 &source_url,
                 &destination,
                 daybook_core::sync::CloneRepoInitOptions::default(),

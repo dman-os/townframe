@@ -24,13 +24,20 @@ use super::log_nickname;
 /// for a short hold of its own — a client-side pacing choice the responder honours —
 /// instead of having a test double ignore the request.
 const REPLAY_HOLD_MS: u32 = 200;
-use crate::{
-    BigRepo, BigRepoConnection, BigRepoStopToken, Config, DocumentId, PeerKey, SqliteBigRepoStore,
-    StorageConfig, WorkerGroupScope,
-};
-use big_sync::{HostPartStore, stress_support};
-use sqlx_utils_rs::SqlCtx;
-use tokio::sync::{Mutex, Notify};
+use crate::BigRepo;
+use crate::BigRepoConnection;
+use crate::BigRepoStopToken;
+use crate::Config;
+use crate::DocumentId;
+use crate::PeerKey;
+use crate::SqliteBigRepoStore;
+use crate::StorageConfig;
+use crate::WorkerGroupScope;
+use big_sync::HostPartStore;
+use big_sync::stress_support;
+use sqlite_rs::SqliteRuntime;
+use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::time::timeout;
 
 /// A single booted BigRepo node with an Iroh endpoint + big-sync worker.
@@ -162,13 +169,14 @@ impl Node {
         frontier_scope: WorkerGroupScope,
         keyhive_change_notifs: bool,
     ) -> crate::Res<Self> {
+        let sqlite_runtime = SqliteRuntime::new(Default::default());
         let sql = match &storage {
-            StorageConfig::Memory => SqlCtx::memory().await?,
+            StorageConfig::Memory => sqlite_runtime.ephemeral(&[])?,
             StorageConfig::Disk { path } => {
                 std::fs::create_dir_all(path)?;
                 let db_path = path.join("big_repo.sqlite");
                 ::tracing::info!(seed, label, path = %path.display(), "booted node with disk storage");
-                SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?
+                sqlite_runtime.database(db_path, &[], "_sqlite_rs_migrations")
             }
         };
         let store = Arc::new(

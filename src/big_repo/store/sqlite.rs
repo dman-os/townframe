@@ -1,55 +1,74 @@
 use crate::interlude::*;
 
+use crate::sqlite::queries;
+use big_sync::HostPartStore;
+use big_sync::PartScope;
+use big_sync::PartStoreStats;
+use big_sync::ReadTarget;
 use big_sync::open_sqlite_revision_reader;
-use big_sync::sqlite_core::{EVENT_CHANGED, EVENT_REMOVED, MemberState, SqliteCore, encode_access};
-use big_sync::{HostPartStore, PartScope, PartStoreStats, ReadTarget};
-use big_sync_core::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
-use big_sync_core::rpc::{
-    BucketObjPageEntry, BucketSummary, GetChangedBucketsRequest, LeafBucketPage, LeafBucketResult,
-    LeafBucketsError, LeafBucketsRequest, ListPartsError, PartEvent, PartPage, PartSummary,
-    SubPartsRequest,
-};
-use big_sync_core::{BuckId, ByteKey, Fingerprint};
+use big_sync::sqlite_core::EVENT_CHANGED;
+use big_sync::sqlite_core::EVENT_REMOVED;
+use big_sync::sqlite_core::MemberState;
+use big_sync::sqlite_core::SqliteCore;
+use big_sync::sqlite_core::encode_access;
+use big_sync_core::BuckId;
+use big_sync_core::ByteKey;
+use big_sync_core::Fingerprint;
+use big_sync_core::part_store::CursorIndex;
+use big_sync_core::part_store::ObjPayload;
+use big_sync_core::part_store::PartDirtyCount;
+use big_sync_core::rpc::BucketObjPageEntry;
+use big_sync_core::rpc::BucketSummary;
+use big_sync_core::rpc::GetChangedBucketsRequest;
+use big_sync_core::rpc::LeafBucketPage;
+use big_sync_core::rpc::LeafBucketResult;
+use big_sync_core::rpc::LeafBucketsError;
+use big_sync_core::rpc::LeafBucketsRequest;
+use big_sync_core::rpc::ListPartsError;
+use big_sync_core::rpc::PartEvent;
+use big_sync_core::rpc::PartPage;
+use big_sync_core::rpc::PartSummary;
+use big_sync_core::rpc::SubPartsRequest;
 use futures::future::BoxFuture;
-use sedimentree_core::{
-    blob::Blob,
-    collections::Set,
-    crypto::digest::Digest,
-    depth::CountLeadingZeroBytes,
-    fragment::Fragment,
-    id::SedimentreeId,
-    loose_commit::{LooseCommit, id::CommitId},
-    sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
-};
-use sqlx_utils_rs::SqlCtx;
+use sedimentree_core::blob::Blob;
+use sedimentree_core::collections::Set;
+use sedimentree_core::crypto::digest::Digest;
+use sedimentree_core::depth::CountLeadingZeroBytes;
+use sedimentree_core::fragment::Fragment;
+use sedimentree_core::id::SedimentreeId;
+use sedimentree_core::loose_commit::LooseCommit;
+use sedimentree_core::loose_commit::id::CommitId;
+use sedimentree_core::sedimentree::Sedimentree;
+use sedimentree_core::sedimentree::minimized::MinimizedSedimentree;
+use sqlite_rs::Database;
+use sqlite_rs::Sql;
+use sqlite_rs::Tx;
 use subduction_core::storage::traits::Storage;
-use subduction_crypto::{signed::Signed, verified_meta::VerifiedMeta};
+use subduction_crypto::signed::Signed;
+use subduction_crypto::verified_meta::VerifiedMeta;
 use tokio::sync::Notify;
 mod events;
-pub(crate) use events::{
-    KEYHIVE_ADMISSION_CONSUMER_AUTOMERGE_FRONTIER, KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT,
-    KEYHIVE_ADMISSION_CONSUMER_GROUP_PART, KEYHIVE_ADMISSION_CONSUMER_PREKEY_JANITOR,
-};
+pub(crate) use events::KEYHIVE_ADMISSION_CONSUMER_AUTOMERGE_FRONTIER;
+pub(crate) use events::KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT;
+pub(crate) use events::KEYHIVE_ADMISSION_CONSUMER_GROUP_PART;
+pub(crate) use events::KEYHIVE_ADMISSION_CONSUMER_PREKEY_JANITOR;
 mod ids;
 mod parts_cursors;
 mod secret_blobs;
 pub(crate) use secret_blobs::SecretBlobKind;
-mod sedimentree;
+pub(crate) mod sedimentree;
 mod tree_cache;
-use tree_cache::{TREE_CACHE_METADATA_CAPACITY, TreeCache, TreeCacheGuard};
+use tree_cache::TREE_CACHE_METADATA_CAPACITY;
+use tree_cache::TreeCache;
+use tree_cache::TreeCacheGuard;
 
 #[cfg(test)]
 static FAIL_NEXT_ADMISSION: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-static MIGRATOR: std::sync::LazyLock<sqlx::migrate::Migrator> = std::sync::LazyLock::new(|| {
-    let mut migrator = sqlx::migrate!("./migrations");
-    migrator.dangerous_set_table_name("_big_repo_migrations");
-    migrator
-});
-struct KeyhiveEventQueryRow {
-    event_hash: Vec<u8>,
-    event_bytes: Vec<u8>,
-    source_id: Option<Vec<u8>>,
+pub(crate) struct KeyhiveEventQueryRow {
+    pub(crate) event_hash: Vec<u8>,
+    pub(crate) event_bytes: Vec<u8>,
+    pub(crate) source_id: Option<Vec<u8>>,
 }
 
 #[cfg(test)]
@@ -131,13 +150,7 @@ impl SqliteBigRepoStore {
     /// Capture every convergence-relevant BigSync row plus protocol-volume
     /// counters. Intended for deterministic cross-node test diagnostics.
     pub async fn big_sync_store_snapshot(&self) -> Res<BigSyncStoreSnapshot> {
-        let object_rows = sqlx::query!(
-            "SELECT obj_id, payload_json FROM big_sync_objs
-             WHERE scope_id = ?1 ORDER BY obj_id",
-            self.scope_id
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let object_rows = queries::snapshot_objects(&self.sql, self.scope_id).await?;
         let objects = object_rows
             .into_iter()
             .map(|row| {
@@ -156,17 +169,7 @@ impl SqliteBigRepoStore {
             })
             .collect::<Res<Vec<_>>>()?;
 
-        let membership_rows = sqlx::query!(
-            "SELECT p.part_id, o.obj_id, m.event_type, m.txid
-             FROM big_sync_members m
-             JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-             JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
-             WHERE m.scope_id = ?1 AND m.maybe_part_ref > 0
-             ORDER BY p.part_id, o.obj_id",
-            self.scope_id
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let membership_rows = queries::snapshot_memberships(&self.sql, self.scope_id).await?;
         let memberships = membership_rows
             .into_iter()
             .map(|row| {
@@ -179,16 +182,7 @@ impl SqliteBigRepoStore {
             })
             .collect::<Res<Vec<_>>>()?;
 
-        let pending_rows = sqlx::query!(
-            "SELECT p.part_id, o.obj_id
-             FROM big_sync_pending_members m
-             JOIN big_sync_parts p ON p.part_ref = m.part_ref
-             JOIN big_sync_objs o ON o.obj_ref = m.obj_ref
-             WHERE m.scope_id = ?1 ORDER BY p.part_id, o.obj_id",
-            self.scope_id
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let pending_rows = queries::snapshot_pending_memberships(&self.sql, self.scope_id).await?;
         let pending_memberships = pending_rows
             .into_iter()
             .map(|row| {
@@ -199,27 +193,13 @@ impl SqliteBigRepoStore {
             })
             .collect::<Res<Vec<_>>>()?;
 
-        let part_rows = sqlx::query!(
-            "SELECT part_id, latest_cursor FROM big_sync_parts
-             WHERE scope_id = ?1 ORDER BY part_id",
-            self.scope_id
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let part_rows = queries::snapshot_part_cursors(&self.sql, self.scope_id).await?;
         let part_cursors = part_rows
             .into_iter()
             .map(|row| Ok((Self::part_from_blob(row.part_id), row.latest_cursor)))
             .collect::<Res<Vec<_>>>()?;
 
-        let peer_rows = sqlx::query!(
-            "SELECT peer_id, p.part_id, cursor
-             FROM big_sync_peer_cursors c
-             JOIN big_sync_parts p ON p.part_ref = c.part_ref
-             WHERE c.scope_id = ?1 ORDER BY peer_id, p.part_id",
-            self.scope_id
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
+        let peer_rows = queries::snapshot_peer_cursors(&self.sql, self.scope_id).await?;
         let peer_part_cursors = peer_rows
             .into_iter()
             .map(|row| {
@@ -231,18 +211,7 @@ impl SqliteBigRepoStore {
             })
             .collect::<Res<Vec<_>>>()?;
 
-        let volume = sqlx::query!(
-            "SELECT
-               (SELECT COUNT(*) FROM big_repo_keyhive_event_log WHERE scope_id = ?1) AS kh_count,
-               (SELECT COALESCE(SUM(length(event_bytes)), 0) FROM big_repo_keyhive_event_log WHERE scope_id = ?1) AS kh_bytes,
-               ((SELECT COUNT(*) FROM big_repo_subduction_commits WHERE scope_id = ?1) +
-                (SELECT COUNT(*) FROM big_repo_subduction_fragments WHERE scope_id = ?1)) AS sediment_count,
-               ((SELECT COALESCE(SUM(length(blob)), 0) FROM big_repo_subduction_commits WHERE scope_id = ?1) +
-                (SELECT COALESCE(SUM(length(blob)), 0) FROM big_repo_subduction_fragments WHERE scope_id = ?1)) AS sediment_bytes",
-            self.scope_id
-        )
-        .fetch_one(&self.sql.read_pool)
-        .await?;
+        let volume = queries::snapshot_volume(&self.sql, self.scope_id).await?;
 
         Ok(BigSyncStoreSnapshot {
             objects,
@@ -411,18 +380,19 @@ impl SqliteBigRepoStore {
     pub(crate) fn scope(&self) -> ScopeHandle<'_> {
         ScopeHandle { store: self }
     }
-    pub async fn new(sql: SqlCtx, scope_key: impl Into<Arc<str>>, bucket_depth: u8) -> Res<Self> {
+    pub async fn new(sql: Database, scope_key: impl Into<Arc<str>>, bucket_depth: u8) -> Res<Self> {
         Self::new_with_config(sql, scope_key, bucket_depth, Default::default()).await
     }
 
     pub async fn new_with_config(
-        sql: SqlCtx,
+        sql: Database,
         scope_key: impl Into<Arc<str>>,
         bucket_depth: u8,
         config: big_sync::HostPartStoreConfig,
     ) -> Res<Self> {
-        SqliteCore::init_schema(&sql.write_pool, bucket_depth).await?;
-        MIGRATOR.run(&sql.write_pool).await?;
+        SqliteCore::init_schema(&sql, bucket_depth).await?;
+        sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+            .await?;
         let core = SqliteCore::new(sql, scope_key, bucket_depth).await?;
 
         let store = Self {
@@ -438,7 +408,7 @@ impl SqliteBigRepoStore {
         Ok(store)
     }
 
-    async fn next_cursor(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Res<CursorIndex> {
+    async fn next_cursor(tx: &mut Tx) -> Res<CursorIndex> {
         SqliteCore::next_cursor(tx).await
     }
 
@@ -511,15 +481,12 @@ impl SqliteBigRepoStore {
         for part_id in candidates {
             let access_level: Option<i64> = match self.core.find_part_ref(part_id.clone()).await? {
                 Some(part_ref) => {
-                    sqlx::query_scalar!(
-                        "SELECT access_level
-                         FROM big_sync_syncable
-                         WHERE scope_id = ?1 AND part_ref = ?2 AND principal_id = ?3",
+                    queries::part_access_level(
+                        &self.sql,
                         self.scope_id,
                         part_ref,
-                        &peer_blob
+                        peer_blob.clone(),
                     )
-                    .fetch_optional(&self.sql.read_pool)
                     .await?
                 }
                 None => None,
@@ -547,25 +514,12 @@ impl SqliteBigRepoStore {
         obj_id: &ObjKey,
         peer_blob: &[u8],
     ) -> Res<Vec<PartKey>> {
-        let rows = sqlx::query!(
-            "SELECT p.part_id AS 'part_id: Vec<u8>', s.access_level
-             FROM big_sync_members m
-             JOIN big_sync_parts p ON p.part_ref = m.maybe_part_ref
-             JOIN big_sync_syncable s ON s.part_ref = m.maybe_part_ref
-             WHERE m.scope_id = ?1
-               AND m.obj_ref = (
-                   SELECT obj_ref FROM big_sync_objs WHERE scope_id = ?1 AND obj_id = ?2
-               )
-               AND m.maybe_part_ref > 0
-               AND m.event_type != 2
-               AND s.scope_id = ?1
-               AND s.principal_id = ?3
-             ORDER BY p.part_id",
+        let rows = queries::readable_parts_of_object(
+            &self.sql,
             self.scope_id,
             Self::obj_blob(obj_id.clone()),
-            peer_blob
+            peer_blob.to_vec(),
         )
-        .fetch_all(&self.sql.read_pool)
         .await?;
         Ok(rows
             .into_iter()
@@ -585,7 +539,7 @@ fn is_fetch_access(access_level: i64) -> bool {
 #[derive(Debug, thiserror::Error)]
 pub enum SqliteBigRepoStoreError {
     #[error("sqlite big repo store error: {0}")]
-    Sqlx(#[from] sqlx::Error),
+    Sqlite(#[from] sqlite_rs::SqlError),
     #[error("invalid sqlite big repo store record")]
     InvalidRecord,
     #[error("failed decoding sqlite big repo store record: {0}")]

@@ -16,7 +16,7 @@ path = "lib.rs"
 #
 # internal
 utils_rs.workspace = true
-sqlx_utils_rs.workspace = true
+sqlite_rs.workspace = true
 
 #
 # error
@@ -29,10 +29,6 @@ wash-runtime.workspace = true
 
 # host plugin trait
 async-trait.workspace = true
-
-#
-# db
-sqlx = { workspace = true, features = ["sqlite"] }
 
 #
 # log
