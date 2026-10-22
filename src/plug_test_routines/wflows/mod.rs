@@ -15,7 +15,7 @@ pub(crate) enum FacetWriteTarget<'a> {
 }
 
 impl FacetWriteTarget<'_> {
-    pub(crate) fn write(
+    pub(crate) async fn write(
         &self,
         data: &str,
         update_context: &str,
@@ -23,15 +23,19 @@ impl FacetWriteTarget<'_> {
     ) -> Result<(), wflow_sdk::JobErrorX> {
         match self {
             Self::Update(token) => token
-                .update(data)
+                .update(data.to_string())
+                .await
                 .map_err(|err| wflow_sdk::JobErrorX::Terminal(ferr!("{update_context}: {err:?}")))?
                 .map_err(|err| {
                     wflow_sdk::JobErrorX::Terminal(ferr!("{update_context}: {err:?}"))
                 })?,
             Self::Create(token, key_id) => {
-                token.create(key_id, data).map_err(|err| {
-                    wflow_sdk::JobErrorX::Terminal(ferr!("{create_context}: {err:?}"))
-                })?;
+                token
+                    .create(key_id.clone(), data.to_string())
+                    .await
+                    .map_err(|err| {
+                        wflow_sdk::JobErrorX::Terminal(ferr!("{create_context}: {err:?}"))
+                    })?;
             }
         }
         Ok(())

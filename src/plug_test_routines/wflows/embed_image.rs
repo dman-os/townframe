@@ -3,7 +3,7 @@ use wflow_sdk::JobErrorX;
 use wflow_sdk::Json;
 use wflow_sdk::WflowCtx;
 
-pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+pub async fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use super::resolve_facet_write_target;
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
@@ -40,6 +40,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
 
     let blob_raw = blob_facet_token
         .get()
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("access error reading blob facet: {err:?}")))?;
     let blob_json: daybook_types::doc::FacetRaw = serde_json::from_str(&blob_raw)
         .map_err(|err| JobErrorX::Terminal(ferr!("error parsing blob facet json: {err}")))?;
@@ -58,6 +59,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         JobErrorX::Terminal(ferr!("access error cloning blob facet token: {err:?}"))
     })?;
     let embed_result = mltools_embed::embed_image(blob_embed_token)
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("error running embed-image: {err}")))?;
 
     let heads = am_utils_rs::parse_commit_heads(&args.heads)
@@ -74,7 +76,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         .flat_map(|value| value.to_le_bytes())
         .collect::<Vec<u8>>();
 
-    cx.effect(|| {
+    cx.effect(async || {
         let new_facet: daybook_types::doc::FacetRaw =
             WellKnownFacet::Embedding(daybook_types::doc::Embedding {
                 facet_ref: facet_ref.clone(),
@@ -88,13 +90,16 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
             .into();
 
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
-        working_facet_target.write(
-            &new_facet,
-            "access error updating image embedding facet",
-            "access error creating image embedding facet",
-        )?;
+        working_facet_target
+            .write(
+                &new_facet,
+                "access error updating image embedding facet",
+                "access error creating image embedding facet",
+            )
+            .await?;
         Ok(Json(()))
-    })?;
+    })
+    .await?;
 
     Ok(())
 }

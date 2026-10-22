@@ -204,7 +204,7 @@ async fn parameter_containers_and_tuples_work_across_executors() -> SqlResult<()
         42
     );
     assert!(db.inner.path.exists());
-    let values = vec![1.into_value(), 2.into_value()];
+    let values = vec![1_i64.into_value(), 2_i64.into_value()];
     assert_eq!(read(&db, values.as_slice()).await?, 3);
     assert_eq!(read(&db, &values).await?, 3);
     let allocation = values.as_ptr();

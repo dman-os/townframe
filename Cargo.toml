@@ -166,6 +166,7 @@ tracing-futures = "0.2.5"
 dotenv-flow = "0.16"
 directories = "6.0"
 rand = "0.9.2"
+rand_10 = { package = "rand", version = "0.10" }
 fs4 = "0.13.1"
 
 #
@@ -229,9 +230,9 @@ uniffi = { version = "0.31.0" }
 
 #
 # wasm
-wasmtime = "47"
-wash-runtime = { git = "https://github.com/wasmCloud/wasmCloud", rev = "44fc4cf76a49a599b42dcb1466586b39f09ef658" }
-wit-bindgen = "0.60.0"
+wasmtime = "48.0.7"
+wash-runtime = { git = "https://github.com/wasmCloud/wasmCloud", rev = "1bcaebaeba509b8a59fd239e668abe6f02596794" }
+wit-bindgen = "0.62.0"
 wstd = "0.6.8"
 # wash-runtime = { path = "../wash/crates/wash-runtime/"}
 

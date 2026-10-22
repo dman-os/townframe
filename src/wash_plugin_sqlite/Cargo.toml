@@ -29,6 +29,7 @@ wash-runtime.workspace = true
 
 # host plugin trait
 async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 #
 # log

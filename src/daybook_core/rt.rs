@@ -801,11 +801,11 @@ impl Rt {
                     ),
                 ]);
 
+            let plugin_bindings = wash_runtime::plugin::PluginBindings::default();
+            let host_ref = self.wash_host.host_ref();
+            let meters = wash_runtime::observability::Meters::default();
             let resolved_workload = unresolved_workload
-                .resolve(
-                    Some(&plugins),
-                    Arc::new(wash_runtime::host::http::NullServer::default()),
-                )
+                .resolve(Some(&plugins), &plugin_bindings, &host_ref, &meters)
                 .await
                 .map_err(|err| eyre::eyre!(err.to_string()))?;
 
@@ -889,11 +889,17 @@ impl Rt {
                 .instantiate_async(&mut store)
                 .await
                 .map_err(|err| eyre::eyre!(err.to_string()))?;
-            let response = instance
-                .townframe_daybook_stateless_view()
-                .call_render_facet_view(&mut store, &args)
+            let response = store
+                .run_concurrent(async move |accessor| {
+                    instance
+                        .townframe_daybook_stateless_view()
+                        .call_render_facet_view(accessor, args)
+                        .await
+                })
                 .await
                 .map_err(|err| eyre::eyre!("error rendering stateless view: {err}"))?;
+            let response =
+                response.map_err(|err| eyre::eyre!("error calling stateless view: {err}"))?;
             let response = response.map_err(|err| match err {
                 stateless_view::RenderViewError::InvalidRequest(msg) => {
                     eyre::eyre!("stateless view rejected request: {msg}")

@@ -86,7 +86,7 @@ class WitsqlConnection implements DatabaseConnection {
   async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
     const { sql, parameters } = compiledQuery;
     const target: Connection | Transaction = this.tx ?? this.conn;
-    const out = target.execute(sql, parameters.map(toSqlValue));
+    const out = await target.execute(sql, parameters.map(toSqlValue));
     return {
       rows: setToRecords(out.resultSet) as R[],
       numAffectedRows: out.rowsAffected,
@@ -105,7 +105,7 @@ class WitsqlConnection implements DatabaseConnection {
   }
 
   async beginTransaction(): Promise<void> {
-    this.tx = this.conn.beginTransaction();
+    this.tx = await this.conn.beginTransaction();
   }
 
   async commitTransaction(): Promise<void> {
@@ -113,7 +113,7 @@ class WitsqlConnection implements DatabaseConnection {
     if (!tx) throw new Error("commitTransaction: no active transaction");
     this.tx = null;
     try {
-      tx.commit();
+      await tx.commit();
     } finally {
       tx[Symbol.dispose]();
     }
@@ -124,7 +124,7 @@ class WitsqlConnection implements DatabaseConnection {
     if (!tx) throw new Error("rollbackTransaction: no active transaction");
     this.tx = null;
     try {
-      tx.rollback();
+      await tx.rollback();
     } finally {
       tx[Symbol.dispose]();
     }

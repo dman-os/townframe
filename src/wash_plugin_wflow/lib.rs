@@ -662,10 +662,16 @@ impl WflowPlugin {
                 cancel_token
                     .clone()
                     .run_until_cancelled(async move {
-                        let fut = instance
-                            .townframe_wflow_bundle()
-                            .call_run(&mut store, &bundle_args);
-                        let trap = match fut.await {
+                        let trap = match store
+                            .run_concurrent(async move |accessor| {
+                                instance
+                                    .townframe_wflow_bundle()
+                                    .call_run(accessor, bundle_args)
+                                    .await
+                            })
+                            .await
+                            .and_then(|res| res)
+                        {
                             Ok(res) => JobTrap::RunComplete(res),
                             Err(err) => {
                                 let terminal =

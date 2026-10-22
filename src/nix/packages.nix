@@ -77,8 +77,8 @@
           "sha256-wCLRhV509AWZzI2IHlyChesSTSkV3exI57iuwqVdoHs=";
         "git+https://github.com/dman-os/subduction?rev=44cd14743b8ae2bf8b9eefb30e09618ef27d6f95#44cd14743b8ae2bf8b9eefb30e09618ef27d6f95" =
           "sha256-zogYtiZrpVSQF6D4t6bvDBshjvvODzImh9Cs3aQn9/I=";
-        "git+https://github.com/wasmCloud/wasmCloud?rev=44fc4cf76a49a599b42dcb1466586b39f09ef658#44fc4cf76a49a599b42dcb1466586b39f09ef658" =
-          "sha256-slqT6qZ9hQY0mUw+ihaaD4zTEZgM2ZznTju+IFnBPNo=";
+        "git+https://github.com/wasmCloud/wasmCloud?rev=1bcaebaeba509b8a59fd239e668abe6f02596794#1bcaebaeba509b8a59fd239e668abe6f02596794" =
+          "sha256-VReAAyM1idIWc2phRUWOn6biUu1pXdq1bCs3Xw/0IS0=";
       };
       # wash-runtime's build.rs finds the wasmCloud repository root by walking
       # up from its own crate directory to the first Cargo.lock, then compiles

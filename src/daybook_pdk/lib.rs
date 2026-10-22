@@ -135,23 +135,23 @@ pub struct InvokeCommandReply {
     pub error_json: Option<String>,
 }
 
-pub fn invoke_command_effect<F>(
+pub async fn invoke_command_effect<'a, F>(
     cx: &mut wflow_sdk::WflowCtx,
-    request: &InvokeCommandRequest,
+    request: &'a InvokeCommandRequest,
     invoke: F,
 ) -> Result<InvokeCommandAccepted, wflow_sdk::JobErrorX>
 where
     F: FnOnce(
-        &InvokeCommandRequest,
+        &'a InvokeCommandRequest,
     ) -> Result<wflow_sdk::Json<InvokeCommandAccepted>, wflow_sdk::JobErrorX>,
 {
-    cx.effect(|| invoke(request))
+    cx.effect(async || invoke(request)).await
 }
 
-pub fn wait_command_reply(
+pub async fn wait_command_reply(
     cx: &mut wflow_sdk::WflowCtx,
 ) -> Result<InvokeCommandReply, wflow_sdk::JobErrorX> {
-    let wflow_sdk::Json(reply) = cx.recv::<wflow_sdk::Json<InvokeCommandReply>>()?;
+    let wflow_sdk::Json(reply) = cx.recv::<wflow_sdk::Json<InvokeCommandReply>>().await?;
     Ok(reply)
 }
 

@@ -31,7 +31,7 @@ features = []
 required_features = []
 default_features = true
 
-[builds.wasm32-wasip2]
+[builds.wasm32-wasip3]
 features = []
 required_features = []
 default_features = true

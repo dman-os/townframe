@@ -1,13 +1,13 @@
 use crate::interlude::*;
 
+use crate::wit::wasi::http::types::Request;
+use crate::wit::wasi::http::types::Response;
 use axum_extra::extract::cookie::Key;
-use wasip2::http::types::IncomingRequest;
-use wasip2::http::types::ResponseOutparam;
 
 mod interop;
 pub mod session;
 
-pub async fn server_main(wasi_req: IncomingRequest, out_param: ResponseOutparam) -> Res<()> {
+pub async fn server_main(wasi_req: Request) -> Res<Response> {
     use crate::app::*;
     use axum::Router;
     use axum::http;
@@ -18,14 +18,6 @@ pub async fn server_main(wasi_req: IncomingRequest, out_param: ResponseOutparam)
 
     utils_rs::setup_tracing().expect("tracing setup error");
 
-    // leptos_wasi::handler::Handler::build(wasi_req, response_out)
-    //     .unwrap()
-    //     // .with_server_fn::<GetCount>()
-    //     .generate_routes(App)
-    //     .handle_with_context(move || shell(leptos_options.clone()), || {})
-    //     .await
-    //     .unwrap();
-    //
     let mut leptos_options = leptos::config::get_config_from_env()?.leptos_options;
     leptos_options.site_root = "/public".into();
     info!("generating route list");
@@ -91,18 +83,17 @@ pub async fn server_main(wasi_req: IncomingRequest, out_param: ResponseOutparam)
         );
 
     info!("converting request");
-
-    let axum_req = interop::try_from_incoming(wasi_req).wrap_err("error converting to axum req")?;
+    let axum_req = interop::try_from_incoming(wasi_req)
+        .await
+        .wrap_err("error converting to axum req")?;
 
     info!("processing request");
     use tower::ServiceExt;
     let axum_res: axum::response::Response = app.oneshot(axum_req).await.expect("infallible");
 
-    interop::try_into_outgoing(axum_res, out_param)
+    interop::try_into_outgoing(axum_res)
         .await
-        .wrap_err("error writing response")?;
-
-    Ok(())
+        .wrap_err("error writing response")
 }
 
 fn load_cookie_sign_key() -> axum_extra::extract::cookie::Key {

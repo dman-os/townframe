@@ -10,7 +10,7 @@ use crate::guardrails::policy::Policy;
 use crate::guardrails::repository::Repository;
 use crate::interlude::*;
 
-const TARGETS: [&str; 3] = ["native", "wasm32-wasip2", "wasm32-unknown-unknown"];
+const TARGETS: [&str; 3] = ["native", "wasm32-wasip3", "wasm32-unknown-unknown"];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn rejects_native_dependencies_but_not_native_test_harnesses() {
-        let guest_policy = wasm_policy("wasm32-wasip2", &[]);
+        let guest_policy = wasm_policy("wasm32-wasip3", &[]);
         let host_dependency = Dependency {
             name: "host".into(),
             path: Some("host".into()),
@@ -442,7 +442,7 @@ mod tests {
         let (_temp, mut repository) = repo(&[(
             "guest",
             "../wasm_utils_rs",
-            wasm_policy("wasm32-wasip2", &[]),
+            wasm_policy("wasm32-wasip3", &[]),
             vec![],
         )]);
         repository.packages.get_mut("guest").unwrap().features =

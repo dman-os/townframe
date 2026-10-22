@@ -21,12 +21,12 @@ interface drawer {
         invalid-patch(string),
     }
     
-    get-doc-at-heads: func(
+    get-doc-at-heads: async func(
         doc-id: doc-id,
         heads: heads,
     ) -> result<doc, get-doc-error>;
     
-    update-doc-at-heads: func(
+    update-doc-at-heads: async func(
         branch-name: string,
         heads: option<heads>,
         patch: doc-patch,
@@ -87,42 +87,42 @@ interface capabilities {
         id: func() -> doc-id;
         rights: func() -> doc-rights;
         clone: func(downscope: option<doc-rights>) -> result<doc-token, access-error>;
-        get-meta: func() -> result<doc-meta, access-error>;
-        list-facets: func() -> result<list<tuple<string, facet-token>>, access-error>;
-        get-facet: func(key: string) -> result<option<facet-token>, access-error>;
-        list-tags: func() -> result<list<tuple<string, facet-tag-token>>, access-error>;
+        get-meta: async func() -> result<doc-meta, access-error>;
+        list-facets: async func() -> result<list<tuple<string, facet-token>>, access-error>;
+        get-facet: async func(key: string) -> result<option<facet-token>, access-error>;
+        list-tags: async func() -> result<list<tuple<string, facet-tag-token>>, access-error>;
     }
 
     resource facet-token {
         key: func() -> string;
         rights: func() -> facet-rights;
         clone: func(downscope: option<facet-rights>) -> result<facet-token, access-error>;
-        meta: func() -> result<facet-meta, access-error>;
-        get: func() -> result<facet-raw, access-error>;
+        meta: async func() -> result<facet-meta, access-error>;
+        get: async func() -> result<facet-raw, access-error>;
         heads: func() -> result<heads, access-error>;
-        update: func(patch: facet-raw) -> result<result<_, update-doc-error>, access-error>;
+        update: async func(patch: facet-raw) -> result<result<_, update-doc-error>, access-error>;
     }
 
     resource facet-create-token {
         key: func() -> string;
-        create-facet: func(data: facet-raw) -> result<facet-token, update-doc-error>;
+        create-facet: async func(data: facet-raw) -> result<facet-token, update-doc-error>;
     }
 
     resource facet-tag-token {
         tag: func() -> string;
         rights: func() -> facet-rights;
-        list-facets: func() -> result<list<facet-token>, access-error>;
-        get: func(key-id: string) -> result<option<facet-token>, access-error>;
-        create: func(key-id: string, data: facet-raw) -> result<facet-token, update-doc-error>;
-        get-create-token: func(key-id: string) -> result<facet-create-token, update-doc-error>;
+        list-facets: async func() -> result<list<facet-token>, access-error>;
+        get: async func(key-id: string) -> result<option<facet-token>, access-error>;
+        create: async func(key-id: string, data: facet-raw) -> result<facet-token, update-doc-error>;
+        get-create-token: async func(key-id: string) -> result<facet-create-token, update-doc-error>;
     }
 
     resource command-invoke-token {
-        invoke: func(request-json: string) -> result<string, invoke-command-error>;
+        invoke: async func(request-json: string) -> result<string, invoke-command-error>;
     }
 
-    delete-facet: func(token: facet-token) -> result<_, access-error>;
-    delete-doc: func(token: doc-token) -> result<_, access-error>;
+    delete-facet: async func(token: facet-token) -> result<_, access-error>;
+    delete-doc: async func(token: doc-token) -> result<_, access-error>;
 }
 
 interface facet-routine {
@@ -186,7 +186,7 @@ interface stateless-view {
         other(string),
     }
 
-    render-facet-view: func(
+    render-facet-view: async func(
         args: render-facet-view-args,
     ) -> result<render-view-response, render-view-error>;
 }
@@ -195,15 +195,15 @@ interface mltools-ocr {
     use capabilities.{facet-token};
     use townframe:mltools/ocr.{ocr-result};
 
-    ocr-image: func(blob-facet: facet-token) -> result<ocr-result, string>;
+    ocr-image: async func(blob-facet: facet-token) -> result<ocr-result, string>;
 }
 
 interface mltools-embed {
     use capabilities.{facet-token};
     use townframe:mltools/embed.{embed-result};
 
-    embed-text: func(text: string) -> result<embed-result, string>;
-    embed-image: func(blob-facet: facet-token) -> result<embed-result, string>;
+    embed-text: async func(text: string) -> result<embed-result, string>;
+    embed-image: async func(blob-facet: facet-token) -> result<embed-result, string>;
 }
 
 interface mltools-image-tools {
@@ -216,7 +216,7 @@ interface mltools-image-tools {
         height: u32,
     }
 
-    downsize-image-from-blob: func(
+    downsize-image-from-blob: async func(
         blob-facet: facet-token,
         max-side: u32,
         jpeg-quality: u8,
@@ -224,8 +224,8 @@ interface mltools-image-tools {
 }
 
 interface mltools-llm-chat {
-    llm-chat: func(text: string) -> result<string, string>;
-    llm-chat-multimodal: func(
+    llm-chat: async func(text: string) -> result<string, string>;
+    llm-chat-multimodal: async func(
         prompt: string,
         image-bytes: list<u8>,
         image-mime: string,

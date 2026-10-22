@@ -42,7 +42,7 @@ wit::export!(Component with_types_in wit);
 struct Component;
 
 impl wit::exports::townframe::wflow::bundle::Guest for Component {
-    fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
+    async fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
         wflow_sdk::route_wflows!(args, {
             "fails_once" => |cx, args: FailsOnceArgs| fails_once(cx, args),
             "fails_until_told" => |cx, args: FailsUntilToldArgs| fails_until_told(cx, args),
@@ -52,6 +52,7 @@ impl wit::exports::townframe::wflow::bundle::Guest for Component {
             "recv_message_then_effect" => |cx, args: RecvMessageThenEffectArgs| recv_message_then_effect(cx, args),
             "sleep_then_effect" => |cx, args: SleepThenEffectArgs| sleep_then_effect(cx, args),
         })
+        .await
     }
 }
 
@@ -60,11 +61,11 @@ struct FailsOnceArgs {
     key: String,
 }
 
-fn fails_once(cx: &mut WflowCtx, args: FailsOnceArgs) -> Result<(), JobErrorX> {
+async fn fails_once(cx: &mut WflowCtx, args: FailsOnceArgs) -> Result<(), JobErrorX> {
     use wasm_utils_rs::wit::wasi::keyvalue::store;
 
     // Get the current value from keyvalue store
-    cx.effect(|| {
+    cx.effect(async || {
         let bucket = store::open("default")
             .map_err(|err| JobErrorX::Terminal(ferr!("error opening bucket: {:?}", err)))?;
         let key = &args.key;
@@ -96,7 +97,8 @@ fn fails_once(cx: &mut WflowCtx, args: FailsOnceArgs) -> Result<(), JobErrorX> {
                 }
             }
         }
-    })?;
+    })
+    .await?;
 
     Ok(())
 }
@@ -106,11 +108,11 @@ struct FailsUntilToldArgs {
     key: String,
 }
 
-fn fails_until_told(cx: &mut WflowCtx, args: FailsUntilToldArgs) -> Result<(), JobErrorX> {
+async fn fails_until_told(cx: &mut WflowCtx, args: FailsUntilToldArgs) -> Result<(), JobErrorX> {
     use wasm_utils_rs::wit::wasi::keyvalue::store;
 
     // Check if we should succeed by reading from keyvalue store
-    cx.effect(|| {
+    cx.effect(async || {
         let bucket = store::open("default")
             .map_err(|err| JobErrorX::Terminal(ferr!("error opening bucket: {:?}", err)))?;
         let key = &args.key;
@@ -134,7 +136,8 @@ fn fails_until_told(cx: &mut WflowCtx, args: FailsUntilToldArgs) -> Result<(), J
                 }
             }
         }
-    })?;
+    })
+    .await?;
 
     Ok(())
 }
@@ -144,9 +147,9 @@ struct EffectChainArgs {
     steps: u64,
 }
 
-fn effect_chain(cx: &mut WflowCtx, args: EffectChainArgs) -> Result<(), JobErrorX> {
+async fn effect_chain(cx: &mut WflowCtx, args: EffectChainArgs) -> Result<(), JobErrorX> {
     for ii in 0..args.steps {
-        cx.effect(|| Ok(Json(ii)))?;
+        cx.effect(async || Ok(Json(ii))).await?;
     }
     Ok(())
 }
@@ -156,28 +159,32 @@ struct SleepThenSucceedArgs {
     millis: u64,
 }
 
-fn sleep_then_succeed(cx: &mut WflowCtx, args: SleepThenSucceedArgs) -> Result<(), JobErrorX> {
-    cx.sleep(Duration::from_millis(args.millis))?;
+async fn sleep_then_succeed(
+    cx: &mut WflowCtx,
+    args: SleepThenSucceedArgs,
+) -> Result<(), JobErrorX> {
+    cx.sleep(Duration::from_millis(args.millis)).await?;
     Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RecvMessageArgs {}
 
-fn recv_message(cx: &mut WflowCtx, _args: RecvMessageArgs) -> Result<(), JobErrorX> {
-    let Json(_) = cx.recv::<Json<serde_json::Value>>()?;
+async fn recv_message(cx: &mut WflowCtx, _args: RecvMessageArgs) -> Result<(), JobErrorX> {
+    let Json(_) = cx.recv::<Json<serde_json::Value>>().await?;
     Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RecvMessageThenEffectArgs {}
 
-fn recv_message_then_effect(
+async fn recv_message_then_effect(
     cx: &mut WflowCtx,
     _args: RecvMessageThenEffectArgs,
 ) -> Result<(), JobErrorX> {
-    let Json(_value) = cx.recv::<Json<serde_json::Value>>()?;
-    cx.effect(|| Ok(Json(serde_json::json!({"ok": true}))))?;
+    let Json(_value) = cx.recv::<Json<serde_json::Value>>().await?;
+    cx.effect(async || Ok(Json(serde_json::json!({"ok": true}))))
+        .await?;
     Ok(())
 }
 
@@ -186,8 +193,9 @@ struct SleepThenEffectArgs {
     millis: u64,
 }
 
-fn sleep_then_effect(cx: &mut WflowCtx, args: SleepThenEffectArgs) -> Result<(), JobErrorX> {
-    cx.sleep(Duration::from_millis(args.millis))?;
-    cx.effect(|| Ok(Json(serde_json::json!({"slept": true}))))?;
+async fn sleep_then_effect(cx: &mut WflowCtx, args: SleepThenEffectArgs) -> Result<(), JobErrorX> {
+    cx.sleep(Duration::from_millis(args.millis)).await?;
+    cx.effect(async || Ok(Json(serde_json::json!({"slept": true}))))
+        .await?;
     Ok(())
 }

@@ -832,7 +832,9 @@ impl DocPredicateClause {
         out: &mut std::collections::HashSet<DocPredicateEvalRequirement>,
     ) {
         match self {
-            Self::HasTag(_) => {}
+            Self::HasTag(tag) => {
+                out.insert(DocPredicateEvalRequirement::FacetsOfTag(tag.clone()));
+            }
             Self::HasReferenceToTag { source_tag, .. } => {
                 out.insert(DocPredicateEvalRequirement::FacetsOfTag(source_tag.clone()));
                 out.insert(DocPredicateEvalRequirement::FacetManifest);
@@ -1326,6 +1328,17 @@ mod tests {
         };
 
         assert!(predicate.evaluate(&doc, DocPredicateEvalMode::Exact, &resolved));
+    }
+
+    #[test]
+    fn has_tag_requests_full_facet_resolution() {
+        let tag: FacetTag = "org.example.embedding".into();
+        let predicate = DocPredicateClause::HasTag(tag.clone());
+        let mut requirements = HashSet::new();
+
+        predicate.append_requirements(&mut requirements);
+
+        assert!(requirements.contains(&DocPredicateEvalRequirement::FacetsOfTag(tag)));
     }
 
     #[test]

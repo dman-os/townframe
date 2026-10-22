@@ -3,7 +3,7 @@ use wflow_sdk::JobErrorX;
 use wflow_sdk::Json;
 use wflow_sdk::WflowCtx;
 
-pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
+pub async fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
     use super::resolve_facet_write_target;
     use crate::wit::townframe::daybook::capabilities::FacetRights;
     use crate::wit::townframe::daybook::facet_routine;
@@ -40,6 +40,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
 
     let current_facet_raw = note_facet_token
         .get()
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("access error reading note facet: {err:?}")))?;
 
     let current_facet_json: daybook_types::doc::FacetRaw = serde_json::from_str(&current_facet_raw)
@@ -51,7 +52,8 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         return Err(JobErrorX::Terminal(ferr!("input facet is not note")));
     };
 
-    let embed_result = mltools_embed::embed_text(&note.content)
+    let embed_result = mltools_embed::embed_text(note.content.clone())
+        .await
         .map_err(|err| JobErrorX::Terminal(ferr!("error running embed-text: {err}")))?;
     let heads = am_utils_rs::parse_commit_heads(&args.heads)
         .map_err(|err| JobErrorX::Terminal(ferr!("invalid heads from facet-routine: {err}")))?;
@@ -67,7 +69,7 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
         .flat_map(|value| value.to_le_bytes())
         .collect::<Vec<u8>>();
 
-    cx.effect(|| {
+    cx.effect(async || {
         let new_facet: daybook_types::doc::FacetRaw =
             WellKnownFacet::Embedding(daybook_types::doc::Embedding {
                 facet_ref: facet_ref.clone(),
@@ -81,14 +83,17 @@ pub fn run(cx: &mut WflowCtx) -> Result<(), JobErrorX> {
             .into();
 
         let new_facet = serde_json::to_string(&new_facet).expect(ERROR_JSON);
-        working_facet_target.write(
-            &new_facet,
-            "access error updating embedding facet",
-            "access error creating embedding facet",
-        )?;
+        working_facet_target
+            .write(
+                &new_facet,
+                "access error updating embedding facet",
+                "access error creating embedding facet",
+            )
+            .await?;
 
         Ok(Json(()))
-    })?;
+    })
+    .await?;
 
     Ok(())
 }

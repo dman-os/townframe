@@ -11,7 +11,7 @@ allow_external_api_types = false
 [builds.native]
 required_features = ["uniffi", "wit", "schemars", "manifest"]
 
-[builds.wasm32-wasip2]
+[builds.wasm32-wasip3]
 required_features = ["wit", "schemars", "manifest"]
 
 [api]

@@ -44,7 +44,7 @@ blake3 = "1.8"
 pastey = "0.1"
 color-eyre = "0.6"
 thiserror = "2"
-wit-bindgen = "0.60.0"
+wit-bindgen = "0.62.0"
 tokio = { version = "1.51", default-features = false }
 axum = { version = "0.8.9", default-features = false }
 axum-extra = { version = "0.12.6", default-features = false }

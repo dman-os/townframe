@@ -40,7 +40,7 @@ interface types {
 interface bundle {
     use types.{run-args, job-result};
 
-    run: func(cx: run-args) -> job-result;
+    run: async func(cx: run-args) -> job-result;
 }
 
 // for the host functionality for wflows

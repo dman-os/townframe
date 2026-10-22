@@ -4,6 +4,9 @@ mod interlude {
     pub use utils_rs::prelude::*;
 }
 
+use std::future::Future;
+use std::pin::Pin;
+
 pub mod wit {
     wit_bindgen::generate!({
         world: "sdk",
@@ -91,9 +94,10 @@ impl WflowCtx {
         })
     }
 
-    pub fn effect<F, O>(&mut self, func: F) -> Result<O, JobErrorX>
+    pub async fn effect<F, O, Fut>(&mut self, func: F) -> Result<O, JobErrorX>
     where
-        F: FnOnce() -> Result<Json<O>, JobErrorX>,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Json<O>, JobErrorX>>,
         O: serde::de::DeserializeOwned + Serialize,
     {
         let _step_guard = self.enter_step("effect")?;
@@ -110,7 +114,7 @@ impl WflowCtx {
                 Ok(value)
             }
             host::StepState::Active(active_op_state) => {
-                let Json(result) = func()?;
+                let Json(result) = func().await?;
                 let json = serde_json::to_string(&result).map_err(|err| {
                     ferr!(
                         "error serializing result as json for '{type_name}': {err:?}",
@@ -124,7 +128,7 @@ impl WflowCtx {
         }
     }
 
-    pub fn sleep(&mut self, duration: Duration) -> Result<(), JobErrorX> {
+    pub async fn sleep(&mut self, duration: Duration) -> Result<(), JobErrorX> {
         let _step_guard = self.enter_step("sleep")?;
         let state = host::next_step(&self.job.job_id)
             .map_err(|err| JobErrorX::Terminal(ferr!("error getting next op: {err}")))?;
@@ -141,7 +145,7 @@ impl WflowCtx {
         }
     }
 
-    pub fn recv<O>(&mut self) -> Result<O, JobErrorX>
+    pub async fn recv<O>(&mut self) -> Result<O, JobErrorX>
     where
         O: RecvCodec,
     {
@@ -187,22 +191,29 @@ pub fn job_error_from_x(err: JobErrorX) -> types::JobError {
 ///
 /// ```ignore
 /// impl wit::exports::townframe::wflow::bundle::Guest for Component {
-///     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
+///     async fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
 ///         wflow_sdk::run_wflow(args, |cx, key, args_json| {
+///             Box::pin(async move {
 ///             match key {
 ///                 "my-workflow" => {
 ///                     let args: MyArgs = serde_json::from_str(args_json)?;
-///                     my_handler(cx, args)
+///                     my_handler(cx, args).await
 ///                 }
 ///                 _ => Err(JobErrorX::Terminal(ferr!("unknown workflow: {key}")))
 ///             }
+///             })
 ///         })
+///         .await
 ///     }
 /// }
 /// ```
-pub fn run_wflow<F, R>(args: types::RunArgs, handler: F) -> types::JobResult
+pub async fn run_wflow<F, R>(args: types::RunArgs, handler: F) -> types::JobResult
 where
-    F: FnOnce(&mut WflowCtx, &str, &str) -> Result<R, JobErrorX>,
+    F: for<'a> FnOnce(
+        &'a mut WflowCtx,
+        &'a str,
+        &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<R, JobErrorX>> + 'a>>,
     R: Serialize,
 {
     let mut cx = WflowCtx {
@@ -214,7 +225,9 @@ where
     let args_json = &args.args_json;
 
     // Call handler and convert errors
-    let result = handler(&mut cx, &args.wflow_key, args_json).map_err(job_error_from_x);
+    let result = handler(&mut cx, &args.wflow_key, args_json)
+        .await
+        .map_err(job_error_from_x);
 
     // Serialize result
     match result {
@@ -239,11 +252,12 @@ where
 ///
 /// ```ignore
 /// impl wit::exports::townframe::wflow::bundle::Guest for Component {
-///     fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
+///     async fn run(args: wit::exports::townframe::wflow::bundle::RunArgs) -> JobResult {
 ///         wflow_sdk::route_wflows!(args, {
 ///             "fails_once" => |cx, args: FailsOnceArgs| fails_once(cx, args),
 ///             "other_workflow" => |cx, args: OtherArgs| other_handler(cx, args),
 ///         })
+///         .await
 ///     }
 /// }
 /// ```
@@ -256,7 +270,8 @@ macro_rules! route_wflows {
             use color_eyre::eyre::format_err as ferr;
 
             run_wflow($args, |cx, key, args_json| {
-                match key {
+                Box::pin(async move {
+                    match key {
                     $(
                         $key => {
                             let $args_var: $args_ty = serde_json::from_str(args_json)
@@ -267,12 +282,13 @@ macro_rules! route_wflows {
                                 )))?;
                             {
                                 let $cx_ident = cx;
-                                $handler
+                                $handler.await
                             }
                         }
                     )*
-                    _ => Err(JobErrorX::Terminal(ferr!("unrecognized wflow_key: {key}"))),
-                }
+                        _ => Err(JobErrorX::Terminal(ferr!("unrecognized wflow_key: {key}"))),
+                    }
+                })
             })
         }
     };

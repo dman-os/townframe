@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [native, wasm32-wasip2, wasm32-unknown-unknown]
+        target: [native, wasm32-wasip3, wasm32-unknown-unknown]
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
@@ -199,7 +199,7 @@ jobs:
         run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
       - name: builds
         run: |
-          nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_wflows --target wasm32-wasip2 --release
+          nix develop .#ci-rust --command cargo --color=always build --locked --manifest-path src/wasm_utils_rs/Cargo.toml -p test_wflows --target wasm32-wasip3 --release
 
       - name: build plug OCI artifacts
         run: |

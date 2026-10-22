@@ -10,12 +10,14 @@ use sqlite_rs::SqlError;
 use sqlite_rs::SqlValue;
 use sqlite_rs::Tx;
 use std::collections::HashSet;
+use std::sync::Arc;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::engine::workload::WorkloadItem;
 use wash_runtime::plugin::HostPlugin;
 use wash_runtime::plugin::WitInterfaces;
 use wash_runtime::wit::WitInterface;
 use wash_runtime::wit::WitWorld;
+use wasmtime::component::Accessor;
 use wasmtime::component::HasSelf;
 use wasmtime::component::Resource;
 
@@ -45,73 +47,12 @@ pub struct SqliteConnectionToken {
 }
 
 pub struct SqliteTransactionToken {
-    pub transaction: Option<Tx>,
+    pub transaction: Option<Arc<tokio::sync::Mutex<Option<Tx>>>>,
 }
 
 impl sqlite_connection::Host for SharedWashCtx {}
 
 impl sqlite_connection::HostConnection for SharedWashCtx {
-    async fn query(
-        &mut self,
-        handle: Resource<sqlite_connection::Connection>,
-        query: String,
-        params: Vec<sql_types::SqlValue>,
-    ) -> wasmtime::Result<Result<sql_types::ResultSet, sql_types::QueryError>> {
-        let db = {
-            let token = self
-                .table
-                .get(&handle)
-                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
-            token.db.clone()
-        };
-        let params = host_params(params);
-        Ok(db
-            .query(&query, &params)
-            .await
-            .map(to_wit_set)
-            .map_err(to_wit_error))
-    }
-
-    async fn execute(
-        &mut self,
-        handle: Resource<sqlite_connection::Connection>,
-        query: String,
-        params: Vec<sql_types::SqlValue>,
-    ) -> wasmtime::Result<Result<sql_types::ExecuteResult, sql_types::QueryError>> {
-        let db = {
-            let token = self
-                .table
-                .get(&handle)
-                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
-            token.db.clone()
-        };
-        let params = host_params(params);
-        Ok(db
-            .execute(&query, &params)
-            .await
-            .map(to_wit_exec)
-            .map_err(to_wit_error))
-    }
-
-    async fn execute_batch(
-        &mut self,
-        handle: Resource<sqlite_connection::Connection>,
-        query: String,
-    ) -> wasmtime::Result<Result<sql_types::ExecuteResult, sql_types::QueryError>> {
-        let db = {
-            let token = self
-                .table
-                .get(&handle)
-                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
-            token.db.clone()
-        };
-        Ok(db
-            .execute_batch(&query)
-            .await
-            .map(to_wit_exec)
-            .map_err(to_wit_error))
-    }
-
     async fn sqlite_file_path(
         &mut self,
         handle: Resource<sqlite_connection::Connection>,
@@ -123,31 +64,6 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
         Ok(token.sqlite_file_path.clone())
     }
 
-    async fn begin_transaction(
-        &mut self,
-        handle: Resource<sqlite_connection::Connection>,
-    ) -> wasmtime::Result<Result<Resource<sqlite_connection::Transaction>, sql_types::QueryError>>
-    {
-        let db = {
-            let token = self
-                .table
-                .get(&handle)
-                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
-            token.db.clone()
-        };
-        let tx = match db.begin_write().await {
-            Ok(tx) => tx,
-            Err(err) => return Ok(Err(to_wit_error(err))),
-        };
-        let handle = self
-            .table
-            .push(SqliteTransactionToken {
-                transaction: Some(tx),
-            })
-            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
-        Ok(Ok(handle))
-    }
-
     async fn drop(&mut self, rep: Resource<sqlite_connection::Connection>) -> wasmtime::Result<()> {
         self.table.delete(rep)?;
         Ok(())
@@ -155,123 +71,6 @@ impl sqlite_connection::HostConnection for SharedWashCtx {
 }
 
 impl sqlite_connection::HostTransaction for SharedWashCtx {
-    async fn query(
-        &mut self,
-        handle: Resource<sqlite_connection::Transaction>,
-        query: String,
-        params: Vec<sql_types::SqlValue>,
-    ) -> wasmtime::Result<Result<sql_types::ResultSet, sql_types::QueryError>> {
-        let token = self
-            .table
-            .get_mut(&handle)
-            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
-        let tx = match token.transaction.as_ref() {
-            Some(tx) => tx,
-            None => {
-                return Ok(Err(sql_types::QueryError::Unexpected(
-                    "transaction already finalized".into(),
-                )));
-            }
-        };
-        let params = host_params(params);
-        Ok(tx
-            .query(&query, &params)
-            .await
-            .map(to_wit_set)
-            .map_err(to_wit_error))
-    }
-
-    async fn execute(
-        &mut self,
-        handle: Resource<sqlite_connection::Transaction>,
-        query: String,
-        params: Vec<sql_types::SqlValue>,
-    ) -> wasmtime::Result<Result<sql_types::ExecuteResult, sql_types::QueryError>> {
-        let token = self
-            .table
-            .get_mut(&handle)
-            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
-        let tx = match token.transaction.as_ref() {
-            Some(tx) => tx,
-            None => {
-                return Ok(Err(sql_types::QueryError::Unexpected(
-                    "transaction already finalized".into(),
-                )));
-            }
-        };
-        let params = host_params(params);
-        Ok(tx
-            .execute(&query, &params)
-            .await
-            .map(to_wit_exec)
-            .map_err(to_wit_error))
-    }
-
-    async fn execute_batch(
-        &mut self,
-        handle: Resource<sqlite_connection::Transaction>,
-        query: String,
-    ) -> wasmtime::Result<Result<sql_types::ExecuteResult, sql_types::QueryError>> {
-        let token = self
-            .table
-            .get_mut(&handle)
-            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
-        let tx = match token.transaction.as_ref() {
-            Some(tx) => tx,
-            None => {
-                return Ok(Err(sql_types::QueryError::Unexpected(
-                    "transaction already finalized".into(),
-                )));
-            }
-        };
-        Ok(tx
-            .execute_batch(&query)
-            .await
-            .map(to_wit_exec)
-            .map_err(to_wit_error))
-    }
-
-    async fn commit(
-        &mut self,
-        handle: Resource<sqlite_connection::Transaction>,
-    ) -> wasmtime::Result<Result<(), sql_types::QueryError>> {
-        // `commit` is a WIT resource *method*, so `self` arrives as a `borrow`
-        // handle: the guest keeps ownership and drops the handle later via
-        // `[resource-drop]transaction`. Take the tx out of the token without
-        // deleting the table entry; the drop will clean up the (now empty) token.
-        let token = self
-            .table
-            .get_mut(&handle)
-            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
-        let tx = token
-            .transaction
-            .take()
-            .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))?;
-        match tx.commit().await {
-            Ok(_) => Ok(Ok(())),
-            Err(err) => Ok(Err(to_wit_error(err))),
-        }
-    }
-
-    async fn rollback(
-        &mut self,
-        handle: Resource<sqlite_connection::Transaction>,
-    ) -> wasmtime::Result<Result<(), sql_types::QueryError>> {
-        // Same as `commit`: borrow method, so don't delete the table entry here.
-        let token = self
-            .table
-            .get_mut(&handle)
-            .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
-        let tx = token
-            .transaction
-            .take()
-            .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))?;
-        match tx.rollback().await {
-            Ok(_) => Ok(Ok(())),
-            Err(err) => Ok(Err(to_wit_error(err))),
-        }
-    }
-
     async fn drop(
         &mut self,
         rep: Resource<sqlite_connection::Transaction>,
@@ -283,6 +82,274 @@ impl sqlite_connection::HostTransaction for SharedWashCtx {
             .delete(rep)
             .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
         Ok(())
+    }
+}
+
+impl<T: 'static + Send> sqlite_connection::HostConnectionWithStore<T> for HasSelf<SharedWashCtx> {
+    async fn query(
+        accessor: &Accessor<T, Self>,
+        handle: Resource<sqlite_connection::Connection>,
+        query: String,
+        params: Vec<sql_types::SqlValue>,
+    ) -> wasmtime::Result<Result<sql_types::ResultSet, sql_types::QueryError>> {
+        let db = accessor.with(|mut access| -> wasmtime::Result<_> {
+            let token = access
+                .get()
+                .table
+                .get(&handle)
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+            Ok(token.db.clone())
+        })?;
+        let params = host_params(params);
+        Ok(db
+            .query(&query, &params)
+            .await
+            .map(to_wit_set)
+            .map_err(to_wit_error))
+    }
+
+    async fn execute(
+        accessor: &Accessor<T, Self>,
+        handle: Resource<sqlite_connection::Connection>,
+        query: String,
+        params: Vec<sql_types::SqlValue>,
+    ) -> wasmtime::Result<Result<sql_types::ExecuteResult, sql_types::QueryError>> {
+        let db = accessor.with(|mut access| -> wasmtime::Result<_> {
+            let token = access
+                .get()
+                .table
+                .get(&handle)
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+            Ok(token.db.clone())
+        })?;
+        let params = host_params(params);
+        Ok(db
+            .execute(&query, &params)
+            .await
+            .map(to_wit_exec)
+            .map_err(to_wit_error))
+    }
+
+    async fn execute_batch(
+        accessor: &Accessor<T, Self>,
+        handle: Resource<sqlite_connection::Connection>,
+        query: String,
+    ) -> wasmtime::Result<Result<sql_types::ExecuteResult, sql_types::QueryError>> {
+        let db = accessor.with(|mut access| -> wasmtime::Result<_> {
+            let token = access
+                .get()
+                .table
+                .get(&handle)
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+            Ok(token.db.clone())
+        })?;
+        Ok(db
+            .execute_batch(&query)
+            .await
+            .map(to_wit_exec)
+            .map_err(to_wit_error))
+    }
+
+    async fn begin_transaction(
+        accessor: &Accessor<T, Self>,
+        handle: Resource<sqlite_connection::Connection>,
+    ) -> wasmtime::Result<Result<Resource<sqlite_connection::Transaction>, sql_types::QueryError>>
+    {
+        let db = accessor.with(|mut access| -> wasmtime::Result<_> {
+            let token = access
+                .get()
+                .table
+                .get(&handle)
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+            Ok(token.db.clone())
+        })?;
+        let tx = match db.begin_write().await {
+            Ok(tx) => tx,
+            Err(err) => return Ok(Err(to_wit_error(err))),
+        };
+        let handle = accessor.with(|mut access| -> wasmtime::Result<_> {
+            access
+                .get()
+                .table
+                .push(SqliteTransactionToken {
+                    transaction: Some(Arc::new(tokio::sync::Mutex::new(Some(tx)))),
+                })
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))
+        })?;
+        Ok(Ok(handle))
+    }
+}
+
+impl<T: 'static + Send> sqlite_connection::HostTransactionWithStore<T> for HasSelf<SharedWashCtx> {
+    async fn query(
+        accessor: &Accessor<T, Self>,
+        handle: Resource<sqlite_connection::Transaction>,
+        query: String,
+        params: Vec<sql_types::SqlValue>,
+    ) -> wasmtime::Result<Result<sql_types::ResultSet, sql_types::QueryError>> {
+        let transaction = accessor.with(|mut access| -> wasmtime::Result<_> {
+            let token = access
+                .get()
+                .table
+                .get(&handle)
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+            Ok(token.transaction.clone())
+        })?;
+        let Some(transaction) = transaction else {
+            return Ok(Err(sql_types::QueryError::Unexpected(
+                "transaction already finalized".into(),
+            )));
+        };
+        let transaction = transaction.lock().await;
+        let Some(tx) = transaction.as_ref() else {
+            return Ok(Err(sql_types::QueryError::Unexpected(
+                "transaction already finalized".into(),
+            )));
+        };
+        let params = host_params(params);
+        Ok(tx
+            .query(&query, &params)
+            .await
+            .map(to_wit_set)
+            .map_err(to_wit_error))
+    }
+
+    async fn execute(
+        accessor: &Accessor<T, Self>,
+        handle: Resource<sqlite_connection::Transaction>,
+        query: String,
+        params: Vec<sql_types::SqlValue>,
+    ) -> wasmtime::Result<Result<sql_types::ExecuteResult, sql_types::QueryError>> {
+        let transaction = accessor.with(|mut access| -> wasmtime::Result<_> {
+            let token = access
+                .get()
+                .table
+                .get(&handle)
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+            Ok(token.transaction.clone())
+        })?;
+        let Some(transaction) = transaction else {
+            return Ok(Err(sql_types::QueryError::Unexpected(
+                "transaction already finalized".into(),
+            )));
+        };
+        let transaction = transaction.lock().await;
+        let Some(tx) = transaction.as_ref() else {
+            return Ok(Err(sql_types::QueryError::Unexpected(
+                "transaction already finalized".into(),
+            )));
+        };
+        let params = host_params(params);
+        Ok(tx
+            .execute(&query, &params)
+            .await
+            .map(to_wit_exec)
+            .map_err(to_wit_error))
+    }
+
+    async fn execute_batch(
+        accessor: &Accessor<T, Self>,
+        handle: Resource<sqlite_connection::Transaction>,
+        query: String,
+    ) -> wasmtime::Result<Result<sql_types::ExecuteResult, sql_types::QueryError>> {
+        let transaction = accessor.with(|mut access| -> wasmtime::Result<_> {
+            let token = access
+                .get()
+                .table
+                .get(&handle)
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+            Ok(token.transaction.clone())
+        })?;
+        let Some(transaction) = transaction else {
+            return Ok(Err(sql_types::QueryError::Unexpected(
+                "transaction already finalized".into(),
+            )));
+        };
+        let transaction = transaction.lock().await;
+        let Some(tx) = transaction.as_ref() else {
+            return Ok(Err(sql_types::QueryError::Unexpected(
+                "transaction already finalized".into(),
+            )));
+        };
+        Ok(tx
+            .execute_batch(&query)
+            .await
+            .map(to_wit_exec)
+            .map_err(to_wit_error))
+    }
+
+    async fn commit(
+        accessor: &Accessor<T, Self>,
+        handle: Resource<sqlite_connection::Transaction>,
+    ) -> wasmtime::Result<Result<(), sql_types::QueryError>> {
+        let transaction = accessor.with(|mut access| -> wasmtime::Result<_> {
+            let token = access
+                .get()
+                .table
+                .get(&handle)
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+            token
+                .transaction
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))
+        })?;
+        let tx = {
+            let mut transaction = transaction.lock().await;
+            transaction
+                .take()
+                .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))?
+        };
+        accessor.with(|mut access| -> wasmtime::Result<()> {
+            let token = access
+                .get()
+                .table
+                .get_mut(&handle)
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+            token.transaction = None;
+            Ok(())
+        })?;
+        match tx.commit().await {
+            Ok(()) => Ok(Ok(())),
+            Err(err) => Ok(Err(to_wit_error(err))),
+        }
+    }
+
+    async fn rollback(
+        accessor: &Accessor<T, Self>,
+        handle: Resource<sqlite_connection::Transaction>,
+    ) -> wasmtime::Result<Result<(), sql_types::QueryError>> {
+        let transaction = accessor.with(|mut access| -> wasmtime::Result<_> {
+            let token = access
+                .get()
+                .table
+                .get(&handle)
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+            token
+                .transaction
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))
+        })?;
+        let tx = {
+            let mut transaction = transaction.lock().await;
+            transaction
+                .take()
+                .ok_or_else(|| wasmtime::Error::msg("transaction already finalized"))?
+        };
+        accessor.with(|mut access| -> wasmtime::Result<()> {
+            let token = access
+                .get()
+                .table
+                .get_mut(&handle)
+                .map_err(|err| wasmtime::Error::msg(err.to_string()))?;
+            token.transaction = None;
+            Ok(())
+        })?;
+        match tx.rollback().await {
+            Ok(()) => Ok(Ok(())),
+            Err(err) => Ok(Err(to_wit_error(err))),
+        }
     }
 }
 

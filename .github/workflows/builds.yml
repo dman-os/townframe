@@ -40,7 +40,7 @@ env:
   OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}
   OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
   DAYBOOK_PRERELEASE_TAG: dev
-  RUST_VERSION: 2026-04-16
+  RUST_VERSION: 2026-09-17
 
 jobs:
   resolve-release-meta:
@@ -186,7 +186,7 @@ jobs:
         with:
           cache: false
           toolchain: nightly-${{ env.RUST_VERSION }}
-          target: wasm32-wasip2
+          target: wasm32-wasip3
 
       - uses: Swatinem/rust-cache@v2
         with:
