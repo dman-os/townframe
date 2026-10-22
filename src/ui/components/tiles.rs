@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnId(pub String);

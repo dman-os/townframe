@@ -7,11 +7,11 @@
 /// wraps the host reference; the guest-side form arrives with the collections WIT waist.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ComponentRef(
-    #[cfg(feature = "native")] clay_host::ComponentRef,
-    #[cfg(not(feature = "native"))] (),
+    #[cfg(feature = "in_process")] clay_host::ComponentRef,
+    #[cfg(not(feature = "in_process"))] (),
 );
 
-#[cfg(feature = "native")]
+#[cfg(feature = "in_process")]
 impl ComponentRef {
     /// Wrap a host-issued reference. Host-side adapter and test vocabulary; the reference's
     /// liveness and grants remain host-enforced.

@@ -9,7 +9,8 @@
 //! open questions this prototype exists to probe, not solve.
 
 use dioxus::prelude::*;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 
 /// One tile: a unit of content or action in an ordered list.
 #[derive(Clone, Debug, PartialEq)]
@@ -330,7 +331,7 @@ pub fn sample_columns() -> Vec<Column> {
 
 #[component]
 pub fn TilesDemo(viewport: (f64, f64)) -> Element {
-    let columns = use_signal(|| sample_columns());
+    let columns = use_signal(sample_columns);
     let mut column_offset = use_signal(|| 0usize);
     let mut column_scroll_lock = use_signal(|| None::<Instant>);
     // Which tile is open at each depth, per peer column. The strip is derived
@@ -663,6 +664,10 @@ fn TileBody(tile: Tile) -> Element {
 }
 
 #[component]
+#[expect(
+    clippy::suspicious_else_formatting,
+    reason = "rsx attribute expressions are formatted by the macro"
+)]
 fn TileRow(
     tile: Tile,
     index: usize,

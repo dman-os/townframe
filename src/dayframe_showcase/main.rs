@@ -1,22 +1,45 @@
 #[cfg(feature = "desktop")]
-use dioxus::desktop::{
-    tao::event::{Event as DesktopEvent, WindowEvent as DesktopWindowEvent},
-    use_wry_event_handler, DesktopContext,
-};
+use dioxus::desktop::tao::event::Event as DesktopEvent;
+#[cfg(feature = "desktop")]
+use dioxus::desktop::tao::event::WindowEvent as DesktopWindowEvent;
+#[cfg(feature = "desktop")]
+use dioxus::desktop::use_wry_event_handler;
+#[cfg(feature = "desktop")]
+use dioxus::desktop::DesktopContext;
 use dioxus::prelude::*;
 use dioxus_native::winit::event::WindowEvent as NativeWindowEvent;
 use dioxus_native::winit::window::Window;
 use serde::Deserialize;
-use std::{collections::BTreeMap, rc::Rc, sync::Arc};
-use ui::{
-    ArcIndex, Button, ButtonVariant, Card, CardContent, CardHeader, ColumnHeight, ColumnId,
-    ColumnRack, ColumnRelation, ColumnSection, ColumnSource, ColumnSpec, ColumnState,
-    SectionLayout, ThemeMode, ThemeRoot, TileChildren, TileContent, TileKind, TileListSpec,
-    TileSpec,
-};
+use std::collections::BTreeMap;
+use std::rc::Rc;
+use std::sync::Arc;
+use ui::ArcIndex;
+use ui::Button;
+use ui::ButtonVariant;
+use ui::Card;
+use ui::CardContent;
+use ui::CardHeader;
+use ui::ColumnHeight;
+use ui::ColumnId;
+use ui::ColumnRack;
+use ui::ColumnRelation;
+use ui::ColumnSection;
+use ui::ColumnSource;
+use ui::ColumnSpec;
+use ui::ColumnState;
+use ui::SectionLayout;
+use ui::ThemeMode;
+use ui::ThemeRoot;
+use ui::TileChildren;
+use ui::TileContent;
+use ui::TileKind;
+use ui::TileListSpec;
+use ui::TileSpec;
 
-const MATERIAL_THEME_JSON: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../ui/styles/material-theme.json"));
+const MATERIAL_THEME_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../ui/styles/material-theme.json"
+));
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 struct MaterialTheme {
@@ -414,375 +437,404 @@ fn browser_tab(id: &str, title: &str, subtitle: &str, children: Vec<TileSpec>) -
     }
 }
 
-#[component]
-fn TileGrammarFoundation(available_width: f64) -> Element {
-    let columns = vec![
-        ColumnSpec {
-            id: ColumnId("frame".to_string()),
-            title: "Frame".to_string(),
-            relation: ColumnRelation::Root,
-            list: TileListSpec {
-                source: ColumnSource::Static,
-                state: ColumnState::Ready,
-                sections: ('A'..='Z')
-                    .enumerate()
-                    .map(|(section_index, letter)| ColumnSection {
-                        title: Some(letter.to_string()),
-                        layout: SectionLayout::List,
-                        tiles: (0..=(section_index % 6))
-                            .map(|item_index| TileSpec {
-                                id: format!("frame-{letter}-{item_index}"),
-                                title: if letter == 'A' && item_index == 0 {
-                                    "A folder".to_string()
-                                } else {
-                                    format!("{letter} item {}", item_index + 1)
-                                },
-                                subtitle: if letter == 'A' && item_index == 0 {
-                                    "Group · inline nested list".to_string()
-                                } else if item_index % 3 == 0 {
-                                    String::new()
-                                } else {
-                                    format!("App · section {letter}")
-                                },
-                                kind: if item_index == 0 {
-                                    TileKind::Group
-                                } else {
-                                    TileKind::App
-                                },
-                                body: if letter == 'A' && item_index == 0 {
-                                    vec![
-                                        "Opens an inline nested list.".to_string(),
-                                        "The body can contain multiple paragraphs while the tile grows naturally.".to_string(),
-                                    ]
-                                } else if item_index % 4 == 0 {
-                                    vec![
-                                        "A longer body example that makes the tile grow naturally.".to_string(),
-                                        "This second paragraph demonstrates how additional context can live below the subtitle without changing the tile grammar.".to_string(),
-                                    ]
-                                } else {
-                                    Vec::new()
-                                },
-                                content: TileContent::Line,
-                                children: if letter == 'A' && item_index == 0 {
-                                    Some(TileChildren::Inline(TileListSpec {
-                                        source: ColumnSource::Child {
-                                            parent: ColumnId(format!(
-                                                "frame-{letter}-{item_index}"
-                                            )),
-                                        },
-                                        state: ColumnState::Ready,
-                                        sections: vec![ColumnSection {
-                                            title: None,
-                                            layout: SectionLayout::List,
-                                            tiles: vec![
-                                                TileSpec {
-                                                    id: "a-nested-one".to_string(),
-                                                    title: "Nested one".to_string(),
-                                                    subtitle: String::new(),
-                                                    kind: TileKind::App,
-                                                    body: Vec::new(),
-                                                    content: TileContent::Line,
-                                                    children: Some(TileChildren::Inline(
-                                                        TileListSpec {
-                                                            source: ColumnSource::Child {
-                                                                parent: ColumnId(
-                                                                    "a-nested-one".to_string(),
-                                                                ),
-                                                            },
-                                                            state: ColumnState::Ready,
-                                                            sections: vec![ColumnSection {
-                                                                title: None,
-                                                                layout: SectionLayout::List,
-                                                                tiles: vec![TileSpec {
-                                                                    id: "a-grandchild".to_string(),
-                                                                    title: "Grandchild".to_string(),
-                                                                    subtitle: String::new(),
-                                                                    kind: TileKind::App,
-                                                                body: vec![
-                                                                    "A second nesting level.".to_string(),
-                                                                    "This grandchild gives the nested body a second paragraph too.".to_string(),
-                                                                ],
-                                                                    content: TileContent::Line,
-                                                                    children: None,
-                                                                }],
-                                                            }],
-                                                            total: Some(1),
-                                                            has_next: false,
-                                                        },
-                                                    )),
-                                                },
-                                                TileSpec {
-                                                    id: "a-nested-two".to_string(),
-                                                    title: "Nested two".to_string(),
-                                                    subtitle: "Inline child".to_string(),
-                                                    kind: TileKind::App,
-                                                    body: Vec::new(),
-                                                    content: TileContent::Line,
-                                                    children: None,
-                                                },
-                                            ],
-                                        }],
-                                        total: Some(2),
-                                        has_next: false,
-                                    }))
-                                } else {
-                                    None
-                                },
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-                total: Some(87),
-                has_next: false,
-            },
+fn tile_grammar_columns() -> Vec<ColumnSpec> {
+    vec![
+        frame_column(),
+        home_column(),
+        widgets_column(),
+        tab_history_column(),
+        photos_column(),
+    ]
+}
+
+fn frame_column() -> ColumnSpec {
+    ColumnSpec {
+        id: ColumnId("frame".to_string()),
+        title: "Frame".to_string(),
+        relation: ColumnRelation::Root,
+        list: TileListSpec {
+            source: ColumnSource::Static,
+            state: ColumnState::Ready,
+            sections: ('A'..='Z')
+                .enumerate()
+                .map(|(section_index, letter)| ColumnSection {
+                    title: Some(letter.to_string()),
+                    layout: SectionLayout::List,
+                    tiles: (0..=(section_index % 6))
+                        .map(|item_index| frame_tile(letter, item_index))
+                        .collect(),
+                })
+                .collect(),
+            total: Some(87),
+            has_next: false,
         },
-        ColumnSpec {
-            id: ColumnId("home".to_string()),
-            title: "Home".to_string(),
-            relation: ColumnRelation::Root,
-            list: TileListSpec {
-                source: ColumnSource::Paged { cursor: None },
-                state: ColumnState::Ready,
-                sections: vec![ColumnSection {
+    }
+}
+
+fn frame_tile(letter: char, item_index: usize) -> TileSpec {
+    let is_folder = letter == 'A' && item_index == 0;
+    TileSpec {
+        id: format!("frame-{letter}-{item_index}"),
+        title: if is_folder {
+            "A folder".to_string()
+        } else {
+            format!("{letter} item {}", item_index + 1)
+        },
+        subtitle: if is_folder {
+            "Group · inline nested list".to_string()
+        } else if item_index.is_multiple_of(3) {
+            String::new()
+        } else {
+            format!("App · section {letter}")
+        },
+        kind: if item_index == 0 {
+            TileKind::Group
+        } else {
+            TileKind::App
+        },
+        body: if is_folder {
+            vec![
+                "Opens an inline nested list.".to_string(),
+                "The body can contain multiple paragraphs while the tile grows naturally."
+                    .to_string(),
+            ]
+        } else if item_index.is_multiple_of(4) {
+            vec![
+                "A longer body example that makes the tile grow naturally.".to_string(),
+                "This second paragraph demonstrates how additional context can live below the subtitle without changing the tile grammar.".to_string(),
+            ]
+        } else {
+            Vec::new()
+        },
+        content: TileContent::Line,
+        children: is_folder.then(|| TileChildren::Inline(nested_frame_list())),
+    }
+}
+
+fn nested_frame_list() -> TileListSpec {
+    TileListSpec {
+        source: ColumnSource::Child {
+            parent: ColumnId("frame-A-0".to_string()),
+        },
+        state: ColumnState::Ready,
+        sections: vec![ColumnSection {
+            title: None,
+            layout: SectionLayout::List,
+            tiles: vec![
+                TileSpec {
+                    id: "a-nested-one".to_string(),
+                    title: "Nested one".to_string(),
+                    subtitle: String::new(),
+                    kind: TileKind::App,
+                    body: Vec::new(),
+                    content: TileContent::Line,
+                    children: Some(TileChildren::Inline(TileListSpec {
+                        source: ColumnSource::Child {
+                            parent: ColumnId("a-nested-one".to_string()),
+                        },
+                        state: ColumnState::Ready,
+                        sections: vec![ColumnSection {
+                            title: None,
+                            layout: SectionLayout::List,
+                            tiles: vec![TileSpec {
+                                id: "a-grandchild".to_string(),
+                                title: "Grandchild".to_string(),
+                                subtitle: String::new(),
+                                kind: TileKind::App,
+                                body: vec![
+                                    "A second nesting level.".to_string(),
+                                    "This grandchild gives the nested body a second paragraph too."
+                                        .to_string(),
+                                ],
+                                content: TileContent::Line,
+                                children: None,
+                            }],
+                        }],
+                        total: Some(1),
+                        has_next: false,
+                    })),
+                },
+                TileSpec {
+                    id: "a-nested-two".to_string(),
+                    title: "Nested two".to_string(),
+                    subtitle: "Inline child".to_string(),
+                    kind: TileKind::App,
+                    body: Vec::new(),
+                    content: TileContent::Line,
+                    children: None,
+                },
+            ],
+        }],
+        total: Some(2),
+        has_next: false,
+    }
+}
+
+fn home_column() -> ColumnSpec {
+    ColumnSpec {
+        id: ColumnId("home".to_string()),
+        title: "Home".to_string(),
+        relation: ColumnRelation::Root,
+        list: TileListSpec {
+            source: ColumnSource::Paged { cursor: None },
+            state: ColumnState::Ready,
+            sections: vec![ColumnSection {
+                title: Some("Pinned".to_string()),
+                layout: SectionLayout::List,
+                tiles: vec![
+                    TileSpec {
+                        id: "manual-order".to_string(),
+                        title: "Manual order".to_string(),
+                        subtitle: "Group · Overlay sublist".to_string(),
+                        kind: TileKind::Group,
+                        body: Vec::new(),
+                        content: TileContent::Line,
+                        children: None,
+                    },
+                    TileSpec {
+                        id: "capture".to_string(),
+                        title: "Capture".to_string(),
+                        subtitle: "Group · Column sublist".to_string(),
+                        kind: TileKind::Group,
+                        body: Vec::new(),
+                        content: TileContent::Line,
+                        children: None,
+                    },
+                ],
+            }],
+            total: None,
+            has_next: true,
+        },
+    }
+}
+
+fn widgets_column() -> ColumnSpec {
+    ColumnSpec {
+        id: ColumnId("widgets".to_string()),
+        title: "Widgets".to_string(),
+        relation: ColumnRelation::Root,
+        list: TileListSpec {
+            source: ColumnSource::Subscription,
+            state: ColumnState::Ready,
+            sections: vec![ColumnSection {
+                title: Some("Active".to_string()),
+                layout: SectionLayout::List,
+                tiles: vec![
+                    TileSpec {
+                        id: "now-playing".to_string(),
+                        title: "Now playing".to_string(),
+                        subtitle: "Widget · Media · stacked slot".to_string(),
+                        body: Vec::new(),
+                        kind: TileKind::Widget,
+                        content: TileContent::Media,
+                        children: None,
+                    },
+                    TileSpec {
+                        id: "scratchpad".to_string(),
+                        title: "Scratchpad".to_string(),
+                        subtitle: "Widget · StickyNote".to_string(),
+                        body: Vec::new(),
+                        kind: TileKind::Widget,
+                        content: TileContent::StickyNote,
+                        children: None,
+                    },
+                ],
+            }],
+            total: Some(3),
+            has_next: false,
+        },
+    }
+}
+
+fn tab_history_column() -> ColumnSpec {
+    ColumnSpec {
+        id: ColumnId("tab-history".to_string()),
+        title: "Tab history".to_string(),
+        relation: ColumnRelation::Root,
+        list: TileListSpec {
+            source: ColumnSource::Static,
+            state: ColumnState::Ready,
+            sections: vec![
+                ColumnSection {
                     title: Some("Pinned".to_string()),
                     layout: SectionLayout::List,
                     tiles: vec![
-                        TileSpec {
-                            id: "manual-order".to_string(),
-                            title: "Manual order".to_string(),
-                            subtitle: "Group · Overlay sublist".to_string(),
-                            kind: TileKind::Group,
-                            body: Vec::new(),
-                            content: TileContent::Line,
-                            children: None,
-                        },
-                        TileSpec {
-                            id: "capture".to_string(),
-                            title: "Capture".to_string(),
-                            subtitle: "Group · Column sublist".to_string(),
-                            kind: TileKind::Group,
-                            body: Vec::new(),
-                            content: TileContent::Line,
-                            children: None,
-                        },
+                        browser_tab(
+                            "pinned-townframe",
+                            "Townframe",
+                            "github.com/dman-os/townframe",
+                            vec![
+                                browser_tab(
+                                    "pinned-townframe-readme",
+                                    "README",
+                                    "github.com/dman-os/townframe/README.md",
+                                    vec![],
+                                ),
+                                browser_tab(
+                                    "pinned-townframe-issues",
+                                    "Issues",
+                                    "github.com/dman-os/townframe/issues",
+                                    vec![],
+                                ),
+                            ],
+                        ),
+                        browser_tab(
+                            "pinned-dioxus",
+                            "Dioxus",
+                            "dioxuslabs.com/learn",
+                            vec![
+                                browser_tab(
+                                    "pinned-dioxus-native",
+                                    "Native renderer",
+                                    "dioxuslabs.com/learn/0.8/native",
+                                    vec![],
+                                ),
+                                browser_tab(
+                                    "pinned-dioxus-rsx",
+                                    "RSX reference",
+                                    "dioxuslabs.com/learn/0.8/reference/rsx",
+                                    vec![],
+                                ),
+                            ],
+                        ),
                     ],
-                }],
-                total: None,
-                has_next: true,
-            },
-        },
-        ColumnSpec {
-            id: ColumnId("widgets".to_string()),
-            title: "Widgets".to_string(),
-            relation: ColumnRelation::Root,
-            list: TileListSpec {
-                source: ColumnSource::Subscription,
-                state: ColumnState::Ready,
-                sections: vec![ColumnSection {
-                    title: Some("Active".to_string()),
+                },
+                ColumnSection {
+                    title: Some("Today".to_string()),
                     layout: SectionLayout::List,
-                    tiles: vec![
-                        TileSpec {
-                            id: "now-playing".to_string(),
-                            title: "Now playing".to_string(),
-                            subtitle: "Widget · Media · stacked slot".to_string(),
-                            body: Vec::new(),
-                            kind: TileKind::Widget,
-                            content: TileContent::Media,
-                            children: None,
-                        },
-                        TileSpec {
-                            id: "scratchpad".to_string(),
-                            title: "Scratchpad".to_string(),
-                            subtitle: "Widget · StickyNote".to_string(),
-                            body: Vec::new(),
-                            kind: TileKind::Widget,
-                            content: TileContent::StickyNote,
-                            children: None,
-                        },
-                    ],
-                }],
-                total: Some(3),
-                has_next: false,
-            },
-        },
-        ColumnSpec {
-            id: ColumnId("tab-history".to_string()),
-            title: "Tab history".to_string(),
-            relation: ColumnRelation::Root,
-            list: TileListSpec {
-                source: ColumnSource::Static,
-                state: ColumnState::Ready,
-                sections: vec![
-                    ColumnSection {
-                        title: Some("Pinned".to_string()),
-                        layout: SectionLayout::List,
-                        tiles: vec![
+                    tiles: (1..=8)
+                        .map(|index| {
                             browser_tab(
-                                "pinned-townframe",
-                                "Townframe",
-                                "github.com/dman-os/townframe",
+                                &format!("today-{index}"),
+                                &format!("Project tab {index}"),
+                                &format!("workspace.local/project/{index}"),
                                 vec![
                                     browser_tab(
-                                        "pinned-townframe-readme",
-                                        "README",
-                                        "github.com/dman-os/townframe/README.md",
-                                        vec![],
+                                        &format!("today-{index}-docs"),
+                                        "Documentation",
+                                        "docs.example.com/reference",
+                                        vec![browser_tab(
+                                            &format!("today-{index}-deep"),
+                                            "Deep history",
+                                            "docs.example.com/reference/details",
+                                            vec![],
+                                        )],
                                     ),
                                     browser_tab(
-                                        "pinned-townframe-issues",
-                                        "Issues",
-                                        "github.com/dman-os/townframe/issues",
+                                        &format!("today-{index}-discussion"),
+                                        "Discussion",
+                                        "community.example.com/thread",
                                         vec![],
                                     ),
                                 ],
-                            ),
+                            )
+                        })
+                        .collect(),
+                },
+                ColumnSection {
+                    title: Some("Yesterday".to_string()),
+                    layout: SectionLayout::List,
+                    tiles: (1..=6)
+                        .map(|index| {
                             browser_tab(
-                                "pinned-dioxus",
-                                "Dioxus",
-                                "dioxuslabs.com/learn",
+                                &format!("yesterday-{index}"),
+                                &format!("Research tab {index}"),
+                                &format!("search.example.com/query/{index}"),
                                 vec![
                                     browser_tab(
-                                        "pinned-dioxus-native",
-                                        "Native renderer",
-                                        "dioxuslabs.com/learn/0.8/native",
+                                        &format!("yesterday-{index}-result-a"),
+                                        "Result A",
+                                        "search.example.com/result/a",
                                         vec![],
                                     ),
                                     browser_tab(
-                                        "pinned-dioxus-rsx",
-                                        "RSX reference",
-                                        "dioxuslabs.com/learn/0.8/reference/rsx",
+                                        &format!("yesterday-{index}-result-b"),
+                                        "Result B",
+                                        "search.example.com/result/b",
                                         vec![],
                                     ),
+                                    browser_tab(
+                                        &format!("yesterday-{index}-archive"),
+                                        "Archived branch",
+                                        "archive.example.com/topic",
+                                        vec![browser_tab(
+                                            &format!("yesterday-{index}-archive-deep"),
+                                            "Archived detail",
+                                            "archive.example.com/topic/detail",
+                                            vec![],
+                                        )],
+                                    ),
                                 ],
-                            ),
-                        ],
-                    },
-                    ColumnSection {
-                        title: Some("Today".to_string()),
-                        layout: SectionLayout::List,
-                        tiles: (1..=8)
-                            .map(|index| {
-                                browser_tab(
-                                    &format!("today-{index}"),
-                                    &format!("Project tab {index}"),
-                                    &format!("workspace.local/project/{index}"),
-                                    vec![
-                                        browser_tab(
-                                            &format!("today-{index}-docs"),
-                                            "Documentation",
-                                            "docs.example.com/reference",
-                                            vec![browser_tab(
-                                                &format!("today-{index}-deep"),
-                                                "Deep history",
-                                                "docs.example.com/reference/details",
-                                                vec![],
-                                            )],
-                                        ),
-                                        browser_tab(
-                                            &format!("today-{index}-discussion"),
-                                            "Discussion",
-                                            "community.example.com/thread",
-                                            vec![],
-                                        ),
-                                    ],
-                                )
-                            })
-                            .collect(),
-                    },
-                    ColumnSection {
-                        title: Some("Yesterday".to_string()),
-                        layout: SectionLayout::List,
-                        tiles: (1..=6)
-                            .map(|index| {
-                                browser_tab(
-                                    &format!("yesterday-{index}"),
-                                    &format!("Research tab {index}"),
-                                    &format!("search.example.com/query/{index}"),
-                                    vec![
-                                        browser_tab(
-                                            &format!("yesterday-{index}-result-a"),
-                                            "Result A",
-                                            "search.example.com/result/a",
-                                            vec![],
-                                        ),
-                                        browser_tab(
-                                            &format!("yesterday-{index}-result-b"),
-                                            "Result B",
-                                            "search.example.com/result/b",
-                                            vec![],
-                                        ),
-                                        browser_tab(
-                                            &format!("yesterday-{index}-archive"),
-                                            "Archived branch",
-                                            "archive.example.com/topic",
-                                            vec![browser_tab(
-                                                &format!("yesterday-{index}-archive-deep"),
-                                                "Archived detail",
-                                                "archive.example.com/topic/detail",
-                                                vec![],
-                                            )],
-                                        ),
-                                    ],
-                                )
-                            })
-                            .collect(),
-                    },
-                ],
-                total: Some(16),
-                has_next: false,
-            },
+                            )
+                        })
+                        .collect(),
+                },
+            ],
+            total: Some(16),
+            has_next: false,
         },
-        ColumnSpec {
-            id: ColumnId("photos".to_string()),
-            title: "Photos".to_string(),
-            relation: ColumnRelation::Root,
-            list: TileListSpec {
-                source: ColumnSource::Static,
-                state: ColumnState::Ready,
-                sections: vec![
-                    ColumnSection {
-                        title: Some("Recent".to_string()),
-                        layout: SectionLayout::DenseGallery { columns: 4 },
-                        tiles: (0..20)
-                            .map(|index| TileSpec {
-                                id: format!("photo-recent-{index}"),
-                                title: String::new(),
-                                subtitle: String::new(),
-                                kind: TileKind::App,
-                                content: TileContent::Thumbnail {
-                                    src: format!("https://picsum.photos/seed/townframe-recent-{index}/320/320"),
-                                    alt: format!("Recent photo {}", index + 1),
-                                },
-                                body: Vec::new(),
-                                children: None,
-                            })
-                            .collect(),
-                    },
-                    ColumnSection {
-                        title: Some("Earlier".to_string()),
-                        layout: SectionLayout::DenseGallery { columns: 4 },
-                        tiles: (20..36)
-                            .map(|index| TileSpec {
-                                id: format!("photo-earlier-{index}"),
-                                title: String::new(),
-                                subtitle: String::new(),
-                                kind: TileKind::App,
-                                content: TileContent::Thumbnail {
-                                    src: format!("https://picsum.photos/seed/townframe-earlier-{index}/320/320"),
-                                    alt: format!("Earlier photo {}", index - 19),
-                                },
-                                body: Vec::new(),
-                                children: None,
-                            })
-                            .collect(),
-                    },
-                ],
-                total: Some(36),
-                has_next: false,
-            },
+    }
+}
+
+fn photos_column() -> ColumnSpec {
+    ColumnSpec {
+        id: ColumnId("photos".to_string()),
+        title: "Photos".to_string(),
+        relation: ColumnRelation::Root,
+        list: TileListSpec {
+            source: ColumnSource::Static,
+            state: ColumnState::Ready,
+            sections: vec![
+                ColumnSection {
+                    title: Some("Recent".to_string()),
+                    layout: SectionLayout::DenseGallery { columns: 4 },
+                    tiles: (0..20)
+                        .map(|index| TileSpec {
+                            id: format!("photo-recent-{index}"),
+                            title: String::new(),
+                            subtitle: String::new(),
+                            kind: TileKind::App,
+                            content: TileContent::Thumbnail {
+                                src: format!(
+                                    "https://picsum.photos/seed/townframe-recent-{index}/320/320"
+                                ),
+                                alt: format!("Recent photo {}", index + 1),
+                            },
+                            body: Vec::new(),
+                            children: None,
+                        })
+                        .collect(),
+                },
+                ColumnSection {
+                    title: Some("Earlier".to_string()),
+                    layout: SectionLayout::DenseGallery { columns: 4 },
+                    tiles: (20..36)
+                        .map(|index| TileSpec {
+                            id: format!("photo-earlier-{index}"),
+                            title: String::new(),
+                            subtitle: String::new(),
+                            kind: TileKind::App,
+                            content: TileContent::Thumbnail {
+                                src: format!(
+                                    "https://picsum.photos/seed/townframe-earlier-{index}/320/320"
+                                ),
+                                alt: format!("Earlier photo {}", index - 19),
+                            },
+                            body: Vec::new(),
+                            children: None,
+                        })
+                        .collect(),
+                },
+            ],
+            total: Some(36),
+            has_next: false,
         },
-    ];
+    }
+}
+
+#[component]
+fn TileGrammarFoundation(available_width: f64) -> Element {
+    let columns = tile_grammar_columns();
     rsx! {
         div {
             class: "df-tile-lab",
@@ -797,7 +849,6 @@ fn TileGrammarFoundation(available_width: f64) -> Element {
         }
     }
 }
-
 #[component]
 fn SurfaceFoundation() -> Element {
     let surfaces = [

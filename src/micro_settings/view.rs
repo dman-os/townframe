@@ -1,6 +1,8 @@
 //! Settings presentation consumes its own typed collection and host-mediated component mounts.
 use crate::SettingsMicro;
-use clay_mdk::native::ComponentSlot;
+use clay_mdk::native::Query;
+use clay_mdk::view::ComponentSlot;
+use clay_mdk::view::use_collection;
 use dioxus::prelude::*;
 
 #[derive(Props, Clone)]
@@ -15,41 +17,34 @@ impl PartialEq for SettingsViewProps {
 
 #[expect(non_snake_case, reason = "Dioxus component naming")]
 pub fn SettingsView(props: SettingsViewProps) -> Element {
-    let reader = props.micro.sections.clone();
-    let mut sections = use_signal(|| reader.snapshot().unwrap());
-    let mut selected = use_signal(|| sections().keys().next().copied());
-    use_future(move || {
-        let mut updates = reader.subscribe().unwrap();
-        async move {
-            loop {
-                let snapshot = updates.borrow_and_update().clone();
-                if selected().is_none_or(|id| !snapshot.contains_key(&id)) {
-                    selected.set(snapshot.keys().next().copied());
-                }
-                sections.set(snapshot);
-                if updates.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    let current = selected().and_then(|id| sections().get(&id).cloned());
+    let sections = use_collection(&props.micro.sections);
+    let rows = sections.query(&Query::new());
+    let mut selected = use_signal(|| rows.first().map(|(id, _)| *id));
+    let active = selected()
+        .filter(|id| sections.visible(id).is_some())
+        .or_else(|| rows.first().map(|(id, _)| *id));
+    let current = active.and_then(|id| sections.visible(&id));
     rsx! {
         section { class: "flex flex-col gap-4", "aria-label": "Settings",
             h2 { class: "text-xl font-semibold", "Settings" }
             div { class: "flex flex-wrap gap-6",
                 nav { class: "flex flex-col gap-2", "aria-label": "Settings sections",
-                    for (id, section) in sections() {
-                        button { key: "{id}", class: "rounded-md border border-border px-4 py-2 text-left focus-visible:outline", "aria-label": "Open {section.title} settings", "aria-pressed": selected() == Some(id), onclick: move |_| selected.set(Some(id)),
-                            if selected() == Some(id) { "▸ " }
-                            "{section.title}"
+                    for (id, section) in &rows {
+                        {
+                            let id = *id;
+                            rsx! {
+                                button { key: "{id}", class: "rounded-md border border-border px-4 py-2 text-left focus-visible:outline", "aria-label": "Open {section.title} settings", "aria-pressed": active == Some(id), onclick: move |_| selected.set(Some(id)),
+                                    if active == Some(id) { "▸ " }
+                                    "{section.title}"
+                                }
+                            }
                         }
                     }
-                    if sections().is_empty() { p { "No settings sections are available." } }
+                    if rows.is_empty() { p { "No settings sections are available." } }
                 }
                 div { class: "min-w-0 flex-1",
                     if let Some(section) = current {
-                        div { key: "{selected().unwrap()}",
+                        div { key: "{active.unwrap()}",
                             h3 { class: "mb-4 text-lg font-semibold", "{section.title}" }
                             ComponentSlot { owner: props.micro.instance.clone(), reference: section.detail }
                         }

@@ -4,13 +4,25 @@
 mod tests;
 mod view;
 
-use clay_mdk::native::{AccessError, Context, DocumentService, Facet, Instance};
-use clay_mdk::{
-    ComponentRef, ConfigGrant, FacetAccess, MicroId, MicroManifest, Provision, ProvisionRef,
-};
+use clay_mdk::ComponentRef;
+use clay_mdk::ConfigGrant;
+use clay_mdk::FacetAccess;
+use clay_mdk::MicroId;
+use clay_mdk::MicroManifest;
+use clay_mdk::Provision;
+use clay_mdk::ProvisionRef;
+use clay_mdk::native::AccessError;
+use clay_mdk::native::Context;
+use clay_mdk::native::DocumentService;
+use clay_mdk::native::Facet;
+use clay_mdk::native::FacetValue;
+use clay_mdk::native::Instance;
+use clay_mdk::native::RendererRegistry;
 use dioxus::prelude::*;
-use micro_settings_manifest::{SettingsSection, SettingsSections};
-use serde::{Deserialize, Serialize};
+use micro_settings_manifest::SettingsSection;
+use micro_settings_manifest::SettingsSections;
+use serde::Deserialize;
+use serde::Serialize;
 
 pub const ID: &str = "dayframe.sample";
 pub const CONFIG_NAME: &str = "sample";
@@ -67,7 +79,9 @@ pub fn manifest() -> MicroManifest {
 
 /// Activation receives already-bound dependencies through the context; it cannot mint grants or
 /// reach the mock node. The host validated the manifest's facet ACL before this runs.
-pub fn activate(context: &Context) -> Result<(), AccessError> {
+pub fn activate<R: RendererRegistry<Render = Element>>(
+    context: &Context<R>,
+) -> Result<(), AccessError> {
     let instance = context.instance();
     let settings = context.require::<SettingsSections>()?.bind(&instance)?;
     let config_document = context
@@ -97,6 +111,10 @@ impl SampleMicro {
 
     pub fn watch(&self) -> &clay_mdk::native::DocumentWatch {
         &self.config.watch
+    }
+
+    pub fn state(&self, snapshot: &clay_mdk::native::DocumentSnapshot) -> FacetValue<SampleConfig> {
+        self.config.state(snapshot)
     }
 
     pub fn decode(&self, snapshot: &clay_mdk::native::DocumentSnapshot) -> Option<SampleConfig> {

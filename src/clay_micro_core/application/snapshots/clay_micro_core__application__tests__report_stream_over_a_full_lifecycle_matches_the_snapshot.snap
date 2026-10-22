@@ -1,0 +1,12 @@
+---
+source: src/clay_micro_core/application/tests.rs
+expression: steps
+---
+- "initial: Ok({})"
+- "configured: Ok({\"consumer\": Active, \"supplier\": Active})"
+- "supplier-disabled: Ok({\"consumer\": Blocked { requirements: [\"test.facility\"] }, \"supplier\": Disabled})"
+- "supplier-reenabled: Ok({\"consumer\": Active, \"supplier\": Active})"
+- "consumer-rebound: Ok({\"consumer\": Active, \"supplier\": Active, \"supplier-2\": Active})"
+- "cleared: Ok({})"
+- "reconfigured: Ok({\"consumer\": Active, \"supplier\": Active})"
+- "host-closed: Ok({\"consumer\": Stopped, \"supplier\": Stopped})"

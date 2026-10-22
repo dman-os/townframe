@@ -1,38 +1,57 @@
 //! Desktop composition: explicit provider linkage, configuration source, and lifecycle controls.
-use clay_compose::micros::{
-    composition::{
-        ConfigurationError, ConfigurationSnapshot, ConfigurationSource, ConfiguredMicro,
-        Enablement, InstanceState, MockConfiguration,
-    },
-    MicroId,
-};
-use clay_dioxus::wasmtime::WasmPackage;
-use clay_dioxus::{application::ApplicationRuntime, use_component_recovery, ComponentMount};
+use clay_dioxus::use_component_recovery;
+use clay_dioxus::ComponentMount;
+use clay_dioxus::NativeComponents;
+use clay_micro_core::application::ApplicationRuntime;
+use clay_micro_core::micros::composition::ConfigurationError;
+use clay_micro_core::micros::composition::ConfigurationSnapshot;
+use clay_micro_core::micros::composition::ConfigurationSource;
+use clay_micro_core::micros::composition::ConfiguredMicro;
+use clay_micro_core::micros::composition::Enablement;
+use clay_micro_core::micros::composition::InstanceState;
+use clay_micro_core::micros::composition::MockConfiguration;
+use clay_micro_core::micros::MicroFactory;
+use clay_micro_core::micros::MicroId;
 use dioxus::prelude::*;
-use micro_settings_manifest::{SettingsSection, SettingsSections};
-use std::{collections::BTreeMap, sync::LazyLock};
+use std::collections::BTreeMap;
 
-#[path = "../micro_counter/fixture.rs"]
-mod counter_fixture;
+type DesktopApplication = ApplicationRuntime<NativeComponents>;
 
-fn counter_package() -> WasmPackage {
-    static PACKAGE: LazyLock<WasmPackage> = LazyLock::new(|| {
-        WasmPackage::from_bytes(counter_fixture::counter_component())
-            .expect("DAYFRAME_COUNTER_COMPONENT must contain a valid counter Wasm component")
-    });
-    PACKAGE.clone()
+/// The micros this binary links, as providers the runtime registers under their manifest ids.
+/// This table is the only place the desktop names a micro crate: each entry is a manifest plus
+/// its backend (an `activate` for a native micro, a prepared package for a wasm one). What a
+/// micro contributes to whom is declared in its manifest and routed by the backend, so adding a
+/// micro here never names another micro's contract.
+fn linked_providers(application: &DesktopApplication) -> Vec<MicroFactory> {
+    vec![
+        clay_mdk::native::provider(
+            application,
+            micro_settings_manifest::manifest(),
+            micro_settings::activate,
+        ),
+        clay_mdk::native::provider(
+            application,
+            micro_sample::manifest(),
+            micro_sample::activate,
+        ),
+        clay_mdk::wasm::provider(
+            application,
+            micro_counter_manifest::manifest(),
+            clay_mdk::wasm::component_package("counter"),
+        ),
+    ]
 }
 
 #[derive(Clone)]
 pub(crate) struct DesktopRuntime {
-    pub(crate) application: ApplicationRuntime,
+    pub(crate) application: DesktopApplication,
     configuration: MockConfiguration,
     states: BTreeMap<String, InstanceState>,
 }
 
 impl DesktopRuntime {
     pub(crate) fn new() -> Self {
-        let mut application = ApplicationRuntime::new();
+        let mut application = DesktopApplication::new();
         micro_sample::bind_mock_defaults(&application.documents());
         let documents = application.mock_documents();
         documents.bind_config(
@@ -41,7 +60,7 @@ impl DesktopRuntime {
             "main".into(),
         );
         documents.seed(
-            clay_data::FacetRoute {
+            clay_docs::FacetRoute {
                 document: "counter-config".into(),
                 branch: "main".into(),
                 tag: micro_counter_manifest::CONFIG_TAG.into(),
@@ -50,36 +69,9 @@ impl DesktopRuntime {
             serde_json::json!(0),
         );
 
-        let settings_provider = clay_mdk::native::provider(
-            &application,
-            micro_settings_manifest::manifest(),
-            micro_settings::activate,
-        );
-        application.register_provider(settings_provider).unwrap();
-        let sample_provider = clay_mdk::native::provider(
-            &application,
-            micro_sample::manifest(),
-            micro_sample::activate,
-        );
-        application.register_provider(sample_provider).unwrap();
-        let counter_provider = clay_mdk::native::wasm_provider(
-            &application,
-            micro_counter_manifest::manifest(),
-            counter_package(),
-            |context, contribution, detail| match contribution {
-                micro_counter_manifest::Contribution::SettingsSection { title } => {
-                    context
-                        .require::<SettingsSections>()?
-                        .bind(&context.instance())?
-                        .insert(SettingsSection {
-                            title: title.clone(),
-                            detail,
-                        })?;
-                    Ok(())
-                }
-            },
-        );
-        application.register_provider(counter_provider).unwrap();
+        for provider in linked_providers(&application) {
+            application.register_provider(provider).unwrap();
+        }
 
         let locked = BTreeMap::from([(
             "settings".into(),
@@ -170,8 +162,8 @@ impl DesktopRuntime {
 pub(crate) fn Application(mut runtime: Signal<DesktopRuntime>) -> Element {
     let host = runtime.read().application.host();
     use_drop(move || host.close());
-    use_context_provider(|| runtime.read().application.native());
-    use_component_recovery(runtime.read().application.native());
+    use_context_provider(|| runtime.read().application.renderer());
+    use_component_recovery(runtime.read().application.renderer());
     let application = runtime.read().application.clone();
     use_future(move || {
         let application = application.clone();
@@ -195,19 +187,7 @@ pub(crate) fn Application(mut runtime: Signal<DesktopRuntime>) -> Element {
     });
 
     let mut settings_open = use_signal(|| true);
-    let reader = runtime.read().application.roots();
-    let mut roots = use_signal(|| reader.snapshot().unwrap());
-    use_future(move || {
-        let mut changes = reader.subscribe().unwrap();
-        async move {
-            loop {
-                roots.set(changes.borrow_and_update().clone());
-                if changes.changed().await.is_err() {
-                    break;
-                }
-            }
-        }
-    });
+    let roots = clay_mdk::view::use_collection(&runtime.read().application.roots());
 
     let configured_names: Vec<String> = runtime.read().desired().into_keys().collect();
 
@@ -223,7 +203,7 @@ pub(crate) fn Application(mut runtime: Signal<DesktopRuntime>) -> Element {
                 }
             }
             if settings_open() {
-                for (id, root) in roots() {
+                for (id, root) in roots.query(&clay_mdk::Query::new()) {
                     div { key: "{id}", "aria-label": "{root.title}",
                         // Guest-written mounting micros (workspace layout, canvas) place other
                         // components through the wire-level slot primitive of ADR 015 §10;
@@ -301,161 +281,7 @@ pub(crate) fn Application(mut runtime: Signal<DesktopRuntime>) -> Element {
 }
 
 #[cfg(test)]
-#[path = "counter_tests.rs"]
 mod counter_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use clay_dioxus::wasmtime::WasmMicro;
-    use clay_host::AccessError;
-    use clay_mdk::native::output;
-    use micro_sample::{SampleConfig, SampleMicro};
-    use micro_settings::SettingsMicro;
-
-    fn started() -> DesktopRuntime {
-        let mut runtime = DesktopRuntime::new();
-        runtime.apply_now().unwrap();
-        runtime
-    }
-
-    fn set_now(runtime: &mut DesktopRuntime, instance: &str, enablement: Enablement) {
-        runtime.set_enablement(instance, enablement).unwrap();
-        runtime.apply_now().unwrap();
-    }
-
-    #[test]
-    fn provider_registration_drives_native_and_wasm_settings_and_locked_boot_entries() {
-        let mut runtime = started();
-        assert_eq!(runtime.application.provider_descriptors().len(), 3);
-        assert_eq!(runtime.application.roots().snapshot().unwrap().len(), 1);
-        assert_eq!(
-            runtime.set_enablement("settings", Enablement::Disabled),
-            Err(ConfigurationError::LockedInstance("settings".into()))
-        );
-        let sample = output::<SampleMicro>(&runtime.application, "sample").unwrap();
-        let counter = runtime.application.output::<WasmMicro>("counter").unwrap();
-        assert!(runtime.application.host().check(&counter.instance).is_ok());
-        let sections = output::<SettingsMicro>(&runtime.application, "settings")
-            .unwrap()
-            .sections
-            .snapshot()
-            .unwrap();
-        assert_eq!(sections.len(), 2);
-        let titles: Vec<_> = sections.values().map(|s| s.title.as_str()).collect();
-        assert!(titles.contains(&"Sample micro"));
-        assert!(titles.contains(&"Counter (Wasm)"));
-        assert_eq!(
-            sample.decode(&sample.watch().current().unwrap()).unwrap(),
-            SampleConfig {
-                enabled: true,
-                greeting: "Hello from a micro".into(),
-            }
-        );
-        runtime.application.host().close();
-    }
-
-    #[test]
-    fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_restarts_wasm() {
-        let mut runtime = started();
-        let first_sample = output::<SampleMicro>(&runtime.application, "sample").unwrap();
-        let first_counter = runtime.application.output::<WasmMicro>("counter").unwrap();
-        let changed = SampleConfig {
-            enabled: false,
-            greeting: "Edited".into(),
-        };
-        first_sample.edit(changed.clone()).unwrap();
-        runtime.application.mock_documents().settle(false);
-        assert_eq!(
-            first_sample.decode(&first_sample.watch().current().unwrap()),
-            Some(SampleConfig {
-                enabled: true,
-                greeting: "Hello from a micro".into(),
-            })
-        );
-        first_sample.edit(changed.clone()).unwrap();
-        runtime.application.mock_documents().settle(true);
-        set_now(&mut runtime, "sample", Enablement::Disabled);
-        set_now(&mut runtime, "counter", Enablement::Disabled);
-        assert_eq!(runtime.states["sample"], InstanceState::Disabled);
-        assert_eq!(runtime.states["counter"], InstanceState::Disabled);
-        assert!(matches!(
-            output::<SampleMicro>(&runtime.application, "sample"),
-            Err(AccessError::Revoked)
-        ));
-        assert!(matches!(
-            runtime.application.output::<WasmMicro>("counter"),
-            Err(AccessError::Revoked)
-        ));
-        assert!(output::<SettingsMicro>(&runtime.application, "settings")
-            .unwrap()
-            .sections
-            .snapshot()
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            first_sample.watch().current().unwrap_err(),
-            AccessError::Revoked
-        );
-        set_now(&mut runtime, "sample", Enablement::Enabled);
-        set_now(&mut runtime, "counter", Enablement::Enabled);
-        let second_sample = output::<SampleMicro>(&runtime.application, "sample").unwrap();
-        let second_counter = runtime.application.output::<WasmMicro>("counter").unwrap();
-        assert!(first_sample.instance != second_sample.instance);
-        assert!(first_counter.instance != second_counter.instance);
-        assert_eq!(
-            second_sample.decode(&second_sample.watch().current().unwrap()),
-            Some(changed)
-        );
-        assert_eq!(
-            output::<SettingsMicro>(&runtime.application, "settings")
-                .unwrap()
-                .sections
-                .snapshot()
-                .unwrap()
-                .len(),
-            2
-        );
-        runtime.application.host().close();
-    }
-
-    #[test]
-    fn provider_withdrawal_closes_dependents_before_their_collection() {
-        let runtime = started();
-        let sample = output::<SampleMicro>(&runtime.application, "sample").unwrap();
-        let counter = runtime.application.output::<WasmMicro>("counter").unwrap();
-        let mut updates = sample.watch().subscribe().unwrap();
-        let settings_instance = output::<SettingsMicro>(&runtime.application, "settings")
-            .unwrap()
-            .instance;
-        let sample_mount = runtime
-            .application
-            .host()
-            .mount(&settings_instance, sample.detail().host())
-            .unwrap();
-        let counter_mount = runtime
-            .application
-            .host()
-            .mount(&settings_instance, counter.surface())
-            .unwrap();
-        runtime
-            .application
-            .host()
-            .close_instance(&settings_instance)
-            .unwrap();
-        assert_eq!(
-            runtime.application.host().check(&sample.instance),
-            Err(AccessError::Revoked)
-        );
-        assert_eq!(
-            runtime.application.host().check(&counter.instance),
-            Err(AccessError::Revoked)
-        );
-        assert!(!sample_mount.is_live());
-        assert!(!counter_mount.is_live());
-        assert!(runtime.application.roots().snapshot().unwrap().is_empty());
-        assert!(updates.borrow_and_update().revoked);
-        assert!(updates.borrow().facets.is_empty());
-        runtime.application.host().close();
-    }
-}
+mod tests;

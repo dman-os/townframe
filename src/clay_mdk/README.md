@@ -1,76 +1,94 @@
-# Dayframe guest presentation probe
+# clay_mdk — the Micro Development Kit
 
-This is the first executable component-boundary experiment, **not a settled micro SDK**.
-`../presentation/wit/{presentation,documents}.wit` supplies both guest and host bindings. Production dependencies
-include the Dioxus fork's Core, hooks, signals and HTML event types, but not the application
-runtime, Blitz, or Wasmtime. Wasmtime is a test backend only.
+The single authoring API every Dayframe micro compiles against (ADR 015 §5). A micro is a
+**manifest** (`manifest.rs`) plus an **activation** (`activate(&Context)`) plus, usually, a
+published component. The MDK adds ergonomics, never authority: capabilities are still the
+host-issued resources, enforced by `clay_host`.
 
-The counter example is a Wasm library. Activation receives named, already-approved document grants.
-Its exported renderer entry point borrows an explicitly issued mount point, creates a surface,
-retains a guest handle, and returns another owned handle to the host. A surface's stable identity
-selects a render target in the incarnation's single VDOM; unmount removes that target without
-resetting incarnation state. Event delivery borrows the surface back into the guest, where
-element identity and event name are dispatched through Dioxus's runtime. The guest callback updates
-a signal, Dioxus diffs the virtual tree, and the `wire::WireMutations` writer commits the resulting
-edit through the imported surface operation; no Rust callback, component, or reactive state crosses WIT.
+## Backends
 
-The explicit `x/check-dayframe.ts` preparation step builds the example using Cargo's configured
-target directory and wraps it as a component. In-crate tests load that artifact and instantiate it;
-they never invoke Cargo or `wasm-tools` themselves. The host replays every received batch through a Rust
-`WriteMutations` — the same path the Blitz-backed native-dom writer takes — and compares the
-result against a natively driven Dioxus virtual DOM rendering the same counter. That proves the
-wire preserves Dioxus's edit stream exactly across the address space. The tests also check
-independent guest state in two instances of the same component, and resource-scoped revocation.
-One test pins a failure with Wasmtime 47.0.3: after a guest traps, dispatch to its neighbour
-sharing the same store fails with `CannotEnterComponent`. A separate test proves that a
-neighbour in its own store continues operating after the first guest traps. It is **not** a renderer
-implementation. The composed host path lives in `dayframe_app::native`, with validation in
-`dayframe_presentation` and incarnation cleanup in `dayframe_engine_wasmtime`. A revoked target is
-removed by the SDK without invalidating sibling targets. Actual traps discard the engine store
-and close that incarnation. Document watches and receipts are delivered by an incarnation-owned
-future, independently of whether any surface is mounted.
+The same authoring vocabulary has two backends:
 
-Source-backed Web IDL/component/browser notes and their scoped implications are in
-[WEB_PLATFORM.md](WEB_PLATFORM.md). These are working notes, not full web-compatibility claims.
+- **`native`** (feature `in_process`): in-process micros, linked by the composition root.
+  `activate<R: RendererRegistry<Render = Element>>(context: &Context<R>)` — renderer-agnostic;
+  the micro constrains only the element type it writes.
+- **`guest`** (feature `dioxus`, Wasm): `activate(&Context)` with the same shape over WIT
+  imports, plus `export_micro!(activate)` which generates the `Guest` impl and
+  `bindings::export!`. See `micro_counter` for the exemplar. Guest hooks that hold per-document
+  state (`use_facet`, `use_document_changes`) must live in the root `render` closure — a child
+  component's state is per mounted surface, so a facet watch in a child would split state across
+  surfaces of one incarnation.
+
+`view` (Dioxus slot/hook glue for host-linked views), `wasmtime` (host-side provider assembly
+for guests), and `wit`/`mirror` (document-mirror authoring over the WIT surface) complete the
+feature set.
+
+## Manifests and contracts
+
+A micro's compile-time declaration is a `MicroManifest`: id, version, requirements, provisions,
+optional config grant, and **contributions** — data (`Contribution { provision, payload:
+serde_json::Value }`) routed at activation to the contract it names. Contracts that accept
+contributions implement `Contributable`; a payload that violates the contract is rejected with
+`AccessError::Denied`, never trusted (payloads may arrive over the wire).
+
+Contract-crate pattern (`micro_<name>_manifest`, following `plug_<name>_manifest`): shared
+contract types, the manifest, and provision identity live in a crate any consumer can depend on
+without linking the micro itself. Put a micro's manifest in its own `_manifest` crate when
+another crate names its contract types or a binary needs the manifest without the micro's code
+(the Wasm case: the desktop links `micro_counter_manifest`, never `micro_counter`); a purely
+native, self-contained micro may keep `manifest()` inline (see `micro_sample`).
+
+## Adding a micro to the desktop composition
+
+1. Write the crate(s) following `micro_sample` (native) or `micro_counter` +
+   `micro_counter_manifest` (guest).
+2. Append one entry to `linked_providers` in `dayframe_desktop/composition.rs` — a manifest plus
+   its backend (`activate` fn or `component_package("name")`). Contribution targets are declared
+   in *your* manifest; you never name another micro's contract from composition code.
+3. Add the instance's entry to the configuration maps in `DesktopRuntime::new` (bindings route
+   your requirements to providers by instance name).
+4. Name the crate `micro_<name>` (and `micro_<name>_manifest`) and it joins the gate
+   automatically: `x/check-dayframe.ts` derives its package list from `cargo metadata` by
+   prefix. A Wasm guest also gets one entry in the script's `components` table; load the prepared
+   artifact with `component_package("<name>")` / `WasmPackage::from_env("<name>")`
+   (`DAYFRAME_<NAME>_COMPONENT`).
 
 ## Run
 
-Requires the repository Nix development shell and the existing Dioxus path dependency.
-Fetch WIT dependencies with `nix develop --command deno run --allow-all x/wit-fetch.ts` in a fresh
-checkout. From the repository root, prepare the fixture and run the scoped tests plus clippy:
+Requires the repository Nix development shell and the Dioxus path dependency. Fetch WIT
+dependencies in a fresh checkout with `wash wit fetch` in `src/api_utils_rs`. From the
+repository root, prepare the guest fixtures and run the scoped tests plus clippy:
 
 ```sh
-CARGO_BUILD_JOBS=2 nix develop --command deno run --allow-all x/check-dayframe.ts --test-threads 2
+CARGO_BUILD_JOBS=2 nix develop --command deno run --allow-all x/check-dayframe.ts -j 2
 ```
 
 For a narrower run, use `--prepare-only`, export the printed absolute
-`DAYFRAME_COUNTER_COMPONENT` path, then run `cargo nextest run -p dayframe_guest` in the dev shell.
-Desktop startup uses the same prepared artifact. No custom Cargo target directory is needed.
-
-The example's component exports are compiled only for Wasm: their WIT-qualified names are not
-valid native shared-library export names. Native tests execute the actual Wasm component,
-not a native substitute for its guest code.
+`DAYFRAME_*_COMPONENT` paths, then run e.g. `cargo nextest run -p clay_mdk` in the dev shell.
+Guest components are compiled only for Wasm: their WIT-qualified export names are not valid
+native shared-library export names, so native tests execute the actual Wasm component, never a
+native substitute for guest code.
 
 ## The wire
 
 `presentation.wit` carries a typed `list<mutation>`. Its variants mirror Dioxus Core's
 `WriteMutations` one-to-one (push/set id, child, pop, create element/text, clone, append,
-replace-with, insert after/before, set attribute, set text, add/remove listener, remove). This is
-a framework-neutral transport of the retained-tree stack machine, chosen so that a React or Vue
-adapter can target the same host writer later. It is deliberately **not** Dioxus's internal
+replace-with, insert after/before, set attribute, set text, add/remove listener, remove). This
+is a framework-neutral transport of the retained-tree stack machine, chosen so that a React or
+Vue adapter can target the same host writer later. It is deliberately **not** Dioxus's internal
 Sledgehammer byte stream: that encoding is macro-generated for the JS interpreter, has no Rust
 decoder, and changes with the pinned revision.
 
 Attribute values are `text | float | int | boolean | none`. Dioxus's `Any` attribute carries a
 process-local Rust object and is excluded; a guest adapter that reaches it is a bug and panics.
 
-Element ids are surface-local. The host writer owns the element-id → real-node mapping, so
-each surface starts from its granted root without any global lookup.
+Element ids are surface-local. The host writer owns the element-id → real-node mapping, so each
+surface starts from its granted root without any global lookup.
 
 ## Boundary findings so far
 
-- An initial mount operation is necessary. Mutation and event interfaces alone leave no way
-  for the guest renderer to receive its explicitly granted placement and build its first tree.
+- An initial mount operation is necessary. Mutation and event interfaces alone leave no way for
+  the guest renderer to receive its explicitly granted placement and build its first tree.
 - Mounting borrows the placement, while returning an owned surface. Consuming the placement
   merely to initialize a renderer would conflate placement lifetime with an entry-point call.
 - Synchronous callbacks can call imported presentation operations and return default-action
@@ -79,15 +97,18 @@ each surface starts from its granted root without any global lookup.
   builds Core, hooks, signals, HTML event conversion, and the real virtual DOM for
   `wasm32-unknown-unknown` without importing `wasm-bindgen`; normal Dioxus web builds retain the
   browser loader through the `dioxus/web` feature.
-- The event envelope follows Dioxus's element/name/bubbling convention, with its serialized HTML
-  payload unchanged. The component installs `SerializedHtmlEventConverter`, dispatches through
-  Dioxus's runtime, and renders signal-driven updates.
+- The event envelope follows Dioxus's element/name/bubbling convention, with its serialized
+  HTML payload unchanged. The component installs `SerializedHtmlEventConverter`, dispatches
+  through Dioxus's runtime, and renders signal-driven updates.
 - The fork exposes native-dom's `DioxusState::writer` and `MutationBuffer`, so the native host
   adapter can replay a guest batch into the subtree under a granted Blitz node with the same
   `WriteMutations` semantics upstream uses for its own virtual DOM.
 
 The first batch receipt describes a committed **logical tree**, not completed layout or paint.
-The native bridge must not hold a renderer/document borrow across guest dispatch: a callback
-can immediately call the host again to commit edits. Direct Blitz ABI tests and the desktop's
+The native bridge must not hold a renderer/document borrow across guest dispatch: a callback can
+immediately call the host again to commit edits. Direct Blitz ABI tests and the desktop's
 composed DOM harness exercise those distinct rendering paths; neither substitutes for native
 window, layout, or accessibility verification.
+
+Source-backed Web IDL/component/browser notes and their scoped implications are in
+[WEB_PLATFORM.md](WEB_PLATFORM.md). These are working notes, not full web-compatibility claims.

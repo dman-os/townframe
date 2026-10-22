@@ -19,7 +19,12 @@ mod wire;
 
 pub use replay::replay;
 pub use tree::SurfaceTree;
-pub use wire::{
-    AttributeValue, Event, EventResponse, Mutation, NodeId, PresentationError, SurfaceEventHandler,
-    SurfaceSession, SurfaceSink,
-};
+pub use wire::AttributeValue;
+pub use wire::Event;
+pub use wire::EventResponse;
+pub use wire::Mutation;
+pub use wire::NodeId;
+pub use wire::PresentationError;
+pub use wire::SurfaceEventHandler;
+pub use wire::SurfaceSession;
+pub use wire::SurfaceSink;

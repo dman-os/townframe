@@ -1,5 +1,10 @@
 # dayframe_dx design system / showcase
 
+Status: Proposal
+Owner: operator + dayframe design track
+Scope: Shared `ui` design language and the native `showcase` inspection surface.
+Updated: 2026-10-22
+
 ## Intent
 
 - Shared `ui` owns the visual language.

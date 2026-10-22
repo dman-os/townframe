@@ -8,4 +8,8 @@ rust-version.workspace = true
 path = "lib.rs"
 
 [dependencies]
-clay_mdk = { path = "../clay_mdk", default-features = false }
+clay_mdk = { workspace = true }
+serde_json.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

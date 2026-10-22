@@ -8,8 +8,8 @@ rust-version.workspace = true
 path = "lib.rs"
 
 [dependencies]
-clay_data = { path = "../clay_data" }
-clay_host = { path = "../clay_host" }
+clay_docs = { workspace = true }
+clay_host = { workspace = true }
 tokio = { workspace = true, features = ["macros", "sync"] }
 
 [dev-dependencies]

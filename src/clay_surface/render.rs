@@ -1,10 +1,13 @@
 //! Projection of a retained [`SurfaceTree`] into the host `VirtualDom`, and the static vocabulary
 //! (tags, attributes, listeners) that projection can name. Ingress validation asks this module
 //! whether a name is projectable, so a batch can never carry a name the renderer cannot emit.
-use crate::{
-    tree::{SurfaceNodeId, SurfaceNodeKind, SurfaceTree},
-    wire::{AttributeValue, Event, NodeId, SurfaceEventHandler},
-};
+use crate::tree::SurfaceNodeId;
+use crate::tree::SurfaceNodeKind;
+use crate::tree::SurfaceTree;
+use crate::wire::AttributeValue;
+use crate::wire::Event;
+use crate::wire::NodeId;
+use crate::wire::SurfaceEventHandler;
 use dioxus::prelude::*;
 use dioxus_core::ListenerCallback;
 use dioxus_html::PlatformEventData;
@@ -272,3 +275,6 @@ surface_tags!(
         svg, g, path, circle, rect, line, polyline, polygon, defs
     ]
 );
+
+#[cfg(test)]
+mod tests;

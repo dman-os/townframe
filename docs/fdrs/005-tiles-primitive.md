@@ -6,7 +6,7 @@
 
 An FDR (feature decision record): the functional decision, described from a functional
 perspective. Technical/implementation choices (storage, transport, renderer) are separate
-records (see ADR 010 for the pieces/faces/in-proc decisions).
+records (see ADR 016 for the pieces/faces/in-proc decisions).
 
 ## Functional decision
 

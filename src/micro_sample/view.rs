@@ -1,6 +1,10 @@
 //! Contributor-owned native presentation; Settings mounts it without reading its document.
 use super::SampleConfig;
-use clay_mdk::native::{Facet, Operation, OperationReceipt};
+use clay_mdk::native::Facet;
+use clay_mdk::native::FacetValue;
+use clay_mdk::native::Freshness;
+use clay_mdk::native::Operation;
+use clay_mdk::native::OperationReceipt;
 use dioxus::prelude::*;
 
 #[component]
@@ -20,7 +24,7 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
         }
     });
     let snapshot = state();
-    let config = facet.value(&snapshot);
+    let config_state = facet.state(&snapshot);
     let mut status = use_signal(|| "Configuration loaded from the mock node.".to_string());
     let mut receipt = use_signal(|| None::<OperationReceipt>);
     let mut track = move |operation: Operation| {
@@ -37,57 +41,70 @@ pub(super) fn SampleDetail(config: Facet<SampleConfig>) -> Element {
             }
         });
     };
-    let config_for_toggle = config.clone();
     let sample_for_toggle = facet.clone();
     let sample_for_refresh = facet.clone();
     rsx! {
         div { class: "flex flex-col gap-4",
             p { "This detail component belongs to the sample micro, not Settings." }
-            if let Some(config) = config {
-                p { "Greeting preview: {config.greeting}" }
-                button {
-                    class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
-                    "aria-label": if config.enabled { "Disable sample configuration flag" } else { "Enable sample configuration flag" },
-                    "aria-pressed": config.enabled,
-                    onclick: move |_| {
-                        let mut next = config_for_toggle.clone().unwrap();
-                        next.enabled = !next.enabled;
-                        match sample_for_toggle.write(next) {
-                            Ok(operation) => {
-                                 track(operation);
-                                 status.set("Optimistic edit is visible. Accept or reject it below.".into());
-                             },
-                            Err(error) => status.set(error.to_string()),
+            match config_state {
+                FacetValue::Present(config) => {
+                    let config_for_toggle = config.clone();
+                    rsx! {
+                        p { "Greeting preview: {config.greeting}" }
+                        button {
+                            class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
+                            "aria-label": if config.enabled { "Disable sample configuration flag" } else { "Enable sample configuration flag" },
+                            "aria-pressed": config.enabled,
+                            onclick: move |_| {
+                                let mut next = config_for_toggle.clone();
+                                next.enabled = !next.enabled;
+                                match sample_for_toggle.write(next) {
+                                    Ok(operation) => {
+                                         track(operation);
+                                         status.set("Optimistic edit is visible. Accept or reject it below.".into());
+                                     },
+                                    Err(error) => status.set(error.to_string()),
+                                }
+                            },
+                            if config.enabled { "Configuration flag: enabled — click to disable" } else { "Configuration flag: disabled — click to enable" }
                         }
-                    },
-                    if config.enabled { "Configuration flag: enabled — click to disable" } else { "Configuration flag: disabled — click to enable" }
-                }
-                label { class: "flex flex-col gap-2", "Greeting",
-                    input {
-                        class: "rounded-md border border-border bg-surface px-4 py-2 text-foreground focus-visible:outline",
-                        "aria-label": "Greeting",
-                        value: "{config.greeting}",
-                        oninput: move |event| {
-                            let mut next = SampleConfig { enabled: config.enabled, greeting: event.value() };
-                            next.greeting.truncate(120);
-                            match facet.write(next) {
-                                Ok(operation) => {
-                                     track(operation);
-                                     status.set("Optimistic greeting edit pending.".into());
-                                 },
-                                Err(error) => status.set(error.to_string()),
+                        label { class: "flex flex-col gap-2", "Greeting",
+                            input {
+                                class: "rounded-md border border-border bg-surface px-4 py-2 text-foreground focus-visible:outline",
+                                "aria-label": "Greeting",
+                                value: "{config.greeting}",
+                                oninput: move |event| {
+                                    let mut next = SampleConfig { enabled: config.enabled, greeting: event.value() };
+                                    next.greeting.truncate(120);
+                                    match facet.write(next) {
+                                        Ok(operation) => {
+                                             track(operation);
+                                             status.set("Optimistic greeting edit pending.".into());
+                                         },
+                                        Err(error) => status.set(error.to_string()),
+                                    }
+                                }
                             }
                         }
                     }
                 }
-            } else { p { "Configuration is not loaded." } }
+                FacetValue::Loading => rsx! { p { "Configuration is loading." } },
+                FacetValue::Absent => rsx! { p { "Configuration is absent." } },
+            }
+            if snapshot.freshness == Freshness::Refreshing {
+                p { role: "status", "Refreshing sample configuration." }
+            }
             div { class: "flex flex-wrap gap-2",
                 button {
                     class: "rounded-md border border-border px-4 py-2 focus-visible:outline",
                     "aria-label": "Refresh configuration",
                     onclick: move |_| {
                         sample_for_refresh.watch.refresh().unwrap();
-                        status.set("Targeted refresh completed; pending edits were retained.".into());
+                        if sample_for_refresh.watch.current().unwrap().freshness == Freshness::Refreshing {
+                            status.set("Refreshing sample configuration; pending edits were retained.".into());
+                        } else {
+                            status.set("Targeted refresh completed; pending edits were retained.".into());
+                        }
                     },
                     "Refresh configuration"
                 }

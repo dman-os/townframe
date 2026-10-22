@@ -256,6 +256,221 @@ async fn settle_tick() {
     tokio::time::sleep(Duration::from_millis(SETTLE_MS / SETTLE_STEPS as u64)).await;
 }
 
+/// Everything the visual tree needs, derived once from the signals and the
+/// viewport. Keeping the derivations in `new` leaves the component reading as
+/// signal wiring plus markup.
+struct ArcGeometry {
+    active: usize,
+    settle: f64,
+    spacing: f64,
+    top: f64,
+    floor: f64,
+    limit: f64,
+    reach: f64,
+    anchor: f64,
+    cell: f64,
+    font: f64,
+    bubble: f64,
+    pointer_events: &'static str,
+    scrim: String,
+    active_label: &'static str,
+    active_dy: f64,
+    show_labels: bool,
+    label_width: String,
+    label_padding: &'static str,
+    label_background: &'static str,
+    placed: Vec<Placed>,
+}
+
+impl ArcGeometry {
+    fn new(
+        viewport: (f64, f64),
+        items: &[&'static str],
+        focus: f64,
+        settle: f64,
+        thumb_x: Option<f64>,
+        pull: f64,
+        hovered: Option<usize>,
+    ) -> Self {
+        let count = items.len();
+        let active = focus.round().clamp(0.0, (count - 1) as f64) as usize;
+        // A zero-sized window happens before the shell reports a real size; fall
+        // back so the rest layout is still sane rather than NaN-ridden.
+        let (width, height) = if viewport.1 > 0.0 {
+            viewport
+        } else {
+            (viewport.0, FALLBACK_HEIGHT)
+        };
+        let base_spacing = spacing(height);
+        let spacing = if settle > 0.0 {
+            base_spacing * ACTIVE_SPACING_MULTIPLIER
+        } else {
+            base_spacing
+        };
+        let top = top_inset(spacing, count, height);
+
+        // How far the thumb has come in from the resting column, and how much
+        // window is left for a label to retreat into.
+        let room = (width - REST_INSET - spacing / 2.0).max(0.0);
+        let inboard = thumb_x.map_or(0.0, |x| (width - x - REST_INSET).max(0.0));
+        // The breakpoint under the thumb, then everything out of reach behind it.
+        let limit = push_limit(inboard, room);
+        let floor = push_floor(limit);
+        let reach = reach_for(limit);
+
+        // Scaled by `settle` so the pull decays back to nothing on release.
+        let anchor = anchor_y(focus, spacing, top, pull * settle);
+
+        let placed = place(items, focus, spacing, floor, limit, settle);
+        let active_label = items.get(active).copied().unwrap_or("");
+        let active_dy = (active as f64 - focus) * spacing;
+
+        // Cells tile the spacing exactly, so labels can never overlap however
+        // tight the window makes them.
+        let cell = spacing;
+        // Kept well under the cell size: the labels are a positional index, not
+        // something to read across the room.
+        let font = (cell * 0.78).min(15.0);
+        let bubble = cell * 0.95;
+        // Inert while at rest so the tiles underneath stay clickable; once a
+        // gesture starts the overlay takes the whole window, which is how the
+        // strip keeps tracking a finger that has left the grab band.
+        let pointer_events = if settle > 0.0 { "auto" } else { "none" };
+        // The scrim only exists while the strip is bent into the content.
+        let scrim = format!(
+            "position:absolute; top:0; right:0; bottom:0; width:{}px; opacity:{settle}; \
+             background:linear-gradient(to left, rgba(9,9,11,0.92), rgba(9,9,11,0)); pointer-events:none;",
+            REST_INSET + limit + cell * 2.0 + 90.0
+        );
+        let show_labels = settle > 0.0 || hovered.is_some();
+        let label_width = if show_labels {
+            "max-content".to_string()
+        } else {
+            format!("{cell}px")
+        };
+        let label_padding = if show_labels { "0 8px" } else { "0" };
+        let label_background = if show_labels {
+            "rgba(24,24,27,0.94)"
+        } else {
+            "transparent"
+        };
+        Self {
+            active,
+            settle,
+            spacing,
+            top,
+            floor,
+            limit,
+            reach,
+            anchor,
+            cell,
+            font,
+            bubble,
+            pointer_events,
+            scrim,
+            active_label,
+            active_dy,
+            show_labels,
+            label_width,
+            label_padding,
+            label_background,
+            placed,
+        }
+    }
+
+    fn markers(&self) -> Element {
+        let settle = self.settle;
+        let anchor = self.anchor;
+        let cell = self.cell;
+        let font = self.font;
+        let bubble = self.bubble;
+        let active = self.active;
+        let active_label = self.active_label;
+        let active_dy = self.active_dy;
+        let show_labels = self.show_labels;
+        let label_width = &self.label_width;
+        let label_padding = self.label_padding;
+        let label_background = self.label_background;
+        let placed = &self.placed;
+        let floor = self.floor;
+        let limit = self.limit;
+        let reach = self.reach;
+        rsx! {
+            // Every label carries a fixed-size flex cell because there is no
+            // `transform: translate(-50%, -50%)` to centre with.
+            for (index, item) in placed.iter().enumerate() {
+                span {
+                    key: "{item.label}",
+                    "aria-hidden": "true",
+                    title: item.label,
+                    style: "position:absolute; right:{REST_INSET + item.push - cell / 2.0}px; \
+                            top:{anchor + item.dy - cell / 2.0}px; width:{label_width}; min-width:{cell}px; height:{cell}px; \
+                            box-sizing:border-box; padding:{label_padding}; display:flex; align-items:center; justify-content:center; \
+                            white-space:nowrap; overflow:visible; border-radius:8px; background:{label_background}; \
+                            font-size:{font}px; font-weight:600; color:#f3f4f6; pointer-events:none; \
+                            text-shadow:0 1px 4px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.95);",
+                    if show_labels && (settle == 0.0 || index != active) { "{item.label}" } else { "—" }
+                }
+            }
+
+            // Focus bubble, left of the strip, i.e. furthest from the thumb.
+            if settle > 0.0 {
+                div {
+                    "aria-hidden": "true",
+                    style: "position:absolute; \
+                            right:{REST_INSET + push_at(active_dy.abs(), floor, limit, reach) * settle + cell * 0.6}px; \
+                            top:{anchor + active_dy - cell * 0.7}px; width:max-content; min-width:{bubble * 2.0}px; height:{cell * 1.4}px; \
+                            box-sizing:border-box; padding:0 12px; border-radius:8px; background:rgba(24,24,27,0.96); \
+                            display:flex; align-items:center; justify-content:center; white-space:nowrap; \
+                            font-size:{font * 1.1}px; color:#f3f4f6; pointer-events:none;",
+                    "{active_label}"
+                }
+            }
+        }
+    }
+
+    fn accessibility(
+        &self,
+        count: usize,
+        commit: Callback<f64>,
+        focus: Signal<f64>,
+        live: Signal<String>,
+    ) -> Element {
+        let active = self.active;
+        let active_label = self.active_label;
+        rsx! {
+            // Accessible surface: one slider whose value is the breakpoint
+            // index, plus a live region so crossing a breakpoint is spoken.
+            div {
+                role: "slider",
+                "aria-label": "index",
+                "aria-valuemin": 1,
+                "aria-valuemax": count,
+                "aria-valuenow": active + 1,
+                "aria-valuetext": "{active_label}",
+                style: "position:absolute; width:1px; height:1px; overflow:hidden;",
+                onkeydown: move |event| {
+                    let step = match event.data().key() {
+                        Key::Named(NamedKey::ArrowDown | NamedKey::ArrowRight | NamedKey::PageDown) => 1.0,
+                        Key::Named(NamedKey::ArrowUp | NamedKey::ArrowLeft | NamedKey::PageUp) => -1.0,
+                        Key::Named(NamedKey::Home) => -(count as f64),
+                        Key::Named(NamedKey::End) => count as f64,
+                        _ => 0.0,
+                    };
+                    if step != 0.0 {
+                        commit.call((*focus.peek() + step).round());
+                    }
+                },
+            }
+            div {
+                "aria-live": "polite",
+                style: "position:absolute; width:1px; height:1px; overflow:hidden;",
+                "{live}"
+            }
+        }
+    }
+}
+
 #[component]
 /// `viewport` is the window's inner size in logical px, supplied by the platform
 /// shell.
@@ -275,9 +490,9 @@ pub fn ArcIndex(
 
     // Continuous position in breakpoint space. The fractional part drives the
     // in-between spacing so the strip glides instead of stepping.
-    let mut focus = use_signal(|| 0.0f64);
+    let focus = use_signal(|| 0.0f64);
     // 1 while the strip is bent around a thumb, easing to 0 once it lifts.
-    let mut settle = use_signal(|| 0.0f64);
+    let settle = use_signal(|| 0.0f64);
     // Where the thumb is horizontally while pressed. Its vertical position needs
     // no state at all: the selection follows the pointer directly.
     let mut thumb_x = use_signal(|| None::<f64>);
@@ -286,137 +501,42 @@ pub fn ArcIndex(
     let mut pull = use_signal(|| 0.0f64);
     // Bumped on every press so a settle animation in flight can tell that it has
     // been superseded and stop writing.
-    let mut generation = use_signal(|| 0u64);
-    let mut announced = use_signal(|| usize::MAX);
-    let mut live = use_signal(String::new);
+    let generation = use_signal(|| 0u64);
+    let announced = use_signal(|| usize::MAX);
+    let live = use_signal(String::new);
     let mut hovered = use_signal(|| None::<usize>);
 
-    let active = (*focus.read()).round().clamp(0.0, (count - 1) as f64) as usize;
-    // A zero-sized window happens before the shell reports a real size; fall
-    // back so the rest layout is still sane rather than NaN-ridden.
-    let (width, height) = if viewport.1 > 0.0 {
-        viewport
+    let height = if viewport.1 > 0.0 {
+        viewport.1
     } else {
-        (viewport.0, FALLBACK_HEIGHT)
+        FALLBACK_HEIGHT
     };
-    let settle_now = *settle.read();
-    let base_spacing = spacing(height);
-    let spacing = if settle_now > 0.0 {
-        base_spacing * ACTIVE_SPACING_MULTIPLIER
-    } else {
-        base_spacing
-    };
-    let top = top_inset(spacing, count, height);
+    let geometry = ArcGeometry::new(
+        viewport,
+        &items.read(),
+        *focus.read(),
+        *settle.read(),
+        *thumb_x.read(),
+        *pull.read(),
+        *hovered.read(),
+    );
+    let top = geometry.top;
+    let spacing = geometry.spacing;
+    let pointer_events = geometry.pointer_events;
+    let scrim = &geometry.scrim;
 
     // `use_callback` so the same closure can be handed to several handlers.
     let commit = use_callback(move |next: f64| {
-        let clamped = next.clamp(0.0, (count - 1) as f64);
-        focus.set(clamped);
-
-        let index = clamped.round() as usize;
-        if index != *announced.peek() {
-            announced.set(index);
-            if let Some(label) = items.read().get(index) {
-                live.set((*label).to_string());
-            }
-            on_select.call(index);
-        }
+        commit_breakpoint(next, count, focus, announced, items, live, on_select);
     });
-
     let press_strip = use_callback(move |point: (f64, f64)| {
-        // Start from the breakpoint actually under the finger, and leave the list
-        // exactly where it is: only a drag past an end moves it.
-        let next_focus = focus_at(point.1, top, spacing, count);
-        commit.call(next_focus);
-
-        let next = *generation.peek() + 1;
-        generation.set(next);
-        thumb_x.set(Some(point.0));
-        pull.set(pull_for(point.1, top, spacing, count, height));
-        settle.set(1.0);
+        begin_press(
+            point, top, spacing, count, height, generation, thumb_x, pull, settle, commit,
+        );
     });
-
-    // Releasing eases the strip back to its resting column *and* back to its
-    // resting position in the window, so the index is always fully visible once
-    // you let go. `press` is held until the animation lands, because the strip
-    // is anchored to the thumb for the whole of it.
     let release_strip = use_callback(move |()| {
-        let mine = *generation.peek() + 1;
-        generation.set(mine);
-
-        spawn(async move {
-            for step in 1..=SETTLE_STEPS {
-                settle_tick().await;
-                if *generation.peek() != mine {
-                    return;
-                }
-                let progress = step as f64 / SETTLE_STEPS as f64;
-                // Ease out: leaves the finger quickly, arrives slowly.
-                let remaining = 1.0 - progress;
-                settle.set(remaining * remaining * remaining);
-            }
-            if *generation.peek() == mine {
-                settle.set(0.0);
-                pull.set(0.0);
-                thumb_x.set(None);
-            }
-        });
+        spawn_release(generation, settle, pull, thumb_x);
     });
-
-    // How far the thumb has come in from the resting column, and how much window
-    // is left for a label to retreat into.
-    let room = (width - REST_INSET - spacing / 2.0).max(0.0);
-    let inboard = (*thumb_x.read()).map_or(0.0, |x| (width - x - REST_INSET).max(0.0));
-    // The breakpoint under the thumb, then everything out of reach behind it.
-    let limit = push_limit(inboard, room);
-    let floor = push_floor(limit);
-    let reach = reach_for(limit);
-
-    // Scaled by `settle` so the pull decays back to nothing on release.
-    let anchor = anchor_y(*focus.read(), spacing, top, *pull.read() * settle_now);
-
-    let placed = place(
-        &items.read(),
-        *focus.read(),
-        spacing,
-        floor,
-        limit,
-        settle_now,
-    );
-    let active_label = items.read().get(active).copied().unwrap_or("");
-    let active_dy = (active as f64 - *focus.read()) * spacing;
-
-    // Cells tile the spacing exactly, so labels can never overlap however tight
-    // the window makes them.
-    let cell = spacing;
-    // Kept well under the cell size: the labels are a positional index, not
-    // something to read across the room.
-    let font = (cell * 0.78).min(15.0);
-    let bubble = cell * 0.95;
-    // Inert while at rest so the tiles underneath stay clickable; once a
-    // gesture starts the overlay takes the whole window, which is how the strip
-    // keeps tracking a finger that has left the grab band.
-    let pointer_events = if settle_now > 0.0 { "auto" } else { "none" };
-    // The scrim only exists while the strip is bent into the content.
-    let scrim = format!(
-        "position:absolute; top:0; right:0; bottom:0; width:{}px; opacity:{settle_now}; \
-         background:linear-gradient(to left, rgba(9,9,11,0.92), rgba(9,9,11,0)); pointer-events:none;",
-        REST_INSET + limit + cell * 2.0 + 90.0
-    );
-    let hovered_index = *hovered.read();
-    let show_labels = settle_now > 0.0 || hovered_index.is_some();
-    let label_width = if show_labels {
-        "max-content".to_string()
-    } else {
-        format!("{cell}px")
-    };
-    let label_padding = if show_labels { "0 8px" } else { "0" };
-    let label_background = if show_labels {
-        "rgba(24,24,27,0.94)"
-    } else {
-        "transparent"
-    };
-    let marker_pointer_events = "none";
 
     rsx! {
         div {
@@ -453,36 +573,7 @@ pub fn ArcIndex(
 
             div { style: "{scrim}" }
 
-            // Every label carries a fixed-size flex cell because there is no
-            // `transform: translate(-50%, -50%)` to centre with.
-            for (index, item) in placed.iter().enumerate() {
-                span {
-                    key: "{item.label}",
-                    "aria-hidden": "true",
-                    title: item.label,
-                    style: "position:absolute; right:{REST_INSET + item.push - cell / 2.0}px; \
-                            top:{anchor + item.dy - cell / 2.0}px; width:{label_width}; min-width:{cell}px; height:{cell}px; \
-                            box-sizing:border-box; padding:{label_padding}; display:flex; align-items:center; justify-content:center; \
-                            white-space:nowrap; overflow:visible; border-radius:8px; background:{label_background}; \
-                            font-size:{font}px; font-weight:600; color:#f3f4f6; pointer-events:{marker_pointer_events}; \
-                            text-shadow:0 1px 4px rgba(0,0,0,0.95), 0 0 2px rgba(0,0,0,0.95);",
-                    if show_labels && (settle_now == 0.0 || index != active) { "{item.label}" } else { "—" }
-                }
-            }
-
-            // Focus bubble, left of the strip, i.e. furthest from the thumb.
-            if settle_now > 0.0 {
-                div {
-                    "aria-hidden": "true",
-                    style: "position:absolute; \
-                            right:{REST_INSET + push_at(active_dy.abs(), floor, limit, reach) * settle_now + cell * 0.6}px; \
-                            top:{anchor + active_dy - cell * 0.7}px; width:max-content; min-width:{bubble * 2.0}px; height:{cell * 1.4}px; \
-                            box-sizing:border-box; padding:0 12px; border-radius:8px; background:rgba(24,24,27,0.96); \
-                            display:flex; align-items:center; justify-content:center; white-space:nowrap; \
-                            font-size:{font * 1.1}px; color:#f3f4f6; pointer-events:none;",
-                    "{active_label}"
-                }
-            }
+            {geometry.markers()}
 
             // Grab band. Pointer input starts here rather than on the labels:
             // without pointer capture we want one stable target for the whole
@@ -506,377 +597,92 @@ pub fn ArcIndex(
                 },
             }
 
-            // Accessible surface: one slider whose value is the breakpoint
-            // index, plus a live region so crossing a breakpoint is spoken.
-            div {
-                role: "slider",
-                "aria-label": "index",
-                "aria-valuemin": 1,
-                "aria-valuemax": count,
-                "aria-valuenow": active + 1,
-                "aria-valuetext": "{active_label}",
-                style: "position:absolute; width:1px; height:1px; overflow:hidden;",
-                onkeydown: move |event| {
-                    let step = match event.data().key() {
-                        Key::Named(NamedKey::ArrowDown | NamedKey::ArrowRight | NamedKey::PageDown) => 1.0,
-                        Key::Named(NamedKey::ArrowUp | NamedKey::ArrowLeft | NamedKey::PageUp) => -1.0,
-                        Key::Named(NamedKey::Home) => -(count as f64),
-                        Key::Named(NamedKey::End) => count as f64,
-                        _ => 0.0,
-                    };
-                    if step != 0.0 {
-                        commit.call((*focus.peek() + step).round());
-                    }
-                },
-            }
-            div {
-                "aria-live": "polite",
-                style: "position:absolute; width:1px; height:1px; overflow:hidden;",
-                "{live}"
-            }
+            {geometry.accessibility(count, commit, focus, live)}
         }
     }
+}
+
+fn commit_breakpoint(
+    next: f64,
+    count: usize,
+    mut focus: Signal<f64>,
+    mut announced: Signal<usize>,
+    items: Signal<Vec<&'static str>>,
+    mut live: Signal<String>,
+    on_select: EventHandler<usize>,
+) {
+    let clamped = next.clamp(0.0, (count - 1) as f64);
+    focus.set(clamped);
+
+    let index = clamped.round() as usize;
+    if index != *announced.peek() {
+        announced.set(index);
+        if let Some(label) = items.read().get(index) {
+            live.set((*label).to_string());
+        }
+        on_select.call(index);
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the gesture state is a flat set of signals"
+)]
+fn begin_press(
+    point: (f64, f64),
+    top: f64,
+    spacing: f64,
+    count: usize,
+    height: f64,
+    mut generation: Signal<u64>,
+    mut thumb_x: Signal<Option<f64>>,
+    mut pull: Signal<f64>,
+    mut settle: Signal<f64>,
+    commit: Callback<f64>,
+) {
+    // Start from the breakpoint actually under the finger, and leave the list
+    // exactly where it is: only a drag past an end moves it.
+    let next_focus = focus_at(point.1, top, spacing, count);
+    commit.call(next_focus);
+
+    let next = *generation.peek() + 1;
+    generation.set(next);
+    thumb_x.set(Some(point.0));
+    pull.set(pull_for(point.1, top, spacing, count, height));
+    settle.set(1.0);
+}
+
+// Releasing eases the strip back to its resting column *and* back to its
+// resting position in the window, so the index is always fully visible once
+// you let go. `press` is held until the animation lands, because the strip
+// is anchored to the thumb for the whole of it.
+fn spawn_release(
+    mut generation: Signal<u64>,
+    mut settle: Signal<f64>,
+    mut pull: Signal<f64>,
+    mut thumb_x: Signal<Option<f64>>,
+) {
+    let mine = *generation.peek() + 1;
+    generation.set(mine);
+
+    spawn(async move {
+        for step in 1..=SETTLE_STEPS {
+            settle_tick().await;
+            if *generation.peek() != mine {
+                return;
+            }
+            let progress = step as f64 / SETTLE_STEPS as f64;
+            // Ease out: leaves the finger quickly, arrives slowly.
+            let remaining = 1.0 - progress;
+            settle.set(remaining * remaining * remaining);
+        }
+        if *generation.peek() == mine {
+            settle.set(0.0);
+            pull.set(0.0);
+            thumb_x.set(None);
+        }
+    });
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const HEIGHT: f64 = 860.0;
-    const WIDTH: f64 = 1076.0;
-
-    /// The distance a label has to retreat into before it runs out of window.
-    fn room() -> f64 {
-        WIDTH - REST_INSET - spacing(HEIGHT) / 2.0
-    }
-
-    fn placed(settle: f64) -> Vec<Placed> {
-        let items = breakpoints();
-        let spacing = spacing(HEIGHT);
-        let limit = push_limit(300.0, room());
-        let floor = push_floor(limit);
-        place(&items, 6.0, spacing, floor, limit, settle)
-    }
-
-    /// The whole point of deriving spacing from the window: at rest every
-    /// breakpoint is on screen, rather than the strip running off the bottom
-    /// after J.
-    #[test]
-    fn resting_index_fits_every_breakpoint() {
-        let count = breakpoints().len();
-        let spacing = spacing(HEIGHT);
-        let span = (count - 1) as f64 * spacing;
-        let inset = top_inset(spacing, count, HEIGHT);
-
-        assert!(span <= HEIGHT, "index spans {span} of {HEIGHT}");
-        assert!(inset > 0.0, "index starts off screen at {inset}");
-    }
-
-    /// At rest the strip is an ordinary equally spaced list with no sideways
-    /// displacement at all.
-    #[test]
-    fn resting_strip_is_flat_and_uniform() {
-        let placed = placed(0.0);
-
-        assert!(
-            placed.iter().all(|p| p.push == 0.0),
-            "idle list must not bow"
-        );
-
-        let steps: Vec<f64> = placed.windows(2).map(|w| w[1].dy - w[0].dy).collect();
-        assert!(
-            steps.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9),
-            "uneven: {steps:?}"
-        );
-    }
-
-    /// The label under the thumb moves furthest, and the push decays away from
-    /// it on both sides.
-    #[test]
-    fn the_push_decays_with_distance_from_the_thumb() {
-        let limit = push_limit(0.0, 900.0);
-        let floor = push_floor(limit);
-        let reach = reach_for(limit);
-        assert_eq!(push_at(0.0, floor, limit, reach), limit);
-
-        // Strictly decaying up to the reach, where the dent ends.
-        let mut previous = f64::INFINITY;
-        for fraction in [0.0, 0.25, 0.5, 0.99] {
-            let push = push_at(fraction * reach, floor, limit, reach);
-            assert!(push < previous, "push did not decay at {fraction}");
-            previous = push;
-        }
-
-        // And flat beyond it: a label out of reach is not dragged along.
-        for fraction in [1.0, 3.0, 100.0] {
-            let distance = fraction * reach;
-            assert_eq!(
-                push_at(distance, floor, limit, reach),
-                floor,
-                "moved at {distance}"
-            );
-        }
-    }
-
-    /// Nothing is ever pushed past the far edge of the window, however hard the
-    /// thumb pulls, and nothing is ever pushed back inside the floor.
-    #[test]
-    fn the_push_stays_between_its_floor_and_the_window_edge() {
-        let room = room();
-
-        for thumb_inboard in [0.0, 100.0, 300.0, 5000.0] {
-            let limit = push_limit(thumb_inboard, room);
-            let floor = push_floor(limit);
-            let reach = reach_for(limit);
-            assert!(limit <= room, "limit {limit} left the window");
-
-            for distance in [0.0, 1.0, 50.0, 190.0, 10_000.0] {
-                let push = push_at(distance, floor, limit, reach);
-                assert!(push <= limit, "push {push} exceeded its limit {limit}");
-                assert!(push >= floor.min(limit), "push {push} fell below its floor");
-            }
-        }
-    }
-
-    /// The strip follows the thumb across the window rather than stopping part
-    /// way: a thumb on the edge barely moves anything, and a thumb dragged
-    /// inboard takes the labels with it until they run out of window.
-    #[test]
-    fn the_strip_follows_the_thumb_until_the_window_runs_out() {
-        let room = room();
-
-        // A thumb sitting right on the resting column clears it by the margin.
-        assert_eq!(push_limit(0.0, room), PUSH_CLEARANCE);
-
-        // Dragged inboard, the labels keep pace with the thumb.
-        for inboard in [50.0, 150.0, 400.0] {
-            assert_eq!(push_limit(inboard, room), inboard + PUSH_CLEARANCE);
-        }
-
-        // And it stops at the far edge of the window, not before.
-        assert_eq!(push_limit(room * 4.0, room), room);
-
-        // Which for a window this wide is far more than the old fixed cap.
-        assert!(room > 900.0, "room was only {room}");
-    }
-
-    /// The floor is where the breakpoints out of reach sit. It has to stay on
-    /// the resting column for a short drag and then come along on a long one,
-    /// with the gap to the thumb never widening past the cap.
-    #[test]
-    fn the_floor_stays_on_the_resting_column_until_the_cap() {
-        // A drag short enough that the gap is under the cap leaves the far end
-        // completely alone: the strip is dented, not shifted.
-        for limit in [PUSH_CLEARANCE, 120.0, MAX_DIFF] {
-            assert_eq!(
-                push_floor(limit),
-                0.0,
-                "far end moved at a limit of {limit}"
-            );
-        }
-
-        // Past the cap it comes along, and the gap stops growing.
-        for limit in [MAX_DIFF + 1.0, MAX_DIFF + 150.0, 5000.0] {
-            let floor = push_floor(limit);
-            assert_eq!(floor, limit - MAX_DIFF, "far end did not follow at {limit}");
-            assert_eq!(limit - floor, MAX_DIFF, "gap was not capped at {limit}");
-            assert!(
-                floor < limit,
-                "the picked breakpoint must still move furthest"
-            );
-        }
-    }
-
-    /// The dent reaches further along the strip the harder the drag, so pulling
-    /// the thumb right across lifts far more breakpoints than a short pull —
-    /// rather than only deepening the same small dent.
-    #[test]
-    fn the_dent_reaches_further_as_the_drag_goes() {
-        let mut previous = 0.0;
-        for limit in [PUSH_CLEARANCE, 150.0, 300.0, 600.0] {
-            let reach = reach_for(limit);
-            assert!(reach > previous, "reach did not grow at a limit of {limit}");
-            previous = reach;
-        }
-        assert!(reach_for(PUSH_CLEARANCE) >= REACH_BASE);
-
-        let count = breakpoints().len();
-        let spacing = spacing(HEIGHT);
-        let lifted = |limit: f64| {
-            let (floor, reach) = (push_floor(limit), reach_for(limit));
-            (0..count)
-                .filter(|i| push_at(*i as f64 * spacing, floor, limit, reach) > floor + 1e-9)
-                .count()
-        };
-
-        assert!(
-            lifted(600.0) > lifted(150.0),
-            "a longer drag should reach more breakpoints: {} vs {}",
-            lifted(600.0),
-            lifted(150.0)
-        );
-    }
-
-    /// The breakpoint the pointer selects is the one sitting under it, so the
-    /// selection never drifts away from the finger.
-    #[test]
-    fn the_selected_breakpoint_is_the_one_under_the_pointer() {
-        let count = breakpoints().len();
-        let spacing = spacing(HEIGHT);
-        let top = top_inset(spacing, count, HEIGHT);
-
-        for index in 0..count {
-            let centre = top + index as f64 * spacing;
-            assert!(
-                (focus_at(centre, top, spacing, count) - index as f64).abs() < 1e-9,
-                "centre of {index} selected something else"
-            );
-
-            // Anywhere within half a spacing still belongs to that breakpoint.
-            for offset in [-0.4, 0.4] {
-                let selected = focus_at(centre + offset * spacing, top, spacing, count);
-                assert!(
-                    (selected - index as f64).abs() < 0.5,
-                    "pointer {offset} away from {index} selected {selected}"
-                );
-            }
-        }
-    }
-
-    /// Pressing a breakpoint must pick up *that* one, and must not move the list.
-    /// Anchoring the previous focus instead snapped the strip to wherever the
-    /// last gesture ended, so the letter under the finger was never the letter
-    /// you got.
-    #[test]
-    fn pressing_picks_the_breakpoint_under_the_finger() {
-        let count = breakpoints().len();
-        let spacing = spacing(HEIGHT);
-        let top = top_inset(spacing, count, HEIGHT);
-
-        // Pressing `L` must focus `L`, not whatever was focused before.
-        let l = breakpoints().iter().position(|l| *l == "L").unwrap() as f64;
-        let press_y = top + l * spacing;
-        assert_eq!(focus_at(press_y, top, spacing, count), l);
-
-        // And the press moves nothing: the anchor is exactly where the pointer
-        // already was, so nothing shifts under the finger.
-        let anchor = anchor_y(
-            l,
-            spacing,
-            top,
-            pull_for(press_y, top, spacing, count, HEIGHT),
-        );
-        assert!(
-            (anchor - press_y).abs() < 1e-9,
-            "press moved the list to {anchor}"
-        );
-
-        // Presses outside the index clamp rather than running off the ends.
-        assert_eq!(focus_at(-500.0, top, spacing, count), 0.0);
-        assert_eq!(
-            focus_at(HEIGHT + 500.0, top, spacing, count),
-            (count - 1) as f64
-        );
-    }
-
-    /// The regression this model exists to fix: inside the index the list must
-    /// not move at all. Otherwise dragging up from the middle shifts the strip,
-    /// A leaves the top of the window, and it can never be reached again.
-    #[test]
-    fn the_list_only_travels_once_the_drag_passes_an_end() {
-        let count = breakpoints().len();
-        let spacing = spacing(HEIGHT);
-        let top = top_inset(spacing, count, HEIGHT);
-
-        // Anywhere within the index: no movement, so the whole list stays put.
-        for index in [0.0, 6.0, 13.0, (count - 1) as f64] {
-            let y = top + index * spacing;
-            let pull = pull_for(y, top, spacing, count, HEIGHT);
-            assert!(pull.abs() < 1e-9, "list moved {pull} at {index}");
-        }
-
-        // Only past the ends does it pull, and in the right direction.
-        assert!(pull_for(top - 3.0 * spacing, top, spacing, count, HEIGHT) < 0.0);
-        let below = top + (count as f64 + 2.0) * spacing;
-        assert!(pull_for(below, top, spacing, count, HEIGHT) > 0.0);
-
-        // One px of drag past the end is one px of pull, so it tracks the finger
-        // rather than the list's spacing.
-        let pulled = pull_for(below, top, spacing, count, HEIGHT)
-            - pull_for(below - 1.0, top, spacing, count, HEIGHT);
-        assert!((pulled - 1.0).abs() < 1e-9, "pull stepped by {pulled}");
-    }
-
-    /// The invariant this model is built on: wherever the thumb is, the picked
-    /// breakpoint is exactly under it — inside the index and out past either end
-    /// alike. The pull resolves from the same absolute pointer as the selection,
-    /// so the two can never disagree and the picked breakpoint cannot slide out
-    /// from under the finger.
-    #[test]
-    fn the_picked_breakpoint_stays_under_the_thumb() {
-        let count = breakpoints().len();
-        let spacing = spacing(HEIGHT);
-        let top = top_inset(spacing, count, HEIGHT);
-
-        for step in 0..=860 {
-            let y = step as f64;
-            let focus = focus_at(y, top, spacing, count);
-            let anchor = anchor_y(
-                focus,
-                spacing,
-                top,
-                pull_for(y, top, spacing, count, HEIGHT),
-            );
-            assert!(
-                (anchor - y).abs() < 1e-9,
-                "picked breakpoint sat at {anchor} for a thumb at {y}"
-            );
-        }
-    }
-
-    /// And the index that the thumb drags stays in the window while it follows.
-    /// This holds because the resting index is centred: the slack at each end is
-    /// exactly the furthest the thumb can overshoot past it.
-    #[test]
-    fn the_index_stays_inside_the_window() {
-        let count = breakpoints().len();
-        let spacing = spacing(HEIGHT);
-        let top = top_inset(spacing, count, HEIGHT);
-        let span = (count - 1) as f64 * spacing;
-
-        // Including pointers that have left the window entirely, which is the
-        // one case the slack alone does not cover.
-        for step in -200..=1060 {
-            let y = step as f64;
-            let focus = focus_at(y, top, spacing, count);
-            let anchor = anchor_y(
-                focus,
-                spacing,
-                top,
-                pull_for(y, top, spacing, count, HEIGHT),
-            );
-
-            let first = anchor - focus * spacing;
-            let last = first + span;
-            assert!(
-                first >= -1e-9,
-                "top left the window with the thumb at {y}: {first}"
-            );
-            assert!(
-                last <= HEIGHT + 1e-9,
-                "bottom left the window with the thumb at {y}"
-            );
-        }
-    }
-
-    /// Nothing is ever culled, so a run of neighbours can never drop one.
-    #[test]
-    fn neighbours_are_never_skipped() {
-        let labels: Vec<&str> = placed(1.0).iter().map(|p| p.label).collect();
-        assert_eq!(labels.len(), breakpoints().len());
-
-        let start = labels.iter().position(|l| *l == "A").expect("A is visible");
-        let end = labels.iter().position(|l| *l == "F").expect("F is visible");
-        assert_eq!(&labels[start..=end], ["A", "B", "C", "D", "E", "F"]);
-    }
-}
+mod tests;

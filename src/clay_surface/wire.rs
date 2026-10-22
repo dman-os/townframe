@@ -102,3 +102,68 @@ impl Drop for SurfaceSession {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    // ── session lifecycle: the drop hook is the renderer's withdrawal signal; it fires
+    //    exactly once, and only for sessions created with one ──────────────────────────────
+
+    #[test]
+    fn session_drop_fires_the_hook_exactly_once() {
+        let drops = Rc::new(Cell::new(0_u32));
+        let counted = drops.clone();
+        let session = SurfaceSession::with_drop(
+            |_| EventResponse::default(),
+            move || {
+                counted.set(counted.get() + 1);
+            },
+        );
+        let handler = session.handler();
+        let response = handler(Event {
+            revision: 7,
+            element: 3,
+            name: "click".into(),
+            bubbles: true,
+            data_json: "null".into(),
+        });
+        assert_eq!(response, EventResponse::default());
+        assert_eq!(drops.get(), 0);
+        drop(session);
+        assert_eq!(drops.get(), 1);
+        // The handler outlives its session; dispatch must stay usable after the hook fired.
+        let _ = handler(Event {
+            revision: 8,
+            element: 3,
+            name: "click".into(),
+            bubbles: true,
+            data_json: "null".into(),
+        });
+        assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn session_without_hook_drops_quietly() {
+        let session = SurfaceSession::new(|_| EventResponse {
+            prevent_default: true,
+            stop_propagation: false,
+        });
+        let handler = session.handler();
+        drop(session);
+        assert_eq!(
+            handler(Event {
+                revision: 0,
+                element: 0,
+                name: "mounted".into(),
+                bubbles: false,
+                data_json: "null".into(),
+            }),
+            EventResponse {
+                prevent_default: true,
+                stop_propagation: false,
+            }
+        );
+    }
+}

@@ -1,5 +1,10 @@
 # Dayframe micros — living design log
 
+Status: Living design log — D1–D13 settled; amendments recorded in ADR 015
+Owner: operator + dayframe track
+Scope: Micro-composition design for `dayframe_dx` (pieces, faces, composition root).
+Updated: 2026-10-22
+
 Scratch log for the `src/dayframe_dx` micro-composition PR. It exists so that work can be handed
 between agents and turns without re-deriving intent.
 
@@ -948,3 +953,256 @@ contradicts the comment.
 
 
 
+
+- **Turn 31 — the shared collection substrate, its semantics tests, and delta-shaped host
+  delivery.** New workspace crate `clay_collection`: one hop of a chain of hops — a base
+  `Replica` (latest row per key, version-guarded, authority-only owner bookkeeping), a
+  segregated whole-row `Ledger` of optimistic overlays (`Local` vs `Replicated` policy, `Outcome`
+  → parked `Base` settlement, scope-id keyed withdrawal), and a `View` whose `Query` answers
+  locally over the visible set (overlays layered over base) while opaque `DemandToken`s go
+  upstream through the `Upstream` trait (attach/demand/release/write). The waist carries
+  `Batch`es (base + overlays + settled + covered in one atomic transition) and never names
+  "collection". Writing the 18-test suite first exposed four real defects in the drafted code,
+  all fixed: (1) `View::write` pre-registered the overlay before `apply`, so the before-snapshot
+  already showed the pending value and the origin's own subscribers never heard of its write;
+  (2) the same pre-registration made the id-dedup skip the `Put`, so `forward.overlays` was
+  always empty and replications never reached sibling views (the Replicated shared-overlay
+  promise was dead on arrival); (3) the relay hop's `Upstream::write` recorded before applying,
+  with the same empty-forward result; (4) `retire_satisfied` was only fed keys carried by base
+  deltas, so a settle-only batch whose base had already moved past the parked version left the
+  overlay resident forever. Fixes: an explicit `record_puts` gate on `Ledger::apply_incoming`
+  (origin passes true regardless of policy), origin writes applied through `apply_origin`, relay
+  writes applied as batches under the policy gate, `dispatch` gating listeners on row changes
+  and relays on forward deltas independently, and retire keyed by settle-touched ∪ base-touched
+  keys with a replica-version fallback. Suite covers origin writes under both policies,
+  reject/unknown reverts, no-flicker durable retirement across all three arrival orders,
+  newest-pending visibility, optimistic delete, terminal authority writes, consumer-vs-authority
+  scope disposal (Clear rides the relay downstream; the authority removes owned rows in one
+  event), query filter/order/limit over pending rows, demand/release without eviction,
+  Replicated-vs-Local sibling chains with a held-back authority echo, epoch reset as one event,
+  stale incarnation/version rejection, and single-transition batch atomicity.
+
+- **Turn 31 (slice 2) — delta-shaped `HostedCollection` delivery; settings and roots now read
+  through the relay.** The whole-map `watch::Sender<BTreeMap>` per reader — flagged in the
+  plugin-theory discussion as the known performance footgun — is gone. `clay_host` now defines
+  `CollectionDelta` (`Replace` / `Upsert` / `Remove` / `Clear`) and per-reader-group
+  `CollectionSubscription` streams over unbounded mpsc channels. `subscribe()` takes the
+  snapshot and registers the channel under one lock and opens the stream with a `Replace` of
+  that snapshot, so the stream is self-synchronizing: no change can slip between what a reader
+  read and what it started listening to. Mutations publish exactly one delta built at the
+  mutation site; provider close publishes `Clear` and closes the senders; a consumer's close
+  clears only its own group; dead senders are pruned on the next publish. Both consumers keep
+  their mount-time shape: `micro_settings/view.rs` and `dayframe_desktop/composition.rs` apply
+  each delta to their local map in place (a `Replace` wholesale, then per-row `write()`s) —
+  the per-change full-map clone to every reader and back is gone from the read path.
+  `clay_mdk::native` re-exports the two new types; `x/check-dayframe.ts` gained `clay_collection`
+  in its package list.
+
+- **Turn 31 (slice 3) — unifying `clay_host`, `clay_data`, `clay_mdk`, `micro_settings`,
+  `micro_sample`, and `dayframe_desktop` onto `clay_collection`.** Evaluated the remaining
+  cross-crate boundaries and eliminated the parallel collection/delta implementations:
+  (1) `HostedCollection<T>` in `clay_host` now stores a `clay_collection::Replica<u64, T>` and
+  streams `clay_collection::Batch<u64, T>` directly (`CollectionDelta` is removed). Separating
+  lease birth-generation (`generations: BTreeMap<u64, u64>`) from monotonic `Version.seq`
+  resolved the generation→version mapping: `Entry::update` advances `Version.seq` while stale
+  `Entry` handles remain rejected by birth-generation. Contributor cleanup registers once per
+  `(collection, contributor)` and uses `Replica::plan_remove_owner(ScopeId)` to emit a single
+  atomic `Batch` on contributor close; consumer/provider close emits `Batch::new(incarnation + 1)`
+  (epoch reset). In `clay_collection::View::dispatch`, empty epoch-reset batches now propagate
+  across relay hops (`empty_epoch_reset_propagates_across_relays`). `CollectionReader::view()`
+  atomically subscribes and drains the bootstrap batch under one lock so `clay_mdk::native::use_collection`
+  mounts a `View<u64, T>` without a read-then-subscribe gap or double snapshot. `micro_settings`
+  and `dayframe_desktop` now query their `View`s via `Query::new()`.
+  (2) `clay_data` deleted its private `src/clay_data/collection.rs` and now backs `DocumentService`
+  with `clay_collection::{Replica<FacetRoute, Value>, Ledger<FacetRoute, Value>}`: O(log N)
+  per-key overlay lookup via `Ledger::visible`, version-stamped base hydration, and durable
+  `WriteOutcome::Applied { version }` + `retire_satisfied` settlement.
+  (3) `clay_data::FacetValue<T = Value>` is now generic (`Loading` / `Absent` / `Present(T)`)
+  with `Facet<T>::state(&DocumentSnapshot) -> FacetValue<T>`, re-exported through
+  `clay_mdk::native`, and `micro_sample` now exposes `SampleMicro::state` and renders distinct
+  `Loading`, `Absent`, `Present`, and `Freshness::Refreshing` states (matching `micro_counter`
+  on the WIT side). Verified: **201/201 nextest** across 15 binaries and zero-warning Clippy
+  across all 15 packages via `x/check-dayframe.ts`.
+
+- **Turn 31 (slice 4) — the host↔substrate boundary: authority is a role, not an absent
+  upstream.** Slice 3's bridge built a reader's `View` with `View::new(...)`, i.e. no upstream,
+  and the substrate inferred "I am the authority" from `upstream.is_none()`. That conflated
+  *being* the authority with *never having been wired to one*, and a host-collection reader
+  inherited all three authority powers by accident: `demand` bootstrapped from its own empty
+  replica and reported the lease covered (a satisfied demand over no data), `write` was
+  terminal into its own replica (bypassing the contributor capability check entirely and
+  diverging from the collection), and `dispose_scope` took the authority branch and removed
+  base rows the consumer never authored. Fixes, all in the substrate's shape rather than
+  around it:
+  - `UpstreamSlot::{Authority, Consumer(Rc<dyn Upstream>)}` replaces `Option<Rc<dyn Upstream>>`,
+    so the role is explicit data and there is no unwrap or `is_none()` inference left.
+    Constructors are now `View::authority`, `View::consumer`, and `View::reader`;
+    `View::new`/`with_upstream` are gone.
+  - Write capability is type-state: `View<K, V, W = Writable>` with `Writable`/`ReadOnly`
+    markers. `write`/`dispose_scope` exist only on `Writable`, so a host-collection reader
+    *cannot* fabricate a row locally — the capability check's conclusion is carried by the
+    type instead of being re-derived at runtime. `impl Upstream for View` is likewise
+    `Writable`-only: a read-only hop cannot serve as a chain relay, since it would have no
+    write path for the intent it relays.
+  - `Upstream::attach` takes a marker-free `Downstream<K, V>` handle (a weak ref to the hop's
+    state) rather than a `&View<K, V>`, because a relay's registration cannot depend on
+    whether the downstream hop may write.
+  - `clay_host` gained `CollectionView<T>`: the read-only view *and* the stream that feeds it
+    as one value, with `view()`, `pump()` (synchronous drain) and `split()` (hand the stream
+    to an async pump, after which `pump` is gone so the two cannot compete for batches).
+    Clippy's `type_complexity` on the old `Result<(View, CollectionSubscription), _>` was the
+    prompt, but the real reason is that a view held without its stream silently stops
+    advancing. The host bridge (`HostUpstream`) registers no relay: the host publishes under
+    its mutex, possibly from another thread, while a view's state is single-threaded, and the
+    pump *is* that boundary.
+  - Demand coverage is per-reader. `CollectionState::publish` (all readers) and `publish_to`
+    (one reader's group) are now distinct, because the old bootstrap batch stamped
+    `covered: vec![DemandId(1)]` into *every* reader's coverage set — a demand nobody had
+    issued, credited to everyone. The opening snapshot now carries no coverage
+    (`snapshot_batch`), and coverage arrives only in answer to a demand that reader issued
+    (`coverage_batch(id)` via the private `CollectionReader::cover`). A revoked reader's
+    demand is left uncovered rather than crashing: its stream is closed behind the
+    revocation, so "no coverage will arrive" is the truthful state.
+  - Resolved open item (slice 2's "`mount_query` demand derivation"): a `Query`'s filter and
+    ordering are closures, so no demand token can be derived from one — the token that
+    narrows an upstream answer must be authored by the caller. `query` stays local-only and
+    `demand` stays explicit; that is the design, not a gap.
+  - Not done, deliberately: `use_collection` does not issue demand on mount. With no caller
+    reading coverage yet, an auto-lease plus a Drop guard would be speculative API; it
+    belongs with the first UI that renders a pending state (which needs the design-language
+    skill).
+  - Test-caught regression during this slice: inlining `match self.state.borrow().upstream`
+    held the scrutinee `Ref` for the whole match, so the arms that re-enter the hop's state
+    panicked with `RefCell already borrowed` — 17 substrate tests failed. Binding the clone
+    to a local first (as the pre-existing code did) is required at all four sites; recorded
+    here because the shape looks like a harmless cleanup.
+  - New tests: `an_unanswered_demand_stays_uncovered_on_the_consumer` (substrate: coverage is
+    the authority's word, and a second demand is its own lease) and
+    `demand_coverage_resolves_only_the_reader_that_issued_it` (host: a quiet reader never
+    reports a lease it did not open). Verified: **203/203 nextest** across 15 binaries,
+    zero-warning `--no-deps` Clippy over all 15 packages, changed-package `cargo fmt --check`
+    clean. Environment: the shared `../dioxus` symlink was deleted mid-turn by a concurrent
+    agent (target workspace intact; restored with `ln -sfn`), and the harness rotated the
+    worktree path (`generation-6-a` → `generation-9-a`), which wiped the generated WIT deps
+    and required an `x/wit-fetch.ts` rerun. Pre-existing, untouched: `src/ui/tiles/mod.rs`
+    Clippy lints and a `src/dayframe_showcase/main.rs` rustfmt diff, both byte-identical to
+    the base checkout and outside this change set (they only surface without `--no-deps`).
+
+- **Turn 31 (slice 5) — review corrections, lifecycle closure, and ordered notifications.**
+  This entry supersedes slice 4's local-only query, `split()`, and per-reader coverage decisions.
+  - **Query demand is caller-authored, not absent.** Closures cannot be translated into upstream
+    tokens, but `Query::demand(DemandToken)` can carry a caller's opaque token. `View::query`
+    snapshots/filter/orders/limits local rows first, then mounts one demand per distinct token,
+    view, and authority incarnation. A synchronous answer changes the next read, not the result
+    already captured. `query_coverage` reports `Unknown` before mounting, `Partial` while awaiting
+    evidence, and `Complete` after that demand's coverage. A new epoch invalidates old evidence;
+    the next read renews the lease, unless the new-epoch answer itself covered it. `release_query`
+    ends the shared token lease without evicting rows; close/last-state-drop release remaining
+    leases. Query objects are not independently reference-counted subscriptions.
+  - **Reading and ingestion are separate capabilities.** `apply`, `write`, and `dispose_scope`
+    exist only on writable views. `View::reader` returns `(View<_, _, ReadOnly>, Downstream)`;
+    only the adapter retains the latter. `View::downstream` is private. The reader still accepts
+    `OverlayPolicy`: read-only replicas must be able to observe replicated optimistic rows.
+  - **The binding owns delivery and disconnection.** `CollectionView` keeps its read-only view,
+    private ingestion handle, and subscription together. `pump()` drains synchronously;
+    `advance().await` applies the next delivery and drains available batches. `split()` is gone.
+    Both paths close and clear the view on disconnection, and dropping the binding closes any
+    retained view clones. `use_collection` retains the binding for its async pump rather than
+    giving UI code ingestion authority. Coverage-only, empty-reset, and terminal-close events
+    wake subscribers even without row changes.
+  - **Coverage is per subscription, including clones of one reader.** `HostUpstream` addresses
+    `(reader_id, subscription_id)` and sends coverage-only batches on that stream, behind its
+    opening snapshot and earlier mutations. Demand no longer reclones the collection. Active
+    demand IDs are tracked at every relay; sibling, unsolicited, and released coverage is ignored.
+    Subscription drops immediately prune their sender; an empty reader group remains until its
+    owner closes, so the same reader can subscribe again. Liveness is checked around receive,
+    discarding queued rows after revocation. A consumer does not invent an authority epoch when
+    closing; provider cleanup still owns the authority reset. A closed view rejects later batches.
+  - **Deletion and settlement retain enough evidence.** `Replica::version` includes deletion
+    tombstones, preventing stale resurrection and allowing a settle-only answer to retire an
+    overlay after a newer removal. A batch introduces overlays before settling them, so a Put
+    and its rejection/durable settlement in one batch cannot leave a pending overlay behind.
+    Ordinary batches snapshot only touched keys; an epoch reset still examines all visible keys.
+  - **Final review found a second ordering boundary inside synchronous callbacks.** A listener
+    could apply a rejection while the overlay's original notification was still being delivered.
+    Recursive dispatch sent that rejection to a sibling before the Put, resurrecting an already
+    rejected overlay. The new regression failed with `a rejected overlay was resurrected` before
+    the fix. Per-hop FIFO notifications now finish delivery of an earlier event to its captured
+    listeners/relays before delivering reentrant events. Close uses the same queue, keeping its
+    notification terminal. Local state application remains synchronous; notification delivery of
+    a nested apply waits for the outer notification to finish. Event payloads describe the exact
+    transition; a callback reading the live view may see a later reentrant transition. The normal
+    path shares the event through `Rc` and unwraps it for the return, without cloning its rows.
+    Tests exercise settlement and closure from both the host listener and its first child, so
+    merely swapping listener/relay order would not satisfy the regression.
+  - **Verification and build diagnosis.** The first full run passed 214 tests but Clippy consumed
+    incompatible dependency metadata: the diagnostic reported a two-argument `View::reader` at
+    line 274, while current source had three arguments and returned the ingestion handle too.
+    A verbose reproduction pinned the mismatch without changing source. With no Cargo/rustc/
+    Clippy processes running, `cargo clean -p clay_collection -p clay_host` removed 194 artifacts
+    (109.8 MiB); the rebuilt tests and Clippy passed. The precise cache invalidation trigger was
+    not established; no target-directory override or broad clean was used. After the ordering
+    fix, `x/check-dayframe.ts --no-fail-fast -j 2` passed **216/216 tests across 15 binaries**, with
+    no skipped tests, and its all-target/all-feature `--no-deps` Clippy stage passed. Additional
+    `cargo clippy --locked --no-deps --all-targets --all-features` with `-D warnings` and
+    `cargo fmt -- --check` passed for `clay_collection`, `clay_host`, `clay_data`, `clay_mdk`,
+    `micro_sample`, `micro_settings`, and `dayframe_desktop`. The substrate now has 30 tests;
+    the host has 23. The wasm preparation still reports the three Dioxus `file_data.rs` unused
+    `path` warnings recorded above; this is not a workspace-wide warning-clean claim.
+    Final log: `/tmp/nix-shell.wc789k/opencode/arena/ses_ea3314aa3ffeL4Gs0SewMtXrli/dayframe-ordered-checks.log`.
+    No VCS commands, commits, or fork edits in this continuation.
+
+### Shared collection guided review tour
+
+Read in this order; each stop has a boundary and a regression to inspect.
+
+1. **Protocol, not a service registry:** `src/clay_collection/types.rs:11` (`Version`) and
+   `src/clay_collection/types.rs:94` (`Batch`). Base rows, optimistic overlays, outcomes, and
+   demand coverage travel together but remain distinct. Only authority versions order base.
+   `src/clay_collection/tests.rs:593` proves a batch is one visible transition.
+2. **Replica versus prediction:** `src/clay_collection/replica.rs:56` (`version`) and
+   `src/clay_collection/ledger.rs:113` (`settle`). Acceptance parks an overlay until the matching
+   base version is observed; rejection removes it. Tombstones prevent stale resurrection.
+   Read `src/clay_collection/tests.rs:852` and `src/clay_collection/tests.rs:874` for deletion
+   evidence and same-batch introduction/settlement. The per-row clone bound is tested at
+   `src/clay_collection/tests.rs:645`.
+3. **Roles and query lifecycle:** `src/clay_collection/view.rs:275` (constructors),
+   `src/clay_collection/view.rs:392` (`query`), and `src/clay_collection/view.rs:430`
+   (`query_coverage`). A host reader cannot mutate its replica; the adapter owns ingestion.
+   Follow `src/clay_collection/tests.rs:699` for an opaque token interpreted by a computed
+   upstream and `src/clay_collection/tests.rs:734` for deduplication, release, and epoch renewal.
+4. **Atomic state and ordered delivery:** `src/clay_collection/view.rs:767` (`apply`), then
+   `src/clay_collection/view.rs:740` (`dispatch`), `src/clay_collection/view.rs:686` (`notify`),
+   and `src/clay_collection/view.rs:635` (`close`). Applying a batch and delivering its event
+   are separate; FIFO delivery prevents reentrant outcomes overtaking their overlay. Inspect
+   `src/clay_collection/tests.rs:899` and `src/clay_collection/tests.rs:938` for the adversarial
+   callback cases, not just the straight-line happy path.
+5. **Host ownership and the thread boundary:** `src/clay_host/lib.rs:823` (`subscribe`),
+   `src/clay_host/lib.rs:855` (`view`), `src/clay_host/lib.rs:881` (`CollectionView`), and
+   `src/clay_host/lib.rs:940` (`HostUpstream`). Snapshot and subscription registration share a
+   lock; coverage goes to the exact requesting stream. The binding pumps into single-threaded
+   view state. Tests at `src/clay_host/lib.rs:1782`, `src/clay_host/lib.rs:1815`, and
+   `src/clay_host/lib.rs:1864` cover coverage isolation, queued-data revocation, async closure,
+   and drop cleanup.
+6. **Real consumers:** `src/clay_mdk/native.rs:170` (`use_collection`) connects all event kinds
+   to a Dioxus signal; its VirtualDom regression at `src/clay_mdk/native.rs:302` demonstrates
+   `Partial:false:0` → `Complete:false:0` → `Complete:false:1` → `Unknown:true:0` and live unmount.
+   `src/clay_data/lib.rs:33` defines a facet row's address; `src/clay_data/lib.rs:216` uses the
+   shared replica/ledger rather than a second collection implementation. Typed facet loading,
+   absence, and value are exposed by `src/clay_data/lib.rs:570` (`Facet::state`); freshness is
+   separate evidence and does not hide an existing value during refresh.
+
+A concrete host query walkthrough: keep `reader.view()?` as the binding, build
+`Query::new().demand(DemandToken(json!({"kind": "all"})))`, and call
+`binding.view().query(&query)`. The first result is local; the coverage response is queued only
+on this binding's subscription. `binding.pump()` (or `advance().await`) applies that evidence,
+after which `query_coverage(&query)` is complete. `release_query(&query)` releases interest but
+keeps cached rows. Dropping the binding closes retained view clones instead of leaving a frozen
+cache pretending to be live.
+
+Remaining boundaries, not implemented promises: collection WIT transport and cross-guest ID
+namespacing; a production node adapter; indexed/serialized query planning. Current queries scan
+the visible set, same-token queries on one view share one lease, and host streams deliberately
+overfetch. Tombstones remain until a newer row supersedes them or the epoch resets; there is no
+safe-compaction watermark yet. Host delivery is unbounded mpsc, so lag/backpressure policy remains
+future work rather than silently dropping batches. ADR changes remain deferred until review.

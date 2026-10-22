@@ -28,11 +28,12 @@ members = [
   "./src/xtask",
   "./src/clay_surface",
   "./src/clay_host",
-  "./src/clay_data",
-  "./src/clay_compose",
+  "./src/clay_docs",
+  "./src/clay_collection",
+  "./src/clay_micro_core",
   "./src/clay_dioxus",
   "./src/clay_mdk",
-  "./src/clay_engine_wasmtime",
+  "./src/clay_rt_wasmtime",
   "./src/clay_guest_session",
   "./src/micro_settings_manifest",
   "./src/micro_settings",
@@ -213,6 +214,7 @@ qrcode = { version = "0.14.1", default-features = false }
 #
 # testing
 insta = { version =  "1.44", features = ["yaml", "filters"] }
+proptest = "1"
 tempfile = "3"
 loom = "0.7.2"
 
@@ -260,6 +262,22 @@ dioxus-native-dom = { path = "../dioxus/packages/native-dom" }
 blitz-dom = "=0.3.0-beta.4"
 ui = { path = "./src/ui" }
 # xilem = { path = "../xilem/xilem/" }
+#
+# dayframe internal
+clay_collection = { path = "./src/clay_collection" }
+clay_host = { path = "./src/clay_host" }
+clay_docs = { path = "./src/clay_docs" }
+clay_micro_core = { path = "./src/clay_micro_core" }
+clay_surface = { path = "./src/clay_surface" }
+clay_dioxus = { path = "./src/clay_dioxus" }
+clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
+clay_guest_session = { path = "./src/clay_guest_session" }
+clay_mdk = { path = "./src/clay_mdk", default-features = false }
+micro_settings_manifest = { path = "./src/micro_settings_manifest" }
+micro_settings = { path = "./src/micro_settings" }
+micro_sample = { path = "./src/micro_sample" }
+micro_counter = { path = "./src/micro_counter" }
+micro_counter_manifest = { path = "./src/micro_counter_manifest" }
 
 [patch.crates-io]
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }

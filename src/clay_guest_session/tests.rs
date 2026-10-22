@@ -1,12 +1,15 @@
 use super::*;
-use clay_data::{DocumentGrant, DocumentService, FacetSelection, MockDocuments, OperationStatus};
+use clay_docs::DocumentGrant;
+use clay_docs::DocumentService;
+use clay_docs::FacetSelection;
+use clay_docs::MockDocuments;
+use clay_docs::OperationStatus;
 use daybook_types::manifest::RoutineFacetAccess;
 use serde_json::json;
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Waker},
-};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Context;
+use std::task::Waker;
 
 struct Rig {
     host: Host,

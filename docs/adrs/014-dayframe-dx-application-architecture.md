@@ -1,7 +1,7 @@
 # ADR 014: dayframe_dx Application Architecture
 
 **Status:** Accepted.
-**Supersedes:** ADR 010, `dayframe_dx Architecture — Pieces, Faces, and the Composition Root`.
+**Supersedes:** ADR 016, `dayframe_dx Architecture — Pieces, Faces, and the Composition Root`.
 
 ## Context
 

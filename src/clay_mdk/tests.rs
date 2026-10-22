@@ -3,19 +3,28 @@
 //! The host replays each typed batch into a Rust `WriteMutations`. That is the same path the
 //! Blitz-backed native-dom writer takes, so what this test proves about ordering and content holds
 //! for the real renderer; only tree semantics differ.
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-};
-use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
-use wasmtime::{Engine, Store};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use wasmtime::Engine;
+use wasmtime::Store;
+use wasmtime::component::Component;
+use wasmtime::component::HasSelf;
+use wasmtime::component::Linker;
+use wasmtime::component::Resource;
+use wasmtime::component::ResourceTable;
 
-#[path = "../micro_counter/fixture.rs"]
-mod counter_fixture;
-use counter_fixture::counter_component;
+fn counter_component() -> Vec<u8> {
+    let variable = "DAYFRAME_COUNTER_COMPONENT";
+    let path = std::env::var_os(variable).unwrap_or_else(|| {
+        panic!("{variable} must name a prepared counter component; run deno run --allow-all x/check-dayframe.ts --prepare-only and export the printed path")
+    });
+    std::fs::read(&path).unwrap_or_else(|error| {
+        panic!("cannot read {variable}: {error}; run deno run --allow-all x/check-dayframe.ts --prepare-only")
+    })
+}
 
 mod host_bindings {
     wasmtime::component::bindgen!({
@@ -30,19 +39,27 @@ mod host_bindings {
     });
 }
 
-use blitz_dom::{BaseDocument, DocumentConfig, LocalName, NodeId, QualName, ns};
-use clay_surface::{AttributeValue, Mutation};
-use dioxus_core::{BorrowedAttributeValue, ElementId, WriteMutations};
+use blitz_dom::BaseDocument;
+use blitz_dom::DocumentConfig;
+use blitz_dom::LocalName;
+use blitz_dom::NodeId;
+use blitz_dom::QualName;
+use blitz_dom::ns;
+use clay_surface::AttributeValue;
+use clay_surface::Mutation;
+use dioxus_core::BorrowedAttributeValue;
+use dioxus_core::ElementId;
+use dioxus_core::WriteMutations;
 use dioxus_native_dom::DioxusState;
 use host_bindings::exports::townframe::dayframe::presentation_events::Event;
-use host_bindings::townframe::dayframe::{
-    documents,
-    presentation::{self, *},
-};
+use host_bindings::townframe::dayframe::documents;
+use host_bindings::townframe::dayframe::presentation::*;
+use host_bindings::townframe::dayframe::presentation::{self};
 
 /// Replays one wire batch into any host `WriteMutations`, in order.
 fn replay(batch: &[presentation::Mutation], to: &mut impl WriteMutations) {
-    use presentation::{AttributeValue, Mutation};
+    use presentation::AttributeValue;
+    use presentation::Mutation;
     let element = |id: u32| ElementId::from_raw(id as usize);
     for mutation in batch {
         match mutation {
@@ -296,11 +313,16 @@ impl TestHost {
     /// that `NodeId`. Releases all borrows of `BaseDocument` before returning so the caller can
     /// invoke the guest (which re-entrantly calls `surface.apply` and mutates `BaseDocument`).
     fn resolve_click(&self, target: NodeId) -> Option<(u32, Event)> {
-        use dioxus_html::{
-            EventData, Modifiers, SerializedMouseData,
-            geometry::{ClientPoint, Coordinates, ElementPoint, PagePoint, ScreenPoint},
-            input_data::{MouseButton, decode_mouse_button_set},
-        };
+        use dioxus_html::EventData;
+        use dioxus_html::Modifiers;
+        use dioxus_html::SerializedMouseData;
+        use dioxus_html::geometry::ClientPoint;
+        use dioxus_html::geometry::Coordinates;
+        use dioxus_html::geometry::ElementPoint;
+        use dioxus_html::geometry::PagePoint;
+        use dioxus_html::geometry::ScreenPoint;
+        use dioxus_html::input_data::MouseButton;
+        use dioxus_html::input_data::decode_mouse_button_set;
 
         let doc = self.doc.as_ref()?;
         let mut current = Some(target);
@@ -590,7 +612,8 @@ fn sdk_click(dom: &mut crate::GuestDom, target: dioxus_core::RenderTargetId) {
 #[test]
 fn sdk_one_root_shares_state_across_targets_and_survives_all_mounts_closing() {
     use dioxus::prelude::*;
-    use std::{cell::Cell, rc::Rc};
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn counter(initializations: Rc<Cell<usize>>) -> Element {
         use_hook(move || initializations.set(initializations.get() + 1));
@@ -670,7 +693,8 @@ fn sdk_colliding_element_ids_dispatch_only_to_the_selected_target_scope() {
 #[test]
 fn sdk_external_updates_render_into_live_mounts_and_later_mounts() {
     use dioxus::prelude::*;
-    use std::{cell::Cell, rc::Rc};
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn app(external: Rc<Cell<Option<Signal<u64>>>>) -> Element {
         let count = use_signal(|| 0_u64);
@@ -794,8 +818,11 @@ fn counter_click_element(batch: &[Mutation]) -> u32 {
 /// match this, the wire preserved Dioxus's edit stream exactly across the address space.
 fn expected_counter_batches(event_count: u64) -> Vec<Vec<Mutation>> {
     use dioxus::prelude::*;
-    use dioxus_core::{RenderTargetId, VirtualDom};
-    use dioxus_html::{EventData, SerializedHtmlEventConverter, SerializedMouseData};
+    use dioxus_core::RenderTargetId;
+    use dioxus_core::VirtualDom;
+    use dioxus_html::EventData;
+    use dioxus_html::SerializedHtmlEventConverter;
+    use dioxus_html::SerializedMouseData;
 
     fn counter() -> Element {
         let mut count = use_signal(|| Some(0_u64));

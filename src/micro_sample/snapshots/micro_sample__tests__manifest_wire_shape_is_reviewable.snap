@@ -1,0 +1,23 @@
+---
+source: src/micro_sample/tests.rs
+expression: manifest()
+---
+id: dayframe.sample
+version: 1
+requirements:
+  - id: settings.sections
+    version: 1
+provisions:
+  - id: sample.controller
+    version: 1
+config:
+  name: sample
+  facets:
+    - owner_plug_id: ~
+      tag: org.dayframe.sample.config
+      key_id: main
+      read: true
+      write: true
+      create: false
+      delete: false
+contributions: []

@@ -1,11 +1,16 @@
 #![cfg(target_arch = "wasm32")]
 
-use clay_mdk::{
-    bindings, document_events, documents, micro_lifecycle, presentation,
-    presentation_events::{self, Event, EventResponse},
-    wire::WireMutations,
-};
-use dioxus_core::{ElementId, WriteMutations};
+use clay_mdk::bindings;
+use clay_mdk::document_events;
+use clay_mdk::documents;
+use clay_mdk::micro_lifecycle;
+use clay_mdk::presentation;
+use clay_mdk::presentation_events::Event;
+use clay_mdk::presentation_events::EventResponse;
+use clay_mdk::presentation_events::{self};
+use clay_mdk::wire::WireMutations;
+use dioxus_core::ElementId;
+use dioxus_core::WriteMutations;
 
 struct Slots;
 

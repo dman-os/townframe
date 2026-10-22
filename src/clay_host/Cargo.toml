@@ -8,10 +8,13 @@ rust-version.workspace = true
 path = "lib.rs"
 
 [dependencies]
+clay_collection = { workspace = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "sync"] }
 
 [dev-dependencies]
+serde_json.workspace = true
+proptest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

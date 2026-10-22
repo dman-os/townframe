@@ -112,7 +112,7 @@ units. Use `page_coordinates()` for anything that spans a gesture.
 ## Related
 
 - `.agents/skills/dayframe-native-dev-loop` — how to build, screenshot and inspect the app.
-- `docs/adrs/010-dayframe-dx-architecture.md` — renderer duality (Blitz ambition, wry prod) and the
+- `docs/adrs/016-dayframe-dx-architecture.md` — renderer duality (Blitz ambition, wry prod) and the
   rule for when forking upstream is justified.
 
 ## Verified against

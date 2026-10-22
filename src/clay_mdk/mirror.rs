@@ -3,12 +3,17 @@
 //! require callers to navigate wire enums — without adding authority: the underlying
 //! `documents::DocumentAccess` resource is still the only capability, and filtering still
 //! happens host-side before data reaches this mirror.
+//!
+//! Reads never perform IO: a watch answers from its retained snapshot, and the host's
+//! `document-events` callbacks (routed through [`DocumentMirror::changed`] and friends) are the
+//! only thing that moves it forward. Every such move runs the mirror's one change notifier, so a
+//! presentation layer can observe "the mirror changed" without each watch knowing about it.
 use crate::documents;
-use std::{
-    cell::RefCell,
-    collections::BTreeMap,
-    rc::{Rc, Weak},
-};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::rc::Weak;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FacetState<T = String> {
@@ -64,12 +69,39 @@ pub struct DocumentMirror {
 struct MirrorState {
     watches: BTreeMap<u64, Weak<WatchState>>,
     operations: BTreeMap<u64, MirrorOperation>,
+    notifier: Option<Rc<dyn Fn()>>,
+}
+
+impl MirrorState {
+    fn notify(&self) {
+        if let Some(notifier) = &self.notifier {
+            notifier();
+        }
+    }
 }
 
 impl DocumentMirror {
+    /// Install the one observer this mirror runs after every state change it applies —
+    /// delivered snapshots, lag marks, completions, resyncs, releases. The guest runtime points
+    /// it at its presentation so hooks re-render; a mirror without one is silent.
+    pub fn set_notifier(&self, notifier: impl Fn() + 'static) {
+        assert!(
+            self.state
+                .borrow_mut()
+                .notifier
+                .replace(Rc::new(notifier))
+                .is_none(),
+            "document mirror notifier installed twice"
+        );
+    }
+
+    fn notify(&self) {
+        self.state.borrow().notify();
+    }
+
     pub fn bind(&self, binding: documents::DocumentBinding) -> ConfigDocument {
         ConfigDocument {
-            binding,
+            binding: Rc::new(binding),
             mirror: self.clone(),
         }
     }
@@ -143,13 +175,19 @@ impl DocumentMirror {
     }
 
     pub fn changed(&self, snapshot: documents::DocumentSnapshot) -> bool {
-        self.watch(snapshot.watch_id)
-            .is_some_and(|watch| watch.apply(snapshot, Delivery::Change))
+        let changed = self
+            .watch(snapshot.watch_id)
+            .is_some_and(|watch| watch.apply(snapshot, Delivery::Change));
+        if changed {
+            self.notify();
+        }
+        changed
     }
 
     pub fn lagged(&self, watch_id: u64) -> Option<MirrorWatch> {
         let watch = self.watch(watch_id)?;
         watch.state.snapshot.borrow_mut().status = MirrorStatus::Lagged;
+        self.notify();
         Some(watch)
     }
 
@@ -168,21 +206,39 @@ impl DocumentMirror {
             self.state.borrow_mut().operations.remove(&id);
             operation.state.remote.borrow_mut().take();
         }
+        self.notify();
         true
     }
 }
 
 /// One named, already-authorized document binding handed to a micro at activation. The host
 /// resolved the owner-config document and granted exactly this facet access; the binding is
-/// authority, not a lookup result.
+/// authority, not a lookup result. Clones share the binding's `document-access` resource.
+#[derive(Clone)]
 pub struct ConfigDocument {
-    binding: documents::DocumentBinding,
+    binding: Rc<documents::DocumentBinding>,
     mirror: DocumentMirror,
 }
 
 impl ConfigDocument {
     pub fn name(&self) -> &str {
         &self.binding.name
+    }
+
+    /// A typed handle on one facet of this document: a retained watch plus the write route, the
+    /// guest-side twin of the native `DocumentRef::facet`. Fails only if the host refuses the
+    /// watch, i.e. the manifest did not grant this facet.
+    pub fn facet<T>(&self, tag: &str, key_id: &str) -> Result<Facet<T>, documents::DocumentError> {
+        let watch = self.watch(tag, key_id)?;
+        Ok(Facet {
+            document: self.clone(),
+            key: documents::FacetKey {
+                tag: tag.into(),
+                key_id: key_id.into(),
+            },
+            watch,
+            _value: PhantomData,
+        })
     }
 
     pub fn watch(&self, tag: &str, key_id: &str) -> Result<MirrorWatch, documents::DocumentError> {
@@ -233,9 +289,83 @@ impl ConfigDocument {
     }
 }
 
+/// A typed handle on one granted facet: reads answer from the retained mirror, writes go
+/// through the binding's `document-access`. Clones share one watch, so equality is watch
+/// identity — what a Dioxus prop needs to know.
+pub struct Facet<T> {
+    document: ConfigDocument,
+    key: documents::FacetKey,
+    watch: MirrorWatch,
+    _value: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for Facet<T> {
+    fn clone(&self) -> Self {
+        Self {
+            document: self.document.clone(),
+            key: self.key.clone(),
+            watch: self.watch.clone(),
+            _value: PhantomData,
+        }
+    }
+}
+
+impl<T> PartialEq for Facet<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.watch == other.watch
+    }
+}
+
+impl<T> Facet<T> {
+    pub fn watch(&self) -> &MirrorWatch {
+        &self.watch
+    }
+
+    pub fn current(&self) -> MirrorSnapshot {
+        self.watch.current()
+    }
+
+    /// Re-read the host's current snapshot into the mirror (after a write, or when lagged).
+    pub fn resync(&self) -> Result<bool, documents::DocumentError> {
+        self.watch.resync()
+    }
+
+    /// Ask the host to refresh the document from its source, then re-read it.
+    pub fn refresh(&self) -> Result<(), documents::DocumentError> {
+        self.watch.refresh()
+    }
+
+    /// The facet's typed value in `snapshot`. A released or revoked watch reads as
+    /// [`FacetState::Loading`]: the value is gone, and the snapshot's status says why.
+    pub fn state(&self, snapshot: &MirrorSnapshot) -> FacetState<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        match snapshot.status {
+            MirrorStatus::Released | MirrorStatus::Revoked => FacetState::Loading,
+            MirrorStatus::Live | MirrorStatus::Lagged => snapshot
+                .value(&self.key.tag, &self.key.key_id)
+                .expect("facet watch must contain its own granted facet"),
+        }
+    }
+
+    pub fn write(&self, value: &T) -> Result<MirrorOperation, documents::DocumentError>
+    where
+        T: serde::Serialize,
+    {
+        self.document.write(&self.key.tag, &self.key.key_id, value)
+    }
+}
+
 #[derive(Clone)]
 pub struct MirrorOperation {
     state: Rc<OperationState>,
+}
+
+impl PartialEq for MirrorOperation {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.state, &other.state)
+    }
 }
 
 struct OperationState {
@@ -252,6 +382,12 @@ impl MirrorOperation {
 #[derive(Clone)]
 pub struct MirrorWatch {
     state: Rc<WatchState>,
+}
+
+impl PartialEq for MirrorWatch {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.state, &other.state)
+    }
 }
 
 struct WatchState {
@@ -282,8 +418,20 @@ impl MirrorWatch {
     }
 
     pub fn release(&self) {
-        if self.current().status != MirrorStatus::Revoked {
+        // Only a live watch has anything to withdraw; releasing a terminal watch is a silent
+        // no-op so the notifier contract stays exactly-once.
+        if matches!(
+            self.current().status,
+            MirrorStatus::Live | MirrorStatus::Lagged
+        ) {
             self.withdraw(MirrorStatus::Released);
+            self.notify();
+        }
+    }
+
+    fn notify(&self) {
+        if let Some(mirror) = self.state.mirror.upgrade() {
+            mirror.borrow().notify();
         }
     }
 
@@ -339,7 +487,19 @@ impl MirrorWatch {
         changed
     }
 
+    /// Pull a fresh snapshot through `read` and apply it as a reset. Every outcome is reflected
+    /// in the watch — a newer snapshot replaces the mirror, an older one marks it lagged, an
+    /// authority failure withdraws it — so the notifier runs whichever way it went.
     fn resync_with(
+        &self,
+        read: impl FnOnce() -> Result<documents::DocumentSnapshot, documents::DocumentError>,
+    ) -> Result<bool, documents::DocumentError> {
+        let result = self.reset_from(read);
+        self.notify();
+        result
+    }
+
+    fn reset_from(
         &self,
         read: impl FnOnce() -> Result<documents::DocumentSnapshot, documents::DocumentError>,
     ) -> Result<bool, documents::DocumentError> {
@@ -437,300 +597,4 @@ fn mirror_snapshot(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::cell::Cell;
-
-    fn route() -> documents::FacetRoute {
-        documents::FacetRoute {
-            document: "config".into(),
-            branch: "main".into(),
-            key: documents::FacetKey {
-                tag: "counter".into(),
-                key_id: "count".into(),
-            },
-        }
-    }
-
-    fn snapshot(
-        watch_id: u64,
-        revision: u64,
-        value: documents::FacetValue,
-    ) -> documents::DocumentSnapshot {
-        documents::DocumentSnapshot {
-            watch_id,
-            revision,
-            facets: vec![documents::FacetEntry {
-                route: route(),
-                value,
-            }],
-            pending: vec![],
-            refreshing: false,
-            revoked: false,
-        }
-    }
-
-    fn retain(mirror: &DocumentMirror, id: u64) -> MirrorWatch {
-        mirror.retain(
-            None,
-            route(),
-            snapshot(id, 1, documents::FacetValue::Loading),
-        )
-    }
-
-    fn receipt(
-        id: u64,
-        revision: u64,
-        status: documents::OperationStatus,
-    ) -> documents::OperationReceipt {
-        documents::OperationReceipt {
-            id,
-            revision,
-            status,
-        }
-    }
-
-    #[test]
-    fn reads_are_local_and_preserve_availability_freshness_and_pending() {
-        let mirror = DocumentMirror::default();
-        let watch = retain(&mirror, 1);
-        for _ in 0..10 {
-            assert_eq!(
-                watch.current().value::<u64>("counter", "count").unwrap(),
-                FacetState::Loading
-            );
-        }
-        assert!(mirror.changed(snapshot(1, 2, documents::FacetValue::Absent)));
-        assert_eq!(
-            watch.current().value::<u64>("counter", "count").unwrap(),
-            FacetState::Absent
-        );
-        let mut incoming = snapshot(1, 3, documents::FacetValue::Present("5".into()));
-        incoming.pending = vec![42];
-        incoming.refreshing = true;
-        assert!(mirror.changed(incoming));
-        assert_eq!(
-            watch.current(),
-            MirrorSnapshot {
-                revision: 3,
-                facets: [(
-                    ("counter".into(), "count".into()),
-                    FacetState::Present("5".into())
-                )]
-                .into(),
-                pending: vec![42],
-                refreshing: true,
-                status: MirrorStatus::Live,
-            }
-        );
-        assert_eq!(
-            watch.current().value::<u64>("counter", "count").unwrap(),
-            FacetState::Present(5)
-        );
-        assert!(matches!(
-            watch.current().value::<u64>("other", "count"),
-            Err(documents::DocumentError::Denied)
-        ));
-    }
-
-    #[test]
-    fn routing_is_monotonic_and_isolated_between_watches() {
-        let mirror = DocumentMirror::default();
-        let first = retain(&mirror, 1);
-        let second = retain(&mirror, 2);
-        let second_initial = second.current();
-        assert!(mirror.changed(snapshot(1, 3, documents::FacetValue::Present("8".into()))));
-        let current = first.current();
-        for (id, revision) in [(1, 1), (1, 3), (99, 9)] {
-            assert!(!mirror.changed(snapshot(id, revision, documents::FacetValue::Absent)));
-        }
-        assert_eq!(first.current(), current);
-        assert_eq!(second.current(), second_initial);
-        assert!(mirror.lagged(99).is_none());
-    }
-
-    #[test]
-    fn lag_requires_explicit_reset_and_never_fetches_during_reads() {
-        let mirror = DocumentMirror::default();
-        let watch = retain(&mirror, 1);
-        mirror.changed(snapshot(1, 3, documents::FacetValue::Present("8".into())));
-        let lagged = mirror.lagged(1).unwrap();
-        for _ in 0..10 {
-            assert_eq!(watch.current().status, MirrorStatus::Lagged);
-            assert_eq!(
-                watch.current().value::<u64>("counter", "count").unwrap(),
-                FacetState::Present(8)
-            );
-        }
-        assert!(mirror.changed(snapshot(1, 4, documents::FacetValue::Present("9".into()))));
-        assert_eq!(watch.current().status, MirrorStatus::Lagged);
-        let reads = Cell::new(0);
-        assert!(matches!(
-            lagged.resync_with(|| {
-                reads.set(reads.get() + 1);
-                Ok(snapshot(1, 3, documents::FacetValue::Absent))
-            }),
-            Err(documents::DocumentError::SubscriptionLagged)
-        ));
-        assert_eq!(watch.current().status, MirrorStatus::Lagged);
-        assert!(
-            lagged
-                .resync_with(|| {
-                    reads.set(reads.get() + 1);
-                    Ok(snapshot(1, 4, documents::FacetValue::Present("9".into())))
-                })
-                .unwrap()
-        );
-        assert_eq!(reads.get(), 2);
-        assert_eq!(watch.current().status, MirrorStatus::Live);
-        assert_eq!(
-            watch.current().value::<u64>("counter", "count").unwrap(),
-            FacetState::Present(9)
-        );
-    }
-
-    #[test]
-    fn release_and_revocation_are_terminal_for_every_clone() {
-        for terminal in [MirrorStatus::Released, MirrorStatus::Revoked] {
-            let mirror = DocumentMirror::default();
-            let watch = retain(&mirror, 1);
-            let clone = watch.clone();
-            mirror.changed(snapshot(1, 2, documents::FacetValue::Present("7".into())));
-            match terminal {
-                MirrorStatus::Released => watch.release(),
-                MirrorStatus::Revoked => {
-                    let mut revoked = snapshot(1, 3, documents::FacetValue::Present("99".into()));
-                    revoked.revoked = true;
-                    revoked.pending = vec![4];
-                    revoked.refreshing = true;
-                    assert!(mirror.changed(revoked));
-                }
-                MirrorStatus::Live | MirrorStatus::Lagged => unreachable!(),
-            }
-            assert_eq!(
-                clone.current(),
-                MirrorSnapshot {
-                    revision: if terminal == MirrorStatus::Released {
-                        2
-                    } else {
-                        3
-                    },
-                    facets: BTreeMap::new(),
-                    pending: vec![],
-                    refreshing: false,
-                    status: terminal,
-                }
-            );
-            assert!(!mirror.changed(snapshot(1, 9, documents::FacetValue::Present("99".into()))));
-            assert!(mirror.lagged(1).is_none());
-            assert!(matches!(
-                clone.resync_with(|| panic!("released watch performed IO")),
-                Err(documents::DocumentError::Revoked)
-            ));
-            assert!(matches!(
-                clone.current().value::<u64>("counter", "count"),
-                Err(documents::DocumentError::Revoked)
-            ));
-            clone.release();
-            assert_eq!(clone.current().status, terminal);
-        }
-    }
-
-    #[test]
-    fn resync_authority_failure_withdraws_local_values() {
-        let mirror = DocumentMirror::default();
-        let watch = retain(&mirror, 1);
-        mirror.changed(snapshot(1, 2, documents::FacetValue::Present("7".into())));
-        assert!(matches!(
-            watch.resync_with(|| Err(documents::DocumentError::Revoked)),
-            Err(documents::DocumentError::Revoked)
-        ));
-        assert_eq!(watch.current().status, MirrorStatus::Revoked);
-        assert!(watch.current().facets.is_empty());
-        assert!(!mirror.changed(snapshot(1, 3, documents::FacetValue::Present("8".into()))));
-    }
-
-    #[test]
-    fn last_watch_drop_removes_routing_but_not_pending_operations() {
-        let mirror = DocumentMirror::default();
-        let watch = retain(&mirror, 1);
-        let clone = watch.clone();
-        let operation = mirror.track(
-            None,
-            receipt(42, 0, documents::OperationStatus::LocallyApplied),
-        );
-        drop(watch);
-        assert!(mirror.changed(snapshot(1, 2, documents::FacetValue::Present("1".into()))));
-        drop(clone);
-        assert!(mirror.state.borrow().watches.is_empty());
-        assert!(!mirror.changed(snapshot(1, 3, documents::FacetValue::Absent)));
-        assert!(!mirror.completed(receipt(42, 0, documents::OperationStatus::Accepted)));
-        assert!(mirror.completed(receipt(42, 1, documents::OperationStatus::Accepted)));
-        assert!(matches!(
-            operation.current().status,
-            documents::OperationStatus::Accepted
-        ));
-        assert_eq!(operation.current().revision, 1);
-        assert!(mirror.state.borrow().operations.is_empty());
-        assert!(!mirror.completed(receipt(42, 2, documents::OperationStatus::LocallyApplied)));
-        assert!(matches!(
-            operation.current().status,
-            documents::OperationStatus::Accepted
-        ));
-    }
-
-    #[test]
-    fn rollback_details_survive_explicit_watch_release() {
-        let mirror = DocumentMirror::default();
-        let watch = retain(&mirror, 1);
-        let operation = mirror.track(
-            None,
-            receipt(42, 0, documents::OperationStatus::LocallyApplied),
-        );
-        watch.release();
-        assert!(mirror.completed(receipt(
-            42,
-            1,
-            documents::OperationStatus::RolledBack(documents::OperationFailure::Transport(
-                documents::TransportFailure {
-                    message: "disconnected".into(),
-                    outcome_unknown: true,
-                },
-            )),
-        )));
-        let current = operation.current();
-        assert_eq!((current.id, current.revision), (42, 1));
-        let documents::OperationStatus::RolledBack(documents::OperationFailure::Transport(failure)) =
-            current.status
-        else {
-            panic!("transport receipt lost its failure details");
-        };
-        assert_eq!(
-            (failure.message.as_str(), failure.outcome_unknown),
-            ("disconnected", true)
-        );
-        assert_eq!(watch.current().status, MirrorStatus::Released);
-        assert!(mirror.state.borrow().operations.is_empty());
-    }
-
-    #[test]
-    fn dropping_ui_operation_handles_does_not_discard_completion_tracking() {
-        let mirror = DocumentMirror::default();
-        drop(mirror.track(
-            None,
-            receipt(42, 0, documents::OperationStatus::LocallyApplied),
-        ));
-        assert_eq!(mirror.state.borrow().operations.len(), 1);
-        assert!(mirror.completed(receipt(
-            42,
-            1,
-            documents::OperationStatus::RolledBack(documents::OperationFailure::Transport(
-                documents::TransportFailure {
-                    message: "disconnected".into(),
-                    outcome_unknown: true,
-                }
-            ),)
-        )));
-        assert!(mirror.state.borrow().operations.is_empty());
-    }
-}
+mod tests;

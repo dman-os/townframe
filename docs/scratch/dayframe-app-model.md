@@ -1,8 +1,13 @@
 # dayframe_dx — App Model
 
+Status: Reference — current app map and re-design directions
+Owner: operator + dayframe track
+Scope: `src/daybook_compose` app surface and its mapping onto the Rust `dayframe_dx` GUI face.
+Updated: 2026-10-22 (crate-hierarchy restructure; ADR renumber)
+
 Source of truth for the re-implementation: `src/daybook_compose` (Kotlin
 Multiplatform + Compose). This document maps the current app, derives the GUI
-face contract (per ADR 010), and records the re-design directions. Generated
+face contract (per ADR 016), and records the re-design directions. Generated
 uniffi bindings (`commonMain/.../uniffi/`) were not read; the app-facing repos
 are used as the interface surface.
 
@@ -21,7 +26,7 @@ are used as the interface surface.
   repo context; screen ViewModels are keyed by container.
 - Camera preview FFI preload is deferred until after bootstrap (avoids FFI init
   races).
-- Camera is a major surface for Kotlin/Swift platform code: the capture pipeline should lean on native host code via the BoltFFI platform bridge (ADR 010 §4).
+- Camera is a major surface for Kotlin/Swift platform code: the capture pipeline should lean on native host code via the BoltFFI platform bridge (ADR 016 §4).
 
 ### Navigation (DaybookNavigation.kt)
 
@@ -82,7 +87,7 @@ Every repo exposes the same shape the IRPC face must provide:
 - targeted refresh vs full refresh, coalesced in the UI (60 ms
   `CoalescingIntentRunner`), with optimistic local updates.
 
-This is exactly the ADR 010 "event lanes" material: GUI-driving events (lane 1)
+This is exactly the ADR 016 "event lanes" material: GUI-driving events (lane 1)
 vs derived-state events (lane 2) should split along these listener surfaces when
 the piece inventory lands.
 
@@ -110,7 +115,7 @@ the piece inventory lands.
    actions — not a menu of links. Widgets stay as the extension seam.
 4. **Editor**: keep block/facet data model; re-design session UX around the
    testable `EditorSessionController`; the display-hint mechanism becomes the
-   renderer-agnostic styling seam (ADR 010 §5).
+   renderer-agnostic styling seam (ADR 016 §5).
 5. **Plugs as UI extension points** (`FacetContentHost` → plugin custom views
    via `RtFfi`): needs a decision for Dioxus — plugin-provided RSX vs an
    embedded view host. This is an open question, not a solved one.

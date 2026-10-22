@@ -1,9 +1,3 @@
-# Dayframe UI guidance
-
-For any UI implementation or review under `src`, read `.agents/skills/dayframe-design-language/SKILL.md` before changing UI. It defines the canonical token source, Tailwind vocabulary, foundation-versus-feature boundary, and the process for surfacing missing design-language expressivity.
-
-For native build, screenshot, accessibility, or renderer verification, also read `.agents/skills/dayframe-native-dev-loop/SKILL.md`.
-
 ---
 name: dayframe-native-dev-loop
 description: Run, screenshot, and semantically inspect the dayframe_dx Dioxus/Blitz native desktop app. Use when building or visually verifying src, when the wrapped Dioxus serve process misbehaves, when taking app screenshots under niri, or when driving the native app with accessibility-cli over AT-SPI.
@@ -168,7 +162,7 @@ The operator has interrupted this loop to ask for less noise. When inspecting a 
   what the app can do at all.
 - `src/AGENTS.md` — Dioxus 0.8-alpha API notes (0.7 docs differ; `cx`/`Scope`/`use_state`
   are gone).
-- `docs/fdrs/005-tiles-primitive.md`, `docs/adrs/010-dayframe-dx-architecture.md`.
+- `docs/fdrs/005-tiles-primitive.md`, `docs/adrs/016-dayframe-dx-architecture.md`.
 
 ## Recently bitten by
 

@@ -7,7 +7,11 @@ edition = "2024"
 path = "lib.rs"
 
 [dependencies]
-clay_mdk = { path = "../clay_mdk", default-features = false, features = ["native"] }
+clay_mdk = { workspace = true, features = ["in_process"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 
 [dev-dependencies]
-clay_host = { path = "../clay_host" }
+clay_host = { workspace = true }
+insta.workspace = true
+serde_json.workspace = true

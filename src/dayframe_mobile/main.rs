@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
-use ui::{ThemeMode, ThemeRoot};
+use ui::ThemeMode;
+use ui::ThemeRoot;
 
 fn main() {
     dioxus::launch(App);

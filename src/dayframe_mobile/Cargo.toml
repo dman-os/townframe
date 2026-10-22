@@ -16,9 +16,11 @@ anyrender_vello_hybrid = { version = "0.10.0" }
 tokio = { version = "1", features = ["time", "rt"] }
 
 [features]
-default = ["native"]
+default = ["desktop"]
 mobile = ["dioxus/mobile"]
-native = ["dioxus/native"]
+# Native windowing backend: a platform is selected by target, so the feature only turns on
+# the Dioxus desktop renderer rather than naming a platform.
+desktop = ["dioxus/native"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-activity = { version = "0.6", features = ["native-activity"] }

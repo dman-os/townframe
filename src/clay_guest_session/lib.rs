@@ -1,13 +1,21 @@
-use clay_data::{
-    DocumentAccess, DocumentError, DocumentSnapshot, DocumentWatch, FacetMutation, FacetRoute,
-    Operation as DataOperation, OperationReceipt, WatchSelection,
-};
-use clay_host::{AccessError, Host, Instance};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
-};
-use tokio::sync::{mpsc, watch};
+use clay_docs::DocumentAccess;
+use clay_docs::DocumentError;
+use clay_docs::DocumentSnapshot;
+use clay_docs::DocumentWatch;
+use clay_docs::FacetMutation;
+use clay_docs::FacetRoute;
+use clay_docs::Operation as DataOperation;
+use clay_docs::OperationReceipt;
+use clay_docs::WatchSelection;
+use clay_host::AccessError;
+use clay_host::Host;
+use clay_host::Instance;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 #[cfg(test)]
 mod tests;

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ffd1b71c605378c0a75b2d91d1e3425ddcbefeaaf437efde3d720b0285eb4973 # shrinks to entries = [EntryGen { present: true, dependent: true, enabled: true, rank: 0, bind_sel: 92 }, EntryGen { present: true, dependent: true, enabled: true, rank: 0, bind_sel: 0 }, EntryGen { present: true, dependent: false, enabled: false, rank: 0, bind_sel: 0 }, EntryGen { present: false, dependent: false, enabled: false, rank: 0, bind_sel: 0 }], edits = [Rebind { slot: 1, bind_sel: 0 }]

@@ -1,182 +1,320 @@
-//! The Dioxus guest adapter: one `VirtualDom` per micro incarnation, one render target per
-//! granted mount, typed `WriteMutations` batches through `surface.apply`. Feature `dioxus`.
-use crate::{presentation, presentation_events, wire};
+//! The guest backend: the same authoring shape as [`crate::native`], implemented over the WIT
+//! imports a wasm micro is linked against. A micro writes one `activate(&Context)` and one
+//! Dioxus view; [`export_micro!`] turns that into the `micro-client` world the host drives.
+//! Activation receives already-granted configuration bindings and publishes one component —
+//! the surface the host mounts — exactly as a native activation receives a [`crate::native::Context`].
+//! What the guest cannot yet do (require provisions, write collections, mount roots) is absent
+//! here rather than stubbed; it arrives with the collections WIT waist.
+//!
+//! Document flow: the host's `document-events` callbacks advance the [`DocumentMirror`]; the
+//! mirror's one notifier bumps a Dioxus signal inside the guest runtime, so any component that
+//! called [`use_document_changes`] (directly or via [`use_facet`]) re-renders and reads the
+//! current snapshot. Reads never cross the boundary; only events and explicit resyncs do.
+pub use crate::mirror::ConfigDocument;
+pub use crate::mirror::Facet;
+pub use crate::mirror::FacetState;
+pub use crate::mirror::MirrorOperation;
+pub use crate::mirror::MirrorSnapshot;
+pub use crate::mirror::MirrorStatus;
+pub use crate::mirror::MirrorWatch;
+pub use dom::GuestDom;
 
-/// The guest owns its `VirtualDom` and event closures in linear memory; only typed `WriteMutations`
-/// batches cross `surface.apply`.
-pub struct GuestDom {
-    pub(crate) dom: dioxus_core::VirtualDom,
-    targets: std::rc::Rc<std::cell::RefCell<Vec<(u64, dioxus_core::RenderTargetId)>>>,
-    pub(crate) edits:
-        std::collections::BTreeMap<dioxus_core::RenderTargetId, wire::WireMutations<'static>>,
-    surfaces: std::collections::BTreeMap<u64, (dioxus_core::RenderTargetId, presentation::Surface)>,
+use crate::documents;
+use crate::mirror::DocumentMirror;
+use crate::presentation;
+use crate::presentation_events;
+use dioxus::prelude::*;
+use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+mod dom;
+
+/// The value surface one guest activation may use: its granted configuration documents and the
+/// publication of its presentation. Constructed only by the runtime behind [`export_micro!`].
+pub struct Context {
+    configs: BTreeMap<String, ConfigDocument>,
+    presentation: Rc<RefCell<Option<GuestDom>>>,
+    changes: Rc<Cell<Option<Signal<u64>>>>,
 }
 
-impl GuestDom {
-    pub fn new(app: fn() -> dioxus_core::Element) -> Self {
-        Self::from_app(app)
+impl Context {
+    /// A configuration document granted from the manifest's declared ACL. `None` means the host
+    /// handed over no binding under that name — the manifest declared none, or the composition
+    /// activated the micro standalone.
+    pub fn config(&self, name: &str) -> Option<&ConfigDocument> {
+        self.configs.get(name)
     }
 
-    pub fn new_with_props<P: Clone + 'static>(
-        app: fn(P) -> dioxus_core::Element,
-        props: P,
-    ) -> Self {
-        Self::from_app(move || app(props.clone()))
-    }
-
-    fn from_app(app: impl Fn() -> dioxus_core::Element + Clone + 'static) -> Self {
-        use dioxus::prelude::*;
-
-        dioxus_html::set_event_converter(Box::new(dioxus_html::SerializedHtmlEventConverter));
-        let targets = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let root_targets = targets.clone();
-        let mut dom = dioxus_core::VirtualDom::new_with_props(
-            move |()| {
-                let children = app();
-                let targets = root_targets.borrow();
-                rsx! {
-                    for (identity, target) in targets.iter() {
-                        Portal {
-                            key: "{identity}",
-                            target: *target,
-                            {children.clone()}
-                        }
-                    }
-                }
+    /// Publish this micro's presentation. The host mounts it into every placement it grants the
+    /// incarnation; a guest has exactly one, so publishing twice is a programming error. Unlike
+    /// the native twin this returns no [`crate::ComponentRef`]: a guest cannot yet place its own
+    /// component anywhere (that arrives with the collections waist), so there is nothing to hold.
+    ///
+    /// `render` runs as the presentation's root scope and its output is rendered once per
+    /// mounted surface, so hooks called directly in `render` hold state every surface shares
+    /// — a child component's hooks hold per-surface state instead. Keep the micro's model in
+    /// `render`; keep child components presentational.
+    pub fn publish_component(&self, render: impl Fn() -> Element + 'static) {
+        let dom = GuestDom::new_with_props(
+            root,
+            RootProps {
+                changes: self.changes.clone(),
+                render: Rc::new(render),
             },
-            (),
         );
-        let mut edits = std::collections::BTreeMap::new();
-        dom.rebuild(&mut edits);
-        Self {
-            dom,
-            targets,
-            edits,
-            surfaces: std::collections::BTreeMap::new(),
+        assert!(
+            self.presentation.borrow_mut().replace(dom).is_none(),
+            "guest micro published more than one component"
+        );
+    }
+}
+
+/// Re-render the calling component on every document-mirror change — delivered snapshots, lag,
+/// completions, resyncs. Reads of [`Facet`] or [`MirrorOperation`] taken after this hook in the
+/// same render are current.
+pub fn use_document_changes() {
+    let changes = use_context::<DocumentChanges>();
+    let _ = (changes.0)();
+}
+
+/// [`use_document_changes`] plus the facet's current snapshot.
+pub fn use_facet<T>(facet: &Facet<T>) -> MirrorSnapshot {
+    use_document_changes();
+    facet.current()
+}
+
+/// Export the `micro-client` world for a guest authored as `activate(&Context)`. Invoke once at
+/// the crate root of a `cdylib` micro; the generated runtime owns the document mirror and the
+/// published presentation and routes every host callback to them.
+#[macro_export]
+macro_rules! export_micro {
+    ($activate:path) => {
+        struct ClayMdkExportedMicro;
+
+        impl $crate::micro_lifecycle::Guest for ClayMdkExportedMicro {
+            fn activate(
+                configs: ::std::vec::Vec<$crate::documents::DocumentBinding>,
+            ) -> ::std::result::Result<(), ::std::string::String> {
+                $crate::guest::Runtime::activate($activate, configs)
+            }
+        }
+
+        impl $crate::document_events::Guest for ClayMdkExportedMicro {
+            fn changed(snapshot: $crate::documents::DocumentSnapshot) {
+                $crate::guest::Runtime::changed(snapshot);
+            }
+
+            fn lagged(watch_id: u64) {
+                $crate::guest::Runtime::lagged(watch_id);
+            }
+
+            fn completed(receipt: $crate::documents::OperationReceipt) {
+                $crate::guest::Runtime::completed(receipt);
+            }
+        }
+
+        impl $crate::presentation_events::Guest for ClayMdkExportedMicro {
+            fn mount(
+                placement: &$crate::presentation::MountPoint,
+                components: ::std::vec::Vec<$crate::presentation::ComponentRef>,
+            ) -> ::std::result::Result<
+                $crate::presentation::Surface,
+                $crate::presentation::PresentationError,
+            > {
+                $crate::guest::Runtime::mount(placement, components)
+            }
+
+            fn unmount(surface: &$crate::presentation::Surface) {
+                $crate::guest::Runtime::unmount(surface);
+            }
+
+            fn dispatch(
+                surface: &$crate::presentation::Surface,
+                event: $crate::presentation_events::Event,
+            ) -> $crate::presentation_events::EventResponse {
+                $crate::guest::Runtime::dispatch(surface, event)
+            }
+        }
+
+        $crate::bindings::export!(ClayMdkExportedMicro with_types_in $crate::bindings);
+    };
+}
+
+/// One incarnation's guest-side state: the mirror every granted binding routes through and the
+/// presentation activation published. A wasm store hosts one incarnation, so this is a
+/// thread-local; the host serializes every call into it. Public only for [`export_micro!`].
+#[doc(hidden)]
+pub struct Runtime {
+    mirror: DocumentMirror,
+    presentation: Rc<RefCell<Option<GuestDom>>>,
+    changes: Rc<Cell<Option<Signal<u64>>>>,
+}
+
+thread_local! {
+    static RUNTIME: RefCell<Option<Runtime>> = const { RefCell::new(None) };
+}
+
+impl Runtime {
+    pub fn activate(
+        activate: impl FnOnce(&Context) -> Result<(), documents::DocumentError>,
+        configs: Vec<documents::DocumentBinding>,
+    ) -> Result<(), String> {
+        let mirror = DocumentMirror::default();
+        let presentation = Rc::new(RefCell::new(None));
+        let changes = Rc::new(Cell::new(None));
+        let context = Context {
+            configs: configs
+                .into_iter()
+                .map(|binding| (binding.name.clone(), mirror.bind(binding)))
+                .collect(),
+            presentation: presentation.clone(),
+            changes: changes.clone(),
+        };
+        let runtime = Self {
+            mirror,
+            presentation,
+            changes,
+        };
+        runtime.mirror.set_notifier({
+            let changes = runtime.changes.clone();
+            move || {
+                let Some(mut signal) = changes.get() else {
+                    return;
+                };
+                signal += 1;
+            }
+        });
+        RUNTIME.with_borrow_mut(|slot| {
+            assert!(
+                slot.replace(runtime).is_none(),
+                "guest micro activated twice"
+            );
+        });
+        activate(&context).map_err(|error| error.to_string())
+    }
+
+    fn with<T>(f: impl FnOnce(&Runtime) -> T) -> T {
+        RUNTIME.with_borrow(|slot| {
+            f(slot
+                .as_ref()
+                .expect("host drove a guest micro before activating it"))
+        })
+    }
+
+    /// Run a mirror mutation where its notifier may write Dioxus state: inside the presentation's
+    /// runtime when one is published (then flush the resulting edits), plainly otherwise.
+    fn in_presentation(&self, change: impl FnOnce()) {
+        match self.presentation.borrow_mut().as_mut() {
+            Some(dom) => dom
+                .update(change)
+                .expect("guest presentation commit failed"),
+            None => change(),
         }
     }
 
-    pub(crate) fn mount_target(&mut self, identity: u64) -> dioxus_core::RenderTargetId {
-        let target = self.dom.runtime().create_render_target();
-        assert!(
-            self.edits
-                .insert(target, wire::WireMutations::default())
-                .is_none()
-        );
-        let mut targets = self.targets.borrow_mut();
-        assert!(targets.iter().all(|(mounted, _)| *mounted != identity));
-        targets.push((identity, target));
-        self.dom.mark_dirty(dioxus_core::ScopeId::APP);
-        target
+    pub fn changed(snapshot: documents::DocumentSnapshot) {
+        Self::with(|runtime| {
+            runtime.in_presentation(|| {
+                runtime.mirror.changed(snapshot);
+            })
+        });
     }
 
-    pub(crate) fn unmount_target(&mut self, identity: u64) {
-        let target = {
-            let mut targets = self.targets.borrow_mut();
-            let Some(index) = targets.iter().position(|(mounted, _)| *mounted == identity) else {
-                return;
-            };
-            targets.remove(index).1
-        };
-        self.dom.mark_dirty(dioxus_core::ScopeId::APP);
-        self.dom.render_immediate(&mut self.edits);
-        self.edits
-            .remove(&target)
-            .expect("mounted target must have a writer");
-        assert!(self.dom.runtime().remove_render_target(target));
-        self.surfaces.remove(&identity);
+    /// A lagged watch is resynchronized on the spot: the mirror is stale and a guest has nothing
+    /// better to do with it than pull the current snapshot. Every failure mode is already
+    /// reflected in the watch's status (still lagged, or withdrawn), which is what views show.
+    pub fn lagged(watch_id: u64) {
+        Self::with(|runtime| {
+            runtime.in_presentation(|| {
+                let Some(watch) = runtime.mirror.lagged(watch_id) else {
+                    return;
+                };
+                match watch.resync() {
+                    Ok(_)
+                    | Err(
+                        documents::DocumentError::SubscriptionLagged
+                        | documents::DocumentError::Revoked
+                        | documents::DocumentError::Denied,
+                    ) => {}
+                    Err(documents::DocumentError::InvalidValue(message)) => {
+                        panic!("document watch read rejected its own selection: {message}")
+                    }
+                }
+            })
+        });
+    }
+
+    pub fn completed(receipt: documents::OperationReceipt) {
+        Self::with(|runtime| {
+            runtime.in_presentation(|| {
+                runtime.mirror.completed(receipt);
+            })
+        });
     }
 
     pub fn mount(
-        &mut self,
         placement: &presentation::MountPoint,
+        components: Vec<presentation::ComponentRef>,
     ) -> Result<presentation::Surface, presentation::PresentationError> {
-        let surface = placement.open()?;
-        let retained = surface.retain()?;
-        let identity = surface.identity();
-        let target = self.mount_target(identity);
-        assert!(self.surfaces.insert(identity, (target, retained)).is_none());
-        if let Err(error) = self.render() {
-            self.unmount_target(identity);
-            return Err(error);
-        }
-        if !self.surfaces.contains_key(&identity) {
-            return Err(presentation::PresentationError::Revoked);
-        }
-        Ok(surface)
+        assert!(
+            components.is_empty(),
+            "component slots are not routed to Dioxus guest micros yet"
+        );
+        Self::with(|runtime| {
+            runtime
+                .presentation
+                .borrow_mut()
+                .as_mut()
+                .expect("host mounted a guest micro that published no component")
+                .mount(placement)
+        })
     }
 
-    pub fn unmount(&mut self, surface: &presentation::Surface) {
-        self.unmount_target(surface.identity());
-        self.render().expect("guest presentation commit failed");
-    }
-
-    /// Applies a change that arrived outside event dispatch (a document callback, for example)
-    /// inside this guest's Dioxus runtime, so signal writes schedule their subscribers, then
-    /// flushes the resulting edits to every mounted surface.
-    pub fn update(&mut self, change: impl FnOnce()) -> Result<(), presentation::PresentationError> {
-        self.dom.in_runtime(change);
-        self.render()
-    }
-
-    pub fn render(&mut self) -> Result<(), presentation::PresentationError> {
-        loop {
-            self.dom.render_immediate(&mut self.edits);
-            let mut revoked = Vec::new();
-            for (&identity, (target, surface)) in &self.surfaces {
-                let edits = self
-                    .edits
-                    .get_mut(target)
-                    .expect("mounted target must have a writer");
-                if !edits.is_empty() {
-                    match surface.apply(&edits.take()) {
-                        Ok(_) => {}
-                        Err(presentation::PresentationError::Revoked) => revoked.push(identity),
-                        Err(error) => return Err(error),
-                    }
-                }
-            }
-            if revoked.is_empty() {
-                return Ok(());
-            }
-            for identity in revoked {
-                self.unmount_target(identity);
-            }
-        }
+    pub fn unmount(surface: &presentation::Surface) {
+        Self::with(|runtime| {
+            runtime
+                .presentation
+                .borrow_mut()
+                .as_mut()
+                .expect("host unmounted a guest micro that published no component")
+                .unmount(surface)
+        });
     }
 
     pub fn dispatch(
-        &mut self,
         surface: &presentation::Surface,
         event: presentation_events::Event,
     ) -> presentation_events::EventResponse {
-        let Some((target, _)) = self.surfaces.get(&surface.identity()) else {
-            return presentation_events::EventResponse {
-                prevent_default: false,
-                stop_propagation: false,
-            };
-        };
-        let data = serde_json::from_str::<serde_json::Value>(&event.data_json)
-            .expect("Dioxus event payload must be valid JSON");
-        let envelope = serde_json::json!({
-            "element": event.element,
-            "name": event.name,
-            "bubbles": event.bubbles,
-            "data": data,
-        });
-        let html_event = serde_json::from_value::<dioxus_html::HtmlEvent>(envelope)
-            .expect("event envelope must match Dioxus HtmlEvent");
-        let dioxus_event = dioxus_core::Event::new(html_event.data.into_any(), html_event.bubbles);
-        self.dom.runtime().handle_event_for_target(
-            *target,
-            &html_event.name,
-            dioxus_event.clone(),
-            dioxus_core::ElementId::from_raw(html_event.element.raw()),
-        );
-        self.render().expect("guest presentation commit failed");
-        presentation_events::EventResponse {
-            prevent_default: !dioxus_event.default_action_enabled(),
-            stop_propagation: !dioxus_event.propagates(),
-        }
+        Self::with(|runtime| {
+            runtime
+                .presentation
+                .borrow_mut()
+                .as_mut()
+                .expect("host dispatched to a guest micro that published no component")
+                .dispatch(surface, event)
+        })
     }
+}
+
+/// The document-change tick [`use_document_changes`] subscribes to, provided at the published
+/// component's root.
+#[derive(Clone, Copy)]
+struct DocumentChanges(Signal<u64>);
+
+#[derive(Clone)]
+struct RootProps {
+    changes: Rc<Cell<Option<Signal<u64>>>>,
+    render: Rc<dyn Fn() -> Element>,
+}
+
+fn root(props: RootProps) -> Element {
+    let changes = use_hook(|| {
+        let signal = Signal::new(0_u64);
+        props.changes.set(Some(signal));
+        signal
+    });
+    use_context_provider(|| DocumentChanges(changes));
+    (props.render)()
 }

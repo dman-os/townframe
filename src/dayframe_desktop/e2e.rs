@@ -1,15 +1,31 @@
-use crate::composition::{Application, DesktopRuntime};
-use blitz_dom::{ns, BaseDocument, DocumentConfig, LocalName, NodeId, QualName};
-use clay_compose::micros::composition::InstanceState;
-use clay_dioxus::wasmtime::WasmMicro;
+use crate::composition::Application;
+use crate::composition::DesktopRuntime;
+use blitz_dom::ns;
+use blitz_dom::BaseDocument;
+use blitz_dom::DocumentConfig;
+use blitz_dom::LocalName;
+use blitz_dom::NodeId;
+use blitz_dom::QualName;
+use clay_dioxus::NativeComponents;
 use clay_host::AccessError;
+use clay_mdk::wasm::WasmMicro;
+use clay_micro_core::application::ApplicationRuntime;
+use clay_micro_core::micros::composition::InstanceState;
 use dioxus::prelude::*;
-use dioxus_core::{ElementId, RenderTargetId, VirtualDom};
-use dioxus_html::{
-    geometry::{ClientPoint, Coordinates, ElementPoint, PagePoint, ScreenPoint},
-    input_data::{decode_mouse_button_set, MouseButton},
-    EventData, Modifiers, SerializedHtmlEventConverter, SerializedMouseData,
-};
+use dioxus_core::ElementId;
+use dioxus_core::RenderTargetId;
+use dioxus_core::VirtualDom;
+use dioxus_html::geometry::ClientPoint;
+use dioxus_html::geometry::Coordinates;
+use dioxus_html::geometry::ElementPoint;
+use dioxus_html::geometry::PagePoint;
+use dioxus_html::geometry::ScreenPoint;
+use dioxus_html::input_data::decode_mouse_button_set;
+use dioxus_html::input_data::MouseButton;
+use dioxus_html::EventData;
+use dioxus_html::Modifiers;
+use dioxus_html::SerializedHtmlEventConverter;
+use dioxus_html::SerializedMouseData;
 use dioxus_native_dom::DioxusState;
 use micro_sample::SampleMicro;
 use micro_settings::SettingsMicro;
@@ -180,56 +196,93 @@ impl HeadlessDom {
     }
 }
 
+const SETTINGS: &str = "section[aria-label=\"Settings\"]";
+const SAMPLE: &str = "button[aria-label=\"Open Sample micro settings\"]";
+const COUNTER: &str = "button[aria-label=\"Open Counter (Wasm) settings\"]";
+const COUNTER_VALUE: &str = "button[aria-label=\"Increment Wasm counter\"]";
+const COUNTER_STATUS: &str = "section[aria-label=\"Settings\"] h3 + div p[role=\"status\"]";
+
+type DesktopApplication = ApplicationRuntime<NativeComponents>;
+
+struct SettingsFixture {
+    application: DesktopApplication,
+    ui: HeadlessDom,
+    mock: clay_docs::MockDocuments,
+    counter_facet: clay_docs::Facet<u64>,
+    counter_route: clay_docs::FacetRoute,
+    settings: SettingsMicro,
+    sample: SampleMicro,
+    first_counter: WasmMicro,
+}
+
+impl SettingsFixture {
+    async fn start() -> Self {
+        fn composed(runtime: DesktopRuntime) -> Element {
+            let runtime = use_signal(move || runtime);
+            rsx! { Application { runtime } }
+        }
+
+        let runtime = DesktopRuntime::new();
+        let application = runtime.application.clone();
+        let mock = application.mock_documents();
+        let counter_facet = application
+            .grant_config(
+                &application.root(),
+                "counter",
+                vec![daybook_types::manifest::RoutineFacetAccess {
+                    tag: micro_counter_manifest::CONFIG_TAG.into(),
+                    key_id: Some(micro_counter_manifest::CONFIG_KEY.into()),
+                    read: true,
+                    ..Default::default()
+                }],
+            )
+            .unwrap()
+            .remove("counter")
+            .unwrap()
+            .facet::<u64>(
+                micro_counter_manifest::CONFIG_TAG.into(),
+                micro_counter_manifest::CONFIG_KEY.into(),
+            )
+            .unwrap();
+        let counter_route = clay_docs::FacetRoute {
+            document: "counter-config".into(),
+            branch: "main".into(),
+            tag: micro_counter_manifest::CONFIG_TAG.into(),
+            key_id: micro_counter_manifest::CONFIG_KEY.into(),
+        };
+        let mut ui = HeadlessDom::new(composed, runtime);
+        ui.wait_until("Settings contributions mounted", |ui| {
+            ui.find(SAMPLE).is_some() && ui.find(COUNTER).is_some()
+        })
+        .await;
+        let settings =
+            clay_mdk::native::output::<SettingsMicro, _>(&application, "settings").unwrap();
+        let sample = clay_mdk::native::output::<SampleMicro, _>(&application, "sample").unwrap();
+        let first_counter = application.output::<WasmMicro>("counter").unwrap();
+        Self {
+            application,
+            ui,
+            mock,
+            counter_facet,
+            counter_route,
+            settings,
+            sample,
+            first_counter,
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn composed_settings_wasm_dom_flow() {
-    const SETTINGS: &str = "section[aria-label=\"Settings\"]";
-    const SAMPLE: &str = "button[aria-label=\"Open Sample micro settings\"]";
-    const COUNTER: &str = "button[aria-label=\"Open Counter (Wasm) settings\"]";
-    const COUNTER_VALUE: &str = "button[aria-label=\"Increment Wasm counter\"]";
-    const COUNTER_STATUS: &str = "section[aria-label=\"Settings\"] h3 + div p[role=\"status\"]";
-
-    fn composed(runtime: DesktopRuntime) -> Element {
-        let runtime = use_signal(move || runtime);
-        rsx! { Application { runtime } }
-    }
-
-    let runtime = DesktopRuntime::new();
-    let application = runtime.application.clone();
-    let mock = application.mock_documents();
-    let counter_facet = application
-        .grant_config(
-            &application.root(),
-            "counter",
-            vec![daybook_types::manifest::RoutineFacetAccess {
-                tag: micro_counter_manifest::CONFIG_TAG.into(),
-                key_id: Some(micro_counter_manifest::CONFIG_KEY.into()),
-                read: true,
-                ..Default::default()
-            }],
-        )
-        .unwrap()
-        .remove("counter")
-        .unwrap()
-        .facet::<u64>(
-            micro_counter_manifest::CONFIG_TAG.into(),
-            micro_counter_manifest::CONFIG_KEY.into(),
-        )
-        .unwrap();
-    let counter_route = clay_data::FacetRoute {
-        document: "counter-config".into(),
-        branch: "main".into(),
-        tag: micro_counter_manifest::CONFIG_TAG.into(),
-        key_id: micro_counter_manifest::CONFIG_KEY.into(),
-    };
-    let reports = application.reports();
-    let mut ui = HeadlessDom::new(composed, runtime);
-    ui.wait_until("Settings contributions mounted", |ui| {
-        ui.find(SAMPLE).is_some() && ui.find(COUNTER).is_some()
-    })
-    .await;
-    let settings = clay_mdk::native::output::<SettingsMicro>(&application, "settings").unwrap();
-    let sample = clay_mdk::native::output::<SampleMicro>(&application, "sample").unwrap();
-    let first_counter = application.output::<WasmMicro>("counter").unwrap();
+    let SettingsFixture {
+        application,
+        mut ui,
+        mock,
+        counter_facet,
+        counter_route,
+        first_counter,
+        ..
+    } = SettingsFixture::start().await;
 
     ui.click(COUNTER);
     ui.wait_until("Wasm section selected", |ui| {
@@ -298,7 +351,7 @@ async fn composed_settings_wasm_dom_flow() {
         .unwrap();
     mock.complete(
         id,
-        Err(clay_data::OperationError::Transport {
+        Err(clay_docs::OperationError::Transport {
             message: "response was lost".into(),
             outcome_unknown: true,
         }),
@@ -312,12 +365,33 @@ async fn composed_settings_wasm_dom_flow() {
     .await;
     ui.click("button[aria-label=\"Refresh Wasm counter\"]");
     assert_eq!(ui.text(COUNTER_VALUE), "41");
-    mock.external_change(counter_route.clone(), Some(serde_json::json!(2)));
+    mock.external_change(counter_route, Some(serde_json::json!(2)));
     ui.wait_until("refreshed guest remains subscribed", |ui| {
         ui.text(COUNTER_VALUE) == "2"
     })
     .await;
+}
 
+#[tokio::test(flavor = "current_thread")]
+async fn composed_settings_wasm_lifecycle_flow() {
+    let SettingsFixture {
+        application,
+        mut ui,
+        mock,
+        counter_facet,
+        counter_route,
+        settings,
+        sample,
+        first_counter,
+    } = SettingsFixture::start().await;
+    let reports = application.reports();
+
+    ui.click(COUNTER);
+    ui.wait_until("Wasm section mounted", |ui| {
+        ui.find(COUNTER_VALUE).is_some()
+    })
+    .await;
+    let button = ui.one(COUNTER_VALUE);
     ui.click(SAMPLE);
     ui.wait_until("switched away from Wasm section", |ui| {
         ui.attribute(SAMPLE, "aria-pressed").as_deref() == Some("true")

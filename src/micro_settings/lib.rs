@@ -5,8 +5,14 @@ mod view;
 pub use view::SettingsView;
 
 use clay_mdk::Provision;
-use clay_mdk::native::{AccessError, CollectionReader, Context, Instance};
-use contract::{SettingsSection, SettingsSections};
+use clay_mdk::native::AccessError;
+use clay_mdk::native::CollectionReader;
+use clay_mdk::native::Context;
+use clay_mdk::native::Instance;
+use clay_mdk::native::RendererRegistry;
+use contract::SettingsSection;
+use contract::SettingsSections;
+use dioxus::prelude::Element;
 pub use micro_settings_manifest as contract;
 
 #[derive(Clone)]
@@ -27,7 +33,9 @@ impl Provision for SettingsMicro {
 
 /// Settings requires storage for its own vocabulary and a granted root-presentation writer.
 /// The activation context supplies both; the micro never assembles its own grants.
-pub fn activate(context: &Context) -> Result<(), AccessError> {
+pub fn activate<R: RendererRegistry<Render = Element>>(
+    context: &Context<R>,
+) -> Result<(), AccessError> {
     let instance = context.instance();
     let sections = context.collection::<SettingsSection>()?;
     let micro = SettingsMicro {
@@ -40,7 +48,7 @@ pub fn activate(context: &Context) -> Result<(), AccessError> {
         rsx! { SettingsView { micro: presentation.clone() } }
     })?;
     context.mount_root("Settings", root)?;
-    context.publish(SettingsSections::new(sections));
+    context.publish_contributable(SettingsSections::new(sections));
     context.publish(micro);
     Ok(())
 }

@@ -7,6 +7,6 @@ edition = "2024"
 path = "lib.rs"
 
 [dependencies]
-clay_mdk = { path = "../clay_mdk", default-features = false, features = ["native"] }
-micro_settings_manifest = { path = "../micro_settings_manifest" }
+clay_mdk = { workspace = true, features = ["in_process", "view"] }
+micro_settings_manifest = { workspace = true }
 dioxus.workspace = true
