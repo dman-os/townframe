@@ -316,7 +316,7 @@ _: {
       ciDesktopShell = pkgs.mkShell (
         {
           name = "ci-desktop";
-          buildInputs = baseBuildInputs ++ dioxusBuildInputs ++ desktopBuildInputs ++ [ rustRust ];
+          buildInputs = baseBuildInputs ++ dioxusBuildInputs ++ desktopBuildInputs ++ rustLintInputs ++ [ rustRust ];
           shellHook = ''
             export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${desktopRuntimeLibraryPath}"
             if [ "$(uname -s)" = "Darwin" ]; then
