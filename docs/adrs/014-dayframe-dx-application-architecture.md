@@ -2,6 +2,8 @@
 
 **Status:** Accepted.
 **Supersedes:** ADR 016, `dayframe_dx Architecture — Pieces, Faces, and the Composition Root`.
+**Amended by:** ADR 015 (crate layout and seam placement), ADR 017 (collection substrate and
+optimistic-write visibility), ADR 018 (browser guest engine, Proposed).
 
 ## Context
 

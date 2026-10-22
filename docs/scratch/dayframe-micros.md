@@ -1,6 +1,7 @@
 # Dayframe micros — living design log
 
-Status: Living design log — D1–D13 settled; amendments recorded in ADR 015
+Status: Living design log — D1–D13 settled; amendments recorded in ADR 015, ADR 017 (collection
+substrate), and ADR 018 (browser engine, Proposed)
 Owner: operator + dayframe track
 Scope: Micro-composition design for `dayframe_dx` (pieces, faces, composition root).
 Updated: 2026-10-22
@@ -1205,4 +1206,5 @@ namespacing; a production node adapter; indexed/serialized query planning. Curre
 the visible set, same-token queries on one view share one lease, and host streams deliberately
 overfetch. Tombstones remain until a newer row supersedes them or the epoch resets; there is no
 safe-compaction watermark yet. Host delivery is unbounded mpsc, so lag/backpressure policy remains
-future work rather than silently dropping batches. ADR changes remain deferred until review.
+future work rather than silently dropping batches. These decisions and boundaries are now
+recorded in ADR 017; the browser-engine investigation is ADR 018.

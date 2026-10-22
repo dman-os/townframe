@@ -1,8 +1,8 @@
 # clay_mdk — the Micro Development Kit
 
-The single authoring API every Dayframe micro compiles against (ADR 015 §5). A micro is a
-**manifest** (`manifest.rs`) plus an **activation** (`activate(&Context)`) plus, usually, a
-published component. The MDK adds ergonomics, never authority: capabilities are still the
+The single authoring API every Dayframe micro compiles against (ADR 015 §5; collections per
+ADR 017). A micro is a **manifest** (`manifest.rs`) plus an **activation** (`activate(&Context)`)
+plus, usually, a published component. The MDK adds ergonomics, never authority: capabilities are still the
 host-issued resources, enforced by `clay_host`.
 
 ## Backends

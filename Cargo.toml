@@ -255,10 +255,11 @@ irpc-iroh = "0.17.0"
 
 #
 # gui
-dioxus = { version = "0.8.0-alpha.3" }
-dioxus-core = { path = "../dioxus/packages/core" }
-dioxus-html = { path = "../dioxus/packages/html" }
-dioxus-native-dom = { path = "../dioxus/packages/native-dom" }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 blitz-dom = "=0.3.0-beta.4"
 ui = { path = "./src/ui" }
 # xilem = { path = "../xilem/xilem/" }
@@ -282,8 +283,8 @@ micro_counter_manifest = { path = "./src/micro_counter_manifest" }
 [patch.crates-io]
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
-dioxus = { path = "../dioxus/packages/dioxus" }
-dioxus-native = { path = "../dioxus/packages/native" }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 # automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
 # leptos = { path = "../leptos/leptos/" }
 # leptos_meta = { path = "../leptos/meta/" }

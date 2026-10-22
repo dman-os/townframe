@@ -565,3 +565,27 @@ is unspecified. Also of note: a superseded configuration revision is *never acti
   `mio`) into `--target wasm32-unknown-unknown`; `x/check-dayframe.ts` therefore builds the two
   guest artifacts with `--config resolver.feature-unification="selected"`. That is the same
   isolation `guardrails check-matrix` applies per configuration (see `CONTRIBUTING.md`).
+
+### 2026-10-22 — ADRs locked in before merge
+
+- **ADR 017 (Accepted)** records the `clay_collection` substrate as built: the chained hop,
+  the `Batch` waist, `Version { incarnation, seq }` epochs, segregated whole-row overlays and
+  their retirement rules, opaque caller-authored demand, coverage, explicit roles and
+  type-state write capability, lifecycle ordering, host-held contribution collections with
+  sibling override collections, and facet-as-row documents. Its "Not yet implemented" list is
+  the decided-but-unbuilt remainder (collection WIT, id namespacing, node adapter, write-path
+  versions, backpressure, tombstone compaction).
+- **ADR 018 (Proposed)** records the `wcmp` browser-engine investigation, previously only in
+  conversation: engine-seam split into `clay_guest_session` + thin `clay_rt_wasmtime`/
+  `clay_rt_wcmp`, async activation with synchronous presentation calls, instance-only
+  publication, accepted lack of web fuel, `wasm-bindgen` alignment, shared composition crate,
+  asset-fetched components, and web gate lanes. Accepted or rejected on the spike's result.
+- **ADR 015** is now Accepted with as-built crate names (`clay_micro_core`, `clay_docs`,
+  `clay_rt_wasmtime`, `clay_collection`, MDK feature `in_process`), the as-built MDK entry
+  shapes and manifest-crate rule, a new rule **R9 "we do not break microspace"**, and
+  amendment pointers where ADR 017 supersedes §4 wording (accepted overlays stay until base
+  catches up; releasing a query does not evict rows). ADR 014 lists its amending ADRs.
+- Open items from the parallel-PR prep review (provision-id validation, `await_close` on
+  unknown ids, close-cascade `try_start`, `Failed` retry keying, `Provisions::resolve`
+  conflation, bind-time payload validation, manifest version-bump discipline) stay tracked in
+  §8 above; only the last is architectural and is now named in ADR 015 R9/§9.
