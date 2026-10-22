@@ -239,12 +239,14 @@ fn disabling_and_reenabling_configured_instances_reuses_durable_config_and_resta
         runtime.application.output::<WasmMicro>("counter"),
         Err(AccessError::Revoked)
     ));
-    assert!(output::<SettingsMicro, _>(&runtime.application, "settings")
-        .unwrap()
-        .sections
-        .snapshot()
-        .unwrap()
-        .is_empty());
+    assert!(
+        output::<SettingsMicro, _>(&runtime.application, "settings")
+            .unwrap()
+            .sections
+            .snapshot()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         first_sample.watch().current().unwrap_err(),
         AccessError::Revoked

@@ -2,10 +2,12 @@
 @layer properties;
 @layer theme, base, components, utilities;
 @layer theme {
-  :root, :host {
+  :root,
+  :host {
     --font-sans: var(--df-font-family-sans);
-    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
-    monospace;
+    --font-mono:
+      ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+      "Courier New", monospace;
     --color-amber-400: oklch(82.8% 0.189 84.429);
     --spacing: var(--df-spacing);
     --container-3xl: 48rem;
@@ -55,17 +57,36 @@
   }
 }
 @layer base {
-  *, ::after, ::before, ::backdrop, ::file-selector-button {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
     box-sizing: border-box;
     margin: 0;
     padding: 0;
     border: 0 solid;
   }
-  html, :host {
+  html,
+  :host {
     line-height: 1.5;
     -webkit-text-size-adjust: 100%;
     tab-size: 4;
-    font-family: var(--default-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', 'Noto Sans', Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji');
+    font-family: var(
+      --default-font-family,
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      Roboto,
+      "Helvetica Neue",
+      "Noto Sans",
+      Arial,
+      sans-serif,
+      "Apple Color Emoji",
+      "Segoe UI Emoji",
+      "Segoe UI Symbol",
+      "Noto Color Emoji"
+    );
     font-feature-settings: var(--default-font-feature-settings, normal);
     font-variation-settings: var(--default-font-variation-settings, normal);
     -webkit-tap-highlight-color: transparent;
@@ -79,7 +100,12 @@
     -webkit-text-decoration: underline dotted;
     text-decoration: underline dotted;
   }
-  h1, h2, h3, h4, h5, h6 {
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
     font-size: inherit;
     font-weight: inherit;
   }
@@ -88,19 +114,37 @@
     -webkit-text-decoration: inherit;
     text-decoration: inherit;
   }
-  b, strong {
+  b,
+  strong {
     font-weight: bolder;
   }
-  code, kbd, samp, pre {
-    font-family: var(--default-mono-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace);
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(
+      --default-mono-font-family,
+      ui-monospace,
+      SFMono-Regular,
+      Menlo,
+      Monaco,
+      Consolas,
+      "Liberation Mono",
+      "Courier New",
+      monospace
+    );
     font-feature-settings: var(--default-mono-font-feature-settings, normal);
-    font-variation-settings: var(--default-mono-font-variation-settings, normal);
+    font-variation-settings: var(
+      --default-mono-font-variation-settings,
+      normal
+    );
     font-size: 1em;
   }
   small {
     font-size: 80%;
   }
-  sub, sup {
+  sub,
+  sup {
     font-size: 75%;
     line-height: 0;
     position: relative;
@@ -126,18 +170,33 @@
   summary {
     display: list-item;
   }
-  ol, ul, menu {
+  ol,
+  ul,
+  menu {
     list-style: none;
   }
-  img, svg, video, canvas, audio, iframe, embed, object {
+  img,
+  svg,
+  video,
+  canvas,
+  audio,
+  iframe,
+  embed,
+  object {
     display: block;
     vertical-align: middle;
   }
-  img, video {
+  img,
+  video {
     max-width: 100%;
     height: auto;
   }
-  button, input, select, optgroup, textarea, ::file-selector-button {
+  button,
+  input,
+  select,
+  optgroup,
+  textarea,
+  ::file-selector-button {
     font: inherit;
     font-feature-settings: inherit;
     font-variation-settings: inherit;
@@ -159,7 +218,8 @@
   ::placeholder {
     opacity: 1;
   }
-  @supports (not (-webkit-appearance: -apple-pay-button))  or (contain-intrinsic-size: 1px) {
+  @supports (not (-webkit-appearance: -apple-pay-button)) or
+    (contain-intrinsic-size: 1px) {
     ::placeholder {
       color: currentcolor;
       @supports (color: color-mix(in lab, red, red)) {
@@ -183,7 +243,15 @@
   ::-webkit-datetime-edit-fields-wrapper {
     padding: 0;
   }
-  ::-webkit-datetime-edit, ::-webkit-datetime-edit-year-field, ::-webkit-datetime-edit-month-field, ::-webkit-datetime-edit-day-field, ::-webkit-datetime-edit-hour-field, ::-webkit-datetime-edit-minute-field, ::-webkit-datetime-edit-second-field, ::-webkit-datetime-edit-millisecond-field, ::-webkit-datetime-edit-meridiem-field {
+  ::-webkit-datetime-edit,
+  ::-webkit-datetime-edit-year-field,
+  ::-webkit-datetime-edit-month-field,
+  ::-webkit-datetime-edit-day-field,
+  ::-webkit-datetime-edit-hour-field,
+  ::-webkit-datetime-edit-minute-field,
+  ::-webkit-datetime-edit-second-field,
+  ::-webkit-datetime-edit-millisecond-field,
+  ::-webkit-datetime-edit-meridiem-field {
     padding-block: 0;
   }
   ::-webkit-calendar-picker-indicator {
@@ -192,13 +260,16 @@
   :-moz-ui-invalid {
     box-shadow: none;
   }
-  button, input:where([type='button'], [type='reset'], [type='submit']), ::file-selector-button {
+  button,
+  input:where([type="button"], [type="reset"], [type="submit"]),
+  ::file-selector-button {
     appearance: button;
   }
-  ::-webkit-inner-spin-button, ::-webkit-outer-spin-button {
+  ::-webkit-inner-spin-button,
+  ::-webkit-outer-spin-button {
     height: auto;
   }
-  [hidden]:where(:not([hidden='until-found'])) {
+  [hidden]:where(:not([hidden="until-found"])) {
     display: none !important;
   }
 }
@@ -235,7 +306,11 @@
     border-width: 0px;
     background-color: var(--scheme-color-surface-container-high);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--scheme-color-surface-container-high) 90%, transparent);
+      background-color: color-mix(
+        in oklab,
+        var(--scheme-color-surface-container-high) 90%,
+        transparent
+      );
     }
     padding: 0px;
     color: var(--df-color-text-muted);
@@ -409,7 +484,11 @@
     border-radius: var(--df-radius-xl);
     background-color: var(--df-color-text);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-text) 2%, transparent);
+      background-color: color-mix(
+        in oklab,
+        var(--df-color-text) 2%,
+        transparent
+      );
     }
   }
   .df-tile-line {
@@ -526,8 +605,14 @@
     border-color: transparent;
     --tw-font-weight: var(--font-weight-medium);
     font-weight: var(--font-weight-medium);
-    transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to;
-    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-property:
+      color, background-color, border-color, outline-color,
+      text-decoration-color, fill, stroke, --tw-gradient-from,
+      --tw-gradient-via, --tw-gradient-to;
+    transition-timing-function: var(
+      --tw-ease,
+      var(--default-transition-timing-function)
+    );
     transition-duration: var(--tw-duration, var(--default-transition-duration));
     --tw-duration: 150ms;
     transition-duration: 150ms;
@@ -548,7 +633,11 @@
     border-radius: calc(infinity * 1px);
     background-color: var(--df-color-text);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-text) 5%, transparent);
+      background-color: color-mix(
+        in oklab,
+        var(--df-color-text) 5%,
+        transparent
+      );
     }
     padding-inline: calc(var(--df-spacing) * 1.5);
     padding-block: var(--df-spacing);
@@ -617,7 +706,10 @@
     background-color: var(--df-color-text-subtle);
     padding: 0px;
     transition-property: all;
-    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-timing-function: var(
+      --tw-ease,
+      var(--default-transition-timing-function)
+    );
     transition-duration: var(--tw-duration, var(--default-transition-duration));
     --tw-duration: 150ms;
     transition-duration: 150ms;
@@ -682,8 +774,14 @@
     overflow: hidden;
     border-radius: var(--df-radius-sm);
     background-color: var(--scheme-color-surface-container);
-    transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to;
-    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-property:
+      color, background-color, border-color, outline-color,
+      text-decoration-color, fill, stroke, --tw-gradient-from,
+      --tw-gradient-via, --tw-gradient-to;
+    transition-timing-function: var(
+      --tw-ease,
+      var(--default-transition-timing-function)
+    );
     transition-duration: var(--tw-duration, var(--default-transition-duration));
     --tw-duration: 150ms;
     transition-duration: 150ms;
@@ -718,7 +816,9 @@
     flex: none;
     color: var(--df-color-text-subtle);
     --tw-numeric-spacing: tabular-nums;
-    font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
+    font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,)
+      var(--tw-numeric-figure,) var(--tw-numeric-spacing,)
+      var(--tw-numeric-fraction,);
   }
   .flex-1 {
     flex: 1;
@@ -730,7 +830,8 @@
     flex-grow: 1;
   }
   .transform {
-    transform: var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,) var(--tw-skew-x,) var(--tw-skew-y,);
+    transform: var(--tw-rotate-x,) var(--tw-rotate-y,) var(--tw-rotate-z,)
+      var(--tw-skew-x,) var(--tw-skew-y,);
   }
   .cursor-pointer {
     cursor: pointer;
@@ -745,13 +846,13 @@
     grid-template-columns: 6rem 1fr 10rem;
   }
   .grid-cols-\[repeat\(auto-fill\,minmax\(11\.25rem\,1fr\)\)\] {
-    grid-template-columns: repeat(auto-fill,minmax(11.25rem,1fr));
+    grid-template-columns: repeat(auto-fill, minmax(11.25rem, 1fr));
   }
   .grid-cols-\[repeat\(auto-fit\,minmax\(14rem\,1fr\)\)\] {
-    grid-template-columns: repeat(auto-fit,minmax(14rem,1fr));
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
   }
   .grid-cols-\[repeat\(auto-fit\,minmax\(15rem\,1fr\)\)\] {
-    grid-template-columns: repeat(auto-fit,minmax(15rem,1fr));
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
   }
   .flex-col {
     flex-direction: column;
@@ -795,8 +896,14 @@
   }
   .tile-line-group {
     border-radius: var(--df-radius-xl);
-    transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to;
-    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-property:
+      color, background-color, border-color, outline-color,
+      text-decoration-color, fill, stroke, --tw-gradient-from,
+      --tw-gradient-via, --tw-gradient-to;
+    transition-timing-function: var(
+      --tw-ease,
+      var(--default-transition-timing-function)
+    );
     transition-duration: var(--tw-duration, var(--default-transition-duration));
     --tw-duration: 150ms;
     transition-duration: 150ms;
@@ -828,7 +935,9 @@
     border-width: 0px;
     background-color: transparent;
     --tw-shadow: 0 0 #0000;
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    box-shadow:
+      var(--tw-inset-shadow), var(--tw-inset-ring-shadow),
+      var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .border {
     border-style: var(--tw-border-style);
@@ -858,7 +967,9 @@
     background-color: var(--df-color-surface);
     color: var(--df-color-text);
     --tw-shadow: var(--df-shadow-sm);
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    box-shadow:
+      var(--tw-inset-shadow), var(--tw-inset-ring-shadow),
+      var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .df-button-default {
     background-color: var(--df-color-primary);
@@ -1070,7 +1181,9 @@
   }
   .ordinal {
     --tw-ordinal: ordinal;
-    font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,) var(--tw-numeric-figure,) var(--tw-numeric-spacing,) var(--tw-numeric-fraction,);
+    font-variant-numeric: var(--tw-ordinal,) var(--tw-slashed-zero,)
+      var(--tw-numeric-figure,) var(--tw-numeric-spacing,)
+      var(--tw-numeric-fraction,);
   }
   .accent-foreground {
     accent-color: var(--df-color-text);
@@ -1079,28 +1192,43 @@
     opacity: 80%;
   }
   .shadow {
-    --tw-shadow: 0 1px 3px 0 var(--tw-shadow-color, rgb(0 0 0 / 0.1)), 0 1px 2px -1px var(--tw-shadow-color, rgb(0 0 0 / 0.1));
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    --tw-shadow:
+      0 1px 3px 0 var(--tw-shadow-color, rgb(0 0 0 / 0.1)),
+      0 1px 2px -1px var(--tw-shadow-color, rgb(0 0 0 / 0.1));
+    box-shadow:
+      var(--tw-inset-shadow), var(--tw-inset-ring-shadow),
+      var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .shadow-md {
     --tw-shadow: var(--df-shadow-md);
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    box-shadow:
+      var(--tw-inset-shadow), var(--tw-inset-ring-shadow),
+      var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .shadow-none {
     --tw-shadow: 0 0 #0000;
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    box-shadow:
+      var(--tw-inset-shadow), var(--tw-inset-ring-shadow),
+      var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .shadow-raised {
     --tw-shadow: var(--df-shadow-raised);
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    box-shadow:
+      var(--tw-inset-shadow), var(--tw-inset-ring-shadow),
+      var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .shadow-sm {
     --tw-shadow: var(--df-shadow-sm);
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    box-shadow:
+      var(--tw-inset-shadow), var(--tw-inset-ring-shadow),
+      var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .ring {
-    --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0 calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0
+      calc(1px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
+    box-shadow:
+      var(--tw-inset-shadow), var(--tw-inset-ring-shadow),
+      var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
   .tile-line:focus {
     outline-style: var(--tw-outline-style);
@@ -1114,25 +1242,39 @@
   }
   .blur {
     --tw-blur: blur(8px);
-    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,)
+      var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,)
+      var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
   }
   .grayscale {
     --tw-grayscale: grayscale(100%);
-    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,)
+      var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,)
+      var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
   }
   .invert {
     --tw-invert: invert(100%);
-    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,)
+      var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,)
+      var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
   }
   .\!filter {
-    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,) !important;
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,)
+      var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,)
+      var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,) !important;
   }
   .filter {
-    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,)
+      var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,)
+      var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
   }
   .transition {
-    transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter, display, content-visibility, overlay, pointer-events;
-    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-property:
+      color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to, opacity, box-shadow, transform, translate, scale, rotate, filter, -webkit-backdrop-filter, backdrop-filter, display, content-visibility, overlay, pointer-events;
+    transition-timing-function: var(
+      --tw-ease,
+      var(--default-transition-timing-function)
+    );
     transition-duration: var(--tw-duration, var(--default-transition-duration));
   }
   .focus-visible\:outline:focus-visible {
@@ -1145,7 +1287,8 @@
     }
   }
 }
-:root, .light {
+:root,
+.light {
   --scheme-color-primary: oklch(48.629% 0.09 276.331);
   --scheme-color-surface-tint: oklch(48.629% 0.09 276.331);
   --scheme-color-on-primary: oklch(100% 0 0);
@@ -1527,13 +1670,16 @@
   }
 }
 @layer base {
-  html, body {
+  html,
+  body {
     margin: 0;
     padding: 0;
     min-width: 100%;
     min-height: 100%;
   }
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     box-sizing: border-box;
   }
 }
@@ -1566,47 +1712,92 @@
   }
 }
 @layer components {
-  .tile-line-group:hover, .tile-line-group:focus-within {
+  .tile-line-group:hover,
+  .tile-line-group:focus-within {
     background-color: var(--df-color-text);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-text) 5%, transparent);
+      background-color: color-mix(
+        in oklab,
+        var(--df-color-text) 5%,
+        transparent
+      );
     }
   }
-  .tile-line-group.surface-1:hover, .tile-widget-group.surface-1:hover {
+  .tile-line-group.surface-1:hover,
+  .tile-widget-group.surface-1:hover {
     background-color: var(--df-color-primary);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-primary) 17%, transparent);
+      background-color: color-mix(
+        in oklab,
+        var(--df-color-primary) 17%,
+        transparent
+      );
     }
   }
-  .tile-line-group.surface-2:hover, .tile-widget-group.surface-2:hover {
+  .tile-line-group.surface-2:hover,
+  .tile-widget-group.surface-2:hover {
     background-color: var(--df-color-accent);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-accent) 17%, transparent);
+      background-color: color-mix(
+        in oklab,
+        var(--df-color-accent) 17%,
+        transparent
+      );
     }
   }
-  .tile-line-group.surface-3:hover, .tile-widget-group.surface-3:hover {
-    background-color: color-mix(in srgb, oklch(82.8% 0.189 84.429) 17%, transparent);
+  .tile-line-group.surface-3:hover,
+  .tile-widget-group.surface-3:hover {
+    background-color: color-mix(
+      in srgb,
+      oklch(82.8% 0.189 84.429) 17%,
+      transparent
+    );
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--color-amber-400) 17%, transparent);
+      background-color: color-mix(
+        in oklab,
+        var(--color-amber-400) 17%,
+        transparent
+      );
     }
   }
-  .surface-1, .surface-2, .surface-3 {
+  .surface-1,
+  .surface-2,
+  .surface-3 {
     background-clip: padding-box;
   }
-  .path-back:hover, .path-back:focus-visible, .column-arrow:hover:not(:disabled), .column-arrow:focus-visible {
+  .path-back:hover,
+  .path-back:focus-visible,
+  .column-arrow:hover:not(:disabled),
+  .column-arrow:focus-visible {
     background-color: var(--df-color-text);
     @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--df-color-text) 10%, transparent);
+      background-color: color-mix(
+        in oklab,
+        var(--df-color-text) 10%,
+        transparent
+      );
     }
     color: var(--df-color-text);
   }
-  .column-dot[aria-current="true"], .column-dot[data-selected="true"], .column-dot[data-window-position="leading"], .column-dot[data-window-position="middle"], .column-dot[data-window-position="trailing"], .column-dot[data-window-position="single"] {
+  .column-dot[aria-current="true"],
+  .column-dot[data-selected="true"],
+  .column-dot[data-window-position="leading"],
+  .column-dot[data-window-position="middle"],
+  .column-dot[data-window-position="trailing"],
+  .column-dot[data-window-position="single"] {
     height: calc(var(--df-spacing) * 2.5);
     width: calc(var(--df-spacing) * 4);
-    --tw-shadow: 0 1px 3px 0 var(--df-color-primary), 0 1px 2px -1px var(--df-color-primary);
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    --tw-shadow:
+      0 1px 3px 0 var(--df-color-primary),
+      0 1px 2px -1px var(--df-color-primary);
+    box-shadow:
+      var(--tw-inset-shadow), var(--tw-inset-ring-shadow),
+      var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
     @supports (color: color-mix(in lab, red, red)) {
-      --tw-shadow: 0 1px 3px 0 color-mix(in srgb, var(--df-color-primary) 50%, transparent), 0 1px 2px -1px color-mix(in srgb, var(--df-color-primary) 50%, transparent);
+      --tw-shadow:
+        0 1px 3px 0 color-mix(in srgb, var(--df-color-primary) 50%, transparent),
+        0 1px 2px -1px
+        color-mix(in srgb, var(--df-color-primary) 50%, transparent);
     }
   }
   .column-dot[data-window-position="leading"] {
@@ -1630,7 +1821,8 @@
   .column-dot[data-window-position="inactive"] {
     background-color: var(--df-color-text-subtle);
   }
-  .column-dot[aria-current="true"], .column-dot[data-selected="true"] {
+  .column-dot[aria-current="true"],
+  .column-dot[data-selected="true"] {
     background-color: var(--scheme-color-secondary) !important;
   }
 }
@@ -1644,7 +1836,8 @@
   .df-button:hover:not(:disabled) {
     filter: brightness(1.08);
   }
-  .df-button:focus-visible, .df-tab-trigger:focus-visible {
+  .df-button:focus-visible,
+  .df-tab-trigger:focus-visible {
     outline-style: var(--tw-outline-style);
     outline-width: 2px;
     outline-offset: 1px;
@@ -1664,7 +1857,8 @@
   .df-tabs-sticky .df-tab-trigger {
     text-decoration-line: none;
   }
-  .df-section-dot:hover .df-section-dot-mark, .df-section-dot:focus-visible .df-section-dot-mark {
+  .df-section-dot:hover .df-section-dot-mark,
+  .df-section-dot:focus-visible .df-section-dot-mark {
     background-color: var(--df-color-primary);
   }
   .df-section-dot:focus-visible {
@@ -1680,8 +1874,11 @@
     object-fit: cover;
   }
   .df-gallery-tile:hover {
-    --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0 calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
-    box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+    --tw-ring-shadow: var(--tw-ring-inset,) 0 0 0
+      calc(2px + var(--tw-ring-offset-width)) var(--tw-ring-color, currentcolor);
+    box-shadow:
+      var(--tw-inset-shadow), var(--tw-inset-ring-shadow),
+      var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
     --tw-ring-color: var(--df-color-primary);
   }
   .df-column-rack[data-height="bounded"] .df-column {
@@ -1696,13 +1893,20 @@
   .df-column-state-error {
     color: var(--df-color-danger);
   }
-  .df-tile[data-kind="app"], .df-tile[data-kind="group"] {
+  .df-tile[data-kind="app"],
+  .df-tile[data-kind="group"] {
     cursor: pointer;
   }
   .df-tile-line {
     border-radius: var(--df-radius-md);
-    transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to;
-    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-property:
+      color, background-color, border-color, outline-color,
+      text-decoration-color, fill, stroke, --tw-gradient-from,
+      --tw-gradient-via, --tw-gradient-to;
+    transition-timing-function: var(
+      --tw-ease,
+      var(--default-transition-timing-function)
+    );
     transition-duration: var(--tw-duration, var(--default-transition-duration));
     --tw-duration: 150ms;
     transition-duration: 150ms;
@@ -1738,8 +1942,14 @@
     margin-top: calc(var(--df-spacing) * 2);
   }
   .df-widget {
-    transition-property: color, background-color, border-color, outline-color, text-decoration-color, fill, stroke, --tw-gradient-from, --tw-gradient-via, --tw-gradient-to;
-    transition-timing-function: var(--tw-ease, var(--default-transition-timing-function));
+    transition-property:
+      color, background-color, border-color, outline-color,
+      text-decoration-color, fill, stroke, --tw-gradient-from,
+      --tw-gradient-via, --tw-gradient-to;
+    transition-timing-function: var(
+      --tw-ease,
+      var(--default-transition-timing-function)
+    );
     transition-duration: var(--tw-duration, var(--default-transition-duration));
     --tw-duration: 150ms;
     transition-duration: 150ms;
@@ -1747,7 +1957,8 @@
   .df-widget:hover {
     background-color: var(--scheme-color-surface-container-high);
   }
-  .df-tile[data-kind="app"]:hover .df-tile-title, .df-tile[data-kind="group"]:hover .df-tile-title {
+  .df-tile[data-kind="app"]:hover .df-tile-title,
+  .df-tile[data-kind="group"]:hover .df-tile-title {
     color: var(--df-color-primary);
   }
   .df-tile:focus-visible {
@@ -1762,7 +1973,8 @@
   .df-widget[data-content="sticky-note"] .df-widget-leading {
     color: var(--df-color-accent);
   }
-  .df-column[data-state="loading"] .df-column-list, .df-column[data-state="stale"] .df-column-list {
+  .df-column[data-state="loading"] .df-column-list,
+  .df-column[data-state="stale"] .df-column-list {
     opacity: 40%;
   }
 }
@@ -1951,8 +2163,12 @@
   inherits: false;
 }
 @layer properties {
-  @supports ((-webkit-hyphens: none) and (not (margin-trim: inline))) or ((-moz-orient: inline) and (not (color:rgb(from red r g b)))) {
-    *, ::before, ::after, ::backdrop {
+  @supports ((-webkit-hyphens: none) and (not (margin-trim: inline))) or
+    ((-moz-orient: inline) and (not (color: rgb(from red r g b)))) {
+    *,
+    ::before,
+    ::after,
+    ::backdrop {
       --tw-border-style: solid;
       --tw-font-weight: initial;
       --tw-duration: initial;

@@ -103,8 +103,10 @@ fn counter_manifest_contributes_live_settings_and_withdraws_on_trap_or_disableme
     assert!(first.instance != second.instance);
     let sections = settings.sections.snapshot().unwrap();
     assert_eq!(sections.len(), 2);
-    assert!(sections
-        .values()
-        .any(|entry| entry.detail == second.surface()));
+    assert!(
+        sections
+            .values()
+            .any(|entry| entry.detail == second.surface())
+    );
     app.host().close();
 }

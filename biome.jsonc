@@ -10,6 +10,8 @@
     "ignoreUnknown": true,
     "includes": [
       "**",
+      // Generated Tailwind output: var-fallback duplicates and !important are its idiom.
+      "!src/ui/assets/tailwind.css",
       // Build artifacts
       "!node_modules",
       "!**/.expo",

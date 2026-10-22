@@ -3,11 +3,17 @@
 }
 
 @utility shadow-primary-sm {
-  --tw-shadow: 0 1px 3px 0 var(--df-color-primary), 0 1px 2px -1px var(--df-color-primary);
-  box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
+  --tw-shadow:
+    0 1px 3px 0 var(--df-color-primary), 0 1px 2px -1px var(--df-color-primary);
+  box-shadow:
+    var(--tw-inset-shadow), var(--tw-inset-ring-shadow),
+    var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
 
   @supports (color: color-mix(in lab, red, red)) {
-    --tw-shadow: 0 1px 3px 0 color-mix(in srgb, var(--df-color-primary) 50%, transparent), 0 1px 2px -1px color-mix(in srgb, var(--df-color-primary) 50%, transparent);
+    --tw-shadow:
+      0 1px 3px 0 color-mix(in srgb, var(--df-color-primary) 50%, transparent),
+      0 1px 2px -1px
+      color-mix(in srgb, var(--df-color-primary) 50%, transparent);
   }
 }
 

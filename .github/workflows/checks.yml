@@ -212,6 +212,9 @@ jobs:
         run: |
           # Plug crates are excluded while automatic triage is broken. `daybook_cli` is excluded
           # because its e2e tests need the built binary and run in the dedicated CLI job.
+          # The `dayframe_*`/`ui` crates are Dioxus applications: they link the Linux GUI stack
+          # (glib/wayland/wgpu) that `ci-rust` deliberately does not carry, and `check-dayframe.ts`
+          # is their scoped gate; the desktop shell verification lane is separate work.
           #
           # `--no-report` accumulates llvm profile data across the nextest and doctest runs (it
           # implies `--no-clean`, so the earlier run's data survives) and the final `report`
@@ -219,11 +222,15 @@ jobs:
           nix develop .#ci-rust --command cargo llvm-cov --no-report nextest \
             --color=always --workspace --all-targets --profile "$NEXTEST_PROFILE" \
             --user-config-file .config/nextest-user-ci.toml \
-            --exclude daybook_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
+            --exclude daybook_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest \
+            --exclude ui \
+            --exclude dayframe_web --exclude dayframe_desktop --exclude dayframe_mobile --exclude dayframe_showcase
           # nextest cannot run doctests, so they go through `cargo test --doc`. `--doc` implies
           # `--doctests`, which persists the doctest binaries the coverage report needs.
           nix develop .#ci-rust --command cargo llvm-cov --no-report --doc --workspace \
-            --exclude daybook_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
+            --exclude daybook_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest \
+            --exclude ui \
+            --exclude dayframe_web --exclude dayframe_desktop --exclude dayframe_mobile --exclude dayframe_showcase
           # `report` only merges the collected profile data and writes lcov; it runs no tests.
           # `--doctests` is what lets the persisted doctest binaries be attributed to their sources.
           nix develop .#ci-rust --command cargo llvm-cov report --doctests --lcov --output-path lcov.info

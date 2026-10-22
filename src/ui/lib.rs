@@ -7,7 +7,6 @@ pub use foundation::ThemeRoot;
 pub use foundation::ThemeStyles;
 
 pub mod components;
-pub use components::sample_column_specs;
 pub use components::Button;
 pub use components::ButtonSize;
 pub use components::ButtonVariant;
@@ -37,6 +36,7 @@ pub use components::TileKind;
 pub use components::TileListSpec;
 pub use components::TileSpec;
 pub use components::Widget;
+pub use components::sample_column_specs;
 
 /// Tiles prototype (FDR 005).
 pub mod tiles;

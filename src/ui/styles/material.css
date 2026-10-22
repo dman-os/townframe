@@ -107,17 +107,23 @@
   --color-on-primary: var(--scheme-color-on-primary);
   --color-on-primary-container: var(--scheme-color-on-primary-container);
   --color-on-primary-fixed: var(--scheme-color-on-primary-fixed);
-  --color-on-primary-fixed-variant: var(--scheme-color-on-primary-fixed-variant);
+  --color-on-primary-fixed-variant: var(
+    --scheme-color-on-primary-fixed-variant
+  );
   --color-on-secondary: var(--scheme-color-on-secondary);
   --color-on-secondary-container: var(--scheme-color-on-secondary-container);
   --color-on-secondary-fixed: var(--scheme-color-on-secondary-fixed);
-  --color-on-secondary-fixed-variant: var(--scheme-color-on-secondary-fixed-variant);
+  --color-on-secondary-fixed-variant: var(
+    --scheme-color-on-secondary-fixed-variant
+  );
   --color-on-surface: var(--scheme-color-on-surface);
   --color-on-surface-variant: var(--scheme-color-on-surface-variant);
   --color-on-tertiary: var(--scheme-color-on-tertiary);
   --color-on-tertiary-container: var(--scheme-color-on-tertiary-container);
   --color-on-tertiary-fixed: var(--scheme-color-on-tertiary-fixed);
-  --color-on-tertiary-fixed-variant: var(--scheme-color-on-tertiary-fixed-variant);
+  --color-on-tertiary-fixed-variant: var(
+    --scheme-color-on-tertiary-fixed-variant
+  );
   --color-outline: var(--scheme-color-outline);
   --color-outline-variant: var(--scheme-color-outline-variant);
   --color-primary-container: var(--scheme-color-primary-container);
@@ -132,9 +138,13 @@
   --color-surface-bright: var(--scheme-color-surface-bright);
   --color-surface-container: var(--scheme-color-surface-container);
   --color-surface-container-high: var(--scheme-color-surface-container-high);
-  --color-surface-container-highest: var(--scheme-color-surface-container-highest);
+  --color-surface-container-highest: var(
+    --scheme-color-surface-container-highest
+  );
   --color-surface-container-low: var(--scheme-color-surface-container-low);
-  --color-surface-container-lowest: var(--scheme-color-surface-container-lowest);
+  --color-surface-container-lowest: var(
+    --scheme-color-surface-container-lowest
+  );
   --color-surface-dim: var(--scheme-color-surface-dim);
   --color-surface-tint: var(--scheme-color-surface-tint);
   --color-surface-variant: var(--scheme-color-surface-variant);

@@ -31,7 +31,10 @@ interface DocumentAccess {
   ): string;
 }
 interface DocumentRef {
-  facet<T>(tag: string, keyId: string): {
+  facet<T>(
+    tag: string,
+    keyId: string,
+  ): {
     watch: DocumentWatch;
     value(snapshot: Snapshot): T | undefined;
     write(value: T): string;

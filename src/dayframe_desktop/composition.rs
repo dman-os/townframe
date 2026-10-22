@@ -1,8 +1,10 @@
 //! Desktop composition: explicit provider linkage, configuration source, and lifecycle controls.
-use clay_dioxus::use_component_recovery;
 use clay_dioxus::ComponentMount;
 use clay_dioxus::NativeComponents;
+use clay_dioxus::use_component_recovery;
 use clay_micro_core::application::ApplicationRuntime;
+use clay_micro_core::micros::MicroFactory;
+use clay_micro_core::micros::MicroId;
 use clay_micro_core::micros::composition::ConfigurationError;
 use clay_micro_core::micros::composition::ConfigurationSnapshot;
 use clay_micro_core::micros::composition::ConfigurationSource;
@@ -10,8 +12,6 @@ use clay_micro_core::micros::composition::ConfiguredMicro;
 use clay_micro_core::micros::composition::Enablement;
 use clay_micro_core::micros::composition::InstanceState;
 use clay_micro_core::micros::composition::MockConfiguration;
-use clay_micro_core::micros::MicroFactory;
-use clay_micro_core::micros::MicroId;
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
 
