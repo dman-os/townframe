@@ -41,28 +41,15 @@ mod state;
 mod e2e;
 
 pub use self::access::DrawerAccess;
-pub use self::add_child::AddChild;
-pub use self::add_doc::AddDoc;
-pub use self::create::{CreateDrawer, CreateLayout, DrawerCreated};
-pub use self::get::{DrawerView, GetDrawer};
-pub use self::grant::GrantDrawer;
-pub use self::known::{
-    ForgetDrawer, KnownDrawer, ListKnownDrawers, RememberDrawer, SetDrawerPolicy,
-};
-pub use self::list::{ListDrawers, ListedDrawer};
-pub use self::list_docs::{ListDocs, ListedDoc};
-pub use self::principal::{InvitePrincipal, Principal, RevokePrincipal};
-pub use self::remove_child::RemoveChild;
-pub use self::remove_doc::RemoveDoc;
-pub use self::revoke::RevokeDrawer;
-pub use self::state::{DrawerRecord, LocalDrawers};
+pub(crate) use self::state::SCOPED_DOCS_SQL;
 pub use big_cabinet_core::drawer::{Drawer, DrawerLayout, LayoutKind};
 
 use self::ledger::Ledger;
 use self::state::State;
 use crate::authority::{
-    Actor, AuthorityProtocol, AuthorityServiceError, CapId, Capability, CheckGrant, GrantAccess,
-    MintCapability, ResolveActor, RevokeAccess, Rights,
+    Actor, AuthorityProtocol, AuthorityServiceError, Authorization, CapId, Capability, CheckGrant,
+    CheckGrants, DomainAuthority, GrantAccess, Invocation, MintCapability, ResolveActor,
+    RevokeAccess, Rights, resolve_invocation,
 };
 use crate::doc::{CommandId, DocsError, DocsProtocol, WriteMode, WriteReceipt};
 use big_cabinet_core::FacetKey;
@@ -74,58 +61,23 @@ use big_cabinet_core::drawer::{
 };
 use big_repo::keyhive_core::access::Access as KeyhiveAccess;
 use big_repo::{BigKeyhiveGroup, SharedBigRepo};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use service_utils_rs::{
-    Client, ClientError, ContextError, Envelope, Handler, Host, Operation, RequestContext,
-    ResponseEnvelope, StopToken, XrpcOperation, service_protocol,
+    Client, ClientError, Envelope, Handler, Host, RequestContext, ResponseEnvelope, StopToken,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
-pub type DrawerId = DocId;
+pub use big_cabinet_core::drawer::protocol::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-pub enum DrawersError {
-    #[error("request context failed: {0}")]
-    Context(#[from] ContextError),
-    #[error("the presented capability does not permit this operation")]
-    Denied,
-    #[error("authority failed: {0}")]
-    Authority(AuthorityServiceError),
-    #[error("authority transport failed: {0}")]
-    AuthorityUnavailable(String),
-    #[error("document repository failed: {0}")]
-    Docs(DocsError),
-    #[error("document repository transport failed: {0}")]
-    DocsUnavailable(String),
-    #[error("keyhive failed: {0}")]
-    Keyhive(String),
-    #[error("drawer state failed: {0}")]
-    Storage(String),
-    #[error("{0} is not a drawer this node knows")]
-    UnknownDrawer(DrawerId),
-    #[error("{0} is a self-doc drawer: it holds only itself and cannot take entries or members")]
-    SelfDoc(DrawerId),
-    #[error("{0} is already a drawer")]
-    AlreadyDrawer(DocId),
-    #[error("a drawer cannot be its own child")]
-    SelfChild,
-    #[error("{0} is not an entry of this drawer")]
-    NotAnEntry(DocId),
-    #[error("the drawer's descriptor states a layout this build does not know: {0}")]
-    ForeignLayout(String),
-    #[error("command {command} is still in flight; retry once it resolves")]
-    CommandInFlight { command: CommandId },
-    #[error("command {command} was already used for a different request")]
-    CommandReused { command: CommandId },
-    #[error("the drawer's roster could not be read: {0}")]
-    RosterUnreadable(String),
+trait LedgerFailure {
+    fn keeps_ledger_row(&self) -> bool;
 }
 
-impl DrawersError {
+impl LedgerFailure for DrawersError {
     /// Whether a failed op may have left a side effect behind, so its ledger row stays for a
     /// retry or the next boot to finish; a refusal left nothing and frees its command id.
-    pub(crate) fn keeps_ledger_row(&self) -> bool {
+    fn keeps_ledger_row(&self) -> bool {
         match self {
             Self::Context(_)
             | Self::AuthorityUnavailable(_)
@@ -205,35 +157,79 @@ impl Drawers {
     pub async fn mint_drawer_capability(
         &self,
         context: &RequestContext,
-        capability: CapId,
+        authorization: Authorization,
         drawer_id: &DrawerId,
         access: Access,
         rights: Rights,
     ) -> Result<Capability, DrawersError> {
-        let actor = self.core.resolve(context, capability).await?;
-        self.core
-            .authorize(context, &actor, drawer_id, access)
-            .await?;
-        self.core
-            .authority
+        self.client
             .call(
                 context.child(),
-                MintCapability {
-                    issuer: self.core.issuer,
-                    object: drawer_object(access, drawer_id),
+                MintDrawerCapability {
+                    authorization,
+                    scope: DrawerScope {
+                        drawers: BTreeMap::from([(drawer_id.clone(), access)]),
+                        create: false,
+                    },
                     rights,
                 },
             )
             .await
-            .map_err(authority_error)
+            .map_err(|error| match error {
+                ClientError::Operation(error) => error,
+                ClientError::Transport { message, .. } => {
+                    DrawersError::AuthorityUnavailable(message)
+                }
+            })
+    }
+}
+
+impl Handler<MintDrawerCapability> for DrawerService {
+    async fn call(
+        &self,
+        request: Envelope<MintDrawerCapability>,
+    ) -> Result<ResponseEnvelope<Capability>, DrawersError> {
+        let params = request.params;
+        let caller = self
+            .core
+            .invocation(&request.context, params.authorization)
+            .await?;
+        if !caller.rights.contains(Rights::NARROW) || !params.rights.is_subset_of(caller.rights) {
+            return Err(DrawersError::Denied);
+        }
+        for (drawer, access) in &params.scope.drawers {
+            self.core
+                .authorize(&request.context, &caller.authority, drawer, *access)
+                .await?;
+        }
+        if params.scope.create {
+            self.core
+                .authorize_create(&request.context, &caller.authority)
+                .await?;
+        }
+        Ok(self
+            .core
+            .authority
+            .call(
+                request.context.child(),
+                MintCapability {
+                    issuer: self.core.issuer,
+                    object: drawer_scope_object(&params.scope),
+                    rights: params.rights,
+                },
+            )
+            .await
+            .map_err(authority_error)?
+            .into())
     }
 }
 
 pub type DrawersHandler = Arc<DrawerService>;
 
-service_protocol! {
-    pub enum DrawersProtocol => DrawersMessage {
+service_utils_rs::bind_service_protocol! {
+    pub struct DrawersBinding for DrawersProtocol => DrawersMessage {
         unary {
+            MintDrawerCapability(MintDrawerCapability),
             CreateDrawer(CreateDrawer),
             AddDoc(AddDoc),
             RemoveDoc(RemoveDoc),
@@ -253,29 +249,6 @@ service_protocol! {
         }
         stream {}
     }
-}
-
-/// The object a standing grant on a drawer names in DrawerService's ledger namespace: the access
-/// level is part of the string (`write drawer <id>`), the rights are ADR 017's generic `use`.
-/// Levels nest — `admin` covers `write` covers `read` covers `relay` — so a check asks for the
-/// strongest level the subject holds and compares.
-pub fn drawer_object(access: Access, drawer: &DrawerId) -> String {
-    let verb = match access {
-        Access::Relay => "relay",
-        Access::Read => "read",
-        Access::Write => "write",
-        Access::Admin => "admin",
-    };
-    format!("{verb} drawer {drawer}")
-}
-
-/// The object an actor needs `use` on to create a collection drawer.
-pub const CREATE_DRAWER_OBJECT: &str = "create drawer";
-
-/// The `placement` a doc names to be created into a drawer: `drawer <id>`. DocsRepo does not read
-/// it; [`DrawerAccess`] does.
-pub fn drawer_placement(drawer: &DrawerId) -> String {
-    format!("drawer {drawer}")
 }
 
 /// The `placement` DrawerService itself uses for a drawer's own metadata doc: it enters the local
@@ -366,141 +339,188 @@ impl Core {
             .expect("DrawerService is booted before any request reaches drawers or their policy")
     }
 
-    pub(crate) async fn resolve(
+    pub(crate) async fn invocation(
         &self,
         context: &RequestContext,
-        capability: CapId,
-    ) -> Result<Actor, DrawersError> {
-        self.authority
-            .call(context.child(), ResolveActor { capability })
-            .await
-            .map_err(authority_error)
+        authorization: Authorization,
+    ) -> Result<Invocation<DrawerScope>, DrawersError> {
+        resolve_invocation(
+            &self.authority,
+            context,
+            authorization,
+            self.actor().actor_id,
+            parse_drawer_scope_object,
+        )
+        .await
+        .map_err(authority_error)
     }
 
-    /// The strongest level `actor` holds on `drawer` directly in this service's ledger namespace.
-    /// Four objects, checked strongest first; the ledger answers only standing grants.
-    pub(crate) async fn held(
+    async fn granted(
         &self,
         context: &RequestContext,
         actor: Uuid7,
-        drawer: &DrawerId,
+        bounds: BTreeMap<DrawerId, Access>,
     ) -> Result<Option<Access>, DrawersError> {
-        for access in Access::ALL.into_iter().rev() {
-            let rights = self
-                .authority
-                .call(
-                    context.child(),
-                    CheckGrant {
-                        via: self.issuer,
-                        subject: actor,
-                        object: drawer_object(access, drawer),
-                    },
-                )
-                .await
-                .map_err(authority_error)?;
-            if rights.contains(Rights::USE) {
-                return Ok(Some(access));
-            }
-        }
-        Ok(None)
+        let candidates: Vec<_> = bounds
+            .iter()
+            .flat_map(|(drawer, bound)| {
+                Access::ALL
+                    .into_iter()
+                    .map(move |access| (drawer_object(access, drawer), access.min(*bound)))
+            })
+            .collect();
+        let rights = self
+            .authority
+            .call(
+                context.child(),
+                CheckGrants {
+                    via: self.issuer,
+                    subject_id: actor,
+                    objects: candidates
+                        .iter()
+                        .map(|(object, _)| object.clone())
+                        .collect(),
+                },
+            )
+            .await
+            .map_err(authority_error)?;
+        assert_eq!(
+            rights.len(),
+            candidates.len(),
+            "one verdict per requested object"
+        );
+        Ok(candidates
+            .into_iter()
+            .zip(rights)
+            .filter_map(|((_, access), rights)| rights.contains(Rights::USE).then_some(access))
+            .max())
     }
 
-    /// Whether `actor` may act on `drawer` at `needed`, by a direct grant or through a parent
-    /// drawer whose child entry reaches it: the effective level along a path is the weakest link,
-    /// and the strongest path wins (ADR 014 child traversal).
     pub(crate) async fn effective(
         &self,
         context: &RequestContext,
         actor: Uuid7,
         drawer: &DrawerId,
     ) -> Result<Option<Access>, DrawersError> {
-        let mut best = self.held(context, actor, drawer).await?;
-        if best == Some(Access::Admin) {
-            return Ok(best);
-        }
-        if self.state.parents_of(drawer).await?.is_empty() {
+        let mut bounds = self
+            .state
+            .ancestors(state::ScopeTarget::Drawer(drawer))
+            .await?;
+        // Self-only (or missing) projection: a synced-in drawer hierarchy may not be
+        // projected yet. `unprojected_candidates` is empty when the projection is complete.
+        if bounds.len() <= 1 {
             self.sync_discovered(context).await?;
+            bounds = self
+                .state
+                .ancestors(state::ScopeTarget::Drawer(drawer))
+                .await?;
         }
-        // `bound` is the strongest level a grant on that drawer can confer on `drawer` through the
-        // entries walked so far. A drawer is re-expanded when a stronger path reaches it, so the
-        // strongest path wins rather than the first one found.
-        let mut bounds: BTreeMap<DrawerId, Access> =
-            BTreeMap::from([(drawer.clone(), Access::Admin)]);
-        let mut frontier = vec![(drawer.clone(), Access::Admin)];
-        while let Some((child, bound)) = frontier.pop() {
-            for (parent, entry) in self.state.parents_of(&child).await? {
-                let via = entry.min(bound);
-                if bounds.get(&parent).is_some_and(|known| *known >= via) {
-                    continue;
-                }
-                bounds.insert(parent.clone(), via);
-                if let Some(held) = self.held(context, actor, &parent).await? {
-                    let reached = held.min(via);
-                    if best.is_none_or(|best| reached > best) {
-                        best = Some(reached);
-                    }
-                }
-                frontier.push((parent, via));
-            }
-        }
-        Ok(best)
+        bounds.insert(drawer.clone(), Access::Admin);
+        self.granted(context, actor, bounds).await
     }
 
-    /// The strongest level `actor` reaches on `doc`: through the doc being a drawer itself, or
-    /// through any drawer listing it, where an entry caps what the drawer confers on the doc.
-    /// This is the doc-access policy's answer, so a caller checked here is checked as DocsRepo
-    /// checks it.
     pub(crate) async fn reach(
         &self,
         context: &RequestContext,
         actor: Uuid7,
         doc: &DocId,
     ) -> Result<Option<Access>, DrawersError> {
-        let mut best = self.reach_projected(context, actor, doc).await?;
-        if best != Some(Access::Admin) {
+        let mut bounds = self.state.ancestors(state::ScopeTarget::Doc(doc)).await?;
+        if bounds.is_empty() {
+            // The doc's drawers may have arrived via sync without a local projection row.
             self.sync_discovered(context).await?;
             if self.state.drawer(doc).await?.is_none() {
                 drop(self.ensure_drawer(context, doc).await?);
             }
-            best = self.reach_projected(context, actor, doc).await?;
+            bounds = self.state.ancestors(state::ScopeTarget::Doc(doc)).await?;
         }
-        Ok(best)
+        self.granted(context, actor, bounds).await
     }
 
-    async fn reach_projected(
+    pub(crate) async fn level(
         &self,
         context: &RequestContext,
-        actor: Uuid7,
+        authority: &DomainAuthority<DrawerScope>,
+        drawer: &DrawerId,
+    ) -> Result<Option<Access>, DrawersError> {
+        match authority {
+            DomainAuthority::Identity(actor) => self.effective(context, *actor, drawer).await,
+            DomainAuthority::Scoped(scope) => {
+                let mut bounds = self
+                    .state
+                    .ancestors(state::ScopeTarget::Drawer(drawer))
+                    .await?;
+                bounds.insert(drawer.clone(), Access::Admin);
+                Ok(scope
+                    .drawers
+                    .iter()
+                    .filter_map(|(root, access)| {
+                        bounds.get(root).map(|bound| (*access).min(*bound))
+                    })
+                    .max())
+            }
+        }
+    }
+
+    pub(crate) async fn doc_level(
+        &self,
+        context: &RequestContext,
+        authority: &DomainAuthority<DrawerScope>,
         doc: &DocId,
     ) -> Result<Option<Access>, DrawersError> {
-        let mut best = None;
-        if self.state.drawer(doc).await?.is_some() {
-            best = self.effective(context, actor, doc).await?;
-        }
-        for (drawer, entry) in self.state.drawers_of(doc).await? {
-            if best == Some(Access::Admin) {
-                break;
-            }
-            if let Some(held) = self.effective(context, actor, &drawer).await? {
-                let reached = held.min(entry);
-                if best.is_none_or(|best| reached > best) {
-                    best = Some(reached);
-                }
+        match authority {
+            DomainAuthority::Identity(actor) => self.reach(context, *actor, doc).await,
+            DomainAuthority::Scoped(scope) => {
+                let bounds = self.state.ancestors(state::ScopeTarget::Doc(doc)).await?;
+                Ok(scope
+                    .drawers
+                    .iter()
+                    .filter_map(|(root, access)| {
+                        bounds.get(root).map(|bound| (*access).min(*bound))
+                    })
+                    .max())
             }
         }
-        Ok(best)
     }
 
     pub(crate) async fn authorize(
         &self,
         context: &RequestContext,
-        actor: &Actor,
+        authority: &DomainAuthority<DrawerScope>,
         drawer: &DrawerId,
         needed: Access,
     ) -> Result<(), DrawersError> {
-        match self.effective(context, actor.uuid, drawer).await? {
+        match self.level(context, authority, drawer).await? {
             Some(held) if held >= needed => Ok(()),
             _ => Err(DrawersError::Denied),
+        }
+    }
+
+    pub(crate) async fn authorize_create(
+        &self,
+        context: &RequestContext,
+        authority: &DomainAuthority<DrawerScope>,
+    ) -> Result<(), DrawersError> {
+        let allowed = match authority {
+            DomainAuthority::Identity(actor) => self
+                .authority
+                .call(
+                    context.child(),
+                    CheckGrant {
+                        via: self.issuer,
+                        subject_id: *actor,
+                        object: CREATE_DRAWER_OBJECT.into(),
+                    },
+                )
+                .await
+                .map_err(authority_error)?
+                .contains(Rights::USE),
+            DomainAuthority::Scoped(scope) => scope.create,
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(DrawersError::Denied)
         }
     }
 
@@ -515,30 +535,9 @@ impl Core {
                 context.child(),
                 GrantAccess {
                     via: self.issuer,
-                    subject,
+                    subject_id: subject,
                     object,
                     rights: Rights::USE,
-                },
-            )
-            .await
-            .map_err(authority_error)?;
-        self.state.notify_changed();
-        Ok(())
-    }
-
-    pub(crate) async fn revoke(
-        &self,
-        context: &RequestContext,
-        subject: Uuid7,
-        object: String,
-    ) -> Result<(), DrawersError> {
-        self.authority
-            .call(
-                context.child(),
-                RevokeAccess {
-                    via: self.issuer,
-                    subject,
-                    object,
                 },
             )
             .await
@@ -562,7 +561,7 @@ impl Core {
             .call(
                 context.child(),
                 crate::doc::WriteFacets {
-                    capability: self.issuer,
+                    authorization: Authorization::identity(self.issuer),
                     command,
                     doc_id: drawer.clone(),
                     mode: WriteMode::AtCurrent,
@@ -588,7 +587,7 @@ impl Core {
             .call(
                 context.child(),
                 crate::doc::ReadFacets {
-                    capability: self.issuer,
+                    authorization: Authorization::identity(self.issuer),
                     doc_id: record.drawer_id.clone(),
                     at: crate::doc::At::Current,
                     facets: None,
@@ -700,7 +699,7 @@ impl Core {
             .call(
                 context.child(),
                 crate::doc::ReadFacets {
-                    capability: self.issuer,
+                    authorization: Authorization::identity(self.issuer),
                     doc_id: drawer_id.clone(),
                     at: crate::doc::At::Current,
                     facets: Some(std::collections::BTreeSet::from([drawer_key()])),
@@ -750,7 +749,7 @@ impl Core {
                 .call(
                     context.child(),
                     crate::doc::ReadFacets {
-                        capability: self.issuer,
+                        authorization: Authorization::identity(self.issuer),
                         doc_id: drawer_id.clone(),
                         at: crate::doc::At::Current,
                         facets: Some(std::collections::BTreeSet::from([drawer_key()])),
@@ -760,9 +759,9 @@ impl Core {
                 .await
             {
                 Ok(read) => read,
-                Err(ClientError::Operation(
-                    DocsError::DocNotFound | DocsError::Pending { .. },
-                )) => continue,
+                Err(ClientError::Operation(DocsError::DocNotFound | DocsError::Pending { .. })) => {
+                    continue;
+                }
                 Err(error) => return Err(docs_error(error)),
             };
             let Some(crate::doc::FacetRead::Accepted { value, .. }) =
@@ -778,8 +777,7 @@ impl Core {
             let initial = crate::drawer::create::record_of(&drawer_id, &descriptor);
             let (record, _) = self.rescan(context, &initial).await?;
             for (child_id, _) in self.state.children_of(&drawer_id).await? {
-                if visited.insert(child_id.clone())
-                    && self.state.drawer(&child_id).await?.is_none()
+                if visited.insert(child_id.clone()) && self.state.drawer(&child_id).await?.is_none()
                 {
                     queue.push_back(child_id);
                 }
@@ -896,9 +894,12 @@ pub async fn boot(config: DrawerConfig) -> Result<(Drawers, StopToken), DrawersE
             .await?;
     }
     service.ensure_local_drawers().await?;
-    service.core.sync_discovered(&RequestContext::root()).await?;
+    service
+        .core
+        .sync_discovered(&RequestContext::root())
+        .await?;
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::direct(Arc::clone(&host));
+    let client = Client::direct(DrawersBinding::new(Arc::clone(&host)));
     Ok((
         Drawers {
             host,

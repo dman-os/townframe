@@ -39,12 +39,12 @@ pub(super) async fn issue(
     row: &ActorRow,
     rights: Rights,
 ) -> Result<CapId, AuthorityError> {
-    if let Some(id) = store::actor_cap(conn, row.uuid, &parent.cap.id, rights).await? {
+    if let Some(id) = store::actor_cap(conn, row.actor_id, &parent.cap.id, rights).await? {
         return Ok(id);
     }
     let issued = parent.child(format!("is actor {}", row.path), rights, issuer)?;
     store::insert_cap(conn, &issued).await?;
-    store::associate_actor(conn, issued.id, row.uuid).await?;
+    store::associate_actor(conn, issued.id, row.actor_id).await?;
     Ok(issued.id)
 }
 
@@ -162,11 +162,11 @@ pub(super) fn public_actor(
     capability: CapId,
 ) -> Result<Actor, AuthorityError> {
     Ok(Actor {
-        uuid: row.uuid,
+        actor_id: row.actor_id,
         url: actor_url(node, &row.path)?,
         public_key: key_text(&row.public_key)?,
         certificate: Bytes::from(row.certificate.clone()),
-        parent_actor: row.parent,
+        parent_actor_id: row.parent,
         capability,
     })
 }

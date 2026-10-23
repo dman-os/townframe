@@ -129,20 +129,39 @@ The embedder opens each subsystem — DocsRepo, DrawerService, the runtime — f
 the operator root and hands it its actor cap. A plug is an actor under the
 runtime (`rt/plugs/ocr`).
 
-To act on a domain, a caller presents its actor cap to the domain service. The
-service resolves it (proving the caller is that actor), asks the ledger what that
-actor holds on the object *the service* named, decides containment, and mints an
-object cap — `edit doc X` — from **its own** actor cap. Later it checks only that
-the cap it is shown is live and was issued by itself, and what rights it carries.
-The domain object grammar lives in exactly one place, the service that named it.
+A domain invocation carries two independent handles: `authority` authorizes the
+operation; `signer` identifies the actor for attribution. An ordinary caller can
+supply the same identity capability in both slots. Using standing grants does not
+require a preliminary capability-minting round trip.
+
+The domain resolves only the `authority` handle to select one of two paths:
+
+- An exact registered identity issuance: check that actor's standing grants over
+  objects the domain names, applying the domain's containment rules.
+- A domain object capability: check liveness, the trusted issuing namespace, the
+  domain object grammar and sufficient rights. Do not consult standing grants or
+  recover an identity from ancestors.
+
+The two paths are alternatives, never a union. The signer's identity and grants
+cannot widen the authority supplied for this invocation. A live but insufficient
+object capability is refused; it does not fall back to the signer's grants.
+AuthorityActors owns exact identity recognition; domain interpretation remains in
+the domain service's authorization resolver, not transport adapters or callers.
+
+When a caller requests a narrower object cap, the domain applies the same
+resolver, verifies containment and rights attenuation, and mints from **its own**
+actor cap. The requested scope cannot exceed the authority presented for minting.
+A plugin can therefore receive a scoped capability without acquiring any standing
+grant rows. Its persistent identity and signing key do not themselves grant access.
 
 A facet write by a plug is signed as the plug. Guests never hold actor caps: the
-runtime holds the plug's actor cap and passes it with the dispatch, DocsRepo
-authorizes the write against the object cap the guest presented, and then signs
-with the plug's actor cap. The authority cannot tell DocsRepo from any other
-holder of an actor cap and does not need to: holding an actor's cap is being that
-actor, so actor caps stay inside trusted subsystems. A dispatch is an object cap
-derived for that dispatch, not an actor.
+runtime keeps the plug's actor cap and injects it into the `signer` slot while
+forwarding only the permitted `authority`. Giving a guest its identity handle
+would also let it present that handle as `authority` and exercise its standing
+grants, defeating a narrower dispatch boundary. The authority cannot tell
+DocsRepo from any other holder of an actor cap and does not need to: holding an
+actor's cap is being that actor, so actor caps stay inside trusted subsystems.
+A dispatch is an object cap derived for that dispatch, not an actor.
 
 ## Transport and trust boundary
 

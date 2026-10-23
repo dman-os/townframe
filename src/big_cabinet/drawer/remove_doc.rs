@@ -5,22 +5,6 @@ use super::*;
 use crate::doc::pipeline::digest;
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoveDoc {
-    pub capability: CapId,
-    pub command: CommandId,
-    pub drawer_id: DrawerId,
-    pub doc_id: DocId,
-}
-
-impl Operation for RemoveDoc {
-    type Output = WriteReceipt;
-    type Error = DrawersError;
-    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.daybook.drawers.removeDoc")
-        .with_schemas("WriteReceipt", "DrawersError");
-}
-
 impl Core {
     /// Take `doc` out of `drawer`, idempotently: the entry is deleted before the docs group is
     /// revoked on the doc (ADR 014), and each half runs only if its state is still there, so a
@@ -89,16 +73,22 @@ impl DrawerService {
         params: RemoveDoc,
     ) -> Result<WriteReceipt, DrawersError> {
         let core = &self.core;
-        let actor = core.resolve(context, params.capability).await?;
-        core.authorize(context, &actor, &params.drawer_id, Access::Write)
+        let caller = core.invocation(context, params.authorization).await?;
+        let actor = &caller.signer;
+        core.authorize(context, &caller.authority, &params.drawer_id, Access::Write)
             .await?;
-        let digest = digest(&("removeDoc", actor.uuid, &params.drawer_id, &params.doc_id));
+        let digest = digest(&(
+            "removeDoc",
+            actor.actor_id,
+            &params.drawer_id,
+            &params.doc_id,
+        ));
         let op = Op::RemoveDoc {
             drawer_id: params.drawer_id.clone(),
             doc_id: params.doc_id.clone(),
         };
         core.ledger
-            .run(&params.command, digest, actor.uuid, op, |_| async {
+            .run(&params.command, digest, actor.actor_id, op, |_| async {
                 core.leave(context, &params.drawer_id, &params.doc_id)
                     .await?
                     .ok_or_else(|| DrawersError::NotAnEntry(params.doc_id.clone()))
@@ -127,7 +117,7 @@ mod tests {
     #[test]
     fn remove_doc_wire_shape() {
         let request = RemoveDoc {
-            capability: CapId::default(),
+            authorization: Authorization::identity(CapId::default()),
             command: CommandId::try_from("remove-1".to_owned()).unwrap(),
             drawer_id: DocId::new([1; 32]),
             doc_id: DocId::new([2; 32]),
@@ -136,7 +126,10 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "capability": "00000000-0000-0000-0000-000000000000",
+                "authorization": {
+                    "authority": "00000000-0000-0000-0000-000000000000",
+                    "signer": "00000000-0000-0000-0000-000000000000",
+                },
                 "command": "remove-1",
                 "drawerId": DocId::new([1; 32]).to_string(),
                 "docId": DocId::new([2; 32]).to_string(),
@@ -148,7 +141,10 @@ mod tests {
     #[test]
     fn a_remove_without_a_command_is_refused() {
         let error = serde_json::from_value::<RemoveDoc>(json!({
-            "capability": "00000000-0000-0000-0000-000000000000",
+            "authorization": {
+                "authority": "00000000-0000-0000-0000-000000000000",
+                "signer": "00000000-0000-0000-0000-000000000000",
+            },
             "drawerId": DocId::new([1; 32]).to_string(),
             "docId": DocId::new([2; 32]).to_string(),
         }))

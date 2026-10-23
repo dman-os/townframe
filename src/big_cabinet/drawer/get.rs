@@ -2,34 +2,6 @@
 
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GetDrawer {
-    pub capability: CapId,
-    pub drawer_id: DrawerId,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DrawerView {
-    pub drawer_id: DrawerId,
-    pub layout: DrawerLayout,
-    /// The `drawer/main` facet, exactly as the doc carries it: the groups live on it, and a
-    /// future member's fields come along without a service version bump.
-    pub descriptor: Drawer,
-    /// The caller's effective level on the drawer.
-    pub access: Access,
-    pub docs: BTreeMap<DocId, Access>,
-    pub children: BTreeMap<DrawerId, Access>,
-}
-
-impl Operation for GetDrawer {
-    type Output = DrawerView;
-    type Error = DrawersError;
-    const XRPC: XrpcOperation = XrpcOperation::query("org.example.daybook.drawers.getDrawer")
-        .with_schemas("DrawerView", "DrawersError");
-}
-
 impl DrawerService {
     /// Relay suffices: ADR 014 lets a relay enumerate the roster. The access check comes before
     /// the record lookup so that an unauthorized caller cannot tell a drawer from any other doc.
@@ -39,9 +11,9 @@ impl DrawerService {
         params: GetDrawer,
     ) -> Result<DrawerView, DrawersError> {
         let core = &self.core;
-        let actor = core.resolve(context, params.capability).await?;
+        let caller = core.invocation(context, params.authorization).await?;
         let access = core
-            .effective(context, actor.uuid, &params.drawer_id)
+            .level(context, &caller.authority, &params.drawer_id)
             .await?
             .ok_or(DrawersError::Denied)?;
         let record = core
@@ -76,14 +48,14 @@ mod tests {
     #[test]
     fn a_request_names_the_drawer() {
         let request = GetDrawer {
-            capability: CapId::from_bytes([1; 16]),
+            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
             drawer_id: DocId::new([2; 32]),
         };
         let value = serde_json::to_value(&request).expect("serialize");
         assert_eq!(
             value,
             serde_json::json!({
-                "capability": CapId::from_bytes([1; 16]),
+                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
                 "drawerId": DocId::new([2; 32]).to_string(),
             })
         );

@@ -1,17 +1,6 @@
 //! MintCapability: mint an object capability in an actor's namespace.
 
-use super::operation;
 use super::*;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MintCapability {
-    pub issuer: CapId,
-    pub object: String,
-    pub rights: Rights,
-}
-
-operation!(MintCapability => Capability, procedure, "mintCapability", "Capability");
 
 impl AuthorityService {
     async fn mint(&self, request: MintCapability) -> Result<Capability, AuthorityError> {

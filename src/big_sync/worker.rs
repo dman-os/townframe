@@ -19,6 +19,59 @@ use big_sync_core::TaskCounts;
 pub struct BigSyncWorkerHandle {
     host_tx: tokio::sync::mpsc::Sender<BigSyncWorkerMsg>,
     stats_tx: tokio::sync::broadcast::Sender<big_sync_core::SyncStatEvent>,
+    interest_tx: tokio::sync::mpsc::UnboundedSender<ObjectInterestMsg>,
+}
+
+#[derive(Clone)]
+pub struct ObjectInterestSource(Arc<ObjectInterestSourceInner>);
+
+struct ObjectInterestSourceInner {
+    id: u64,
+    tx: tokio::sync::mpsc::UnboundedSender<ObjectInterestMsg>,
+}
+
+impl ObjectInterestSource {
+    pub async fn replace(
+        &self,
+        peers: std::collections::HashSet<PeerKey>,
+        objects: HashMap<ObjKey, BackendId>,
+    ) -> Res<()> {
+        let (resp, rx) = tokio::sync::oneshot::channel();
+        self.0
+            .tx
+            .send(ObjectInterestMsg::Replace {
+                id: self.0.id,
+                peers,
+                objects,
+                resp,
+            })
+            .map_err(|_| ferr!(ERROR_CHANNEL))?;
+        rx.await.wrap_err(ERROR_CHANNEL)??;
+        Ok(())
+    }
+}
+
+impl Drop for ObjectInterestSourceInner {
+    fn drop(&mut self) {
+        let _closed = self.tx.send(ObjectInterestMsg::Remove { id: self.id });
+    }
+}
+
+enum ObjectInterestMsg {
+    Replace {
+        id: u64,
+        peers: std::collections::HashSet<PeerKey>,
+        objects: HashMap<ObjKey, BackendId>,
+        resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>,
+    },
+    Remove {
+        id: u64,
+    },
+}
+
+struct ObjectInterest {
+    peers: std::collections::HashSet<PeerKey>,
+    objects: HashMap<ObjKey, BackendId>,
 }
 
 type SharedPartitionStore = Arc<dyn crate::part_store::HostPartStore>;
@@ -107,6 +160,7 @@ pub struct StopToken {
 pub struct WorkerSnapshot {
     pub label: &'static str,
     pub peer_parts: HashMap<PeerKey, HashMap<PartKey, BackendId>>,
+    pub peer_objects: HashMap<PeerKey, HashMap<ObjKey, BackendId>>,
     pub full_sync_waiters: HashMap<u64, Vec<(PeerKey, PartKey)>>,
     pub last_object_syncs: Vec<(PeerKey, PartKey, big_sync_core::ObjKey, std::time::Instant)>,
     pub task_counts: TaskCounts,
@@ -133,6 +187,7 @@ impl WorkerSnapshot {
     pub fn convergence_eq(&self, other: &Self) -> bool {
         self.label == other.label
             && self.peer_parts == other.peer_parts
+            && self.peer_objects == other.peer_objects
             && self.full_sync_waiters == other.full_sync_waiters
             && self.last_object_syncs == other.last_object_syncs
             && self.task_counts == other.task_counts
@@ -175,6 +230,14 @@ impl StopToken {
 }
 
 impl BigSyncWorkerHandle {
+    pub fn object_interest_source(&self) -> ObjectInterestSource {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        ObjectInterestSource(Arc::new(ObjectInterestSourceInner {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            tx: self.interest_tx.clone(),
+        }))
+    }
+
     pub fn subscribe_stats(
         &self,
     ) -> tokio::sync::broadcast::Receiver<big_sync_core::SyncStatEvent> {
@@ -366,6 +429,7 @@ pub fn spawn_big_sync_worker_with_options(
         machine.set_default_sync_mode(sync_mode);
     }
     let (host_tx, host_rx) = tokio::sync::mpsc::channel(64);
+    let (interest_tx, interest_rx) = tokio::sync::mpsc::unbounded_channel();
     let (sync_tx, sync_rx) = mpsc::bounded(64, "SyncWorkers".into(), "BigSyncMachine".into());
     let (task_tx, task_rx) = mpsc::bounded(64, "BigSync tasks".into(), "BigSyncMachine".into());
     let mut worker = BigSyncWorker {
@@ -381,6 +445,8 @@ pub fn spawn_big_sync_worker_with_options(
         sync_spawn_queue: default(),
 
         host_rx,
+        interest_rx,
+        interests: default(),
         sync_tx,
         sync_rx,
         task_tx,
@@ -455,7 +521,11 @@ pub fn spawn_big_sync_worker_with_options(
         tokio::task::spawn(async move { fut.await.unwrap() }.instrument(span.or_current()));
 
     Ok((
-        BigSyncWorkerHandle { host_tx, stats_tx },
+        BigSyncWorkerHandle {
+            host_tx,
+            stats_tx,
+            interest_tx,
+        },
         StopToken {
             cancel_token,
             join_handle,
@@ -498,6 +568,8 @@ struct BigSyncWorker {
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
 
     host_rx: tokio::sync::mpsc::Receiver<BigSyncWorkerMsg>,
+    interest_rx: tokio::sync::mpsc::UnboundedReceiver<ObjectInterestMsg>,
+    interests: HashMap<u64, ObjectInterest>,
     machine: BigSyncMachine,
 
     machine_spawn_queue: VecDeque<MachineTask>,
@@ -520,6 +592,7 @@ struct BigSyncWorker {
 
 struct PeerState {
     parts: HashMap<PartKey, BackendId>,
+    configured_objects: HashMap<ObjKey, BackendId>,
     objects: HashMap<ObjKey, BackendId>,
 }
 
@@ -641,6 +714,9 @@ impl BigSyncWorker {
                     debug!(worker = %self.label, ?evt, "big_sync worker received sync event");
                     self.machine.handle_evt(evt);
                 }
+                Some(msg) = self.interest_rx.recv() => {
+                    self.handle_interest(msg);
+                }
                 msg = self.host_rx.recv() => {
                     let Some(msg) = msg else {
                         break;
@@ -714,6 +790,74 @@ impl BigSyncWorker {
         Ok(())
     }
 
+    fn refresh_peer_interest(&mut self, peer_id: &PeerKey) -> bool {
+        let peer = self.peers.get_mut(peer_id).expect(ERROR_IMPOSSIBLE);
+        let mut objects = peer.configured_objects.clone();
+        for interest in self
+            .interests
+            .values()
+            .filter(|source| source.peers.contains(peer_id))
+        {
+            for (obj, backend) in &interest.objects {
+                if let Some(existing) = objects.insert(obj.clone(), Arc::clone(backend)) {
+                    assert_eq!(existing, *backend, "object interest backend conflict");
+                }
+            }
+        }
+        if peer.objects == objects {
+            return false;
+        }
+        peer.objects = objects;
+        true
+    }
+
+    fn publish_peer_interest(&mut self, peer_id: &PeerKey) {
+        let peer = self.peers.get(peer_id).expect(ERROR_IMPOSSIBLE);
+        self.machine
+            .handle_evt(BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
+                peer_id: peer_id.clone(),
+                parts: peer.parts.keys().cloned().collect(),
+                objects: peer.objects.keys().cloned().collect(),
+            }));
+    }
+
+    fn handle_interest(&mut self, msg: ObjectInterestMsg) {
+        match msg {
+            ObjectInterestMsg::Replace {
+                id,
+                peers,
+                objects,
+                resp,
+            } => {
+                for (obj_id, backend_id) in &objects {
+                    if !self.sync_backends.contains_key(backend_id) {
+                        let _cancelled = resp.send(Err(BigSyncWorkerError::UnknownObjectBackend {
+                            backend_id: Arc::clone(backend_id),
+                            obj_id: obj_id.clone(),
+                        }));
+                        return;
+                    }
+                }
+                self.interests.insert(id, ObjectInterest { peers, objects });
+                for peer in self.peers.keys().cloned().collect::<Vec<_>>() {
+                    if self.refresh_peer_interest(&peer) {
+                        self.publish_peer_interest(&peer);
+                    }
+                }
+                let _cancelled = resp.send(Ok(()));
+            }
+            ObjectInterestMsg::Remove { id } => {
+                if self.interests.remove(&id).is_some() {
+                    for peer in self.peers.keys().cloned().collect::<Vec<_>>() {
+                        if self.refresh_peer_interest(&peer) {
+                            self.publish_peer_interest(&peer);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn handle_msg(&mut self, msg: BigSyncWorkerMsg) -> Res<()> {
         match msg {
             BigSyncWorkerMsg::SetPeer {
@@ -756,17 +900,14 @@ impl BigSyncWorker {
                     peer_id.clone(),
                     PeerState {
                         parts: parts.clone(),
-                        objects: objects.clone(),
+                        configured_objects: objects.clone(),
+                        objects: HashMap::new(),
                     },
                 );
                 let part_count = parts.len();
                 let object_count = objects.len();
-                let evt = BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
-                    peer_id: peer_id.clone(),
-                    parts: parts.into_keys().collect(),
-                    objects: objects.into_keys().collect(),
-                });
-                self.machine.handle_evt(evt);
+                self.refresh_peer_interest(&peer_id);
+                self.publish_peer_interest(&peer_id);
                 resp.send(Ok(()))
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
@@ -842,6 +983,11 @@ impl BigSyncWorker {
                         .peers
                         .iter()
                         .map(|(peer_id, peer_state)| (peer_id.clone(), peer_state.parts.clone()))
+                        .collect(),
+                    peer_objects: self
+                        .peers
+                        .iter()
+                        .map(|(id, peer)| (id.clone(), peer.objects.clone()))
                         .collect(),
                     full_sync_waiters: self.machine.debug_full_sync_waiters(),
                     last_object_syncs: self.machine.debug_last_object_syncs(),
@@ -1240,6 +1386,7 @@ mod tests {
         let obj_id = ObjKey::random();
         let peer = PeerState {
             parts: [(PartKey::random(), Arc::from("backend"))].into(),
+            configured_objects: HashMap::new(),
             objects: HashMap::new(),
         };
         let task = SyncTask {
@@ -1265,6 +1412,7 @@ mod tests {
         WorkerSnapshot {
             label: "big_sync test",
             peer_parts: HashMap::new(),
+            peer_objects: HashMap::new(),
             full_sync_waiters: HashMap::new(),
             last_object_syncs: Vec::new(),
             task_counts,

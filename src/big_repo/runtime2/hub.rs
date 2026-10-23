@@ -131,6 +131,7 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     next_quiescence_stall_report: Option<std::time::Instant>,
     // ── doc-worker registry ────────────────────────────────────────────────
     doc_workers: HashMap<DocumentId, DocWorkerEntry>,
+    interests: Arc<crate::interest::SyncInterests>,
     pending_materialization: HashSet<DocumentId>,
     /// Documents with a materialization retry in flight, mapped to the Keyhive
     /// state generation at retry start. A `Pending` completion whose walk ran
@@ -813,6 +814,12 @@ where
                         resp,
                     ),
                 )?;
+            }
+            Runtime2Cmd::AcquireDocInterest { doc_id, resp } => {
+                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
+                worker
+                    .send(DocWorkerMsg::AcquireInterest { resp, _lease })
+                    .wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::GetDocHandle {
                 doc_id,
@@ -3322,6 +3329,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             self.cmd_tx.clone(),
             self.evt_tx.clone(),
             generation,
+            Arc::clone(&self.interests),
             self.span.clone(),
         )?;
         let handle = worker.handle;
@@ -3543,6 +3551,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
 
     fn janitor_tick(&mut self) {
         let now = self.clock.instant();
+        self.interests.expire();
         self.report_quiescence_stall(now);
         self.report_unresolved_keyhive_round(now);
         // Both lease counts must be zero for eviction, so an in-flight
@@ -3913,6 +3922,7 @@ where
         activity_generation: 0,
         tracked_in_flight: 0,
         doc_workers: HashMap::new(),
+        interests: crate::interest::SyncInterests::new(Arc::clone(&clock)),
         tracked_work: HashMap::new(),
         quiescence_stall_since: None,
         next_quiescence_stall_report: None,
@@ -3925,6 +3935,7 @@ where
     let handle = Runtime2Handle::<F>::new(
         cmd_tx.clone(),
         hub.sync_policy,
+        Arc::clone(&hub.interests),
         #[cfg(any(test, feature = "test-support"))]
         Arc::clone(&timer),
         doc_sync_waiter_ids,

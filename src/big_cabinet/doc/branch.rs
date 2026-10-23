@@ -4,68 +4,54 @@ use super::commands::{Detail, Kind, Row, State};
 use super::pipeline::{Failure, Plan, digest};
 use super::*;
 
-/// Branch `doc_id` at `at` into a new document, then place the branch through the access
-/// policy like a created document.
-///
-/// A branch *is* the origin's changes up to `at` under a new document id: no value is copied, so
-/// every signature on the origin reconstructs on the branch exactly as it did there, and the branch
-/// can later be merged back with [`MergeDoc`]. The branch's first change is its
-/// `org.example.daybook.branch/<branch id>` facet naming `path`.
-///
-/// A branch is announced on the origin by the same `org.example.daybook.branch/<branch id>` facet,
-/// including its concrete parent reference and fork heads. This requires origin write access;
-/// a `stealth` branch skips the announcement and needs only origin read access.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BranchDoc {
-    pub capability: CapId,
-    pub command: CommandId,
-    pub doc_id: DocId,
-    pub at: At,
-    pub path: String,
-    #[serde(default)]
-    pub stealth: bool,
-    pub placement: String,
-}
-
-impl Operation for BranchDoc {
-    type Output = WriteReceipt;
-    type Error = DocsError;
-    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.daybook.docs.branchDoc")
-        .with_schemas("WriteReceipt", "DocsError");
-}
-
 impl DocsService {
     async fn branch(
         &self,
         context: &RequestContext,
         params: BranchDoc,
     ) -> Result<WriteReceipt, DocsError> {
-        let actor = self.actor(context, params.capability).await?;
-        self.authorize(context, &actor, AccessRequest::Read(&params.doc_id))
-            .await?;
+        let caller = self.invocation(context, params.authorization).await?;
+        let actor = &caller.signer;
+        self.authorize(
+            context,
+            &caller.authority,
+            AccessRequest::Read(&params.doc_id),
+        )
+        .await?;
         if !params.stealth {
-            self.authorize(context, &actor, AccessRequest::Write(&params.doc_id))
-                .await?;
+            self.authorize(
+                context,
+                &caller.authority,
+                AccessRequest::Write(&params.doc_id),
+            )
+            .await?;
         }
         self.authorize(
             context,
-            &actor,
+            &caller.authority,
             AccessRequest::Create {
                 placement: &params.placement,
             },
         )
         .await?;
+        let owner_id = match caller.authority {
+            DomainAuthority::Identity(actor) => Some(actor),
+            DomainAuthority::Scoped(_) => None,
+        };
         let request_digest = digest(&(
             "branch",
-            actor.uuid,
+            actor.actor_id,
+            owner_id,
             &params.doc_id,
             &params.at,
             &params.path,
             params.stealth,
             &params.placement,
         ));
-        if let Some(receipt) = self.replay(&params.command, request_digest).await? {
+        if let Some(receipt) = self
+            .replay(&params.command, request_digest, actor.actor_id)
+            .await?
+        {
             return Ok(receipt);
         }
         let origin = self.handle(&params.doc_id).await?;
@@ -80,13 +66,14 @@ impl DocsService {
             origin: params.doc_id.clone(),
             path: params.path.clone(),
             stealth: params.stealth,
+            owner_id,
         };
         self.commands
             .begin(
                 &params.command,
                 Kind::Branch,
                 request_digest,
-                actor.uuid,
+                actor.actor_id,
                 None,
                 Some(&params.placement),
                 Some(&detail),
@@ -140,7 +127,7 @@ impl DocsService {
                 command: params.command,
                 kind: Kind::Branch,
                 digest: request_digest,
-                actor: actor.uuid,
+                actor: actor.actor_id,
                 document: Some(branch.clone()),
                 placement: Some(params.placement),
                 detail: Some(detail),
@@ -170,6 +157,7 @@ impl DocsService {
                 origin,
                 path: _,
                 stealth,
+                owner_id,
             }),
         ) = (&row.document, &row.placement, &row.detail)
         else {
@@ -224,7 +212,7 @@ impl DocsService {
             }
         }
         self.access
-            .place(context, row.actor, branch, placement)
+            .place(context, *owner_id, branch, placement)
             .await
             .map_err(access_error)?;
         self.commands

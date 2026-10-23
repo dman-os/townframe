@@ -66,6 +66,103 @@ fn doc_identifier(doc_id: crate::DocumentId) -> keyhive_core::principal::identif
 // Test cases
 // ========================================================================
 
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_interest_fetches_missing_bytes_without_manual_doc_sync() -> crate::Res<()> {
+    use std::collections::{HashMap, HashSet};
+
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(160, 161, "Owner", "Reader").await?;
+    pair.left().set_peer_parts(pair.right(), Vec::new()).await?;
+    pair.right().set_peer_parts(pair.left(), Vec::new()).await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "interest-fetch"))
+        .map_err(|error| crate::ferr!("{error:?}"))?;
+    let owner = pair.left().repo.create_doc(initial).await?;
+    let doc_id = owner.document_id();
+    assert_eq!(
+        *pair.left().repo.sync_demand().documents(),
+        HashSet::from([doc_id.clone()])
+    );
+    let interest = pair.right().repo.interest(doc_id.clone()).await?;
+    let interest_clone = interest.clone();
+    assert!(
+        !pair
+            .right()
+            .repo
+            .contains_sedimentree_id(doc_id.clone())
+            .await?
+    );
+    assert!(futures::poll!(std::pin::pin!(interest.ready())).is_pending());
+    let reader = fixtures::agent_of(&pair.left().repo, pair.right()).await?;
+    fixtures::grant_and_propagate(&pair, doc_id.clone(), &reader, Access::Read).await?;
+    let (peers_tx, peers_rx) = tokio::sync::watch::channel(HashSet::from([pair.left().peer_id()]));
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(
+        pair.right()
+            .repo
+            .sync_demand()
+            .drive(pair.right().worker.object_interest_source(), peers_rx),
+    );
+    interest.wait_until_ready().await?;
+    assert!(
+        pair.right()
+            .repo
+            .inspect_doc_head_state(doc_id.clone())
+            .await?
+            .expect(ERROR_IMPOSSIBLE)
+            .materialized_heads
+            .is_some()
+    );
+    let handle = interest.ready().await?;
+    assert_eq!(
+        read_text(&handle, "title").await.as_deref(),
+        Some("interest-fetch")
+    );
+    assert_eq!(
+        pair.right().worker.snapshot().await?.peer_parts,
+        HashMap::from([(pair.left().peer_id(), HashMap::new())])
+    );
+    assert_eq!(
+        pair.right().worker.snapshot().await?.peer_objects,
+        HashMap::from([(
+            pair.left().peer_id(),
+            HashMap::from([(doc_id.clone(), crate::BigRepo::BACKEND_ID.into())])
+        )])
+    );
+    drop(interest);
+    drop(handle);
+    let handle = interest_clone.ready().await?;
+    assert_eq!(
+        read_text(&handle, "title").await.as_deref(),
+        Some("interest-fetch")
+    );
+    let reacquired = pair
+        .right()
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
+    assert_eq!(reacquired.document_id(), doc_id);
+    drop(reacquired);
+    drop(handle);
+    drop(interest_clone);
+    assert!(
+        pair.right()
+            .repo
+            .sync_demand()
+            .documents()
+            .contains(&doc_id)
+    );
+    drop(peers_tx);
+    tasks.join_next().await.expect(ERROR_IMPOSSIBLE)??;
+    assert_eq!(
+        pair.right().worker.snapshot().await?.peer_objects,
+        HashMap::from([(pair.left().peer_id(), HashMap::new())])
+    );
+    Ok(())
+}
+
 // ─── Closed connection errors cleanly ──────────────────────────────────────
 //
 // A connection that has been stopped must fail subsequent keyhive and doc

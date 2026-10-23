@@ -2,29 +2,6 @@
 
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListDrawers {
-    pub capability: CapId,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListedDrawer {
-    pub drawer_id: DrawerId,
-    pub layout: DrawerLayout,
-    /// The descriptor facet, as [`DrawerView`] carries it.
-    pub descriptor: Drawer,
-    pub access: Access,
-}
-
-impl Operation for ListDrawers {
-    type Output = Vec<ListedDrawer>;
-    type Error = DrawersError;
-    const XRPC: XrpcOperation = XrpcOperation::query("org.example.daybook.drawers.listDrawers")
-        .with_schemas("ListedDrawers", "DrawersError");
-}
-
 impl DrawerService {
     /// In id order, which is how the projection lists them.
     async fn list(
@@ -33,12 +10,12 @@ impl DrawerService {
         params: ListDrawers,
     ) -> Result<Vec<ListedDrawer>, DrawersError> {
         let core = &self.core;
-        let actor = core.resolve(context, params.capability).await?;
+        let caller = core.invocation(context, params.authorization).await?;
         core.sync_discovered(context).await?;
         let mut listed = Vec::new();
         for record in core.state.drawers().await? {
             if let Some(access) = core
-                .effective(context, actor.uuid, &record.drawer_id)
+                .level(context, &caller.authority, &record.drawer_id)
                 .await?
             {
                 let descriptor = core.descriptor(context, &record.drawer_id).await?;
@@ -68,14 +45,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_request_carries_only_the_capability() {
+    fn a_request_carries_only_authorization() {
         let request = ListDrawers {
-            capability: CapId::from_bytes([1; 16]),
+            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
         };
         let value = serde_json::to_value(&request).expect("serialize");
         assert_eq!(
             value,
-            serde_json::json!({ "capability": CapId::from_bytes([1; 16]) })
+            serde_json::json!({ "authorization": Authorization::identity(CapId::from_bytes([1; 16])) })
         );
         assert_eq!(
             serde_json::from_value::<ListDrawers>(value).expect("deserialize"),

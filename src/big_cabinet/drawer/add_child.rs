@@ -6,23 +6,6 @@ use crate::doc::pipeline::digest;
 use big_cabinet_core::drawer::DrawerChildEntry;
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddChild {
-    pub capability: CapId,
-    pub command: CommandId,
-    pub parent_id: DrawerId,
-    pub child_id: DrawerId,
-    pub access: Access,
-}
-
-impl Operation for AddChild {
-    type Output = WriteReceipt;
-    type Error = DrawersError;
-    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.daybook.drawers.addChild")
-        .with_schemas("WriteReceipt", "DrawersError");
-}
-
 /// The level a principal admitted to a drawer at `access` gets on its metadata group: the same
 /// level, except that `Relay` takes `Read` there — enumerating the canonical roster needs it,
 /// and metadata is not the ciphertext Relay exists to withhold (ADR 014 "Child entries").
@@ -169,22 +152,23 @@ impl DrawerService {
         if params.parent_id == params.child_id {
             return Err(DrawersError::SelfChild);
         }
-        let actor = core.resolve(context, params.capability).await?;
-        core.authorize(context, &actor, &params.parent_id, Access::Write)
+        let caller = core.invocation(context, params.authorization).await?;
+        let actor = &caller.signer;
+        core.authorize(context, &caller.authority, &params.parent_id, Access::Write)
             .await?;
         // The entry confers `access` on the child through the parent, so the actor must hold it
         // on the child itself; a Relay entry still takes Read, which is what enumerating the
         // child's roster needs.
         core.authorize(
             context,
-            &actor,
+            &caller.authority,
             &params.child_id,
             params.access.max(Access::Read),
         )
         .await?;
         let digest = digest(&(
             "addChild",
-            actor.uuid,
+            actor.actor_id,
             &params.parent_id,
             &params.child_id,
             params.access,
@@ -195,7 +179,7 @@ impl DrawerService {
             access: params.access,
         };
         core.ledger
-            .run(&params.command, digest, actor.uuid, op, |_| {
+            .run(&params.command, digest, actor.actor_id, op, |_| {
                 core.link(context, &params.parent_id, &params.child_id, params.access)
             })
             .await
@@ -224,7 +208,7 @@ mod tests {
         (access, expected),
         {
             let request = AddChild {
-                capability: CapId::default(),
+                authorization: Authorization::identity(CapId::default()),
                 command: CommandId::try_from("link-1".to_owned()).unwrap(),
                 parent_id: DocId::new([1; 32]),
                 child_id: DocId::new([2; 32]),
@@ -234,7 +218,10 @@ mod tests {
             assert_eq!(
                 value,
                 json!({
-                    "capability": "00000000-0000-0000-0000-000000000000",
+                    "authorization": {
+                        "authority": "00000000-0000-0000-0000-000000000000",
+                        "signer": "00000000-0000-0000-0000-000000000000",
+                    },
                     "command": "link-1",
                     "parentId": DocId::new([1; 32]).to_string(),
                     "childId": DocId::new([2; 32]).to_string(),
@@ -255,7 +242,10 @@ mod tests {
     #[test]
     fn an_unknown_access_level_is_refused() {
         let error = serde_json::from_value::<AddChild>(json!({
-            "capability": "00000000-0000-0000-0000-000000000000",
+            "authorization": {
+                "authority": "00000000-0000-0000-0000-000000000000",
+                "signer": "00000000-0000-0000-0000-000000000000",
+            },
             "command": "link-1",
             "parentId": DocId::new([1; 32]).to_string(),
             "childId": DocId::new([2; 32]).to_string(),

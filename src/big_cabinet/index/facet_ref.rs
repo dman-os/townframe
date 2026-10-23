@@ -110,9 +110,7 @@ impl FacetRefStore {
                     .push_bind(route.facet_key.to_string());
             }
             FacetRefQuery::OriginDoc(doc_id) => {
-                query
-                    .push("origin_doc = ")
-                    .push_bind(doc_id.to_string());
+                query.push("origin_doc = ").push_bind(doc_id.to_string());
             }
             FacetRefQuery::Target(route) => {
                 query
@@ -122,9 +120,7 @@ impl FacetRefStore {
                     .push_bind(route.facet_key.to_string());
             }
             FacetRefQuery::TargetDoc(doc_id) => {
-                query
-                    .push("target_doc = ")
-                    .push_bind(doc_id.to_string());
+                query.push("target_doc = ").push_bind(doc_id.to_string());
             }
         }
         query.push(" ORDER BY origin_doc, origin_facet, origin_path, target_doc, target_facet");

@@ -93,7 +93,7 @@ async fn removal_is_a_verified_absence_and_a_later_set_resurrects_the_slot() {
         .call(
             RequestContext::root(),
             ListFacets {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 doc_id: document.clone(),
                 at: At::Current,
             },

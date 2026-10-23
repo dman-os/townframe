@@ -1,17 +1,6 @@
 //! ResolveActor: identify the actor a capability presents.
 
-use super::operation;
 use super::*;
-
-/// Which actor is this actor capability? Needs `use`: presenting an actor's
-/// capability is how a caller identifies as it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResolveActor {
-    pub capability: CapId,
-}
-
-operation!(ResolveActor => Actor, query, "resolveActor", "Actor");
 
 impl AuthorityService {
     async fn resolve_actor(&self, request: ResolveActor) -> Result<Actor, AuthorityError> {

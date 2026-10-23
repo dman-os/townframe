@@ -1154,6 +1154,7 @@ dependencies = [
  "displaydoc",
  "ed25519-dalek 2.2.0",
  "indexmap 2.14.0",
+ "irpc",
  "jiff",
  "json-canon",
  "jsonschema",
@@ -1166,9 +1167,11 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "service_core_rs",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
  "unicode-properties",
  "unicode-segmentation",
  "url",
@@ -11310,13 +11313,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "service_client_rs"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "iroh",
+ "irpc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "service_core_rs",
+ "sha1 0.10.7",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "service_core_rs"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "http",
+ "irpc",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "uuid",
+]
+
+[[package]]
 name = "service_utils_rs"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
  "futures",
- "http-body-util",
  "hyper",
  "hyper-util",
  "iroh",
@@ -11328,7 +11371,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "sha1 0.10.7",
+ "service_client_rs",
+ "service_core_rs",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",

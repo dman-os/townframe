@@ -1,0 +1,9 @@
+pub use service_core_rs::*;
+
+pub mod client;
+#[cfg(feature = "http")]
+pub mod xrpc;
+
+pub use client::{Client, ClientStream, InlineRoute};
+#[cfg(feature = "http")]
+pub use xrpc::{XrpcClient, XrpcClientError};

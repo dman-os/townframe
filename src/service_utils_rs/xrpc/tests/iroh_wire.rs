@@ -179,35 +179,40 @@ async fn iroh_http1_query_procedure_and_domain_error_use_shared_wire() {
         .expect("Iroh query");
     assert_eq!(query.value, "iroh-query");
     assert_eq!(query.authorization.as_deref(), Some("Capability iroh"));
-    // Enter the handler before waiting for the server's declared
-    // deadline.  Calling execute_inner bypasses the client's outer timer,
-    // so this proves the server timeout boundary and its exact 504 mapping
-    // rather than whichever side won a nanosecond race. The budget is part of
-    // the request context and travels as x-timeout-ms.
     let deadline_context = context.clone().with_time_budget(Duration::from_millis(25));
-    let deadline_client = client.clone();
+    let deadline_connection = client
+        .active_connection()
+        .await
+        .expect("retained connection");
     let deadline_request = tokio::spawn(async move {
-        deadline_client
-            .execute_inner::<EchoParams, Output, TestError>(
-                PROCEDURE_OPERATION,
-                deadline_context,
-                &HttpMetadata::default(),
-                &EchoParams {
-                    value: "pending".to_owned(),
-                },
-            )
+        let (mut send, mut recv) = deadline_connection
+            .open_bi()
             .await
+            .expect("deadline stream");
+        let body = serde_json::to_string(&EchoParams {
+            value: "pending".to_owned(),
+        })
+        .unwrap();
+        let request = format!(
+            "POST /xrpc/{} HTTP/1.1\r\nhost: localhost\r\ncontent-type: application/json\r\ncontent-length: {}\r\nx-request-id: {}\r\nx-timeout-ms: {}\r\nconnection: close\r\n\r\n{body}",
+            PROCEDURE_OPERATION.nsid,
+            body.len(),
+            deadline_context.request_id,
+            deadline_context.remaining_budget().unwrap().as_millis(),
+        );
+        tokio::io::AsyncWriteExt::write_all(&mut send, request.as_bytes())
+            .await
+            .expect("deadline request");
+        send.finish().expect("deadline request finished");
+        recv.read_to_end(4096).await.expect("deadline response")
     });
     deadline_started.notified().await;
     let deadline = deadline_request.await.expect("deadline request join");
-    assert!(matches!(
-        deadline,
-        Err(XrpcClientError::Domain {
-            status: StatusCode::GATEWAY_TIMEOUT,
-            outcome_unknown: true,
-            ..
-        })
-    ));
+    let deadline = String::from_utf8(deadline).expect("HTTP response");
+    assert!(deadline.starts_with("HTTP/1.1 504 Gateway Timeout\r\n"));
+    let (_, body) = deadline.split_once("\r\n\r\n").expect("HTTP body");
+    let error: TestError = serde_json::from_str(body).expect("deadline error");
+    assert_eq!(error.error, "DeadlineExceeded");
     let limited: Result<Output, XrpcClientError<TestError>> = client
         .execute(
             PROCEDURE_OPERATION,
@@ -359,11 +364,8 @@ async fn iroh_http1_client_disconnect_drops_entered_handler() {
     });
     started.notified().await;
     let connection = client
-        .connection
-        .lock()
+        .active_connection()
         .await
-        .connection
-        .clone()
         .expect("retained client connection");
     connection.close(0u32.into(), b"client disconnect");
     let result = request.await.expect("disconnected request join");
@@ -463,11 +465,8 @@ async fn iroh_http1_client_stream_cancel_drops_only_entered_handler() {
     });
     started.notified().await;
     let retained_connection = client
-        .connection
-        .lock()
+        .active_connection()
         .await
-        .connection
-        .clone()
         .expect("retained client connection");
 
     let survivor_started_wait = survivor_started.notified();

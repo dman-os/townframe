@@ -51,10 +51,14 @@ impl Kind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub(super) enum Detail {
+    Create {
+        owner_id: Option<Uuid7>,
+    },
     Branch {
         origin: DocId,
         path: String,
         stealth: bool,
+        owner_id: Option<Uuid7>,
     },
     /// The row's document is the target; `heads` are the source heads merged into it.
     Merge {
@@ -440,7 +444,7 @@ mod tests {
             Kind::Branch,
             None,
             Some("drawer:a"),
-            Some(Detail::Branch { origin: DocId::new([8; 32]), path: "/draft".into(), stealth: false }),
+            Some(Detail::Branch { origin: DocId::new([8; 32]), path: "/draft".into(), stealth: false, owner_id: Some(Uuid7::new()) }),
         ),
         merge_with_source_heads: (
             Kind::Merge,

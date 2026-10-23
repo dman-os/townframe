@@ -360,10 +360,10 @@ async fn domain_errors_are_typed_and_malformed_query_is_rejected() {
         }) if message == "bad value"
     ));
     let malformed = client
-        .client
+        .http_client()
         .get(
             client
-                .base_url
+                .base_url()
                 .join("xrpc/org.example.test.echo")
                 .expect("URL"),
         )
@@ -378,8 +378,9 @@ async fn domain_errors_are_typed_and_malformed_query_is_rejected() {
 #[tokio::test]
 async fn response_body_limit_is_enforced() {
     let (client, task, shutdown) = test_server().await;
-    let limited = XrpcClient::with_client(client.client.clone(), client.base_url.clone(), 2)
-        .expect("limited client");
+    let limited =
+        XrpcClient::with_client(client.http_client().clone(), client.base_url().clone(), 2)
+            .expect("limited client");
     let result: Result<Output, XrpcClientError<TestError>> = limited
         .execute(
             QUERY_OPERATION,
@@ -506,10 +507,10 @@ async fn malformed_procedure_error_body_is_ambiguous_protocol_failure() {
 async fn method_body_and_request_body_limits_are_explicit() {
     let (client, task, shutdown) = test_server().await;
     let wrong_method = client
-        .client
+        .http_client()
         .post(
             client
-                .base_url
+                .base_url()
                 .join("xrpc/org.example.test.echo")
                 .expect("URL"),
         )
@@ -519,10 +520,10 @@ async fn method_body_and_request_body_limits_are_explicit() {
         .expect("method response");
     assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
     let missing_media_type = client
-        .client
+        .http_client()
         .post(
             client
-                .base_url
+                .base_url()
                 .join("xrpc/org.example.test.write")
                 .expect("URL"),
         )
@@ -535,10 +536,10 @@ async fn method_body_and_request_body_limits_are_explicit() {
         StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
     let parameterized_body = client
-        .client
+        .http_client()
         .post(
             client
-                .base_url
+                .base_url()
                 .join("xrpc/org.example.test.write")
                 .expect("URL"),
         )
@@ -549,10 +550,10 @@ async fn method_body_and_request_body_limits_are_explicit() {
         .expect("parameterized media type response");
     assert_eq!(parameterized_body.status(), StatusCode::OK);
     let suffix_body = client
-        .client
+        .http_client()
         .post(
             client
-                .base_url
+                .base_url()
                 .join("xrpc/org.example.test.write")
                 .expect("URL"),
         )
@@ -572,10 +573,10 @@ async fn method_body_and_request_body_limits_are_explicit() {
         HeaderValue::from_static("application/json"),
     );
     let duplicate_parameter = client
-        .client
+        .http_client()
         .post(
             client
-                .base_url
+                .base_url()
                 .join("xrpc/org.example.test.write")
                 .expect("URL"),
         )
@@ -592,10 +593,10 @@ async fn method_body_and_request_body_limits_are_explicit() {
         StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
     let duplicate_body = client
-        .client
+        .http_client()
         .post(
             client
-                .base_url
+                .base_url()
                 .join("xrpc/org.example.test.write")
                 .expect("URL"),
         )
@@ -606,10 +607,10 @@ async fn method_body_and_request_body_limits_are_explicit() {
         .expect("duplicate media type response");
     assert_eq!(duplicate_body.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
     let malformed_media_type = client
-        .client
+        .http_client()
         .post(
             client
-                .base_url
+                .base_url()
                 .join("xrpc/org.example.test.write")
                 .expect("URL"),
         )
@@ -623,10 +624,10 @@ async fn method_body_and_request_body_limits_are_explicit() {
         StatusCode::UNSUPPORTED_MEDIA_TYPE
     );
     let malformed_body = client
-        .client
+        .http_client()
         .post(
             client
-                .base_url
+                .base_url()
                 .join("xrpc/org.example.test.write")
                 .expect("URL"),
         )
@@ -637,10 +638,10 @@ async fn method_body_and_request_body_limits_are_explicit() {
         .expect("body response");
     assert_eq!(malformed_body.status(), StatusCode::BAD_REQUEST);
     let oversized_body = client
-        .client
+        .http_client()
         .post(
             client
-                .base_url
+                .base_url()
                 .join("xrpc/org.example.test.write")
                 .expect("URL"),
         )
@@ -658,10 +659,10 @@ async fn method_body_and_request_body_limits_are_explicit() {
 async fn server_timeout_stops_handler_before_it_can_complete() {
     let (client, task, shutdown) = test_server().await;
     let response = client
-        .client
+        .http_client()
         .post(
             client
-                .base_url
+                .base_url()
                 .join("xrpc/org.example.test.write")
                 .expect("URL"),
         )
@@ -677,11 +678,12 @@ async fn server_timeout_stops_handler_before_it_can_complete() {
     let envelope: XrpcErrorEnvelope = response.json().await.expect("error envelope");
     assert_eq!(
         envelope,
-        XrpcErrorEnvelope {
-            error: "DeadlineExceeded".to_owned(),
-            message: Some("XRPC operation exceeded its time budget".to_owned()),
-            details: BTreeMap::new(),
-        }
+        XrpcErrorEnvelope::new(
+            "DeadlineExceeded".to_owned(),
+            Some("XRPC operation exceeded its time budget".to_owned()),
+            BTreeMap::new(),
+        )
+        .unwrap()
     );
     shutdown.send(()).expect("server shutdown receiver");
     task.await.expect("server task join").expect("server task");
@@ -692,12 +694,12 @@ async fn chunked_request_and_response_limits_are_exact() {
     use futures::stream;
     let (client, task, shutdown) = test_server().await;
     let endpoint = client
-        .base_url
+        .base_url()
         .join("xrpc/org.example.test.write")
         .expect("URL");
     let exact_body = "x".repeat(1024);
     let exact_response = client
-        .client
+        .http_client()
         .post(endpoint.clone())
         .header(header::CONTENT_TYPE, "application/json")
         .body(reqwest::Body::wrap_stream(stream::iter(vec![Ok::<
@@ -712,7 +714,7 @@ async fn chunked_request_and_response_limits_are_exact() {
     assert_ne!(exact_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let oversized_body = "x".repeat(1025);
     let oversized_response = client
-        .client
+        .http_client()
         .post(endpoint)
         .header(header::CONTENT_TYPE, "application/json")
         .body(reqwest::Body::wrap_stream(stream::iter(vec![Ok::<
@@ -791,7 +793,7 @@ async fn fragmented_request_exact_boundary_and_overflow_are_bounded() {
     use tokio::sync::mpsc;
     let (client, task, shutdown) = test_server().await;
     let endpoint = client
-        .base_url
+        .base_url()
         .join("xrpc/org.example.test.write")
         .expect("URL");
     for (chunks, oversized) in [
@@ -829,7 +831,7 @@ async fn fragmented_request_exact_boundary_and_overflow_are_bounded() {
             },
         );
         let request = client
-            .client
+            .http_client()
             .post(endpoint.clone())
             .header(header::CONTENT_TYPE, "application/json")
             .body(reqwest::Body::wrap_stream(body_stream));
@@ -1428,8 +1430,8 @@ async fn domain_error_details_remain_in_standard_envelope() {
     let XrpcHandlerError::Domain { body, .. } = error else {
         panic!("expected domain error")
     };
-    assert_eq!(body.error, "RateLimited");
-    assert_eq!(body.details, details);
+    assert_eq!(body.error(), "RateLimited");
+    assert_eq!(body.details(), &details);
     assert_eq!(
         serde_json::to_value(body).expect("serialize envelope")["message"],
         "try again later"

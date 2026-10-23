@@ -261,7 +261,7 @@ impl Model {
                 .call(
                     RequestContext::root(),
                     ReadFacets {
-                        capability: actor.capability,
+                        authorization: Authorization::identity(actor.capability),
                         doc_id: self.document.clone(),
                         at: at.clone(),
                         facets: Some(SLOTS.map(key).into_iter().collect()),
@@ -299,7 +299,7 @@ impl Model {
             .call(
                 RequestContext::root(),
                 ListFacets {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     doc_id: self.document.clone(),
                     at,
                 },
@@ -477,7 +477,7 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
         .map(|(_, name)| (key(name), note("initial")))
         .collect();
     let create = Request::Create(CreateDoc {
-        capability: owner.capability,
+        authorization: Authorization::identity(owner.capability),
         command: format!("{case}/create").try_into().unwrap(),
         placement: PLACEMENT.into(),
         facets: initial.clone(),
@@ -503,7 +503,7 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
                 let mode = mode.resolved(&model);
                 let context = format!("{context}, resolved base {mode:?}");
                 let request = Request::Write(WriteFacets {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     command: Some(format!("{case}/{step}").try_into().unwrap()),
                     doc_id: model.document.clone(),
                     mode: mode.request(&model),

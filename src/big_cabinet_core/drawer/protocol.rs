@@ -1,0 +1,383 @@
+use super::{Drawer, DrawerAccess as Access, DrawerGroups, DrawerLayout, GroupKey, LayoutKind};
+use crate::authority::{AuthorityServiceError, Authorization, Capability, Rights};
+use crate::dmeta::{DocId, Uuid7};
+use crate::doc::{CommandId, DocsError, WriteReceipt};
+use automerge::ChangeHash;
+use serde::{Deserialize, Serialize};
+use service_core_rs::{ContextError, Operation, XrpcOperation, declare_service_protocol};
+use std::collections::BTreeMap;
+
+pub type DrawerId = DocId;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalDrawers {
+    pub present_id: DrawerId,
+    pub originated_id: DrawerId,
+    pub registry_id: DrawerId,
+}
+
+impl LocalDrawers {
+    pub fn both(&self) -> [&DrawerId; 2] {
+        [&self.present_id, &self.originated_id]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawerRecord {
+    pub drawer_id: DrawerId,
+    pub descriptor: Drawer,
+}
+
+impl DrawerRecord {
+    pub fn layout_kind(&self) -> Option<LayoutKind> {
+        self.descriptor.layout.known()
+    }
+
+    pub fn groups(&self) -> Option<DrawerGroups> {
+        self.descriptor.groups()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum DrawersError {
+    #[error("request context failed: {0}")]
+    Context(#[from] ContextError),
+    #[error("the presented capability does not permit this operation")]
+    Denied,
+    #[error("authority failed: {0}")]
+    Authority(AuthorityServiceError),
+    #[error("authority transport failed: {0}")]
+    AuthorityUnavailable(String),
+    #[error("document repository failed: {0}")]
+    Docs(DocsError),
+    #[error("document repository transport failed: {0}")]
+    DocsUnavailable(String),
+    #[error("keyhive failed: {0}")]
+    Keyhive(String),
+    #[error("drawer state failed: {0}")]
+    Storage(String),
+    #[error("{0} is not a drawer this node knows")]
+    UnknownDrawer(DrawerId),
+    #[error("{0} is a self-doc drawer: it holds only itself and cannot take entries or members")]
+    SelfDoc(DrawerId),
+    #[error("{0} is already a drawer")]
+    AlreadyDrawer(DocId),
+    #[error("a drawer cannot be its own child")]
+    SelfChild,
+    #[error("{0} is not an entry of this drawer")]
+    NotAnEntry(DocId),
+    #[error("the drawer's descriptor states a layout this build does not know: {0}")]
+    ForeignLayout(String),
+    #[error("command {command} is still in flight; retry once it resolves")]
+    CommandInFlight { command: CommandId },
+    #[error("command {command} was already used for a different request")]
+    CommandReused { command: CommandId },
+    #[error("the drawer's roster could not be read: {0}")]
+    RosterUnreadable(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "layout",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CreateLayout {
+    SelfDoc { doc_id: DocId },
+    SingleGroup,
+}
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DrawerScope {
+    pub drawers: BTreeMap<DrawerId, Access>,
+    pub create: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MintDrawerCapability {
+    pub authorization: Authorization,
+    pub scope: DrawerScope,
+    pub rights: Rights,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDrawer {
+    pub authorization: Authorization,
+    pub command: CommandId,
+    #[serde(flatten)]
+    pub layout: CreateLayout,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawerCreated {
+    pub drawer_id: DrawerId,
+    pub heads: Vec<ChangeHash>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddDoc {
+    pub authorization: Authorization,
+    pub command: CommandId,
+    pub drawer_id: DrawerId,
+    pub doc_id: DocId,
+    pub access: Access,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveDoc {
+    pub authorization: Authorization,
+    pub command: CommandId,
+    pub drawer_id: DrawerId,
+    pub doc_id: DocId,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddChild {
+    pub authorization: Authorization,
+    pub command: CommandId,
+    pub parent_id: DrawerId,
+    pub child_id: DrawerId,
+    pub access: Access,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveChild {
+    pub authorization: Authorization,
+    pub command: CommandId,
+    pub parent_id: DrawerId,
+    pub child_id: DrawerId,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetDrawer {
+    pub authorization: Authorization,
+    pub drawer_id: DrawerId,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawerView {
+    pub drawer_id: DrawerId,
+    pub layout: DrawerLayout,
+    pub descriptor: Drawer,
+    pub access: Access,
+    pub docs: BTreeMap<DocId, Access>,
+    pub children: BTreeMap<DrawerId, Access>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDocs {
+    pub authorization: Authorization,
+    pub drawer_id: DrawerId,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedDoc {
+    pub doc_id: DocId,
+    pub access: Access,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<DrawerId>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RememberDrawer {
+    pub authorization: Authorization,
+    pub drawer_id: DrawerId,
+    #[serde(default)]
+    pub mirror: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgetDrawer {
+    pub authorization: Authorization,
+    pub drawer_id: DrawerId,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListKnownDrawers {
+    pub authorization: Authorization,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownDrawer {
+    pub drawer_id: DrawerId,
+    pub mirror: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDrawerPolicy {
+    pub authorization: Authorization,
+    pub drawer_id: DrawerId,
+    pub mirror: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListDrawers {
+    pub authorization: Authorization,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListedDrawer {
+    pub drawer_id: DrawerId,
+    pub layout: DrawerLayout,
+    pub descriptor: Drawer,
+    pub access: Access,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantDrawer {
+    pub authorization: Authorization,
+    pub drawer_id: DrawerId,
+    pub subject_id: Uuid7,
+    pub access: Access,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokeDrawer {
+    pub authorization: Authorization,
+    pub drawer_id: DrawerId,
+    pub subject_id: Uuid7,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum Principal {
+    Peer { peer_id: GroupKey },
+    Group { group_id: GroupKey },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitePrincipal {
+    pub authorization: Authorization,
+    pub drawer_id: DrawerId,
+    pub principal: Principal,
+    pub access: Access,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevokePrincipal {
+    pub authorization: Authorization,
+    pub drawer_id: DrawerId,
+    pub principal: Principal,
+}
+
+macro_rules! operation {
+    ($request:ident => $output:ty, $kind:ident, $nsid:literal) => {
+        impl Operation for $request {
+            type Output = $output;
+            type Error = DrawersError;
+            const XRPC: XrpcOperation =
+                XrpcOperation::$kind(concat!("org.example.daybook.drawers.", $nsid))
+                    .with_schemas(stringify!($output), stringify!(DrawersError));
+        }
+    };
+}
+operation!(MintDrawerCapability => Capability, procedure, "mintDrawerCapability");
+operation!(CreateDrawer => DrawerCreated, procedure, "createDrawer");
+operation!(AddDoc => WriteReceipt, procedure, "addDoc");
+operation!(RemoveDoc => WriteReceipt, procedure, "removeDoc");
+operation!(AddChild => WriteReceipt, procedure, "addChild");
+operation!(RemoveChild => WriteReceipt, procedure, "removeChild");
+operation!(GetDrawer => DrawerView, query, "getDrawer");
+operation!(ListDocs => Vec<ListedDoc>, procedure, "listDocs");
+operation!(RememberDrawer => (), procedure, "rememberDrawer");
+operation!(ForgetDrawer => (), procedure, "forgetDrawer");
+operation!(ListKnownDrawers => Vec<KnownDrawer>, query, "listKnownDrawers");
+operation!(SetDrawerPolicy => (), procedure, "setDrawerPolicy");
+operation!(ListDrawers => Vec<ListedDrawer>, query, "listDrawers");
+operation!(GrantDrawer => (), procedure, "grantDrawer");
+operation!(RevokeDrawer => (), procedure, "revokeDrawer");
+operation!(InvitePrincipal => (), procedure, "invitePrincipal");
+operation!(RevokePrincipal => (), procedure, "revokePrincipal");
+
+declare_service_protocol! {
+    pub enum DrawersProtocol => DrawersMessage {
+        unary {
+            MintDrawerCapability(MintDrawerCapability),
+            CreateDrawer(CreateDrawer),
+            AddDoc(AddDoc),
+            RemoveDoc(RemoveDoc),
+            AddChild(AddChild),
+            RemoveChild(RemoveChild),
+            GetDrawer(GetDrawer),
+            ListDocs(ListDocs),
+            RememberDrawer(RememberDrawer),
+            ForgetDrawer(ForgetDrawer),
+            ListKnownDrawers(ListKnownDrawers),
+            SetDrawerPolicy(SetDrawerPolicy),
+            ListDrawers(ListDrawers),
+            GrantDrawer(GrantDrawer),
+            RevokeDrawer(RevokeDrawer),
+            InvitePrincipal(InvitePrincipal),
+            RevokePrincipal(RevokePrincipal)
+        }
+        stream {}
+    }
+}
+
+pub const CREATE_DRAWER_OBJECT: &str = "create drawer";
+pub fn drawer_object(access: Access, drawer: &DrawerId) -> String {
+    let verb = match access {
+        Access::Relay => "relay",
+        Access::Read => "read",
+        Access::Write => "write",
+        Access::Admin => "admin",
+    };
+    format!("{verb} drawer {drawer}")
+}
+pub fn drawer_placement(drawer: &DrawerId) -> String {
+    format!("drawer {drawer}")
+}
+
+/// The object a drawer scope capability carries: the standing-grant verb when the scope is one
+/// DrawerService object (`write drawer D` / `create drawer`), so grants written through the cap
+/// match ledger rows, and the general scope grammar otherwise.
+pub fn drawer_scope_object(scope: &DrawerScope) -> String {
+    if !scope.create && scope.drawers.len() == 1 {
+        let (drawer, access) = scope.drawers.iter().next().expect("one drawer");
+        return drawer_object(*access, drawer);
+    }
+    if scope.create && scope.drawers.is_empty() {
+        return CREATE_DRAWER_OBJECT.to_owned();
+    }
+    format!(
+        "DrawerService/scope/v1/{}",
+        serde_json::to_string(scope).expect("drawer scope serializes")
+    )
+}
+
+/// Parse a drawer capability object back into the scope it authorizes: either encoding of
+/// [`drawer_scope_object`].
+pub fn parse_drawer_scope_object(object: &str) -> Option<DrawerScope> {
+    if let Some(json) = object.strip_prefix("DrawerService/scope/v1/") {
+        return serde_json::from_str(json).ok();
+    }
+    if object == CREATE_DRAWER_OBJECT {
+        return Some(DrawerScope {
+            drawers: BTreeMap::new(),
+            create: true,
+        });
+    }
+    let (verb, drawer) = object.split_once(" drawer ")?;
+    let access = match verb {
+        "relay" => Access::Relay,
+        "read" => Access::Read,
+        "write" => Access::Write,
+        "admin" => Access::Admin,
+        _ => return None,
+    };
+    Some(DrawerScope {
+        drawers: BTreeMap::from([(drawer.parse().ok()?, access)]),
+        create: false,
+    })
+}

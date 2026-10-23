@@ -4,47 +4,35 @@ use super::commands::{Detail, Kind, State};
 use super::pipeline::digest;
 use super::*;
 
-/// Merge `source` as of `at` into `target`: Automerge's merge of the source's changes, which adds
-/// no change of its own. Both must share history (a branch and its origin, or two branches of one
-/// origin), and every facet of the source at `at` must be accepted. The receipt names the target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MergeDoc {
-    pub capability: CapId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<CommandId>,
-    pub source_id: DocId,
-    pub at: At,
-    pub target_id: DocId,
-}
-
-impl Operation for MergeDoc {
-    type Output = WriteReceipt;
-    type Error = DocsError;
-    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.daybook.docs.mergeDoc")
-        .with_schemas("WriteReceipt", "DocsError");
-}
-
 impl DocsService {
     async fn merge(
         &self,
         context: &RequestContext,
         params: MergeDoc,
     ) -> Result<WriteReceipt, DocsError> {
-        let actor = self.actor(context, params.capability).await?;
-        self.authorize(context, &actor, AccessRequest::Read(&params.source_id))
-            .await?;
-        self.authorize(context, &actor, AccessRequest::Write(&params.target_id))
-            .await?;
+        let caller = self.invocation(context, params.authorization).await?;
+        let actor = &caller.signer;
+        self.authorize(
+            context,
+            &caller.authority,
+            AccessRequest::Read(&params.source_id),
+        )
+        .await?;
+        self.authorize(
+            context,
+            &caller.authority,
+            AccessRequest::Write(&params.target_id),
+        )
+        .await?;
         let request_digest = digest(&(
             "merge",
-            actor.uuid,
+            actor.actor_id,
             &params.source_id,
             &params.at,
             &params.target_id,
         ));
         if let Some(command) = &params.command
-            && let Some(receipt) = self.replay(command, request_digest).await?
+            && let Some(receipt) = self.replay(command, request_digest, actor.actor_id).await?
         {
             return Ok(receipt);
         }
@@ -79,7 +67,7 @@ impl DocsService {
                     command,
                     Kind::Merge,
                     request_digest,
-                    actor.uuid,
+                    actor.actor_id,
                     Some(&params.target_id),
                     None,
                     Some(&Detail::Merge {

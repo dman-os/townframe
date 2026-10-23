@@ -244,7 +244,8 @@ async fn a_bogus_signature_entry_rejects_only_its_own_facet() {
             .unwrap()
             .to_owned();
         let entry = tx.insert_object(&list, 0, ObjType::Map).unwrap();
-        tx.put(&entry, "actorUuid", alice.uuid.to_string()).unwrap();
+        tx.put(&entry, "actorUuid", alice.actor_id.to_string())
+            .unwrap();
         tx.put(&entry, "docUuid", doc_uuid).unwrap();
         tx.put(&entry, "signature", vec![9_u8; 64]).unwrap();
         tx.commit();
@@ -325,7 +326,7 @@ utils_rs::table_tests! {
         let explicit = op(node.client().call(
             RequestContext::root(),
             ReadFacets {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 doc_id: document.clone(),
                 at: At::Current,
                 facets: Some(BTreeSet::from([key("main")])),
@@ -425,7 +426,7 @@ async fn signed_outside(
         let dmeta = object(&tx, &facets, DMETA);
         let actors = object(&tx, &dmeta, "actors");
         let binding = tx
-            .put_object(&actors, signer.uuid.to_string(), ObjType::Map)
+            .put_object(&actors, signer.actor_id.to_string(), ObjType::Map)
             .unwrap();
         tx.put(&binding, "pubkey", signer.public_key.to_string())
             .unwrap();
@@ -457,7 +458,7 @@ async fn signed_outside(
         let list = signatures(&tx, &facet);
         tx.delete(&list, 0).unwrap();
         let entry = tx.insert_object(&list, 0, ObjType::Map).unwrap();
-        tx.put(&entry, "actorUuid", signer.uuid.to_string())
+        tx.put(&entry, "actorUuid", signer.actor_id.to_string())
             .unwrap();
         let documents = object(&tx, &dmeta, "branchUuids");
         let doc_uuid = tx
@@ -482,7 +483,7 @@ async fn signed_outside(
             origin_document: document.clone(),
             facet_key: facet.clone(),
             chosen_uuid: chosen.try_into().unwrap(),
-            actor_uuid: signer.uuid,
+            actor_uuid: signer.actor_id,
             operation: ClaimOperation::Set,
             value_cid: Some(cid_of(&encode_native(&native))),
             predecessors,
@@ -491,7 +492,7 @@ async fn signed_outside(
             Damage::None => {}
             Damage::MissingCertificate => tx.delete(&binding, "delegation").unwrap(),
             Damage::MissingUrl => tx.delete(&binding, "actorUrl").unwrap(),
-            Damage::MissingActor => tx.delete(&actors, signer.uuid.to_string()).unwrap(),
+            Damage::MissingActor => tx.delete(&actors, signer.actor_id.to_string()).unwrap(),
             Damage::MissingAlias => tx.delete(&aliases, chosen.to_string()).unwrap(),
             Damage::UnboundDocUuid => tx
                 .put(

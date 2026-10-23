@@ -7,45 +7,6 @@ use crate::doc::{CreateDoc, WriteFacets};
 use big_cabinet_core::drawer::{Drawer, DrawerRoster};
 use ledger::Op;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "layout",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum CreateLayout {
-    /// Declare `doc` a drawer of itself: write `drawer/main` on it. Needs Write on the doc; the
-    /// creator is granted Admin on the drawer, as for a collection.
-    SelfDoc { doc_id: DocId },
-    /// A new metadata doc naming two fresh groups. Needs `use` on [`CREATE_DRAWER_OBJECT`]; the
-    /// creator is granted Admin on the new drawer.
-    SingleGroup,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateDrawer {
-    pub capability: CapId,
-    pub command: CommandId,
-    #[serde(flatten)]
-    pub layout: CreateLayout,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DrawerCreated {
-    pub drawer_id: DrawerId,
-    pub heads: Vec<automerge::ChangeHash>,
-}
-
-impl Operation for CreateDrawer {
-    type Output = DrawerCreated;
-    type Error = DrawersError;
-    const XRPC: XrpcOperation =
-        XrpcOperation::procedure("org.example.daybook.drawers.createDrawer")
-            .with_schemas("DrawerCreated", "DrawersError");
-}
-
 fn facet_value(facet: &impl Serialize) -> serde_json::Value {
     serde_json::to_value(facet).expect("a drawer facet serializes")
 }
@@ -69,25 +30,31 @@ impl Core {
     async fn create_self_doc(
         &self,
         context: &RequestContext,
-        capability: CapId,
+        authorization: Authorization,
         command: CommandId,
         doc_id: DocId,
     ) -> Result<DrawerCreated, DrawersError> {
-        let actor = self.resolve(context, capability).await?;
+        let caller = self.invocation(context, authorization).await?;
+        let actor = &caller.signer;
         if self.state.drawer(&doc_id).await?.is_some() {
             return Err(DrawersError::AlreadyDrawer(doc_id));
         }
-        if self.reach(context, actor.uuid, &doc_id).await? < Some(Access::Write) {
+        if self.doc_level(context, &caller.authority, &doc_id).await? < Some(Access::Write) {
             return Err(DrawersError::Denied);
         }
-        let request_digest = digest(&("createSelfDoc", actor.uuid, &doc_id));
+        let owner_id = match caller.authority {
+            DomainAuthority::Identity(actor) => Some(actor),
+            DomainAuthority::Scoped(_) => None,
+        };
+        let request_digest = digest(&("createSelfDoc", actor.actor_id, owner_id, &doc_id));
         self.ledger
             .run(
                 &command,
                 request_digest,
-                actor.uuid,
+                actor.actor_id,
                 Op::CreateSelfDoc {
                     doc_id: doc_id.clone(),
+                    owner_id,
                 },
                 |_| async {
                     let receipt = self
@@ -95,7 +62,10 @@ impl Core {
                         .call(
                             context.child(),
                             WriteFacets {
-                                capability,
+                                authorization: Authorization {
+                                    authority: self.issuer,
+                                    signer: authorization.signer,
+                                },
                                 command: Some(command.clone()),
                                 doc_id: doc_id.clone(),
                                 mode: WriteMode::AtCurrent,
@@ -109,8 +79,10 @@ impl Core {
                         .await
                         .map_err(docs_error)?;
                     self.state.put_drawer(&doc_id, &Drawer::self_doc()).await?;
-                    self.grant(context, actor.uuid, drawer_object(Access::Admin, &doc_id))
-                        .await?;
+                    if let Some(owner_id) = owner_id {
+                        self.grant(context, owner_id, drawer_object(Access::Admin, &doc_id))
+                            .await?;
+                    }
                     Ok(DrawerCreated {
                         drawer_id: doc_id,
                         heads: receipt.heads,
@@ -125,7 +97,7 @@ impl Core {
         context: &RequestContext,
         row: &ledger::Row,
     ) -> Result<(), DrawersError> {
-        let Op::CreateSelfDoc { doc_id } = &row.op else {
+        let Op::CreateSelfDoc { doc_id, owner_id } = &row.op else {
             unreachable!(
                 "resume_create_self_doc runs under a create-self-doc row: {:?}",
                 row.op
@@ -136,7 +108,7 @@ impl Core {
             .call(
                 context.child(),
                 crate::doc::ReadFacets {
-                    capability: self.issuer,
+                    authorization: Authorization::identity(self.issuer),
                     doc_id: doc_id.clone(),
                     at: crate::doc::At::Current,
                     facets: Some(std::collections::BTreeSet::from([drawer_key()])),
@@ -147,12 +119,15 @@ impl Core {
             .map_err(docs_error)?;
         match read.facets.get(&drawer_key()) {
             Some(crate::doc::FacetRead::Accepted { value, .. }) => {
-                let descriptor: Drawer = serde_json::from_value(value.clone()).map_err(|error| {
-                    DrawersError::RosterUnreadable(format!("{doc_id} descriptor: {error}"))
-                })?;
+                let descriptor: Drawer =
+                    serde_json::from_value(value.clone()).map_err(|error| {
+                        DrawersError::RosterUnreadable(format!("{doc_id} descriptor: {error}"))
+                    })?;
                 self.state.put_drawer(doc_id, &descriptor).await?;
-                self.grant(context, row.actor, drawer_object(Access::Admin, doc_id))
-                    .await?;
+                if let Some(owner_id) = owner_id {
+                    self.grant(context, *owner_id, drawer_object(Access::Admin, doc_id))
+                        .await?;
+                }
                 self.ledger
                     .finish(
                         &row.command,
@@ -176,15 +151,19 @@ impl Core {
         context: &RequestContext,
         command: &CommandId,
         actor: Uuid7,
+        owner_id: Option<Uuid7>,
     ) -> Result<DrawerCreated, DrawersError> {
-        let request_digest = digest(&("createDrawer", actor));
+        let request_digest = digest(&("createDrawer", actor, owner_id));
         self.ledger
             .run(
                 command,
                 request_digest,
                 actor,
-                Op::Create { groups: None },
-                |op| self.create_collection(context, command, actor, op),
+                Op::Create {
+                    groups: None,
+                    owner_id,
+                },
+                |op| self.create_collection(context, command, op),
             )
             .await
     }
@@ -196,10 +175,9 @@ impl Core {
         &self,
         context: &RequestContext,
         command: &CommandId,
-        actor: Uuid7,
         op: Op,
     ) -> Result<DrawerCreated, DrawersError> {
-        let Op::Create { groups } = op else {
+        let Op::Create { groups, owner_id } = op else {
             unreachable!("create_collection runs under a create row: {op:?}")
         };
         let (meta, docs) = match groups {
@@ -229,6 +207,7 @@ impl Core {
                     .record(
                         command,
                         &Op::Create {
+                            owner_id,
                             groups: Some(DrawerGroups {
                                 meta_group: group_key(&meta),
                                 docs_group: group_key(&docs),
@@ -245,7 +224,7 @@ impl Core {
             .call(
                 context.child(),
                 CreateDoc {
-                    capability: self.issuer,
+                    authorization: Authorization::identity(self.issuer),
                     command: command.clone(),
                     placement: METADATA_PLACEMENT.into(),
                     facets: BTreeMap::from([
@@ -261,12 +240,14 @@ impl Core {
             .await
             .map_err(keyhive_error)?;
         self.state.put_drawer(&receipt.doc_id, &descriptor).await?;
-        self.grant(
-            context,
-            actor,
-            drawer_object(Access::Admin, &receipt.doc_id),
-        )
-        .await?;
+        if let Some(owner_id) = owner_id {
+            self.grant(
+                context,
+                owner_id,
+                drawer_object(Access::Admin, &receipt.doc_id),
+            )
+            .await?;
+        }
         Ok(DrawerCreated {
             drawer_id: receipt.doc_id,
             heads: receipt.heads,
@@ -279,7 +260,7 @@ impl Core {
         row: &ledger::Row,
     ) -> Result<(), DrawersError> {
         let created = self
-            .create_collection(context, &row.command, row.actor, row.op.clone())
+            .create_collection(context, &row.command, row.op.clone())
             .await?;
         self.ledger.finish(&row.command, &created).await
     }
@@ -294,29 +275,20 @@ impl DrawerService {
         match params.layout {
             CreateLayout::SelfDoc { doc_id } => {
                 self.core
-                    .create_self_doc(context, params.capability, params.command, doc_id)
+                    .create_self_doc(context, params.authorization, params.command, doc_id)
                     .await
             }
             CreateLayout::SingleGroup => {
-                let actor = self.core.resolve(context, params.capability).await?;
-                let rights = self
-                    .core
-                    .authority
-                    .call(
-                        context.child(),
-                        CheckGrant {
-                            via: self.core.issuer,
-                            subject: actor.uuid,
-                            object: CREATE_DRAWER_OBJECT.into(),
-                        },
-                    )
-                    .await
-                    .map_err(authority_error)?;
-                if !rights.contains(Rights::USE) {
-                    return Err(DrawersError::Denied);
-                }
+                let caller = self.core.invocation(context, params.authorization).await?;
                 self.core
-                    .create_single_group(context, &params.command, actor.uuid)
+                    .authorize_create(context, &caller.authority)
+                    .await?;
+                let owner_id = match caller.authority {
+                    DomainAuthority::Identity(actor) => Some(actor),
+                    DomainAuthority::Scoped(_) => None,
+                };
+                self.core
+                    .create_single_group(context, &params.command, caller.signer.actor_id, owner_id)
                     .await
             }
         }
@@ -331,14 +303,14 @@ impl DrawerService {
             return Ok(());
         }
         let context = RequestContext::root();
-        let actor = self.core.actor().uuid;
+        let actor = self.core.actor().actor_id;
         let mut created = Vec::with_capacity(2);
         for command in ["local drawer present", "local drawer originated"] {
             let command = CommandId::try_from(command.to_owned())
                 .expect("the local drawer commands are within bounds");
             created.push(
                 self.core
-                    .create_single_group(&context, &command, actor)
+                    .create_single_group(&context, &command, actor, Some(actor))
                     .await?
                     .drawer_id,
             );
@@ -354,7 +326,7 @@ impl DrawerService {
             .call(
                 context.child(),
                 CreateDoc {
-                    capability: self.core.issuer,
+                    authorization: Authorization::identity(self.core.issuer),
                     command: command.clone(),
                     placement: METADATA_PLACEMENT.into(),
                     facets: BTreeMap::from([(drawer_key(), facet_value(&Drawer::self_doc()))]),
@@ -418,12 +390,12 @@ mod tests {
     create_drawer_wire_shape! {
         self_doc: (
             CreateDrawer {
-                capability: CapId::from_bytes([1; 16]),
+                authorization: Authorization::identity(CapId::from_bytes([1; 16])),
                 command: command(),
                 layout: CreateLayout::SelfDoc { doc_id: DocId::new([2; 32]) },
             },
             serde_json::json!({
-                "capability": CapId::from_bytes([1; 16]),
+                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
                 "command": "cmd-1",
                 "layout": "selfDoc",
                 "docId": DocId::new([2; 32]).to_string(),
@@ -431,12 +403,12 @@ mod tests {
         ),
         single_group: (
             CreateDrawer {
-                capability: CapId::from_bytes([1; 16]),
+                authorization: Authorization::identity(CapId::from_bytes([1; 16])),
                 command: command(),
                 layout: CreateLayout::SingleGroup,
             },
             serde_json::json!({
-                "capability": CapId::from_bytes([1; 16]),
+                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
                 "command": "cmd-1",
                 "layout": "singleGroup",
             })
@@ -446,13 +418,13 @@ mod tests {
     #[test]
     fn a_layout_is_required() {
         let error = serde_json::from_value::<CreateDrawer>(serde_json::json!({
-            "capability": CapId::from_bytes([1; 16]),
+            "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
             "command": "cmd-1",
         }))
         .unwrap_err();
         assert!(error.to_string().contains("layout"), "{error}");
         let error = serde_json::from_value::<CreateDrawer>(serde_json::json!({
-            "capability": CapId::from_bytes([1; 16]),
+            "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
             "command": "cmd-1",
             "layout": "selfDoc",
         }))

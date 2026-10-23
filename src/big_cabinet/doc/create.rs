@@ -1,28 +1,8 @@
 //! CreateDoc: create a document, place it, and settle its command row.
 
-use super::commands::{Kind, State};
+use super::commands::{Detail, Kind, State};
 use super::pipeline::{Plan, digest};
 use super::*;
-use serde_json::Value;
-
-/// Create a document holding `facets`, then place it through the access policy. `placement` is the
-/// policy's own spelling of where the document goes (for DrawerService, a drawer); this repository
-/// does not interpret it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateDoc {
-    pub capability: CapId,
-    pub command: CommandId,
-    pub placement: String,
-    pub facets: BTreeMap<FacetKey, Value>,
-}
-
-impl Operation for CreateDoc {
-    type Output = WriteReceipt;
-    type Error = DocsError;
-    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.daybook.docs.createDoc")
-        .with_schemas("WriteReceipt", "DocsError");
-}
 
 impl DocsService {
     async fn create(
@@ -30,17 +10,31 @@ impl DocsService {
         context: &RequestContext,
         params: CreateDoc,
     ) -> Result<WriteReceipt, DocsError> {
-        let actor = self.actor(context, params.capability).await?;
+        let caller = self.invocation(context, params.authorization).await?;
+        let actor = &caller.signer;
         self.authorize(
             context,
-            &actor,
+            &caller.authority,
             AccessRequest::Create {
                 placement: &params.placement,
             },
         )
         .await?;
-        let request_digest = digest(&("create", actor.uuid, &params.placement, &params.facets));
-        if let Some(receipt) = self.replay(&params.command, request_digest).await? {
+        let owner_id = match caller.authority {
+            DomainAuthority::Identity(actor) => Some(actor),
+            DomainAuthority::Scoped(_) => None,
+        };
+        let request_digest = digest(&(
+            "create",
+            actor.actor_id,
+            owner_id,
+            &params.placement,
+            &params.facets,
+        ));
+        if let Some(receipt) = self
+            .replay(&params.command, request_digest, actor.actor_id)
+            .await?
+        {
             return Ok(receipt);
         }
         let set = self.schemas(params.facets, &BTreeSet::new())?;
@@ -49,10 +43,10 @@ impl DocsService {
                 &params.command,
                 Kind::Create,
                 request_digest,
-                actor.uuid,
+                actor.actor_id,
                 None,
                 Some(&params.placement),
-                None,
+                Some(&Detail::Create { owner_id }),
             )
             .await?;
         let doc_id = self.big_repo.allocate_id().await.map_err(repository)?;
@@ -60,7 +54,7 @@ impl DocsService {
         let mut plan = Plan {
             document: &doc_id,
             doc_uuid: Uuid7::new(),
-            actor: &actor,
+            actor,
             set,
             remove: BTreeSet::new(),
             now: jiff::Timestamp::now(),
@@ -68,7 +62,12 @@ impl DocsService {
             aliases: BTreeMap::new(),
         };
         let initial = match self
-            .initial_content(context, params.capability, &mut plan, Automerge::new())
+            .initial_content(
+                context,
+                params.authorization.signer,
+                &mut plan,
+                Automerge::new(),
+            )
             .await
         {
             Ok(initial) => initial,
@@ -90,7 +89,7 @@ impl DocsService {
         self.settle_create(
             context,
             &params.command,
-            actor.uuid,
+            owner_id,
             &doc_id,
             &params.placement,
             &heads,
@@ -105,7 +104,7 @@ impl DocsService {
         &self,
         context: &RequestContext,
         command: &CommandId,
-        actor: Uuid7,
+        actor: Option<Uuid7>,
         document: &DocId,
         placement: &str,
         heads: &[ChangeHash],

@@ -21,6 +21,7 @@ use std::sync::Arc;
 pub struct Runtime2Handle<F: FutureForm> {
     pub(crate) cmd_tx: async_channel::Sender<Runtime2Cmd>,
     pub(crate) sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
+    pub(crate) interests: Arc<crate::interest::SyncInterests>,
     pub(crate) doc_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) keyhive_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Injected runtime-neutral timer for timeout operations.
@@ -35,6 +36,7 @@ impl<F: FutureForm> Clone for Runtime2Handle<F> {
         Self {
             cmd_tx: self.cmd_tx.clone(),
             sync_policy: self.sync_policy,
+            interests: Arc::clone(&self.interests),
             doc_sync_waiter_ids: Arc::clone(&self.doc_sync_waiter_ids),
             keyhive_sync_waiter_ids: Arc::clone(&self.keyhive_sync_waiter_ids),
             #[cfg(any(test, feature = "test-support"))]
@@ -54,6 +56,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     pub(crate) fn new(
         cmd_tx: async_channel::Sender<Runtime2Cmd>,
         sync_policy: crate::runtime2::types::BigRepoSyncPolicy,
+        interests: Arc<crate::interest::SyncInterests>,
         #[cfg(any(test, feature = "test-support"))] timer: Arc<dyn Timer<F>>,
         doc_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
         keyhive_sync_waiter_ids: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -61,6 +64,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
         Self {
             cmd_tx,
             sync_policy,
+            interests,
             doc_sync_waiter_ids,
             keyhive_sync_waiter_ids,
             #[cfg(any(test, feature = "test-support"))]
@@ -71,6 +75,18 @@ impl<F: FutureForm> Runtime2Handle<F> {
     }
 
     // ── doc lifecycle ──────────────────────────────────────────────────────
+
+    pub(crate) async fn acquire_doc_interest(
+        &self,
+        doc_id: DocumentId,
+    ) -> Res<crate::interest::PendingDocLease> {
+        let (resp, rx) = futures::channel::oneshot::channel();
+        self.cmd_tx
+            .send(Runtime2Cmd::AcquireDocInterest { doc_id, resp })
+            .await
+            .map_err(|_| ferr!(ERROR_ACTOR))?;
+        rx.await.map_err(|_| ferr!(ERROR_CHANNEL))?
+    }
 
     pub async fn allocate_doc(&self) -> eyre::Result<DocumentId> {
         let (resp, rx) = futures::channel::oneshot::channel();

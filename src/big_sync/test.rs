@@ -894,6 +894,106 @@ where
     })
 }
 
+#[tokio::test]
+async fn object_interest_sources_union_replace_drop_and_reconnect() -> Res<()> {
+    let world = Arc::new(TestWorld::default());
+    let local = boot_node(Arc::clone(&world), 10).await?;
+    let remote = boot_node(world, 11).await?;
+    let configured = gen_obj_id(901);
+    let shared = gen_obj_id(902);
+    let dynamic = gen_obj_id(903);
+    for obj in [&configured, &shared, &dynamic] {
+        remote
+            .seed_obj(obj.clone(), payload("seed", 1, remote.peer_id.clone()))
+            .await?;
+    }
+    let peers = HashSet::from([remote.peer_id.clone()]);
+    let first = local.handle.object_interest_source();
+    let first_clone = first.clone();
+    let second = local.handle.object_interest_source();
+    first
+        .replace(
+            peers.clone(),
+            HashMap::from([
+                (shared.clone(), TEST_BACKEND_ID.into()),
+                (dynamic.clone(), TEST_BACKEND_ID.into()),
+            ]),
+        )
+        .await?;
+    second
+        .replace(
+            peers.clone(),
+            HashMap::from([(shared.clone(), TEST_BACKEND_ID.into())]),
+        )
+        .await?;
+    let parts: HashMap<_, _> = [(test_part(), TEST_BACKEND_ID.into())].into();
+    let configured_objects: HashMap<_, _> = [(configured.clone(), TEST_BACKEND_ID.into())].into();
+    local
+        .handle
+        .set_peer(
+            remote.peer_id.clone(),
+            Arc::new(remote.rpc.in_memory_client(local.peer_id.clone())),
+            parts.clone(),
+            configured_objects.clone(),
+        )
+        .await?;
+    let expected: HashMap<_, _> = [configured.clone(), shared.clone(), dynamic]
+        .into_iter()
+        .map(|obj| (obj, TEST_BACKEND_ID.into()))
+        .collect();
+    let snapshot = local.handle.snapshot().await?;
+    assert_eq!(
+        snapshot.peer_parts,
+        HashMap::from([(remote.peer_id.clone(), parts.clone())])
+    );
+    assert_eq!(
+        snapshot.peer_objects,
+        HashMap::from([(remote.peer_id.clone(), expected.clone())])
+    );
+    drop(first);
+    assert_eq!(
+        local.handle.snapshot().await?.peer_objects,
+        HashMap::from([(remote.peer_id.clone(), expected)])
+    );
+    first_clone.replace(peers, HashMap::new()).await?;
+    let expected: HashMap<_, _> = [configured.clone(), shared]
+        .into_iter()
+        .map(|obj| (obj, TEST_BACKEND_ID.into()))
+        .collect();
+    assert_eq!(
+        local.handle.snapshot().await?.peer_objects,
+        HashMap::from([(remote.peer_id.clone(), expected.clone())])
+    );
+    local.handle.remove_peer(remote.peer_id.clone()).await?;
+    local
+        .handle
+        .set_peer(
+            remote.peer_id.clone(),
+            Arc::new(remote.rpc.in_memory_client(local.peer_id.clone())),
+            parts.clone(),
+            configured_objects.clone(),
+        )
+        .await?;
+    assert_eq!(
+        local.handle.snapshot().await?.peer_objects,
+        HashMap::from([(remote.peer_id.clone(), expected)])
+    );
+    drop(second);
+    let snapshot = local.handle.snapshot().await?;
+    assert_eq!(
+        snapshot.peer_parts,
+        HashMap::from([(remote.peer_id.clone(), parts)])
+    );
+    assert_eq!(
+        snapshot.peer_objects,
+        HashMap::from([(remote.peer_id.clone(), configured_objects)])
+    );
+    drop(first_clone);
+    local.stop().await?;
+    remote.stop().await?;
+    Ok(())
+}
+
 async fn boot_node(world: Arc<TestWorld>, peer_seed: u8) -> Res<NodeHarness> {
     let peer_id = peer_id(peer_seed);
     let store = Arc::new(MemoryPartStore::new());

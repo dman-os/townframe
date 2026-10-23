@@ -8,23 +8,6 @@ use big_cabinet_core::drawer::DrawerDocEntry;
 use big_repo::keyhive_core::principal::identifier::Identifier;
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddDoc {
-    pub capability: CapId,
-    pub command: CommandId,
-    pub drawer_id: DrawerId,
-    pub doc_id: DocId,
-    pub access: Access,
-}
-
-impl Operation for AddDoc {
-    type Output = WriteReceipt;
-    type Error = DrawersError;
-    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.daybook.drawers.addDoc")
-        .with_schemas("WriteReceipt", "DrawersError");
-}
-
 fn drawer_access(access: KeyhiveAccess) -> Access {
     match access {
         KeyhiveAccess::Relay => Access::Relay,
@@ -66,7 +49,7 @@ impl Core {
             .call(
                 context.child(),
                 ReadFacets {
-                    capability: self.issuer,
+                    authorization: Authorization::identity(self.issuer),
                     doc_id: drawer.clone(),
                     at: At::Current,
                     facets: Some(BTreeSet::new()),
@@ -182,23 +165,28 @@ impl DrawerService {
         params: AddDoc,
     ) -> Result<WriteReceipt, DrawersError> {
         let core = &self.core;
-        let actor = core.resolve(context, params.capability).await?;
+        let caller = core.invocation(context, params.authorization).await?;
+        let actor = &caller.signer;
         // Conferring Admin on the doc takes Admin on the drawer; any other level takes Write.
         let needed = if params.access == Access::Admin {
             Access::Admin
         } else {
             Access::Write
         };
-        core.authorize(context, &actor, &params.drawer_id, needed)
+        core.authorize(context, &caller.authority, &params.drawer_id, needed)
             .await?;
         // Granting the docs group on a doc gives away what the caller holds on it: the caller
         // must itself reach the doc at the level it confers, through whatever path carries it.
-        if core.reach(context, actor.uuid, &params.doc_id).await? < Some(params.access) {
+        if core
+            .doc_level(context, &caller.authority, &params.doc_id)
+            .await?
+            < Some(params.access)
+        {
             return Err(DrawersError::Denied);
         }
         let digest = digest(&(
             "addDoc",
-            actor.uuid,
+            actor.actor_id,
             &params.drawer_id,
             &params.doc_id,
             params.access,
@@ -209,7 +197,7 @@ impl DrawerService {
             access: params.access,
         };
         core.ledger
-            .run(&params.command, digest, actor.uuid, op, |_| {
+            .run(&params.command, digest, actor.actor_id, op, |_| {
                 core.enter(context, &params.drawer_id, &params.doc_id, params.access)
             })
             .await
@@ -235,7 +223,7 @@ mod tests {
         (access, expected),
         {
             let request = AddDoc {
-                capability: CapId::default(),
+                authorization: Authorization::identity(CapId::default()),
                 command: CommandId::try_from("add-1".to_owned()).unwrap(),
                 drawer_id: DocId::new([1; 32]),
                 doc_id: DocId::new([2; 32]),
@@ -245,7 +233,10 @@ mod tests {
             assert_eq!(
                 value,
                 json!({
-                    "capability": "00000000-0000-0000-0000-000000000000",
+                    "authorization": {
+                        "authority": "00000000-0000-0000-0000-000000000000",
+                        "signer": "00000000-0000-0000-0000-000000000000",
+                    },
                     "command": "add-1",
                     "drawerId": DocId::new([1; 32]).to_string(),
                     "docId": DocId::new([2; 32]).to_string(),
@@ -266,7 +257,10 @@ mod tests {
     #[test]
     fn an_unknown_access_level_is_refused() {
         let error = serde_json::from_value::<AddDoc>(json!({
-            "capability": "00000000-0000-0000-0000-000000000000",
+            "authorization": {
+                "authority": "00000000-0000-0000-0000-000000000000",
+                "signer": "00000000-0000-0000-0000-000000000000",
+            },
             "command": "add-1",
             "drawerId": DocId::new([1; 32]).to_string(),
             "docId": DocId::new([2; 32]).to_string(),

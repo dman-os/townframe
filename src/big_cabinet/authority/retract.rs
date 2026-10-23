@@ -1,19 +1,6 @@
 //! RetractCapability: retract a capability and everything derived from it.
 
-use super::operation;
 use super::*;
-
-/// Retract a capability and, with it, everything derived from it. `via` must
-/// be the capability itself or one of its ancestors. The operator root is not
-/// retractable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RetractCapability {
-    pub via: CapId,
-    pub capability: CapId,
-}
-
-operation!(RetractCapability => (), procedure, "retractCapability", "Void");
 
 impl AuthorityService {
     async fn retract(&self, request: RetractCapability) -> Result<(), AuthorityError> {
@@ -28,6 +15,7 @@ impl AuthorityService {
         }
         store::retract_cap(&mut transaction, &request.capability).await?;
         transaction.commit().await?;
+        self.publish_change();
         Ok(())
     }
 }

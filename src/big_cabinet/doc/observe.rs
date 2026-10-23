@@ -2,101 +2,13 @@
 //! filtered by the same read access as gated reads (ADR 009 §6).
 
 use super::*;
+use crate::authority::{CapabilityStatus, ObserveCapability};
 use crate::index::facet_set::{FacetMembership, FacetRoute};
 use big_sync_core::keyed_frontier::{FrontierEntry, KeyedFrontierError};
 use big_sync_core::revisioned_store::{
     RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
 };
-
-/// The scope of an [`ObserveFacets`] subscription.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "scope",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ObserveScope {
-    /// Every facet route in one document. Read access to the document is
-    /// required before the stream opens.
-    Doc { doc_id: DocId },
-    /// Every facet route carrying one tag, across all documents. Each
-    /// document is filtered by the observer's read access as entries arrive.
-    Tag { tag: FacetTag },
-    /// Every facet route (optionally narrowed to `tag`) in documents the
-    /// observer may read through `drawer_id`. Read access on `drawer_id` is
-    /// required before the stream opens, and live drawer membership or grant
-    /// changes emit `Present` or `AccessLost` for affected documents.
-    Drawer {
-        drawer_id: DocId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tag: Option<FacetTag>,
-    },
-}
-
-/// One observed facet route, as projected by `facet_set` (ADR 009). The
-/// projection is ungated: `version` carries unverified signature-introduction
-/// heads, and consumers that read values do so through the gated read path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "state",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum ObservedFacet {
-    Present {
-        doc_heads: Vec<ChangeHash>,
-        version: FacetVersion,
-    },
-    Removed {
-        doc_heads: Option<Vec<ChangeHash>>,
-        version: FacetVersion,
-    },
-    /// The observer lost (or never had) read access to this event's document.
-    /// Emitted once per document per loss; observation of the document
-    /// resumes if access returns.
-    AccessLost,
-}
-
-/// One item on an [`ObserveFacets`] stream: either a `facet_set` frontier
-/// entry filtered to the observer's scope and authority, or the marker that
-/// the replay captured when the stream opened has been fully delivered.
-/// `revision` on an entry is the frontier revision to resume from (`after`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum FacetObserved {
-    Entry {
-        revision: u64,
-        doc_id: DocId,
-        facet_key: FacetKey,
-        facet: ObservedFacet,
-    },
-    /// Every entry at or below `through` that the stream will ever replay has
-    /// been delivered (subject to authority filtering); later entries are live.
-    ReplayComplete { through: u64 },
-}
-
-/// Subscription: facet membership changes after frontier revision `after`
-/// (0 replays the current matching set). See ADR 009 §6.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ObserveFacets {
-    pub capability: CapId,
-    pub scope: ObserveScope,
-    #[serde(default)]
-    pub after: u64,
-}
-
-impl Operation for ObserveFacets {
-    type Output = EventStream<FacetObserved, DocsError>;
-    type Error = DocsError;
-    const XRPC: XrpcOperation =
-        XrpcOperation::subscription("org.example.daybook.docs.observeFacets")
-            .with_schemas("FacetObserved", "DocsError");
-}
-
-impl Subscription for ObserveFacets {
-    type Event = FacetObserved;
-}
+use futures::StreamExt;
 
 impl Handler<ObserveFacets> for DocsService {
     async fn call(
@@ -104,22 +16,41 @@ impl Handler<ObserveFacets> for DocsService {
         request: Envelope<ObserveFacets>,
     ) -> Result<ResponseEnvelope<EventStream<FacetObserved, DocsError>>, DocsError> {
         let params = request.params;
-        let actor = self.actor(&request.context, params.capability).await?;
+        let mut authority_changes = self
+            .authority
+            .subscribe(
+                request.context.child(),
+                ObserveCapability {
+                    capability: params.authorization.authority,
+                },
+            )
+            .await
+            .map_err(authority_error)?;
+        let caller = self
+            .invocation(&request.context, params.authorization)
+            .await?;
+        let authority_client = self.authority.clone();
+        let issuer = self.system_actor.actor_id;
         let mut changes = self.access.subscribe_changes();
         let mut drawer_readable = match &params.scope {
             ObserveScope::Doc { doc_id } => {
-                self.authorize(&request.context, &actor, AccessRequest::Read(doc_id))
-                    .await?;
+                self.authorize(
+                    &request.context,
+                    &caller.authority,
+                    AccessRequest::Read(doc_id),
+                )
+                .await?;
                 None
             }
             ObserveScope::Tag { .. } => None,
             ObserveScope::Drawer { drawer_id, .. } => {
-                let readable = self
-                    .readable_in_drawer(&request.context, &actor, drawer_id)
-                    .await?;
-                if let Some(rx) = changes.as_mut() {
-                    rx.borrow_and_update();
-                }
+                let readable = Self::readable_in_drawer(
+                    self.access.as_ref(),
+                    &request.context,
+                    &caller.authority,
+                    drawer_id,
+                )
+                .await?;
                 Some(readable)
             }
         };
@@ -127,6 +58,13 @@ impl Handler<ObserveFacets> for DocsService {
             return Err(DocsError::Repository(
                 "facet observation is not configured on this repository".into(),
             ));
+        };
+        let repo = Arc::clone(&self.big_repo);
+        let mut interest = match &params.scope {
+            ObserveScope::Doc { doc_id } => {
+                Some(repo.interest(doc_id.clone()).await.map_err(repository)?)
+            }
+            ObserveScope::Tag { .. } | ObserveScope::Drawer { .. } => None,
         };
         let access = Arc::clone(&self.access);
         let tasks = self.tasks.clone();
@@ -142,10 +80,9 @@ impl Handler<ObserveFacets> for DocsService {
                 ObserveScope::Doc { .. } | ObserveScope::Drawer { tag: None, .. } => {
                     store.open_all(params.after).await
                 }
-                ObserveScope::Tag { tag }
-                | ObserveScope::Drawer {
-                    tag: Some(tag), ..
-                } => store.open_tags([(tag.clone(), params.after)]).await,
+                ObserveScope::Tag { tag } | ObserveScope::Drawer { tag: Some(tag), .. } => {
+                    store.open_tags([(tag.clone(), params.after)]).await
+                }
             };
             let mut reader = match opened {
                 Ok(reader) => reader,
@@ -185,10 +122,124 @@ impl Handler<ObserveFacets> for DocsService {
                             Some(rx) => rx.changed().await,
                             None => std::future::pending().await,
                         }
-                    }, if replay_complete && drawer_readable.is_some() => Wake::MembershipChanged,
+                    }, if replay_complete => Wake::MembershipChanged,
+                    change = authority_changes.next() => match change {
+                        Some(Ok(CapabilityStatus::Live)) => Wake::MembershipChanged,
+                        Some(Ok(CapabilityStatus::Retracted)) => {
+                            drop(sender.send(Err(DocsError::Denied)).await);
+                            break 'pump;
+                        }
+                        Some(Err(error)) => {
+                            drop(sender.send(Err(authority_error(error))).await);
+                            break 'pump;
+                        }
+                        None => {
+                            drop(sender.send(Err(DocsError::AuthorityUnavailable(
+                                "authority change stream ended without retraction".into(),
+                            ))).await);
+                            break 'pump;
+                        }
+                    },
                     read = reader.next(RevisionReadLimits::default()) => Wake::Frontier(read),
                 };
+                let caller = match resolve_invocation(
+                    &authority_client,
+                    &context,
+                    params.authorization,
+                    issuer,
+                    |object| serde_json::from_str(object.strip_prefix("DocsRepo/scope/v1/")?).ok(),
+                )
+                .await
+                {
+                    Ok(caller) => caller,
+                    Err(error) => {
+                        drop(sender.send(Err(authority_error(error))).await);
+                        break 'pump;
+                    }
+                };
                 let entries = match wake {
+                    Wake::MembershipChanged if drawer_readable.is_none() => {
+                        let revision = match store.latest_revision().await {
+                            Ok(revision) => revision,
+                            Err(error) => {
+                                drop(sender.send(Err(repository(error))).await);
+                                break 'pump;
+                            }
+                        };
+                        let mut restored = BTreeSet::new();
+                        for doc_id in &delivered {
+                            let allowed = match Self::allowed(
+                                access.as_ref(),
+                                &context,
+                                &caller.authority,
+                                AccessRequest::Read(doc_id),
+                            )
+                            .await
+                            {
+                                Ok(allowed) => allowed,
+                                Err(error) => {
+                                    drop(sender.send(Err(error)).await);
+                                    break 'pump;
+                                }
+                            };
+                            if matches!(&params.scope, ObserveScope::Doc { .. }) {
+                                if allowed && interest.is_none() {
+                                    interest = match repo.interest(doc_id.clone()).await {
+                                        Ok(interest) => Some(interest),
+                                        Err(error) => {
+                                            drop(sender.send(Err(repository(error))).await);
+                                            break 'pump;
+                                        }
+                                    };
+                                } else if !allowed {
+                                    interest = None;
+                                }
+                            }
+                            if allowed {
+                                if lost.contains(doc_id) {
+                                    restored.insert(doc_id.clone());
+                                }
+                            } else {
+                                last_present.retain(|(doc, _), _| doc != doc_id);
+                                if lost.insert(doc_id.clone())
+                                    && let Some(facet_key) = delivered_keys.get(doc_id).cloned()
+                                    && sender
+                                        .send(Ok(FacetObserved::Entry {
+                                            revision,
+                                            doc_id: doc_id.clone(),
+                                            facet_key,
+                                            facet: ObservedFacet::AccessLost,
+                                        }))
+                                        .await
+                                        .is_err()
+                                {
+                                    break 'pump;
+                                }
+                            }
+                        }
+                        let tag = match &params.scope {
+                            ObserveScope::Tag { tag } => Some(tag),
+                            ObserveScope::Doc { .. } | ObserveScope::Drawer { .. } => None,
+                        };
+                        match store.query_docs(&restored, tag, None).await {
+                            Ok(records) => records
+                                .into_iter()
+                                .map(|record| FrontierEntry {
+                                    revision,
+                                    key: record.route,
+                                    value: Some(FacetMembership::Present {
+                                        doc_heads: record.doc_heads,
+                                        facet_heads: record.facet_heads,
+                                        clock: record.clock,
+                                    }),
+                                })
+                                .collect(),
+                            Err(error) => {
+                                drop(sender.send(Err(repository(error))).await);
+                                break 'pump;
+                            }
+                        }
+                    }
                     Wake::MembershipChanged => {
                         let ObserveScope::Drawer { drawer_id, tag } = &params.scope else {
                             continue;
@@ -196,14 +247,18 @@ impl Handler<ObserveFacets> for DocsService {
                         let current_readable = drawer_readable
                             .as_mut()
                             .expect("drawer scope initializes readable set");
-                        let next_readable = match access
-                            .readable_in_drawer(&context, actor.uuid, drawer_id)
-                            .await
+                        let next_readable = match Self::readable_in_drawer(
+                            access.as_ref(),
+                            &context,
+                            &caller.authority,
+                            drawer_id,
+                        )
+                        .await
                         {
-                            Ok(Some(docs)) => docs,
-                            Ok(None) => BTreeSet::new(),
+                            Ok(docs) => docs,
+                            Err(DocsError::Denied) => BTreeSet::new(),
                             Err(error) => {
-                                drop(sender.send(Err(access_error(error))).await);
+                                drop(sender.send(Err(error)).await);
                                 break 'pump;
                             }
                         };
@@ -241,48 +296,24 @@ impl Handler<ObserveFacets> for DocsService {
                                 break 'pump;
                             }
                         }
-                        if !added_docs.is_empty() {
-                            let records = match store.query_docs(&added_docs, tag.as_ref(), None).await {
-                                Ok(records) => records,
-                                Err(error) => {
-                                    drop(sender.send(Err(repository(error))).await);
-                                    break 'pump;
-                                }
-                            };
-                            for record in records {
-                                let version = FacetVersion {
-                                    heads: record.facet_heads,
-                                    clock: record.clock,
-                                };
-                                let pair = (record.route.doc_id.clone(), record.route.facet_key.clone());
-                                let state = (record.doc_heads.clone(), version.clone());
-                                if last_present.get(&pair) == Some(&state) {
-                                    continue;
-                                }
-                                last_present.insert(pair, state);
-                                delivered.insert(record.route.doc_id.clone());
-                                delivered_keys
-                                    .entry(record.route.doc_id.clone())
-                                    .or_insert_with(|| record.route.facet_key.clone());
-                                lost.remove(&record.route.doc_id);
-                                if sender
-                                    .send(Ok(FacetObserved::Entry {
-                                        revision,
-                                        doc_id: record.route.doc_id,
-                                        facet_key: record.route.facet_key,
-                                        facet: ObservedFacet::Present {
-                                            doc_heads: record.doc_heads,
-                                            version,
-                                        },
-                                    }))
-                                    .await
-                                    .is_err()
-                                {
-                                    break 'pump;
-                                }
+                        match store.query_docs(&added_docs, tag.as_ref(), None).await {
+                            Ok(records) => records
+                                .into_iter()
+                                .map(|record| FrontierEntry {
+                                    revision,
+                                    key: record.route,
+                                    value: Some(FacetMembership::Present {
+                                        doc_heads: record.doc_heads,
+                                        facet_heads: record.facet_heads,
+                                        clock: record.clock,
+                                    }),
+                                })
+                                .collect(),
+                            Err(error) => {
+                                drop(sender.send(Err(repository(error))).await);
+                                break 'pump;
                             }
                         }
-                        continue;
                     }
                     Wake::Frontier(Ok(RevisionRead::Entries { entries, .. })) => entries,
                     Wake::Frontier(Ok(RevisionRead::ReplayComplete { through })) => {
@@ -326,17 +357,17 @@ impl Handler<ObserveFacets> for DocsService {
                         match checks.get(&route.doc_id) {
                             Some(allowed) => *allowed,
                             None => {
-                                let checked = match access
-                                    .check(
-                                        &context,
-                                        actor.uuid,
-                                        AccessRequest::Read(&route.doc_id),
-                                    )
-                                    .await
+                                let checked = match Self::allowed(
+                                    access.as_ref(),
+                                    &context,
+                                    &caller.authority,
+                                    AccessRequest::Read(&route.doc_id),
+                                )
+                                .await
                                 {
                                     Ok(allowed) => allowed,
                                     Err(error) => {
-                                        drop(sender.send(Err(access_error(error))).await);
+                                        drop(sender.send(Err(error)).await);
                                         break 'pump;
                                     }
                                 };

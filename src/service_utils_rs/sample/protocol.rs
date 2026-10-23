@@ -4,9 +4,7 @@
 //! Nothing here knows how the service is implemented. A consumer that only
 //! talks to the sample over IRPC or HTTP needs exactly this module.
 
-use crate::{
-    ContextError, EventStream, HttpMetadata, Operation, RequestContext, Subscription, XrpcOperation,
-};
+use crate::{ContextError, HttpMetadata, RequestContext};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,12 +45,7 @@ pub struct GetValueOutput {
     pub observed_metadata: HttpMetadata,
 }
 
-impl Operation for GetValue {
-    type Output = GetValueOutput;
-    type Error = SampleError;
-    const XRPC: XrpcOperation = XrpcOperation::query("org.example.sample.getValue")
-        .with_schemas("GetValueOutput", "SampleError");
-}
+crate::service_operation!(GetValue => GetValueOutput, SampleError, query("org.example.sample.getValue"));
 
 /// Procedure: write the source and wait until the projector has interpreted it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,12 +58,7 @@ pub struct PutValueOutput {
     pub snapshot: ValueSnapshot,
 }
 
-impl Operation for PutValue {
-    type Output = PutValueOutput;
-    type Error = SampleError;
-    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.sample.putValue")
-        .with_schemas("PutValueOutput", "SampleError");
-}
+crate::service_operation!(PutValue => PutValueOutput, SampleError, procedure("org.example.sample.putValue"));
 
 /// Query: the revisioned read a lagged observer uses to catch up.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,12 +72,7 @@ pub struct StatePage {
     pub reset_required: bool,
 }
 
-impl Operation for ReadState {
-    type Output = StatePage;
-    type Error = SampleError;
-    const XRPC: XrpcOperation = XrpcOperation::query("org.example.sample.readState")
-        .with_schemas("StatePage", "SampleError");
-}
+crate::service_operation!(ReadState => StatePage, SampleError, query("org.example.sample.readState"));
 
 /// Subscription: interpreted-state changes after a source revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,16 +80,7 @@ pub struct SubscribeEvents {
     pub after_source_revision: u64,
 }
 
-impl Operation for SubscribeEvents {
-    type Output = EventStream<SampleEvent, SampleError>;
-    type Error = SampleError;
-    const XRPC: XrpcOperation = XrpcOperation::subscription("org.example.sample.subscribeEvents")
-        .with_schemas("SampleEvent", "SampleError");
-}
-
-impl Subscription for SubscribeEvents {
-    type Event = SampleEvent;
-}
+crate::service_operation!(SubscribeEvents => stream SampleEvent, SampleError, "org.example.sample.subscribeEvents");
 
 crate::service_protocol! {
     pub enum SampleProtocol => SampleMessage {

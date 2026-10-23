@@ -21,11 +21,14 @@ mod actor;
 mod attenuate;
 mod cap;
 mod check;
+mod check_grants;
 mod grant;
 mod inspect_cap;
 mod mint;
+mod observe;
 mod open_actor;
 mod resolve;
+mod resolve_authority;
 mod retract;
 mod revoke;
 mod sign;
@@ -35,27 +38,14 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use self::attenuate::AttenuateCapability;
-pub use self::check::CheckGrant;
-pub use self::grant::GrantAccess;
-pub use self::inspect_cap::InspectCapability;
-pub use self::mint::MintCapability;
-pub use self::open_actor::OpenActor;
-pub use self::resolve::ResolveActor;
-pub use self::retract::RetractCapability;
-pub use self::revoke::RevokeAccess;
-pub use self::sign::SignFacetClaim;
-
 use self::store::{ActorRow, CapRow, NodeRow};
 use big_cabinet_core::dmeta::{
-    AttributionError, Bytes, DmetaError, FacetClaim, MultibaseKey, SignedFacetClaim, Uuid7,
+    AttributionError, DmetaError, MultibaseKey, SignedFacetClaim, Uuid7,
 };
 use ed25519_dalek::SigningKey;
 use secrets_rs::{SecretStore, SecretsError};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use service_utils_rs::{
-    Client, ContextError, Envelope, Handler, Host, Operation, ResponseEnvelope, StopToken,
-    XrpcOperation, service_protocol,
+    Client, ClientError, Envelope, Handler, Host, RequestContext, ResponseEnvelope, StopToken,
 };
 use sqlx::{Sqlite, Transaction};
 use sqlx_utils_rs::SqlCtx;
@@ -72,213 +62,66 @@ pub type ActorPublicKey = [u8; 32];
 const NODE_SERVICE: &str = "big_cabinet.authority";
 const WRAPPING_KEY: &str = "wrapping";
 
-/// The object string of the operator's root capability.
-pub const OPERATOR_OBJECT: &str = "is operator";
+pub use big_cabinet_core::authority::*;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct CapId(uuid::Uuid);
-
-impl CapId {
-    pub(super) fn new_random() -> Self {
-        Self(uuid::Uuid::new_v4())
-    }
-
-    pub(super) const fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
-    }
-
-    pub(super) fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+pub(crate) enum DomainAuthority<S> {
+    Identity(Uuid7),
+    Scoped(S),
 }
 
-impl std::fmt::Debug for CapId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("CapId([redacted])")
-    }
+pub(crate) struct Invocation<S> {
+    pub(crate) authority: DomainAuthority<S>,
+    pub(crate) signer: Actor,
+    pub(crate) rights: Rights,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub struct Rights(u32);
-
-impl Rights {
-    pub const USE: Self = Self(1);
-    pub const NARROW: Self = Self(2);
-    pub const MINT_CHILD: Self = Self(4);
-    pub const DELEGATE: Self = Self(8);
-
-    const NAMES: [(Self, &'static str); 4] = [
-        (Self::USE, "use"),
-        (Self::NARROW, "narrow"),
-        (Self::MINT_CHILD, "mintChild"),
-        (Self::DELEGATE, "delegate"),
-    ];
-
-    pub const fn all() -> Self {
-        Self(Self::USE.0 | Self::NARROW.0 | Self::MINT_CHILD.0 | Self::DELEGATE.0)
-    }
-
-    pub const fn empty() -> Self {
-        Self(0)
-    }
-
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
-    pub const fn is_subset_of(self, other: Self) -> bool {
-        other.contains(self)
-    }
-
-    fn named(name: &str) -> Option<Self> {
-        Self::NAMES
-            .iter()
-            .find(|(_, right)| *right == name)
-            .map(|(right, _)| *right)
-    }
-
-    pub(super) fn bits_i64(self) -> i64 {
-        i64::from(self.0)
-    }
-
-    /// Rights read back from storage. Bits outside the vocabulary are a corrupt
-    /// row, not a right this build forgot.
-    pub(super) fn from_bits(bits: i64) -> Option<Self> {
-        u32::try_from(bits)
-            .ok()
-            .filter(|bits| bits & !Self::all().0 == 0)
-            .map(Self)
-    }
-}
-
-impl std::ops::BitOr for Rights {
-    type Output = Self;
-
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-
-impl std::fmt::Display for Rights {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut first = true;
-        for (right, name) in Self::NAMES {
-            if self.contains(right) {
-                if !first {
-                    formatter.write_str("+")?;
-                }
-                formatter.write_str(name)?;
-                first = false;
+pub(crate) async fn resolve_invocation<S>(
+    client: &Client<AuthorityProtocol>,
+    context: &RequestContext,
+    authorization: Authorization,
+    issuer: Uuid7,
+    parse: impl FnOnce(&str) -> Option<S>,
+) -> Result<Invocation<S>, ClientError<AuthorityServiceError>> {
+    let resolved = client
+        .call(
+            context.child(),
+            ResolveAuthority {
+                capability: authorization.authority,
+            },
+        )
+        .await?;
+    let signer = if authorization.authority == authorization.signer {
+        resolved.actor.clone().ok_or(ClientError::Operation(
+            AuthorityServiceError::UnrecognizedActor,
+        ))?
+    } else {
+        client
+            .call(
+                context.child(),
+                ResolveActor {
+                    capability: authorization.signer,
+                },
+            )
+            .await?
+    };
+    let authority = match resolved.actor {
+        Some(actor) => DomainAuthority::Identity(actor.actor_id),
+        None => {
+            if resolved.capability.issuer_id != issuer {
+                return Err(ClientError::Operation(AuthorityServiceError::Unauthorized));
             }
-        }
-        Ok(())
-    }
-}
-
-impl std::fmt::Debug for Rights {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.to_string())
-    }
-}
-
-impl Serialize for Rights {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeSeq;
-        let names: Vec<&str> = Self::NAMES
-            .iter()
-            .filter(|(right, _)| self.contains(*right))
-            .map(|(_, name)| *name)
-            .collect();
-        let mut seq = serializer.serialize_seq(Some(names.len()))?;
-        for name in names {
-            seq.serialize_element(name)?;
-        }
-        seq.end()
-    }
-}
-
-impl<'de> Deserialize<'de> for Rights {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let names = Vec::<String>::deserialize(deserializer)?;
-        let mut rights = Self::default();
-        for name in names {
-            let right = Self::named(&name).ok_or_else(|| {
-                serde::de::Error::custom(format!("unknown capability right {name}"))
-            })?;
-            rights = rights | right;
-        }
-        Ok(rights)
-    }
-}
-
-/// One capability as the service reports it. `object` is opaque here: only the
-/// actor that named it knows what it means.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Capability {
-    pub id: CapId,
-    pub object: String,
-    pub rights: Rights,
-    pub issuer: Uuid7,
-}
-
-/// An actor binding, carrying exactly what dmeta's `ActorMetadata` needs plus
-/// the actor capability that was presented for it or opened with it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Actor {
-    pub uuid: Uuid7,
-    pub url: String,
-    pub public_key: MultibaseKey,
-    /// Node-signed attribution certificate (ADR 015 §5) for this binding.
-    pub certificate: Bytes,
-    /// The actor that opened this one. The operator has none.
-    pub parent_actor: Option<Uuid7>,
-    pub capability: CapId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-pub enum AuthorityServiceError {
-    #[error("request context failed: {0}")]
-    Context(#[from] ContextError),
-    #[error("capability is unknown, retracted, or descends from a retracted capability")]
-    InvalidCapability,
-    #[error("capability lacks the right this operation needs")]
-    Unauthorized,
-    #[error("the request asks for more than the presented capability holds")]
-    Escalation,
-    #[error("AuthorityActors did not associate this capability with an actor")]
-    UnrecognizedActor,
-    #[error("actor path is not its parent's path plus one segment")]
-    InvalidActorPath,
-    #[error("actor is not registered")]
-    ActorNotFound,
-    #[error("authority state is corrupt: {0}")]
-    StateCorrupt(String),
-    #[error("authority storage failed: {0}")]
-    Storage(String),
-    #[error("claim is invalid or could not be signed: {0}")]
-    Claim(String),
-}
-
-macro_rules! operation {
-    ($request:ident => $output:ty, $kind:ident, $nsid:literal, $schema:literal) => {
-        impl Operation for $request {
-            type Output = $output;
-            type Error = AuthorityServiceError;
-            const XRPC: XrpcOperation =
-                XrpcOperation::$kind(concat!("org.example.daybook.authority.", $nsid))
-                    .with_schemas($schema, "AuthorityServiceError");
+            DomainAuthority::Scoped(
+                parse(&resolved.capability.object)
+                    .ok_or(ClientError::Operation(AuthorityServiceError::Unauthorized))?,
+            )
         }
     };
+    Ok(Invocation {
+        authority,
+        signer,
+        rights: resolved.capability.rights,
+    })
 }
-
-pub(crate) use operation;
 
 /// Every way an authority operation or boot fails. Operations report the wire
 /// form, [`AuthorityServiceError`]; boot reports this one, whose sources are
@@ -338,6 +181,7 @@ pub struct AuthorityService {
     operator: Uuid7,
     root_cap: CapId,
     actors_issuer: Uuid7,
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl AuthorityService {
@@ -389,6 +233,7 @@ impl AuthorityService {
                 operator: node.operator,
                 root_cap: node.root_cap,
                 actors_issuer: node.actors_issuer,
+                changes: tokio::sync::watch::channel(0).0,
             }),
             stop,
         ))
@@ -411,7 +256,7 @@ impl AuthorityService {
         store::insert_actor(
             transaction,
             &ActorRow {
-                uuid: operator,
+                actor_id: operator,
                 path: String::new(),
                 parent: None,
                 public_key: operator_public_key,
@@ -497,11 +342,13 @@ impl AuthorityService {
     }
 }
 
-service_protocol! {
-    pub enum AuthorityProtocol => AuthorityMessage {
+service_utils_rs::bind_service_protocol! {
+    pub struct AuthorityBinding for AuthorityProtocol => AuthorityMessage {
         unary {
             OpenActor(OpenActor),
             ResolveActor(ResolveActor),
+            ResolveAuthority(ResolveAuthority),
+            CheckGrants(CheckGrants),
             MintCapability(MintCapability),
             AttenuateCapability(AttenuateCapability),
             InspectCapability(InspectCapability),
@@ -511,7 +358,7 @@ service_protocol! {
             CheckGrant(CheckGrant),
             SignFacetClaim(SignFacetClaim)
         }
-        stream {}
+        stream { ObserveCapability(ObserveCapability) }
     }
 }
 
@@ -538,7 +385,7 @@ pub async fn boot(
 ) -> Result<(Authority, StopToken), AuthorityError> {
     let (service, service_stop) = AuthorityService::boot(secrets, sql).await?;
     let (host, host_stop) = Host::new(Arc::clone(&service) as AuthorityHandler);
-    let client = Client::direct(Arc::clone(&host));
+    let client = Client::direct(AuthorityBinding::new(Arc::clone(&host)));
     let authority = Authority {
         root: service.root_cap(),
         node_issuer: service.node_issuer(),

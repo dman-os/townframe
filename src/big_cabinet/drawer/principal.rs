@@ -8,57 +8,6 @@ use crate::doc::pipeline::digest;
 use big_repo::BigKeyhiveAuthority;
 use big_sync_core::PeerKey;
 
-/// A Keyhive principal as a caller names one: the contact card of an agent this node has
-/// received, or a group id already in this node's Keyhive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum Principal {
-    /// A peer, by the 32 bytes of its Keyhive peer id (its Ed25519 verifying key).
-    Peer {
-        peer_id: GroupKey,
-    },
-    Group {
-        group_id: GroupKey,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InvitePrincipal {
-    pub capability: CapId,
-    pub drawer_id: DrawerId,
-    pub principal: Principal,
-    pub access: Access,
-}
-
-impl Operation for InvitePrincipal {
-    type Output = ();
-    type Error = DrawersError;
-    const XRPC: XrpcOperation =
-        XrpcOperation::procedure("org.example.daybook.drawers.invitePrincipal")
-            .with_schemas("Void", "DrawersError");
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RevokePrincipal {
-    pub capability: CapId,
-    pub drawer_id: DrawerId,
-    pub principal: Principal,
-}
-
-impl Operation for RevokePrincipal {
-    type Output = ();
-    type Error = DrawersError;
-    const XRPC: XrpcOperation =
-        XrpcOperation::procedure("org.example.daybook.drawers.revokePrincipal")
-            .with_schemas("Void", "DrawersError");
-}
-
 impl Core {
     /// The Keyhive authority a request names, or why this node cannot name it. The 32 bytes are
     /// caller input, so a key off the curve is refused here: Keyhive's group lookup asserts it.
@@ -170,14 +119,15 @@ impl DrawerService {
         params: InvitePrincipal,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let actor = core.resolve(context, params.capability).await?;
-        core.authorize(context, &actor, &params.drawer_id, Access::Admin)
+        let caller = core.invocation(context, params.authorization).await?;
+        let actor = &caller.signer;
+        core.authorize(context, &caller.authority, &params.drawer_id, Access::Admin)
             .await?;
         // Two Keyhive memberships, one drawer fact: under the ledger so a crash between them
         // resumes rather than leaving the principal in the docs group and out of the meta.
         let digest = digest(&(
             "invitePrincipal",
-            actor.uuid,
+            actor.actor_id,
             &params.drawer_id,
             &params.principal,
             params.access,
@@ -190,7 +140,7 @@ impl DrawerService {
             access: params.access,
         };
         core.ledger
-            .run(&command, digest, actor.uuid, op, |_| {
+            .run(&command, digest, actor.actor_id, op, |_| {
                 core.invite_principal(context, &params.drawer_id, &params.principal, params.access)
             })
             .await?;
@@ -203,12 +153,13 @@ impl DrawerService {
         params: RevokePrincipal,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let actor = core.resolve(context, params.capability).await?;
-        core.authorize(context, &actor, &params.drawer_id, Access::Admin)
+        let caller = core.invocation(context, params.authorization).await?;
+        let actor = &caller.signer;
+        core.authorize(context, &caller.authority, &params.drawer_id, Access::Admin)
             .await?;
         let digest = digest(&(
             "revokePrincipal",
-            actor.uuid,
+            actor.actor_id,
             &params.drawer_id,
             &params.principal,
         ));
@@ -219,7 +170,7 @@ impl DrawerService {
             principal: params.principal.clone(),
         };
         core.ledger
-            .run(&command, digest, actor.uuid, op, |_| {
+            .run(&command, digest, actor.actor_id, op, |_| {
                 core.revoke_principal_membership(context, &params.drawer_id, &params.principal)
             })
             .await?;
@@ -277,7 +228,7 @@ mod tests {
     #[test]
     fn invite_wire_shape() {
         let request = InvitePrincipal {
-            capability: CapId::default(),
+            authorization: Authorization::identity(CapId::default()),
             drawer_id: DocId::new([1; 32]),
             principal: Principal::Peer {
                 peer_id: GroupKey([5; 32]),
@@ -288,7 +239,10 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "capability": "00000000-0000-0000-0000-000000000000",
+                "authorization": {
+                    "authority": "00000000-0000-0000-0000-000000000000",
+                    "signer": "00000000-0000-0000-0000-000000000000",
+                },
                 "drawerId": DocId::new([1; 32]).to_string(),
                 "principal": { "kind": "peer", "peerId": GroupKey([5; 32]).to_string() },
                 "access": "Relay",
@@ -303,7 +257,7 @@ mod tests {
     #[test]
     fn revoke_wire_shape() {
         let request = RevokePrincipal {
-            capability: CapId::default(),
+            authorization: Authorization::identity(CapId::default()),
             drawer_id: DocId::new([1; 32]),
             principal: Principal::Group {
                 group_id: GroupKey([6; 32]),
@@ -313,7 +267,10 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "capability": "00000000-0000-0000-0000-000000000000",
+                "authorization": {
+                    "authority": "00000000-0000-0000-0000-000000000000",
+                    "signer": "00000000-0000-0000-0000-000000000000",
+                },
                 "drawerId": DocId::new([1; 32]).to_string(),
                 "principal": { "kind": "group", "groupId": GroupKey([6; 32]).to_string() },
             })
