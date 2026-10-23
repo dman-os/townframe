@@ -63,6 +63,19 @@ pub enum FacetSetQuery {
     Key(FacetKey),
 }
 
+fn facet_record(row: sqlx::sqlite::SqliteRow) -> Res<FacetRecord> {
+    Ok(FacetRecord {
+        route: FacetRoute {
+            doc_id: row.get::<String, _>("doc_id").parse()?,
+            facet_key: row.get::<String, _>("facet_key").parse()?,
+        },
+        doc_heads: serde_json::from_slice(row.get("doc_heads"))?,
+        facet_heads: serde_json::from_slice(row.get("facet_heads"))?,
+        clock: u64::try_from(row.get::<i64, _>("clock"))
+            .map_err(|_| utils_rs::prelude::ferr!("facet-set clock is out of range"))?,
+    })
+}
+
 #[derive(Clone)]
 struct FacetSetCodec;
 
@@ -249,18 +262,51 @@ impl FacetSetStore {
             .fetch_all(&self.sql.read_pool)
             .await?
             .into_iter()
-            .map(|row| {
-                Ok(FacetRecord {
-                    route: FacetRoute {
-                        doc_id: row.get::<String, _>("doc_id").parse()?,
-                        facet_key: row.get::<String, _>("facet_key").parse()?,
-                    },
-                    doc_heads: serde_json::from_slice(row.get("doc_heads"))?,
-                    facet_heads: serde_json::from_slice(row.get("facet_heads"))?,
-                    clock: u64::try_from(row.get::<i64, _>("clock"))
-                        .map_err(|_| utils_rs::prelude::ferr!("facet-set clock is out of range"))?,
-                })
-            })
+            .map(facet_record)
+            .collect()
+    }
+
+    /// Query every live route in `docs`, optionally narrowed to `tag` or `key`.
+    pub async fn query_docs(
+        &self,
+        docs: &BTreeSet<DocId>,
+        tag: Option<&FacetTag>,
+        key: Option<&FacetKey>,
+    ) -> Res<Vec<FacetRecord>> {
+        if docs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut query = QueryBuilder::<Sqlite>::new(
+            r#"SELECT doc_id
+                 , facet_key
+                 , doc_heads
+                 , facet_heads
+                 , clock
+              FROM big_cabinet_facet_set_entries
+             WHERE doc_id IN ("#,
+        );
+        let mut separated = query.separated(", ");
+        for doc_id in docs {
+            separated.push_bind(doc_id.to_string());
+        }
+        separated.push_unseparated(")");
+        if let Some(tag) = tag {
+            query
+                .push(" AND facet_tag = ")
+                .push_bind(tag.as_str().to_owned());
+        }
+        if let Some(key) = key {
+            query
+                .push(" AND facet_key = ")
+                .push_bind(key.to_string());
+        }
+        query.push(" ORDER BY doc_id, facet_key");
+        query
+            .build()
+            .fetch_all(&self.sql.read_pool)
+            .await?
+            .into_iter()
+            .map(facet_record)
             .collect()
     }
 

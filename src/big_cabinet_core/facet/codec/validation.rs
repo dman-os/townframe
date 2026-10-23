@@ -651,6 +651,19 @@ fn resolve_schema<'a>(
 }
 
 fn authoring_matches(schema: &Value, value: &Value) -> bool {
+    // A union branch pinned to a discriminant does not carry a value spelling a different one:
+    // without this the authoring walk visits every branch, and a member whose schema rejects the
+    // candidate (another member's required fields absent) reads as ambiguity rather than as the
+    // discriminant having chosen its branch. The pin is on the branch's `$type` property, the
+    // same position the compiled union adds it at.
+    let pinned = schema
+        .get("properties")
+        .and_then(|properties| properties.get("$type"))
+        .and_then(|tagged| tagged.get("const"))
+        .and_then(Value::as_str);
+    if let Some(pinned) = pinned {
+        return value.get("$type").and_then(Value::as_str) == Some(pinned);
+    }
     if matches!(
         schema.get(KEYWORD).and_then(Value::as_str),
         Some("float" | "uint")

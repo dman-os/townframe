@@ -13,9 +13,9 @@ pub struct MergeDoc {
     pub capability: CapId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<CommandId>,
-    pub source: DocId,
+    pub source_id: DocId,
     pub at: At,
-    pub target: DocId,
+    pub target_id: DocId,
 }
 
 impl Operation for MergeDoc {
@@ -32,23 +32,23 @@ impl DocsService {
         params: MergeDoc,
     ) -> Result<WriteReceipt, DocsError> {
         let actor = self.actor(context, params.capability).await?;
-        self.authorize(context, &actor, AccessRequest::Read(&params.source))
+        self.authorize(context, &actor, AccessRequest::Read(&params.source_id))
             .await?;
-        self.authorize(context, &actor, AccessRequest::Write(&params.target))
+        self.authorize(context, &actor, AccessRequest::Write(&params.target_id))
             .await?;
         let request_digest = digest(&(
             "merge",
             actor.uuid,
-            &params.source,
+            &params.source_id,
             &params.at,
-            &params.target,
+            &params.target_id,
         ));
         if let Some(command) = &params.command
             && let Some(receipt) = self.replay(command, request_digest).await?
         {
             return Ok(receipt);
         }
-        let source = self.handle(&params.source).await?;
+        let source = self.handle(&params.source_id).await?;
         let (heads, mut fork) = source
             .with_document_read(|doc| -> Result<_, DocsError> {
                 context.validate()?;
@@ -72,7 +72,7 @@ impl DocsService {
                 Ok((heads.clone(), doc.fork_at(&heads).map_err(repository)?))
             })
             .await?;
-        let target = self.handle(&params.target).await?;
+        let target = self.handle(&params.target_id).await?;
         if let Some(command) = &params.command {
             self.commands
                 .begin(
@@ -80,10 +80,10 @@ impl DocsService {
                     Kind::Merge,
                     request_digest,
                     actor.uuid,
-                    Some(&params.target),
+                    Some(&params.target_id),
                     None,
                     Some(&Detail::Merge {
-                        source: params.source.clone(),
+                        source: params.source_id.clone(),
                         heads: heads.clone(),
                     }),
                 )
@@ -111,7 +111,7 @@ impl DocsService {
                     self.commands.advance(command, State::Done, &heads).await?;
                 }
                 Ok(WriteReceipt {
-                    doc_id: params.target,
+                    doc_id: params.target_id,
                     heads,
                 })
             }

@@ -45,7 +45,7 @@ impl Failure {
     }
 }
 
-pub(super) fn digest(value: &impl serde::Serialize) -> [u8; 32] {
+pub(crate) fn digest(value: &impl serde::Serialize) -> [u8; 32] {
     *blake3::hash(&serde_json::to_vec(value).expect("a request serializes")).as_bytes()
 }
 

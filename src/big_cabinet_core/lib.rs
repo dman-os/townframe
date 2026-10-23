@@ -3,6 +3,7 @@
 extern crate self as big_cabinet_core;
 
 pub mod dmeta;
+pub mod drawer;
 pub mod facet;
 pub mod reference;
 pub mod schema_compat;

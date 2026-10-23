@@ -9,7 +9,7 @@ expression: observed
   "facetKey": "org.example.note/main",
   "facet": {
     "state": "present",
-    "doc_heads": [
+    "docHeads": [
       "0101010101010101010101010101010101010101010101010101010101010101"
     ],
     "version": {

@@ -577,6 +577,10 @@ const SUPPLEMENT_KEYS: &[&str] = &[
     "contentEncoding",
     "default",
     "pattern",
+    "enum",
+    "knownValues",
+    "const",
+    "not",
 ];
 
 fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str) -> Result<()> {
@@ -655,6 +659,59 @@ fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str
     }
     if object.contains_key("required") {
         names(object, "required", path)?;
+    }
+    // A union's fallback branch excludes the known discriminants with `not`: an enum of tags, or
+    // a member-branch anyOf. Anything else under `not` is not a discriminant spelling.
+    if let Some(not) = object.get("not") {
+        let enum_tags = not
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|tags| tags.iter().all(Value::is_string));
+        let member_branches = not
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .is_some_and(|branches| {
+                branches.iter().all(|branch| {
+                    branch
+                        .get("properties")
+                        .and_then(|properties| properties.get("$type"))
+                        .and_then(|tagged| tagged.get("const"))
+                        .is_some_and(Value::is_string)
+                })
+            });
+        if !enum_tags && !member_branches {
+            return Err(invalid(
+                path,
+                "`not` is admitted only as a union fallback's discriminant exclusion",
+            ));
+        }
+    }
+    // A union member branch pins its discriminant with `const`, the same value the compiled
+    // branch's `$type` was given; the overlay holds the two to agreement below.
+    if let Some(constant) = object.get("const") {
+        let typed_string = object.get("type").and_then(Value::as_str) == Some("string");
+        let untyped_string = !object.contains_key("type") && constant.is_string();
+        if !typed_string && !untyped_string {
+            return Err(invalid(
+                path,
+                "`const` is admitted only as a string discriminant",
+            ));
+        }
+    }
+    // A string vocabulary spells its values as `enum` (closed) or `knownValues` (open), the
+    // same list its Lexicon projection carries; the overlay holds the two to agreement.
+    for key in ["enum", "knownValues"] {
+        if let Some(values) = object.get(key)
+            && (object.get("type").and_then(Value::as_str) != Some("string")
+                || !values
+                    .as_array()
+                    .is_some_and(|values| !values.is_empty() && values.iter().all(Value::is_string)))
+        {
+            return Err(invalid(
+                path,
+                format!("`{key}` is admitted only as a string vocabulary on a string position"),
+            ));
+        }
     }
     if let Some(kind) = object.get("type") {
         let supported = |kind: &Value| {
@@ -825,10 +882,160 @@ impl Overlay<'_> {
                 }
                 return self.apply(&mut branches[0], &nonnull, path, depth + 1);
             }
-            return Err(invalid(
-                path,
-                "supplements on unions are not yet supported; omit the union supplement",
-            ));
+            // A union's supplement is its member branches: one `oneOf` arm per member, matched to
+            // the primary's branch by its discriminant `const`, with each member overlaid in place
+            // so the compiled union keeps its tag order and openness. This is how a declared union
+            // member's facet-level constraints (its storage markers, its closed object) reach the
+            // compiled document the codec validates against.
+            let Some(supplement_branches) = object.get("oneOf").and_then(Value::as_array) else {
+                return Err(invalid(
+                    path,
+                    "a union's supplement is a `oneOf` of its member branches",
+                ));
+            };
+            // The primary's branches are compiled `$ref`s to the members' tagged definitions; the
+            // supplement names a member by its discriminant, so resolve each `$ref` and overlay
+            // the member's declared definition (not the tagged copy — two members would pair to
+            // the same one), with the discriminant the compiler added re-stated on it.
+            let base = self.base.clone();
+            let primary_branches = primary
+                .get_mut("anyOf")
+                .and_then(Value::as_array_mut)
+                .expect("a compiled union is its branches");
+            for branch in supplement_branches {
+                let branch_object = branch
+                    .as_object()
+                    .ok_or_else(|| invalid(path, "a union branch is an object"))?;
+                let Some(tag) = branch_object
+                    .get("properties")
+                    .and_then(|properties| properties.get("$type"))
+                    .and_then(|tagged| tagged.get("const"))
+                    .and_then(Value::as_str)
+                else {
+                    // The fallback branch: it states only that the discriminant is none of the
+                    // known ones. There is no member to overlay.
+                    continue;
+                };
+                let resolve = |branch: &Value| -> Option<String> {
+                    let tag_of = |schema: &Value| {
+                        schema
+                            .get("properties")
+                            .and_then(|properties| properties.get("$type"))
+                            .and_then(|tagged| tagged.get("const"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    };
+                    if let Some(tag) = tag_of(branch) {
+                        return Some(tag);
+                    }
+                    let reference = branch.get("$ref")?.as_str()?.strip_prefix("#/$defs/")?;
+                    base.get(reference).and_then(tag_of)
+                };
+                let target = primary_branches
+                    .iter_mut()
+                    .find(|primary_branch| resolve(primary_branch).as_deref() == Some(tag));
+                let Some(target) = target else {
+                    return Err(invalid(
+                        path,
+                        format!("union member `{tag}` is absent from the primary union"),
+                    ));
+                };
+                // The member's declared definition lives in the supplement's `$defs` under its
+                // type name; its discriminant (`$type` const) names which one `tag` is.
+                let member_name = self
+                    .source
+                    .iter()
+                    .find(|(_, definition)| {
+                        definition
+                            .get("properties")
+                            .and_then(|properties| properties.get("$type"))
+                            .and_then(|tagged| tagged.get("const"))
+                            .and_then(Value::as_str)
+                            == Some(tag)
+                    })
+                    .map(|(name, _)| name.clone());
+                let mut member = match member_name {
+                    Some(name) => {
+                        // The compiled copy the branch `$ref`s carries the discriminant and the
+                        // member's primary constraints; the declared definition adds nothing the
+                        // copy does not state except what the overlay is about to restate.
+                        let reference = target
+                            .get("$ref")
+                            .and_then(Value::as_str)
+                            .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                            .expect("a compiled union branch is a member `$ref`")
+                            .to_owned();
+                        let mut compiled =
+                            self.base.get(&reference).cloned().unwrap_or_else(|| {
+                                self.source.get(&name).cloned().expect("declared")
+                            });
+                        let declared = self.source.get(&name).cloned().expect("declared");
+                        // The compiled `T…` copy pins the tag; restate only what the overlay is
+                        // for: the member's own properties, from its declaration.
+                        for (key, property) in declared
+                            .get("properties")
+                            .and_then(Value::as_object)
+                            .into_iter()
+                            .flatten()
+                        {
+                            if key != "$type" {
+                                compiled["properties"][key] = property.clone();
+                            }
+                        }
+                        compiled
+                    }
+                    None => self
+                        .base
+                        .iter()
+                        .find(|(_, definition)| {
+                            definition
+                                .get("properties")
+                                .and_then(|properties| properties.get("$type"))
+                                .and_then(|tagged| tagged.get("const"))
+                                .and_then(Value::as_str)
+                                == Some(tag)
+                        })
+                        .map(|(_, definition)| definition.clone())
+                        .ok_or_else(|| {
+                            invalid(
+                                path,
+                                format!("union member `{tag}` has no carried declaration"),
+                            )
+                        })?,
+                };
+                member["properties"]["$type"] = json!({"type": "string", "const": tag});
+                let required = member
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if !required.iter().any(|name| name.as_str() == Some("$type")) {
+                    let mut names = required;
+                    names.push(json!("$type"));
+                    member["required"] = Value::Array(names);
+                }
+                let mut payload = branch.clone();
+                if let Some(properties) =
+                    payload.get_mut("properties").and_then(Value::as_object_mut)
+                {
+                    properties.remove("$type");
+                }
+                if let Some(required) = payload.get_mut("required").and_then(Value::as_array_mut) {
+                    required.retain(|name| name != "$type");
+                }
+                self.apply(&mut member, &payload, path, depth + 1)?;
+                let paired_name = format!("S{}", self.paired.len());
+                self.paired.insert(
+                    (
+                        format!("union-member:{tag}"),
+                        serde_json::to_string(&payload).expect("schema serializes"),
+                    ),
+                    paired_name.clone(),
+                );
+                self.definitions.insert(paired_name.clone(), member);
+                *target = json!({"$ref": format!("#/$defs/{paired_name}")});
+            }
+            return Ok(());
         }
         let kind = primary
             .get("type")
@@ -841,6 +1048,30 @@ impl Overlay<'_> {
             return Err(invalid(
                 path,
                 format!("supplement type {stated} contradicts primary `{kind}`"),
+            ));
+        }
+        if let Some(values) = object.get("enum")
+            && primary.get("enum") != Some(values)
+        {
+            return Err(invalid(
+                path,
+                "supplement enum contradicts the primary vocabulary",
+            ));
+        }
+        if let Some(values) = object.get("knownValues")
+            && primary.get(KEYWORD).and_then(|lex| lex.get("knownValues")) != Some(values)
+        {
+            return Err(invalid(
+                path,
+                "supplement knownValues contradicts the primary vocabulary",
+            ));
+        }
+        if let Some(constant) = object.get("const")
+            && primary.get("const") != Some(constant)
+        {
+            return Err(invalid(
+                path,
+                "supplement const contradicts the primary discriminant",
             ));
         }
         // `default` is the `#[serde(default)]` spelling: an annotation with no validation or
@@ -1020,7 +1251,14 @@ impl Overlay<'_> {
             self.apply(target, items, &format!("{path}.items"), depth + 1)?;
         }
         if object.contains_key("required") {
-            let required = names(object, "required", path)?;
+            // The discriminant the compile added to a union member is restated in the member's
+            // own supplement; it is the same `$type` the filter below removes from the primary's
+            // set before the two are compared.
+            let required: BTreeSet<String> = names(object, "required", path)?
+                .into_iter()
+                .filter(|name| *name != "$type")
+                .map(str::to_owned)
+                .collect();
             let actual: BTreeSet<_> = primary
                 .get("required")
                 .and_then(Value::as_array)
@@ -1028,6 +1266,7 @@ impl Overlay<'_> {
                 .flatten()
                 .filter_map(Value::as_str)
                 .filter(|name| *name != "$type")
+                .map(str::to_owned)
                 .collect();
             if required != actual {
                 return Err(invalid(
@@ -1872,6 +2111,111 @@ mod tests {
         ] {
             assert!(!accepts(&compiled, invalid));
         }
+    }
+
+    #[test]
+    fn a_supplement_vocabulary_restates_the_primary_enum_or_is_refused() {
+        let primary = record(
+            json!({"value": {"type": "string", "enum": ["a", "b"]}}),
+            &["value"],
+            &[],
+        );
+        let compiled = Bundle::new(
+            &supplement(json!({"value": {"type": "string", "enum": ["a", "b"]}})),
+            Vec::new(),
+        )
+        .validate_lexicon(TAG, &primary, &[])
+        .unwrap();
+        assert!(accepts(&compiled, json!({"value": "a"})));
+        assert!(!accepts(&compiled, json!({"value": "c"})));
+        for (disagreeing, reason) in [
+            (json!({"type": "string", "enum": ["a", "c"]}), "contradicts"),
+            (json!({"type": "string", "enum": []}), "string vocabulary"),
+            (json!({"type": "integer", "enum": [1]}), "string vocabulary"),
+        ] {
+            let error = Bundle::new(&supplement(json!({"value": disagreeing})), Vec::new())
+                .validate_lexicon(TAG, &primary, &[])
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(reason), "{error}");
+        }
+        let unlisted = record(json!({"value": {"type": "string"}}), &["value"], &[]);
+        let error = Bundle::new(
+            &supplement(json!({"value": {"type": "string", "enum": ["a"]}})),
+            Vec::new(),
+        )
+        .validate_lexicon(TAG, &unlisted, &[])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("contradicts"), "{error}");
+    }
+
+    #[test]
+    fn a_supplement_member_branch_restates_its_discriminant_const() {
+        let primary = record(
+            json!({
+                "layout": {
+                    "type": "union",
+                    "refs": ["#member"],
+                    "closed": true,
+                }
+            }),
+            &["layout"],
+            &[],
+        );
+        let mut primary = primary;
+        primary["defs"]["member"] = json!({
+            "type": "object",
+            "properties": {"empty": {"type": "boolean"}},
+        });
+        // The compiled union names its branches by the member's tag, not the definition's name;
+        // the member file is carried, as admission requires.
+        primary["defs"]["main"]["record"]["properties"]["layout"]["refs"] =
+            json!(["org.example.test.member"]);
+        let member = json!({
+            "lexicon": 1,
+            "id": "org.example.test.member",
+            "defs": {"main": {"type": "object", "properties": {"empty": {"type": "boolean"}}}},
+        });
+        let union = supplement(json!({
+            "layout": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "$type": {"type": "string", "const": "org.example.test.member"},
+                            "empty": {"type": "boolean"},
+                        },
+                        "required": ["$type"],
+                    }
+                ]
+            }
+        }));
+        Bundle::new(&union, Vec::new())
+            .validate_lexicon(TAG, &primary, &[&member])
+            .unwrap();
+        // A const that does not match the branch's compiled discriminant is refused.
+        let disagreeing = supplement(json!({
+            "layout": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "$type": {"type": "string", "const": "org.example.test.other"},
+                        },
+                        "required": ["$type"],
+                    }
+                ]
+            }
+        }));
+        let error = Bundle::new(&disagreeing, Vec::new())
+            .validate_lexicon(TAG, &primary, &[&member])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("const") || error.contains("absent from the primary union"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -531,6 +531,7 @@ fn enum_shape(
         }
     });
     let schema_impl = quote! {
+        #[cfg(feature = "schemars")]
         impl ::schemars::JsonSchema for #name {
             fn schema_name() -> ::std::borrow::Cow<'static, str> {
                 ::std::borrow::Cow::Borrowed(::core::stringify!(#name))
@@ -883,6 +884,7 @@ fn string_enum_shape(
                 }
             }
 
+            #[cfg(feature = "schemars")]
             impl ::schemars::JsonSchema for #name {
                 fn schema_name() -> ::std::borrow::Cow<'static, str> {
                     ::std::borrow::Cow::Borrowed(::core::stringify!(#name))

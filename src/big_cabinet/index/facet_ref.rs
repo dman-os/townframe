@@ -46,8 +46,12 @@ pub struct FacetRefEdge {
 pub enum FacetRefQuery {
     /// Every edge out of one facet route.
     Origin(FacetRoute),
+    /// Every edge out of any facet in one document.
+    OriginDoc(big_cabinet_core::DocId),
     /// Every edge pointing at one facet route.
     Target(FacetRoute),
+    /// Every edge pointing at any facet in one document.
+    TargetDoc(big_cabinet_core::DocId),
 }
 
 #[derive(Clone)]
@@ -105,12 +109,22 @@ impl FacetRefStore {
                     .push(" AND origin_facet = ")
                     .push_bind(route.facet_key.to_string());
             }
+            FacetRefQuery::OriginDoc(doc_id) => {
+                query
+                    .push("origin_doc = ")
+                    .push_bind(doc_id.to_string());
+            }
             FacetRefQuery::Target(route) => {
                 query
                     .push("target_doc = ")
                     .push_bind(route.doc_id.to_string())
                     .push(" AND target_facet = ")
                     .push_bind(route.facet_key.to_string());
+            }
+            FacetRefQuery::TargetDoc(doc_id) => {
+                query
+                    .push("target_doc = ")
+                    .push_bind(doc_id.to_string());
             }
         }
         query.push(" ORDER BY origin_doc, origin_facet, origin_path, target_doc, target_facet");

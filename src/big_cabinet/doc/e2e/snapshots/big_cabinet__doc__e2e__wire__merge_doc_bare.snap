@@ -1,12 +1,12 @@
 ---
-source: src/big_cabinet/document/e2e/wire.rs
+source: src/big_cabinet/doc/e2e/wire.rs
 expression: request
 ---
 {
   "capability": "01010101-0101-0101-0101-010101010101",
-  "source": "z8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+  "sourceId": "z8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
   "at": {
     "at": "current"
   },
-  "target": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+  "targetId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
 }
