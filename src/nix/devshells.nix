@@ -317,7 +317,14 @@ _: {
         {
           name = "ci-desktop";
           buildInputs =
-            baseBuildInputs ++ dioxusBuildInputs ++ desktopBuildInputs ++ rustLintInputs ++ [ rustRust ];
+            baseBuildInputs
+            ++ dioxusBuildInputs
+            ++ desktopBuildInputs
+            ++ rustLintInputs
+            ++ [
+              rustRust
+              pkgs.wasm-tools
+            ];
           shellHook = ''
             export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${desktopRuntimeLibraryPath}"
             if [ "$(uname -s)" = "Darwin" ]; then
