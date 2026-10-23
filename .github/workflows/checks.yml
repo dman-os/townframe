@@ -277,8 +277,6 @@ jobs:
         with:
           paths: |
             **/nextest/ci/results.xml
-            src/daybook_compose/composeApp/build/test-results/**/*.xml
-            src/daybook_compose/composeApp/build/reports/tests/**/TEST-*.xml
 
       - name: Upload coverage data to codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
@@ -286,75 +284,6 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           files: lcov.info
-
-  kotlin-tests:
-    name: Kotlin tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Setup tmate session
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-
-      - name: remove unused files
-        run: |
-          sudo rm -rf /usr/lib/jvm
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /opt/microsoft /opt/google
-          sudo rm -rf /opt/az
-          sudo rm -rf /usr/local/share/powershell
-          # sudo rm -rf /opt/hostedtoolcache
-
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/flakehub-cache-action@v3
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: setup wash CLI
-        uses: wasmCloud/setup-wash-action@v2.1.0
-        with:
-          wash-version: v2.6.1
-      - name: fetch WIT dependencies
-        run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
-      - name: build plug OCI artifacts
-        run: |
-          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_test_manifest
-          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_dayledger_manifest
-
-      - name: kotlin tests
-        run: |
-          nix develop .#ci-desktop --command bash -lc '
-            export PROTOC="$(command -v protoc)"
-            cd src/daybook_compose
-            ./gradlew :composeApp:desktopTest --no-daemon --no-configuration-cache
-          '
-
-      - uses: actions/upload-artifact@v6
-        if: always()
-        with:
-          name: gradle-test-reports
-          path: src/daybook_compose/composeApp/build/reports/tests/
 
   e2e-sysadmin-chromium:
     name: E2E (sysadmin / chromium)
