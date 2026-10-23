@@ -43,12 +43,7 @@ impl DrawerAccess {
         sql: SqlCtx,
     ) -> Result<Arc<Self>, DrawersError> {
         let actor = authority
-            .call(
-                RequestContext::root(),
-                ResolveActor {
-                    capability: issuer,
-                },
-            )
+            .call(RequestContext::root(), ResolveActor { capability: issuer })
             .await
             .map_err(authority_error)?;
         let state = State::open(sql.clone()).await?;
@@ -87,7 +82,7 @@ impl DocAccess for DrawerAccess {
     ) -> AccessFuture<'a, bool> {
         Box::pin(async move {
             // The service's own roster writes and metadata doc creations: it checked the caller.
-            if actor == self.core.actor().uuid {
+            if actor == self.core.actor().actor_id {
                 return Ok(true);
             }
             let verdict = match request {
@@ -120,7 +115,7 @@ impl DocAccess for DrawerAccess {
     fn place<'a>(
         &'a self,
         context: &'a RequestContext,
-        actor: Uuid7,
+        actor: Option<Uuid7>,
         document: &'a DocId,
         placement: &'a str,
     ) -> AccessFuture<'a, ()> {
@@ -136,7 +131,7 @@ impl DocAccess for DrawerAccess {
                     );
                     assert_eq!(
                         actor,
-                        core.actor().uuid,
+                        Some(core.actor().actor_id),
                         "only DrawerService creates with the metadata placement"
                     );
                 }
@@ -163,7 +158,7 @@ impl DocAccess for DrawerAccess {
         drawer_id: &'a DocId,
     ) -> AccessFuture<'a, Option<BTreeSet<DocId>>> {
         Box::pin(async move {
-            let level = if actor == self.core.actor().uuid {
+            let level = if actor == self.core.actor().actor_id {
                 Some(Access::Admin)
             } else {
                 self.core
@@ -171,12 +166,16 @@ impl DocAccess for DrawerAccess {
                     .await
                     .map_err(access_error)?
             };
-            if level < Some(Access::Read) {
+            let Some(level) = level.filter(|level| *level >= Access::Read) else {
                 return Ok(None);
-            }
+            };
+            // The level above is this call's authorization; the projection query uses it
+            // directly so a concurrent revoke cannot turn a second effective() into Denied
+            // after we already observed Read.
             let docs = self
                 .core
-                .scoped_docs(context, actor, drawer_id)
+                .state
+                .scoped_docs(drawer_id, level)
                 .await
                 .map_err(access_error)?;
             Ok(Some(
@@ -184,6 +183,53 @@ impl DocAccess for DrawerAccess {
                     .filter_map(|(doc_id, (access, _))| (access >= Access::Read).then_some(doc_id))
                     .collect(),
             ))
+        })
+    }
+
+    fn drawer_access<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        actor: Uuid7,
+        drawer_id: &'a DocId,
+    ) -> AccessFuture<'a, Option<Access>> {
+        Box::pin(async move {
+            if actor == self.core.actor().actor_id {
+                return Ok(Some(Access::Admin));
+            }
+            self.core
+                .effective(context, actor, drawer_id)
+                .await
+                .map_err(access_error)
+        })
+    }
+
+    fn scoped_docs<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        drawer_id: &'a DocId,
+        access: Access,
+        doc_id: Option<&'a DocId>,
+    ) -> AccessFuture<'a, std::collections::BTreeMap<DocId, Access>> {
+        Box::pin(async move {
+            match doc_id {
+                Some(doc_id) => Ok(self
+                    .core
+                    .state
+                    .scoped_doc(drawer_id, access, doc_id)
+                    .await
+                    .map_err(access_error)?
+                    .map(|held| std::collections::BTreeMap::from([(doc_id.clone(), held)]))
+                    .unwrap_or_default()),
+                None => Ok(self
+                    .core
+                    .state
+                    .scoped_docs(drawer_id, access)
+                    .await
+                    .map_err(access_error)?
+                    .into_iter()
+                    .map(|(doc, (held, _))| (doc, held))
+                    .collect()),
+            }
         })
     }
 

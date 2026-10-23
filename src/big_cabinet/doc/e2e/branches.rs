@@ -40,7 +40,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 BranchDoc {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     command: CommandId::try_from(command.to_owned()).unwrap(),
                     doc_id: origin.clone(),
                     at: At::Current,
@@ -63,7 +63,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 MergeDoc {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     command: None,
                     source_id: source.clone(),
                     at: At::Current,
@@ -87,7 +87,10 @@ impl Node {
             .call(
                 RequestContext::root(),
                 InspectFacetClaims {
-                    capability: capability.id,
+                    authorization: Authorization {
+                        authority: capability.capability_id,
+                        signer: self.docs_actor.capability,
+                    },
                     doc_id: document.clone(),
                     facet_key: facet.clone(),
                     heads,
@@ -218,7 +221,7 @@ async fn a_historical_branch_pins_its_concrete_parent_and_preserves_inherited_br
         .call(
             RequestContext::root(),
             BranchDoc {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("historical"),
                 doc_id: origin.doc_id.clone(),
                 at: At::Heads(origin.heads.clone()),
@@ -527,13 +530,14 @@ async fn the_boot_pass_announces_and_places_a_committed_branch_and_abandons_an_u
                 &command(name),
                 Kind::Branch,
                 [0; 32],
-                alice.uuid,
+                alice.actor_id,
                 None,
                 Some(PLACEMENT),
                 Some(&Detail::Branch {
                     origin: origin.doc_id.clone(),
                     path: format!("/{name}"),
                     stealth: false,
+                    owner_id: Some(alice.actor_id),
                 }),
             )
             .await
@@ -605,7 +609,7 @@ async fn the_boot_pass_settles_a_merge_by_whether_the_target_holds_the_source_he
                 &command(name),
                 Kind::Merge,
                 [0; 32],
-                alice.uuid,
+                alice.actor_id,
                 Some(&origin.doc_id),
                 None,
                 Some(&Detail::Merge {

@@ -8,61 +8,86 @@
 
 use super::{DrawerId, DrawersError};
 use big_cabinet_core::dmeta::DocId;
-use big_cabinet_core::drawer::{Drawer, DrawerAccess as Access, DrawerGroups, LayoutKind};
-use serde::{Deserialize, Serialize};
+use big_cabinet_core::drawer::{Drawer, DrawerAccess as Access};
 use sqlx::Row as _;
 use sqlx_utils_rs::SqlCtx;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-/// The two drawers every doc created on this node is entered into (ADR 014).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalDrawers {
-    /// Docs physically present on this node.
-    pub present_id: DrawerId,
-    /// Docs this node originated.
-    pub originated_id: DrawerId,
-    /// The known-drawers registry: an explicitly managed list, not a collection — remembering a
-    /// drawer grants no access, and observing a tag never writes here.
-    pub registry_id: DrawerId,
-}
-
-impl LocalDrawers {
-    /// The drawers a new doc is placed into: the registry is not one — it records intent
-    /// about *drawers*, and a doc does not belong in it by being created here.
-    pub fn both(&self) -> [&DrawerId; 2] {
-        [&self.present_id, &self.originated_id]
-    }
-}
-
-/// A known drawer as this node carries it: the descriptor facet, verbatim. The facet is open —
-/// a layout this build does not know, and fields it does not read, survive in `descriptor`
-/// untouched. Operating code asks `layout_kind()` and refuses what it cannot interpret;
-/// carrying code (listing, storing) never has to.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DrawerRecord {
-    pub drawer_id: DrawerId,
-    pub descriptor: Drawer,
-}
-
-impl DrawerRecord {
-    /// The layout if it is one this build operates; `None` is a carried foreign layout.
-    pub fn layout_kind(&self) -> Option<LayoutKind> {
-        self.descriptor.layout.known()
-    }
-
-    /// Present exactly when the layout has groups, as the descriptor states them.
-    pub fn groups(&self) -> Option<DrawerGroups> {
-        self.descriptor.groups()
-    }
-}
+use big_cabinet_core::drawer::protocol::{DrawerRecord, LocalDrawers};
 
 pub(crate) struct State {
     sql: SqlCtx,
     local: OnceLock<LocalDrawers>,
     changes: tokio::sync::watch::Sender<u64>,
+}
+
+pub(crate) enum ScopeTarget<'a> {
+    Drawer(&'a DrawerId),
+    Doc(&'a DocId),
+}
+
+pub(crate) const SCOPED_DOCS_SQL: &str = r#"
+WITH RECURSIVE levels(access, level) AS (
+    VALUES ('Relay', 0), ('Read', 1), ('Write', 2), ('Admin', 3)
+), reachable(drawer_id, level) AS (
+    SELECT ?1, ?2
+    UNION
+    SELECT links.child_id
+         , MIN(reachable.level, levels.level)
+      FROM reachable
+      JOIN big_cabinet_drawer_children AS links ON links.parent_id = reachable.drawer_id
+      JOIN levels ON levels.access = links.access
+      JOIN big_cabinet_drawers AS parent ON parent.drawer_id = reachable.drawer_id
+     WHERE json_extract(parent.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
+), entries(doc_id, level, via) AS (
+    SELECT docs.doc_id
+         , MIN(reachable.level, levels.level)
+         , CASE WHEN reachable.drawer_id = ?1 THEN NULL ELSE reachable.drawer_id END
+      FROM reachable
+      JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = reachable.drawer_id
+      JOIN big_cabinet_drawer_docs AS docs ON docs.drawer_id = reachable.drawer_id
+      JOIN levels ON levels.access = docs.access
+     WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
+    UNION ALL
+    SELECT reachable.drawer_id
+         , reachable.level
+         , CASE WHEN reachable.drawer_id = ?1 THEN NULL ELSE reachable.drawer_id END
+      FROM reachable
+      JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = reachable.drawer_id
+     WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'
+), ranked AS (
+    SELECT doc_id
+         , level
+         , via
+         , ROW_NUMBER() OVER (PARTITION BY doc_id ORDER BY level DESC, via IS NOT NULL, via) AS ordinal
+      FROM entries
+), scoped_docs AS (
+    SELECT doc_id
+         , level
+         , via
+      FROM ranked
+     WHERE ordinal = 1
+)
+"#;
+
+fn level(access: Access) -> i64 {
+    match access {
+        Access::Relay => 0,
+        Access::Read => 1,
+        Access::Write => 2,
+        Access::Admin => 3,
+    }
+}
+
+fn access_level(value: i64) -> Access {
+    match value {
+        0 => Access::Relay,
+        1 => Access::Read,
+        2 => Access::Write,
+        3 => Access::Admin,
+        _ => unreachable!("projected access is a known level"),
+    }
 }
 
 fn storage(error: sqlx::Error) -> DrawersError {
@@ -248,6 +273,104 @@ impl State {
         Ok(rows.iter().map(drawer_record).collect())
     }
 
+    pub(crate) async fn scoped_docs(
+        &self,
+        drawer_id: &DrawerId,
+        access: Access,
+    ) -> Result<BTreeMap<DocId, (Access, Option<DrawerId>)>, DrawersError> {
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(SCOPED_DOCS_SQL);
+        query.push(" SELECT doc_id, level, via FROM scoped_docs ORDER BY doc_id");
+        let rows = query
+            .build()
+            .bind(drawer_id.to_string())
+            .bind(level(access))
+            .fetch_all(&self.sql.read_pool)
+            .await
+            .map_err(storage)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let via: Option<String> = row.get("via");
+                (
+                    id_column(&row, "doc_id"),
+                    (
+                        access_level(row.get("level")),
+                        via.map(|id| id.parse().expect("projected drawer id is valid")),
+                    ),
+                )
+            })
+            .collect())
+    }
+
+    pub(crate) async fn scoped_doc(
+        &self,
+        drawer_id: &DrawerId,
+        access: Access,
+        doc_id: &DocId,
+    ) -> Result<Option<Access>, DrawersError> {
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(SCOPED_DOCS_SQL);
+        query.push(" SELECT level FROM scoped_docs WHERE doc_id = ?3");
+        let found: Option<i64> = query
+            .build_query_scalar()
+            .bind(drawer_id.to_string())
+            .bind(level(access))
+            .bind(doc_id.to_string())
+            .fetch_optional(&self.sql.read_pool)
+            .await
+            .map_err(storage)?;
+        Ok(found.map(access_level))
+    }
+
+    pub(crate) async fn ancestors(
+        &self,
+        target: ScopeTarget<'_>,
+    ) -> Result<BTreeMap<DrawerId, Access>, DrawersError> {
+        let (target_id, document) = match target {
+            ScopeTarget::Drawer(drawer_id) => (drawer_id, false),
+            ScopeTarget::Doc(doc_id) => (doc_id, true),
+        };
+        let rows = sqlx::query(
+            r#"WITH RECURSIVE levels(access, level) AS (
+                   VALUES ('Relay', 0), ('Read', 1), ('Write', 2), ('Admin', 3)
+               ), reached(drawer_id, level) AS (
+                   SELECT drawer_id
+                        , 3
+                     FROM big_cabinet_drawers
+                    WHERE drawer_id = ?1
+                   UNION
+                   SELECT docs.drawer_id
+                        , levels.level
+                     FROM big_cabinet_drawer_docs AS docs
+                     JOIN levels ON levels.access = docs.access
+                     JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = docs.drawer_id
+                    WHERE ?2 AND docs.doc_id = ?1
+                      AND json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
+                   UNION
+                   SELECT links.parent_id
+                        , MIN(reached.level, levels.level)
+                     FROM reached
+                     JOIN big_cabinet_drawer_children AS links ON links.child_id = reached.drawer_id
+                     JOIN levels ON levels.access = links.access
+                     JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = links.parent_id
+                    WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
+               )
+               SELECT drawer_id
+                    , MAX(level) AS level
+                 FROM reached
+                GROUP BY drawer_id
+                ORDER BY drawer_id"#,
+        )
+        .bind(target_id.to_string())
+        .bind(document)
+        .fetch_all(&self.sql.read_pool)
+        .await
+        .map_err(storage)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (id_column(&row, "drawer_id"), access_level(row.get("level"))))
+            .collect())
+    }
+
     /// Candidate drawer ids referenced by child links or by the `facet_set` index that have not
     /// yet been projected into `big_cabinet_drawers`.
     pub(crate) async fn unprojected_candidates(&self) -> Result<Vec<DrawerId>, DrawersError> {
@@ -408,29 +531,6 @@ impl State {
             .collect())
     }
 
-    /// Every drawer whose roster lists `doc`, with the entry's access: the reverse index the
-    /// access policy walks.
-    pub(crate) async fn drawers_of(
-        &self,
-        doc: &DocId,
-    ) -> Result<Vec<(DrawerId, Access)>, DrawersError> {
-        let rows = sqlx::query(
-            "SELECT drawer_id
-                  , access
-               FROM big_cabinet_drawer_docs
-              WHERE doc_id = ?
-              ORDER BY drawer_id",
-        )
-        .bind(doc.to_string())
-        .fetch_all(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
-        Ok(rows
-            .iter()
-            .map(|row| (id_column(row, "drawer_id"), access_column(row, "access")))
-            .collect())
-    }
-
     pub(crate) async fn put_child(
         &self,
         parent: &DrawerId,
@@ -511,27 +611,6 @@ impl State {
             .collect())
     }
 
-    pub(crate) async fn parents_of(
-        &self,
-        child: &DrawerId,
-    ) -> Result<Vec<(DrawerId, Access)>, DrawersError> {
-        let rows = sqlx::query(
-            "SELECT parent_id
-                  , access
-               FROM big_cabinet_drawer_children
-              WHERE child_id = ?
-              ORDER BY parent_id",
-        )
-        .bind(child.to_string())
-        .fetch_all(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
-        Ok(rows
-            .iter()
-            .map(|row| (id_column(row, "parent_id"), access_column(row, "access")))
-            .collect())
-    }
-
     /// Replace a drawer's roster rows with what its doc says now: the rescan after a boot or a
     /// read that found the projection behind the doc.
     pub(crate) async fn replace_roster(
@@ -561,32 +640,215 @@ impl State {
         .execute(&mut *transaction)
         .await
         .map_err(storage)?;
-        for (doc, access) in docs {
-            sqlx::query(
-                "INSERT INTO big_cabinet_drawer_docs (drawer_id, doc_id, access)
-                 VALUES (?, ?, ?)",
-            )
-            .bind(&id)
-            .bind(doc.to_string())
-            .bind(access_text(*access))
-            .execute(&mut *transaction)
-            .await
-            .map_err(storage)?;
-        }
-        for (child, access) in children {
-            sqlx::query(
-                "INSERT INTO big_cabinet_drawer_children (parent_id, child_id, access)
-                 VALUES (?, ?, ?)",
-            )
-            .bind(&id)
-            .bind(child.to_string())
-            .bind(access_text(*access))
-            .execute(&mut *transaction)
-            .await
-            .map_err(storage)?;
+        for (table, source, target, entries) in [
+            ("big_cabinet_drawer_docs", "drawer_id", "doc_id", docs),
+            (
+                "big_cabinet_drawer_children",
+                "parent_id",
+                "child_id",
+                children,
+            ),
+        ] {
+            let mut entries = entries.iter().peekable();
+            while entries.peek().is_some() {
+                let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(format!(
+                    "INSERT INTO {table} ({source}, {target}, access) "
+                ));
+                query.push_values(
+                    entries.by_ref().take(256),
+                    |mut values, (target_id, access)| {
+                        values
+                            .push_bind(&id)
+                            .push_bind(target_id.to_string())
+                            .push_bind(access_text(*access));
+                    },
+                );
+                query
+                    .build()
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(storage)?;
+            }
         }
         transaction.commit().await.map_err(storage)?;
         self.notify_changed();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use big_cabinet_core::drawer::GroupKey;
+
+    #[tokio::test]
+    async fn scoped_sql_terminates_cycles_and_selects_the_strongest_path() {
+        let state = State::open(SqlCtx::memory().await.unwrap()).await.unwrap();
+        let [root, left, right, leaf, doc] =
+            [1_u8, 2, 3, 4, 5].map(|value| DocId::new([value; 32]));
+        for id in [&root, &left, &right] {
+            state
+                .put_drawer(
+                    id,
+                    &Drawer::single_group(GroupKey([8; 32]), GroupKey([9; 32])),
+                )
+                .await
+                .unwrap();
+        }
+        state.put_drawer(&leaf, &Drawer::self_doc()).await.unwrap();
+        for (parent, child, access) in [
+            (&root, &left, Access::Read),
+            (&root, &right, Access::Write),
+            (&left, &right, Access::Admin),
+            (&right, &root, Access::Relay),
+            (&right, &leaf, Access::Read),
+        ] {
+            state.put_child(parent, child, access).await.unwrap();
+        }
+        state.put_doc(&right, &doc, Access::Admin).await.unwrap();
+        assert_eq!(
+            state.scoped_docs(&root, Access::Admin).await.unwrap(),
+            BTreeMap::from([
+                (doc.clone(), (Access::Write, Some(right.clone()))),
+                (leaf.clone(), (Access::Read, Some(leaf.clone()))),
+            ]),
+        );
+        assert_eq!(
+            state.ancestors(ScopeTarget::Doc(&doc)).await.unwrap(),
+            BTreeMap::from([
+                (root.clone(), Access::Write),
+                (left.clone(), Access::Admin),
+                (right.clone(), Access::Admin),
+            ]),
+        );
+        assert_eq!(
+            state.ancestors(ScopeTarget::Drawer(&leaf)).await.unwrap(),
+            BTreeMap::from([
+                (root.clone(), Access::Read),
+                (left.clone(), Access::Read),
+                (right.clone(), Access::Read),
+                (leaf.clone(), Access::Admin),
+            ]),
+        );
+        assert_eq!(
+            state.scoped_docs(&root, Access::Relay).await.unwrap(),
+            BTreeMap::from([
+                (doc.clone(), (Access::Relay, Some(right.clone()))),
+                (leaf.clone(), (Access::Relay, Some(leaf.clone()))),
+            ]),
+        );
+        state.put_drawer(&right, &Drawer::self_doc()).await.unwrap();
+        assert_eq!(
+            state.scoped_docs(&root, Access::Admin).await.unwrap(),
+            BTreeMap::from([(right.clone(), (Access::Write, Some(right)))]),
+        );
+        assert!(
+            state
+                .ancestors(ScopeTarget::Doc(&doc))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_facet_query_only_returns_readable_verified_members() {
+        use crate::index::facet_set::{FacetRecord, FacetRoute, FacetSetStore};
+        use big_cabinet_core::{FacetKey, FacetTag};
+
+        let sql = SqlCtx::memory().await.unwrap();
+        let state = State::open(sql.clone()).await.unwrap();
+        let store = FacetSetStore::new(sql.clone()).await.unwrap();
+        let [drawer_id, readable, relay, unrelated] =
+            [1_u8, 2, 3, 4].map(|value| DocId::new([value; 32]));
+        state
+            .put_drawer(
+                &drawer_id,
+                &Drawer::single_group(GroupKey([8; 32]), GroupKey([9; 32])),
+            )
+            .await
+            .unwrap();
+        state
+            .put_doc(&drawer_id, &readable, Access::Read)
+            .await
+            .unwrap();
+        state
+            .put_doc(&drawer_id, &relay, Access::Relay)
+            .await
+            .unwrap();
+        let facet_key = FacetKey::from_text("org.example.note", "main").unwrap();
+        let tag = FacetTag::new("org.example.note").unwrap();
+        for doc_id in [&readable, &relay, &unrelated] {
+            sqlx::query(
+                "INSERT INTO big_cabinet_facet_set_entries
+                      ( doc_id
+                      , facet_key
+                      , facet_tag
+                      , doc_heads
+                      , facet_heads
+                      , clock
+                      )
+                 VALUES (?, ?, ?, ?, ?, 0)",
+            )
+            .bind(doc_id.to_string())
+            .bind(facet_key.to_string())
+            .bind(tag.as_str())
+            .bind(b"[]".as_slice())
+            .bind(b"[]".as_slice())
+            .execute(&sql.write_pool)
+            .await
+            .unwrap();
+        }
+        let expected = vec![FacetRecord {
+            route: FacetRoute {
+                doc_id: readable.clone(),
+                facet_key: facet_key.clone(),
+            },
+            doc_heads: Vec::new(),
+            facet_heads: Vec::new(),
+            clock: 0,
+        }];
+        assert_eq!(
+            store
+                .query_drawer(&drawer_id, Access::Admin, None, None, None)
+                .await
+                .unwrap(),
+            expected,
+        );
+        assert_eq!(
+            store
+                .query_drawer(
+                    &drawer_id,
+                    Access::Read,
+                    Some(&tag),
+                    Some(&facet_key),
+                    Some(&readable)
+                )
+                .await
+                .unwrap(),
+            expected,
+        );
+        assert!(
+            store
+                .query_drawer(&drawer_id, Access::Relay, None, None, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .query_drawer(&drawer_id, Access::Admin, None, None, Some(&unrelated))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        state.remove_doc(&drawer_id, &readable).await.unwrap();
+        assert!(
+            store
+                .query_drawer(&drawer_id, Access::Admin, None, None, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

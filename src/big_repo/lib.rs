@@ -39,6 +39,8 @@ mod backend;
 #[expect(unused)]
 mod changes;
 mod encrypted_blob;
+mod interest;
+pub use interest::{DocInterest, DocSyncDemand};
 pub mod ephemeral;
 pub(crate) mod handler;
 mod keyhive;
@@ -669,6 +671,15 @@ impl BigRepo {
 
 // main methods
 impl BigRepo {
+    pub fn sync_demand(&self) -> DocSyncDemand {
+        self.runtime.interests.subscribe()
+    }
+
+    pub async fn interest(self: &Arc<Self>, doc_id: DocumentId) -> Res<DocInterest> {
+        let lease = self.runtime.acquire_doc_interest(doc_id.clone()).await?;
+        Ok(DocInterest::new(Arc::clone(self), doc_id, lease))
+    }
+
     #[tracing::instrument(
         skip_all,
         fields(%document_id, %self.local_peer_id)

@@ -703,9 +703,9 @@ fn check_supplement(schema: &Value, definitions: &Map<String, Value>, path: &str
     for key in ["enum", "knownValues"] {
         if let Some(values) = object.get(key)
             && (object.get("type").and_then(Value::as_str) != Some("string")
-                || !values
-                    .as_array()
-                    .is_some_and(|values| !values.is_empty() && values.iter().all(Value::is_string)))
+                || !values.as_array().is_some_and(|values| {
+                    !values.is_empty() && values.iter().all(Value::is_string)
+                }))
         {
             return Err(invalid(
                 path,

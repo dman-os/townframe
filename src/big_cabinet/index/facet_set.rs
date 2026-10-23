@@ -283,26 +283,63 @@ impl FacetSetStore {
                  , facet_heads
                  , clock
               FROM big_cabinet_facet_set_entries
-             WHERE doc_id IN ("#,
+              WHERE doc_id IN (SELECT value FROM json_each("#,
         );
-        let mut separated = query.separated(", ");
-        for doc_id in docs {
-            separated.push_bind(doc_id.to_string());
-        }
-        separated.push_unseparated(")");
+        query.push_bind(serde_json::to_string(docs)?).push("))");
         if let Some(tag) = tag {
             query
                 .push(" AND facet_tag = ")
                 .push_bind(tag.as_str().to_owned());
         }
         if let Some(key) = key {
-            query
-                .push(" AND facet_key = ")
-                .push_bind(key.to_string());
+            query.push(" AND facet_key = ").push_bind(key.to_string());
         }
         query.push(" ORDER BY doc_id, facet_key");
         query
             .build()
+            .fetch_all(&self.sql.read_pool)
+            .await?
+            .into_iter()
+            .map(facet_record)
+            .collect()
+    }
+
+    pub(crate) async fn query_drawer(
+        &self,
+        drawer_id: &DocId,
+        access: big_cabinet_core::drawer::DrawerAccess,
+        tag: Option<&FacetTag>,
+        key: Option<&FacetKey>,
+        doc_id: Option<&DocId>,
+    ) -> Res<Vec<FacetRecord>> {
+        use big_cabinet_core::drawer::DrawerAccess;
+        let level = match access {
+            DrawerAccess::Relay => 0_i64,
+            DrawerAccess::Read => 1,
+            DrawerAccess::Write => 2,
+            DrawerAccess::Admin => 3,
+        };
+        let mut sql = sqlx::QueryBuilder::<sqlx::Sqlite>::new(crate::drawer::SCOPED_DOCS_SQL);
+        sql.push(
+            " SELECT facets.doc_id
+                     , facets.facet_key
+                     , facets.doc_heads
+                     , facets.facet_heads
+                     , facets.clock
+                  FROM big_cabinet_facet_set_entries AS facets
+                  JOIN scoped_docs ON scoped_docs.doc_id = facets.doc_id
+                 WHERE scoped_docs.level >= 1
+                   AND (?3 IS NULL OR facets.facet_tag = ?3)
+                   AND (?4 IS NULL OR facets.facet_key = ?4)
+                   AND (?5 IS NULL OR facets.doc_id = ?5)
+                 ORDER BY facets.doc_id, facets.facet_key",
+        );
+        sql.build()
+            .bind(drawer_id.to_string())
+            .bind(level)
+            .bind(tag.map(|tag| tag.as_str().to_owned()))
+            .bind(key.map(ToString::to_string))
+            .bind(doc_id.map(ToString::to_string))
             .fetch_all(&self.sql.read_pool)
             .await?
             .into_iter()

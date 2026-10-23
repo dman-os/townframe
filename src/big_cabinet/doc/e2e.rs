@@ -5,6 +5,7 @@
 //! each test states exactly which invariant the sabotage breaks.
 
 mod branches;
+mod capabilities;
 mod commands;
 mod gate;
 mod model;
@@ -196,7 +197,7 @@ impl Node {
                 RequestContext::root(),
                 GrantAccess {
                     via: self.docs_actor.capability,
-                    subject: actor.uuid,
+                    subject_id: actor.actor_id,
                     object,
                     rights: Rights::USE,
                 },
@@ -216,7 +217,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 CreateDoc {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     command: CommandId::try_from(command.to_owned()).unwrap(),
                     placement: PLACEMENT.into(),
                     facets: facets.into_iter().collect(),
@@ -238,7 +239,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 WriteFacets {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     command: None,
                     doc_id: document.clone(),
                     mode,
@@ -261,7 +262,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 ReadFacets {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     doc_id: document.clone(),
                     at,
                     facets: None,
@@ -281,7 +282,7 @@ impl Node {
         let read = self.client().call(
             RequestContext::root(),
             ReadFacets {
-                capability: actor.capability,
+                authorization: Authorization::identity(actor.capability),
                 doc_id: document.clone(),
                 at,
                 facets: Some(BTreeSet::from([facet.clone()])),

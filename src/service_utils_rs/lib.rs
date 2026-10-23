@@ -44,9 +44,9 @@ pub use admission::{
     Admission, CancellationKey, CancellationReceiver, CancellationRequestGuard, CancellationSignal,
     CancellationTransport, TaskActivity, cancellation_channel,
 };
-pub use client::Client;
+pub use client::{Client, ClientStream, InlineRoute};
 pub use context::{ContextError, HttpMetadata, RequestContext, TraceContext};
-pub use host::{Dispatch, Host, Route};
+pub use host::{Dispatch, Host, Route, ServerBinding};
 pub use irpc as __irpc;
 pub use irpc_adapter::IrpcAdapter;
 pub use lifecycle::{Spawner, StopToken};
@@ -55,6 +55,9 @@ pub use operation::{
     ClientError, Envelope, EventFrame, EventReply, EventStream, HttpInput, HttpMethod, Operation,
     Reply, ResponseEnvelope, ResponseMetadata, ServiceError, Subscription, TransportContext, Unary,
     Wire, XrpcKind, XrpcOperation,
+};
+pub use service_core_rs::{
+    Protocol, ProtocolOperations, declare_service_protocol, service_operation,
 };
 pub use xrpc::{XrpcClient, XrpcRouter};
 

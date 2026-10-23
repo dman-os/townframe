@@ -1,13 +1,13 @@
 //! Service-level tests: every assertion goes through `Client<AuthorityProtocol>`,
 //! so they exercise the same hosted path a real consumer uses.
 
-use super::AuthorityMessage;
 use super::{
     Actor, AttenuateCapability, Authority, AuthorityError, AuthorityProtocol,
     AuthorityServiceError, CapId, Capability, CheckGrant, GrantAccess, InspectCapability,
     MintCapability, OPERATOR_OBJECT, OpenActor, ResolveActor, RetractCapability, RevokeAccess,
     Rights, SignFacetClaim, boot,
 };
+use super::{AuthorityBinding, AuthorityMessage};
 use big_cabinet_core::FacetKey;
 use big_cabinet_core::dmeta::{
     ActorMetadata, Attribution, Cid, ClaimOperation, DocId, FacetClaim, Uuid7,
@@ -15,8 +15,8 @@ use big_cabinet_core::dmeta::{
 use irpc::{Channels, WithChannels, channel::none::NoReceiver};
 use secrets_rs::SecretStore;
 use service_utils_rs::{
-    Admission, Client, ClientError, Envelope, IrpcAdapter, Operation, Reply, RequestContext, Route,
-    StopToken, XrpcClient, XrpcRouter, xrpc,
+    Admission, Client, ClientError, Envelope, IrpcAdapter, Operation, Reply, RequestContext,
+    ServerBinding, StopToken, XrpcClient, XrpcRouter, xrpc,
 };
 use sqlx_utils_rs::SqlCtx;
 use std::sync::Arc;
@@ -132,7 +132,7 @@ impl TestAuthority {
     ) -> Result<(), AuthorityServiceError> {
         self.call(GrantAccess {
             via,
-            subject,
+            subject_id: subject,
             object: object.to_owned(),
             rights,
         })
@@ -147,7 +147,7 @@ impl TestAuthority {
     ) -> Result<(), AuthorityServiceError> {
         self.call(RevokeAccess {
             via,
-            subject,
+            subject_id: subject,
             object: object.to_owned(),
         })
         .await
@@ -156,7 +156,7 @@ impl TestAuthority {
     async fn check(&self, issuer: &Actor, subject: &Actor, object: &str) -> Rights {
         self.call(CheckGrant {
             via: issuer.capability,
-            subject: subject.uuid,
+            subject_id: subject.actor_id,
             object: object.to_owned(),
         })
         .await
@@ -212,10 +212,10 @@ async fn boot_hosts_a_service_whose_root_is_the_operators_actor_capability() {
     assert_eq!(
         root,
         Capability {
-            id: test.root(),
+            capability_id: test.root(),
             object: OPERATOR_OBJECT.to_owned(),
             rights: Rights::all(),
-            issuer: root.issuer,
+            issuer_id: root.issuer_id,
         }
     );
     let operator = test
@@ -229,7 +229,7 @@ async fn boot_hosts_a_service_whose_root_is_the_operators_actor_capability() {
         operator.url,
         format!("db+actor://{}/", test.authority.node_issuer)
     );
-    assert_eq!(operator.parent_actor, None);
+    assert_eq!(operator.parent_actor_id, None);
     assert_refused!(
         test.retract(test.root(), test.root()).await,
         AuthorityServiceError::Unauthorized
@@ -246,7 +246,7 @@ async fn an_opened_actor_carries_a_verifiable_attribution_certificate() {
         format!("db+actor://{}/docs", test.authority.node_issuer)
     );
     assert_eq!(
-        actor.parent_actor,
+        actor.parent_actor_id,
         Some(test.authority.service.operator_uuid())
     );
     assert!(actor.public_key.to_string().starts_with('z'));
@@ -261,7 +261,7 @@ async fn an_opened_actor_carries_a_verifiable_attribution_certificate() {
     Attribution::verify(
         &actor.certificate,
         &test.authority.node_issuer,
-        actor.uuid,
+        actor.actor_id,
         &metadata,
     )
     .expect("attribution certificate");
@@ -285,7 +285,7 @@ async fn actor_paths_extend_their_parent_by_exactly_one_segment() {
         .await
         .expect("nested actor");
     assert!(plugs.url.ends_with("/rt/plugs"), "{}", plugs.url);
-    assert_eq!(plugs.parent_actor, Some(runtime.uuid));
+    assert_eq!(plugs.parent_actor_id, Some(runtime.actor_id));
 
     for (parent, path) in [
         (runtime.capability, "other"),
@@ -326,7 +326,7 @@ async fn opening_an_actor_again_returns_the_same_identity() {
         .open(test.root(), "docs", Rights::USE | Rights::MINT_CHILD)
         .await
         .unwrap();
-    assert_eq!(narrower.uuid, first.uuid);
+    assert_eq!(narrower.actor_id, first.actor_id);
     assert_eq!(narrower.public_key, first.public_key);
     assert_ne!(narrower.capability, first.capability);
 
@@ -356,7 +356,7 @@ async fn opening_an_actor_again_returns_the_same_identity() {
         AuthorityServiceError::InvalidCapability
     );
     let rotated = test.open(test.root(), "docs", Rights::all()).await.unwrap();
-    assert_eq!(rotated.uuid, first.uuid);
+    assert_eq!(rotated.actor_id, first.actor_id);
     assert_eq!(rotated.certificate, first.certificate);
     assert_ne!(rotated.capability, first.capability);
     test.stop.stop().await;
@@ -373,31 +373,33 @@ async fn only_an_actors_own_capability_acts_as_it() {
         .mint(docs.capability, "edit doc X", OBJECT)
         .await
         .unwrap();
-    assert_eq!(edit.issuer, docs.uuid);
+    assert_eq!(edit.issuer_id, docs.actor_id);
 
     assert_refused!(
-        test.sign(edit.id, facet_claim(docs.uuid, 1)).await,
+        test.sign(edit.capability_id, facet_claim(docs.actor_id, 1))
+            .await,
         AuthorityServiceError::UnrecognizedActor
     );
     assert_refused!(
         test.call(ResolveActor {
-            capability: edit.id
+            capability: edit.capability_id
         })
         .await,
         AuthorityServiceError::UnrecognizedActor
     );
     assert_refused!(
-        test.open(edit.id, "docs/sneaky", OBJECT).await,
+        test.open(edit.capability_id, "docs/sneaky", OBJECT).await,
         AuthorityServiceError::UnrecognizedActor
     );
     assert_refused!(
-        test.mint(edit.id, "edit doc Y", Rights::USE).await,
+        test.mint(edit.capability_id, "edit doc Y", Rights::USE)
+            .await,
         AuthorityServiceError::UnrecognizedActor
     );
     assert_refused!(
         test.call(CheckGrant {
-            via: edit.id,
-            subject: docs.uuid,
+            via: edit.capability_id,
+            subject_id: docs.actor_id,
             object: "edit doc X".into(),
         })
         .await,
@@ -410,7 +412,7 @@ async fn only_an_actors_own_capability_acts_as_it() {
         .await
         .unwrap();
     assert_refused!(
-        test.sign(opener.capability, facet_claim(docs.uuid, 2))
+        test.sign(opener.capability, facet_claim(docs.actor_id, 2))
             .await,
         AuthorityServiceError::Unauthorized
     );
@@ -432,24 +434,27 @@ async fn capabilities_only_attenuate_and_labels_cannot_forge_issuance() {
         .mint(docs.capability, "edit doc X", Rights::USE | Rights::NARROW)
         .await
         .unwrap();
-    let copy = test.attenuate(edit.id, Rights::USE).await.unwrap();
+    let copy = test
+        .attenuate(edit.capability_id, Rights::USE)
+        .await
+        .unwrap();
     assert_eq!(
         copy,
         Capability {
-            id: copy.id,
+            capability_id: copy.capability_id,
             object: edit.object.clone(),
             rights: Rights::USE,
-            issuer: docs.uuid,
+            issuer_id: docs.actor_id,
         }
     );
 
     assert_refused!(
-        test.attenuate(edit.id, Rights::USE | Rights::DELEGATE)
+        test.attenuate(edit.capability_id, Rights::USE | Rights::DELEGATE)
             .await,
         AuthorityServiceError::Escalation
     );
     assert_refused!(
-        test.attenuate(copy.id, Rights::USE).await,
+        test.attenuate(copy.capability_id, Rights::USE).await,
         AuthorityServiceError::Unauthorized
     );
     let registered = test
@@ -467,33 +472,36 @@ async fn capabilities_only_attenuate_and_labels_cannot_forge_issuance() {
         .await
         .unwrap();
     assert_eq!(derived.object, registered.object);
-    assert_eq!(derived.issuer, registered.issuer);
+    assert_eq!(derived.issuer_id, registered.issuer_id);
     assert_eq!(named.object, registered.object);
-    assert_ne!(named.issuer, registered.issuer);
+    assert_ne!(named.issuer_id, registered.issuer_id);
     for counterfeit in [derived, named] {
         assert_refused!(
             test.call(ResolveActor {
-                capability: counterfeit.id
+                capability: counterfeit.capability_id
             })
             .await,
             AuthorityServiceError::UnrecognizedActor
         );
         assert_refused!(
-            test.sign(counterfeit.id, facet_claim(docs.uuid, 4)).await,
+            test.sign(counterfeit.capability_id, facet_claim(docs.actor_id, 4))
+                .await,
             AuthorityServiceError::UnrecognizedActor
         );
         assert_refused!(
-            test.open(counterfeit.id, "docs/fake", Rights::all()).await,
+            test.open(counterfeit.capability_id, "docs/fake", Rights::all())
+                .await,
             AuthorityServiceError::UnrecognizedActor
         );
         assert_refused!(
-            test.mint(counterfeit.id, "edit doc Y", Rights::USE).await,
+            test.mint(counterfeit.capability_id, "edit doc Y", Rights::USE)
+                .await,
             AuthorityServiceError::UnrecognizedActor
         );
         assert_refused!(
             test.call(CheckGrant {
-                via: counterfeit.id,
-                subject: docs.uuid,
+                via: counterfeit.capability_id,
+                subject_id: docs.actor_id,
                 object: "edit doc X".into()
             })
             .await,
@@ -502,7 +510,8 @@ async fn capabilities_only_attenuate_and_labels_cannot_forge_issuance() {
     }
     let root_copy = test.attenuate(test.root(), Rights::all()).await.unwrap();
     assert_refused!(
-        test.open(root_copy.id, "fake", Rights::all()).await,
+        test.open(root_copy.capability_id, "fake", Rights::all())
+            .await,
         AuthorityServiceError::UnrecognizedActor
     );
     // An actor's objects never carry more than its own capability does.
@@ -539,9 +548,9 @@ async fn inspection_exposes_uuid_handles_but_not_parent_authority() {
     assert_eq!(wire.as_object().unwrap().len(), 4);
     assert!(wire.get("parent").is_none());
     assert!(wire.get("kind").is_none());
-    let id = uuid::Uuid::parse_str(wire["id"].as_str().unwrap()).unwrap();
+    let id = uuid::Uuid::parse_str(wire["capabilityId"].as_str().unwrap()).unwrap();
     assert_eq!(id.get_version_num(), 4);
-    assert_eq!(id.to_string(), wire["id"].as_str().unwrap());
+    assert_eq!(id.to_string(), wire["capabilityId"].as_str().unwrap());
     assert_eq!(
         serde_json::from_value::<Capability>(wire.clone()).unwrap(),
         edit
@@ -554,8 +563,8 @@ async fn inspection_exposes_uuid_handles_but_not_parent_authority() {
                 .unwrap()
         )
     );
-    assert_eq!(format!("{:?}", edit.id), "CapId([redacted])");
-    let issuer_as_cap = serde_json::from_value::<CapId>(wire["issuer"].clone()).unwrap();
+    assert_eq!(format!("{:?}", edit.capability_id), "CapId([redacted])");
+    let issuer_as_cap = serde_json::from_value::<CapId>(wire["issuerId"].clone()).unwrap();
     assert_refused!(
         test.call(InspectCapability {
             capability: issuer_as_cap
@@ -575,15 +584,15 @@ async fn derivations_stop_before_creating_unusable_handles() {
         .await
         .unwrap();
     for _ in 3..64 {
-        held = test.attenuate(held.id, OBJECT).await.unwrap();
+        held = test.attenuate(held.capability_id, OBJECT).await.unwrap();
     }
     assert_refused!(
-        test.attenuate(held.id, OBJECT).await,
+        test.attenuate(held.capability_id, OBJECT).await,
         AuthorityServiceError::Escalation
     );
     assert_eq!(
         test.call(InspectCapability {
-            capability: held.id
+            capability: held.capability_id
         })
         .await
         .unwrap(),
@@ -601,22 +610,32 @@ async fn retraction_is_structural_and_takes_derivations_with_it() {
         .mint(docs.capability, "edit doc X", OBJECT)
         .await
         .unwrap();
-    let copy = test.attenuate(edit.id, Rights::USE).await.unwrap();
-    let held = test.attenuate(edit.id, Rights::USE).await.unwrap();
+    let copy = test
+        .attenuate(edit.capability_id, Rights::USE)
+        .await
+        .unwrap();
+    let held = test
+        .attenuate(edit.capability_id, Rights::USE)
+        .await
+        .unwrap();
 
     assert_refused!(
-        test.retract(other.capability, edit.id).await,
+        test.retract(other.capability, edit.capability_id).await,
         AuthorityServiceError::Unauthorized
     );
     assert_refused!(
-        test.retract(copy.id, edit.id).await,
+        test.retract(copy.capability_id, edit.capability_id).await,
         AuthorityServiceError::Unauthorized
     );
     // A holder may give up its own capability.
-    test.retract(held.id, held.id).await.unwrap();
+    test.retract(held.capability_id, held.capability_id)
+        .await
+        .unwrap();
 
-    test.retract(docs.capability, edit.id).await.unwrap();
-    for gone in [edit.id, copy.id, held.id] {
+    test.retract(docs.capability, edit.capability_id)
+        .await
+        .unwrap();
+    for gone in [edit.capability_id, copy.capability_id, held.capability_id] {
         assert_refused!(
             test.call(InspectCapability { capability: gone }).await,
             AuthorityServiceError::InvalidCapability
@@ -630,7 +649,7 @@ async fn retraction_is_structural_and_takes_derivations_with_it() {
     test.retract(test.root(), docs.capability).await.unwrap();
     assert_refused!(
         test.call(InspectCapability {
-            capability: survivor.id
+            capability: survivor.capability_id
         })
         .await,
         AuthorityServiceError::InvalidCapability
@@ -649,7 +668,7 @@ async fn grants_live_in_the_issuers_namespace_and_match_exactly() {
         test.check(&docs, &plugin, "drawer D").await,
         Rights::empty()
     );
-    test.grant(docs.capability, plugin.uuid, "drawer D", Rights::USE)
+    test.grant(docs.capability, plugin.actor_id, "drawer D", Rights::USE)
         .await
         .unwrap();
     assert_eq!(test.check(&docs, &plugin, "drawer D").await, Rights::USE);
@@ -670,7 +689,7 @@ async fn grants_live_in_the_issuers_namespace_and_match_exactly() {
     // Granting again through the same capability replaces what it recorded.
     test.grant(
         docs.capability,
-        plugin.uuid,
+        plugin.actor_id,
         "drawer D",
         Rights::USE | Rights::NARROW,
     )
@@ -691,12 +710,18 @@ async fn grants_live_in_the_issuers_namespace_and_match_exactly() {
         .await
         .unwrap();
     assert_refused!(
-        test.grant(derived.id, plugin.uuid, "drawer D", Rights::USE)
-            .await,
+        test.grant(
+            derived.capability_id,
+            plugin.actor_id,
+            "drawer D",
+            Rights::USE
+        )
+        .await,
         AuthorityServiceError::UnrecognizedActor
     );
     assert_refused!(
-        test.revoke(derived.id, plugin.uuid, "drawer D").await,
+        test.revoke(derived.capability_id, plugin.actor_id, "drawer D")
+            .await,
         AuthorityServiceError::UnrecognizedActor
     );
     let quiet = test
@@ -704,12 +729,12 @@ async fn grants_live_in_the_issuers_namespace_and_match_exactly() {
         .await
         .unwrap();
     assert_refused!(
-        test.grant(quiet.capability, plugin.uuid, "drawer D", Rights::USE)
+        test.grant(quiet.capability, plugin.actor_id, "drawer D", Rights::USE)
             .await,
         AuthorityServiceError::Unauthorized
     );
 
-    test.revoke(docs.capability, plugin.uuid, "drawer D")
+    test.revoke(docs.capability, plugin.actor_id, "drawer D")
         .await
         .unwrap();
     assert_eq!(
@@ -737,48 +762,65 @@ async fn delegated_grants_stand_while_the_capability_they_came_through_lives() {
         .await
         .unwrap();
 
-    test.grant(owner.id, plugin.uuid, "drawer D", Rights::USE)
-        .await
-        .unwrap();
+    test.grant(
+        owner.capability_id,
+        plugin.actor_id,
+        "drawer D",
+        Rights::USE,
+    )
+    .await
+    .unwrap();
     assert_eq!(test.check(&docs, &plugin, "drawer D").await, Rights::USE);
     assert_refused!(
-        test.grant(owner.id, plugin.uuid, "drawer E", Rights::USE)
-            .await,
+        test.grant(
+            owner.capability_id,
+            plugin.actor_id,
+            "drawer E",
+            Rights::USE
+        )
+        .await,
         AuthorityServiceError::Escalation
     );
     let user = test
-        .attenuate(owner.id, Rights::USE | Rights::DELEGATE)
+        .attenuate(owner.capability_id, Rights::USE | Rights::DELEGATE)
         .await
         .unwrap();
     assert_refused!(
-        test.grant(user.id, plugin.uuid, "drawer D", Rights::NARROW)
-            .await,
+        test.grant(
+            user.capability_id,
+            plugin.actor_id,
+            "drawer D",
+            Rights::NARROW
+        )
+        .await,
         AuthorityServiceError::Escalation
     );
 
     // Revoking through a capability reaches grants written through what was
     // derived from it, and nothing else.
-    test.grant(user.id, helper.uuid, "drawer D", Rights::USE)
+    test.grant(user.capability_id, helper.actor_id, "drawer D", Rights::USE)
         .await
         .unwrap();
-    test.grant(docs.capability, helper.uuid, "drawer D", Rights::NARROW)
+    test.grant(docs.capability, helper.actor_id, "drawer D", Rights::NARROW)
         .await
         .unwrap();
     assert_eq!(
         test.check(&docs, &helper, "drawer D").await,
         Rights::USE | Rights::NARROW
     );
-    test.revoke(owner.id, helper.uuid, "drawer D")
+    test.revoke(owner.capability_id, helper.actor_id, "drawer D")
         .await
         .unwrap();
     assert_eq!(test.check(&docs, &helper, "drawer D").await, Rights::NARROW);
 
     // Retracting the capability withdraws what was granted through it; the
     // issuer's own grant stands.
-    test.grant(docs.capability, plugin.uuid, "drawer D", Rights::NARROW)
+    test.grant(docs.capability, plugin.actor_id, "drawer D", Rights::NARROW)
         .await
         .unwrap();
-    test.retract(docs.capability, owner.id).await.unwrap();
+    test.retract(docs.capability, owner.capability_id)
+        .await
+        .unwrap();
     assert_eq!(test.check(&docs, &plugin, "drawer D").await, Rights::NARROW);
     test.stop.stop().await;
 }
@@ -787,13 +829,13 @@ async fn delegated_grants_stand_while_the_capability_they_came_through_lives() {
 async fn signing_binds_the_claim_to_the_presenting_actor() {
     let test = boot_authority().await;
     let docs = test.subsystem("docs").await;
-    test.sign(docs.capability, facet_claim(docs.uuid, 7))
+    test.sign(docs.capability, facet_claim(docs.actor_id, 7))
         .await
         .expect("signature");
     let signed = test
         .call(SignFacetClaim {
             actor: docs.capability,
-            claim: facet_claim(docs.uuid, 8),
+            claim: facet_claim(docs.actor_id, 8),
         })
         .await
         .unwrap();
@@ -823,11 +865,12 @@ async fn unknown_capability_ids_are_refused() {
         AuthorityServiceError::InvalidCapability
     );
     assert_refused!(
-        test.sign(forged, facet_claim(docs.uuid, 1)).await,
+        test.sign(forged, facet_claim(docs.actor_id, 1)).await,
         AuthorityServiceError::InvalidCapability
     );
     assert_refused!(
-        test.grant(forged, docs.uuid, "drawer D", Rights::USE).await,
+        test.grant(forged, docs.actor_id, "drawer D", Rights::USE)
+            .await,
         AuthorityServiceError::InvalidCapability
     );
     test.stop.stop().await;
@@ -856,7 +899,7 @@ async fn actors_capabilities_and_grants_survive_a_reopen() {
         .await
         .unwrap();
     first
-        .grant(docs.capability, plugin.uuid, "drawer D", Rights::USE)
+        .grant(docs.capability, plugin.actor_id, "drawer D", Rights::USE)
         .await
         .unwrap();
     let derived_identity = first
@@ -897,14 +940,14 @@ async fn actors_capabilities_and_grants_survive_a_reopen() {
     assert_refused!(
         reopened
             .call(ResolveActor {
-                capability: derived_identity.id
+                capability: derived_identity.capability_id
             })
             .await,
         AuthorityServiceError::UnrecognizedActor
     );
     reopened
         .call(InspectCapability {
-            capability: edit.id,
+            capability: edit.capability_id,
         })
         .await
         .expect("capability survives");
@@ -913,7 +956,7 @@ async fn actors_capabilities_and_grants_survive_a_reopen() {
         Rights::USE
     );
     reopened
-        .sign(docs.capability, facet_claim(docs.uuid, 9))
+        .sign(docs.capability, facet_claim(docs.actor_id, 9))
         .await
         .expect("signing survives");
     reopened.stop.stop().await;
@@ -935,13 +978,16 @@ async fn the_protocol_answers_alike_over_every_transport() {
     const BODY_LIMIT: usize = 64 * 1024;
     let test = boot_authority().await;
     let (irpc_client, irpc_stop) = IrpcAdapter::local::<_, AuthorityProtocol>(
-        Arc::clone(&test.authority.host),
+        AuthorityBinding::new(Arc::clone(&test.authority.host)),
         Admission::new(4, 1),
         8,
     );
     let mut router = XrpcRouter::new(BODY_LIMIT);
-    AuthorityProtocol::mount(&mut router, Arc::clone(&test.authority.host))
-        .expect("mount authority");
+    AuthorityBinding::mount(
+        &mut router,
+        AuthorityBinding::new(Arc::clone(&test.authority.host)),
+    )
+    .expect("mount authority");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback listener");
@@ -983,7 +1029,7 @@ async fn the_protocol_answers_alike_over_every_transport() {
         let inspected = call(
             client,
             InspectCapability {
-                capability: edit.id,
+                capability: edit.capability_id,
             },
         )
         .await
@@ -1002,7 +1048,7 @@ async fn the_protocol_answers_alike_over_every_transport() {
             call(
                 client,
                 ResolveActor {
-                    capability: derived.id
+                    capability: derived.capability_id
                 }
             )
             .await,
@@ -1012,7 +1058,7 @@ async fn the_protocol_answers_alike_over_every_transport() {
             client,
             SignFacetClaim {
                 actor: actor.capability,
-                claim: facet_claim(actor.uuid, 3),
+                claim: facet_claim(actor.actor_id, 3),
             },
         )
         .await
@@ -1023,7 +1069,7 @@ async fn the_protocol_answers_alike_over_every_transport() {
                 client,
                 CheckGrant {
                     via: actor.capability,
-                    subject: actor.uuid,
+                    subject_id: actor.actor_id,
                     object: "edit doc X".into(),
                 }
             )
@@ -1035,8 +1081,8 @@ async fn the_protocol_answers_alike_over_every_transport() {
         let refusal = call(
             client,
             SignFacetClaim {
-                actor: edit.id,
-                claim: facet_claim(actor.uuid, 3),
+                actor: edit.capability_id,
+                claim: facet_claim(actor.actor_id, 3),
             },
         )
         .await;

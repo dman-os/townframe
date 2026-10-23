@@ -45,251 +45,42 @@ mod write;
 mod e2e;
 
 pub use self::access::{AccessError, AccessFuture, AccessRequest, DocAccess, LedgerAccess};
-pub use self::branch::BranchDoc;
 pub use self::claim_history::{
     ClaimHistoryEntry, ClaimHistoryError, ClaimHistoryResult, HistoryBudget, ReconstructedClaim,
     SignatureIntroduction, predecessor_ids, reconstruct_claim, reconstruct_claim_for_marker,
     reconstruct_current_claims,
 };
-pub use self::create::CreateDoc;
-pub use self::inspect::{
-    EvidenceScope, FacetClaimEvidence, FacetClaimsInspection, InspectFacetClaims,
-    SignatureEvidence, UnsafeFacetInspection, UnsafeInspectFacet, VerifiedSignatureEvidence,
-};
-pub use self::list::ListFacets;
-pub use self::merge::MergeDoc;
-pub use self::observe::{FacetObserved, ObserveFacets, ObserveScope, ObservedFacet};
-pub use self::query::{
-    FacetRefSelector, FacetSelector, QueriedFacet, QueriedFacetRef, QueryFacetRefs, QueryFacets,
-};
-pub use self::read::ReadFacets;
-pub use self::write::WriteFacets;
 
 use self::commands::Commands;
 use self::gate::{DMETA_KEY, Gate, Verdict, doc_actor, facet_version, signature_heads};
 use crate::authority::{
-    Actor, AuthorityProtocol, AuthorityServiceError, CapId, Capability, InspectCapability,
-    MintCapability, ResolveActor, Rights, SignFacetClaim,
+    Actor, AuthorityProtocol, AuthorityServiceError, Authorization, CapId, Capability,
+    DomainAuthority, InspectCapability, Invocation, MintCapability, ResolveActor, Rights,
+    SignFacetClaim, resolve_invocation,
 };
 use crate::index::facet_ref::FacetRefStore;
 use crate::index::facet_set::FacetSetStore;
 use crate::schema::{SchemaHandle, SchemaRepo};
 use automerge::transaction::{CommitOptions, Transactable, Transaction};
 use automerge::{Automerge, ChangeHash, ObjId, ObjType, PatchLog, ReadDoc, Value};
+use big_cabinet_core::FacetKey;
 use big_cabinet_core::dmeta::{
-    ActorMetadata, BRANCH_FACET_TAG, Bytes, Cid, ClaimOperation, DMETA_FACET_TAG, Dmeta, DocId,
+    ActorMetadata, BRANCH_FACET_TAG, Cid, ClaimOperation, DMETA_FACET_TAG, Dmeta, DocId,
     FacetClaim, FacetMetadata, FacetSignature, MultibaseKey, NativeReadBudget, NativeValue,
     SignatureBytes, Uuid7, cid_of, encode_native,
 };
 use big_cabinet_core::facet::{CompiledSchema, hydrate_value, reconcile_json_atomic};
-use big_cabinet_core::{FacetKey, FacetTag};
 use big_repo::{BigDocHandle, DocLookup, SharedBigRepo};
-use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use service_utils_rs::{
-    Client, ClientError, ContextError, Envelope, EventStream, Handler, Host, Operation,
-    RequestContext, ResponseEnvelope, Spawner, StopToken, Subscription, XrpcOperation,
-    service_protocol,
+    Client, ClientError, ContextError, Envelope, EventStream, Handler, Host, RequestContext,
+    ResponseEnvelope, Spawner, StopToken,
 };
 use sqlx_utils_rs::SqlCtx;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// A caller-chosen idempotency key. A command that completed returns its original receipt when
-/// replayed with the same request; one still in flight is refused rather than run twice.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(transparent)]
-pub struct CommandId(String);
-
-impl CommandId {
-    pub const MAX_BYTES: usize = 256;
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for CommandId {
-    type Error = DocsError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.is_empty() || value.len() > Self::MAX_BYTES {
-            return Err(DocsError::InvalidCommand);
-        }
-        Ok(Self(value))
-    }
-}
-
-impl<'de> Deserialize<'de> for CommandId {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-impl std::fmt::Display for CommandId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-/// Which document heads a read is taken at.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "at", content = "heads", rename_all = "camelCase")]
-pub enum At {
-    Current,
-    Heads(Vec<ChangeHash>),
-}
-
-/// The commit condition of a write. See ADR 015 §2.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "camelCase")]
-pub enum WriteMode {
-    /// Commit only if the document heads still equal `heads`; the write is based on them.
-    IfDocUnchanged { heads: Vec<ChangeHash> },
-    /// Commit only if each named facet still has exactly these facet heads (empty: never written
-    /// or written by nobody verifiable). The write is based on current heads at commit time.
-    IfFacetsUnchanged {
-        facets: BTreeMap<FacetKey, FacetVersion>,
-    },
-    /// Write from these historical heads, producing a concurrent change if newer heads exist.
-    AtHeads { heads: Vec<ChangeHash> },
-    /// Write from the heads current when the write is prepared. Authenticity is still checked.
-    AtCurrent,
-}
-
-/// The version of one facet slot: the change hashes that introduced each
-/// signature currently covering it, plus a Lamport clock for ordering.
-///
-/// `clock` is the greatest Automerge `max_op` among `heads`. Automerge assigns
-/// every new change a `start_op` above the document's current maximum, so a
-/// version produced by writing on top of another always has a strictly greater
-/// clock. Concurrent versions are incomparable: equal clock with different
-/// heads means the versions merged or diverged, and the consumer must re-read
-/// rather than pick one. The clock is an ordering aid only; write conditions
-/// compare `heads` exactly.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FacetVersion {
-    pub heads: Vec<ChangeHash>,
-    pub clock: u64,
-}
-
-/// One facet as read at some heads, after the repository verified it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
-pub enum FacetRead {
-    /// Every signature covering the facet verifies and the stored value is exactly what they
-    /// signed (merged by Automerge's rules where they are concurrent).
-    Accepted { value: Json, version: FacetVersion },
-    /// Removed by a verified removal claim, or never written. `version.heads` is empty when the
-    /// slot was never written.
-    Absent { version: FacetVersion },
-    /// Verification could not complete, such as an unsupported encoding or a resource limit.
-    /// Missing metadata in an applied change is malformed, not pending. `value` is present only
-    /// when the read asked to be optimistic; it can never be written on top of.
-    Pending {
-        reason: String,
-        version: FacetVersion,
-        value: Option<Json>,
-    },
-    /// Proven invalid: a bad signature, or a change to the facet that no valid signature covers.
-    /// The value is never returned.
-    Rejected { reason: String },
-    /// Authentic, but the stored value cannot be read as its declaration states (or, with no
-    /// declaration, has no raw JSON spelling). It can still be overwritten.
-    Undecodable {
-        reason: String,
-        version: FacetVersion,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FacetsRead {
-    pub heads: Vec<ChangeHash>,
-    pub facets: BTreeMap<FacetKey, FacetRead>,
-}
-
-/// The slots present at some heads and their facet heads. This is a listing, not a read: it
-/// returns no values and verifies nothing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FacetListing {
-    pub heads: Vec<ChangeHash>,
-    pub facets: BTreeMap<FacetKey, FacetVersion>,
-}
-
-/// A successful local commit. It asserts local persistence only, not delivery to any peer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteReceipt {
-    pub doc_id: DocId,
-    pub heads: Vec<ChangeHash>,
-}
-
-/// Why a facet base or read was not accepted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
-pub enum Unaccepted {
-    Pending { reason: String },
-    Rejected { reason: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-pub enum DocsError {
-    #[error("request context failed: {0}")]
-    Context(#[from] ContextError),
-    #[error("the presented capability does not permit this operation")]
-    Denied,
-    #[error("authority failed: {0}")]
-    Authority(AuthorityServiceError),
-    #[error("authority transport failed: {0}")]
-    AuthorityUnavailable(String),
-    #[error("document access policy failed: {0}")]
-    Access(String),
-    #[error("document repository failed: {0}")]
-    Repository(String),
-    #[error("document is not locally available")]
-    DocNotFound,
-    #[error("requested heads are unknown: {heads:?}")]
-    UnknownHeads { heads: Vec<ChangeHash> },
-    #[error("a command id is 1..=256 bytes")]
-    InvalidCommand,
-    #[error("command {command} is still in flight; retry once it resolves")]
-    CommandInFlight { command: CommandId },
-    #[error("command {command} was already used for a different request")]
-    CommandReused { command: CommandId },
-    #[error("no schema is registered for facet tag {facet_tag}")]
-    UnknownSchema { facet_tag: String },
-    #[error("facet {facet_key} is managed by the repository and cannot be written directly")]
-    SystemFacet { facet_key: FacetKey },
-    #[error("facet {facet_key} is both set and removed")]
-    SetAndRemoved { facet_key: FacetKey },
-    #[error("facet {facet_key} value is invalid: {reason}")]
-    InvalidValue { facet_key: FacetKey, reason: String },
-    #[error("the write condition no longer holds at {heads:?}")]
-    Conflict {
-        heads: Vec<ChangeHash>,
-        facets: BTreeMap<FacetKey, FacetVersion>,
-    },
-    #[error("facet {facet_key} at the write's base is not accepted: {verdict:?}")]
-    BaseNotAccepted {
-        facet_key: FacetKey,
-        verdict: Unaccepted,
-    },
-    #[error("inspection evidence is pending: {reason}")]
-    Pending { reason: String },
-    #[error("inspection resource limit: {reason}")]
-    ResourceRefused { reason: String },
-    #[error("unsupported inspection evidence: {reason}")]
-    Unsupported { reason: String },
-    #[error("malformed inspection evidence: {reason}")]
-    MalformedEvidence { reason: String },
-    #[error("the documents share no history, so one cannot be merged into the other")]
-    UnrelatedHistory,
-}
+pub use big_cabinet_core::doc::*;
 
 /// Everything DocsRepo is booted with.
 pub struct DocsConfig {
@@ -428,18 +219,78 @@ impl DocsService {
             .map_err(authority_error)
     }
 
+    async fn invocation(
+        &self,
+        context: &RequestContext,
+        authorization: Authorization,
+    ) -> Result<Invocation<DocScope>, DocsError> {
+        resolve_invocation(
+            &self.authority,
+            context,
+            authorization,
+            self.system_actor.actor_id,
+            |object| serde_json::from_str(object.strip_prefix("DocsRepo/scope/v1/")?).ok(),
+        )
+        .await
+        .map_err(authority_error)
+    }
+
+    async fn allowed(
+        access_policy: &dyn DocAccess,
+        context: &RequestContext,
+        authority: &DomainAuthority<DocScope>,
+        request: AccessRequest<'_>,
+    ) -> Result<bool, DocsError> {
+        match authority {
+            DomainAuthority::Identity(actor) => access_policy
+                .check(context, *actor, request)
+                .await
+                .map_err(access_error),
+            DomainAuthority::Scoped(scope) => {
+                let (document, needed) = match request {
+                    AccessRequest::Read(doc)
+                        if scope.read.contains(doc) || scope.write.contains(doc) =>
+                    {
+                        return Ok(true);
+                    }
+                    AccessRequest::Write(doc) if scope.write.contains(doc) => return Ok(true),
+                    AccessRequest::Create { placement } => {
+                        return Ok(scope.create.contains(placement)
+                            || crate::drawer::parse_placement(placement).is_some_and(|drawer| {
+                                scope.drawers.get(&drawer).is_some_and(|access| {
+                                    *access >= big_cabinet_core::drawer::DrawerAccess::Write
+                                })
+                            }));
+                    }
+                    AccessRequest::Read(doc) => (doc, big_cabinet_core::drawer::DrawerAccess::Read),
+                    AccessRequest::Write(doc) => {
+                        (doc, big_cabinet_core::drawer::DrawerAccess::Write)
+                    }
+                };
+                for (drawer, access) in &scope.drawers {
+                    if *access >= needed
+                        && access_policy
+                            .scoped_docs(context, drawer, *access, Some(document))
+                            .await
+                            .map_err(access_error)?
+                            .get(document)
+                            .is_some_and(|held| *held >= needed)
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+
     async fn authorize(
         &self,
         context: &RequestContext,
-        actor: &Actor,
+        authority: &DomainAuthority<DocScope>,
         request: AccessRequest<'_>,
     ) -> Result<(), DocsError> {
-        if self
-            .access
-            .check(context, actor.uuid, request)
-            .await
-            .map_err(access_error)?
-        {
+        if Self::allowed(self.access.as_ref(), context, authority, request).await? {
             Ok(())
         } else {
             Err(DocsError::Denied)
@@ -471,9 +322,10 @@ fn present_keys(doc: &Automerge, heads: &[ChangeHash]) -> Result<BTreeSet<FacetK
         .collect())
 }
 
-service_protocol! {
-    pub enum DocsProtocol => DocsMessage {
+service_utils_rs::bind_service_protocol! {
+    pub struct DocsBinding for DocsProtocol => DocsMessage {
         unary {
+            MintDocCapability(MintDocCapability),
             CreateDoc(CreateDoc),
             WriteFacets(WriteFacets),
             BranchDoc(BranchDoc),
@@ -559,7 +411,7 @@ pub async fn boot(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsError
     });
     let (mint_stop, mint_spawner) = StopToken::new();
     let (host, host_stop) = Host::new(Arc::clone(&service));
-    let client = Client::direct(Arc::clone(&host));
+    let client = Client::direct(DocsBinding::new(Arc::clone(&host)));
     service.access.attach_docs(client.clone());
     if let Err(error) = service.recover().await {
         host_stop.then(mint_stop).then(service_stop).stop().await;
@@ -584,7 +436,7 @@ mod tests {
         command_id_bounds,
         (input, valid),
         {
-            let expected = if valid { Ok(CommandId(input.clone())) } else { Err(DocsError::InvalidCommand) };
+            let expected = if valid { Ok(CommandId::try_from(input.clone()).expect("valid command")) } else { Err(DocsError::InvalidCommand) };
             assert_eq!(CommandId::try_from(input.clone()), expected);
             let json = serde_json::to_string(&input).expect("serialize input");
             assert_eq!(
@@ -616,7 +468,7 @@ mod tests {
         (json, expected),
         {
             let expected: Option<String> = expected;
-            let expected = expected.map(CommandId).ok_or(serde_json::error::Category::Data);
+            let expected = expected.map(|input| CommandId::try_from(input).expect("valid command")).ok_or(serde_json::error::Category::Data);
             let actual = serde_json::from_str::<CommandId>(&json).map_err(|error| error.classify());
             assert_eq!(actual, expected);
             if let Ok(id) = actual {

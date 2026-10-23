@@ -5,22 +5,6 @@ use super::*;
 use crate::doc::pipeline::digest;
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoveChild {
-    pub capability: CapId,
-    pub command: CommandId,
-    pub parent_id: DrawerId,
-    pub child_id: DrawerId,
-}
-
-impl Operation for RemoveChild {
-    type Output = WriteReceipt;
-    type Error = DrawersError;
-    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.daybook.drawers.removeChild")
-        .with_schemas("WriteReceipt", "DrawersError");
-}
-
 impl Core {
     /// Take `child` out of `parent`, idempotently: the entry is deleted before the parent's
     /// groups are withdrawn from the child's (ADR 014), and each half runs only if its state is
@@ -99,12 +83,13 @@ impl DrawerService {
         params: RemoveChild,
     ) -> Result<WriteReceipt, DrawersError> {
         let core = &self.core;
-        let actor = core.resolve(context, params.capability).await?;
-        core.authorize(context, &actor, &params.parent_id, Access::Write)
+        let caller = core.invocation(context, params.authorization).await?;
+        let actor = &caller.signer;
+        core.authorize(context, &caller.authority, &params.parent_id, Access::Write)
             .await?;
         let digest = digest(&(
             "removeChild",
-            actor.uuid,
+            actor.actor_id,
             &params.parent_id,
             &params.child_id,
         ));
@@ -113,7 +98,7 @@ impl DrawerService {
             child_id: params.child_id.clone(),
         };
         core.ledger
-            .run(&params.command, digest, actor.uuid, op, |_| async {
+            .run(&params.command, digest, actor.actor_id, op, |_| async {
                 core.unlink(context, &params.parent_id, &params.child_id)
                     .await?
                     .ok_or_else(|| DrawersError::NotAnEntry(params.child_id.clone()))
@@ -142,7 +127,7 @@ mod tests {
     #[test]
     fn remove_child_wire_shape() {
         let request = RemoveChild {
-            capability: CapId::default(),
+            authorization: Authorization::identity(CapId::default()),
             command: CommandId::try_from("unlink-1".to_owned()).unwrap(),
             parent_id: DocId::new([1; 32]),
             child_id: DocId::new([2; 32]),
@@ -151,7 +136,10 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "capability": "00000000-0000-0000-0000-000000000000",
+                "authorization": {
+                    "authority": "00000000-0000-0000-0000-000000000000",
+                    "signer": "00000000-0000-0000-0000-000000000000",
+                },
                 "command": "unlink-1",
                 "parentId": DocId::new([1; 32]).to_string(),
                 "childId": DocId::new([2; 32]).to_string(),
@@ -166,7 +154,10 @@ mod tests {
     #[test]
     fn a_removal_without_a_command_is_refused() {
         let error = serde_json::from_value::<RemoveChild>(json!({
-            "capability": "00000000-0000-0000-0000-000000000000",
+            "authorization": {
+                "authority": "00000000-0000-0000-0000-000000000000",
+                "signer": "00000000-0000-0000-0000-000000000000",
+            },
             "parentId": DocId::new([1; 32]).to_string(),
             "childId": DocId::new([2; 32]).to_string(),
         }))

@@ -66,6 +66,7 @@ pub use worker::StopToken;
 pub use worker::SyncTaskRunOutcome;
 #[cfg(any(test, feature = "test-support"))]
 pub use worker::WorkerSnapshot;
+pub use worker::ObjectInterestSource;
 pub use worker::spawn_big_sync_worker;
 pub use worker::spawn_big_sync_worker_with_options;
 

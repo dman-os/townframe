@@ -37,7 +37,10 @@ unicode-properties = { version = "=0.1.1", default-features = false, features = 
 unicode-segmentation = { version = "=1.13.3", optional = true }
 autosurgeon = { workspace = true, features = ["uuid"] }
 automerge = { workspace = true }
-uuid = { workspace = true, features = ["v7"] }
+uuid = { workspace = true, features = ["v4", "v7"] }
+service_core_rs = { path = "../service_core_rs" }
+irpc.workspace = true
+tracing.workspace = true
 blake3.workspace = true
 ed25519-dalek.workspace = true
 coset = "0.4.2"

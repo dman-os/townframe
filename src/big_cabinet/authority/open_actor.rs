@@ -1,27 +1,7 @@
 //! OpenActor: open (or create) the child actor at a path and return its identity and capability.
 
-use super::operation;
 use super::store::ActorRow;
 use super::*;
-
-/// Open the child actor at `path`, creating it on first use. `parent` must be
-/// the parent actor's own capability with `mintChild`, and `path` must be the
-/// parent's path plus one segment, so the path alone names the parent and two
-/// parents never contend for one child.
-///
-/// The actor (UUID, key, URL, certificate) is created once and is the same on
-/// every later open. Its capability is a handle: an open reuses a live actor
-/// capability with the same parent and rights, and mints a new one otherwise,
-/// so a parent rotates a child's capability by retracting it and opening again.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenActor {
-    pub parent: CapId,
-    pub path: String,
-    pub rights: Rights,
-}
-
-operation!(OpenActor => Actor, procedure, "openActor", "Actor");
 
 impl AuthorityService {
     async fn open_actor(&self, request: OpenActor) -> Result<Actor, AuthorityError> {
@@ -45,7 +25,7 @@ impl AuthorityService {
                 let certificate =
                     actor::issue_certificate(&self.node_key, uuid, &public_key, &url)?;
                 let row = ActorRow {
-                    uuid,
+                    actor_id: uuid,
                     path: request.path.clone(),
                     parent: Some(parent_actor),
                     public_key,

@@ -10,44 +10,6 @@ use super::*;
 use crate::index::facet_ref::{FacetRefEdge, FacetRefQuery};
 use crate::index::facet_set::{FacetRecord, FacetRoute, FacetSetQuery};
 
-/// Which facet routes a [`QueryFacets`] call selects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "by",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum FacetSelector {
-    /// Every live facet route in the scope (`drawer_id` is required).
-    All,
-    /// Every live facet route in `doc_id`.
-    Doc { doc_id: DocId },
-    /// Every live facet route carrying `tag`.
-    Tag { tag: FacetTag },
-    /// One exact `(doc_id, facet_key)` route.
-    Route { doc_id: DocId, facet_key: FacetKey },
-    /// Every live facet route with `facet_key`, across documents.
-    Key { facet_key: FacetKey },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueryFacets {
-    pub capability: CapId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drawer_id: Option<DocId>,
-    pub selector: FacetSelector,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueriedFacet {
-    pub doc_id: DocId,
-    pub facet_key: FacetKey,
-    pub doc_heads: Vec<ChangeHash>,
-    pub version: FacetVersion,
-}
-
 impl From<FacetRecord> for QueriedFacet {
     fn from(record: FacetRecord) -> Self {
         Self {
@@ -62,36 +24,12 @@ impl From<FacetRecord> for QueriedFacet {
     }
 }
 
-impl Operation for QueryFacets {
-    type Output = Vec<QueriedFacet>;
-    type Error = DocsError;
-    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.daybook.docs.queryFacets")
-        .with_schemas("QueriedFacet[]", "DocsError");
+trait FacetRefSelectorQuery {
+    fn doc_id(&self) -> &DocId;
+    fn into_query(self) -> FacetRefQuery;
 }
 
-/// Which reference edges a [`QueryFacetRefs`] call selects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "by",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub enum FacetRefSelector {
-    /// Outgoing reference edges from `doc_id` (or from `facet_key` on `doc_id` when given).
-    Origin {
-        doc_id: DocId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        facet_key: Option<FacetKey>,
-    },
-    /// Incoming reference edges pointing at `doc_id` (or at `facet_key` on `doc_id` when given).
-    Target {
-        doc_id: DocId,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        facet_key: Option<FacetKey>,
-    },
-}
-
-impl FacetRefSelector {
+impl FacetRefSelectorQuery for FacetRefSelector {
     fn doc_id(&self) -> &DocId {
         match self {
             Self::Origin { doc_id, .. } | Self::Target { doc_id, .. } => doc_id,
@@ -120,26 +58,6 @@ impl FacetRefSelector {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueryFacetRefs {
-    pub capability: CapId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drawer_id: Option<DocId>,
-    pub selector: FacetRefSelector,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QueriedFacetRef {
-    pub origin_doc_id: DocId,
-    pub origin_facet_key: FacetKey,
-    pub path: String,
-    pub target_doc_id: DocId,
-    pub target_facet_key: FacetKey,
-    pub ref_heads: Vec<ChangeHash>,
-}
-
 impl From<FacetRefEdge> for QueriedFacetRef {
     fn from(edge: FacetRefEdge) -> Self {
         Self {
@@ -153,26 +71,37 @@ impl From<FacetRefEdge> for QueriedFacetRef {
     }
 }
 
-impl Operation for QueryFacetRefs {
-    type Output = Vec<QueriedFacetRef>;
-    type Error = DocsError;
-    const XRPC: XrpcOperation =
-        XrpcOperation::procedure("org.example.daybook.docs.queryFacetRefs")
-            .with_schemas("QueriedFacetRef[]", "DocsError");
-}
-
 impl DocsService {
     pub(crate) async fn readable_in_drawer(
-        &self,
+        access_policy: &dyn DocAccess,
         context: &RequestContext,
-        actor: &Actor,
+        authority: &DomainAuthority<DocScope>,
         drawer_id: &DocId,
     ) -> Result<BTreeSet<DocId>, DocsError> {
-        self.access
-            .readable_in_drawer(context, actor.uuid, drawer_id)
-            .await
-            .map_err(access_error)?
-            .ok_or(DocsError::Denied)
+        match authority {
+            DomainAuthority::Identity(actor) => access_policy
+                .readable_in_drawer(context, *actor, drawer_id)
+                .await
+                .map_err(access_error)?
+                .ok_or(DocsError::Denied),
+            DomainAuthority::Scoped(scope) => {
+                let access = scope
+                    .drawers
+                    .get(drawer_id)
+                    .copied()
+                    .filter(|held| *held >= big_cabinet_core::drawer::DrawerAccess::Read)
+                    .ok_or(DocsError::Denied)?;
+                Ok(access_policy
+                    .scoped_docs(context, drawer_id, access, None)
+                    .await
+                    .map_err(access_error)?
+                    .into_iter()
+                    .filter_map(|(doc, held)| {
+                        (held >= big_cabinet_core::drawer::DrawerAccess::Read).then_some(doc)
+                    })
+                    .collect())
+            }
+        }
     }
 
     async fn query_facets(
@@ -180,46 +109,41 @@ impl DocsService {
         context: &RequestContext,
         params: QueryFacets,
     ) -> Result<Vec<QueriedFacet>, DocsError> {
-        let actor = self.actor(context, params.capability).await?;
+        let caller = self.invocation(context, params.authorization).await?;
         let Some(store) = &self.facet_set else {
             return Err(DocsError::Repository(
                 "facet-set index is not configured on this repository".into(),
             ));
         };
         if let Some(drawer_id) = &params.drawer_id {
-            let readable = self.readable_in_drawer(context, &actor, drawer_id).await?;
-            let records = match &params.selector {
-                FacetSelector::All => store.query_docs(&readable, None, None).await,
-                FacetSelector::Tag { tag } => store.query_docs(&readable, Some(tag), None).await,
-                FacetSelector::Key { facet_key } => {
-                    store.query_docs(&readable, None, Some(facet_key)).await
-                }
-                FacetSelector::Doc { doc_id } => {
-                    if !readable.contains(doc_id) {
-                        return Ok(Vec::new());
-                    }
-                    store.query(FacetSetQuery::Doc(doc_id.clone())).await
-                }
-                FacetSelector::Route { doc_id, facet_key } => {
-                    if !readable.contains(doc_id) {
-                        return Ok(Vec::new());
-                    }
-                    store
-                        .query(FacetSetQuery::Route(FacetRoute {
-                            doc_id: doc_id.clone(),
-                            facet_key: facet_key.clone(),
-                        }))
-                        .await
-                }
+            let level = match &caller.authority {
+                DomainAuthority::Identity(actor) => self
+                    .access
+                    .drawer_access(context, *actor, drawer_id)
+                    .await
+                    .map_err(access_error)?,
+                DomainAuthority::Scoped(scope) => scope.drawers.get(drawer_id).copied(),
             }
-            .map_err(repository)?;
+            .filter(|access| *access >= big_cabinet_core::drawer::DrawerAccess::Read)
+            .ok_or(DocsError::Denied)?;
+            let (tag, key, doc_id) = match &params.selector {
+                FacetSelector::All => (None, None, None),
+                FacetSelector::Tag { tag } => (Some(tag), None, None),
+                FacetSelector::Key { facet_key } => (None, Some(facet_key), None),
+                FacetSelector::Doc { doc_id } => (None, None, Some(doc_id)),
+                FacetSelector::Route { doc_id, facet_key } => (None, Some(facet_key), Some(doc_id)),
+            };
+            let records = store
+                .query_drawer(drawer_id, level, tag, key, doc_id)
+                .await
+                .map_err(repository)?;
             return Ok(records.into_iter().map(QueriedFacet::from).collect());
         }
 
         match params.selector {
             FacetSelector::All => Err(DocsError::Denied),
             FacetSelector::Doc { doc_id } => {
-                self.authorize(context, &actor, AccessRequest::Read(&doc_id))
+                self.authorize(context, &caller.authority, AccessRequest::Read(&doc_id))
                     .await?;
                 Ok(store
                     .query(FacetSetQuery::Doc(doc_id))
@@ -230,7 +154,7 @@ impl DocsService {
                     .collect())
             }
             FacetSelector::Route { doc_id, facet_key } => {
-                self.authorize(context, &actor, AccessRequest::Read(&doc_id))
+                self.authorize(context, &caller.authority, AccessRequest::Read(&doc_id))
                     .await?;
                 Ok(store
                     .query(FacetSetQuery::Route(FacetRoute { doc_id, facet_key }))
@@ -245,14 +169,16 @@ impl DocsService {
                     .query(FacetSetQuery::Tag(tag))
                     .await
                     .map_err(repository)?;
-                self.filter_records(context, &actor, records).await
+                self.filter_records(context, &caller.authority, records)
+                    .await
             }
             FacetSelector::Key { facet_key } => {
                 let records = store
                     .query(FacetSetQuery::Key(facet_key))
                     .await
                     .map_err(repository)?;
-                self.filter_records(context, &actor, records).await
+                self.filter_records(context, &caller.authority, records)
+                    .await
             }
         }
     }
@@ -260,7 +186,7 @@ impl DocsService {
     async fn filter_records(
         &self,
         context: &RequestContext,
-        actor: &Actor,
+        authority: &DomainAuthority<DocScope>,
         records: Vec<FacetRecord>,
     ) -> Result<Vec<QueriedFacet>, DocsError> {
         let mut checks: BTreeMap<DocId, bool> = BTreeMap::new();
@@ -269,11 +195,13 @@ impl DocsService {
             let allowed = match checks.get(&record.route.doc_id) {
                 Some(allowed) => *allowed,
                 None => {
-                    let checked = self
-                        .access
-                        .check(context, actor.uuid, AccessRequest::Read(&record.route.doc_id))
-                        .await
-                        .map_err(access_error)?;
+                    let checked = Self::allowed(
+                        self.access.as_ref(),
+                        context,
+                        authority,
+                        AccessRequest::Read(&record.route.doc_id),
+                    )
+                    .await?;
                     checks.insert(record.route.doc_id.clone(), checked);
                     checked
                 }
@@ -290,14 +218,20 @@ impl DocsService {
         context: &RequestContext,
         params: QueryFacetRefs,
     ) -> Result<Vec<QueriedFacetRef>, DocsError> {
-        let actor = self.actor(context, params.capability).await?;
+        let caller = self.invocation(context, params.authorization).await?;
         let Some(store) = &self.facet_ref else {
             return Err(DocsError::Repository(
                 "facet-ref index is not configured on this repository".into(),
             ));
         };
         if let Some(drawer_id) = &params.drawer_id {
-            let readable = self.readable_in_drawer(context, &actor, drawer_id).await?;
+            let readable = Self::readable_in_drawer(
+                self.access.as_ref(),
+                context,
+                &caller.authority,
+                drawer_id,
+            )
+            .await?;
             if !readable.contains(params.selector.doc_id()) {
                 return Ok(Vec::new());
             }
@@ -312,8 +246,12 @@ impl DocsService {
                 .collect());
         }
 
-        self.authorize(context, &actor, AccessRequest::Read(params.selector.doc_id()))
-            .await?;
+        self.authorize(
+            context,
+            &caller.authority,
+            AccessRequest::Read(params.selector.doc_id()),
+        )
+        .await?;
         let edges = store
             .query(params.selector.into_query())
             .await
@@ -324,11 +262,13 @@ impl DocsService {
             let allowed = match checks.get(&edge.origin.doc_id) {
                 Some(allowed) => *allowed,
                 None => {
-                    let checked = self
-                        .access
-                        .check(context, actor.uuid, AccessRequest::Read(&edge.origin.doc_id))
-                        .await
-                        .map_err(access_error)?;
+                    let checked = Self::allowed(
+                        self.access.as_ref(),
+                        context,
+                        &caller.authority,
+                        AccessRequest::Read(&edge.origin.doc_id),
+                    )
+                    .await?;
                     checks.insert(edge.origin.doc_id.clone(), checked);
                     checked
                 }
@@ -368,11 +308,12 @@ impl Handler<QueryFacetRefs> for DocsService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use big_cabinet_core::FacetTag;
 
     #[test]
     fn query_facets_and_refs_wire_shapes() {
         let query = QueryFacets {
-            capability: CapId::from_bytes([1; 16]),
+            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
             drawer_id: Some(DocId::new([2; 32])),
             selector: FacetSelector::Tag {
                 tag: FacetTag::new("org.example.note").unwrap(),
@@ -382,7 +323,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "capability": CapId::from_bytes([1; 16]),
+                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
                 "drawerId": DocId::new([2; 32]).to_string(),
                 "selector": {
                     "by": "tag",
@@ -393,7 +334,7 @@ mod tests {
         assert_eq!(serde_json::from_value::<QueryFacets>(value).unwrap(), query);
 
         let refs = QueryFacetRefs {
-            capability: CapId::from_bytes([1; 16]),
+            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
             drawer_id: None,
             selector: FacetRefSelector::Target {
                 doc_id: DocId::new([3; 32]),
@@ -404,7 +345,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "capability": CapId::from_bytes([1; 16]),
+                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
                 "selector": {
                     "by": "target",
                     "docId": DocId::new([3; 32]).to_string(),

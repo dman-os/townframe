@@ -1,0 +1,27 @@
+[package]
+name = "service_core_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+futures.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
+irpc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid = { version = "1", features = ["serde", "v7"] }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
+tracing-opentelemetry = "0.32"
+http.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

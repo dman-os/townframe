@@ -12,9 +12,11 @@ path = "lib.rs"
 [features]
 default = []
 # HTTP/1 XRPC served over Iroh connections, in addition to TCP.
-iroh-http = ["dep:iroh"]
+iroh-http = ["dep:iroh", "service_client_rs/iroh-http"]
 
 [dependencies]
+service_core_rs.workspace = true
+service_client_rs = { workspace = true, features = ["http"] }
 #
 # async
 futures.workspace = true
@@ -27,22 +29,15 @@ irpc.workspace = true
 axum = { workspace = true, default-features = false, features = ["http1", "json", "query", "tokio"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["server", "tokio"] }
-http-body-util = "0.1"
-reqwest = { workspace = true, default-features = false, features = ["stream", "rustls-tls"] }
 mime = "0.3"
-url.workspace = true
 iroh = { workspace = true, optional = true }
 
 #
 # encoding
 serde.workspace = true
 serde_json.workspace = true
-sha1 = "0.10"
-base64 = "0.22"
 serde_urlencoded = "0.7"
 uuid = { version = "1", features = ["serde", "v7"] }
-opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
 tracing-opentelemetry = "0.32"
 
 #
@@ -51,5 +46,9 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+url.workspace = true
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
+reqwest.workspace = true
 tokio = { workspace = true, features = ["full", "tracing"] }
 tracing-subscriber.workspace = true

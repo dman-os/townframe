@@ -4,7 +4,7 @@ use super::{CapId, Rights};
 use big_cabinet_core::dmeta::Uuid7;
 use sqlx::SqliteConnection;
 
-const MAX_CHAIN_DEPTH: usize = 64;
+pub(super) const MAX_CHAIN_DEPTH: usize = 64;
 
 pub(super) struct Chain {
     pub(super) cap: CapRow,

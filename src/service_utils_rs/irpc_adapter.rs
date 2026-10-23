@@ -8,7 +8,7 @@
 
 use crate::{
     admission::Admission,
-    host::{Dispatch, Host, Route},
+    host::{Dispatch, ServerBinding},
     lifecycle::StopToken,
 };
 use std::sync::Arc;
@@ -20,13 +20,13 @@ impl IrpcAdapter {
     /// the irpc client that feeds it. Hand the client to
     /// [`Client::irpc`](crate::Client::irpc).
     pub fn local<H, Proto>(
-        host: Arc<Host<H>>,
+        host: Arc<H>,
         admission: Arc<Admission>,
         queue: usize,
     ) -> (irpc::Client<Proto>, StopToken)
     where
-        H: Send + Sync + 'static,
-        Proto: Route<H>,
+        H: ServerBinding<Proto>,
+        Proto: irpc::Service,
     {
         let (sender, receiver) = tokio::sync::mpsc::channel(queue);
         let stop = Self::serve::<H, Proto>(host, admission, receiver);
@@ -36,13 +36,13 @@ impl IrpcAdapter {
     /// Serves `Proto` from any message receiver. The loop ends when the
     /// receiver closes or the returned token is stopped.
     pub fn serve<H, Proto>(
-        host: Arc<Host<H>>,
+        host: Arc<H>,
         admission: Arc<Admission>,
         mut receiver: tokio::sync::mpsc::Receiver<Proto::Message>,
     ) -> StopToken
     where
-        H: Send + Sync + 'static,
-        Proto: Route<H>,
+        H: ServerBinding<Proto>,
+        Proto: irpc::Service,
     {
         let (stop, spawner) = StopToken::new();
         let loop_spawner = spawner.clone();
@@ -59,7 +59,7 @@ impl IrpcAdapter {
                     admission: Arc::clone(&admission),
                     spawner: loop_spawner.clone(),
                 };
-                Proto::route(Arc::clone(&host), dispatch, message).await;
+                Arc::clone(&host).route(dispatch, message).await;
             }
         });
         stop

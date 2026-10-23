@@ -12,77 +12,6 @@ use super::*;
 use crate::doc::At;
 use big_cabinet_core::drawer::KnownDrawerEntry;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RememberDrawer {
-    pub capability: CapId,
-    pub drawer_id: DrawerId,
-    /// Intent to fetch and retain the drawer's content. Absent or `false` means none —
-    /// remembering is not mirroring.
-    #[serde(default)]
-    pub mirror: bool,
-}
-
-impl Operation for RememberDrawer {
-    type Output = ();
-    type Error = DrawersError;
-    const XRPC: XrpcOperation =
-        XrpcOperation::procedure("org.example.daybook.drawers.rememberDrawer")
-            .with_schemas("Void", "DrawersError");
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ForgetDrawer {
-    pub capability: CapId,
-    pub drawer_id: DrawerId,
-}
-
-impl Operation for ForgetDrawer {
-    type Output = ();
-    type Error = DrawersError;
-    const XRPC: XrpcOperation =
-        XrpcOperation::procedure("org.example.daybook.drawers.forgetDrawer")
-            .with_schemas("Void", "DrawersError");
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListKnownDrawers {
-    pub capability: CapId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnownDrawer {
-    pub drawer_id: DrawerId,
-    pub mirror: bool,
-}
-
-impl Operation for ListKnownDrawers {
-    type Output = Vec<KnownDrawer>;
-    type Error = DrawersError;
-    const XRPC: XrpcOperation =
-        XrpcOperation::query("org.example.daybook.drawers.listKnownDrawers")
-            .with_schemas("KnownDrawer[]", "DrawersError");
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetDrawerPolicy {
-    pub capability: CapId,
-    pub drawer_id: DrawerId,
-    pub mirror: bool,
-}
-
-impl Operation for SetDrawerPolicy {
-    type Output = ();
-    type Error = DrawersError;
-    const XRPC: XrpcOperation =
-        XrpcOperation::procedure("org.example.daybook.drawers.setDrawerPolicy")
-            .with_schemas("Void", "DrawersError");
-}
-
 impl Core {
     /// The registry's `knownEntry` facets, read as this service at current heads.
     pub(crate) async fn known_entries(
@@ -95,7 +24,7 @@ impl Core {
             .call(
                 context.child(),
                 crate::doc::ReadFacets {
-                    capability: self.issuer,
+                    authorization: Authorization::identity(self.issuer),
                     doc_id: registry,
                     at: At::Current,
                     facets: None,
@@ -139,7 +68,16 @@ impl DrawerService {
         params: RememberDrawer,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        core.resolve(context, params.capability).await?;
+        let caller = core.invocation(context, params.authorization).await?;
+        if matches!(caller.authority, DomainAuthority::Scoped(_)) {
+            core.authorize(
+                context,
+                &caller.authority,
+                &core.state.local().registry_id,
+                Access::Admin,
+            )
+            .await?;
+        }
         let registry = core.state.local().registry_id;
         let entry = KnownDrawerEntry {
             mirror: params.mirror.then_some(true),
@@ -168,7 +106,16 @@ impl DrawerService {
         params: ForgetDrawer,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        core.resolve(context, params.capability).await?;
+        let caller = core.invocation(context, params.authorization).await?;
+        if matches!(caller.authority, DomainAuthority::Scoped(_)) {
+            core.authorize(
+                context,
+                &caller.authority,
+                &core.state.local().registry_id,
+                Access::Admin,
+            )
+            .await?;
+        }
         let registry = core.state.local().registry_id;
         core.write_roster(
             context,
@@ -187,7 +134,16 @@ impl DrawerService {
         params: ListKnownDrawers,
     ) -> Result<Vec<KnownDrawer>, DrawersError> {
         let core = &self.core;
-        core.resolve(context, params.capability).await?;
+        let caller = core.invocation(context, params.authorization).await?;
+        if matches!(caller.authority, DomainAuthority::Scoped(_)) {
+            core.authorize(
+                context,
+                &caller.authority,
+                &core.state.local().registry_id,
+                Access::Admin,
+            )
+            .await?;
+        }
         Ok(core
             .known_entries(context)
             .await?
@@ -205,7 +161,16 @@ impl DrawerService {
         params: SetDrawerPolicy,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        core.resolve(context, params.capability).await?;
+        let caller = core.invocation(context, params.authorization).await?;
+        if matches!(caller.authority, DomainAuthority::Scoped(_)) {
+            core.authorize(
+                context,
+                &caller.authority,
+                &core.state.local().registry_id,
+                Access::Admin,
+            )
+            .await?;
+        }
         if !core
             .known_entries(context)
             .await?
@@ -216,7 +181,7 @@ impl DrawerService {
         self.remember(
             context,
             RememberDrawer {
-                capability: params.capability,
+                authorization: params.authorization,
                 drawer_id: params.drawer_id,
                 mirror: params.mirror,
             },
@@ -277,7 +242,7 @@ mod tests {
     #[test]
     fn the_wire_spells_intent_not_membership() {
         let remember = RememberDrawer {
-            capability: CapId::from_bytes([1; 16]),
+            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
             drawer_id: DocId::new([2; 32]),
             mirror: true,
         };
@@ -285,7 +250,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "capability": CapId::from_bytes([1; 16]),
+                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
                 "drawerId": DocId::new([2; 32]).to_string(),
                 "mirror": true,
             })

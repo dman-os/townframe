@@ -11,7 +11,7 @@
 //! that left no side effect — denied, unknown drawer, not an entry — drops the row so the id is
 //! free again; a failure that may have left one — transport, Keyhive, storage — keeps it.
 
-use super::{DrawerId, DrawersError};
+use super::{DrawerId, DrawersError, LedgerFailure};
 use crate::doc::CommandId;
 use big_cabinet_core::dmeta::{DocId, Uuid7};
 use big_cabinet_core::drawer::{DrawerAccess as Access, DrawerGroups};
@@ -54,10 +54,12 @@ pub(crate) enum Op {
     /// whether it was created.
     Create {
         groups: Option<DrawerGroups>,
+        owner_id: Option<Uuid7>,
     },
     /// A self-doc drawer declaration on an existing doc.
     CreateSelfDoc {
         doc_id: DocId,
+        owner_id: Option<Uuid7>,
     },
     /// A principal invited to a drawer's groups. Both memberships are re-asserted by a resume;
     /// adding a member that is already there is a no-op in Keyhive.

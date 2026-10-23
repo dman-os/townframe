@@ -6,6 +6,8 @@
 //! id of the thing they list (`docEntry/<docId>`, `childEntry/<drawerId>`), the same pattern the
 //! branch facet uses: the key id is the target, so an entry needs no reference field.
 
+pub mod protocol;
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;

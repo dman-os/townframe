@@ -14,7 +14,7 @@ pub(super) fn sign_claim(
     row: &ActorRow,
     claim: FacetClaim,
 ) -> Result<SignedFacetClaim, AuthorityError> {
-    if claim.actor_uuid != row.uuid {
+    if claim.actor_uuid != row.actor_id {
         return Err(AuthorityError::Unauthorized);
     }
     // Canonicalize the claim before opening the key: a malformed mutation
@@ -22,7 +22,7 @@ pub(super) fn sign_claim(
     let message = claim.signing_bytes()?;
     let key = actor::unseal(
         wrapping,
-        &row.uuid.to_string(),
+        &row.actor_id.to_string(),
         &row.sealed,
         &row.public_key,
     )?;

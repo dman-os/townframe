@@ -264,7 +264,7 @@ impl XrpcRouter {
                 };
                 let mut envelope =
                     Envelope::with_metadata(request.context, request.metadata, params);
-                envelope.transport = request.transport;
+                envelope.set_transport(request.transport);
                 let response = host
                     .invoke(envelope)
                     .await
@@ -305,7 +305,7 @@ impl XrpcRouter {
                     };
                     let mut envelope =
                         Envelope::with_metadata(request.context, request.metadata, params);
-                    envelope.transport = request.transport;
+                    envelope.set_transport(request.transport);
                     let response = host
                         .invoke(envelope)
                         .await
@@ -374,11 +374,12 @@ where
     let value = serde_json::to_value(error).expect("operation errors must serialize");
     XrpcHandlerError::Domain {
         status: DOMAIN_ERROR_STATUS,
-        body: XrpcErrorEnvelope {
-            error: operation.error_schema.to_owned(),
-            message: Some(format!("{error:?}")),
-            details: BTreeMap::from([(DOMAIN_ERROR_FIELD.to_owned(), value)]),
-        },
+        body: XrpcErrorEnvelope::new(
+            operation.error_schema.to_owned(),
+            Some(format!("{error:?}")),
+            BTreeMap::from([(DOMAIN_ERROR_FIELD.to_owned(), value)]),
+        )
+        .expect("operation error detail is not reserved"),
     }
 }
 
@@ -542,13 +543,10 @@ async fn dispatch(
             "InvalidRequest",
             &message,
         ),
-        Err(XrpcHandlerError::Domain { status, body }) => error_response_with_details(
-            status,
-            request_id,
-            &body.error,
-            body.message.as_deref(),
-            body.details,
-        ),
+        Err(XrpcHandlerError::Domain { status, body }) => {
+            let (error, message, details) = body.into_parts();
+            error_response_with_details(status, request_id, &error, message.as_deref(), details)
+        }
         Err(XrpcHandlerError::Unavailable(message)) => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             request_id,
@@ -662,12 +660,13 @@ async fn dispatch_subscription(
             );
         }
         Err(XrpcHandlerError::Domain { status, body }) => {
+            let (error, message, details) = body.into_parts();
             return error_response_with_details(
                 status,
                 request_id,
-                &body.error,
-                body.message.as_deref(),
-                body.details,
+                &error,
+                message.as_deref(),
+                details,
             );
         }
         Err(XrpcHandlerError::Unavailable(message)) => {
@@ -871,11 +870,10 @@ fn error_response_with_details(
     json_response(
         status,
         request_id,
-        json!(XrpcErrorEnvelope {
-            error: error.to_owned(),
-            message: message.map(str::to_owned),
-            details,
-        }),
+        json!(
+            XrpcErrorEnvelope::new(error.to_owned(), message.map(str::to_owned), details,)
+                .expect("XRPC details must not contain reserved fields")
+        ),
     )
 }
 

@@ -14,6 +14,7 @@ pub struct DocLease {
     cmd_tx: async_channel::Sender<crate::runtime2::Runtime2Cmd>,
     doc_id: DocumentId,
     generation: u64,
+    pub(crate) sync_interest: Option<crate::interest::SyncInterestLease>,
 }
 
 impl DocLease {
@@ -26,6 +27,7 @@ impl DocLease {
             cmd_tx,
             doc_id,
             generation,
+            sync_interest: None,
         }
     }
 }

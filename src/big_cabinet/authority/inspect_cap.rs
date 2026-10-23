@@ -1,16 +1,6 @@
 //! InspectCapability: report what a live capability says.
 
-use super::operation;
 use super::*;
-
-/// Is this capability live, and what does it say? Holding the id is enough.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InspectCapability {
-    pub capability: CapId,
-}
-
-operation!(InspectCapability => Capability, query, "inspectCapability", "Capability");
 
 impl AuthorityService {
     async fn inspect(&self, request: InspectCapability) -> Result<Capability, AuthorityError> {

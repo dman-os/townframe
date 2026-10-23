@@ -30,7 +30,7 @@ pub(super) struct NodeRow {
 }
 
 pub(super) struct ActorRow {
-    pub(super) uuid: Uuid7,
+    pub(super) actor_id: Uuid7,
     pub(super) path: String,
     pub(super) parent: Option<Uuid7>,
     pub(super) public_key: ActorPublicKey,
@@ -50,10 +50,10 @@ pub(super) struct CapRow {
 impl CapRow {
     pub(super) fn wire(&self) -> Capability {
         Capability {
-            id: self.id,
+            capability_id: self.id,
             object: self.object.clone(),
             rights: self.rights,
-            issuer: self.issuer,
+            issuer_id: self.issuer,
         }
     }
 }
@@ -199,7 +199,7 @@ pub(super) async fn insert_node(
 
 fn actor_row(row: SqliteRow) -> Result<ActorRow, AuthorityError> {
     Ok(ActorRow {
-        uuid: uuid(row.try_get("uuid")?)?,
+        actor_id: uuid(row.try_get("uuid")?)?,
         path: row.try_get("path")?,
         parent: row
             .try_get::<Option<String>, _>("parent_uuid")?
@@ -308,7 +308,7 @@ pub(super) async fn insert_actor(
               )
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )
-    .bind(actor.uuid.to_string())
+    .bind(actor.actor_id.to_string())
     .bind(&actor.path)
     .bind(actor.parent.map(|parent| parent.to_string()))
     .bind(actor.public_key.as_slice())

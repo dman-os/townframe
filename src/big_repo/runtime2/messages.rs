@@ -89,6 +89,11 @@ pub enum Runtime2Cmd {
         resp:
             futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::types::LiveDocHandle>>,
     },
+    AcquireDocInterest {
+        doc_id: DocumentId,
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::interest::PendingDocLease>>,
+    },
     GetDocHandle {
         doc_id: DocumentId,
         lease: crate::runtime2::DocLeaseKind,
@@ -447,6 +452,12 @@ pub enum DocWorkerMsg {
         initial_keys: Vec<(Vec<u8>, [u8; 32])>,
         resp:
             futures::channel::oneshot::Sender<eyre::Result<crate::runtime2::types::LiveDocHandle>>,
+        #[educe(Debug(ignore))]
+        _lease: crate::runtime2::DocWorkerInternalLease,
+    },
+    AcquireInterest {
+        #[educe(Debug(ignore))]
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::interest::PendingDocLease>>,
         #[educe(Debug(ignore))]
         _lease: crate::runtime2::DocWorkerInternalLease,
     },

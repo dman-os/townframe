@@ -141,7 +141,10 @@ impl Node {
             let store = (*facet_set).clone();
             let repo = Arc::clone(&repo);
             tokio::spawn(async move {
-                store.run(repo, NonZeroUsize::new(2).unwrap()).await.unwrap();
+                store
+                    .run(repo, NonZeroUsize::new(2).unwrap())
+                    .await
+                    .unwrap();
             })
         };
         let facet_ref = Arc::new(FacetRefStore::new(sql.clone()).await.unwrap());
@@ -262,7 +265,7 @@ impl Node {
                 RequestContext::root(),
                 GrantAccess {
                     via: self.drawers_actor.capability,
-                    subject: actor.uuid,
+                    subject_id: actor.actor_id,
                     object: CREATE_DRAWER_OBJECT.into(),
                     rights: Rights::USE,
                 },
@@ -277,7 +280,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 CreateDrawer {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     command: command(name),
                     layout: CreateLayout::SingleGroup,
                 },
@@ -298,7 +301,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 CreateDoc {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     command: command(name),
                     placement: drawer_placement(drawer),
                     facets: BTreeMap::from([(key, value)]),
@@ -316,7 +319,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 ReadFacets {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     doc_id: doc.clone(),
                     at: At::Current,
                     facets: Some(BTreeSet::from([key.clone()])),
@@ -337,7 +340,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 WriteFacets {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     command: None,
                     doc_id: doc.clone(),
                     mode: WriteMode::AtCurrent,
@@ -358,7 +361,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 ReadFacets {
-                    capability: self.drawers_actor.capability,
+                    authorization: Authorization::identity(self.drawers_actor.capability),
                     doc_id: drawer.clone(),
                     at: At::Current,
                     facets: None,
@@ -382,7 +385,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 GetDrawer {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     drawer_id: drawer.clone(),
                 },
             )
@@ -402,7 +405,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 AddDoc {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     command: command(name),
                     drawer_id: drawer.clone(),
                     doc_id: doc.clone(),
@@ -424,7 +427,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 RemoveDoc {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     command: command(name),
                     drawer_id: drawer.clone(),
                     doc_id: doc.clone(),
@@ -439,9 +442,9 @@ impl Node {
             .call(
                 RequestContext::root(),
                 GrantDrawer {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     drawer_id: drawer.clone(),
-                    subject_id: subject.uuid,
+                    subject_id: subject.actor_id,
                     access,
                 },
             )
@@ -460,7 +463,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 ListDocs {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     drawer_id: drawer.clone(),
                     offset,
                     limit,
@@ -475,7 +478,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 RememberDrawer {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     drawer_id: drawer.clone(),
                     mirror,
                 },
@@ -489,7 +492,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 ForgetDrawer {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     drawer_id: drawer.clone(),
                 },
             )
@@ -510,7 +513,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 ListKnownDrawers {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                 },
             )
             .await
@@ -687,9 +690,9 @@ async fn a_doc_created_in_a_drawer_belongs_to_it_and_to_the_local_drawers() {
         .call(
             RequestContext::root(),
             RevokeDrawer {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 drawer_id: drawer.clone(),
-                subject_id: bob.uuid,
+                subject_id: bob.actor_id,
             },
         )
         .await
@@ -707,9 +710,9 @@ async fn a_doc_created_in_a_drawer_belongs_to_it_and_to_the_local_drawers() {
         .call(
             RequestContext::root(),
             GrantDrawer {
-                capability: carol.capability,
+                authorization: Authorization::identity(carol.capability),
                 drawer_id: drawer.clone(),
-                subject_id: bob.uuid,
+                subject_id: bob.actor_id,
                 access: Access::Read,
             },
         )
@@ -856,7 +859,7 @@ async fn a_child_drawer_confers_access_through_its_parent() {
         .call(
             RequestContext::root(),
             AddChild {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("self"),
                 parent_id: parent.clone(),
                 child_id: parent.clone(),
@@ -871,7 +874,7 @@ async fn a_child_drawer_confers_access_through_its_parent() {
         .call(
             RequestContext::root(),
             AddChild {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("adopt"),
                 parent_id: parent.clone(),
                 child_id: child.clone(),
@@ -908,7 +911,7 @@ async fn a_child_drawer_confers_access_through_its_parent() {
         .call(
             RequestContext::root(),
             RemoveChild {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("disown"),
                 parent_id: parent.clone(),
                 child_id: child.clone(),
@@ -944,7 +947,7 @@ async fn a_self_doc_drawer_is_the_doc_itself() {
         .call(
             RequestContext::root(),
             CreateDrawer {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
                 command: command("bob declares"),
                 layout: CreateLayout::SelfDoc {
                     doc_id: doc.clone(),
@@ -960,7 +963,7 @@ async fn a_self_doc_drawer_is_the_doc_itself() {
         .call(
             RequestContext::root(),
             CreateDrawer {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("declare"),
                 layout: CreateLayout::SelfDoc {
                     doc_id: doc.clone(),
@@ -979,7 +982,7 @@ async fn a_self_doc_drawer_is_the_doc_itself() {
         .call(
             RequestContext::root(),
             CreateDrawer {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("declare twice"),
                 layout: CreateLayout::SelfDoc {
                     doc_id: doc.clone(),
@@ -1012,7 +1015,7 @@ async fn a_self_doc_drawer_is_the_doc_itself() {
         .call(
             RequestContext::root(),
             ListDrawers {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
             },
         )
         .await
@@ -1042,8 +1045,8 @@ async fn an_add_interrupted_after_its_grant_is_finished_at_boot() {
         .ledger
         .plant(
             &cmd,
-            crate::doc::pipeline::digest(&("addDoc", alice.uuid, &shared, &doc, Access::Write)),
-            alice.uuid,
+            crate::doc::pipeline::digest(&("addDoc", alice.actor_id, &shared, &doc, Access::Write)),
+            alice.actor_id,
             &ledger::Op::AddDoc {
                 drawer_id: shared.clone(),
                 doc_id: doc.clone(),
@@ -1090,8 +1093,14 @@ async fn an_add_interrupted_after_its_grant_is_finished_at_boot() {
         .ledger
         .plant(
             &cmd,
-            crate::doc::pipeline::digest(&("addDoc", alice.uuid, &shared, &other, Access::Read)),
-            alice.uuid,
+            crate::doc::pipeline::digest(&(
+                "addDoc",
+                alice.actor_id,
+                &shared,
+                &other,
+                Access::Read,
+            )),
+            alice.actor_id,
             &ledger::Op::AddDoc {
                 drawer_id: shared.clone(),
                 doc_id: other.clone(),
@@ -1156,7 +1165,7 @@ async fn list_docs_is_one_check_then_the_scoped_roster() {
         .call(
             RequestContext::root(),
             AddChild {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("adopt"),
                 parent_id: home.clone(),
                 child_id: sub.clone(),
@@ -1194,9 +1203,9 @@ async fn list_docs_is_one_check_then_the_scoped_roster() {
         .call(
             RequestContext::root(),
             crate::drawer::RevokeDrawer {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 drawer_id: home.clone(),
-                subject_id: bob.uuid,
+                subject_id: bob.actor_id,
             },
         )
         .await
@@ -1249,7 +1258,7 @@ async fn the_known_drawers_registry_is_explicit_and_survives_restart() {
         .call(
             RequestContext::root(),
             SetDrawerPolicy {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 drawer_id: shared.clone(),
                 mirror: true,
             },
@@ -1318,14 +1327,14 @@ async fn an_invite_interrupted_between_its_memberships_is_finished_at_boot() {
             &command,
             crate::doc::pipeline::digest(&(
                 "invitePrincipal",
-                alice.uuid,
+                alice.actor_id,
                 &home,
                 &crate::drawer::Principal::Group {
                     group_id: invitee_key,
                 },
                 Access::Read,
             )),
-            alice.uuid,
+            alice.actor_id,
             &ledger::Op::Invite {
                 drawer_id: home.clone(),
                 principal: crate::drawer::Principal::Group {
@@ -1370,7 +1379,7 @@ async fn an_entry_with_an_unknown_access_level_is_carried_without_granting_or_br
         .call(
             RequestContext::root(),
             AddDoc {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("enter known"),
                 drawer_id: shared.clone(),
                 doc_id: known_doc.clone(),
@@ -1386,7 +1395,7 @@ async fn an_entry_with_an_unknown_access_level_is_carried_without_granting_or_br
         .call(
             RequestContext::root(),
             WriteFacets {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: None,
                 doc_id: shared.clone(),
                 mode: WriteMode::AtCurrent,
@@ -1403,7 +1412,10 @@ async fn an_entry_with_an_unknown_access_level_is_carried_without_granting_or_br
         .await
         .unwrap();
     let view = node.view(&bob, &shared).await.unwrap();
-    assert_eq!(view.docs, BTreeMap::from([(known_doc.clone(), Access::Read)]));
+    assert_eq!(
+        view.docs,
+        BTreeMap::from([(known_doc.clone(), Access::Read)])
+    );
     assert!(view.children.is_empty());
     assert_eq!(
         node.list_docs(&bob, &shared, 0, None).await.unwrap(),
@@ -1437,7 +1449,7 @@ async fn wait_for_facet_set(node: &Node, actor: &Actor, doc_id: &DocId) {
             .call(
                 RequestContext::root(),
                 QueryFacets {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     drawer_id: None,
                     selector: FacetSelector::Doc {
                         doc_id: doc_id.clone(),
@@ -1461,7 +1473,7 @@ async fn wait_for_facet_ref(node: &Node, actor: &Actor, doc_id: &DocId, expected
             .call(
                 RequestContext::root(),
                 QueryFacetRefs {
-                    capability: actor.capability,
+                    authorization: Authorization::identity(actor.capability),
                     drawer_id: None,
                     selector: FacetRefSelector::Origin {
                         doc_id: doc_id.clone(),
@@ -1491,7 +1503,10 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
     let other = node.collection(&alice, "other").await;
 
     let doc_direct = node.create_doc(&alice, &parent, "direct").await.unwrap();
-    let doc_relay_entry = node.create_doc(&alice, &other, "relay-entry").await.unwrap();
+    let doc_relay_entry = node
+        .create_doc(&alice, &other, "relay-entry")
+        .await
+        .unwrap();
     let doc_in_child_read = node
         .create_doc(&alice, &child_read, "in-child-read")
         .await
@@ -1509,7 +1524,7 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         .call(
             RequestContext::root(),
             WriteFacets {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: None,
                 doc_id: doc_direct.clone(),
                 mode: WriteMode::AtCurrent,
@@ -1524,7 +1539,7 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         .call(
             RequestContext::root(),
             WriteFacets {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: None,
                 doc_id: doc_outside.clone(),
                 mode: WriteMode::AtCurrent,
@@ -1549,14 +1564,20 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
 
     // Enter `doc_relay_entry` into `parent` at `Relay`, and link `child_read` at `Read` and
     // `child_relay` at `Relay`.
-    node.add_doc(&alice, "add-relay-doc", &parent, &doc_relay_entry, Access::Relay)
-        .await
-        .unwrap();
+    node.add_doc(
+        &alice,
+        "add-relay-doc",
+        &parent,
+        &doc_relay_entry,
+        Access::Relay,
+    )
+    .await
+    .unwrap();
     node.drawers()
         .call(
             RequestContext::root(),
             AddChild {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("link-child-read"),
                 parent_id: parent.clone(),
                 child_id: child_read.clone(),
@@ -1569,7 +1590,7 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         .call(
             RequestContext::root(),
             AddChild {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("link-child-relay"),
                 parent_id: parent.clone(),
                 child_id: child_relay.clone(),
@@ -1590,13 +1611,19 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
 
     // Carol holds only `Relay` on `parent`: she can `ListDocs`, but `QueryFacets` and
     // `QueryFacetRefs` on `parent` are refused (`Denied`).
-    assert_eq!(node.list_docs(&carol, &parent, 0, None).await.unwrap().len(), 4);
+    assert_eq!(
+        node.list_docs(&carol, &parent, 0, None)
+            .await
+            .unwrap()
+            .len(),
+        4
+    );
     let carol_query = node
         .docs()
         .call(
             RequestContext::root(),
             QueryFacets {
-                capability: carol.capability,
+                authorization: Authorization::identity(carol.capability),
                 drawer_id: Some(parent.clone()),
                 selector: FacetSelector::Tag {
                     tag: note_tag.clone(),
@@ -1604,7 +1631,10 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
             },
         )
         .await;
-    assert_eq!(carol_query.unwrap_err(), ClientError::Operation(DocsError::Denied));
+    assert_eq!(
+        carol_query.unwrap_err(),
+        ClientError::Operation(DocsError::Denied)
+    );
 
     // Bob's drawer-scoped `QueryFacets` on `parent` returns ONLY `doc_direct` and
     // `doc_in_child_read`: `doc_relay_entry` and `doc_in_child_relay` are attenuated to `Relay` in
@@ -1614,7 +1644,7 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         .call(
             RequestContext::root(),
             QueryFacets {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
                 drawer_id: Some(parent.clone()),
                 selector: FacetSelector::Tag {
                     tag: note_tag.clone(),
@@ -1638,7 +1668,7 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         .call(
             RequestContext::root(),
             QueryFacets {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
                 drawer_id: None,
                 selector: FacetSelector::Tag {
                     tag: note_tag.clone(),
@@ -1672,7 +1702,7 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         .call(
             RequestContext::root(),
             QueryFacetRefs {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
                 drawer_id: Some(parent.clone()),
                 selector: FacetRefSelector::Target {
                     doc_id: doc_direct.clone(),
@@ -1689,7 +1719,7 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         .call(
             RequestContext::root(),
             QueryFacetRefs {
-                capability: dave.capability,
+                authorization: Authorization::identity(dave.capability),
                 drawer_id: None,
                 selector: FacetRefSelector::Target {
                     doc_id: doc_direct.clone(),
@@ -1706,7 +1736,7 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         .call(
             RequestContext::root(),
             QueryFacetRefs {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
                 drawer_id: None,
                 selector: FacetRefSelector::Target {
                     doc_id: doc_direct.clone(),
@@ -1733,7 +1763,7 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         .call(
             RequestContext::root(),
             QueryFacetRefs {
-                capability: dave.capability,
+                authorization: Authorization::identity(dave.capability),
                 drawer_id: Some(parent.clone()),
                 selector: FacetRefSelector::Origin {
                     doc_id: doc_direct.clone(),
@@ -1769,7 +1799,10 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     let other = node.collection(&alice, "other-drawer").await;
 
     let doc_initial = node.create_doc(&alice, &drawer, "initial").await.unwrap();
-    let doc_added_later = node.create_doc(&alice, &other, "added-later").await.unwrap();
+    let doc_added_later = node
+        .create_doc(&alice, &other, "added-later")
+        .await
+        .unwrap();
     let doc_in_child = node.create_doc(&alice, &child, "in-child").await.unwrap();
     for doc in [&doc_initial, &doc_added_later, &doc_in_child] {
         wait_for_facet_set(&node, &alice, doc).await;
@@ -1783,7 +1816,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         .subscribe(
             RequestContext::root(),
             ObserveFacets {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
                 scope: ObserveScope::Drawer {
                     drawer_id: drawer.clone(),
                     tag: Some(note_tag),
@@ -1896,7 +1929,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         .call(
             RequestContext::root(),
             AddChild {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("link-child"),
                 parent_id: drawer.clone(),
                 child_id: child.clone(),
@@ -1921,7 +1954,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         .call(
             RequestContext::root(),
             RemoveChild {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("unlink-child"),
                 parent_id: drawer.clone(),
                 child_id: child.clone(),
@@ -1948,9 +1981,9 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         .call(
             RequestContext::root(),
             RevokeDrawer {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 drawer_id: drawer.clone(),
-                subject_id: bob.uuid,
+                subject_id: bob.actor_id,
             },
         )
         .await
@@ -2004,7 +2037,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         .call(
             RequestContext::root(),
             AddChild {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 command: command("link-synced-child"),
                 parent_id: parent.clone(),
                 child_id: child.clone(),
@@ -2020,14 +2053,12 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
             .execute(&node.sql.write_pool)
             .await
             .unwrap();
-        sqlx::query(
-            "DELETE FROM big_cabinet_drawer_children WHERE parent_id = ? OR child_id = ?",
-        )
-        .bind(id.to_string())
-        .bind(id.to_string())
-        .execute(&node.sql.write_pool)
-        .await
-        .unwrap();
+        sqlx::query("DELETE FROM big_cabinet_drawer_children WHERE parent_id = ? OR child_id = ?")
+            .bind(id.to_string())
+            .bind(id.to_string())
+            .execute(&node.sql.write_pool)
+            .await
+            .unwrap();
         sqlx::query("DELETE FROM big_cabinet_drawers WHERE drawer_id = ?")
             .bind(id.to_string())
             .execute(&node.sql.write_pool)
@@ -2051,7 +2082,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         .call(
             RequestContext::root(),
             ListDrawers {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
             },
         )
         .await
@@ -2065,7 +2096,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         .call(
             RequestContext::root(),
             ListDocs {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
                 drawer_id: parent.clone(),
                 offset: 0,
                 limit: Some(20),
@@ -2084,7 +2115,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         .call(
             RequestContext::root(),
             ListKnownDrawers {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
             },
         )
         .await
@@ -2095,7 +2126,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         .call(
             RequestContext::root(),
             RememberDrawer {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
                 drawer_id: parent.clone(),
                 mirror: true,
             },
@@ -2107,7 +2138,7 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         .call(
             RequestContext::root(),
             ListKnownDrawers {
-                capability: bob.capability,
+                authorization: Authorization::identity(bob.capability),
             },
         )
         .await
@@ -2124,7 +2155,21 @@ async fn delegated_drawer_capabilities_share_and_retract_access() {
 
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
-    let bob = node.actor("bob").await;
+    // Minting attenuates against the presented identity's rights, so Bob holds the
+    // bits the write-cap mint requests; standing Write still bounds the scope.
+    let bob = node
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: node.authority.root,
+                path: "bob".into(),
+                rights: Rights::USE | Rights::NARROW | Rights::DELEGATE,
+            },
+        )
+        .await
+        .unwrap();
     let plug = node.actor("plug").await;
     let drawer = node.collection(&alice, "workspace").await;
     let doc = node
@@ -2141,7 +2186,7 @@ async fn delegated_drawer_capabilities_share_and_retract_access() {
             .unwrap()
             .mint_drawer_capability(
                 &RequestContext::root(),
-                bob.capability,
+                Authorization::identity(bob.capability),
                 &drawer,
                 Access::Admin,
                 Rights::USE | Rights::DELEGATE,
@@ -2159,7 +2204,7 @@ async fn delegated_drawer_capabilities_share_and_retract_access() {
         .unwrap()
         .mint_drawer_capability(
             &RequestContext::root(),
-            bob.capability,
+            Authorization::identity(bob.capability),
             &drawer,
             Access::Write,
             Rights::USE | Rights::NARROW | Rights::DELEGATE,
@@ -2172,7 +2217,7 @@ async fn delegated_drawer_capabilities_share_and_retract_access() {
         .call(
             RequestContext::root(),
             AttenuateCapability {
-                capability: write_cap.id,
+                capability: write_cap.capability_id,
                 rights: Rights::USE | Rights::DELEGATE,
             },
         )
@@ -2187,8 +2232,8 @@ async fn delegated_drawer_capabilities_share_and_retract_access() {
         .call(
             RequestContext::root(),
             GrantAccess {
-                via: delegated_cap.id,
-                subject: plug.uuid,
+                via: delegated_cap.capability_id,
+                subject_id: plug.actor_id,
                 object: drawer_object(Access::Admin, &drawer),
                 rights: Rights::USE,
             },
@@ -2204,15 +2249,18 @@ async fn delegated_drawer_capabilities_share_and_retract_access() {
         .call(
             RequestContext::root(),
             GrantAccess {
-                via: delegated_cap.id,
-                subject: plug.uuid,
+                via: delegated_cap.capability_id,
+                subject_id: plug.actor_id,
                 object: drawer_object(Access::Write, &drawer),
                 rights: Rights::USE,
             },
         )
         .await
         .unwrap();
-    assert_eq!(node.view(&plug, &drawer).await.unwrap().access, Access::Write);
+    assert_eq!(
+        node.view(&plug, &drawer).await.unwrap().access,
+        Access::Write
+    );
     node.write_note(&plug, &doc, "written-by-plug")
         .await
         .unwrap();
@@ -2228,8 +2276,8 @@ async fn delegated_drawer_capabilities_share_and_retract_access() {
         .call(
             RequestContext::root(),
             RetractCapability {
-                via: write_cap.id,
-                capability: write_cap.id,
+                via: write_cap.capability_id,
+                capability: write_cap.capability_id,
             },
         )
         .await
@@ -2461,7 +2509,7 @@ mod model {
                 .call(
                     RequestContext::root(),
                     ListDrawers {
-                        capability: bob.capability,
+                        authorization: Authorization::identity(bob.capability),
                     },
                 )
                 .await
@@ -2544,10 +2592,7 @@ mod model {
                 .into_iter()
                 .filter(|(id, _)| self.drawer_index(id).is_some())
                 .collect();
-            assert_eq!(
-                actual_known, self.known,
-                "{context}: ListKnownDrawers"
-            );
+            assert_eq!(actual_known, self.known, "{context}: ListKnownDrawers");
         }
     }
 
@@ -2565,7 +2610,9 @@ mod model {
             node.create_doc(&alice, &home, "doc1").await.unwrap(),
         ];
         let mut model = DrawerModel::new(drawers, docs);
-        model.check(node, &alice, &bob, &format!("{case}/init")).await;
+        model
+            .check(node, &alice, &bob, &format!("{case}/init"))
+            .await;
 
         for (step, &op_step) in script.iter().enumerate() {
             let ctx = format!("{case}/{step}:{op_step:?}");
@@ -2577,7 +2624,7 @@ mod model {
                     access,
                 } => {
                     let req = AddDoc {
-                        capability: alice.capability,
+                        authorization: Authorization::identity(alice.capability),
                         command: cmd,
                         drawer_id: model.drawers[drawer].clone(),
                         doc_id: model.docs[doc].clone(),
@@ -2589,14 +2636,12 @@ mod model {
                         .await
                         .unwrap();
                     model.roster_docs[drawer].insert(model.docs[doc].clone(), access);
-                    model
-                        .commands
-                        .push((RecordedCommand::AddDoc(req), receipt));
+                    model.commands.push((RecordedCommand::AddDoc(req), receipt));
                 }
                 ModelOp::RemoveDoc { drawer, doc } => {
                     let doc_id = model.docs[doc].clone();
                     let req = RemoveDoc {
-                        capability: alice.capability,
+                        authorization: Authorization::identity(alice.capability),
                         command: cmd,
                         drawer_id: model.drawers[drawer].clone(),
                         doc_id: doc_id.clone(),
@@ -2621,7 +2666,7 @@ mod model {
                     access,
                 } => {
                     let req = AddChild {
-                        capability: alice.capability,
+                        authorization: Authorization::identity(alice.capability),
                         command: cmd,
                         parent_id: model.drawers[parent].clone(),
                         child_id: model.drawers[child].clone(),
@@ -2636,8 +2681,7 @@ mod model {
                         assert_eq!(res.unwrap_err(), DrawersError::SelfChild, "{ctx}");
                     } else {
                         let receipt = res.expect(&ctx);
-                        model.roster_children[parent]
-                            .insert(model.drawers[child].clone(), access);
+                        model.roster_children[parent].insert(model.drawers[child].clone(), access);
                         model
                             .commands
                             .push((RecordedCommand::AddChild(req), receipt));
@@ -2646,7 +2690,7 @@ mod model {
                 ModelOp::RemoveChild { parent, child } => {
                     let child_id = model.drawers[child].clone();
                     let req = RemoveChild {
-                        capability: alice.capability,
+                        authorization: Authorization::identity(alice.capability),
                         command: cmd,
                         parent_id: model.drawers[parent].clone(),
                         child_id: child_id.clone(),
@@ -2679,9 +2723,9 @@ mod model {
                         .call(
                             RequestContext::root(),
                             RevokeDrawer {
-                                capability: alice.capability,
+                                authorization: Authorization::identity(alice.capability),
                                 drawer_id: model.drawers[drawer].clone(),
-                                subject_id: bob.uuid,
+                                subject_id: bob.actor_id,
                             },
                         )
                         .await
@@ -2700,7 +2744,7 @@ mod model {
                         .call(
                             RequestContext::root(),
                             SetDrawerPolicy {
-                                capability: alice.capability,
+                                authorization: Authorization::identity(alice.capability),
                                 drawer_id: drawer_id.clone(),
                                 mirror,
                             },
@@ -2876,6 +2920,3 @@ mod model {
         }
     }
 }
-
-
-

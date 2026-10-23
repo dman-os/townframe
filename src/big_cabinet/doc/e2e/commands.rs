@@ -1,6 +1,6 @@
 //! The command ledger: replays, reuse, and what the boot pass settles after a crash.
 
-use super::super::commands::{Commands, Kind, State};
+use super::super::commands::{Commands, Detail, Kind, State};
 use super::*;
 use automerge::transaction::{CommitOptions, Transactable};
 
@@ -23,7 +23,7 @@ async fn a_replayed_command_returns_its_receipt_without_acting_again() {
         created
     );
     let write = || WriteFacets {
-        capability: alice.capability,
+        authorization: Authorization::identity(alice.capability),
         command: Some(command("write")),
         doc_id: created.doc_id.clone(),
         mode: WriteMode::AtCurrent,
@@ -68,7 +68,7 @@ async fn a_refused_write_releases_its_command() {
         .await
         .unwrap();
     let write = |heads: Vec<ChangeHash>| WriteFacets {
-        capability: alice.capability,
+        authorization: Authorization::identity(alice.capability),
         command: Some(command("write")),
         doc_id: created.doc_id.clone(),
         mode: WriteMode::IfDocUnchanged { heads },
@@ -104,7 +104,7 @@ async fn the_boot_pass_settles_interrupted_writes_from_their_commit_message() {
                 &command(name),
                 Kind::Write,
                 [0; 32],
-                alice.uuid,
+                alice.actor_id,
                 Some(document),
                 None,
                 None,
@@ -139,10 +139,12 @@ async fn the_boot_pass_places_a_committed_create_and_abandons_an_uncommitted_one
                 &command(name),
                 Kind::Create,
                 [0; 32],
-                alice.uuid,
+                alice.actor_id,
                 None,
                 Some(PLACEMENT),
-                None,
+                Some(&Detail::Create {
+                    owner_id: Some(alice.actor_id),
+                }),
             )
             .await
             .unwrap();

@@ -36,7 +36,7 @@ async fn doc_observation_replays_then_streams_membership_and_versions() {
         .subscribe(
             RequestContext::root(),
             ObserveFacets {
-                capability: alice.capability,
+                authorization: Authorization::identity(alice.capability),
                 scope: ObserveScope::Doc {
                     doc_id: document.clone(),
                 },
@@ -100,7 +100,7 @@ async fn tag_observation_hides_documents_the_observer_cannot_read() {
         .subscribe(
             RequestContext::root(),
             ObserveFacets {
-                capability: mallory.capability,
+                authorization: Authorization::identity(mallory.capability),
                 scope: ObserveScope::Doc {
                     doc_id: created.doc_id.clone(),
                 },
@@ -118,7 +118,7 @@ async fn tag_observation_hides_documents_the_observer_cannot_read() {
         .subscribe(
             RequestContext::root(),
             ObserveFacets {
-                capability: mallory.capability,
+                authorization: Authorization::identity(mallory.capability),
                 scope: ObserveScope::Tag {
                     tag: big_cabinet_core::FacetTag::new(NOTE).unwrap(),
                 },
