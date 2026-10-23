@@ -1,0 +1,53 @@
+/* Runtime reset and theme-provider adapters. Foundation defaults are generated from tokens/*.tokens.json. */
+
+@layer base {
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    min-width: 100%;
+    min-height: 100%;
+  }
+
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+}
+
+/*
+ * Material remains an external theme provider during migration. It overrides
+ * only theme-dependent semantic color roles; dimensions, typography, and
+ * elevation come from tokens.generated.css.
+ */
+@layer theme {
+  .df-theme {
+    --df-color-canvas: var(--scheme-color-background);
+    --df-color-surface: var(--scheme-color-surface-container-low);
+    --df-color-surface-raised: var(--scheme-color-surface-container);
+    --df-color-surface-sunken: var(--scheme-color-surface-dim);
+    --df-color-text: var(--scheme-color-on-background);
+    --df-color-text-muted: var(--scheme-color-on-surface-variant);
+    --df-color-text-subtle: var(--scheme-color-outline);
+    --df-color-border: var(--scheme-color-outline-variant);
+    --df-color-focus: var(--scheme-color-primary);
+    --df-color-primary: var(--scheme-color-primary);
+    --df-color-on-primary: var(--scheme-color-on-primary);
+    --df-color-accent: var(--scheme-color-secondary);
+    --df-color-on-accent: var(--scheme-color-on-secondary);
+    --df-color-accent-container: var(--scheme-color-secondary-container);
+    --df-color-on-accent-container: var(--scheme-color-on-secondary-container);
+    --df-color-danger: var(--scheme-color-error);
+    --df-color-on-danger: var(--scheme-color-on-error);
+    --df-color-success: var(--scheme-color-tertiary);
+    --df-color-warning: var(--scheme-color-secondary);
+
+    /* Compatibility aliases for existing utility and component vocabulary. */
+    --color-foreground-muted: var(--df-color-text-muted);
+    --color-foreground-subtle: var(--df-color-text-subtle);
+    --color-surface-raised: var(--df-color-surface-raised);
+    --color-secondary: var(--df-color-accent);
+    --color-secondary-foreground: var(--df-color-on-accent);
+  }
+}

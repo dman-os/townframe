@@ -1,0 +1,12 @@
+[package]
+name = "micro_settings"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_mdk = { workspace = true, features = ["in_process", "view"] }
+micro_settings_manifest = { workspace = true }
+dioxus.workspace = true

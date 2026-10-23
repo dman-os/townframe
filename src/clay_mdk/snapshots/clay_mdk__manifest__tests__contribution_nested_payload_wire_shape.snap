@@ -1,0 +1,20 @@
+---
+source: src/clay_mdk/manifest.rs
+expression: "serde_json::to_string_pretty(&nested_contribution()).unwrap()"
+---
+{
+  "provision": "dayframe.shelf",
+  "payload": {
+    "badges": [
+      1,
+      null,
+      "beta"
+    ],
+    "enabled": true,
+    "label": {
+      "en": "Counter"
+    },
+    "order": 2,
+    "slot": "toolbar"
+  }
+}

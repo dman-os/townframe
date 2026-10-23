@@ -1,0 +1,5 @@
+---
+source: src/micro_settings_manifest/lib.rs
+expression: "serde_json::to_value(DeclaredSection\n{ title: \"Counter (Wasm)\".into(), }).unwrap()"
+---
+title: Counter (Wasm)

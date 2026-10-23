@@ -1,0 +1,13 @@
+---
+source: src/clay_micro_core/micros/composition/tests.rs
+expression: "serde_json::to_value(&desired).unwrap()"
+---
+consumer:
+  bindings:
+    test.facility: supplier
+  enablement: Enabled
+  provider: dependent
+supplier:
+  bindings: {}
+  enablement: Disabled
+  provider: source

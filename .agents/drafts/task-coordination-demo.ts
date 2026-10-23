@@ -94,9 +94,9 @@ class RouterClaim {
   ) {}
 
   rank(): string {
-    return `${
-      this.generation.toString().padStart(8, "0")
-    }/${this.candidate}/${this.claimId}`;
+    return `${this.generation
+      .toString()
+      .padStart(8, "0")}/${this.candidate}/${this.claimId}`;
   }
 }
 
@@ -104,10 +104,11 @@ class RouterSlot {
   readonly claims = new Map<NodeId, RouterClaim>();
 
   claim(pool: PoolId, candidate: NodeId): RouterClaim {
-    const generation = Math.max(
-      0,
-      ...[...this.claims.values()].map((claim) => claim.generation),
-    ) + 1;
+    const generation =
+      Math.max(
+        0,
+        ...[...this.claims.values()].map((claim) => claim.generation),
+      ) + 1;
     const claim = new RouterClaim(
       pool,
       candidate,
@@ -235,8 +236,10 @@ class TriageDomain implements TaskDomain {
     if (this.settled.get(this.slot) === task.generation) return "obsolete";
     if (this.desired.get(this.slot) !== task.generation) return "obsolete";
     if (
-      task.requiredInput !== undefined && !node.inputs.has(task.requiredInput)
-    ) return "not-ready";
+      task.requiredInput !== undefined &&
+      !node.inputs.has(task.requiredInput)
+    )
+      return "not-ready";
     return "runnable";
   }
 
@@ -262,8 +265,10 @@ class StandaloneAgentDomain implements TaskDomain {
     if (task.isTerminal()) return "obsolete";
     if (task.notAfter !== undefined && now >= task.notAfter) return "obsolete";
     if (
-      task.requiredInput !== undefined && !node.inputs.has(task.requiredInput)
-    ) return "not-ready";
+      task.requiredInput !== undefined &&
+      !node.inputs.has(task.requiredInput)
+    )
+      return "not-ready";
     return "runnable";
   }
 
@@ -285,7 +290,10 @@ class StandaloneAgentDomain implements TaskDomain {
 class DispatchAttempt {
   state: "running" | "cancel-requested" | "complete" = "running";
 
-  constructor(readonly id: string, readonly task: TaskTicket) {}
+  constructor(
+    readonly id: string,
+    readonly task: TaskTicket,
+  ) {}
 }
 
 class DispatchRepo {
@@ -326,7 +334,10 @@ class RoutingRpc {
 class PoolRouter {
   private readonly executors = new Map<NodeId, ExecutorRegistration>();
 
-  constructor(readonly pool: PoolId, readonly node: DaybookNode) {}
+  constructor(
+    readonly pool: PoolId,
+    readonly node: DaybookNode,
+  ) {}
 
   register(registration: ExecutorRegistration): void {
     this.executors.set(registration.node.id, registration);
@@ -344,7 +355,7 @@ class PoolRouter {
     });
     for (const registration of registrations) {
       const capable = [...task.requiredCapabilities].every((capability) =>
-        registration.capabilities.has(capability)
+        registration.capabilities.has(capability),
       );
       if (!capable || registration.activeAttempts.has(task.id)) continue;
       if (domain.classify(registration.node, task, now) !== "runnable") {
@@ -414,7 +425,8 @@ class DaybookNode {
     if (
       domain === undefined ||
       domain.classify(this, task, Date.now()) !== "runnable"
-    ) return;
+    )
+      return;
     this.dispatch.start(task);
     console.log(`  ${this.id} starts ${task.id}`);
   }
@@ -570,18 +582,17 @@ class Demo {
         this.triage.desired.get(this.triage.slot) ?? "none"
       } settled=${this.triage.settled.get(this.triage.slot) ?? "none"}`,
     );
-    for (
-      const replica of [
-        this.phone.bigSync,
-        this.laptop.bigSync,
-        this.desktop.bigSync,
-        this.relay,
-      ]
-    ) {
-      const tasks = [...replica.tasks.values()].map((task) =>
-        `${task.id}:${task.active ? "active" : "inactive"}${
-          task.isTerminal() ? "/terminal" : ""
-        }`
+    for (const replica of [
+      this.phone.bigSync,
+      this.laptop.bigSync,
+      this.desktop.bigSync,
+      this.relay,
+    ]) {
+      const tasks = [...replica.tasks.values()].map(
+        (task) =>
+          `${task.id}:${task.active ? "active" : "inactive"}${
+            task.isTerminal() ? "/terminal" : ""
+          }`,
       );
       console.log(`  ${replica.name}: ${tasks.join(", ") || "empty"}`);
     }

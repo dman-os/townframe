@@ -1,0 +1,8 @@
+version = 1
+role = "plugin"
+dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
+allowed_dependencies = [
+    "clay_mdk",
+    "micro_settings_manifest",
+]
+allow_external_api_types = false

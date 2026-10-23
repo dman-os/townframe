@@ -1,0 +1,17 @@
+[package]
+name = "micro_settings_manifest"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_mdk = { workspace = true, features = ["in_process"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+clay_host = { workspace = true }
+insta.workspace = true
+serde_json.workspace = true

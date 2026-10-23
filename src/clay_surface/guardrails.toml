@@ -1,0 +1,6 @@
+version = 1
+role = "foundation"
+dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
+allowed_dependencies = [
+]
+allow_external_api_types = false

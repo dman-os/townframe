@@ -1,0 +1,20 @@
+[package]
+name = "clay_docs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_collection = { workspace = true }
+clay_host = { workspace = true }
+daybook_types = { workspace = true, default-features = false, features = ["manifest"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

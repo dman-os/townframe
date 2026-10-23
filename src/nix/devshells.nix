@@ -96,6 +96,7 @@ _: {
         wayland-scanner
 
         at-spi2-atk
+        at-spi2-core
         atkmm
         gdk-pixbuf
         glib
@@ -250,6 +251,7 @@ _: {
         vulkan-loader
         pulseaudio
         alsa-lib
+        at-spi2-core
       ];
 
       desktopRuntimeLibraryPath = pkgs.lib.makeLibraryPath (
@@ -314,7 +316,15 @@ _: {
       ciDesktopShell = pkgs.mkShell (
         {
           name = "ci-desktop";
-          buildInputs = baseBuildInputs ++ dioxusBuildInputs ++ desktopBuildInputs ++ [ rustRust ];
+          buildInputs =
+            baseBuildInputs
+            ++ dioxusBuildInputs
+            ++ desktopBuildInputs
+            ++ rustLintInputs
+            ++ [
+              rustRust
+              pkgs.wasm-tools
+            ];
           shellHook = ''
             export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${desktopRuntimeLibraryPath}"
             if [ "$(uname -s)" = "Darwin" ]; then
@@ -343,7 +353,7 @@ _: {
           buildInputs = devShellBuildInputs;
 
           shellHook = ''
-            export XDG_DATA_DIRS=${pkgs.fontconfig.out}/share:$XDG_DATA_DIRS
+            export XDG_DATA_DIRS=${pkgs.fontconfig.out}/share:${pkgs.at-spi2-core}/share:$XDG_DATA_DIRS
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
               export BINDGEN_EXTRA_CLANG_ARGS="-I${pkgs.linuxHeaders}/include -idirafter ${pkgs.stdenv.cc.libc.dev}/include"
             ''}

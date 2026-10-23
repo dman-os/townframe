@@ -1,0 +1,31 @@
+[package]
+name = "dayframe_mobile"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dioxus = { workspace = true }
+ui = { workspace = true }
+
+dioxus-native = { workspace = true, features = ["scrollbars"] }
+anyrender = { version = "0.13.0" }
+anyrender_skia = { version = "0.11.0" }
+anyrender_vello = { version = "0.14.0" }
+anyrender_vello_cpu = { version = "0.17.0" }
+anyrender_vello_hybrid = { version = "0.10.0" }
+tokio = { version = "1", features = ["time", "rt"] }
+
+[features]
+default = ["desktop"]
+mobile = ["dioxus/mobile"]
+# Native windowing backend: a platform is selected by target, so the feature only turns on
+# the Dioxus desktop renderer rather than naming a platform.
+desktop = ["dioxus/native"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+winit = { version = "0.31.0-beta.3", features = ["android-native-activity"] }
+
+[[bin]]
+name = "dayframe_mobile"
+path = "main.rs"

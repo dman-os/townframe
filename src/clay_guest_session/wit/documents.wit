@@ -1,0 +1,126 @@
+package townframe:dayframe@0.1.0;
+
+interface documents {
+    type doc-id = string;
+    type facet-raw = string;
+
+    record facet-key {
+        tag: string,
+        key-id: string,
+    }
+
+    record facet-route {
+        document: doc-id,
+        branch: string,
+        key: facet-key,
+    }
+
+    variant facet-selection {
+        tags(list<string>),
+        keys(list<facet-key>),
+    }
+
+    record watch-selection {
+        documents: list<doc-id>,
+        branch: string,
+        facets: facet-selection,
+    }
+
+    variant document-error {
+        denied,
+        revoked,
+        invalid-value(string),
+        subscription-lagged,
+    }
+
+    variant facet-value {
+        loading,
+        absent,
+        present(facet-raw),
+    }
+
+    record facet-entry {
+        route: facet-route,
+        value: facet-value,
+    }
+
+    record document-snapshot {
+        watch-id: u64,
+        revision: u64,
+        facets: list<facet-entry>,
+        pending: list<u64>,
+        refreshing: bool,
+        revoked: bool,
+    }
+
+    record transport-failure {
+        message: string,
+        outcome-unknown: bool,
+    }
+
+    variant operation-failure {
+        rejected(string),
+        transport(transport-failure),
+    }
+
+    variant operation-status {
+        locally-applied,
+        accepted,
+        rolled-back(operation-failure),
+    }
+
+    record operation-receipt {
+        id: u64,
+        revision: u64,
+        status: operation-status,
+    }
+
+    variant facet-mutation {
+        update(facet-raw),
+        create(facet-raw),
+        delete,
+    }
+
+    resource operation {
+        current: func() -> result<operation-receipt, document-error>;
+    }
+
+    resource document-watch {
+        current: func() -> result<document-snapshot, document-error>;
+        select: func(selection: watch-selection) -> result<_, document-error>;
+        refresh: func() -> result<_, document-error>;
+    }
+
+    resource document-access {
+        watch: func(selection: watch-selection) -> result<document-watch, document-error>;
+        mutate: func(route: facet-route, mutation: facet-mutation) -> result<operation, document-error>;
+    }
+
+    record document-binding {
+        name: string,
+        document: doc-id,
+        branch: string,
+        access: document-access,
+    }
+}
+
+interface document-events {
+    use documents.{document-snapshot, operation-receipt};
+
+    changed: func(snapshot: document-snapshot);
+    lagged: func(watch-id: u64);
+    completed: func(receipt: operation-receipt);
+}
+
+interface micro-lifecycle {
+    use documents.{document-binding};
+
+    activate: func(configs: list<document-binding>) -> result<_, string>;
+}
+
+world micro-client {
+    include presentation-client;
+    import documents;
+    export document-events;
+    export micro-lifecycle;
+}

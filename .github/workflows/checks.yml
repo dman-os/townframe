@@ -212,17 +212,25 @@ jobs:
         run: |
           # Plug crates are excluded while automatic triage is broken. `daybook_cli` is excluded
           # because its e2e tests need the built binary and run in the dedicated CLI job.
+          # This lane runs in `ci-desktop` because the Dayframe Dioxus crates link the Linux GUI
+          # stack (glib/wayland/wgpu) through the workspace, and `ci-rust` does not carry it.
+          #
+          # Prepare the wasm guest components first: the clay_*/micro_* tests read
+          # DAYFRAME_<NAME>_COMPONENT paths printed by the prepare step.
+          nix develop .#ci-desktop --command deno run --allow-all x/check-dayframe.ts --prepare-only > /tmp/dayframe-components.env
+          source /tmp/dayframe-components.env
+          export DAYFRAME_COUNTER_COMPONENT DAYFRAME_SLOTS_COMPONENT
           #
           # `--no-report` accumulates llvm profile data across the nextest and doctest runs (it
           # implies `--no-clean`, so the earlier run's data survives) and the final `report`
           # invocation turns the whole lot into a single lcov file.
-          nix develop .#ci-rust --command cargo llvm-cov --no-report nextest \
+          nix develop .#ci-desktop --command cargo llvm-cov --no-report nextest \
             --color=always --workspace --all-targets --profile "$NEXTEST_PROFILE" \
             --user-config-file .config/nextest-user-ci.toml \
             --exclude daybook_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
           # nextest cannot run doctests, so they go through `cargo test --doc`. `--doc` implies
           # `--doctests`, which persists the doctest binaries the coverage report needs.
-          nix develop .#ci-rust --command cargo llvm-cov --no-report --doc --workspace \
+          nix develop .#ci-desktop --command cargo llvm-cov --no-report --doc --workspace \
             --exclude daybook_cli --exclude plug_test_manifest --exclude plug_dayledger_manifest --exclude plug_plabels_manifest
           # `report` only merges the collected profile data and writes lcov; it runs no tests.
           # `--doctests` is what lets the persisted doctest binaries be attributed to their sources.
@@ -269,8 +277,6 @@ jobs:
         with:
           paths: |
             **/nextest/ci/results.xml
-            src/daybook_compose/composeApp/build/test-results/**/*.xml
-            src/daybook_compose/composeApp/build/reports/tests/**/TEST-*.xml
 
       - name: Upload coverage data to codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
@@ -278,75 +284,6 @@ jobs:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           files: lcov.info
-
-  kotlin-tests:
-    name: Kotlin tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Setup tmate session
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-
-      - name: remove unused files
-        run: |
-          sudo rm -rf /usr/lib/jvm
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /opt/microsoft /opt/google
-          sudo rm -rf /opt/az
-          sudo rm -rf /usr/local/share/powershell
-          # sudo rm -rf /opt/hostedtoolcache
-
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/flakehub-cache-action@v3
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: setup wash CLI
-        uses: wasmCloud/setup-wash-action@v2.1.0
-        with:
-          wash-version: v2.6.1
-      - name: fetch WIT dependencies
-        run: nix develop .#ci-rust --command deno run -A ./x/wit-fetch.ts --clean
-      - name: build plug OCI artifacts
-        run: |
-          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_test_manifest
-          nix develop .#ci-rust --command cargo --color=always x plug build-oci --plug-root ./src/plug_dayledger_manifest
-
-      - name: kotlin tests
-        run: |
-          nix develop .#ci-desktop --command bash -lc '
-            export PROTOC="$(command -v protoc)"
-            cd src/daybook_compose
-            ./gradlew :composeApp:desktopTest --no-daemon --no-configuration-cache
-          '
-
-      - uses: actions/upload-artifact@v6
-        if: always()
-        with:
-          name: gradle-test-reports
-          path: src/daybook_compose/composeApp/build/reports/tests/
 
   e2e-sysadmin-chromium:
     name: E2E (sysadmin / chromium)

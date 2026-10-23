@@ -1,0 +1,15 @@
+[package]
+name = "micro_counter_manifest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+clay_mdk = { workspace = true }
+serde_json.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

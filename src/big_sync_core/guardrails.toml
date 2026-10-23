@@ -120,15 +120,6 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 [[exemptions]]
 code = "ERROR_LINT_REASON"
 path = "src/big_sync_core/fingerprint.rs"
-symbol = "module"
-ceiling = 1
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_LINT_REASON"
-path = "src/big_sync_core/fingerprint.rs"
 symbol = "module::FingerprintSeed as serde :: Deserialize < 'de >::deserialize::SeedVisitor as serde :: de :: Visitor < '_ >::visit_bytes"
 ceiling = 1
 class = "LEGACY_DEBT"

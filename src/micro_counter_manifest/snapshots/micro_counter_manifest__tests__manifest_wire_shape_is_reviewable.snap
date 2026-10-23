@@ -1,0 +1,26 @@
+---
+source: src/micro_counter_manifest/lib.rs
+expression: manifest()
+---
+id: dayframe.counter
+version: 1
+requirements:
+  - id: settings.sections
+    version: 1
+provisions:
+  - id: wasm.controller
+    version: 1
+config:
+  name: counter
+  facets:
+    - owner_plug_id: ~
+      tag: org.dayframe.counter.config
+      key_id: count
+      read: true
+      write: true
+      create: false
+      delete: false
+contributions:
+  - provision: settings.sections
+    payload:
+      title: Counter (Wasm)

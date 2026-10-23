@@ -1,0 +1,14 @@
+---
+source: src/micro_settings_manifest/lib.rs
+expression: manifest()
+---
+id: dayframe.settings
+version: 1
+requirements: []
+provisions:
+  - id: settings.sections
+    version: 1
+  - id: settings.controller
+    version: 1
+config: ~
+contributions: []
