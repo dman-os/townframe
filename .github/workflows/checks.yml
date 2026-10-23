@@ -215,6 +215,12 @@ jobs:
           # This lane runs in `ci-desktop` because the Dayframe Dioxus crates link the Linux GUI
           # stack (glib/wayland/wgpu) through the workspace, and `ci-rust` does not carry it.
           #
+          # Prepare the wasm guest components first: the clay_*/micro_* tests read
+          # DAYFRAME_<NAME>_COMPONENT paths printed by the prepare step.
+          nix develop .#ci-desktop --command deno run --allow-all x/check-dayframe.ts --prepare-only > /tmp/dayframe-components.env
+          source /tmp/dayframe-components.env
+          export DAYFRAME_COUNTER_COMPONENT DAYFRAME_SLOTS_COMPONENT
+          #
           # `--no-report` accumulates llvm profile data across the nextest and doctest runs (it
           # implies `--no-clean`, so the earlier run's data survives) and the final `report`
           # invocation turns the whole lot into a single lcov file.
