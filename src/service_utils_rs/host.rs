@@ -72,12 +72,18 @@ impl<H: Send + Sync + 'static> Host<H> {
         let _tracked = self.spawner.track().ok_or(ContextError::Cancelled)?;
         request.context.validate()?;
         let context = request.context.clone();
+        // The handler's future is boxed here, at the one point every call passes through. Left
+        // inline, it would be a field of this future, of `invoke`'s, of `unary`'s and of the
+        // protocol's `route` block, and each of those poll frames would carry a temporary of its
+        // full size while constructing it. A handler that calls another service through a direct
+        // client nests that chain once per hop, and in a debug build three in-process hops were
+        // enough to overflow a 2 MiB test thread.
         tokio::select! {
             biased;
             _ = self.spawner.cancelled() => Err(ContextError::Cancelled.into()),
             _ = context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
             _ = context.expired() => Err(ContextError::DeadlineExceeded.into()),
-            result = self.handler.call(request) => result,
+            result = Box::pin(self.handler.call(request)) => result,
         }
     }
 

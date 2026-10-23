@@ -981,16 +981,14 @@ impl BigRepo {
         Ok(group)
     }
 
-    /// Add a principal to a group and propagate reader membership into every
-    /// document governed by that group. Reader additions also create one
-    /// history checkpoint per affected document.
-    pub async fn add_member_to_group(
+    /// The sedimentree frontier of every document `group` governs that is locally
+    /// materialized, keyed by document: the `after_content` a membership change on the group
+    /// is signed over.
+    async fn group_content_frontier(
         self: &Arc<Self>,
-        member: impl Into<BigKeyhiveAuthority>,
         group: &BigKeyhiveGroup,
-        access: keyhive_core::access::Access,
-    ) -> Res<()> {
-        let mut docs = BTreeMap::new();
+    ) -> Res<BTreeMap<DocumentId, Vec<Vec<u8>>>> {
+        let mut after_content = BTreeMap::new();
         for doc_id in self.keyhive.group_document_ids(group).await {
             // A document can be created concurrently with this grant - the encryption
             // worker creates key documents at runtime - and such a document is already in
@@ -1003,8 +1001,10 @@ impl BigRepo {
             // completing the grant). Failing here over an unmaterialized member killed
             // clone provisions outright.
             match self.get_doc(&doc_id).await?.into_ready(doc_id.clone()) {
-                Ok(doc) => {
-                    docs.insert(doc_id, doc);
+                Ok(_doc) => {
+                    let heads = self.doc_head_state(doc_id.clone()).await?.sedimentree_heads;
+                    after_content
+                        .insert(doc_id, heads.iter().map(|head| head.0.to_vec()).collect());
                 }
                 Err(err @ (GetDocError::NotFound(_) | GetDocError::PendingMaterialization(_))) => {
                     tracing::debug!(
@@ -1016,12 +1016,20 @@ impl BigRepo {
                 }
             }
         }
+        Ok(after_content)
+    }
 
-        let mut after_content = BTreeMap::new();
-        for doc_id in docs.keys().cloned() {
-            let heads = self.doc_head_state(doc_id.clone()).await?.sedimentree_heads;
-            after_content.insert(doc_id, heads.iter().map(|head| head.0.to_vec()).collect());
-        }
+    /// Add a principal to a group and propagate reader membership into every
+    /// document governed by that group. Reader additions also create one
+    /// history checkpoint per affected document.
+    pub async fn add_member_to_group(
+        self: &Arc<Self>,
+        member: impl Into<BigKeyhiveAuthority>,
+        group: &BigKeyhiveGroup,
+        access: keyhive_core::access::Access,
+    ) -> Res<()> {
+        let after_content = self.group_content_frontier(group).await?;
+        let preflighted: BTreeSet<DocumentId> = after_content.keys().cloned().collect();
 
         let (affected_docs, _hashes) = self
             .keyhive
@@ -1033,16 +1041,16 @@ impl BigRepo {
         if access.is_reader() {
             for doc_id in &affected_docs {
                 // `affected_docs` is read off the live Keyhive graph after the grant has
-                // landed, while `docs` above is the snapshot taken before it. A document
-                // created inside that window joins the group and is legitimately affected
-                // without having been preflighted: the encryption worker creates key
-                // documents at runtime, so the snapshot is not stable across the grant.
+                // landed, while `preflighted` above is the snapshot taken before it. A
+                // document created inside that window joins the group and is legitimately
+                // affected without having been preflighted: the encryption worker creates
+                // key documents at runtime, so the snapshot is not stable across the grant.
                 // The invariant "every affected document was preflighted" is therefore not
                 // enforceable, and enforcing it failed the whole grant - a clone provision
                 // that raced a key-document creation died outright. The checkpoint does not
                 // need the snapshot: it is derived per document here, and when the causal
                 // keys are still in flight the durable event consumer retries.
-                if !docs.contains_key(doc_id) {
+                if !preflighted.contains(doc_id) {
                     tracing::debug!(
                         %doc_id,
                         "document joined the group between the pre-grant snapshot and the \
@@ -1055,6 +1063,29 @@ impl BigRepo {
             }
         }
 
+        self.wait_for_keyhive_reconciliation().await?;
+        Ok(())
+    }
+
+    /// Remove a principal from a group, signing the revocation over the current frontier of
+    /// every document the group governs, and rotate the keys of every document the removed
+    /// member can no longer reach. Every other member keeps its access: a member the removed
+    /// one had delegated to is re-delegated by this node.
+    pub async fn remove_member_from_group(
+        self: &Arc<Self>,
+        member: impl Into<BigKeyhiveAuthority>,
+        group: &BigKeyhiveGroup,
+    ) -> Res<()> {
+        let after_content = self.group_content_frontier(group).await?;
+        let (affected_docs, _hashes) = self
+            .keyhive
+            .remove_member_from_group(member, group, after_content, &self.keyhive_protocol)
+            .await?;
+        for doc_id in &affected_docs {
+            if !self.runtime.ensure_causal_coverage(doc_id.clone()).await? {
+                tracing::debug!(%doc_id, "group revocation causal checkpoint deferred to durable event reconciliation");
+            }
+        }
         self.wait_for_keyhive_reconciliation().await?;
         Ok(())
     }

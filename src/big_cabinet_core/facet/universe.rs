@@ -151,11 +151,35 @@ impl Universe {
     /// carried twice, deliberately, so that [`Bundle::validate`] reports it rather than one of them
     /// quietly winning.
     pub fn collect(declarations: impl IntoIterator<Item = Declaration>) -> Self {
+        let declarations: Vec<Declaration> = declarations.into_iter().collect();
         let mut facets: Vec<FacetDecl> = Vec::new();
         let mut types: Vec<TypeDecl> = Vec::new();
+        // Two passes: a union member's own declaration and the definition a member-using facet's
+        // schema hoists for it name the same type, and the hoisted copy is a `$ref` target without
+        // the facet's document frame (`$schema`, `title`). Declaration order is arbitrary, so the
+        // facets are all known before the types are screened against them.
+        for declaration in &declarations {
+            facets.push(declaration.facet.clone());
+        }
         for declaration in declarations {
             for decl in declaration.types {
-                if declaration.facet.name == decl.name {
+                let facet_agrees = facets.iter().any(|facet| {
+                    facet.name == decl.name && same_schema(&facet.schema, &decl.schema)
+                });
+                let schema_frame = |document: Value| {
+                    let mut document = document;
+                    if let Value::Object(object) = &mut document {
+                        object.remove("$schema");
+                        object.remove("title");
+                    }
+                    document
+                };
+                let framed_agrees = facets.iter().any(|facet| {
+                    facet.name == decl.name
+                        && schema_frame(serde_json::to_value(&facet.schema).expect("a schema"))
+                            == serde_json::to_value(&decl.schema).expect("a schema")
+                });
+                if facet_agrees || framed_agrees || declaration.facet.name == decl.name {
                     continue;
                 }
                 if types
@@ -166,7 +190,6 @@ impl Universe {
                 }
                 types.push(decl);
             }
-            facets.push(declaration.facet);
         }
         Self { facets, types }
     }
@@ -267,6 +290,14 @@ impl<'a> Bundle<'a> {
     /// This is what makes the context cost a consumer nothing. The manifest carries definitions
     /// flat, because that is what lets two facets share one; a reader that just wants to check a
     /// value takes this instead of assembling `$defs` itself.
+    /// A union member's definition as the member declares it. The overlay of a union position
+    /// matches a supplement branch by its discriminant and applies the branch — which is this
+    /// definition with the discriminant added — to the member's compiled definition; when the
+    /// whole union schema was handed over instead, every branch paired to the same definition.
+    pub fn member_definition(&self, name: &str) -> Option<&Schema> {
+        self.resolve(name)
+    }
+
     pub fn document(&self, facet_name: &str) -> Option<Schema> {
         let defs = self.defs_in_scope();
         if !defs.contains_key(facet_name) {

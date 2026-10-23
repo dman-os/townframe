@@ -145,6 +145,7 @@ impl Node {
             access: Arc::new(LedgerAccess::new(self.authority.client.clone(), issuer)),
             sql: self.sql.clone(),
             facet_set: Some(Arc::clone(&self.facet_set)),
+            facet_ref: None,
         })
         .await?;
         self.docs = Some(docs);

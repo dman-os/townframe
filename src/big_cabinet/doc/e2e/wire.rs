@@ -450,9 +450,9 @@ fn merge_doc_wire() {
             MergeDoc {
                 capability: capability(1),
                 command: Some(command("merge-1")),
-                source: document(2),
+                source_id: document(2),
                 at: At::Heads(vec![hash(2)]),
-                target: document(1),
+                target_id: document(1),
             },
         ),
         (
@@ -460,9 +460,9 @@ fn merge_doc_wire() {
             MergeDoc {
                 capability: capability(1),
                 command: None,
-                source: document(2),
+                source_id: document(2),
                 at: At::Current,
-                target: document(1),
+                target_id: document(1),
             },
         ),
     ] {

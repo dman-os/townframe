@@ -65,9 +65,9 @@ impl Node {
                 MergeDoc {
                     capability: actor.capability,
                     command: None,
-                    source: source.clone(),
+                    source_id: source.clone(),
                     at: At::Current,
-                    target: target.clone(),
+                    target_id: target.clone(),
                 },
             )
             .await)

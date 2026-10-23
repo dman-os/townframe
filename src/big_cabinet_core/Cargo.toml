@@ -13,7 +13,7 @@ crate-type = ["rlib"]
 
 [features]
 default = ["manifest"]
-schemars = ["dep:schemars", "dep:macros", "dep:unicode-segmentation"]
+schemars = ["dep:schemars", "dep:unicode-segmentation"]
 manifest = []
 
 [dependencies]
@@ -42,7 +42,7 @@ blake3.workspace = true
 ed25519-dalek.workspace = true
 coset = "0.4.2"
 ciborium = "0.2.2"
-macros = { path = "../macros", optional = true }
+macros = { path = "../macros" }
 
 [dev-dependencies]
 panproto-lens = "=0.74.4"

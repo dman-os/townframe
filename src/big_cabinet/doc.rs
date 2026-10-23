@@ -36,7 +36,8 @@ mod inspect;
 mod list;
 mod merge;
 mod observe;
-mod pipeline;
+pub(crate) mod pipeline;
+mod query;
 mod read;
 mod write;
 
@@ -58,6 +59,9 @@ pub use self::inspect::{
 pub use self::list::ListFacets;
 pub use self::merge::MergeDoc;
 pub use self::observe::{FacetObserved, ObserveFacets, ObserveScope, ObservedFacet};
+pub use self::query::{
+    FacetRefSelector, FacetSelector, QueriedFacet, QueriedFacetRef, QueryFacetRefs, QueryFacets,
+};
 pub use self::read::ReadFacets;
 pub use self::write::WriteFacets;
 
@@ -67,6 +71,7 @@ use crate::authority::{
     Actor, AuthorityProtocol, AuthorityServiceError, CapId, Capability, InspectCapability,
     MintCapability, ResolveActor, Rights, SignFacetClaim,
 };
+use crate::index::facet_ref::FacetRefStore;
 use crate::index::facet_set::FacetSetStore;
 use crate::schema::{SchemaHandle, SchemaRepo};
 use automerge::transaction::{CommitOptions, Transactable, Transaction};
@@ -299,10 +304,14 @@ pub struct DocsConfig {
     pub node_issuer: MultibaseKey,
     pub access: Arc<dyn DocAccess>,
     pub sql: SqlCtx,
-    /// The facet-set projection backing `ObserveFacets`, if the embedder runs
-    /// one. The embedder owns `FacetSetStore::run`; DocsRepo only reads the
-    /// committed projection. Without it, `ObserveFacets` is refused.
+    /// The facet-set projection backing `ObserveFacets` and `QueryFacets`, if
+    /// the embedder runs one. The embedder owns `FacetSetStore::run`; DocsRepo
+    /// only reads the committed projection. Without it, `ObserveFacets` and
+    /// `QueryFacets` are refused.
     pub facet_set: Option<Arc<FacetSetStore>>,
+    /// The declared-reference index backing `QueryFacetRefs`, if the embedder
+    /// runs one.
+    pub facet_ref: Option<Arc<FacetRefStore>>,
 }
 
 pub struct DocsService {
@@ -322,6 +331,7 @@ pub struct DocsService {
     branch: SchemaHandle,
     commands: Commands,
     facet_set: Option<Arc<FacetSetStore>>,
+    facet_ref: Option<Arc<FacetRefStore>>,
     /// Spawns the service's long-lived per-subscription tasks (the
     /// `ObserveFacets` pumps). Stopped after the host and the mint spawner,
     /// in reverse construction order.
@@ -470,6 +480,8 @@ service_protocol! {
             MergeDoc(MergeDoc),
             ReadFacets(ReadFacets),
             ListFacets(ListFacets),
+            QueryFacets(QueryFacets),
+            QueryFacetRefs(QueryFacetRefs),
             UnsafeInspectFacet(UnsafeInspectFacet),
             InspectFacetClaims(InspectFacetClaims)
         }
@@ -542,12 +554,17 @@ pub async fn boot(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsError
         branch,
         commands: Commands::open(config.sql).await?,
         facet_set: config.facet_set,
+        facet_ref: config.facet_ref,
         tasks: service_spawner,
     });
-    service.recover().await?;
     let (mint_stop, mint_spawner) = StopToken::new();
     let (host, host_stop) = Host::new(Arc::clone(&service));
     let client = Client::direct(Arc::clone(&host));
+    service.access.attach_docs(client.clone());
+    if let Err(error) = service.recover().await {
+        host_stop.then(mint_stop).then(service_stop).stop().await;
+        return Err(error);
+    }
     Ok((
         DocsRepo {
             service,

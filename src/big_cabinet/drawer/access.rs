@@ -1,0 +1,193 @@
+//! The [`DocAccess`] policy for an embedding with drawers: a doc is reachable through the drawers
+//! that list it, and a placement is a drawer.
+//!
+//! Built before DocsRepo (DocsRepo is booted with it) and completed by [`super::boot`], which
+//! hands it the docs client it needs to publish entries. The service and the policy are one
+//! [`Core`]: the same ledger namespace, the same projection, the same actor.
+
+use super::{
+    Core, DrawerId, DrawersError, METADATA_PLACEMENT, authority_error, drawer_object,
+    ledger::Ledger, parse_placement, state::State,
+};
+use crate::authority::{AuthorityProtocol, CapId, ResolveActor};
+use crate::doc::{AccessError, AccessFuture, AccessRequest, DocAccess, DocsProtocol};
+use big_cabinet_core::dmeta::{DocId, Uuid7};
+use big_cabinet_core::drawer::DrawerAccess as Access;
+use big_repo::SharedBigRepo;
+use service_utils_rs::{Client, RequestContext};
+use sqlx_utils_rs::SqlCtx;
+use std::collections::BTreeSet;
+use std::sync::{Arc, OnceLock};
+
+pub struct DrawerAccess {
+    pub(crate) core: Arc<Core>,
+}
+
+fn access_error(error: DrawersError) -> AccessError {
+    match error {
+        DrawersError::AuthorityUnavailable(_)
+        | DrawersError::DocsUnavailable(_)
+        | DrawersError::Storage(_)
+        | DrawersError::Keyhive(_) => AccessError::Unavailable(error.to_string()),
+        other => AccessError::Refused(other.to_string()),
+    }
+}
+
+impl DrawerAccess {
+    /// `issuer` is DrawerService's own actor capability, carrying `use` and `delegate`. `sql` is
+    /// the projection and ledger store; DocsRepo may share the same `SqlCtx`.
+    pub async fn open(
+        big_repo: SharedBigRepo,
+        authority: Client<AuthorityProtocol>,
+        issuer: CapId,
+        sql: SqlCtx,
+    ) -> Result<Arc<Self>, DrawersError> {
+        let actor = authority
+            .call(
+                RequestContext::root(),
+                ResolveActor {
+                    capability: issuer,
+                },
+            )
+            .await
+            .map_err(authority_error)?;
+        let state = State::open(sql.clone()).await?;
+        let ledger = Ledger::open(sql).await?;
+        let actor_cell = OnceLock::new();
+        actor_cell.set(actor).expect("fresh cell");
+        Ok(Arc::new(Self {
+            core: Arc::new(Core {
+                big_repo,
+                authority,
+                issuer,
+                actor: actor_cell,
+                docs: OnceLock::new(),
+                state,
+                ledger,
+            }),
+        }))
+    }
+
+    /// The object a standing grant on a drawer names; the embedder grants these to its actors.
+    pub fn object(access: Access, drawer: &DrawerId) -> String {
+        drawer_object(access, drawer)
+    }
+}
+
+impl DocAccess for DrawerAccess {
+    fn attach_docs(&self, docs: Client<DocsProtocol>) {
+        drop(self.core.docs.set(docs));
+    }
+
+    fn check<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        actor: Uuid7,
+        request: AccessRequest<'a>,
+    ) -> AccessFuture<'a, bool> {
+        Box::pin(async move {
+            // The service's own roster writes and metadata doc creations: it checked the caller.
+            if actor == self.core.actor().uuid {
+                return Ok(true);
+            }
+            let verdict = match request {
+                AccessRequest::Read(doc) => self
+                    .core
+                    .reach(context, actor, doc)
+                    .await
+                    .map(|reached| reached >= Some(Access::Read)),
+                AccessRequest::Write(doc) => self
+                    .core
+                    .reach(context, actor, doc)
+                    .await
+                    .map(|reached| reached >= Some(Access::Write)),
+                AccessRequest::Create { placement } => match parse_placement(placement) {
+                    Some(drawer) => self
+                        .core
+                        .effective(context, actor, &drawer)
+                        .await
+                        .map(|held| held >= Some(Access::Write)),
+                    None => Ok(false),
+                },
+            };
+            verdict.map_err(access_error)
+        })
+    }
+
+    /// Enter the new doc in the drawer it was created into and in both local drawers, at `Admin`:
+    /// a doc created in a drawer belongs to it. Idempotent — DocsRepo replays a placement a crash
+    /// interrupted — because `enter` grants and publishes only what is not already there.
+    fn place<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        actor: Uuid7,
+        document: &'a DocId,
+        placement: &'a str,
+    ) -> AccessFuture<'a, ()> {
+        Box::pin(async move {
+            let core = &self.core;
+            let mut targets = Vec::with_capacity(3);
+            match parse_placement(placement) {
+                Some(drawer) => targets.push(drawer),
+                None => {
+                    assert_eq!(
+                        placement, METADATA_PLACEMENT,
+                        "a placement that is not a drawer is refused by `check` before it is placed"
+                    );
+                    assert_eq!(
+                        actor,
+                        core.actor().uuid,
+                        "only DrawerService creates with the metadata placement"
+                    );
+                }
+            }
+            // The local drawers' own metadata docs are created before the local drawers exist.
+            if let Some(local) = core.state.local_if_set() {
+                targets.extend(local.both().into_iter().cloned());
+            }
+            targets.sort();
+            targets.dedup();
+            for drawer in &targets {
+                core.enter(context, drawer, document, Access::Admin)
+                    .await
+                    .map_err(access_error)?;
+            }
+            Ok(())
+        })
+    }
+
+    fn readable_in_drawer<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        actor: Uuid7,
+        drawer_id: &'a DocId,
+    ) -> AccessFuture<'a, Option<BTreeSet<DocId>>> {
+        Box::pin(async move {
+            let level = if actor == self.core.actor().uuid {
+                Some(Access::Admin)
+            } else {
+                self.core
+                    .effective(context, actor, drawer_id)
+                    .await
+                    .map_err(access_error)?
+            };
+            if level < Some(Access::Read) {
+                return Ok(None);
+            }
+            let docs = self
+                .core
+                .scoped_docs(context, actor, drawer_id)
+                .await
+                .map_err(access_error)?;
+            Ok(Some(
+                docs.into_iter()
+                    .filter_map(|(doc_id, (access, _))| (access >= Access::Read).then_some(doc_id))
+                    .collect(),
+            ))
+        })
+    }
+
+    fn subscribe_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        Some(self.core.state.subscribe_changes())
+    }
+}

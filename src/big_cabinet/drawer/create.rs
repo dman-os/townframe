@@ -1,0 +1,482 @@
+//! CreateDrawer: a new single-group drawer (two Keyhive groups and a metadata doc), or an existing
+//! doc declared a self-doc drawer.
+
+use super::*;
+use crate::doc::pipeline::digest;
+use crate::doc::{CreateDoc, WriteFacets};
+use big_cabinet_core::drawer::{Drawer, DrawerRoster};
+use ledger::Op;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "layout",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CreateLayout {
+    /// Declare `doc` a drawer of itself: write `drawer/main` on it. Needs Write on the doc; the
+    /// creator is granted Admin on the drawer, as for a collection.
+    SelfDoc { doc_id: DocId },
+    /// A new metadata doc naming two fresh groups. Needs `use` on [`CREATE_DRAWER_OBJECT`]; the
+    /// creator is granted Admin on the new drawer.
+    SingleGroup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDrawer {
+    pub capability: CapId,
+    pub command: CommandId,
+    #[serde(flatten)]
+    pub layout: CreateLayout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawerCreated {
+    pub drawer_id: DrawerId,
+    pub heads: Vec<automerge::ChangeHash>,
+}
+
+impl Operation for CreateDrawer {
+    type Output = DrawerCreated;
+    type Error = DrawersError;
+    const XRPC: XrpcOperation =
+        XrpcOperation::procedure("org.example.daybook.drawers.createDrawer")
+            .with_schemas("DrawerCreated", "DrawersError");
+}
+
+fn facet_value(facet: &impl Serialize) -> serde_json::Value {
+    serde_json::to_value(facet).expect("a drawer facet serializes")
+}
+
+/// The record a descriptor states. Carrying, not operating: a foreign layout is stored as it
+/// arrived, and operating code refuses it at `layout_kind()`, not here.
+pub(crate) fn record_of(drawer_id: &DrawerId, descriptor: &Drawer) -> DrawerRecord {
+    DrawerRecord {
+        drawer_id: drawer_id.clone(),
+        descriptor: descriptor.clone(),
+    }
+}
+
+impl Core {
+    /// Declare `doc` a self-doc drawer by writing the descriptor on it with the caller's own
+    /// capability: DocsRepo enforces Write, signs the facet as the caller, and its command ledger
+    /// makes the command idempotent. The drawer ledger row ensures that if a crash falls after the
+    /// descriptor write and before the projection record or the creator's Admin grant, boot
+    /// finishes both from the committed descriptor even if the caller never retries; if the crash
+    /// fell before the descriptor write, boot drops the row.
+    async fn create_self_doc(
+        &self,
+        context: &RequestContext,
+        capability: CapId,
+        command: CommandId,
+        doc_id: DocId,
+    ) -> Result<DrawerCreated, DrawersError> {
+        let actor = self.resolve(context, capability).await?;
+        if self.state.drawer(&doc_id).await?.is_some() {
+            return Err(DrawersError::AlreadyDrawer(doc_id));
+        }
+        if self.reach(context, actor.uuid, &doc_id).await? < Some(Access::Write) {
+            return Err(DrawersError::Denied);
+        }
+        let request_digest = digest(&("createSelfDoc", actor.uuid, &doc_id));
+        self.ledger
+            .run(
+                &command,
+                request_digest,
+                actor.uuid,
+                Op::CreateSelfDoc {
+                    doc_id: doc_id.clone(),
+                },
+                |_| async {
+                    let receipt = self
+                        .docs()
+                        .call(
+                            context.child(),
+                            WriteFacets {
+                                capability,
+                                command: Some(command.clone()),
+                                doc_id: doc_id.clone(),
+                                mode: WriteMode::AtCurrent,
+                                set: BTreeMap::from([(
+                                    drawer_key(),
+                                    facet_value(&Drawer::self_doc()),
+                                )]),
+                                remove: Default::default(),
+                            },
+                        )
+                        .await
+                        .map_err(docs_error)?;
+                    self.state.put_drawer(&doc_id, &Drawer::self_doc()).await?;
+                    self.grant(context, actor.uuid, drawer_object(Access::Admin, &doc_id))
+                        .await?;
+                    Ok(DrawerCreated {
+                        drawer_id: doc_id,
+                        heads: receipt.heads,
+                    })
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn resume_create_self_doc(
+        &self,
+        context: &RequestContext,
+        row: &ledger::Row,
+    ) -> Result<(), DrawersError> {
+        let Op::CreateSelfDoc { doc_id } = &row.op else {
+            unreachable!(
+                "resume_create_self_doc runs under a create-self-doc row: {:?}",
+                row.op
+            )
+        };
+        let read = self
+            .docs()
+            .call(
+                context.child(),
+                crate::doc::ReadFacets {
+                    capability: self.issuer,
+                    doc_id: doc_id.clone(),
+                    at: crate::doc::At::Current,
+                    facets: Some(std::collections::BTreeSet::from([drawer_key()])),
+                    optimistic: false,
+                },
+            )
+            .await
+            .map_err(docs_error)?;
+        match read.facets.get(&drawer_key()) {
+            Some(crate::doc::FacetRead::Accepted { value, .. }) => {
+                let descriptor: Drawer = serde_json::from_value(value.clone()).map_err(|error| {
+                    DrawersError::RosterUnreadable(format!("{doc_id} descriptor: {error}"))
+                })?;
+                self.state.put_drawer(doc_id, &descriptor).await?;
+                self.grant(context, row.actor, drawer_object(Access::Admin, doc_id))
+                    .await?;
+                self.ledger
+                    .finish(
+                        &row.command,
+                        &DrawerCreated {
+                            drawer_id: doc_id.clone(),
+                            heads: read.heads,
+                        },
+                    )
+                    .await
+            }
+            _ => self.ledger.forget(&row.command).await,
+        }
+    }
+
+    /// A new single-group drawer for an already authorized `actor`, run under the ledger so a
+    /// crash at any point resumes: before the groups are recorded they are made again (two groups
+    /// made but not recorded are leaked — Keyhive has no group deletion, and an unreferenced group
+    /// is inert); after, the recorded ones are reused.
+    async fn create_single_group(
+        &self,
+        context: &RequestContext,
+        command: &CommandId,
+        actor: Uuid7,
+    ) -> Result<DrawerCreated, DrawersError> {
+        let request_digest = digest(&("createDrawer", actor));
+        self.ledger
+            .run(
+                command,
+                request_digest,
+                actor,
+                Op::Create { groups: None },
+                |op| self.create_collection(context, command, actor, op),
+            )
+            .await
+    }
+
+    /// Everything after the row exists: make or look up the groups, create the metadata doc as
+    /// this service under `command` (DocsRepo's own ledger replays it if a crash already created
+    /// it), put the meta group in charge of that doc, record the drawer, and grant `actor` Admin.
+    pub(crate) async fn create_collection(
+        &self,
+        context: &RequestContext,
+        command: &CommandId,
+        actor: Uuid7,
+        op: Op,
+    ) -> Result<DrawerCreated, DrawersError> {
+        let Op::Create { groups } = op else {
+            unreachable!("create_collection runs under a create row: {op:?}")
+        };
+        let (meta, docs) = match groups {
+            Some(DrawerGroups {
+                meta_group,
+                docs_group,
+            }) => {
+                let group = |key: GroupKey| async move {
+                    self.big_repo.get_group_by_id(key.0).await.ok_or_else(|| {
+                        DrawersError::Keyhive(format!("group {key} is not in keyhive"))
+                    })
+                };
+                (group(meta_group).await?, group(docs_group).await?)
+            }
+            None => {
+                let meta = self
+                    .big_repo
+                    .create_group_with_parents(Vec::new())
+                    .await
+                    .map_err(keyhive_error)?;
+                let docs = self
+                    .big_repo
+                    .create_group_with_parents(Vec::new())
+                    .await
+                    .map_err(keyhive_error)?;
+                self.ledger
+                    .record(
+                        command,
+                        &Op::Create {
+                            groups: Some(DrawerGroups {
+                                meta_group: group_key(&meta),
+                                docs_group: group_key(&docs),
+                            }),
+                        },
+                    )
+                    .await?;
+                (meta, docs)
+            }
+        };
+        let descriptor = Drawer::single_group(group_key(&meta), group_key(&docs));
+        let receipt = self
+            .docs()
+            .call(
+                context.child(),
+                CreateDoc {
+                    capability: self.issuer,
+                    command: command.clone(),
+                    placement: METADATA_PLACEMENT.into(),
+                    facets: BTreeMap::from([
+                        (drawer_key(), facet_value(&descriptor)),
+                        (roster_key(), facet_value(&DrawerRoster::inline())),
+                    ]),
+                },
+            )
+            .await
+            .map_err(docs_error)?;
+        self.big_repo
+            .grant_doc_access(receipt.doc_id.clone(), meta, KeyhiveAccess::Admin)
+            .await
+            .map_err(keyhive_error)?;
+        self.state.put_drawer(&receipt.doc_id, &descriptor).await?;
+        self.grant(
+            context,
+            actor,
+            drawer_object(Access::Admin, &receipt.doc_id),
+        )
+        .await?;
+        Ok(DrawerCreated {
+            drawer_id: receipt.doc_id,
+            heads: receipt.heads,
+        })
+    }
+
+    pub(crate) async fn resume_create(
+        &self,
+        context: &RequestContext,
+        row: &ledger::Row,
+    ) -> Result<(), DrawersError> {
+        let created = self
+            .create_collection(context, &row.command, row.actor, row.op.clone())
+            .await?;
+        self.ledger.finish(&row.command, &created).await
+    }
+}
+
+impl DrawerService {
+    async fn create(
+        &self,
+        context: &RequestContext,
+        params: CreateDrawer,
+    ) -> Result<DrawerCreated, DrawersError> {
+        match params.layout {
+            CreateLayout::SelfDoc { doc_id } => {
+                self.core
+                    .create_self_doc(context, params.capability, params.command, doc_id)
+                    .await
+            }
+            CreateLayout::SingleGroup => {
+                let actor = self.core.resolve(context, params.capability).await?;
+                let rights = self
+                    .core
+                    .authority
+                    .call(
+                        context.child(),
+                        CheckGrant {
+                            via: self.core.issuer,
+                            subject: actor.uuid,
+                            object: CREATE_DRAWER_OBJECT.into(),
+                        },
+                    )
+                    .await
+                    .map_err(authority_error)?;
+                if !rights.contains(Rights::USE) {
+                    return Err(DrawersError::Denied);
+                }
+                self.core
+                    .create_single_group(context, &params.command, actor.uuid)
+                    .await
+            }
+        }
+    }
+
+    /// Create the two local drawers on first boot and record them; later boots find them. Each
+    /// goes through the ledger under a fixed command like a request, so a boot interrupted between
+    /// the groups and the record resumes it, and one interrupted between the two drawers or before
+    /// `set_local` replays the finished one.
+    pub(super) async fn ensure_local_drawers(&self) -> Result<(), DrawersError> {
+        if self.core.state.local_if_set().is_some() {
+            return Ok(());
+        }
+        let context = RequestContext::root();
+        let actor = self.core.actor().uuid;
+        let mut created = Vec::with_capacity(2);
+        for command in ["local drawer present", "local drawer originated"] {
+            let command = CommandId::try_from(command.to_owned())
+                .expect("the local drawer commands are within bounds");
+            created.push(
+                self.core
+                    .create_single_group(&context, &command, actor)
+                    .await?
+                    .drawer_id,
+            );
+        }
+        // The registry is a fresh self-doc drawer: a metadata doc that is its own drawer, its
+        // known entries are bookkeeping facets on it, and a foreign layout arriving from a
+        // peer is carried rather than operated, as anywhere else.
+        let command = CommandId::try_from("local drawer registry".to_owned())
+            .expect("the registry command is within bounds");
+        let receipt = self
+            .core
+            .docs()
+            .call(
+                context.child(),
+                CreateDoc {
+                    capability: self.core.issuer,
+                    command: command.clone(),
+                    placement: METADATA_PLACEMENT.into(),
+                    facets: BTreeMap::from([(drawer_key(), facet_value(&Drawer::self_doc()))]),
+                },
+            )
+            .await
+            .map_err(docs_error)?;
+        self.core
+            .state
+            .put_drawer(&receipt.doc_id, &Drawer::self_doc())
+            .await?;
+        self.core
+            .grant(
+                &context,
+                actor,
+                drawer_object(Access::Admin, &receipt.doc_id),
+            )
+            .await?;
+        let [present, originated]: [DrawerId; 2] =
+            created.try_into().expect("two local drawers were created");
+        self.core
+            .state
+            .set_local(LocalDrawers {
+                present_id: present,
+                originated_id: originated,
+                registry_id: receipt.doc_id,
+            })
+            .await
+    }
+}
+
+impl Handler<CreateDrawer> for DrawerService {
+    async fn call(
+        &self,
+        request: Envelope<CreateDrawer>,
+    ) -> Result<ResponseEnvelope<DrawerCreated>, DrawersError> {
+        Ok(self.create(&request.context, request.params).await?.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use automerge::ChangeHash;
+
+    fn command() -> CommandId {
+        CommandId::try_from("cmd-1".to_owned()).expect("a command id")
+    }
+
+    utils_rs::table_tests! {
+        create_drawer_wire_shape,
+        (request, expected),
+        {
+            let value = serde_json::to_value(&request).expect("serialize");
+            assert_eq!(value, expected);
+            let back: CreateDrawer = serde_json::from_value(value).expect("deserialize");
+            assert_eq!(back, request);
+        }
+    }
+
+    create_drawer_wire_shape! {
+        self_doc: (
+            CreateDrawer {
+                capability: CapId::from_bytes([1; 16]),
+                command: command(),
+                layout: CreateLayout::SelfDoc { doc_id: DocId::new([2; 32]) },
+            },
+            serde_json::json!({
+                "capability": CapId::from_bytes([1; 16]),
+                "command": "cmd-1",
+                "layout": "selfDoc",
+                "docId": DocId::new([2; 32]).to_string(),
+            })
+        ),
+        single_group: (
+            CreateDrawer {
+                capability: CapId::from_bytes([1; 16]),
+                command: command(),
+                layout: CreateLayout::SingleGroup,
+            },
+            serde_json::json!({
+                "capability": CapId::from_bytes([1; 16]),
+                "command": "cmd-1",
+                "layout": "singleGroup",
+            })
+        ),
+    }
+
+    #[test]
+    fn a_layout_is_required() {
+        let error = serde_json::from_value::<CreateDrawer>(serde_json::json!({
+            "capability": CapId::from_bytes([1; 16]),
+            "command": "cmd-1",
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("layout"), "{error}");
+        let error = serde_json::from_value::<CreateDrawer>(serde_json::json!({
+            "capability": CapId::from_bytes([1; 16]),
+            "command": "cmd-1",
+            "layout": "selfDoc",
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("doc"), "{error}");
+    }
+
+    #[test]
+    fn a_receipt_names_the_drawer_and_its_heads() {
+        let created = DrawerCreated {
+            drawer_id: DocId::new([3; 32]),
+            heads: vec![ChangeHash([4; 32])],
+        };
+        let value = serde_json::to_value(&created).expect("serialize");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "drawerId": DocId::new([3; 32]).to_string(),
+                "heads": [ChangeHash([4; 32])],
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<DrawerCreated>(value).expect("deserialize"),
+            created
+        );
+    }
+}

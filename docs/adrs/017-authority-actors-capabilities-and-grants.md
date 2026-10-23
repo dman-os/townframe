@@ -125,7 +125,7 @@ produced.
 
 ## Composition
 
-The embedder opens each subsystem — DocsRepo, DrawerRepo, the runtime — from
+The embedder opens each subsystem — DocsRepo, DrawerService, the runtime — from
 the operator root and hands it its actor cap. A plug is an actor under the
 runtime (`rt/plugs/ocr`).
 

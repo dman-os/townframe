@@ -6,7 +6,7 @@ use super::*;
 use serde_json::Value;
 
 /// Create a document holding `facets`, then place it through the access policy. `placement` is the
-/// policy's own spelling of where the document goes (for DrawerRepo, a drawer); this repository
+/// policy's own spelling of where the document goes (for DrawerService, a drawer); this repository
 /// does not interpret it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

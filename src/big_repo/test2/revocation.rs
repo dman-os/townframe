@@ -571,3 +571,69 @@ async fn tier6_remote_unauthorized_backend_must_not_ack_as_noop() -> crate::Res<
     drop(owner_doc);
     Ok(())
 }
+
+// A group added to another group and removed again is no longer a member: the removal
+// revokes the delegation and rotates the keys of the documents the outer group governs.
+#[tokio::test(flavor = "multi_thread")]
+async fn tier6_remove_member_from_group_withdraws_the_membership() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let owner = super::harness::topo::Node::boot(238, "Owner").await?;
+    let guard = super::harness::topo::ShutdownGuard::from(vec![owner]);
+    let repo = &guard.node(0).repo;
+
+    let outer = repo.create_group_with_parents(vec![]).await?;
+    let inner = repo.create_group_with_parents(vec![]).await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "title", "governed"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let doc = repo
+        .create_doc_with_parents(initial, vec![outer.clone().into()])
+        .await?;
+    let doc_id = doc.document_id();
+    let inner_ident = keyhive_core::principal::identifier::Identifier::from(inner.id());
+    let outer_ident = keyhive_core::principal::identifier::Identifier::from(outer.id());
+    let doc_ident = keyhive_core::principal::identifier::Identifier::from(
+        ed25519_dalek::VerifyingKey::from_bytes(&doc_id.to_bytes32().expect(ERROR_IMPOSSIBLE))
+            .expect("doc id must be a verifying key"),
+    );
+
+    repo.add_member_to_group(inner.clone(), &outer, Access::Read)
+        .await?;
+    assert_eq!(
+        repo.keyhive()
+            .agent_access_on(&inner_ident, outer_ident)
+            .await,
+        Some(Access::Read)
+    );
+    assert_eq!(
+        repo.keyhive()
+            .agent_access_on(&inner_ident, doc_ident)
+            .await,
+        Some(Access::Read),
+        "membership of the outer group reaches the document it governs"
+    );
+
+    repo.remove_member_from_group(inner.clone(), &outer).await?;
+    assert_eq!(
+        repo.keyhive()
+            .agent_access_on(&inner_ident, outer_ident)
+            .await,
+        None,
+        "the removed member is no longer reported on the group"
+    );
+    assert_eq!(
+        repo.keyhive()
+            .agent_access_on(&inner_ident, doc_ident)
+            .await,
+        None,
+        "the removed member no longer reaches the governed document"
+    );
+
+    // Removing a member the group does not list is an empty update, not an error.
+    repo.remove_member_from_group(inner, &outer).await?;
+
+    drop(doc);
+    drop(guard);
+    Ok(())
+}

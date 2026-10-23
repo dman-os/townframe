@@ -608,6 +608,7 @@ mod tests {
             access: Arc::new(LedgerAccess::new(authority.client.clone(), issuer)),
             sql: SqlCtx::memory().await.unwrap(),
             facet_set: None,
+            facet_ref: None,
         }
     }
 

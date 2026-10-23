@@ -2,7 +2,7 @@
 //!
 //! DocsRepo does not know what a drawer is. It asks a [`DocAccess`] policy, owned above
 //! it, whether an actor may act on a document, and hands that policy the document it created so the
-//! policy can place it (for DrawerRepo: enter it in the named drawer and grant node authority).
+//! policy can place it (for DrawerService: enter it in the named drawer and the local drawers).
 //! Containment — "doc X is in drawer D, so write on D covers X" — is the policy's decision, because
 //! the policy is the one that named D.
 //!
@@ -14,8 +14,10 @@
 use crate::authority::{
     AuthorityProtocol, AuthorityServiceError, CapId, CheckGrant, GrantAccess, Rights,
 };
+use crate::doc::DocsProtocol;
 use big_cabinet_core::dmeta::{DocId, Uuid7};
 use service_utils_rs::{Client, ClientError, RequestContext};
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -37,6 +39,10 @@ pub enum AccessError {
 }
 
 pub trait DocAccess: Send + Sync + 'static {
+    /// Hand the policy a client to the booted [`DocsProtocol`] before boot recovery replays any
+    /// interrupted placements.
+    fn attach_docs(&self, _docs: Client<DocsProtocol>) {}
+
     /// Whether `actor` may perform `request`. A pure policy read: nothing is minted or recorded.
     fn check<'a>(
         &'a self,
@@ -55,6 +61,27 @@ pub trait DocAccess: Send + Sync + 'static {
         document: &'a DocId,
         placement: &'a str,
     ) -> AccessFuture<'a, ()>;
+
+    /// Every document in `drawer_id` that `actor` may read (`Read` or stronger) through that
+    /// drawer, or `Ok(None)` when `actor` does not hold at least `Read` on `drawer_id`.
+    fn readable_in_drawer<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        _actor: Uuid7,
+        _drawer_id: &'a DocId,
+    ) -> AccessFuture<'a, Option<BTreeSet<DocId>>> {
+        Box::pin(async {
+            Err(AccessError::Refused(
+                "drawers are not configured on this repository".into(),
+            ))
+        })
+    }
+
+    /// A watch receiver that ticks whenever drawer membership or standing grants change, or `None`
+    /// when the policy has no drawer membership changes to report.
+    fn subscribe_changes(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        None
+    }
 }
 
 pub struct LedgerAccess {
