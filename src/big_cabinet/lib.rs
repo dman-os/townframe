@@ -1,6 +1,8 @@
 pub mod authority;
+mod capability;
 pub mod doc;
 pub mod drawer;
+pub mod grants;
 pub mod index;
 pub mod schema;
 

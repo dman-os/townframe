@@ -9,7 +9,7 @@ use super::{
     Core, DrawerId, DrawersError, METADATA_PLACEMENT, authority_error, drawer_object,
     ledger::Ledger, parse_placement, state::State,
 };
-use crate::authority::{AuthorityProtocol, CapId, ResolveActor};
+use crate::authority::{AuthorityProtocol, CapId, Namespace, ResolveActor};
 use crate::doc::{AccessError, AccessFuture, AccessRequest, DocAccess, DocsProtocol};
 use big_cabinet_core::dmeta::{DocId, Uuid7};
 use big_cabinet_core::drawer::DrawerAccess as Access;
@@ -40,6 +40,7 @@ impl DrawerAccess {
         big_repo: SharedBigRepo,
         authority: Client<AuthorityProtocol>,
         issuer: CapId,
+        namespace: Namespace,
         sql: SqlCtx,
     ) -> Result<Arc<Self>, DrawersError> {
         let actor = authority
@@ -47,20 +48,36 @@ impl DrawerAccess {
             .await
             .map_err(authority_error)?;
         let state = State::open(sql.clone()).await?;
+        let grants = Arc::new(
+            crate::grants::Grants::open(sql.clone(), authority.clone(), namespace)
+                .await
+                .map_err(super::grant_error)?,
+        );
         let ledger = Ledger::open(sql).await?;
         let actor_cell = OnceLock::new();
         actor_cell.set(actor).expect("fresh cell");
         Ok(Arc::new(Self {
             core: Arc::new(Core {
                 big_repo,
+                capabilities: super::DomainCapabilities::new(
+                    authority.clone(),
+                    namespace,
+                    "DrawerService/scope/v2/",
+                ),
+                grants,
                 authority,
                 issuer,
+                namespace,
                 actor: actor_cell,
                 docs: OnceLock::new(),
                 state,
                 ledger,
             }),
         }))
+    }
+
+    pub fn grants(&self) -> &Arc<crate::grants::Grants> {
+        &self.core.grants
     }
 
     /// The object a standing grant on a drawer names; the embedder grants these to its actors.
@@ -72,6 +89,66 @@ impl DrawerAccess {
 impl DocAccess for DrawerAccess {
     fn attach_docs(&self, docs: Client<DocsProtocol>) {
         drop(self.core.docs.set(docs));
+    }
+
+    fn prove<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        actor: Uuid7,
+        scope: &'a crate::doc::DocScope,
+    ) -> AccessFuture<'a, Vec<CapId>> {
+        Box::pin(async move {
+            if actor == self.core.actor().actor_id {
+                return Ok(vec![self.core.namespace.capability]);
+            }
+            let mut dependencies = Vec::new();
+            for (doc, needed) in scope
+                .read
+                .difference(&scope.write)
+                .map(|doc| (doc, Access::Read))
+                .chain(scope.write.iter().map(|doc| (doc, Access::Write)))
+            {
+                let (held, proof) = self
+                    .core
+                    .reach(context, actor, doc)
+                    .await
+                    .map_err(access_error)?
+                    .ok_or_else(|| AccessError::Refused("document is not reachable".into()))?;
+                if held < needed {
+                    return Err(AccessError::Refused("insufficient document access".into()));
+                }
+                dependencies.extend(proof);
+            }
+            for placement in &scope.create {
+                let drawer = parse_placement(placement)
+                    .ok_or_else(|| AccessError::Refused("invalid drawer placement".into()))?;
+                let (held, proof) = self
+                    .core
+                    .effective(context, actor, &drawer)
+                    .await
+                    .map_err(access_error)?
+                    .ok_or_else(|| AccessError::Refused("placement is not reachable".into()))?;
+                if held < Access::Write {
+                    return Err(AccessError::Refused("insufficient placement access".into()));
+                }
+                dependencies.extend(proof);
+            }
+            for (drawer, needed) in &scope.drawers {
+                let (held, proof) = self
+                    .core
+                    .effective(context, actor, drawer)
+                    .await
+                    .map_err(access_error)?
+                    .ok_or_else(|| AccessError::Refused("drawer is not reachable".into()))?;
+                if held < *needed {
+                    return Err(AccessError::Refused("insufficient drawer access".into()));
+                }
+                dependencies.extend(proof);
+            }
+            dependencies.sort_unstable_by_key(|capability| *capability.as_bytes());
+            dependencies.dedup();
+            Ok(dependencies)
+        })
     }
 
     fn check<'a>(
@@ -90,18 +167,18 @@ impl DocAccess for DrawerAccess {
                     .core
                     .reach(context, actor, doc)
                     .await
-                    .map(|reached| reached >= Some(Access::Read)),
+                    .map(|reached| reached.is_some_and(|(held, _)| held >= Access::Read)),
                 AccessRequest::Write(doc) => self
                     .core
                     .reach(context, actor, doc)
                     .await
-                    .map(|reached| reached >= Some(Access::Write)),
+                    .map(|reached| reached.is_some_and(|(held, _)| held >= Access::Write)),
                 AccessRequest::Create { placement } => match parse_placement(placement) {
                     Some(drawer) => self
                         .core
                         .effective(context, actor, &drawer)
                         .await
-                        .map(|held| held >= Some(Access::Write)),
+                        .map(|reached| reached.is_some_and(|(held, _)| held >= Access::Write)),
                     None => Ok(false),
                 },
             };
@@ -165,6 +242,7 @@ impl DocAccess for DrawerAccess {
                     .effective(context, actor, drawer_id)
                     .await
                     .map_err(access_error)?
+                    .map(|(access, _)| access)
             };
             let Some(level) = level.filter(|level| *level >= Access::Read) else {
                 return Ok(None);
@@ -199,6 +277,7 @@ impl DocAccess for DrawerAccess {
             self.core
                 .effective(context, actor, drawer_id)
                 .await
+                .map(|proof| proof.map(|(access, _)| access))
                 .map_err(access_error)
         })
     }

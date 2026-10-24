@@ -11,7 +11,7 @@ impl DrawerService {
         params: GetDrawer,
     ) -> Result<DrawerView, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.authorization).await?;
+        let caller = core.invocation(context, params.capability).await?;
         let access = core
             .level(context, &caller.authority, &params.drawer_id)
             .await?
@@ -48,14 +48,14 @@ mod tests {
     #[test]
     fn a_request_names_the_drawer() {
         let request = GetDrawer {
-            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
+            capability: CapId::from_bytes([1; 16]),
             drawer_id: DocId::new([2; 32]),
         };
         let value = serde_json::to_value(&request).expect("serialize");
         assert_eq!(
             value,
             serde_json::json!({
-                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
+                "capability": CapId::from_bytes([1; 16]),
                 "drawerId": DocId::new([2; 32]).to_string(),
             })
         );

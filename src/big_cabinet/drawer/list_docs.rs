@@ -22,7 +22,7 @@ impl DrawerService {
         params: ListDocs,
     ) -> Result<Vec<ListedDoc>, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.authorization).await?;
+        let caller = core.invocation(context, params.capability).await?;
         let level = core
             .level(context, &caller.authority, &params.drawer_id)
             .await?
@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn a_request_pages_and_a_listing_spells_what_the_drawer_confers() {
         let request = ListDocs {
-            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
+            capability: CapId::from_bytes([1; 16]),
             drawer_id: DocId::new([2; 32]),
             offset: 2,
             limit: Some(10),
@@ -74,7 +74,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
+                "capability": CapId::from_bytes([1; 16]),
                 "drawerId": DocId::new([2; 32]).to_string(),
                 "offset": 2,
                 "limit": 10,

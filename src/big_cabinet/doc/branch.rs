@@ -10,7 +10,7 @@ impl DocsService {
         context: &RequestContext,
         params: BranchDoc,
     ) -> Result<WriteReceipt, DocsError> {
-        let caller = self.invocation(context, params.authorization).await?;
+        let caller = self.invocation(context, params.capability).await?;
         let actor = &caller.signer;
         self.authorize(
             context,
@@ -34,10 +34,7 @@ impl DocsService {
             },
         )
         .await?;
-        let owner_id = match caller.authority {
-            DomainAuthority::Identity(actor) => Some(actor),
-            DomainAuthority::Scoped(_) => None,
-        };
+        let owner_id = caller.originating_actor;
         let request_digest = digest(&(
             "branch",
             actor.actor_id,

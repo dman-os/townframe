@@ -3,10 +3,7 @@ source: src/big_cabinet/document/e2e/wire.rs
 expression: request
 ---
 {
-  "authorization": {
-    "authority": "01010101-0101-0101-0101-010101010101",
-    "signer": "01010101-0101-0101-0101-010101010101"
-  },
+  "capability": "01010101-0101-0101-0101-010101010101",
   "command": "branch-1",
   "docId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
   "at": {

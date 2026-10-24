@@ -10,7 +10,7 @@ impl DocsService {
         context: &RequestContext,
         params: WriteFacets,
     ) -> Result<WriteReceipt, DocsError> {
-        let caller = self.invocation(context, params.authorization).await?;
+        let caller = self.invocation(context, params.capability).await?;
         let actor = &caller.signer;
         self.authorize(
             context,
@@ -58,7 +58,7 @@ impl DocsService {
         let result = self
             .commit_write(
                 context,
-                params.authorization.signer,
+                actor.capability,
                 &params.mode,
                 &mut plan,
                 params.command.as_ref(),

@@ -10,7 +10,7 @@ impl DrawerService {
         params: ListDrawers,
     ) -> Result<Vec<ListedDrawer>, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.authorization).await?;
+        let caller = core.invocation(context, params.capability).await?;
         core.sync_discovered(context).await?;
         let mut listed = Vec::new();
         for record in core.state.drawers().await? {
@@ -45,14 +45,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_request_carries_only_authorization() {
+    fn a_request_carries_only_capability() {
         let request = ListDrawers {
-            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
+            capability: CapId::from_bytes([1; 16]),
         };
         let value = serde_json::to_value(&request).expect("serialize");
         assert_eq!(
             value,
-            serde_json::json!({ "authorization": Authorization::identity(CapId::from_bytes([1; 16])) })
+            serde_json::json!({ "capability": CapId::from_bytes([1; 16]) })
         );
         assert_eq!(
             serde_json::from_value::<ListDrawers>(value).expect("deserialize"),

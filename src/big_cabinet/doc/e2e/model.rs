@@ -210,6 +210,16 @@ impl Model {
     }
 
     async fn check(&self, node: &Node, actor: &Actor, snapshot: &Snapshot, at: At, context: &str) {
+        let capability = node
+            .capability(
+                actor,
+                DocScope {
+                    read: BTreeSet::from([self.document.clone()]),
+                    ..DocScope::default()
+                },
+            )
+            .await
+            .unwrap();
         // Rewrite every facet of a response to the candidate its slot matched, so the comparisons
         // below stay whole-object equalities.
         let normalize = |read: FacetsRead| FacetsRead {
@@ -261,7 +271,7 @@ impl Model {
                 .call(
                     RequestContext::root(),
                     ReadFacets {
-                        authorization: Authorization::identity(actor.capability),
+                        capability,
                         doc_id: self.document.clone(),
                         at: at.clone(),
                         facets: Some(SLOTS.map(key).into_iter().collect()),
@@ -299,7 +309,7 @@ impl Model {
             .call(
                 RequestContext::root(),
                 ListFacets {
-                    authorization: Authorization::identity(actor.capability),
+                    capability,
                     doc_id: self.document.clone(),
                     at,
                 },
@@ -443,22 +453,44 @@ enum Op {
 
 #[derive(Clone)]
 enum Request {
-    Create(CreateDoc),
-    Write(WriteFacets),
+    Create(Actor, CreateDoc),
+    Write(Actor, WriteFacets),
 }
 
 impl Request {
     async fn call(&self, node: &Node) -> Result<WriteReceipt, DocsError> {
         match self {
-            Self::Create(request) => op(node
+            Self::Create(_, request) => op(node
                 .client()
                 .call(RequestContext::root(), request.clone())
                 .await),
-            Self::Write(request) => op(node
+            Self::Write(_, request) => op(node
                 .client()
                 .call(RequestContext::root(), request.clone())
                 .await),
         }
+    }
+
+    async fn reacquire(&mut self, node: &Node) {
+        let (actor, capability, scope) = match self {
+            Self::Create(actor, request) => (
+                actor,
+                &mut request.capability,
+                DocScope {
+                    create: BTreeSet::from([request.placement.clone()]),
+                    ..DocScope::default()
+                },
+            ),
+            Self::Write(actor, request) => (
+                actor,
+                &mut request.capability,
+                DocScope {
+                    write: BTreeSet::from([request.doc_id.clone()]),
+                    ..DocScope::default()
+                },
+            ),
+        };
+        *capability = node.capability(actor, scope).await.unwrap();
     }
 }
 
@@ -476,12 +508,24 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
         .filter(|(slot, _)| initial_mask & (1 << slot) != 0)
         .map(|(_, name)| (key(name), note("initial")))
         .collect();
-    let create = Request::Create(CreateDoc {
-        authorization: Authorization::identity(owner.capability),
-        command: format!("{case}/create").try_into().unwrap(),
-        placement: PLACEMENT.into(),
-        facets: initial.clone(),
-    });
+    let create = Request::Create(
+        owner.clone(),
+        CreateDoc {
+            capability: node
+                .capability(
+                    owner,
+                    DocScope {
+                        create: BTreeSet::from([PLACEMENT.into()]),
+                        ..DocScope::default()
+                    },
+                )
+                .await
+                .unwrap(),
+            command: format!("{case}/create").try_into().unwrap(),
+            placement: PLACEMENT.into(),
+            facets: initial.clone(),
+        },
+    );
     let created = create.call(node).await.unwrap();
     let mut model = Model::new(&created, &initial);
     let mut commands = vec![(create, created)];
@@ -502,25 +546,36 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
                 let changes = edit.changes(&format!("{case}/{step}"));
                 let mode = mode.resolved(&model);
                 let context = format!("{context}, resolved base {mode:?}");
-                let request = Request::Write(WriteFacets {
-                    authorization: Authorization::identity(actor.capability),
-                    command: Some(format!("{case}/{step}").try_into().unwrap()),
-                    doc_id: model.document.clone(),
-                    mode: mode.request(&model),
-                    set: changes
-                        .iter()
-                        .filter_map(|(&slot, value)| {
-                            value
-                                .as_ref()
-                                .map(|value| (key(SLOTS[slot]), value.clone()))
-                        })
-                        .collect(),
-                    remove: changes
-                        .iter()
-                        .filter(|(_, value)| value.is_none())
-                        .map(|(&slot, _)| key(SLOTS[slot]))
-                        .collect(),
-                });
+                let scope = if author == Author::Other && !shared_write {
+                    DocScope::default()
+                } else {
+                    DocScope {
+                        write: BTreeSet::from([model.document.clone()]),
+                        ..DocScope::default()
+                    }
+                };
+                let request = Request::Write(
+                    actor.clone(),
+                    WriteFacets {
+                        capability: node.capability(actor, scope).await.unwrap(),
+                        command: Some(format!("{case}/{step}").try_into().unwrap()),
+                        doc_id: model.document.clone(),
+                        mode: mode.request(&model),
+                        set: changes
+                            .iter()
+                            .filter_map(|(&slot, value)| {
+                                value
+                                    .as_ref()
+                                    .map(|value| (key(SLOTS[slot]), value.clone()))
+                            })
+                            .collect(),
+                        remove: changes
+                            .iter()
+                            .filter(|(_, value)| value.is_none())
+                            .map(|(&slot, _)| key(SLOTS[slot]))
+                            .collect(),
+                    },
+                );
                 let actual = request.call(node).await;
                 if author == Author::Other && !shared_write {
                     assert_eq!(actual, Err(DocsError::Denied), "{context}");
@@ -561,7 +616,12 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
                 let (request, receipt) = &commands[seed % commands.len()];
                 assert_eq!(request.call(node).await, Ok(receipt.clone()), "{context}");
             }
-            Op::Restart => node.restart().await.unwrap(),
+            Op::Restart => {
+                node.restart().await.unwrap();
+                for (request, _) in &mut commands {
+                    request.reacquire(node).await;
+                }
+            }
             Op::OtherDenied => {
                 // Meaningless once `other` holds a grant; the generator cannot know that yet.
                 if shared_read || shared_write {
@@ -632,11 +692,13 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
                 if shared_write {
                     continue;
                 }
-                node.grant(
-                    other,
-                    LedgerAccess::object(AccessRequest::Write(&model.document)),
-                )
-                .await;
+                for request in [
+                    AccessRequest::Read(&model.document),
+                    AccessRequest::Write(&model.document),
+                ] {
+                    node.grant(other, LedgerAccess::object(request)).await;
+                }
+                shared_read = true;
                 shared_write = true;
             }
         }

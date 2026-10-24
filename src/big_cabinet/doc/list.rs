@@ -8,7 +8,7 @@ impl DocsService {
         context: &RequestContext,
         params: ListFacets,
     ) -> Result<FacetListing, DocsError> {
-        let caller = self.invocation(context, params.authorization).await?;
+        let caller = self.invocation(context, params.capability).await?;
         self.authorize(
             context,
             &caller.authority,

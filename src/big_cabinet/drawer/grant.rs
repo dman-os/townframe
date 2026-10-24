@@ -9,13 +9,17 @@ impl DrawerService {
         params: GrantDrawer,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.authorization).await?;
+        let caller = core.invocation(context, params.capability).await?;
         core.authorize(context, &caller.authority, &params.drawer_id, Access::Admin)
             .await?;
+        if !caller.rights.contains(Rights::DELEGATE) {
+            return Err(DrawersError::Denied);
+        }
         core.grant(
             context,
             params.subject_id,
             drawer_object(params.access, &params.drawer_id),
+            Some(params.capability),
         )
         .await
     }
@@ -38,7 +42,7 @@ mod tests {
     fn a_request_spells_the_level() {
         let subject = Uuid7::new();
         let request = GrantDrawer {
-            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
+            capability: CapId::from_bytes([1; 16]),
             drawer_id: DocId::new([2; 32]),
             subject_id: subject,
             access: Access::Write,
@@ -47,7 +51,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
+                "capability": CapId::from_bytes([1; 16]),
                 "drawerId": DocId::new([2; 32]).to_string(),
                 "subjectId": subject.to_string(),
                 "access": "Write",

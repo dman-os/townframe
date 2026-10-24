@@ -5,11 +5,12 @@ impl AuthorityService {
         &self,
         request: ResolveAuthority,
     ) -> Result<ResolvedAuthority, AuthorityError> {
-        let mut transaction = self.read().await?;
-        let chain = cap::walk(&mut transaction, &request.capability).await?;
+        let state = self.state.lock().await;
+        let chain = cap::walk(&state, &request.capability)?;
         chain.require(Rights::USE)?;
-        let actor = match store::associated_actor(&mut transaction, chain.cap.id).await? {
+        let actor = match state.actors.get(&chain.cap.id).copied() {
             Some(actor_id) => {
+                let mut transaction = self.read().await?;
                 let row = Self::actor_row(&mut transaction, actor_id).await?;
                 Some(actor::public_actor(
                     &self.node_public_key(),

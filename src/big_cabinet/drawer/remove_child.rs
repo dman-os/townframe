@@ -83,7 +83,7 @@ impl DrawerService {
         params: RemoveChild,
     ) -> Result<WriteReceipt, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.authorization).await?;
+        let caller = core.invocation(context, params.capability).await?;
         let actor = &caller.signer;
         core.authorize(context, &caller.authority, &params.parent_id, Access::Write)
             .await?;
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn remove_child_wire_shape() {
         let request = RemoveChild {
-            authorization: Authorization::identity(CapId::default()),
+            capability: CapId::default(),
             command: CommandId::try_from("unlink-1".to_owned()).unwrap(),
             parent_id: DocId::new([1; 32]),
             child_id: DocId::new([2; 32]),
@@ -136,10 +136,7 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "authorization": {
-                    "authority": "00000000-0000-0000-0000-000000000000",
-                    "signer": "00000000-0000-0000-0000-000000000000",
-                },
+                "capability": "00000000-0000-0000-0000-000000000000",
                 "command": "unlink-1",
                 "parentId": DocId::new([1; 32]).to_string(),
                 "childId": DocId::new([2; 32]).to_string(),
@@ -154,10 +151,7 @@ mod tests {
     #[test]
     fn a_removal_without_a_command_is_refused() {
         let error = serde_json::from_value::<RemoveChild>(json!({
-            "authorization": {
-                "authority": "00000000-0000-0000-0000-000000000000",
-                "signer": "00000000-0000-0000-0000-000000000000",
-            },
+            "capability": "00000000-0000-0000-0000-000000000000",
             "parentId": DocId::new([1; 32]).to_string(),
             "childId": DocId::new([2; 32]).to_string(),
         }))

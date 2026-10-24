@@ -8,8 +8,8 @@ for the self-doc and single-group layouts; the deferred list at the end is uncha
 [The drawer FDR](../fdrs/001-drawers-as-document-collections.md) defines the
 user-visible collection model. This ADR is the contract for the drawer model
 Cabinet implements: the drawer facets, roster, child entries, and required
-local drawers below are `DrawerService`'s contract. The authority slice that has landed — actor identities,
-capabilities, the grant ledger, and secret-backed signing — is specified in
+local drawers below are `DrawerService`'s contract. Namespace capabilities, actor identities,
+domain-owned grants, signing, and their implementation migration are specified in
 [ADR 017](017-authority-actors-capabilities-and-grants.md) and the
 [authority guide](../big-cabinet-authority.md). Subset drawers, managed-participant
 layouts, roster sharding, provider/home facets, and Panproto integration are
@@ -194,28 +194,32 @@ form every other 32-byte key in this tree has.
 
 ## Actors and node authority
 
-The authority service (ADR 017) manages actor identities, capabilities, and a
-grant ledger namespaced by issuing actor. Boot returns the operator root capability; the
-embedder opens DrawerService as an actor and hands it its actor capability. A caller presents
-its own actor capability here, and DrawerService checks its ledger namespace for that actor
-(`<relay|read|write|admin> drawer <id>`, and `create drawer` for collections) before acting
-as itself (ADR 017). Creating a drawer of either layout grants the creator Admin on it; a
-self-doc drawer needs Write on the doc instead of `create drawer`. A level covers the ones
-below it, and a grant on a parent drawer reaches a child at the weaker of the grant and the
-child entry, strongest path winning. Actor
-signing keys are sealed under a `secrets_rs` keyring key, and the service returns
-signatures rather than keys.
+ADR 017 separates DrawerService's namespace minting authority from its actor proof.
+The embedder provisions both. DrawerService owns durable standing grants, evaluated
+when a caller exchanges an identity proof for a scoped drawer cap; resource operations
+then accept that cap, with no identity fallback. Grant gates tie derived caps to
+their support, replacing central grant RPCs and two-slot resource requests.
 
-Actor capabilities authorize Cabinet operations. BigRepo/Keyhive separately gate what
-the node can do. If the node lacks authority, no actor capability bypasses it. Recovery
+Standing grants cover drawer levels and collection creation. A level covers the ones
+below it, and a grant on a parent drawer reaches a child at the weaker of the grant and
+the child entry, strongest path winning. Not every actor needs grant rows: a dispatch
+can receive a scoped cap narrowed from another principal's authority. Withdrawing a
+grant must retract the authority derived from it, including cross-domain derivations.
+A self-doc drawer needs Write on the doc instead of collection creation authority.
+Creation records the originating actor independently from the bound signer, and
+recovery preserves that provenance when applying creation grants. Actor signing keys
+remain sealed under a `secrets_rs` keyring key.
+
+Domain capabilities authorize Cabinet operations. BigRepo/Keyhive separately gate what
+the node can do. If the node lacks authority, no local capability bypasses it. Recovery
 principals are node-level work deferred to another PR.
 
 Drawer access uses Keyhive's `Relay`, `Read`, `Write`, and `Admin` vocabulary in
-roster entries. In capabilities and ledger rows the access level is part of the object
-string DrawerService names (`write drawer D`), and the rights are ADR 017's generic
-vocabulary; the drawer meaning of an object string belongs to DrawerService, not to the
-authority service. Removing a doc entry never means global
-doc deletion.
+roster entries. Standing grant objects name levels (`write drawer D`), while scoped
+capabilities encode levels, signer bindings, and originating-actor provenance under
+`DrawerService/scope/v2/`. Rights use ADR 017's generic vocabulary; the meaning of
+these objects belongs to DrawerService, not to the capability table. Removing a doc
+entry never means global doc deletion.
 
 ## Listing a drawer's docs
 

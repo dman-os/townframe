@@ -36,7 +36,16 @@ async fn doc_observation_replays_then_streams_membership_and_versions() {
         .subscribe(
             RequestContext::root(),
             ObserveFacets {
-                authorization: Authorization::identity(alice.capability),
+                capability: node
+                    .capability(
+                        &alice,
+                        DocScope {
+                            read: BTreeSet::from([document.clone()]),
+                            ..DocScope::default()
+                        },
+                    )
+                    .await
+                    .unwrap(),
                 scope: ObserveScope::Doc {
                     doc_id: document.clone(),
                 },
@@ -94,13 +103,28 @@ async fn tag_observation_hides_documents_the_observer_cannot_read() {
         .await
         .unwrap();
 
+    let own = node
+        .create(&mallory, "mallory-create", [(key("main"), note("mine"))])
+        .await
+        .unwrap();
+    let capability = node
+        .capability(
+            &mallory,
+            DocScope {
+                read: BTreeSet::from([own.doc_id.clone()]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+
     // Doc scope refuses at establishment, like a gated read.
     let refused = node
         .client()
         .subscribe(
             RequestContext::root(),
             ObserveFacets {
-                authorization: Authorization::identity(mallory.capability),
+                capability,
                 scope: ObserveScope::Doc {
                     doc_id: created.doc_id.clone(),
                 },
@@ -118,7 +142,7 @@ async fn tag_observation_hides_documents_the_observer_cannot_read() {
         .subscribe(
             RequestContext::root(),
             ObserveFacets {
-                authorization: Authorization::identity(mallory.capability),
+                capability,
                 scope: ObserveScope::Tag {
                     tag: big_cabinet_core::FacetTag::new(NOTE).unwrap(),
                 },
@@ -130,10 +154,6 @@ async fn tag_observation_hides_documents_the_observer_cannot_read() {
     // Alice's document was never delivered to Mallory, so it is silently
     // omitted rather than named by an `AccessLost` entry: the first entry is
     // Mallory's own document.
-    let own = node
-        .create(&mallory, "mallory-create", [(key("main"), note("mine"))])
-        .await
-        .unwrap();
     let (doc_id, _, facet) = next_entry(&mut events).await;
     assert_eq!(doc_id, own.doc_id);
     assert!(matches!(facet, ObservedFacet::Present { .. }), "{facet:?}");

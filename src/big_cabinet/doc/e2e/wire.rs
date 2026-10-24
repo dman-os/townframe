@@ -4,7 +4,7 @@
 use super::{NOTE, PLACEMENT, facet_map, key, note};
 use automerge::ChangeHash;
 use big_cabinet_core::DocId;
-use big_cabinet_core::authority::{AuthorityServiceError, Authorization, CapId};
+use big_cabinet_core::authority::{AuthorityServiceError, CapId};
 use big_cabinet_core::dmeta::{
     Bytes, ClaimOperation, FacetClaim, FacetSignature, MultibaseKey, SignatureBytes, Uuid7, cid_of,
 };
@@ -259,7 +259,7 @@ fn facet_observed_wire() {
     insta::assert_json_snapshot!(
         "observe_facets_doc",
         ObserveFacets {
-            authorization: Authorization::identity(capability(1)),
+            capability: capability(1),
             scope: ObserveScope::Doc {
                 doc_id: document(1)
             },
@@ -408,7 +408,7 @@ fn docs_error_wire() {
 #[test]
 fn create_doc_wire() {
     insta::assert_json_snapshot!(CreateDoc {
-        authorization: Authorization::identity(capability(1)),
+        capability: capability(1),
         command: command("create-note-1"),
         placement: PLACEMENT.into(),
         facets: facet_map(&[(&key("main"), note("hello"))]),
@@ -421,7 +421,7 @@ fn branch_doc_wire() {
         (
             "branch_doc_announced",
             BranchDoc {
-                authorization: Authorization::identity(capability(1)),
+                capability: capability(1),
                 command: command("branch-1"),
                 doc_id: document(1),
                 at: At::Heads(vec![hash(1)]),
@@ -433,7 +433,7 @@ fn branch_doc_wire() {
         (
             "branch_doc_stealth",
             BranchDoc {
-                authorization: Authorization::identity(capability(1)),
+                capability: capability(1),
                 command: command("branch-2"),
                 doc_id: document(1),
                 at: At::Current,
@@ -453,7 +453,7 @@ fn merge_doc_wire() {
         (
             "merge_doc_with_command",
             MergeDoc {
-                authorization: Authorization::identity(capability(1)),
+                capability: capability(1),
                 command: Some(command("merge-1")),
                 source_id: document(2),
                 at: At::Heads(vec![hash(2)]),
@@ -463,7 +463,7 @@ fn merge_doc_wire() {
         (
             "merge_doc_bare",
             MergeDoc {
-                authorization: Authorization::identity(capability(1)),
+                capability: capability(1),
                 command: None,
                 source_id: document(2),
                 at: At::Current,
@@ -481,7 +481,7 @@ fn write_facets_wire() {
         (
             "write_facets_with_command",
             WriteFacets {
-                authorization: Authorization::identity(capability(1)),
+                capability: capability(1),
                 command: Some(command("write-1")),
                 doc_id: document(1),
                 mode: WriteMode::IfDocUnchanged {
@@ -494,7 +494,7 @@ fn write_facets_wire() {
         (
             "write_facets_bare",
             WriteFacets {
-                authorization: Authorization::identity(capability(1)),
+                capability: capability(1),
                 command: None,
                 doc_id: document(1),
                 mode: WriteMode::AtCurrent,
@@ -513,7 +513,7 @@ fn read_facets_wire() {
         (
             "read_facets_all",
             ReadFacets {
-                authorization: Authorization::identity(capability(1)),
+                capability: capability(1),
                 doc_id: document(1),
                 at: At::Current,
                 facets: None,
@@ -523,7 +523,7 @@ fn read_facets_wire() {
         (
             "read_facets_named_optimistic",
             ReadFacets {
-                authorization: Authorization::identity(capability(1)),
+                capability: capability(1),
                 doc_id: document(1),
                 at: At::Heads(vec![hash(1)]),
                 facets: Some(BTreeSet::from([key("main")])),
@@ -538,7 +538,7 @@ fn read_facets_wire() {
 #[test]
 fn list_facets_wire() {
     insta::assert_json_snapshot!(ListFacets {
-        authorization: Authorization::identity(capability(1)),
+        capability: capability(1),
         doc_id: document(1),
         at: At::Heads(vec![hash(1)]),
     });
@@ -547,7 +547,7 @@ fn list_facets_wire() {
 #[test]
 fn unsafe_inspect_facet_wire() {
     insta::assert_json_snapshot!(UnsafeInspectFacet {
-        authorization: Authorization::identity(capability(1)),
+        capability: capability(1),
         doc_id: document(1),
         facet_key: key("main"),
         heads: vec![hash(1)],
@@ -565,7 +565,7 @@ fn unsafe_inspect_facet_wire() {
 #[test]
 fn inspect_facet_claims_wire() {
     insta::assert_json_snapshot!(InspectFacetClaims {
-        authorization: Authorization::identity(capability(1)),
+        capability: capability(1),
         doc_id: document(1),
         facet_key: key("main"),
         heads: vec![hash(1)],
