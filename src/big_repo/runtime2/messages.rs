@@ -397,6 +397,9 @@ pub enum Runtime2Evt {
     },
     DocWorkerStopped {
         doc_id: DocumentId,
+        /// Incarnation that stopped: an evicted worker's stop can land after a
+        /// replacement was installed, and must not remove the replacement.
+        generation: u64,
         error: Option<String>,
     },
     DocWorkerMaterializationPending {

@@ -27,8 +27,11 @@ impl DrawerService {
                 .await
                 .map_err(authority_error)?;
         }
-        // One wake after every level is gone: notifying per level would let an observer
-        // recheck between revokes and see a partial withdrawal as a hard access failure.
+        // One policy wake after every level is gone. This does not stop an observer from
+        // rechecking mid-withdrawal: every `RevokeAccess` publishes an authority revision and
+        // `ObserveCapability` reports `Live` on each, so observers may run one check per level.
+        // Each such check is a single `effective()` read, so a partial withdrawal reads as a
+        // lower level (or none), never as an error.
         core.state.notify_changed();
         Ok(())
     }

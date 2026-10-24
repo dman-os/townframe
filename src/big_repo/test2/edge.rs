@@ -13,6 +13,7 @@
 //! | `dropped_content_apply_fails_sync_receipt` | A round whose received content cannot be routed to a stopping doc worker fails the caller instead of reporting a success receipt. |
 //! | `keyhive_completion_defers_until_admission_watermark` | A keyhive completion whose admission watermark is ahead of the hub's admitted head is held until the admission event lands, so the follow-up reconciliation wait cannot observe a stale head. |
 //! | `quiescence_probe_fences_on_admission_head` | `wait_for_quiescence` stays parked while the group-part projection still owes admissions the hub had already incorporated when the probe started, and resolves once they are settled. |
+//! | `stale_doc_worker_stopped_event_does_not_evict_fresh_worker` | An evicted worker's late `DocWorkerStopped` names its own generation only; a replacement spawned in between keeps its entry and the handles it issued. |
 //!
 //! # Skipped-by-design
 //!
@@ -1270,6 +1271,36 @@ async fn tier9_watch_connection_end_abortable_join_set_cleanup() -> crate::Res<(
     Ok(())
 }
 
+/// Create a doc on `node` whose only caller handle is dropped at once, so the
+/// idle TTL (3s) and the janitor tick (500ms) are all that stand between the
+/// worker and eviction.
+async fn create_doc_and_drop_handle(node: &Node) -> crate::Res<crate::DocumentId> {
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "key", "evict-me"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let owner_doc = node.repo.create_doc(initial).await?;
+    let doc_id = owner_doc.document_id();
+    assert!(
+        node.repo.runtime.has_doc_worker(doc_id.clone()).await?,
+        "create_doc must spawn a doc worker"
+    );
+    drop(owner_doc);
+    Ok(doc_id)
+}
+
+async fn wait_until_doc_worker_evicted(node: &Node, doc_id: &crate::DocumentId) -> crate::Res<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while node.repo.runtime.has_doc_worker(doc_id.clone()).await? {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "doc worker was not evicted after all caller leases dropped"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Ok(())
+}
+
 // ─── Worker eviction after all caller leases drop ──────────────────────────
 //
 // The doc-worker retains the materialized bundle strongly, but the eviction
@@ -1286,45 +1317,55 @@ async fn tier9_watch_connection_end_abortable_join_set_cleanup() -> crate::Res<(
 async fn tier9_doc_worker_is_evicted_after_all_caller_leases_drop() -> crate::Res<()> {
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(254, 255, "Owner", "Reader").await?;
+    let doc_id = create_doc_and_drop_handle(pair.left()).await?;
+    wait_until_doc_worker_evicted(pair.left(), &doc_id).await
+}
 
-    let mut initial = automerge::Automerge::new();
-    initial
-        .transact(|tx| tx.put(automerge::ROOT, "key", "evict-me"))
-        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
-    let owner_doc = pair.left().repo.create_doc(initial).await?;
-    let doc_id = owner_doc.document_id();
+// ─── A stale worker stop must not evict its replacement ────────────────────
+//
+// The janitor removes an idle worker's entry and aborts it, but the aborted
+// mailbox loop still reports `DocWorkerStopped` once its task is next polled.
+// A command that needs the doc in between spawns a replacement and hands out a
+// live handle on it. The late stop names the evicted incarnation only: were
+// the hub to remove the replacement's entry on it, the replacement's mailbox
+// would close, the worker would be dropped, and the fresh handle refused with
+// "the doc worker serving this handle was replaced".
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_stale_doc_worker_stopped_event_does_not_evict_fresh_worker() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let pair = Pair::boot(252, 253, "Owner", "Reader").await?;
+    let node = pair.left();
+    let doc_id = create_doc_and_drop_handle(node).await?;
+
+    // Holding events leaves the command-side janitor running, so the idle
+    // worker is evicted while its `DocWorkerStopped` stays queued.
+    let hold = node.repo.hold_hub_events().await?;
+    wait_until_doc_worker_evicted(node, &doc_id).await?;
+
+    let fresh = node
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
+    assert!(node.repo.runtime.has_doc_worker(doc_id.clone()).await?);
+
+    hold.resume().await?;
+    drop(hold);
+    // Give a wrongly evicted replacement time to observe its closed mailbox.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
     assert!(
-        pair.left()
-            .repo
-            .runtime
-            .has_doc_worker(doc_id.clone())
-            .await?,
-        "create_doc must spawn a doc worker"
+        node.repo.runtime.has_doc_worker(doc_id.clone()).await?,
+        "the replacement worker must survive the evicted incarnation's stop"
     );
-
-    // Drop the only caller lease; the worker's strong bundle retention must
-    // not keep it alive past the idle TTL (3s) + janitor tick (500ms).
-    drop(owner_doc);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let has_worker = match tokio::time::timeout(
-            deadline.saturating_duration_since(std::time::Instant::now()),
-            pair.left().repo.runtime.has_doc_worker(doc_id.clone()),
-        )
-        .await
-        {
-            Ok(result) => result?,
-            Err(_) => break,
-        };
-        if !has_worker {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "doc worker was not evicted after all caller leases dropped"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    fresh
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "key", "v1"))
+                .map(|_| ())
+                .map_err(|err| crate::ferr!("{err:?}"))
+        })
+        .await??;
+    assert_eq!(read_text(&fresh, "key").await.as_deref(), Some("v1"));
     Ok(())
 }
 

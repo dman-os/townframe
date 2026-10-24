@@ -146,6 +146,7 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                     let _res = runtime_evt_tx
                         .send(Runtime2Evt::DocWorkerStopped {
                             doc_id,
+                            generation,
                             error: error.clone(),
                         })
                         .await;
