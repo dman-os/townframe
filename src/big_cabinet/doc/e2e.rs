@@ -14,7 +14,7 @@ mod wire;
 mod writes;
 
 use super::*;
-use crate::authority::{Actor, Authority, GrantAccess, OpenActor, Rights};
+use crate::authority::{Actor, Authority, OpenActor, Rights};
 use crate::index::FacetSetStore;
 use crate::schema::{SchemaRegistration, SchemaRegistrationGroup, SchemaRepo};
 use automerge::{Automerge, ChangeHash};
@@ -63,6 +63,8 @@ struct Node {
     authority: Authority,
     authority_stop: Option<StopToken>,
     docs_actor: Actor,
+    docs_namespace: Namespace,
+    access: Arc<LedgerAccess>,
     repo: SharedBigRepo,
     repo_stop: Option<BigRepoStopToken>,
     sql: SqlCtx,
@@ -93,6 +95,17 @@ impl Node {
             )
             .await
             .unwrap();
+        let docs_namespace = authority
+            .service
+            .open_namespace(Uuid7::new())
+            .await
+            .unwrap();
+        let sql = SqlCtx::memory().await.unwrap();
+        let access = Arc::new(
+            LedgerAccess::open(sql.clone(), authority.client.clone(), docs_namespace)
+                .await
+                .unwrap(),
+        );
         let (repo, repo_stop) = BigRepo::boot(Config {
             node_identity_seed: [41; 32],
             storage: StorageConfig::Memory,
@@ -123,9 +136,11 @@ impl Node {
             authority,
             authority_stop: Some(authority_stop),
             docs_actor,
+            docs_namespace,
+            access,
             repo,
             repo_stop: Some(repo_stop),
-            sql: SqlCtx::memory().await.unwrap(),
+            sql,
             docs: None,
             docs_stop: None,
             facet_set,
@@ -137,13 +152,15 @@ impl Node {
 
     async fn start(&mut self) -> Result<(), DocsError> {
         let issuer = self.docs_actor.capability;
+        let access = Arc::clone(&self.access);
         let (docs, stop) = boot(DocsConfig {
             big_repo: Arc::clone(&self.repo),
             schema_repo: schemas(),
             authority: self.authority.client.clone(),
             issuer,
+            namespace: self.docs_namespace,
             node_issuer: self.authority.node_issuer.clone(),
-            access: Arc::new(LedgerAccess::new(self.authority.client.clone(), issuer)),
+            access,
             sql: self.sql.clone(),
             facet_set: Some(Arc::clone(&self.facet_set)),
             facet_ref: None,
@@ -154,10 +171,29 @@ impl Node {
         Ok(())
     }
 
+    async fn reopen_namespace(&mut self) {
+        self.docs_namespace = self
+            .authority
+            .service
+            .open_namespace(self.docs_namespace.namespace_id)
+            .await
+            .unwrap();
+        self.access = Arc::new(
+            LedgerAccess::open(
+                self.sql.clone(),
+                self.authority.client.clone(),
+                self.docs_namespace,
+            )
+            .await
+            .unwrap(),
+        );
+    }
+
     /// Stop and boot DocsRepo again over the same ledger and BigRepo, as after a crash.
     async fn restart(&mut self) -> Result<(), DocsError> {
         self.docs.take();
         self.docs_stop.take().unwrap().stop().await;
+        self.reopen_namespace().await;
         self.start().await
     }
 
@@ -175,7 +211,7 @@ impl Node {
                 OpenActor {
                     parent: self.authority.root,
                     path: path.into(),
-                    rights: Rights::USE,
+                    rights: Rights::USE | Rights::NARROW,
                 },
             )
             .await
@@ -191,19 +227,32 @@ impl Node {
     }
 
     async fn grant(&self, actor: &Actor, object: String) {
-        self.authority
-            .client
-            .call(
-                RequestContext::root(),
-                GrantAccess {
-                    via: self.docs_actor.capability,
-                    subject_id: actor.actor_id,
-                    object,
-                    rights: Rights::USE,
-                },
+        self.access
+            .grants
+            .grant(
+                &RequestContext::root(),
+                actor.actor_id,
+                object,
+                Rights::USE,
+                None,
             )
             .await
             .unwrap();
+    }
+
+    async fn capability(&self, actor: &Actor, scope: DocScope) -> Result<CapId, DocsError> {
+        op(self
+            .client()
+            .call(
+                RequestContext::root(),
+                MintDocCapability {
+                    authorization: Authorization::identity(actor.capability),
+                    scope,
+                    rights: Rights::USE,
+                },
+            )
+            .await)
+        .map(|capability| capability.capability_id)
     }
 
     async fn create(
@@ -217,7 +266,15 @@ impl Node {
             .call(
                 RequestContext::root(),
                 CreateDoc {
-                    authorization: Authorization::identity(actor.capability),
+                    capability: self
+                        .capability(
+                            actor,
+                            DocScope {
+                                create: BTreeSet::from([PLACEMENT.into()]),
+                                ..DocScope::default()
+                            },
+                        )
+                        .await?,
                     command: CommandId::try_from(command.to_owned()).unwrap(),
                     placement: PLACEMENT.into(),
                     facets: facets.into_iter().collect(),
@@ -239,7 +296,15 @@ impl Node {
             .call(
                 RequestContext::root(),
                 WriteFacets {
-                    authorization: Authorization::identity(actor.capability),
+                    capability: self
+                        .capability(
+                            actor,
+                            DocScope {
+                                write: BTreeSet::from([document.clone()]),
+                                ..DocScope::default()
+                            },
+                        )
+                        .await?,
                     command: None,
                     doc_id: document.clone(),
                     mode,
@@ -262,7 +327,15 @@ impl Node {
             .call(
                 RequestContext::root(),
                 ReadFacets {
-                    authorization: Authorization::identity(actor.capability),
+                    capability: self
+                        .capability(
+                            actor,
+                            DocScope {
+                                read: BTreeSet::from([document.clone()]),
+                                ..DocScope::default()
+                            },
+                        )
+                        .await?,
                     doc_id: document.clone(),
                     at,
                     facets: None,
@@ -282,7 +355,16 @@ impl Node {
         let read = self.client().call(
             RequestContext::root(),
             ReadFacets {
-                authorization: Authorization::identity(actor.capability),
+                capability: self
+                    .capability(
+                        actor,
+                        DocScope {
+                            read: BTreeSet::from([document.clone()]),
+                            ..DocScope::default()
+                        },
+                    )
+                    .await
+                    .unwrap(),
                 doc_id: document.clone(),
                 at,
                 facets: Some(BTreeSet::from([facet.clone()])),

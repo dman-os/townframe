@@ -186,19 +186,18 @@ pub enum CapabilityStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CheckGrants {
-    pub via: CapId,
-    pub subject_id: Uuid7,
-    pub objects: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Capability {
     pub capability_id: CapId,
     pub object: String,
     pub rights: Rights,
     pub issuer_id: Uuid7,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Namespace {
+    pub namespace_id: Uuid7,
+    pub capability: CapId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +251,8 @@ pub struct ResolveActor {
 #[serde(rename_all = "camelCase")]
 pub struct MintCapability {
     pub issuer: CapId,
+    pub parent: Option<CapId>,
+    pub dependencies: Vec<CapId>,
     pub object: String,
     pub rights: Rights,
 }
@@ -274,28 +275,6 @@ pub struct RetractCapability {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GrantAccess {
-    pub via: CapId,
-    pub subject_id: Uuid7,
-    pub object: String,
-    pub rights: Rights,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RevokeAccess {
-    pub via: CapId,
-    pub subject_id: Uuid7,
-    pub object: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CheckGrant {
-    pub via: CapId,
-    pub subject_id: Uuid7,
-    pub object: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SignFacetClaim {
     pub actor: CapId,
     pub claim: FacetClaim,
@@ -315,14 +294,10 @@ macro_rules! operation {
 operation!(OpenActor => Actor, procedure, "openActor");
 operation!(ResolveActor => Actor, query, "resolveActor");
 operation!(ResolveAuthority => ResolvedAuthority, query, "resolveAuthority");
-operation!(CheckGrants => Vec<Rights>, procedure, "checkGrants");
 operation!(MintCapability => Capability, procedure, "mintCapability");
 operation!(AttenuateCapability => Capability, procedure, "attenuateCapability");
 operation!(InspectCapability => Capability, query, "inspectCapability");
 operation!(RetractCapability => (), procedure, "retractCapability");
-operation!(GrantAccess => (), procedure, "grantAccess");
-operation!(RevokeAccess => (), procedure, "revokeAccess");
-operation!(CheckGrant => Rights, query, "checkGrant");
 operation!(SignFacetClaim => SignedFacetClaim, procedure, "signFacetClaim");
 
 service_core_rs::service_operation!(ObserveCapability => stream CapabilityStatus, AuthorityServiceError, "org.example.daybook.authority.observeCapability");
@@ -333,14 +308,10 @@ declare_service_protocol! {
             OpenActor(OpenActor),
             ResolveActor(ResolveActor),
             ResolveAuthority(ResolveAuthority),
-            CheckGrants(CheckGrants),
             MintCapability(MintCapability),
             AttenuateCapability(AttenuateCapability),
             InspectCapability(InspectCapability),
             RetractCapability(RetractCapability),
-            GrantAccess(GrantAccess),
-            RevokeAccess(RevokeAccess),
-            CheckGrant(CheckGrant),
             SignFacetClaim(SignFacetClaim)
         }
         stream { ObserveCapability(ObserveCapability) }

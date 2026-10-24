@@ -40,7 +40,21 @@ impl Node {
             .call(
                 RequestContext::root(),
                 BranchDoc {
-                    authorization: Authorization::identity(actor.capability),
+                    capability: self
+                        .capability(
+                            actor,
+                            DocScope {
+                                read: BTreeSet::from([origin.clone()]),
+                                write: if stealth {
+                                    BTreeSet::new()
+                                } else {
+                                    BTreeSet::from([origin.clone()])
+                                },
+                                create: BTreeSet::from([PLACEMENT.into()]),
+                                ..DocScope::default()
+                            },
+                        )
+                        .await?,
                     command: CommandId::try_from(command.to_owned()).unwrap(),
                     doc_id: origin.clone(),
                     at: At::Current,
@@ -63,7 +77,16 @@ impl Node {
             .call(
                 RequestContext::root(),
                 MergeDoc {
-                    authorization: Authorization::identity(actor.capability),
+                    capability: self
+                        .capability(
+                            actor,
+                            DocScope {
+                                read: BTreeSet::from([source.clone()]),
+                                write: BTreeSet::from([target.clone()]),
+                                ..DocScope::default()
+                            },
+                        )
+                        .await?,
                     command: None,
                     source_id: source.clone(),
                     at: At::Current,
@@ -73,9 +96,16 @@ impl Node {
             .await)
     }
 
-    async fn claims(&self, document: &DocId, facet: &FacetKey) -> Vec<FacetClaimEvidence> {
+    pub(super) async fn claims(
+        &self,
+        document: &DocId,
+        facet: &FacetKey,
+    ) -> Vec<FacetClaimEvidence> {
         let docs = self.docs.as_ref().unwrap();
-        let capability = docs.mint_inspection_handle(document.clone()).await.unwrap();
+        let capability = docs
+            .mint_inspection_handle(document.clone(), self.docs_actor.capability)
+            .await
+            .unwrap();
         let handle = match self.repo.get_doc(document).await.unwrap() {
             big_repo::DocLookup::Ready(handle) => handle,
             _ => panic!("document is local"),
@@ -87,10 +117,7 @@ impl Node {
             .call(
                 RequestContext::root(),
                 InspectFacetClaims {
-                    authorization: Authorization {
-                        authority: capability.capability_id,
-                        signer: self.docs_actor.capability,
-                    },
+                    capability: capability.capability_id,
                     doc_id: document.clone(),
                     facet_key: facet.clone(),
                     heads,
@@ -221,7 +248,17 @@ async fn a_historical_branch_pins_its_concrete_parent_and_preserves_inherited_br
         .call(
             RequestContext::root(),
             BranchDoc {
-                authorization: Authorization::identity(alice.capability),
+                capability: node
+                    .capability(
+                        &alice,
+                        DocScope {
+                            write: BTreeSet::from([origin.doc_id.clone()]),
+                            create: BTreeSet::from([PLACEMENT.into()]),
+                            ..DocScope::default()
+                        },
+                    )
+                    .await
+                    .unwrap(),
                 command: command("historical"),
                 doc_id: origin.doc_id.clone(),
                 at: At::Heads(origin.heads.clone()),

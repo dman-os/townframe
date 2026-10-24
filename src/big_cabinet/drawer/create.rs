@@ -30,11 +30,11 @@ impl Core {
     async fn create_self_doc(
         &self,
         context: &RequestContext,
-        authorization: Authorization,
+        capability: CapId,
         command: CommandId,
         doc_id: DocId,
     ) -> Result<DrawerCreated, DrawersError> {
-        let caller = self.invocation(context, authorization).await?;
+        let caller = self.invocation(context, capability).await?;
         let actor = &caller.signer;
         if self.state.drawer(&doc_id).await?.is_some() {
             return Err(DrawersError::AlreadyDrawer(doc_id));
@@ -42,10 +42,7 @@ impl Core {
         if self.doc_level(context, &caller.authority, &doc_id).await? < Some(Access::Write) {
             return Err(DrawersError::Denied);
         }
-        let owner_id = match caller.authority {
-            DomainAuthority::Identity(actor) => Some(actor),
-            DomainAuthority::Scoped(_) => None,
-        };
+        let owner_id = caller.originating_actor;
         let request_digest = digest(&("createSelfDoc", actor.actor_id, owner_id, &doc_id));
         self.ledger
             .run(
@@ -62,10 +59,16 @@ impl Core {
                         .call(
                             context.child(),
                             WriteFacets {
-                                authorization: Authorization {
-                                    authority: self.issuer,
-                                    signer: authorization.signer,
-                                },
+                                capability: self
+                                    .doc_capability(
+                                        context,
+                                        actor.capability,
+                                        DocScope {
+                                            write: [doc_id.clone()].into(),
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await?,
                                 command: Some(command.clone()),
                                 doc_id: doc_id.clone(),
                                 mode: WriteMode::AtCurrent,
@@ -80,8 +83,13 @@ impl Core {
                         .map_err(docs_error)?;
                     self.state.put_drawer(&doc_id, &Drawer::self_doc()).await?;
                     if let Some(owner_id) = owner_id {
-                        self.grant(context, owner_id, drawer_object(Access::Admin, &doc_id))
-                            .await?;
+                        self.grant(
+                            context,
+                            owner_id,
+                            drawer_object(Access::Admin, &doc_id),
+                            None,
+                        )
+                        .await?;
                     }
                     Ok(DrawerCreated {
                         drawer_id: doc_id,
@@ -108,7 +116,16 @@ impl Core {
             .call(
                 context.child(),
                 crate::doc::ReadFacets {
-                    authorization: Authorization::identity(self.issuer),
+                    capability: self
+                        .doc_capability(
+                            context,
+                            self.issuer,
+                            DocScope {
+                                read: [doc_id.clone()].into(),
+                                ..Default::default()
+                            },
+                        )
+                        .await?,
                     doc_id: doc_id.clone(),
                     at: crate::doc::At::Current,
                     facets: Some(std::collections::BTreeSet::from([drawer_key()])),
@@ -125,8 +142,13 @@ impl Core {
                     })?;
                 self.state.put_drawer(doc_id, &descriptor).await?;
                 if let Some(owner_id) = owner_id {
-                    self.grant(context, *owner_id, drawer_object(Access::Admin, doc_id))
-                        .await?;
+                    self.grant(
+                        context,
+                        *owner_id,
+                        drawer_object(Access::Admin, doc_id),
+                        None,
+                    )
+                    .await?;
                 }
                 self.ledger
                     .finish(
@@ -224,7 +246,16 @@ impl Core {
             .call(
                 context.child(),
                 CreateDoc {
-                    authorization: Authorization::identity(self.issuer),
+                    capability: self
+                        .doc_capability(
+                            context,
+                            self.issuer,
+                            DocScope {
+                                create: [METADATA_PLACEMENT.into()].into(),
+                                ..Default::default()
+                            },
+                        )
+                        .await?,
                     command: command.clone(),
                     placement: METADATA_PLACEMENT.into(),
                     facets: BTreeMap::from([
@@ -245,6 +276,7 @@ impl Core {
                 context,
                 owner_id,
                 drawer_object(Access::Admin, &receipt.doc_id),
+                None,
             )
             .await?;
         }
@@ -275,18 +307,17 @@ impl DrawerService {
         match params.layout {
             CreateLayout::SelfDoc { doc_id } => {
                 self.core
-                    .create_self_doc(context, params.authorization, params.command, doc_id)
+                    .create_self_doc(context, params.capability, params.command, doc_id)
                     .await
             }
             CreateLayout::SingleGroup => {
-                let caller = self.core.invocation(context, params.authorization).await?;
-                self.core
-                    .authorize_create(context, &caller.authority)
-                    .await?;
-                let owner_id = match caller.authority {
-                    DomainAuthority::Identity(actor) => Some(actor),
-                    DomainAuthority::Scoped(_) => None,
-                };
+                let caller = self.core.invocation(context, params.capability).await?;
+                drop(
+                    self.core
+                        .authorize_create(context, &caller.authority)
+                        .await?,
+                );
+                let owner_id = caller.originating_actor;
                 self.core
                     .create_single_group(context, &params.command, caller.signer.actor_id, owner_id)
                     .await
@@ -326,7 +357,17 @@ impl DrawerService {
             .call(
                 context.child(),
                 CreateDoc {
-                    authorization: Authorization::identity(self.core.issuer),
+                    capability: self
+                        .core
+                        .doc_capability(
+                            &context,
+                            self.core.issuer,
+                            DocScope {
+                                create: [METADATA_PLACEMENT.into()].into(),
+                                ..Default::default()
+                            },
+                        )
+                        .await?,
                     command: command.clone(),
                     placement: METADATA_PLACEMENT.into(),
                     facets: BTreeMap::from([(drawer_key(), facet_value(&Drawer::self_doc()))]),
@@ -343,6 +384,7 @@ impl DrawerService {
                 &context,
                 actor,
                 drawer_object(Access::Admin, &receipt.doc_id),
+                None,
             )
             .await?;
         let [present, originated]: [DrawerId; 2] =
@@ -390,12 +432,12 @@ mod tests {
     create_drawer_wire_shape! {
         self_doc: (
             CreateDrawer {
-                authorization: Authorization::identity(CapId::from_bytes([1; 16])),
+                capability: CapId::from_bytes([1; 16]),
                 command: command(),
                 layout: CreateLayout::SelfDoc { doc_id: DocId::new([2; 32]) },
             },
             serde_json::json!({
-                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
+                "capability": CapId::from_bytes([1; 16]),
                 "command": "cmd-1",
                 "layout": "selfDoc",
                 "docId": DocId::new([2; 32]).to_string(),
@@ -403,12 +445,12 @@ mod tests {
         ),
         single_group: (
             CreateDrawer {
-                authorization: Authorization::identity(CapId::from_bytes([1; 16])),
+                capability: CapId::from_bytes([1; 16]),
                 command: command(),
                 layout: CreateLayout::SingleGroup,
             },
             serde_json::json!({
-                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
+                "capability": CapId::from_bytes([1; 16]),
                 "command": "cmd-1",
                 "layout": "singleGroup",
             })
@@ -418,13 +460,13 @@ mod tests {
     #[test]
     fn a_layout_is_required() {
         let error = serde_json::from_value::<CreateDrawer>(serde_json::json!({
-            "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
+            "capability": CapId::from_bytes([1; 16]),
             "command": "cmd-1",
         }))
         .unwrap_err();
         assert!(error.to_string().contains("layout"), "{error}");
         let error = serde_json::from_value::<CreateDrawer>(serde_json::json!({
-            "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
+            "capability": CapId::from_bytes([1; 16]),
             "command": "cmd-1",
             "layout": "selfDoc",
         }))

@@ -73,7 +73,7 @@ impl DrawerService {
         params: RemoveDoc,
     ) -> Result<WriteReceipt, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.authorization).await?;
+        let caller = core.invocation(context, params.capability).await?;
         let actor = &caller.signer;
         core.authorize(context, &caller.authority, &params.drawer_id, Access::Write)
             .await?;
@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn remove_doc_wire_shape() {
         let request = RemoveDoc {
-            authorization: Authorization::identity(CapId::default()),
+            capability: CapId::default(),
             command: CommandId::try_from("remove-1".to_owned()).unwrap(),
             drawer_id: DocId::new([1; 32]),
             doc_id: DocId::new([2; 32]),
@@ -126,10 +126,7 @@ mod tests {
         assert_eq!(
             value,
             json!({
-                "authorization": {
-                    "authority": "00000000-0000-0000-0000-000000000000",
-                    "signer": "00000000-0000-0000-0000-000000000000",
-                },
+                "capability": "00000000-0000-0000-0000-000000000000",
                 "command": "remove-1",
                 "drawerId": DocId::new([1; 32]).to_string(),
                 "docId": DocId::new([2; 32]).to_string(),
@@ -141,10 +138,7 @@ mod tests {
     #[test]
     fn a_remove_without_a_command_is_refused() {
         let error = serde_json::from_value::<RemoveDoc>(json!({
-            "authorization": {
-                "authority": "00000000-0000-0000-0000-000000000000",
-                "signer": "00000000-0000-0000-0000-000000000000",
-            },
+            "capability": "00000000-0000-0000-0000-000000000000",
             "drawerId": DocId::new([1; 32]).to_string(),
             "docId": DocId::new([2; 32]).to_string(),
         }))

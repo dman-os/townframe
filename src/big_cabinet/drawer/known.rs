@@ -24,7 +24,16 @@ impl Core {
             .call(
                 context.child(),
                 crate::doc::ReadFacets {
-                    authorization: Authorization::identity(self.issuer),
+                    capability: self
+                        .doc_capability(
+                            context,
+                            self.issuer,
+                            DocScope {
+                                read: [registry.clone()].into(),
+                                ..Default::default()
+                            },
+                        )
+                        .await?,
                     doc_id: registry,
                     at: At::Current,
                     facets: None,
@@ -68,16 +77,14 @@ impl DrawerService {
         params: RememberDrawer,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.authorization).await?;
-        if matches!(caller.authority, DomainAuthority::Scoped(_)) {
-            core.authorize(
-                context,
-                &caller.authority,
-                &core.state.local().registry_id,
-                Access::Admin,
-            )
-            .await?;
-        }
+        let caller = core.invocation(context, params.capability).await?;
+        core.authorize(
+            context,
+            &caller.authority,
+            &core.state.local().registry_id,
+            Access::Admin,
+        )
+        .await?;
         let registry = core.state.local().registry_id;
         let entry = KnownDrawerEntry {
             mirror: params.mirror.then_some(true),
@@ -106,16 +113,14 @@ impl DrawerService {
         params: ForgetDrawer,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.authorization).await?;
-        if matches!(caller.authority, DomainAuthority::Scoped(_)) {
-            core.authorize(
-                context,
-                &caller.authority,
-                &core.state.local().registry_id,
-                Access::Admin,
-            )
-            .await?;
-        }
+        let caller = core.invocation(context, params.capability).await?;
+        core.authorize(
+            context,
+            &caller.authority,
+            &core.state.local().registry_id,
+            Access::Admin,
+        )
+        .await?;
         let registry = core.state.local().registry_id;
         core.write_roster(
             context,
@@ -134,16 +139,14 @@ impl DrawerService {
         params: ListKnownDrawers,
     ) -> Result<Vec<KnownDrawer>, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.authorization).await?;
-        if matches!(caller.authority, DomainAuthority::Scoped(_)) {
-            core.authorize(
-                context,
-                &caller.authority,
-                &core.state.local().registry_id,
-                Access::Admin,
-            )
-            .await?;
-        }
+        let caller = core.invocation(context, params.capability).await?;
+        core.authorize(
+            context,
+            &caller.authority,
+            &core.state.local().registry_id,
+            Access::Admin,
+        )
+        .await?;
         Ok(core
             .known_entries(context)
             .await?
@@ -161,16 +164,14 @@ impl DrawerService {
         params: SetDrawerPolicy,
     ) -> Result<(), DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.authorization).await?;
-        if matches!(caller.authority, DomainAuthority::Scoped(_)) {
-            core.authorize(
-                context,
-                &caller.authority,
-                &core.state.local().registry_id,
-                Access::Admin,
-            )
-            .await?;
-        }
+        let caller = core.invocation(context, params.capability).await?;
+        core.authorize(
+            context,
+            &caller.authority,
+            &core.state.local().registry_id,
+            Access::Admin,
+        )
+        .await?;
         if !core
             .known_entries(context)
             .await?
@@ -181,7 +182,7 @@ impl DrawerService {
         self.remember(
             context,
             RememberDrawer {
-                authorization: params.authorization,
+                capability: params.capability,
                 drawer_id: params.drawer_id,
                 mirror: params.mirror,
             },
@@ -242,7 +243,7 @@ mod tests {
     #[test]
     fn the_wire_spells_intent_not_membership() {
         let remember = RememberDrawer {
-            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
+            capability: CapId::from_bytes([1; 16]),
             drawer_id: DocId::new([2; 32]),
             mirror: true,
         };
@@ -250,7 +251,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
+                "capability": CapId::from_bytes([1; 16]),
                 "drawerId": DocId::new([2; 32]).to_string(),
                 "mirror": true,
             })

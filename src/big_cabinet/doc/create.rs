@@ -10,7 +10,7 @@ impl DocsService {
         context: &RequestContext,
         params: CreateDoc,
     ) -> Result<WriteReceipt, DocsError> {
-        let caller = self.invocation(context, params.authorization).await?;
+        let caller = self.invocation(context, params.capability).await?;
         let actor = &caller.signer;
         self.authorize(
             context,
@@ -20,10 +20,7 @@ impl DocsService {
             },
         )
         .await?;
-        let owner_id = match caller.authority {
-            DomainAuthority::Identity(actor) => Some(actor),
-            DomainAuthority::Scoped(_) => None,
-        };
+        let owner_id = caller.originating_actor;
         let request_digest = digest(&(
             "create",
             actor.actor_id,
@@ -62,12 +59,7 @@ impl DocsService {
             aliases: BTreeMap::new(),
         };
         let initial = match self
-            .initial_content(
-                context,
-                params.authorization.signer,
-                &mut plan,
-                Automerge::new(),
-            )
+            .initial_content(context, actor.capability, &mut plan, Automerge::new())
             .await
         {
             Ok(initial) => initial,

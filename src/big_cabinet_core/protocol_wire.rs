@@ -1,7 +1,7 @@
 use crate::DocId;
 use crate::authority::{
-    Actor, AuthorityProtocol, Authorization, CapId, Capability, CheckGrant, CheckGrants,
-    ResolveAuthority, ResolvedAuthority, Rights,
+    Actor, AuthorityProtocol, CapId, Capability, MintCapability, Namespace, ResolveAuthority,
+    ResolvedAuthority, Rights,
 };
 use crate::dmeta::{Bytes, MultibaseKey, Uuid7};
 use crate::doc::{At, DocsProtocol, ObserveFacets, ObserveScope, ReadFacets};
@@ -68,7 +68,7 @@ fn core_protocol_metadata_wire() {
     assert!(
         AuthorityProtocol::OPERATIONS
             .unary
-            .contains(&CheckGrant::XRPC)
+            .contains(&MintCapability::XRPC)
     );
     assert!(DocsProtocol::OPERATIONS.unary.contains(&ReadFacets::XRPC));
     assert!(
@@ -83,11 +83,11 @@ fn core_protocol_metadata_wire() {
             .unary
             .contains(&ResolveAuthority::XRPC)
     );
-    assert!(
-        AuthorityProtocol::OPERATIONS
-            .unary
-            .contains(&CheckGrants::XRPC)
-    );
+    assert!(AuthorityProtocol::OPERATIONS.unary.iter().all(|operation| {
+        !["grantAccess", "revokeAccess", "checkGrant", "checkGrants"]
+            .iter()
+            .any(|name| operation.nsid.ends_with(name))
+    }));
     assert_eq!(
         ResolveAuthority::XRPC.nsid,
         "org.example.daybook.authority.resolveAuthority"
@@ -95,11 +95,11 @@ fn core_protocol_metadata_wire() {
     assert_eq!(ResolveAuthority::XRPC.kind, XrpcKind::Query);
     assert_eq!(ResolveAuthority::XRPC.output_schema, "ResolvedAuthority");
     assert_eq!(
-        CheckGrants::XRPC.nsid,
-        "org.example.daybook.authority.checkGrants"
+        MintCapability::XRPC.nsid,
+        "org.example.daybook.authority.mintCapability"
     );
-    assert_eq!(CheckGrants::XRPC.kind, XrpcKind::Procedure);
-    assert_eq!(CheckGrants::XRPC.output_schema, "Vec<Rights>");
+    assert_eq!(MintCapability::XRPC.kind, XrpcKind::Procedure);
+    assert_eq!(MintCapability::XRPC.output_schema, "Capability");
 }
 
 #[test]
@@ -118,9 +118,8 @@ fn core_protocol_channels_wire() {
         Envelope<P>: irpc::Channels<Proto, Tx = EventReply<P>>,
     {
     }
-    unary::<CheckGrant, AuthorityProtocol>();
+    unary::<MintCapability, AuthorityProtocol>();
     unary::<ResolveAuthority, AuthorityProtocol>();
-    unary::<CheckGrants, AuthorityProtocol>();
     unary::<ReadFacets, DocsProtocol>();
     unary::<GetDrawer, DrawersProtocol>();
     stream::<ObserveFacets, DocsProtocol>();
@@ -167,19 +166,18 @@ fn authority_identifiers_wire() {
         }),
     );
     wire(
-        &CheckGrant {
-            via: capability_id,
-            subject_id: actor_id,
-            object: "read document".into(),
+        &Namespace {
+            namespace_id: actor_id,
+            capability: capability_id,
         },
-        json!({"via": capability_id, "subjectId": actor_id, "object": "read document"}),
+        json!({"namespaceId": actor_id, "capability": capability_id}),
     );
     assert_eq!(format!("{capability_id:?}"), "CapId([redacted])");
     assert_eq!(CapId::from_bytes(*capability_id.as_bytes()), capability_id);
 }
 
 #[test]
-fn authority_resolution_and_batch_wire() {
+fn authority_resolution_and_mint_wire() {
     let capability_id = CapId::from_bytes([1; 16]);
     let actor_id =
         Uuid7::try_from(uuid::Uuid::parse_str("01940000-0000-7000-8000-000000000001").unwrap())
@@ -211,27 +209,24 @@ fn authority_resolution_and_batch_wire() {
         };
         wire(&response, json!({"capability": capability, "actor": actor}));
     }
+    let source = CapId::from_bytes([2; 16]);
+    let signer = CapId::from_bytes([3; 16]);
     wire(
-        &CheckGrants {
-            via: capability_id,
-            subject_id: actor_id,
-            objects: vec![
-                "write document".into(),
-                "read document".into(),
-                "write document".into(),
-            ],
+        &MintCapability {
+            issuer: capability_id,
+            parent: Some(source),
+            dependencies: vec![signer],
+            object: "opaque domain data".into(),
+            rights: Rights::USE,
         },
         json!({
-            "via": capability_id,
-            "subjectId": actor_id,
-            "objects": ["write document", "read document", "write document"],
+            "issuer": capability_id,
+            "parent": source,
+            "dependencies": [signer],
+            "object": "opaque domain data",
+            "rights": ["use"],
         }),
     );
-    let response: <CheckGrants as Operation>::Output =
-        vec![Rights::USE, Rights::empty(), Rights::USE | Rights::NARROW];
-    wire(&response, json!([["use"], [], ["use", "narrow"]]));
-    let empty: <CheckGrants as Operation>::Output = Vec::new();
-    wire(&empty, json!([]));
 }
 
 #[test]
@@ -255,9 +250,6 @@ fn rights_wire_rejects_unknown_vocabulary() {
 #[test]
 fn core_protocol_envelopes_wire() {
     let capability = CapId::from_bytes([1; 16]);
-    let actor_id =
-        Uuid7::try_from(uuid::Uuid::parse_str("01940000-0000-7000-8000-000000000001").unwrap())
-            .unwrap();
     let context = RequestContext::root();
     let expected = |variant: &str, params: Value| {
         json!({(variant): {
@@ -268,18 +260,21 @@ fn core_protocol_envelopes_wire() {
     };
     let authority = AuthorityProtocol::from(Envelope::new(
         context.clone(),
-        CheckGrant {
-            via: capability,
-            subject_id: actor_id,
+        MintCapability {
+            issuer: capability,
+            parent: None,
+            dependencies: Vec::new(),
             object: "read document".into(),
+            rights: Rights::USE,
         },
     ));
     wire(
         &authority,
         expected(
-            "CheckGrant",
+            "MintCapability",
             json!({
-                "via": capability, "subjectId": actor_id, "object": "read document",
+                "issuer": capability, "parent": null, "dependencies": [],
+                "object": "read document", "rights": ["use"],
             }),
         ),
     );
@@ -291,31 +286,11 @@ fn core_protocol_envelopes_wire() {
         &resolved,
         expected("ResolveAuthority", json!({"capability": capability})),
     );
-    let grants = AuthorityProtocol::from(Envelope::new(
-        context.clone(),
-        CheckGrants {
-            via: capability,
-            subject_id: actor_id,
-            objects: vec!["write document".into(), "read document".into()],
-        },
-    ));
-    wire(
-        &grants,
-        expected(
-            "CheckGrants",
-            json!({
-                "via": capability,
-                "subjectId": actor_id,
-                "objects": ["write document", "read document"],
-            }),
-        ),
-    );
     let doc_id = DocId::new([2; 32]);
-    let authorization = Authorization::identity(capability);
     let docs = DocsProtocol::from(Envelope::new(
         context.clone(),
         ReadFacets {
-            authorization,
+            capability,
             doc_id: doc_id.clone(),
             at: At::Current,
             facets: None,
@@ -327,7 +302,7 @@ fn core_protocol_envelopes_wire() {
         expected(
             "ReadFacets",
             json!({
-                "authorization": {"authority": capability, "signer": capability},
+                "capability": capability,
                 "docId": doc_id, "at": {"at": "current"}, "optimistic": false,
             }),
         ),
@@ -335,7 +310,7 @@ fn core_protocol_envelopes_wire() {
     let observed = DocsProtocol::from(Envelope::new(
         context.clone(),
         ObserveFacets {
-            authorization,
+            capability,
             scope: ObserveScope::Doc {
                 doc_id: doc_id.clone(),
             },
@@ -347,7 +322,7 @@ fn core_protocol_envelopes_wire() {
         expected(
             "ObserveFacets",
             json!({
-                "authorization": {"authority": capability, "signer": capability},
+                "capability": capability,
                 "scope": {"scope": "doc", "docId": doc_id}, "after": 0,
             }),
         ),
@@ -355,7 +330,7 @@ fn core_protocol_envelopes_wire() {
     let drawers = DrawersProtocol::from(Envelope::new(
         context.clone(),
         GetDrawer {
-            authorization,
+            capability,
             drawer_id: doc_id.clone(),
         },
     ));
@@ -364,7 +339,7 @@ fn core_protocol_envelopes_wire() {
         expected(
             "GetDrawer",
             json!({
-                "authorization": {"authority": capability, "signer": capability},
+                "capability": capability,
                 "drawerId": doc_id,
             }),
         ),

@@ -326,7 +326,10 @@ utils_rs::table_tests! {
         let explicit = op(node.client().call(
             RequestContext::root(),
             ReadFacets {
-                authorization: Authorization::identity(alice.capability),
+                capability: node.capability(&alice, DocScope {
+                    read: BTreeSet::from([document.clone()]),
+                    ..DocScope::default()
+                }).await.unwrap(),
                 doc_id: document.clone(),
                 at: At::Current,
                 facets: Some(BTreeSet::from([key("main")])),

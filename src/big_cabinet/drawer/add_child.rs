@@ -152,7 +152,7 @@ impl DrawerService {
         if params.parent_id == params.child_id {
             return Err(DrawersError::SelfChild);
         }
-        let caller = core.invocation(context, params.authorization).await?;
+        let caller = core.invocation(context, params.capability).await?;
         let actor = &caller.signer;
         core.authorize(context, &caller.authority, &params.parent_id, Access::Write)
             .await?;
@@ -208,7 +208,7 @@ mod tests {
         (access, expected),
         {
             let request = AddChild {
-                authorization: Authorization::identity(CapId::default()),
+                capability: CapId::default(),
                 command: CommandId::try_from("link-1".to_owned()).unwrap(),
                 parent_id: DocId::new([1; 32]),
                 child_id: DocId::new([2; 32]),
@@ -218,10 +218,7 @@ mod tests {
             assert_eq!(
                 value,
                 json!({
-                    "authorization": {
-                        "authority": "00000000-0000-0000-0000-000000000000",
-                        "signer": "00000000-0000-0000-0000-000000000000",
-                    },
+                    "capability": "00000000-0000-0000-0000-000000000000",
                     "command": "link-1",
                     "parentId": DocId::new([1; 32]).to_string(),
                     "childId": DocId::new([2; 32]).to_string(),
@@ -242,10 +239,7 @@ mod tests {
     #[test]
     fn an_unknown_access_level_is_refused() {
         let error = serde_json::from_value::<AddChild>(json!({
-            "authorization": {
-                "authority": "00000000-0000-0000-0000-000000000000",
-                "signer": "00000000-0000-0000-0000-000000000000",
-            },
+            "capability": "00000000-0000-0000-0000-000000000000",
             "command": "link-1",
             "parentId": DocId::new([1; 32]).to_string(),
             "childId": DocId::new([2; 32]).to_string(),

@@ -22,8 +22,18 @@ async fn a_replayed_command_returns_its_receipt_without_acting_again() {
             .unwrap(),
         created
     );
+    let capability = node
+        .capability(
+            &alice,
+            DocScope {
+                write: BTreeSet::from([created.doc_id.clone()]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
     let write = || WriteFacets {
-        authorization: Authorization::identity(alice.capability),
+        capability,
         command: Some(command("write")),
         doc_id: created.doc_id.clone(),
         mode: WriteMode::AtCurrent,
@@ -67,8 +77,18 @@ async fn a_refused_write_releases_its_command() {
         .create(&alice, "create", [(key("main"), note("x"))])
         .await
         .unwrap();
+    let capability = node
+        .capability(
+            &alice,
+            DocScope {
+                write: BTreeSet::from([created.doc_id.clone()]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
     let write = |heads: Vec<ChangeHash>| WriteFacets {
-        authorization: Authorization::identity(alice.capability),
+        capability,
         command: Some(command("write")),
         doc_id: created.doc_id.clone(),
         mode: WriteMode::IfDocUnchanged { heads },

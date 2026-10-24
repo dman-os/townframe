@@ -2129,16 +2129,44 @@ where
                 self.keyhive_reconciliation_waiters = pending;
                 self.try_resolve_quiescence()?;
             }
-            Runtime2Evt::DocWorkerStopped { doc_id, error } => {
-                self.doc_workers.remove(&doc_id);
-                self.pending_materialization.remove(&doc_id);
-                self.materialization_retries_in_flight.remove(&doc_id);
-                self.materialization_retries_requested.remove(&doc_id);
-                if let Some(probe) = self.quiescence_probe.as_mut() {
-                    probe.pending_docs.remove(&doc_id);
+            Runtime2Evt::DocWorkerStopped {
+                doc_id,
+                generation,
+                error,
+            } => {
+                // A stop from a superseded incarnation names a worker the hub
+                // already replaced (the janitor evicted it and a later command
+                // spawned the replacement before this event landed). The entry
+                // and the per-doc materialization state belong to the worker
+                // that is alive now, so a stale stop must not touch them.
+                let current_generation =
+                    self.doc_workers.get(&doc_id).map(|entry| entry.generation);
+                match current_generation {
+                    Some(current_generation) if current_generation != generation => {
+                        debug!(
+                            %doc_id,
+                            stopped_generation = generation,
+                            current_generation,
+                            "ignoring stale doc worker stop for superseded worker incarnation"
+                        );
+                    }
+                    _ => {
+                        self.doc_workers.remove(&doc_id);
+                        self.pending_materialization.remove(&doc_id);
+                        self.materialization_retries_in_flight.remove(&doc_id);
+                        self.materialization_retries_requested.remove(&doc_id);
+                        if let Some(probe) = self.quiescence_probe.as_mut() {
+                            probe.pending_docs.remove(&doc_id);
+                        }
+                    }
                 }
                 if let Some(err) = error {
-                    tracing::error!(%doc_id, error = %err, "doc worker stopped with error");
+                    tracing::error!(
+                        %doc_id,
+                        generation,
+                        error = %err,
+                        "doc worker stopped with error"
+                    );
                 }
             }
             Runtime2Evt::DocWorkerMaterializationPending { doc_id } => {
@@ -3558,11 +3586,12 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         // operation is never cancelled underneath itself; an entry that expired
         // while still leased has its deadline disarmed instead of being evicted.
         for doc_id in sweep_idle_doc_workers(&mut self.doc_workers, now) {
-            // Remove the entry *before* cancelling: the abort path of the
-            // worker's mailbox loop does not emit `DocWorkerStopped` (that
-            // event is only sent on normal mailbox completion), so a cancelled
-            // worker would otherwise linger as a stale closed-sender entry —
-            // re-cancelled by the janitor every tick and fenced by quiescence.
+            // Remove the entry here rather than waiting for the worker's own
+            // `DocWorkerStopped`: the aborted mailbox loop does emit it, but
+            // only once its task is next polled, and a command that needs the
+            // doc in the meantime must find no entry so it spawns a fresh
+            // incarnation. When the late stop lands, its generation no longer
+            // matches the entry and the hub ignores it.
             let entry = self
                 .doc_workers
                 .remove(&doc_id)

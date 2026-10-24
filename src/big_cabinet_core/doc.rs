@@ -1,4 +1,4 @@
-use crate::authority::{AuthorityServiceError, Authorization, Capability, Rights};
+use crate::authority::{AuthorityServiceError, Authorization, CapId, Capability, Rights};
 use crate::dmeta::{Bytes, DocId, FacetClaim, FacetSignature, MultibaseKey};
 use crate::drawer::DrawerAccess;
 use crate::{FacetKey, FacetTag};
@@ -192,7 +192,7 @@ pub struct MintDocCapability {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDoc {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub command: CommandId,
     pub placement: String,
     pub facets: BTreeMap<FacetKey, Json>,
@@ -200,7 +200,7 @@ pub struct CreateDoc {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteFacets {
-    pub authorization: Authorization,
+    pub capability: CapId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<CommandId>,
     pub doc_id: DocId,
@@ -213,7 +213,7 @@ pub struct WriteFacets {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchDoc {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub command: CommandId,
     pub doc_id: DocId,
     pub at: At,
@@ -225,7 +225,7 @@ pub struct BranchDoc {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeDoc {
-    pub authorization: Authorization,
+    pub capability: CapId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<CommandId>,
     pub source_id: DocId,
@@ -235,7 +235,7 @@ pub struct MergeDoc {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadFacets {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub doc_id: DocId,
     pub at: At,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -246,7 +246,7 @@ pub struct ReadFacets {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListFacets {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub doc_id: DocId,
     pub at: At,
 }
@@ -263,7 +263,7 @@ pub enum FacetSelector {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryFacets {
-    pub authorization: Authorization,
+    pub capability: CapId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drawer_id: Option<DocId>,
     pub selector: FacetSelector,
@@ -293,7 +293,7 @@ pub enum FacetRefSelector {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryFacetRefs {
-    pub authorization: Authorization,
+    pub capability: CapId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drawer_id: Option<DocId>,
     pub selector: FacetRefSelector,
@@ -365,7 +365,7 @@ pub enum FacetObserved {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ObserveFacets {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub scope: ObserveScope,
     #[serde(default)]
     pub after: u64,
@@ -433,7 +433,7 @@ pub struct UnsafeFacetInspection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnsafeInspectFacet {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub doc_id: DocId,
     pub facet_key: FacetKey,
     pub heads: Vec<ChangeHash>,
@@ -441,7 +441,7 @@ pub struct UnsafeInspectFacet {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InspectFacetClaims {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub doc_id: DocId,
     pub facet_key: FacetKey,
     pub heads: Vec<ChangeHash>,

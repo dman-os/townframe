@@ -1,5 +1,5 @@
 use super::{Drawer, DrawerAccess as Access, DrawerGroups, DrawerLayout, GroupKey, LayoutKind};
-use crate::authority::{AuthorityServiceError, Authorization, Capability, Rights};
+use crate::authority::{AuthorityServiceError, Authorization, CapId, Capability, Rights};
 use crate::dmeta::{DocId, Uuid7};
 use crate::doc::{CommandId, DocsError, WriteReceipt};
 use automerge::ChangeHash;
@@ -106,7 +106,7 @@ pub struct MintDrawerCapability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDrawer {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub command: CommandId,
     #[serde(flatten)]
     pub layout: CreateLayout,
@@ -120,7 +120,7 @@ pub struct DrawerCreated {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddDoc {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub command: CommandId,
     pub drawer_id: DrawerId,
     pub doc_id: DocId,
@@ -129,7 +129,7 @@ pub struct AddDoc {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveDoc {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub command: CommandId,
     pub drawer_id: DrawerId,
     pub doc_id: DocId,
@@ -137,7 +137,7 @@ pub struct RemoveDoc {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddChild {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub command: CommandId,
     pub parent_id: DrawerId,
     pub child_id: DrawerId,
@@ -146,7 +146,7 @@ pub struct AddChild {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveChild {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub command: CommandId,
     pub parent_id: DrawerId,
     pub child_id: DrawerId,
@@ -154,7 +154,7 @@ pub struct RemoveChild {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetDrawer {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub drawer_id: DrawerId,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,7 +170,7 @@ pub struct DrawerView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListDocs {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub drawer_id: DrawerId,
     #[serde(default)]
     pub offset: u64,
@@ -188,7 +188,7 @@ pub struct ListedDoc {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RememberDrawer {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub drawer_id: DrawerId,
     #[serde(default)]
     pub mirror: bool,
@@ -196,13 +196,13 @@ pub struct RememberDrawer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForgetDrawer {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub drawer_id: DrawerId,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListKnownDrawers {
-    pub authorization: Authorization,
+    pub capability: CapId,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -213,14 +213,14 @@ pub struct KnownDrawer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetDrawerPolicy {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub drawer_id: DrawerId,
     pub mirror: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListDrawers {
-    pub authorization: Authorization,
+    pub capability: CapId,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -233,7 +233,7 @@ pub struct ListedDrawer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrantDrawer {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub drawer_id: DrawerId,
     pub subject_id: Uuid7,
     pub access: Access,
@@ -241,7 +241,7 @@ pub struct GrantDrawer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevokeDrawer {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub drawer_id: DrawerId,
     pub subject_id: Uuid7,
 }
@@ -258,7 +258,7 @@ pub enum Principal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvitePrincipal {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub drawer_id: DrawerId,
     pub principal: Principal,
     pub access: Access,
@@ -266,7 +266,7 @@ pub struct InvitePrincipal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevokePrincipal {
-    pub authorization: Authorization,
+    pub capability: CapId,
     pub drawer_id: DrawerId,
     pub principal: Principal,
 }
@@ -337,47 +337,4 @@ pub fn drawer_object(access: Access, drawer: &DrawerId) -> String {
 }
 pub fn drawer_placement(drawer: &DrawerId) -> String {
     format!("drawer {drawer}")
-}
-
-/// The object a drawer scope capability carries: the standing-grant verb when the scope is one
-/// DrawerService object (`write drawer D` / `create drawer`), so grants written through the cap
-/// match ledger rows, and the general scope grammar otherwise.
-pub fn drawer_scope_object(scope: &DrawerScope) -> String {
-    if !scope.create && scope.drawers.len() == 1 {
-        let (drawer, access) = scope.drawers.iter().next().expect("one drawer");
-        return drawer_object(*access, drawer);
-    }
-    if scope.create && scope.drawers.is_empty() {
-        return CREATE_DRAWER_OBJECT.to_owned();
-    }
-    format!(
-        "DrawerService/scope/v1/{}",
-        serde_json::to_string(scope).expect("drawer scope serializes")
-    )
-}
-
-/// Parse a drawer capability object back into the scope it authorizes: either encoding of
-/// [`drawer_scope_object`].
-pub fn parse_drawer_scope_object(object: &str) -> Option<DrawerScope> {
-    if let Some(json) = object.strip_prefix("DrawerService/scope/v1/") {
-        return serde_json::from_str(json).ok();
-    }
-    if object == CREATE_DRAWER_OBJECT {
-        return Some(DrawerScope {
-            drawers: BTreeMap::new(),
-            create: true,
-        });
-    }
-    let (verb, drawer) = object.split_once(" drawer ")?;
-    let access = match verb {
-        "relay" => Access::Relay,
-        "read" => Access::Read,
-        "write" => Access::Write,
-        "admin" => Access::Admin,
-        _ => return None,
-    };
-    Some(DrawerScope {
-        drawers: BTreeMap::from([(drawer.parse().ok()?, access)]),
-        create: false,
-    })
 }

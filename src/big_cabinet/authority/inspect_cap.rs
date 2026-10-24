@@ -4,11 +4,8 @@ use super::*;
 
 impl AuthorityService {
     async fn inspect(&self, request: InspectCapability) -> Result<Capability, AuthorityError> {
-        let mut transaction = self.read().await?;
-        Ok(cap::walk(&mut transaction, &request.capability)
-            .await?
-            .cap
-            .wire())
+        let state = self.state.lock().await;
+        Ok(cap::walk(&state, &request.capability)?.cap.wire())
     }
 }
 

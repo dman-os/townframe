@@ -109,7 +109,7 @@ impl DocsService {
         context: &RequestContext,
         params: QueryFacets,
     ) -> Result<Vec<QueriedFacet>, DocsError> {
-        let caller = self.invocation(context, params.authorization).await?;
+        let caller = self.invocation(context, params.capability).await?;
         let Some(store) = &self.facet_set else {
             return Err(DocsError::Repository(
                 "facet-set index is not configured on this repository".into(),
@@ -218,7 +218,7 @@ impl DocsService {
         context: &RequestContext,
         params: QueryFacetRefs,
     ) -> Result<Vec<QueriedFacetRef>, DocsError> {
-        let caller = self.invocation(context, params.authorization).await?;
+        let caller = self.invocation(context, params.capability).await?;
         let Some(store) = &self.facet_ref else {
             return Err(DocsError::Repository(
                 "facet-ref index is not configured on this repository".into(),
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn query_facets_and_refs_wire_shapes() {
         let query = QueryFacets {
-            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
+            capability: CapId::from_bytes([1; 16]),
             drawer_id: Some(DocId::new([2; 32])),
             selector: FacetSelector::Tag {
                 tag: FacetTag::new("org.example.note").unwrap(),
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
+                "capability": CapId::from_bytes([1; 16]),
                 "drawerId": DocId::new([2; 32]).to_string(),
                 "selector": {
                     "by": "tag",
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(serde_json::from_value::<QueryFacets>(value).unwrap(), query);
 
         let refs = QueryFacetRefs {
-            authorization: Authorization::identity(CapId::from_bytes([1; 16])),
+            capability: CapId::from_bytes([1; 16]),
             drawer_id: None,
             selector: FacetRefSelector::Target {
                 doc_id: DocId::new([3; 32]),
@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "authorization": Authorization::identity(CapId::from_bytes([1; 16])),
+                "capability": CapId::from_bytes([1; 16]),
                 "selector": {
                     "by": "target",
                     "docId": DocId::new([3; 32]).to_string(),

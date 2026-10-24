@@ -10,7 +10,7 @@ impl DocsService {
         context: &RequestContext,
         params: MergeDoc,
     ) -> Result<WriteReceipt, DocsError> {
-        let caller = self.invocation(context, params.authorization).await?;
+        let caller = self.invocation(context, params.capability).await?;
         let actor = &caller.signer;
         self.authorize(
             context,

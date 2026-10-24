@@ -47,11 +47,14 @@ pub use big_cabinet_core::drawer::{Drawer, DrawerLayout, LayoutKind};
 use self::ledger::Ledger;
 use self::state::State;
 use crate::authority::{
-    Actor, AuthorityProtocol, AuthorityServiceError, Authorization, CapId, Capability, CheckGrant,
-    CheckGrants, DomainAuthority, GrantAccess, Invocation, MintCapability, ResolveActor,
-    RevokeAccess, Rights, resolve_invocation,
+    Actor, AuthorityProtocol, AuthorityServiceError, Authorization, CapId, Capability,
+    DomainAuthority, Namespace, ResolveActor, Rights,
 };
-use crate::doc::{CommandId, DocsError, DocsProtocol, WriteMode, WriteReceipt};
+use crate::capability::{DomainCapabilities, Invocation};
+use crate::doc::{
+    CommandId, DocScope, DocsError, DocsProtocol, MintDocCapability, WriteMode, WriteReceipt,
+};
+use crate::grants::{GrantError, Grants};
 use big_cabinet_core::FacetKey;
 use big_cabinet_core::dmeta::{DocId, Uuid7};
 use big_cabinet_core::drawer::{
@@ -112,9 +115,8 @@ impl LedgerFailure for DrawersError {
 pub struct DrawerConfig {
     pub big_repo: SharedBigRepo,
     pub authority: Client<AuthorityProtocol>,
-    /// DrawerService's own actor capability: it names the objects it mints and checks, and it is
-    /// the actor every roster write and every drawer doc creation goes through DocsRepo as.
     pub issuer: CapId,
+    pub namespace: Namespace,
     pub docs: Client<DocsProtocol>,
     /// The policy DocsRepo was booted with. It was built from the same `sql` before DocsRepo, so
     /// the two services share one projection; boot hands it the docs client it was missing.
@@ -132,6 +134,9 @@ pub(crate) struct Core {
     pub(crate) big_repo: SharedBigRepo,
     pub(crate) authority: Client<AuthorityProtocol>,
     pub(crate) issuer: CapId,
+    pub(crate) namespace: Namespace,
+    pub(crate) capabilities: DomainCapabilities,
+    pub(crate) grants: Arc<Grants>,
     pub(crate) actor: OnceLock<Actor>,
     pub(crate) docs: OnceLock<Client<DocsProtocol>>,
     pub(crate) state: State,
@@ -192,31 +197,51 @@ impl Handler<MintDrawerCapability> for DrawerService {
         let params = request.params;
         let caller = self
             .core
-            .invocation(&request.context, params.authorization)
-            .await?;
+            .capabilities
+            .source::<DrawerScope>(&request.context, params.authorization)
+            .await
+            .map_err(authority_error)?;
         if !caller.rights.contains(Rights::NARROW) || !params.rights.is_subset_of(caller.rights) {
             return Err(DrawersError::Denied);
         }
+        let mut dependencies = Vec::new();
         for (drawer, access) in &params.scope.drawers {
-            self.core
-                .authorize(&request.context, &caller.authority, drawer, *access)
-                .await?;
+            match &caller.authority {
+                DomainAuthority::Identity(actor) => {
+                    let (held, proof) = self
+                        .core
+                        .effective(&request.context, *actor, drawer)
+                        .await?
+                        .ok_or(DrawersError::Denied)?;
+                    if held < *access {
+                        return Err(DrawersError::Denied);
+                    }
+                    dependencies.extend(proof);
+                }
+                DomainAuthority::Scoped(_) => {
+                    self.core
+                        .authorize(&request.context, &caller.authority, drawer, *access)
+                        .await?;
+                }
+            }
         }
         if params.scope.create {
-            self.core
-                .authorize_create(&request.context, &caller.authority)
-                .await?;
+            dependencies.extend(
+                self.core
+                    .authorize_create(&request.context, &caller.authority)
+                    .await?,
+            );
         }
         Ok(self
             .core
-            .authority
-            .call(
-                request.context.child(),
-                MintCapability {
-                    issuer: self.core.issuer,
-                    object: drawer_scope_object(&params.scope),
-                    rights: params.rights,
-                },
+            .capabilities
+            .mint(
+                &request.context,
+                params.authorization.authority,
+                &caller,
+                params.scope,
+                params.rights,
+                dependencies,
             )
             .await
             .map_err(authority_error)?
@@ -313,6 +338,13 @@ pub(crate) fn authority_error(error: ClientError<AuthorityServiceError>) -> Draw
     }
 }
 
+pub(crate) fn grant_error(error: GrantError) -> DrawersError {
+    match error {
+        GrantError::Storage(error) => DrawersError::Storage(error.to_string()),
+        GrantError::Authority(error) => authority_error(error),
+    }
+}
+
 pub(crate) fn docs_error(error: ClientError<DocsError>) -> DrawersError {
     match error {
         ClientError::Operation(DocsError::Context(error)) => error.into(),
@@ -342,17 +374,35 @@ impl Core {
     pub(crate) async fn invocation(
         &self,
         context: &RequestContext,
-        authorization: Authorization,
+        capability: CapId,
     ) -> Result<Invocation<DrawerScope>, DrawersError> {
-        resolve_invocation(
-            &self.authority,
-            context,
-            authorization,
-            self.actor().actor_id,
-            parse_drawer_scope_object,
-        )
-        .await
-        .map_err(authority_error)
+        self.capabilities
+            .resolve(context, capability)
+            .await
+            .map_err(authority_error)
+    }
+
+    pub(crate) async fn doc_capability(
+        &self,
+        context: &RequestContext,
+        signer: CapId,
+        scope: DocScope,
+    ) -> Result<CapId, DrawersError> {
+        self.docs()
+            .call(
+                context.child(),
+                MintDocCapability {
+                    authorization: Authorization {
+                        authority: self.issuer,
+                        signer,
+                    },
+                    scope,
+                    rights: Rights::USE,
+                },
+            )
+            .await
+            .map(|cap| cap.capability_id)
+            .map_err(docs_error)
     }
 
     async fn granted(
@@ -360,7 +410,7 @@ impl Core {
         context: &RequestContext,
         actor: Uuid7,
         bounds: BTreeMap<DrawerId, Access>,
-    ) -> Result<Option<Access>, DrawersError> {
+    ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
         let candidates: Vec<_> = bounds
             .iter()
             .flat_map(|(drawer, bound)| {
@@ -369,31 +419,32 @@ impl Core {
                     .map(move |access| (drawer_object(access, drawer), access.min(*bound)))
             })
             .collect();
-        let rights = self
-            .authority
-            .call(
-                context.child(),
-                CheckGrants {
-                    via: self.issuer,
-                    subject_id: actor,
-                    objects: candidates
-                        .iter()
-                        .map(|(object, _)| object.clone())
-                        .collect(),
-                },
+        let proofs = self
+            .grants
+            .matching(
+                context,
+                actor,
+                &candidates
+                    .iter()
+                    .map(|(object, _)| object.clone())
+                    .collect::<Vec<_>>(),
             )
             .await
-            .map_err(authority_error)?;
+            .map_err(grant_error)?;
         assert_eq!(
-            rights.len(),
+            proofs.len(),
             candidates.len(),
-            "one verdict per requested object"
+            "one proof per requested object"
         );
-        Ok(candidates
-            .into_iter()
-            .zip(rights)
-            .filter_map(|((_, access), rights)| rights.contains(Rights::USE).then_some(access))
-            .max())
+        let mut selected = None;
+        for ((_, access), proof) in candidates.into_iter().zip(proofs) {
+            if proof.rights.contains(Rights::USE)
+                && selected.as_ref().is_none_or(|(held, _)| access > *held)
+            {
+                selected = Some((access, proof.dependencies));
+            }
+        }
+        Ok(selected)
     }
 
     pub(crate) async fn effective(
@@ -401,7 +452,7 @@ impl Core {
         context: &RequestContext,
         actor: Uuid7,
         drawer: &DrawerId,
-    ) -> Result<Option<Access>, DrawersError> {
+    ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
         let mut bounds = self
             .state
             .ancestors(state::ScopeTarget::Drawer(drawer))
@@ -424,7 +475,7 @@ impl Core {
         context: &RequestContext,
         actor: Uuid7,
         doc: &DocId,
-    ) -> Result<Option<Access>, DrawersError> {
+    ) -> Result<Option<(Access, Vec<CapId>)>, DrawersError> {
         let mut bounds = self.state.ancestors(state::ScopeTarget::Doc(doc)).await?;
         if bounds.is_empty() {
             // The doc's drawers may have arrived via sync without a local projection row.
@@ -444,7 +495,10 @@ impl Core {
         drawer: &DrawerId,
     ) -> Result<Option<Access>, DrawersError> {
         match authority {
-            DomainAuthority::Identity(actor) => self.effective(context, *actor, drawer).await,
+            DomainAuthority::Identity(actor) => Ok(self
+                .effective(context, *actor, drawer)
+                .await?
+                .map(|(access, _)| access)),
             DomainAuthority::Scoped(scope) => {
                 let mut bounds = self
                     .state
@@ -469,7 +523,10 @@ impl Core {
         doc: &DocId,
     ) -> Result<Option<Access>, DrawersError> {
         match authority {
-            DomainAuthority::Identity(actor) => self.reach(context, *actor, doc).await,
+            DomainAuthority::Identity(actor) => Ok(self
+                .reach(context, *actor, doc)
+                .await?
+                .map(|(access, _)| access)),
             DomainAuthority::Scoped(scope) => {
                 let bounds = self.state.ancestors(state::ScopeTarget::Doc(doc)).await?;
                 Ok(scope
@@ -500,27 +557,23 @@ impl Core {
         &self,
         context: &RequestContext,
         authority: &DomainAuthority<DrawerScope>,
-    ) -> Result<(), DrawersError> {
-        let allowed = match authority {
-            DomainAuthority::Identity(actor) => self
-                .authority
-                .call(
-                    context.child(),
-                    CheckGrant {
-                        via: self.issuer,
-                        subject_id: *actor,
-                        object: CREATE_DRAWER_OBJECT.into(),
-                    },
-                )
-                .await
-                .map_err(authority_error)?
-                .contains(Rights::USE),
-            DomainAuthority::Scoped(scope) => scope.create,
-        };
-        if allowed {
-            Ok(())
-        } else {
-            Err(DrawersError::Denied)
+    ) -> Result<Vec<CapId>, DrawersError> {
+        match authority {
+            DomainAuthority::Identity(actor) => {
+                let proof = self
+                    .grants
+                    .matching(context, *actor, &[CREATE_DRAWER_OBJECT.into()])
+                    .await
+                    .map_err(grant_error)?
+                    .pop()
+                    .expect("one proof for creation");
+                if !proof.rights.contains(Rights::USE) {
+                    return Err(DrawersError::Denied);
+                }
+                Ok(proof.dependencies)
+            }
+            DomainAuthority::Scoped(scope) if scope.create => Ok(Vec::new()),
+            DomainAuthority::Scoped(_) => Err(DrawersError::Denied),
         }
     }
 
@@ -529,19 +582,12 @@ impl Core {
         context: &RequestContext,
         subject: Uuid7,
         object: String,
+        source: Option<CapId>,
     ) -> Result<(), DrawersError> {
-        self.authority
-            .call(
-                context.child(),
-                GrantAccess {
-                    via: self.issuer,
-                    subject_id: subject,
-                    object,
-                    rights: Rights::USE,
-                },
-            )
+        self.grants
+            .grant(context, subject, object, Rights::USE, source)
             .await
-            .map_err(authority_error)?;
+            .map_err(grant_error)?;
         self.state.notify_changed();
         Ok(())
     }
@@ -561,7 +607,16 @@ impl Core {
             .call(
                 context.child(),
                 crate::doc::WriteFacets {
-                    authorization: Authorization::identity(self.issuer),
+                    capability: self
+                        .doc_capability(
+                            context,
+                            self.issuer,
+                            DocScope {
+                                write: [drawer.clone()].into(),
+                                ..Default::default()
+                            },
+                        )
+                        .await?,
                     command,
                     doc_id: drawer.clone(),
                     mode: WriteMode::AtCurrent,
@@ -587,7 +642,16 @@ impl Core {
             .call(
                 context.child(),
                 crate::doc::ReadFacets {
-                    authorization: Authorization::identity(self.issuer),
+                    capability: self
+                        .doc_capability(
+                            context,
+                            self.issuer,
+                            DocScope {
+                                read: [record.drawer_id.clone()].into(),
+                                ..Default::default()
+                            },
+                        )
+                        .await?,
                     doc_id: record.drawer_id.clone(),
                     at: crate::doc::At::Current,
                     facets: None,
@@ -699,7 +763,16 @@ impl Core {
             .call(
                 context.child(),
                 crate::doc::ReadFacets {
-                    authorization: Authorization::identity(self.issuer),
+                    capability: self
+                        .doc_capability(
+                            context,
+                            self.issuer,
+                            DocScope {
+                                read: [drawer_id.clone()].into(),
+                                ..Default::default()
+                            },
+                        )
+                        .await?,
                     doc_id: drawer_id.clone(),
                     at: crate::doc::At::Current,
                     facets: Some(std::collections::BTreeSet::from([drawer_key()])),
@@ -749,7 +822,16 @@ impl Core {
                 .call(
                     context.child(),
                     crate::doc::ReadFacets {
-                        authorization: Authorization::identity(self.issuer),
+                        capability: self
+                            .doc_capability(
+                                context,
+                                self.issuer,
+                                DocScope {
+                                    read: [drawer_id.clone()].into(),
+                                    ..Default::default()
+                                },
+                            )
+                            .await?,
                         doc_id: drawer_id.clone(),
                         at: crate::doc::At::Current,
                         facets: Some(std::collections::BTreeSet::from([drawer_key()])),
@@ -873,6 +955,10 @@ pub async fn boot(config: DrawerConfig) -> Result<(Drawers, StopToken), DrawersE
         core.issuer, config.issuer,
         "DrawerService and its DocAccess policy are the same actor"
     );
+    assert_eq!(
+        core.namespace, config.namespace,
+        "DrawerService and its DocAccess policy use the same namespace"
+    );
     let actor = core
         .authority
         .call(
@@ -906,7 +992,7 @@ pub async fn boot(config: DrawerConfig) -> Result<(Drawers, StopToken), DrawersE
             client,
             core: Arc::clone(&service.core),
         },
-        host_stop,
+        host_stop.then(service.core.capabilities.stop_token()),
     ))
 }
 

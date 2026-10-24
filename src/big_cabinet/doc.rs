@@ -55,9 +55,9 @@ use self::commands::Commands;
 use self::gate::{DMETA_KEY, Gate, Verdict, doc_actor, facet_version, signature_heads};
 use crate::authority::{
     Actor, AuthorityProtocol, AuthorityServiceError, Authorization, CapId, Capability,
-    DomainAuthority, InspectCapability, Invocation, MintCapability, ResolveActor, Rights,
-    SignFacetClaim, resolve_invocation,
+    DomainAuthority, Namespace, ResolveActor, Rights, SignFacetClaim,
 };
+use crate::capability::{DomainCapabilities, Invocation};
 use crate::index::facet_ref::FacetRefStore;
 use crate::index::facet_set::FacetSetStore;
 use crate::schema::{SchemaHandle, SchemaRepo};
@@ -87,8 +87,8 @@ pub struct DocsConfig {
     pub big_repo: SharedBigRepo,
     pub schema_repo: Arc<SchemaRepo>,
     pub authority: Client<AuthorityProtocol>,
-    /// DocsRepo's own actor capability: it names the objects it mints and checks.
     pub issuer: CapId,
+    pub namespace: Namespace,
     /// This node's attribution issuer. Every change DocsRepo makes is authored under this key
     /// as its Automerge actor, which is what lets a verifier find the expected issuer of the
     /// attribution certificates the change carries.
@@ -111,6 +111,8 @@ pub struct DocsService {
     authority: Client<AuthorityProtocol>,
     access: Arc<dyn DocAccess>,
     issuer: CapId,
+    capabilities: DomainCapabilities,
+    inspection_capabilities: DomainCapabilities,
     /// DocsRepo's own actor, which signs `org.example.daybook.branch/<id>` on the branch and,
     /// unless stealth, the same facet on the origin. Access is checked before either is written;
     /// signing them as the
@@ -144,10 +146,6 @@ fn committed_change(doc: &Automerge, command: &CommandId) -> Option<ChangeHash> 
         .map(|change| change.hash())
 }
 
-fn inspection_object(doc_id: &DocId) -> String {
-    format!("DocsRepo/UNSAFE/inspection/{doc_id}")
-}
-
 fn authority_error(error: ClientError<AuthorityServiceError>) -> DocsError {
     match error {
         ClientError::Operation(AuthorityServiceError::Context(error)) => error.into(),
@@ -162,7 +160,10 @@ fn authority_error(error: ClientError<AuthorityServiceError>) -> DocsError {
 }
 
 fn access_error(error: AccessError) -> DocsError {
-    DocsError::Access(error.to_string())
+    match error {
+        AccessError::Refused(_) => DocsError::Denied,
+        AccessError::Unavailable(_) => DocsError::Access(error.to_string()),
+    }
 }
 
 fn repository(error: impl std::fmt::Display) -> DocsError {
@@ -212,27 +213,15 @@ fn unaccepted(verdict: Verdict) -> Result<Vec<ChangeHash>, Unaccepted> {
 }
 
 impl DocsService {
-    async fn actor(&self, context: &RequestContext, capability: CapId) -> Result<Actor, DocsError> {
-        self.authority
-            .call(context.child(), ResolveActor { capability })
-            .await
-            .map_err(authority_error)
-    }
-
     async fn invocation(
         &self,
         context: &RequestContext,
-        authorization: Authorization,
+        capability: CapId,
     ) -> Result<Invocation<DocScope>, DocsError> {
-        resolve_invocation(
-            &self.authority,
-            context,
-            authorization,
-            self.system_actor.actor_id,
-            |object| serde_json::from_str(object.strip_prefix("DocsRepo/scope/v1/")?).ok(),
-        )
-        .await
-        .map_err(authority_error)
+        self.capabilities
+            .resolve(context, capability)
+            .await
+            .map_err(authority_error)
     }
 
     async fn allowed(
@@ -351,20 +340,46 @@ pub struct DocsRepo {
 }
 
 impl DocsRepo {
-    pub async fn mint_inspection_handle(&self, doc_id: DocId) -> Result<Capability, DocsError> {
+    pub async fn mint_inspection_handle(
+        &self,
+        doc_id: DocId,
+        signer: CapId,
+    ) -> Result<Capability, DocsError> {
         let service = Arc::clone(&self.service);
         let owner = self.mint_spawner.clone();
         let task = self
             .mint_spawner
             .spawn(async move {
+                let mint = async {
+                    let context = RequestContext::root();
+                    let caller = service
+                        .inspection_capabilities
+                        .source::<DocId>(
+                            &context,
+                            Authorization {
+                                authority: service.issuer,
+                                signer,
+                            },
+                        )
+                        .await
+                        .map_err(authority_error)?;
+                    service
+                        .inspection_capabilities
+                        .mint(
+                            &context,
+                            service.issuer,
+                            &caller,
+                            doc_id,
+                            Rights::USE,
+                            Vec::new(),
+                        )
+                        .await
+                        .map_err(authority_error)
+                };
                 tokio::select! {
                     biased;
                     _ = owner.cancelled() => Err(ContextError::Cancelled.into()),
-                    result = service.authority.call(RequestContext::root(), MintCapability {
-                        issuer: service.issuer,
-                        object: inspection_object(&doc_id),
-                        rights: Rights::USE,
-                    }) => result.map_err(authority_error),
+                    result = mint => result,
                 }
             })
             .ok_or(ContextError::Cancelled)?;
@@ -396,6 +411,16 @@ pub async fn boot(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsError
     let service = Arc::new(DocsService {
         big_repo: config.big_repo,
         schema_repo: config.schema_repo,
+        capabilities: DomainCapabilities::new(
+            config.authority.clone(),
+            config.namespace,
+            "DocsRepo/scope/v2/",
+        ),
+        inspection_capabilities: DomainCapabilities::new(
+            config.authority.clone(),
+            config.namespace,
+            "DocsRepo/UNSAFE/inspection/v2/",
+        ),
         authority: config.authority,
         access: config.access,
         issuer: config.issuer,
@@ -411,10 +436,14 @@ pub async fn boot(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsError
     });
     let (mint_stop, mint_spawner) = StopToken::new();
     let (host, host_stop) = Host::new(Arc::clone(&service));
+    let stop = host_stop
+        .then(mint_stop)
+        .then(service_stop)
+        .then(service.capabilities.stop_token());
     let client = Client::direct(DocsBinding::new(Arc::clone(&host)));
     service.access.attach_docs(client.clone());
     if let Err(error) = service.recover().await {
-        host_stop.then(mint_stop).then(service_stop).stop().await;
+        stop.stop().await;
         return Err(error);
     }
     Ok((
@@ -424,7 +453,7 @@ pub async fn boot(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsError
             host,
             client,
         },
-        host_stop.then(mint_stop).then(service_stop),
+        stop,
     ))
 }
 

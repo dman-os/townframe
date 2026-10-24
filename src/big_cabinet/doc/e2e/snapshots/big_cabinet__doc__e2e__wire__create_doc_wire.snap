@@ -3,10 +3,7 @@ source: src/big_cabinet/document/e2e/wire.rs
 expression: "CreateDoc\n{\n    capability: capability(1), command: command(\"create-note-1\"), placement:\n    PLACEMENT.into(), facets: facet_map(&[(&key(\"main\"), note(\"hello\"))]),\n}"
 ---
 {
-  "authorization": {
-    "authority": "01010101-0101-0101-0101-010101010101",
-    "signer": "01010101-0101-0101-0101-010101010101"
-  },
+  "capability": "01010101-0101-0101-0101-010101010101",
   "command": "create-note-1",
   "placement": "drawer test",
   "facets": {

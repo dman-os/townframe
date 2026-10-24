@@ -6,20 +6,21 @@
 //! Containment — "doc X is in drawer D, so write on D covers X" — is the policy's decision, because
 //! the policy is the one that named D.
 //!
-//! [`LedgerAccess`] is the policy this crate ships: standing grants in the authority ledger on
+//! [`LedgerAccess`] is the policy this crate ships: standing grants in the local domain ledger on
 //! objects DocsRepo names itself (`read document <id>`, `write document <id>`,
 //! `create document in <placement>`). It is a complete policy for an embedding without drawers and
 //! for tests, not a stand-in.
 
-use crate::authority::{
-    AuthorityProtocol, AuthorityServiceError, CapId, CheckGrant, GrantAccess, Rights,
-};
-use crate::doc::{DocsError, DocsProtocol, DocsService, MintDocCapability};
+use crate::authority::{AuthorityProtocol, CapId, DomainAuthority, Namespace, Rights};
+use crate::doc::{DocScope, DocsError, DocsProtocol, DocsService, MintDocCapability};
+use crate::grants::{GrantError, Grants};
 use big_cabinet_core::dmeta::{DocId, Uuid7};
 use service_utils_rs::{Client, ClientError, RequestContext};
+use sqlx_utils_rs::SqlCtx;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 pub type AccessFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, AccessError>> + Send + 'a>>;
 
@@ -43,7 +44,14 @@ pub trait DocAccess: Send + Sync + 'static {
     /// interrupted placements.
     fn attach_docs(&self, _docs: Client<DocsProtocol>) {}
 
-    /// Whether `actor` may perform `request`. A pure policy read: nothing is minted or recorded.
+    fn prove<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        actor: Uuid7,
+        scope: &'a DocScope,
+    ) -> AccessFuture<'a, Vec<CapId>>;
+
+    /// Whether `actor` may perform `request`.
     fn check<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -109,16 +117,22 @@ pub trait DocAccess: Send + Sync + 'static {
 }
 
 pub struct LedgerAccess {
-    authority: Client<AuthorityProtocol>,
-    issuer: CapId,
+    pub grants: Arc<Grants>,
 }
 
 impl LedgerAccess {
-    /// `issuer` is DocsRepo's own actor capability: the ledger answers grant checks only to
-    /// the actor that named the objects, and that actor's capability must carry `use` and
-    /// `delegate`.
-    pub fn new(authority: Client<AuthorityProtocol>, issuer: CapId) -> Self {
-        Self { authority, issuer }
+    pub async fn open(
+        sql: SqlCtx,
+        authority: Client<AuthorityProtocol>,
+        namespace: Namespace,
+    ) -> Result<Self, AccessError> {
+        Ok(Self {
+            grants: Arc::new(
+                Grants::open(sql, authority, namespace)
+                    .await
+                    .map_err(ledger_error)?,
+            ),
+        })
     }
 
     pub fn object(request: AccessRequest<'_>) -> String {
@@ -130,14 +144,66 @@ impl LedgerAccess {
     }
 }
 
-fn ledger_error(error: ClientError<AuthorityServiceError>) -> AccessError {
+fn ledger_error(error: GrantError) -> AccessError {
     match error {
-        ClientError::Operation(error) => AccessError::Refused(error.to_string()),
-        ClientError::Transport { message, .. } => AccessError::Unavailable(message),
+        GrantError::Storage(error) => AccessError::Unavailable(error.to_string()),
+        GrantError::Authority(ClientError::Operation(error)) => {
+            AccessError::Refused(error.to_string())
+        }
+        GrantError::Authority(ClientError::Transport { message, .. }) => {
+            AccessError::Unavailable(message)
+        }
     }
 }
 
 impl DocAccess for LedgerAccess {
+    fn prove<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        actor: Uuid7,
+        scope: &'a DocScope,
+    ) -> AccessFuture<'a, Vec<CapId>> {
+        Box::pin(async move {
+            if !scope.drawers.is_empty() {
+                return Err(AccessError::Refused(
+                    "drawers are not configured on this repository".into(),
+                ));
+            }
+            let objects: Vec<_> = scope
+                .read
+                .union(&scope.write)
+                .map(|document| Self::object(AccessRequest::Read(document)))
+                .chain(
+                    scope
+                        .write
+                        .iter()
+                        .map(|document| Self::object(AccessRequest::Write(document))),
+                )
+                .chain(
+                    scope
+                        .create
+                        .iter()
+                        .map(|placement| Self::object(AccessRequest::Create { placement })),
+                )
+                .collect();
+            let proofs = self
+                .grants
+                .matching(context, actor, &objects)
+                .await
+                .map_err(ledger_error)?;
+            let mut dependencies = Vec::new();
+            for proof in proofs {
+                if !proof.rights.contains(Rights::USE) {
+                    return Err(AccessError::Refused("document scope is not granted".into()));
+                }
+                dependencies.extend(proof.dependencies);
+            }
+            dependencies.sort_unstable_by_key(|capability| *capability.as_bytes());
+            dependencies.dedup();
+            Ok(dependencies)
+        })
+    }
+
     fn check<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -145,19 +211,14 @@ impl DocAccess for LedgerAccess {
         request: AccessRequest<'a>,
     ) -> AccessFuture<'a, bool> {
         Box::pin(async move {
-            let rights = self
-                .authority
-                .call(
-                    context.child(),
-                    CheckGrant {
-                        via: self.issuer,
-                        subject_id: actor,
-                        object: Self::object(request),
-                    },
-                )
+            let proof = self
+                .grants
+                .matching(context, actor, &[Self::object(request)])
                 .await
-                .map_err(ledger_error)?;
-            Ok(rights.contains(Rights::USE))
+                .map_err(ledger_error)?
+                .pop()
+                .expect("one requested object has one grant proof");
+            Ok(proof.rights.contains(Rights::USE))
         })
     }
 
@@ -169,21 +230,15 @@ impl DocAccess for LedgerAccess {
         _placement: &'a str,
     ) -> AccessFuture<'a, ()> {
         Box::pin(async move {
-            let Some(actor) = actor else { return Ok(()); };
+            let Some(actor) = actor else {
+                return Ok(());
+            };
             for request in [
                 AccessRequest::Read(document),
                 AccessRequest::Write(document),
             ] {
-                self.authority
-                    .call(
-                        context.child(),
-                        GrantAccess {
-                            via: self.issuer,
-                            subject_id: actor,
-                            object: Self::object(request),
-                            rights: Rights::USE,
-                        },
-                    )
+                self.grants
+                    .grant(context, actor, Self::object(request), Rights::USE, None)
                     .await
                     .map_err(ledger_error)?;
             }
@@ -198,52 +253,53 @@ impl DocsService {
         context: &RequestContext,
         request: MintDocCapability,
     ) -> Result<crate::authority::Capability, DocsError> {
-        let caller = self.invocation(context, request.authorization).await?;
+        let caller = self
+            .capabilities
+            .source::<super::DocScope>(context, request.authorization)
+            .await
+            .map_err(super::authority_error)?;
         if !caller.rights.contains(Rights::NARROW) || !request.rights.is_subset_of(caller.rights) {
             return Err(DocsError::Denied);
         }
-        for doc in request.scope.read.union(&request.scope.write) {
-            self.authorize(context, &caller.authority, AccessRequest::Read(doc))
-                .await?;
-        }
-        for doc in &request.scope.write {
-            self.authorize(context, &caller.authority, AccessRequest::Write(doc))
-                .await?;
-        }
-        for placement in &request.scope.create {
-            self.authorize(
-                context,
-                &caller.authority,
-                AccessRequest::Create { placement },
-            )
-            .await?;
-        }
-        for (drawer, needed) in &request.scope.drawers {
-            let held = match &caller.authority {
-                crate::authority::DomainAuthority::Identity(actor) => self
-                    .access
-                    .drawer_access(context, *actor, drawer)
-                    .await
-                    .map_err(super::access_error)?,
-                crate::authority::DomainAuthority::Scoped(scope) => {
-                    scope.drawers.get(drawer).copied()
+        let dependencies = match &caller.authority {
+            DomainAuthority::Identity(actor) => self
+                .access
+                .prove(context, *actor, &request.scope)
+                .await
+                .map_err(super::access_error)?,
+            DomainAuthority::Scoped(scope) => {
+                for doc in request.scope.read.union(&request.scope.write) {
+                    self.authorize(context, &caller.authority, AccessRequest::Read(doc))
+                        .await?;
                 }
-            };
-            if held < Some(*needed) {
-                return Err(DocsError::Denied);
+                for doc in &request.scope.write {
+                    self.authorize(context, &caller.authority, AccessRequest::Write(doc))
+                        .await?;
+                }
+                for placement in &request.scope.create {
+                    self.authorize(
+                        context,
+                        &caller.authority,
+                        AccessRequest::Create { placement },
+                    )
+                    .await?;
+                }
+                for (drawer, needed) in &request.scope.drawers {
+                    if scope.drawers.get(drawer) < Some(needed) {
+                        return Err(DocsError::Denied);
+                    }
+                }
+                Vec::new()
             }
-        }
-        self.authority
-            .call(
-                context.child(),
-                crate::authority::MintCapability {
-                    issuer: self.issuer,
-                    object: format!(
-                        "DocsRepo/scope/v1/{}",
-                        serde_json::to_string(&request.scope).expect("document scope serializes")
-                    ),
-                    rights: request.rights,
-                },
+        };
+        self.capabilities
+            .mint(
+                context,
+                request.authorization.authority,
+                &caller,
+                request.scope,
+                request.rights,
+                dependencies,
             )
             .await
             .map_err(super::authority_error)

@@ -49,7 +49,16 @@ impl Core {
             .call(
                 context.child(),
                 ReadFacets {
-                    authorization: Authorization::identity(self.issuer),
+                    capability: self
+                        .doc_capability(
+                            context,
+                            self.issuer,
+                            DocScope {
+                                read: [drawer.clone()].into(),
+                                ..Default::default()
+                            },
+                        )
+                        .await?,
                     doc_id: drawer.clone(),
                     at: At::Current,
                     facets: Some(BTreeSet::new()),
@@ -165,7 +174,7 @@ impl DrawerService {
         params: AddDoc,
     ) -> Result<WriteReceipt, DrawersError> {
         let core = &self.core;
-        let caller = core.invocation(context, params.authorization).await?;
+        let caller = core.invocation(context, params.capability).await?;
         let actor = &caller.signer;
         // Conferring Admin on the doc takes Admin on the drawer; any other level takes Write.
         let needed = if params.access == Access::Admin {
@@ -223,7 +232,7 @@ mod tests {
         (access, expected),
         {
             let request = AddDoc {
-                authorization: Authorization::identity(CapId::default()),
+                capability: CapId::default(),
                 command: CommandId::try_from("add-1".to_owned()).unwrap(),
                 drawer_id: DocId::new([1; 32]),
                 doc_id: DocId::new([2; 32]),
@@ -233,10 +242,7 @@ mod tests {
             assert_eq!(
                 value,
                 json!({
-                    "authorization": {
-                        "authority": "00000000-0000-0000-0000-000000000000",
-                        "signer": "00000000-0000-0000-0000-000000000000",
-                    },
+                    "capability": "00000000-0000-0000-0000-000000000000",
                     "command": "add-1",
                     "drawerId": DocId::new([1; 32]).to_string(),
                     "docId": DocId::new([2; 32]).to_string(),
@@ -257,10 +263,7 @@ mod tests {
     #[test]
     fn an_unknown_access_level_is_refused() {
         let error = serde_json::from_value::<AddDoc>(json!({
-            "authorization": {
-                "authority": "00000000-0000-0000-0000-000000000000",
-                "signer": "00000000-0000-0000-0000-000000000000",
-            },
+            "capability": "00000000-0000-0000-0000-000000000000",
             "command": "add-1",
             "drawerId": DocId::new([1; 32]).to_string(),
             "docId": DocId::new([2; 32]).to_string(),

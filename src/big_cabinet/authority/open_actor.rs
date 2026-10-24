@@ -5,10 +5,20 @@ use super::*;
 
 impl AuthorityService {
     async fn open_actor(&self, request: OpenActor) -> Result<Actor, AuthorityError> {
-        let mut transaction = self.write().await?;
-        let parent = cap::walk(&mut transaction, &request.parent).await?;
-        let parent_actor = actor::recognize(&mut transaction, &parent, Rights::MINT_CHILD).await?;
+        let mut state = self.state.lock().await;
+        let parent = cap::walk(&state, &request.parent)?;
+        let parent_actor = actor::recognize(&state, &parent, Rights::MINT_CHILD)?;
+        let namespace = cap::walk(&state, &self.actors_namespace.capability)?;
+        namespace.bound(request.rights)?;
         parent.bound(request.rights)?;
+        let issued = state.child(
+            format!("is actor {}", request.path),
+            request.rights,
+            self.actors_namespace.namespace_id,
+            cap::Kind::Object,
+            [self.actors_namespace.capability, request.parent],
+        )?;
+        let mut transaction = self.write().await?;
         let parent_row = Self::actor_row(&mut transaction, parent_actor).await?;
         actor::check_child_path(&parent_row.path, &request.path)?;
 
@@ -36,16 +46,21 @@ impl AuthorityService {
                 row
             }
         };
-        let capability = actor::issue(
-            &mut transaction,
-            &parent,
-            self.actors_issuer,
-            &row,
-            request.rights,
-        )
-        .await?;
+        let key = (row.actor_id, request.parent, request.rights.bits_i64());
+        let existing = state
+            .actor_caps
+            .get(&key)
+            .copied()
+            .filter(|id| cap::walk(&state, id).is_ok());
+        let capability = existing.unwrap_or(issued.id);
+        let actor = actor::public_actor(&self.node_public_key(), &row, capability)?;
         transaction.commit().await?;
-        actor::public_actor(&self.node_public_key(), &row, capability)
+        if existing.is_none() {
+            state.insert(issued);
+            assert!(state.actors.insert(capability, row.actor_id).is_none());
+            state.actor_caps.insert(key, capability);
+        }
+        Ok(actor)
     }
 }
 

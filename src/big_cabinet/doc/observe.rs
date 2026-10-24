@@ -21,16 +21,13 @@ impl Handler<ObserveFacets> for DocsService {
             .subscribe(
                 request.context.child(),
                 ObserveCapability {
-                    capability: params.authorization.authority,
+                    capability: params.capability,
                 },
             )
             .await
             .map_err(authority_error)?;
-        let caller = self
-            .invocation(&request.context, params.authorization)
-            .await?;
-        let authority_client = self.authority.clone();
-        let issuer = self.system_actor.actor_id;
+        let caller = self.invocation(&request.context, params.capability).await?;
+        let capabilities = self.capabilities.clone();
         let mut changes = self.access.subscribe_changes();
         let mut drawer_readable = match &params.scope {
             ObserveScope::Doc { doc_id } => {
@@ -142,14 +139,9 @@ impl Handler<ObserveFacets> for DocsService {
                     },
                     read = reader.next(RevisionReadLimits::default()) => Wake::Frontier(read),
                 };
-                let caller = match resolve_invocation(
-                    &authority_client,
-                    &context,
-                    params.authorization,
-                    issuer,
-                    |object| serde_json::from_str(object.strip_prefix("DocsRepo/scope/v1/")?).ok(),
-                )
-                .await
+                let caller = match capabilities
+                    .resolve::<DocScope>(&context, params.capability)
+                    .await
                 {
                     Ok(caller) => caller,
                     Err(error) => {
