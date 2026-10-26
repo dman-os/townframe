@@ -4,6 +4,8 @@ pub mod doc;
 pub mod drawer;
 pub mod grants;
 pub mod index;
+#[cfg(test)]
+mod peer_net;
 pub mod schema;
 
 pub use authority::{

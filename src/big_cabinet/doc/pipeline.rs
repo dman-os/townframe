@@ -414,7 +414,10 @@ impl DocsService {
                             self.commands.discard(&row.command).await?;
                             continue;
                         }
-                        Err(_) => continue,
+                        // The document is still materializing, so whether the write landed is
+                        // not yet knowable; the row stays in flight for the next boot pass.
+                        Err(DocsError::Pending { .. }) => continue,
+                        Err(error) => return Err(error),
                     };
                     let committed = handle
                         .with_document_read(|doc| committed_change(doc, &row.command))
@@ -482,7 +485,8 @@ impl DocsService {
                             self.commands.discard(&row.command).await?;
                             continue;
                         }
-                        Err(_) => continue,
+                        Err(DocsError::Pending { .. }) => continue,
+                        Err(error) => return Err(error),
                     };
                     let merged = handle
                         .with_document_read(|doc| {

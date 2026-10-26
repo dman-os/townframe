@@ -577,6 +577,29 @@ impl BigKeyhiveHandle {
         None
     }
 
+    /// What [`Access`] `agent` holds on this doc/group through its own delegation, ignoring
+    /// whatever it reaches through the groups it is a member of. None if it is not a member.
+    pub async fn direct_access_on(
+        &self,
+        agent: &Identifier,
+        membered_id: Identifier,
+    ) -> Option<Access> {
+        let keyhive = self.keyhive.as_ref();
+        let membered =
+            if let Some(doc) = keyhive.get_document(KhDocumentId::from(membered_id)).await {
+                Membered::Document(KhDocumentId::from(membered_id), doc)
+            } else {
+                Membered::Group(
+                    KhGroupId::from(membered_id),
+                    keyhive.get_group(KhGroupId::from(membered_id)).await?,
+                )
+            };
+        membered
+            .get_capability(agent)
+            .await
+            .map(|delegation| delegation.payload.can())
+    }
+
     /// All groups AND docs `agent` can reach, with [`Access`].
     pub async fn membered_for_agent(&self, agent: &Identifier) -> HashMap<[u8; 32], Access> {
         let keyhive = self.keyhive.as_ref();

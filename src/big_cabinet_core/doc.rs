@@ -251,6 +251,38 @@ pub struct ListFacets {
     pub at: At,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalDocUsability {
+    NotObserved,
+    NoLocalContent,
+    PendingMaterialization,
+    Usable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocAvailability {
+    pub doc_id: DocId,
+    pub local_usability: LocalDocUsability,
+    pub sync_demand: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetDocAvailability {
+    pub capability: CapId,
+    pub doc_id: DocId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObserveDocAvailability {
+    pub capability: CapId,
+    pub doc_id: DocId,
+}
+service_core_rs::service_operation!(ObserveDocAvailability => stream DocAvailability, DocsError, "org.example.daybook.docs.observeDocAvailability");
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum FacetSelector {
@@ -470,6 +502,13 @@ operation!(QueryFacetRefs => Vec<QueriedFacetRef>, "queryFacetRefs");
 operation!(UnsafeInspectFacet => UnsafeFacetInspection, "unsafeInspectFacet");
 operation!(InspectFacetClaims => FacetClaimsInspection, "inspectFacetClaims");
 
+impl Operation for GetDocAvailability {
+    type Output = DocAvailability;
+    type Error = DocsError;
+    const XRPC: XrpcOperation = XrpcOperation::query("org.example.daybook.docs.getDocAvailability")
+        .with_schemas("DocAvailability", "DocsError");
+}
+
 declare_service_protocol! {
     pub enum DocsProtocol => DocsMessage {
         unary {
@@ -483,8 +522,12 @@ declare_service_protocol! {
             QueryFacets(QueryFacets),
             QueryFacetRefs(QueryFacetRefs),
             UnsafeInspectFacet(UnsafeInspectFacet),
-            InspectFacetClaims(InspectFacetClaims)
+            InspectFacetClaims(InspectFacetClaims),
+            GetDocAvailability(GetDocAvailability)
         }
-        stream { ObserveFacets(ObserveFacets) }
+        stream {
+            ObserveFacets(ObserveFacets),
+            ObserveDocAvailability(ObserveDocAvailability)
+        }
     }
 }

@@ -12,22 +12,66 @@ impl DrawerService {
         let core = &self.core;
         let caller = core.invocation(context, params.capability).await?;
         core.sync_discovered(context).await?;
-        let mut listed = Vec::new();
-        for record in core.state.drawers().await? {
-            if let Some(access) = core
-                .level(context, &caller.authority, &record.drawer_id)
-                .await?
-            {
-                let descriptor = core.descriptor(context, &record.drawer_id).await?;
-                listed.push(ListedDrawer {
-                    drawer_id: record.drawer_id,
-                    layout: record.descriptor.layout.clone(),
-                    descriptor,
-                    access,
-                });
-            }
+        let DomainAuthority::Scoped(scope) = &caller.authority else {
+            return Err(DrawersError::Denied);
+        };
+        let records = core.state.scoped_drawers(&scope.drawers).await?;
+        if records.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(listed)
+        core.as_signer(
+            context,
+            core.issuer,
+            DocScope {
+                read: records
+                    .iter()
+                    .map(|(record, _)| record.drawer_id.clone())
+                    .collect(),
+                ..Default::default()
+            },
+            |capability| async move {
+                let mut listed = Vec::with_capacity(records.len());
+                for (record, access) in records {
+                    let read = core
+                        .docs()
+                        .call(
+                            context.child(),
+                            crate::doc::ReadFacets {
+                                capability,
+                                doc_id: record.drawer_id.clone(),
+                                at: crate::doc::At::Current,
+                                facets: Some(std::collections::BTreeSet::from([drawer_key()])),
+                                optimistic: false,
+                            },
+                        )
+                        .await
+                        .map_err(docs_error)?;
+                    let value = match read.facets.into_iter().next() {
+                        Some((_, crate::doc::FacetRead::Accepted { value, .. })) => value,
+                        _ => {
+                            return Err(DrawersError::RosterUnreadable(format!(
+                                "{} carries no drawer descriptor",
+                                record.drawer_id
+                            )));
+                        }
+                    };
+                    let descriptor: Drawer = serde_json::from_value(value).map_err(|error| {
+                        DrawersError::RosterUnreadable(format!(
+                            "{} descriptor: {error}",
+                            record.drawer_id
+                        ))
+                    })?;
+                    listed.push(ListedDrawer {
+                        drawer_id: record.drawer_id,
+                        layout: descriptor.layout.clone(),
+                        descriptor,
+                        access,
+                    });
+                }
+                Ok(listed)
+            },
+        )
+        .await
     }
 }
 

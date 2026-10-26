@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6efa1dfb79efab130794cca477ba65eb964304185062ad2458bc023414cce992 # shrinks to script = [AddDoc { drawer: 0, doc: 0, access: Relay }, AddChild { parent: 1, child: 0, access: Relay }, RemoveDoc { drawer: 1, doc: 0 }]
+cc c0176debff0d12024ac702e8c50ff53f52b33c036245d5c9238cdf38a31998ad # shrinks to script = [AddDoc { drawer: 0, doc: 0, access: Relay }, AddDoc { drawer: 0, doc: 0, access: Relay }, Remember { drawer: 0, mirror: false }]

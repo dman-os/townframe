@@ -6,16 +6,17 @@ use crate::authority::{
 use big_cabinet_core::dmeta::Uuid7;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use service_utils_rs::{Client, ClientError, RequestContext, StopToken};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 type Error = ClientError<AuthorityServiceError>;
 
+/// The object a domain capability carries. `signer` is the actor capability the mint bound
+/// the handle to; it is also a dependency of the handle, so a handle whose signer has been
+/// retracted is itself invalid and never reaches [`DomainCapabilities::scoped`].
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BoundScope<S> {
     scope: S,
-    binding_id: Uuid7,
+    signer: CapId,
     originating_actor: Option<Uuid7>,
 }
 
@@ -31,7 +32,6 @@ pub(crate) struct DomainCapabilities {
     authority: Client<AuthorityProtocol>,
     namespace: Namespace,
     prefix: &'static str,
-    bindings: Arc<Mutex<HashMap<Uuid7, Actor>>>,
 }
 
 impl DomainCapabilities {
@@ -44,7 +44,6 @@ impl DomainCapabilities {
             authority,
             namespace,
             prefix,
-            bindings: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -75,7 +74,11 @@ impl DomainCapabilities {
         stop
     }
 
-    fn scoped<S: DeserializeOwned>(&self, cap: Capability) -> Result<Invocation<S>, Error> {
+    async fn scoped<S: DeserializeOwned>(
+        &self,
+        context: &RequestContext,
+        cap: Capability,
+    ) -> Result<Invocation<S>, Error> {
         if cap.issuer_id != self.namespace.namespace_id || !cap.rights.contains(Rights::USE) {
             return Err(ClientError::Operation(AuthorityServiceError::Unauthorized));
         }
@@ -86,14 +89,14 @@ impl DomainCapabilities {
         let bound: BoundScope<S> = serde_json::from_str(object)
             .map_err(|_| ClientError::Operation(AuthorityServiceError::Unauthorized))?;
         let signer = self
-            .bindings
-            .lock()
-            .unwrap()
-            .get(&bound.binding_id)
-            .cloned()
-            .ok_or(ClientError::Operation(
-                AuthorityServiceError::InvalidCapability,
-            ))?;
+            .authority
+            .call(
+                context.child(),
+                ResolveActor {
+                    capability: bound.signer,
+                },
+            )
+            .await?;
         Ok(Invocation {
             authority: DomainAuthority::Scoped(bound.scope),
             signer,
@@ -107,11 +110,11 @@ impl DomainCapabilities {
         context: &RequestContext,
         capability: CapId,
     ) -> Result<Invocation<S>, Error> {
-        self.scoped(
-            self.authority
-                .call(context.child(), InspectCapability { capability })
-                .await?,
-        )
+        let cap = self
+            .authority
+            .call(context.child(), InspectCapability { capability })
+            .await?;
+        self.scoped(context, cap).await
     }
 
     pub(crate) async fn source<S: DeserializeOwned>(
@@ -145,7 +148,7 @@ impl DomainCapabilities {
                 rights: resolved.capability.rights,
             }),
             None => {
-                let mut source = self.scoped(resolved.capability)?;
+                let mut source = self.scoped(context, resolved.capability).await?;
                 source.signer = signer;
                 Ok(source)
             }
@@ -165,26 +168,17 @@ impl DomainCapabilities {
             return Err(ClientError::Operation(AuthorityServiceError::Escalation));
         }
         dependencies.push(caller.signer.capability);
-        let binding_id = Uuid7::new();
         let object = format!(
             "{}{}",
             self.prefix,
             serde_json::to_string(&BoundScope {
                 scope,
-                binding_id,
+                signer: caller.signer.capability,
                 originating_actor: caller.originating_actor,
             })
             .expect("domain capability data serializes")
         );
-        assert!(
-            self.bindings
-                .lock()
-                .unwrap()
-                .insert(binding_id, caller.signer.clone())
-                .is_none()
-        );
-        let result = self
-            .authority
+        self.authority
             .call(
                 context.child(),
                 MintCapability {
@@ -195,10 +189,24 @@ impl DomainCapabilities {
                     rights,
                 },
             )
-            .await;
-        if result.is_err() {
-            self.bindings.lock().unwrap().remove(&binding_id);
-        }
-        result
+            .await
+    }
+
+    /// Retract a handle this domain minted. The handle is its own `via`, so this needs no
+    /// more authority than holding it.
+    pub(crate) async fn retract(
+        &self,
+        context: &RequestContext,
+        capability: CapId,
+    ) -> Result<(), Error> {
+        self.authority
+            .call(
+                context.child(),
+                RetractCapability {
+                    via: capability,
+                    capability,
+                },
+            )
+            .await
     }
 }

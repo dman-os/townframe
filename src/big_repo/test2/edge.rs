@@ -103,7 +103,7 @@ async fn sync_interest_fetches_missing_bytes_without_manual_doc_sync() -> crate:
         pair.right()
             .repo
             .sync_demand()
-            .drive(pair.right().worker.object_interest_source(), peers_rx),
+            .drive(pair.right().worker.subscription_source(), peers_rx),
     );
     interest.wait_until_ready().await?;
     assert!(
@@ -1366,6 +1366,99 @@ async fn tier9_stale_doc_worker_stopped_event_does_not_evict_fresh_worker() -> c
         })
         .await??;
     assert_eq!(read_text(&fresh, "key").await.as_deref(), Some("v1"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tier9_replaced_closed_worker_does_not_inherit_stale_leases() -> crate::Res<()> {
+    utils_rs::testing::setup_tracing_once();
+    let node = Node::boot(217, "Owner").await?;
+    let mut initial = automerge::Automerge::new();
+    initial
+        .transact(|tx| tx.put(automerge::ROOT, "key", "before-replacement"))
+        .map_err(|err| crate::ferr!("failed creating doc: {err:?}"))?;
+    let stale_retained = node.repo.create_doc(initial).await?;
+    let doc_id = stale_retained.document_id();
+    let stale_released = node
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
+    node.repo.wait_for_quiescence(None).await?;
+    let received_commit_ids = node
+        .repo
+        .doc_head_state(doc_id.clone())
+        .await?
+        .sedimentree_heads
+        .iter()
+        .map(|head| sedimentree_core::loose_commit::id::CommitId::new(head.0))
+        .collect::<Vec<_>>();
+    assert!(!received_commit_ids.is_empty());
+
+    let hold = node.repo.hold_hub_events().await?;
+    node.repo
+        .fail_next_content_apply_route(doc_id.clone())
+        .await?;
+    node.repo
+        .inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::SyncSessionObserved {
+            cause: tracing::Span::current(),
+            session: subduction_core::sync_session::SyncSession {
+                peer_id: subduction_core::peer::id::PeerId::new([219; 32]),
+                sedimentree_id: sedimentree_core::id::SedimentreeId::new(doc_id.to_bytes32()?),
+                kind: subduction_core::sync_session::SyncSessionKind::InboundPush,
+                remote_heads: Default::default(),
+                rejected_commit_ids: Default::default(),
+                rejected_fragment_ids: Default::default(),
+                remote_rejection: None,
+                received_commit_ids,
+                received_fragment_ids: Vec::new(),
+                sent_commit_ids: Vec::new(),
+                sent_fragment_ids: Vec::new(),
+            },
+        })
+        .await?;
+    loop {
+        let notified = stale_retained.handle.bundle.barrier_notify.notified();
+        if stale_retained.handle.bundle.is_broken() {
+            break;
+        }
+        notified.await;
+    }
+    assert_eq!(
+        stale_retained.handle.bundle.broken_reason(),
+        Some(crate::runtime2::types::BrokenReason::WorkerDropped)
+    );
+    assert!(node.repo.runtime.has_doc_worker(doc_id.clone()).await?);
+
+    let fresh = node
+        .repo
+        .get_doc(&doc_id)
+        .await?
+        .into_ready(doc_id.clone())?;
+    assert_ne!(fresh.handle.bundle.id(), stale_retained.handle.bundle.id());
+    drop(stale_released);
+    assert!(node.repo.runtime.has_doc_worker(doc_id.clone()).await?);
+    hold.resume().await?;
+    drop(hold);
+    node.repo.wait_for_quiescence(None).await?;
+    assert!(node.repo.runtime.has_doc_worker(doc_id.clone()).await?);
+    fresh
+        .with_document(|doc| {
+            doc.transact(|tx| tx.put(automerge::ROOT, "key", "after-replacement"))
+                .map(|_| ())
+                .map_err(|err| crate::ferr!("{err:?}"))
+        })
+        .await??;
+    assert_eq!(
+        read_text(&fresh, "key").await.as_deref(),
+        Some("after-replacement")
+    );
+
+    drop(fresh);
+    wait_until_doc_worker_evicted(&node, &doc_id).await?;
+    assert!(stale_retained.handle.bundle.is_broken());
+    drop(stale_retained);
+    assert!(!node.repo.runtime.has_doc_worker(doc_id).await?);
     Ok(())
 }
 

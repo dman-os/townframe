@@ -8,6 +8,7 @@ members = [
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
+  "./src/big_node/",
   "./src/btress_sysadmin/",
   "./src/daybook_cli",
   "./src/daybook_core",
@@ -69,6 +70,7 @@ wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
+big_node = { path = "./src/big_node/" }
 
 #
 # meta

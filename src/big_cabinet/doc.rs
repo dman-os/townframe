@@ -27,6 +27,7 @@
 //! back. Add document deletion to BigRepo before exposing Delete or branch rollback.
 
 pub mod access;
+mod availability;
 mod branch;
 mod claim_history;
 mod commands;
@@ -256,21 +257,56 @@ impl DocsService {
                         (doc, big_cabinet_core::drawer::DrawerAccess::Write)
                     }
                 };
-                for (drawer, access) in &scope.drawers {
-                    if *access >= needed
-                        && access_policy
-                            .scoped_docs(context, drawer, *access, Some(document))
-                            .await
-                            .map_err(access_error)?
-                            .get(document)
-                            .is_some_and(|held| *held >= needed)
-                    {
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
+                let documents = BTreeSet::from([document.clone()]);
+                Ok(
+                    Self::allowed_docs(access_policy, context, authority, &documents, needed)
+                        .await?
+                        .contains(document),
+                )
             }
         }
+    }
+
+    async fn allowed_docs(
+        access_policy: &dyn DocAccess,
+        context: &RequestContext,
+        authority: &DomainAuthority<DocScope>,
+        documents: &BTreeSet<DocId>,
+        needed: big_cabinet_core::drawer::DrawerAccess,
+    ) -> Result<BTreeSet<DocId>, DocsError> {
+        use big_cabinet_core::drawer::DrawerAccess;
+        let DomainAuthority::Scoped(scope) = authority else {
+            return Err(DocsError::Denied);
+        };
+        let mut allowed: BTreeSet<_> = documents
+            .iter()
+            .filter(|doc| {
+                scope.write.contains(*doc)
+                    || (needed == DrawerAccess::Read && scope.read.contains(*doc))
+            })
+            .cloned()
+            .collect();
+        let candidates: BTreeSet<_> = documents.difference(&allowed).cloned().collect();
+        if candidates.is_empty() {
+            return Ok(allowed);
+        }
+        let drawers: BTreeMap<_, _> = scope
+            .drawers
+            .iter()
+            .filter(|(_, held)| **held >= needed)
+            .map(|(drawer, held)| (drawer.clone(), *held))
+            .collect();
+        if !drawers.is_empty() {
+            allowed.extend(
+                access_policy
+                    .scoped_docs(context, &drawers, Some(&candidates))
+                    .await
+                    .map_err(access_error)?
+                    .into_iter()
+                    .filter_map(|(doc, held)| (held >= needed).then_some(doc)),
+            );
+        }
+        Ok(allowed)
     }
 
     async fn authorize(
@@ -324,9 +360,13 @@ service_utils_rs::bind_service_protocol! {
             QueryFacets(QueryFacets),
             QueryFacetRefs(QueryFacetRefs),
             UnsafeInspectFacet(UnsafeInspectFacet),
-            InspectFacetClaims(InspectFacetClaims)
+            InspectFacetClaims(InspectFacetClaims),
+            GetDocAvailability(GetDocAvailability)
         }
-        stream { ObserveFacets(ObserveFacets) }
+        stream {
+            ObserveFacets(ObserveFacets),
+            ObserveDocAvailability(ObserveDocAvailability)
+        }
     }
 }
 
@@ -388,8 +428,16 @@ impl DocsRepo {
     }
 }
 
-/// Boot DocsRepo: settle the command ledger, then host the service.
 pub async fn boot(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsError> {
+    let (docs, stop) = prepare(config).await?;
+    if let Err(error) = docs.recover().await {
+        stop.stop().await;
+        return Err(error);
+    }
+    Ok((docs, stop))
+}
+
+pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsError> {
     let actor = config
         .authority
         .call(
@@ -441,11 +489,6 @@ pub async fn boot(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsError
         .then(service_stop)
         .then(service.capabilities.stop_token());
     let client = Client::direct(DocsBinding::new(Arc::clone(&host)));
-    service.access.attach_docs(client.clone());
-    if let Err(error) = service.recover().await {
-        stop.stop().await;
-        return Err(error);
-    }
     Ok((
         DocsRepo {
             service,
@@ -455,6 +498,12 @@ pub async fn boot(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsError
         },
         stop,
     ))
+}
+
+impl DocsRepo {
+    pub async fn recover(&self) -> Result<(), DocsError> {
+        self.service.recover().await
+    }
 }
 
 #[cfg(test)]

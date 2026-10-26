@@ -40,15 +40,14 @@ mod state;
 #[cfg(test)]
 mod e2e;
 
-pub use self::access::DrawerAccess;
-pub(crate) use self::state::SCOPED_DOCS_SQL;
+pub use self::access::{DrawerAccess, DrawerProvider, DrawerWorker};
 pub use big_cabinet_core::drawer::{Drawer, DrawerLayout, LayoutKind};
 
 use self::ledger::Ledger;
 use self::state::State;
 use crate::authority::{
-    Actor, AuthorityProtocol, AuthorityServiceError, Authorization, CapId, Capability,
-    DomainAuthority, Namespace, ResolveActor, Rights,
+    Actor, AuthorityServiceError, Authorization, CapId, Capability, DomainAuthority, Namespace,
+    Rights,
 };
 use crate::capability::{DomainCapabilities, Invocation};
 use crate::doc::{
@@ -69,7 +68,7 @@ use service_utils_rs::{
     Client, ClientError, Envelope, Handler, Host, RequestContext, ResponseEnvelope, StopToken,
 };
 use std::collections::BTreeMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 pub use big_cabinet_core::drawer::protocol::*;
 
@@ -111,36 +110,73 @@ impl LedgerFailure for DrawersError {
     }
 }
 
-/// Everything DrawerService is booted with.
-pub struct DrawerConfig {
-    pub big_repo: SharedBigRepo,
-    pub authority: Client<AuthorityProtocol>,
-    pub issuer: CapId,
-    pub namespace: Namespace,
-    pub docs: Client<DocsProtocol>,
-    /// The policy DocsRepo was booted with. It was built from the same `sql` before DocsRepo, so
-    /// the two services share one projection; boot hands it the docs client it was missing.
-    pub access: Arc<DrawerAccess>,
+pub struct DrawerConfig<'a> {
+    pub worker: &'a DrawerWorker,
 }
 
-/// The service: one per node, shared with [`DrawerAccess`] through [`Core`].
 pub struct DrawerService {
     core: Arc<Core>,
 }
 
-/// What both the hosted service and the [`DocAccess`] policy need. The docs client is set once
-/// DocsRepo exists, which is after the policy was built and before any request reaches either.
-pub(crate) struct Core {
+pub(crate) struct Projection {
     pub(crate) big_repo: SharedBigRepo,
-    pub(crate) authority: Client<AuthorityProtocol>,
     pub(crate) issuer: CapId,
     pub(crate) namespace: Namespace,
     pub(crate) capabilities: DomainCapabilities,
     pub(crate) grants: Arc<Grants>,
-    pub(crate) actor: OnceLock<Actor>,
-    pub(crate) docs: OnceLock<Client<DocsProtocol>>,
+    pub(crate) actor: Actor,
     pub(crate) state: State,
+    pub(crate) facet_set: Arc<crate::index::FacetSetStore>,
     pub(crate) ledger: Ledger,
+    pub(crate) commands: tokio::sync::mpsc::Sender<access::PolicyCommand>,
+}
+
+pub(crate) struct Core {
+    pub(crate) projection: Arc<Projection>,
+    pub(crate) docs: Client<DocsProtocol>,
+    #[cfg(test)]
+    pub(crate) placement_gate: std::sync::Mutex<Option<access::PlacementGate>>,
+    /// An armed crash: the next operation that reaches the point fails there, as a process
+    /// dying at that boundary would, leaving its ledger row for the next boot.
+    #[cfg(test)]
+    pub(crate) crash: std::sync::Mutex<Option<CrashPoint>>,
+}
+
+/// The boundaries inside a roster operation where a crash leaves one half done.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CrashPoint {
+    /// An entry's Keyhive grant landed; the roster never said so.
+    DocGranted,
+    /// An entry's roster write landed; the projection row never followed.
+    RosterWritten,
+    /// A removal's roster write landed; the Keyhive grant was never revoked.
+    RosterRemoved,
+    /// An invite's docs membership landed; the meta membership never did.
+    DocsMembershipAdded,
+}
+
+impl Core {
+    /// Fail here if a crash is armed at `point`, consuming it.
+    #[cfg(test)]
+    pub(crate) fn crash_at(&self, point: CrashPoint) -> Result<(), DrawersError> {
+        let mut armed = self.crash.lock().unwrap();
+        if *armed == Some(point) {
+            armed.take();
+            return Err(DrawersError::Storage(format!(
+                "injected crash at {point:?}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for Core {
+    type Target = Projection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.projection
+    }
 }
 
 /// The booted service.
@@ -357,18 +393,15 @@ pub(crate) fn keyhive_error(error: impl std::fmt::Display) -> DrawersError {
     DrawersError::Keyhive(error.to_string())
 }
 
+impl Projection {
+    pub(crate) fn actor(&self) -> &Actor {
+        &self.actor
+    }
+}
+
 impl Core {
     pub(crate) fn docs(&self) -> &Client<DocsProtocol> {
-        self.docs
-            .get()
-            .expect("DrawerService is booted before any request reaches drawers or their policy")
-    }
-
-    /// DrawerService's own actor, resolved at boot.
-    pub(crate) fn actor(&self) -> &Actor {
-        self.actor
-            .get()
-            .expect("DrawerService is booted before any request reaches drawers or their policy")
+        &self.docs
     }
 
     pub(crate) async fn invocation(
@@ -382,13 +415,23 @@ impl Core {
             .map_err(authority_error)
     }
 
-    pub(crate) async fn doc_capability(
+    /// Run `request` against the docs service under a capability narrowed to `scope` and
+    /// signed as `signer`, minted for this call and retracted once it returns. The drawer
+    /// service holds doc authority over every drawer it projects, so a handle per request
+    /// is how it narrows that authority; retracting it keeps the authority's handle table
+    /// from growing with every roster read.
+    pub(crate) async fn as_signer<T, F>(
         &self,
         context: &RequestContext,
         signer: CapId,
         scope: DocScope,
-    ) -> Result<CapId, DrawersError> {
-        self.docs()
+        request: impl FnOnce(CapId) -> F,
+    ) -> Result<T, DrawersError>
+    where
+        F: Future<Output = Result<T, DrawersError>>,
+    {
+        let capability = self
+            .docs()
             .call(
                 context.child(),
                 MintDocCapability {
@@ -401,11 +444,19 @@ impl Core {
                 },
             )
             .await
-            .map(|cap| cap.capability_id)
-            .map_err(docs_error)
+            .map_err(docs_error)?
+            .capability_id;
+        let result = request(capability).await;
+        self.capabilities
+            .retract(context, capability)
+            .await
+            .map_err(authority_error)?;
+        result
     }
+}
 
-    async fn granted(
+impl Projection {
+    pub(crate) async fn granted(
         &self,
         context: &RequestContext,
         actor: Uuid7,
@@ -446,7 +497,9 @@ impl Core {
         }
         Ok(selected)
     }
+}
 
+impl Core {
     pub(crate) async fn effective(
         &self,
         context: &RequestContext,
@@ -458,7 +511,7 @@ impl Core {
             .ancestors(state::ScopeTarget::Drawer(drawer))
             .await?;
         // Self-only (or missing) projection: a synced-in drawer hierarchy may not be
-        // projected yet. `unprojected_candidates` is empty when the projection is complete.
+        // projected yet. `sync_discovered` finds nothing when the projection is complete.
         if bounds.len() <= 1 {
             self.sync_discovered(context).await?;
             bounds = self
@@ -500,6 +553,12 @@ impl Core {
                 .await?
                 .map(|(access, _)| access)),
             DomainAuthority::Scoped(scope) => {
+                if scope.drawers.get(drawer) == Some(&Access::Admin) {
+                    return Ok(Some(Access::Admin));
+                }
+                if scope.drawers.is_empty() {
+                    return Ok(None);
+                }
                 let mut bounds = self
                     .state
                     .ancestors(state::ScopeTarget::Drawer(drawer))
@@ -603,29 +662,31 @@ impl Core {
         set: BTreeMap<FacetKey, serde_json::Value>,
         remove: std::collections::BTreeSet<FacetKey>,
     ) -> Result<WriteReceipt, DrawersError> {
-        self.docs()
-            .call(
-                context.child(),
-                crate::doc::WriteFacets {
-                    capability: self
-                        .doc_capability(
-                            context,
-                            self.issuer,
-                            DocScope {
-                                write: [drawer.clone()].into(),
-                                ..Default::default()
-                            },
-                        )
-                        .await?,
-                    command,
-                    doc_id: drawer.clone(),
-                    mode: WriteMode::AtCurrent,
-                    set,
-                    remove,
-                },
-            )
-            .await
-            .map_err(docs_error)
+        self.as_signer(
+            context,
+            self.issuer,
+            DocScope {
+                write: [drawer.clone()].into(),
+                ..Default::default()
+            },
+            |capability| async move {
+                self.docs()
+                    .call(
+                        context.child(),
+                        crate::doc::WriteFacets {
+                            capability,
+                            command,
+                            doc_id: drawer.clone(),
+                            mode: WriteMode::AtCurrent,
+                            set,
+                            remove,
+                        },
+                    )
+                    .await
+                    .map_err(docs_error)
+            },
+        )
+        .await
     }
 
     /// Bring the projection of `drawer` back in line with its doc: the roster facets, read as
@@ -638,28 +699,30 @@ impl Core {
         record: &DrawerRecord,
     ) -> Result<(DrawerRecord, big_cabinet_core::drawer::Drawer), DrawersError> {
         let read = self
-            .docs()
-            .call(
-                context.child(),
-                crate::doc::ReadFacets {
-                    capability: self
-                        .doc_capability(
-                            context,
-                            self.issuer,
-                            DocScope {
-                                read: [record.drawer_id.clone()].into(),
-                                ..Default::default()
+            .as_signer(
+                context,
+                self.issuer,
+                DocScope {
+                    read: [record.drawer_id.clone()].into(),
+                    ..Default::default()
+                },
+                |capability| async move {
+                    self.docs()
+                        .call(
+                            context.child(),
+                            crate::doc::ReadFacets {
+                                capability,
+                                doc_id: record.drawer_id.clone(),
+                                at: crate::doc::At::Current,
+                                facets: None,
+                                optimistic: false,
                             },
                         )
-                        .await?,
-                    doc_id: record.drawer_id.clone(),
-                    at: crate::doc::At::Current,
-                    facets: None,
-                    optimistic: false,
+                        .await
+                        .map_err(docs_error)
                 },
             )
-            .await
-            .map_err(docs_error)?;
+            .await?;
         // The descriptor is re-read with the entries: a layout edited on another node — into
         // another known layout, or into one this build does not know — replaces the stored rows
         // with what the facet now states.
@@ -752,48 +815,6 @@ impl Core {
         Ok((record, descriptor))
     }
 
-    /// The descriptor facet as the doc carries it, read as this service at current heads.
-    pub(crate) async fn descriptor(
-        &self,
-        context: &RequestContext,
-        drawer_id: &DrawerId,
-    ) -> Result<big_cabinet_core::drawer::Drawer, DrawersError> {
-        let read = self
-            .docs()
-            .call(
-                context.child(),
-                crate::doc::ReadFacets {
-                    capability: self
-                        .doc_capability(
-                            context,
-                            self.issuer,
-                            DocScope {
-                                read: [drawer_id.clone()].into(),
-                                ..Default::default()
-                            },
-                        )
-                        .await?,
-                    doc_id: drawer_id.clone(),
-                    at: crate::doc::At::Current,
-                    facets: Some(std::collections::BTreeSet::from([drawer_key()])),
-                    optimistic: false,
-                },
-            )
-            .await
-            .map_err(docs_error)?;
-        let value = match read.facets.into_iter().next() {
-            Some((_, crate::doc::FacetRead::Accepted { value, .. })) => value,
-            _ => {
-                return Err(DrawersError::RosterUnreadable(format!(
-                    "{drawer_id} carries no drawer descriptor"
-                )));
-            }
-        };
-        serde_json::from_value(value).map_err(|error| {
-            DrawersError::RosterUnreadable(format!("{drawer_id} descriptor: {error}"))
-        })
-    }
-
     /// Look up `drawer_id` in the local projection, or if it is not yet projected but its doc is
     /// locally available with an accepted `org.example.daybook.drawer/main` facet, project its
     /// descriptor and roster now.
@@ -817,34 +838,45 @@ impl Core {
         let mut visited = std::collections::BTreeSet::from([root_id.clone()]);
         let mut root_record = None;
         while let Some(drawer_id) = queue.pop_front() {
-            let read = match self
-                .docs()
-                .call(
-                    context.child(),
-                    crate::doc::ReadFacets {
-                        capability: self
-                            .doc_capability(
-                                context,
-                                self.issuer,
-                                DocScope {
-                                    read: [drawer_id.clone()].into(),
-                                    ..Default::default()
-                                },
-                            )
-                            .await?,
-                        doc_id: drawer_id.clone(),
-                        at: crate::doc::At::Current,
-                        facets: Some(std::collections::BTreeSet::from([drawer_key()])),
-                        optimistic: false,
+            let read = self
+                .as_signer(
+                    context,
+                    self.issuer,
+                    DocScope {
+                        read: [drawer_id.clone()].into(),
+                        ..Default::default()
+                    },
+                    |capability| {
+                        let drawer_id = &drawer_id;
+                        async move {
+                            match self
+                                .docs()
+                                .call(
+                                    context.child(),
+                                    crate::doc::ReadFacets {
+                                        capability,
+                                        doc_id: drawer_id.clone(),
+                                        at: crate::doc::At::Current,
+                                        facets: Some(std::collections::BTreeSet::from([
+                                            drawer_key(),
+                                        ])),
+                                        optimistic: false,
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(read) => Ok(Some(read)),
+                                Err(ClientError::Operation(
+                                    DocsError::DocNotFound | DocsError::Pending { .. },
+                                )) => Ok(None),
+                                Err(error) => Err(docs_error(error)),
+                            }
+                        }
                     },
                 )
-                .await
-            {
-                Ok(read) => read,
-                Err(ClientError::Operation(DocsError::DocNotFound | DocsError::Pending { .. })) => {
-                    continue;
-                }
-                Err(error) => return Err(docs_error(error)),
+                .await?;
+            let Some(read) = read else {
+                continue;
             };
             let Some(crate::doc::FacetRead::Accepted { value, .. }) =
                 read.facets.get(&drawer_key())
@@ -877,7 +909,18 @@ impl Core {
         &self,
         context: &RequestContext,
     ) -> Result<(), DrawersError> {
-        for candidate in self.state.unprojected_candidates().await? {
+        let announced = self
+            .facet_set
+            .query(crate::index::FacetSetQuery::Tag(
+                big_cabinet_core::FacetTag::new(big_cabinet_core::drawer::DRAWER_FACET_TAG)
+                    .expect("the drawer facet tag is a valid tag"),
+            ))
+            .await
+            .map_err(|error| DrawersError::Storage(error.to_string()))?
+            .into_iter()
+            .map(|record| record.route.doc_id)
+            .collect();
+        for candidate in self.state.unprojected(&announced).await? {
             drop(self.discover_drawer(context, &candidate).await?);
         }
         Ok(())
@@ -943,35 +986,10 @@ impl DrawerService {
     }
 }
 
-/// Boot DrawerService: resolve its actor, hand the policy its docs client, make sure the two local
-/// drawers exist, settle the op ledger, then host the service.
-pub async fn boot(config: DrawerConfig) -> Result<(Drawers, StopToken), DrawersError> {
-    let core = Arc::clone(&config.access.core);
-    assert!(
-        Arc::ptr_eq(&core.big_repo, &config.big_repo),
-        "DrawerService and its DocAccess policy are built over the same BigRepo"
-    );
-    assert_eq!(
-        core.issuer, config.issuer,
-        "DrawerService and its DocAccess policy are the same actor"
-    );
-    assert_eq!(
-        core.namespace, config.namespace,
-        "DrawerService and its DocAccess policy use the same namespace"
-    );
-    let actor = core
-        .authority
-        .call(
-            RequestContext::root(),
-            ResolveActor {
-                capability: config.issuer,
-            },
-        )
-        .await
-        .map_err(authority_error)?;
-    drop(core.actor.set(actor));
-    drop(core.docs.set(config.docs));
-    let service = Arc::new(DrawerService { core });
+pub async fn boot(config: DrawerConfig<'_>) -> Result<(Drawers, StopToken), DrawersError> {
+    let service = Arc::new(DrawerService {
+        core: Arc::clone(&config.worker.core),
+    });
     service.recover().await?;
     for record in service.core.state.drawers().await? {
         service
@@ -992,7 +1010,7 @@ pub async fn boot(config: DrawerConfig) -> Result<(Drawers, StopToken), DrawersE
             client,
             core: Arc::clone(&service.core),
         },
-        host_stop.then(service.core.capabilities.stop_token()),
+        host_stop,
     ))
 }
 

@@ -48,8 +48,9 @@ pub use part_store::{
 #[cfg(any(test, feature = "test-support"))]
 pub use worker::WorkerSnapshot;
 pub use worker::{
-    BackendId, BigSyncWorkerError, BigSyncWorkerHandle, ObjectInterestSource, StopToken,
-    SyncTaskRunOutcome, spawn_big_sync_worker, spawn_big_sync_worker_with_options,
+    BackendId, BigSyncWorkerError, BigSyncWorkerHandle, StopToken, SubscriptionEvent,
+    SubscriptionSource, SubscriptionUpdate, SyncTaskRunOutcome, spawn_big_sync_worker,
+    spawn_big_sync_worker_with_options,
 };
 
 #[derive(Clone)]

@@ -12,12 +12,12 @@
 //! for tests, not a stand-in.
 
 use crate::authority::{AuthorityProtocol, CapId, DomainAuthority, Namespace, Rights};
-use crate::doc::{DocScope, DocsError, DocsProtocol, DocsService, MintDocCapability};
+use crate::doc::{DocScope, DocsError, DocsService, MintDocCapability};
 use crate::grants::{GrantError, Grants};
 use big_cabinet_core::dmeta::{DocId, Uuid7};
 use service_utils_rs::{Client, ClientError, RequestContext};
 use sqlx_utils_rs::SqlCtx;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -40,10 +40,6 @@ pub enum AccessError {
 }
 
 pub trait DocAccess: Send + Sync + 'static {
-    /// Hand the policy a client to the booted [`DocsProtocol`] before boot recovery replays any
-    /// interrupted placements.
-    fn attach_docs(&self, _docs: Client<DocsProtocol>) {}
-
     fn prove<'a>(
         &'a self,
         context: &'a RequestContext,
@@ -85,23 +81,12 @@ pub trait DocAccess: Send + Sync + 'static {
         })
     }
 
-    fn drawer_access<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _actor: Uuid7,
-        _drawer_id: &'a DocId,
-    ) -> AccessFuture<'a, Option<big_cabinet_core::drawer::DrawerAccess>> {
-        Box::pin(async { Ok(None) })
-    }
-
     fn scoped_docs<'a>(
         &'a self,
         _context: &'a RequestContext,
-        _drawer_id: &'a DocId,
-        _access: big_cabinet_core::drawer::DrawerAccess,
-        _doc_id: Option<&'a DocId>,
-    ) -> AccessFuture<'a, std::collections::BTreeMap<DocId, big_cabinet_core::drawer::DrawerAccess>>
-    {
+        _drawers: &'a BTreeMap<DocId, big_cabinet_core::drawer::DrawerAccess>,
+        _documents: Option<&'a BTreeSet<DocId>>,
+    ) -> AccessFuture<'a, BTreeMap<DocId, big_cabinet_core::drawer::DrawerAccess>> {
         Box::pin(async {
             Err(AccessError::Refused(
                 "drawers are not configured on this repository".into(),
@@ -315,5 +300,200 @@ impl service_utils_rs::Handler<MintDocCapability> for DocsService {
             .mint_capability(&request.context, request.params)
             .await?
             .into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use big_cabinet_core::drawer::DrawerAccess;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct BoundedAccess {
+        drawers: BTreeMap<DocId, DrawerAccess>,
+        documents: BTreeSet<DocId>,
+        result: BTreeMap<DocId, DrawerAccess>,
+        calls: AtomicUsize,
+    }
+
+    impl DocAccess for BoundedAccess {
+        fn prove<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _actor: Uuid7,
+            _scope: &'a DocScope,
+        ) -> AccessFuture<'a, Vec<CapId>> {
+            panic!("resource filtering must not prove identity grants")
+        }
+
+        fn check<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _actor: Uuid7,
+            _request: AccessRequest<'a>,
+        ) -> AccessFuture<'a, bool> {
+            panic!("resource filtering must not check identity grants")
+        }
+
+        fn place<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _actor: Option<Uuid7>,
+            _document: &'a DocId,
+            _placement: &'a str,
+        ) -> AccessFuture<'a, ()> {
+            panic!("resource filtering must not place documents")
+        }
+
+        fn scoped_docs<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            drawers: &'a BTreeMap<DocId, DrawerAccess>,
+            documents: Option<&'a BTreeSet<DocId>>,
+        ) -> AccessFuture<'a, BTreeMap<DocId, DrawerAccess>> {
+            Box::pin(async move {
+                assert_eq!(drawers, &self.drawers);
+                assert_eq!(documents, Some(&self.documents));
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(self.result.clone())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_document_filter_batches_only_unresolved_candidates() {
+        let [
+            read,
+            write,
+            member,
+            relay,
+            denied,
+            first,
+            second,
+            relay_root,
+        ] = [1_u8, 2, 3, 4, 5, 6, 7, 8].map(|value| DocId::new([value; 32]));
+        let drawers = BTreeMap::from([
+            (first.clone(), DrawerAccess::Read),
+            (second.clone(), DrawerAccess::Write),
+        ]);
+        let mut policy = BoundedAccess {
+            drawers: drawers.clone(),
+            documents: BTreeSet::from([member.clone(), relay.clone(), denied.clone()]),
+            result: BTreeMap::from([
+                (member.clone(), DrawerAccess::Write),
+                (relay.clone(), DrawerAccess::Relay),
+            ]),
+            calls: AtomicUsize::new(0),
+        };
+        let mut scope = DocScope {
+            read: BTreeSet::from([read.clone()]),
+            write: BTreeSet::from([write.clone()]),
+            drawers,
+            ..Default::default()
+        };
+        scope.drawers.insert(relay_root, DrawerAccess::Relay);
+        let authority = DomainAuthority::Scoped(scope);
+        let context = RequestContext::root();
+        let direct = BTreeSet::from([read.clone(), write.clone()]);
+        assert_eq!(
+            DocsService::allowed_docs(&policy, &context, &authority, &direct, DrawerAccess::Read)
+                .await
+                .unwrap(),
+            direct,
+        );
+        let writable = BTreeSet::from([write.clone()]);
+        assert_eq!(
+            DocsService::allowed_docs(
+                &policy,
+                &context,
+                &authority,
+                &writable,
+                DrawerAccess::Write
+            )
+            .await
+            .unwrap(),
+            writable,
+        );
+        assert_eq!(policy.calls.load(Ordering::SeqCst), 0);
+        let candidates =
+            BTreeSet::from([read.clone(), write.clone(), member.clone(), relay, denied]);
+        assert_eq!(
+            DocsService::allowed_docs(
+                &policy,
+                &context,
+                &authority,
+                &candidates,
+                DrawerAccess::Read
+            )
+            .await
+            .unwrap(),
+            BTreeSet::from([read.clone(), write.clone(), member.clone()]),
+        );
+        assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            DocsService::allowed_docs(
+                &policy,
+                &context,
+                &DomainAuthority::Identity(Uuid7::new()),
+                &candidates,
+                DrawerAccess::Read,
+            )
+            .await,
+            Err(DocsError::Denied),
+        ));
+        assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
+        policy.drawers = BTreeMap::from([(second, DrawerAccess::Write)]);
+        policy.documents = candidates.difference(&writable).cloned().collect();
+        assert!(
+            policy
+                .result
+                .insert(read.clone(), DrawerAccess::Read)
+                .is_none()
+        );
+        assert_eq!(
+            DocsService::allowed_docs(
+                &policy,
+                &context,
+                &authority,
+                &candidates,
+                DrawerAccess::Write,
+            )
+            .await
+            .unwrap(),
+            BTreeSet::from([write, member]),
+        );
+        assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
+        let read_only = DomainAuthority::Scoped(DocScope {
+            read: BTreeSet::from([read]),
+            write: writable.clone(),
+            drawers: BTreeMap::from([(first, DrawerAccess::Read)]),
+            ..Default::default()
+        });
+        assert_eq!(
+            DocsService::allowed_docs(
+                &policy,
+                &context,
+                &read_only,
+                &candidates,
+                DrawerAccess::Write,
+            )
+            .await
+            .unwrap(),
+            writable,
+        );
+        let empty_candidates = BTreeSet::new();
+        assert!(
+            DocsService::allowed_docs(
+                &policy,
+                &context,
+                &authority,
+                &empty_candidates,
+                DrawerAccess::Read,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
     }
 }

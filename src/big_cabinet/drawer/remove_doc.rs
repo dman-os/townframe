@@ -34,6 +34,8 @@ impl Core {
                 )
                 .await?;
             self.state.remove_doc(drawer, doc).await?;
+            #[cfg(test)]
+            self.crash_at(super::CrashPoint::RosterRemoved)?;
             receipt
         } else {
             self.roster_receipt(context, drawer).await?

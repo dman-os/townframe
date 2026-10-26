@@ -23,7 +23,7 @@ mod backend;
 mod changes;
 mod encrypted_blob;
 mod interest;
-pub use interest::{DocInterest, DocSyncDemand};
+pub use interest::{DocInterest, DocSyncDemand, DocSyncDemandDriver};
 pub mod ephemeral;
 pub(crate) mod handler;
 mod keyhive;
@@ -211,6 +211,11 @@ pub struct BigRepo {
     runtime: runtime2::Runtime2Handle<future_form::Sendable>,
     #[educe(Debug(ignore))]
     ephemeral: BigEphemeral,
+    /// Test-only seam: documents whose next [`Self::get_doc`] fails as a repository error, so an
+    /// embedder's recovery path can be shown to propagate a lookup failure it cannot classify.
+    #[cfg(any(test, feature = "test-support"))]
+    #[educe(Debug(ignore))]
+    doc_lookup_faults: std::sync::Mutex<std::collections::HashSet<DocumentId>>,
     #[educe(Debug(ignore))]
     keyhive_protocol: handler::BigRepoKeyhiveProtocol,
     #[educe(Debug(ignore))]
@@ -478,6 +483,8 @@ impl BigRepo {
             sqlite_store: subduction_storage.clone(),
             runtime,
             ephemeral,
+            #[cfg(any(test, feature = "test-support"))]
+            doc_lookup_faults: std::sync::Mutex::new(std::collections::HashSet::new()),
             keyhive_protocol,
             keyhive_dispatcher,
             change_manager,
@@ -636,6 +643,15 @@ impl BigRepo {
         self.runtime.interests.subscribe()
     }
 
+    pub fn drive_sync_demand(
+        &self,
+        worker: &big_sync::BigSyncWorkerHandle,
+        peers: tokio::sync::watch::Receiver<HashSet<PeerKey>>,
+    ) -> DocSyncDemandDriver {
+        self.sync_demand()
+            .drive(worker.subscription_source(), peers)
+    }
+
     pub async fn interest(self: &Arc<Self>, doc_id: DocumentId) -> Res<DocInterest> {
         let lease = self.runtime.acquire_doc_interest(doc_id.clone()).await?;
         Ok(DocInterest::new(Arc::clone(self), doc_id, lease))
@@ -649,7 +665,26 @@ impl BigRepo {
         self: &Arc<Self>,
         document_id: &DocumentId,
     ) -> Res<DocLookup<BigDocHandle>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if self.doc_lookup_faults.lock().unwrap().remove(document_id) {
+            return Err(ferr!("injected document lookup failure for {document_id}"));
+        }
         let out = self.runtime.get_doc_handle(document_id.clone()).await?;
+        Ok(out.map_ready(|handle| BigDocHandle {
+            repo: Arc::clone(self),
+            handle,
+        }))
+    }
+
+    #[tracing::instrument(skip_all, fields(%document_id, %self.local_peer_id))]
+    pub async fn get_doc_for_projection(
+        self: &Arc<Self>,
+        document_id: &DocumentId,
+    ) -> Res<DocLookup<BigDocHandle>> {
+        let out = self
+            .runtime
+            .acquire_internal_doc_handle(document_id.clone())
+            .await?;
         Ok(out.map_ready(|handle| BigDocHandle {
             repo: Arc::clone(self),
             handle,
@@ -794,6 +829,13 @@ impl BigRepo {
             .fail_next_content_apply_route_for_test(doc_id)
             .await?;
         Ok(())
+    }
+
+    /// Test-only seam: the next [`Self::get_doc`] for `doc_id` fails with a repository error
+    /// instead of answering. One-shot; the lookup after it behaves normally.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_doc_lookup(&self, doc_id: DocumentId) {
+        self.doc_lookup_faults.lock().unwrap().insert(doc_id);
     }
 
     /// Test-only: whether `peer_id` currently has a registered connection in

@@ -4,7 +4,10 @@ use crate::authority::{
     ResolvedAuthority, Rights,
 };
 use crate::dmeta::{Bytes, MultibaseKey, Uuid7};
-use crate::doc::{At, DocsProtocol, ObserveFacets, ObserveScope, ReadFacets};
+use crate::doc::{
+    At, DocAvailability, DocsProtocol, GetDocAvailability, LocalDocUsability,
+    ObserveDocAvailability, ObserveFacets, ObserveScope, ReadFacets,
+};
 use crate::drawer::protocol::{DrawersProtocol, GetDrawer};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -121,8 +124,92 @@ fn core_protocol_channels_wire() {
     unary::<MintCapability, AuthorityProtocol>();
     unary::<ResolveAuthority, AuthorityProtocol>();
     unary::<ReadFacets, DocsProtocol>();
+    unary::<GetDocAvailability, DocsProtocol>();
     unary::<GetDrawer, DrawersProtocol>();
     stream::<ObserveFacets, DocsProtocol>();
+    stream::<ObserveDocAvailability, DocsProtocol>();
+}
+
+#[test]
+fn doc_availability_wire() {
+    assert!(
+        DocsProtocol::OPERATIONS
+            .unary
+            .contains(&GetDocAvailability::XRPC)
+    );
+    assert_eq!(
+        GetDocAvailability::XRPC,
+        service_core_rs::XrpcOperation::query("org.example.daybook.docs.getDocAvailability")
+            .with_schemas("DocAvailability", "DocsError"),
+    );
+    assert!(
+        DocsProtocol::OPERATIONS
+            .stream
+            .contains(&ObserveDocAvailability::XRPC)
+    );
+    assert_eq!(
+        ObserveDocAvailability::XRPC,
+        service_core_rs::XrpcOperation::subscription(
+            "org.example.daybook.docs.observeDocAvailability"
+        )
+        .with_schemas("DocAvailability", "DocsError"),
+    );
+    let capability = CapId::from_bytes([1; 16]);
+    let doc_id = DocId::new([2; 32]);
+    let context = RequestContext::root();
+    wire(
+        &DocsProtocol::from(Envelope::new(
+            context.clone(),
+            ObserveDocAvailability {
+                capability,
+                doc_id: doc_id.clone(),
+            },
+        )),
+        json!({"ObserveDocAvailability": {
+            "context": context,
+            "metadata": {"authorization": null, "idempotency_key": null},
+            "params": {"capability": capability, "docId": doc_id},
+        }}),
+    );
+    wire(
+        &DocsProtocol::from(Envelope::new(
+            context.clone(),
+            GetDocAvailability {
+                capability,
+                doc_id: doc_id.clone(),
+            },
+        )),
+        json!({"GetDocAvailability": {
+            "context": context,
+            "metadata": {"authorization": null, "idempotency_key": null},
+            "params": {"capability": capability, "docId": doc_id},
+        }}),
+    );
+    for (local_usability, tag) in [
+        (LocalDocUsability::NotObserved, "notObserved"),
+        (LocalDocUsability::NoLocalContent, "noLocalContent"),
+        (
+            LocalDocUsability::PendingMaterialization,
+            "pendingMaterialization",
+        ),
+        (LocalDocUsability::Usable, "usable"),
+    ] {
+        for sync_demand in [false, true] {
+            let response: <GetDocAvailability as Operation>::Output = DocAvailability {
+                doc_id: doc_id.clone(),
+                local_usability,
+                sync_demand,
+            };
+            wire(
+                &response,
+                json!({
+                    "docId": doc_id,
+                    "localUsability": tag,
+                    "syncDemand": sync_demand,
+                }),
+            );
+        }
+    }
 }
 
 #[test]

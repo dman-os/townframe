@@ -18,8 +18,14 @@ pub(super) struct CapRow {
     pub(super) dependencies: Vec<CapId>,
     pub(super) issuer: Uuid7,
     pub(super) kind: Kind,
-    pub(super) retracted: bool,
     depth: usize,
+}
+
+/// The actor an actor capability names, with the `actor_caps` key that reuses it (the
+/// operator's root has none), so retracting the capability drops both entries without a scan.
+pub(super) struct ActorBinding {
+    pub(super) actor_id: Uuid7,
+    pub(super) reuse_key: Option<(Uuid7, CapId, i64)>,
 }
 
 impl CapRow {
@@ -33,27 +39,69 @@ impl CapRow {
     }
 }
 
+/// Every live capability. Retraction deletes rows: a capability is invalid exactly when it
+/// has no row, and `dependents` is the reverse of `CapRow::dependencies` so retracting one
+/// capability removes everything derived from it in one pass instead of leaving dead rows
+/// to be discovered walk by walk.
 #[derive(Default)]
 pub(super) struct State {
     pub(super) caps: HashMap<CapId, CapRow>,
-    pub(super) actors: HashMap<CapId, Uuid7>,
+    pub(super) actors: HashMap<CapId, ActorBinding>,
     pub(super) actor_caps: HashMap<(Uuid7, CapId, i64), CapId>,
     namespaces: HashMap<Uuid7, CapId>,
+    dependents: HashMap<CapId, HashSet<CapId>>,
 }
 
 impl State {
     pub(super) fn insert(&mut self, cap: CapRow) {
+        for dependency in &cap.dependencies {
+            assert!(
+                self.dependents
+                    .entry(*dependency)
+                    .or_default()
+                    .insert(cap.id)
+            );
+        }
         assert!(
             self.caps.insert(cap.id, cap).is_none(),
             "capability id collision"
         );
     }
 
+    /// Delete `root` and every capability that depends on it, transitively, together with
+    /// the actor and namespace entries that pointed at the deleted rows.
+    pub(super) fn retract(&mut self, root: CapId) {
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            let Some(row) = self.caps.remove(&id) else {
+                continue;
+            };
+            for dependency in &row.dependencies {
+                if let Some(siblings) = self.dependents.get_mut(dependency) {
+                    siblings.remove(&id);
+                    if siblings.is_empty() {
+                        self.dependents.remove(dependency);
+                    }
+                }
+            }
+            if let Some(dependents) = self.dependents.remove(&id) {
+                pending.extend(dependents);
+            }
+            if let Some(ActorBinding {
+                reuse_key: Some(key),
+                ..
+            }) = self.actors.remove(&id)
+            {
+                assert_eq!(self.actor_caps.remove(&key), Some(id));
+            }
+            if row.kind == Kind::Namespace && self.namespaces.get(&row.issuer) == Some(&id) {
+                self.namespaces.remove(&row.issuer);
+            }
+        }
+    }
+
     pub(super) fn open_namespace(&mut self, namespace_id: Uuid7) -> Namespace {
-        let previous = self.namespaces.get(&namespace_id).copied();
-        if let Some(capability) = previous
-            && !self.caps[&capability].retracted
-        {
+        if let Some(capability) = self.namespaces.get(&namespace_id).copied() {
             return Namespace {
                 namespace_id,
                 capability,
@@ -67,10 +115,9 @@ impl State {
             dependencies: Vec::new(),
             issuer: namespace_id,
             kind: Kind::Namespace,
-            retracted: false,
             depth: 1,
         });
-        assert_eq!(self.namespaces.insert(namespace_id, capability), previous);
+        assert!(self.namespaces.insert(namespace_id, capability).is_none());
         Namespace {
             namespace_id,
             capability,
@@ -106,7 +153,6 @@ impl State {
             dependencies: direct,
             issuer,
             kind,
-            retracted: false,
             depth: depth + 1,
         })
     }
@@ -132,7 +178,7 @@ impl State {
                 .caps
                 .get(&id)
                 .ok_or(AuthorityError::InvalidCapability)?;
-            if row.retracted || row.depth > MAX_CHAIN_DEPTH {
+            if row.depth > MAX_CHAIN_DEPTH {
                 return Err(AuthorityError::InvalidCapability);
             }
             depth = depth.max(row.depth);

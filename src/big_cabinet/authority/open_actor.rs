@@ -47,18 +47,25 @@ impl AuthorityService {
             }
         };
         let key = (row.actor_id, request.parent, request.rights.bits_i64());
-        let existing = state
-            .actor_caps
-            .get(&key)
-            .copied()
-            .filter(|id| cap::walk(&state, id).is_ok());
+        let existing = state.actor_caps.get(&key).copied();
         let capability = existing.unwrap_or(issued.id);
         let actor = actor::public_actor(&self.node_public_key(), &row, capability)?;
         transaction.commit().await?;
         if existing.is_none() {
             state.insert(issued);
-            assert!(state.actors.insert(capability, row.actor_id).is_none());
-            state.actor_caps.insert(key, capability);
+            assert!(
+                state
+                    .actors
+                    .insert(
+                        capability,
+                        cap::ActorBinding {
+                            actor_id: row.actor_id,
+                            reuse_key: Some(key),
+                        },
+                    )
+                    .is_none()
+            );
+            assert!(state.actor_caps.insert(key, capability).is_none());
         }
         Ok(actor)
     }
