@@ -56,6 +56,8 @@ impl Core {
             .add_member_to_group(principal.clone(), &docs, keyhive_access(access))
             .await
             .map_err(keyhive_error)?;
+        #[cfg(test)]
+        self.crash_at(super::CrashPoint::DocsMembershipAdded)?;
         self.big_repo
             .add_member_to_group(principal, &meta, keyhive_access(meta_access(access)))
             .await

@@ -92,7 +92,11 @@ impl DocsService {
                     .filter(|held| *held >= big_cabinet_core::drawer::DrawerAccess::Read)
                     .ok_or(DocsError::Denied)?;
                 Ok(access_policy
-                    .scoped_docs(context, drawer_id, access, None)
+                    .scoped_docs(
+                        context,
+                        &BTreeMap::from([(drawer_id.clone(), access)]),
+                        None,
+                    )
                     .await
                     .map_err(access_error)?
                     .into_iter()
@@ -116,25 +120,31 @@ impl DocsService {
             ));
         };
         if let Some(drawer_id) = &params.drawer_id {
-            let level = match &caller.authority {
-                DomainAuthority::Identity(actor) => self
-                    .access
-                    .drawer_access(context, *actor, drawer_id)
-                    .await
-                    .map_err(access_error)?,
-                DomainAuthority::Scoped(scope) => scope.drawers.get(drawer_id).copied(),
-            }
-            .filter(|access| *access >= big_cabinet_core::drawer::DrawerAccess::Read)
-            .ok_or(DocsError::Denied)?;
-            let (tag, key, doc_id) = match &params.selector {
-                FacetSelector::All => (None, None, None),
-                FacetSelector::Tag { tag } => (Some(tag), None, None),
-                FacetSelector::Key { facet_key } => (None, Some(facet_key), None),
-                FacetSelector::Doc { doc_id } => (None, None, Some(doc_id)),
-                FacetSelector::Route { doc_id, facet_key } => (None, Some(facet_key), Some(doc_id)),
+            // The policy decides which documents the caller reads through the drawer; the index
+            // is only ever asked about that set. Which tables say what a drawer contains is the
+            // policy's business, not the index's.
+            let mut docs = Self::readable_in_drawer(
+                self.access.as_ref(),
+                context,
+                &caller.authority,
+                drawer_id,
+            )
+            .await?;
+            let (tag, key) = match &params.selector {
+                FacetSelector::All => (None, None),
+                FacetSelector::Tag { tag } => (Some(tag), None),
+                FacetSelector::Key { facet_key } => (None, Some(facet_key)),
+                FacetSelector::Doc { doc_id } => {
+                    docs.retain(|doc| doc == doc_id);
+                    (None, None)
+                }
+                FacetSelector::Route { doc_id, facet_key } => {
+                    docs.retain(|doc| doc == doc_id);
+                    (None, Some(facet_key))
+                }
             };
             let records = store
-                .query_drawer(drawer_id, level, tag, key, doc_id)
+                .query_docs(&docs, tag, key)
                 .await
                 .map_err(repository)?;
             return Ok(records.into_iter().map(QueriedFacet::from).collect());
@@ -189,28 +199,23 @@ impl DocsService {
         authority: &DomainAuthority<DocScope>,
         records: Vec<FacetRecord>,
     ) -> Result<Vec<QueriedFacet>, DocsError> {
-        let mut checks: BTreeMap<DocId, bool> = BTreeMap::new();
-        let mut out = Vec::new();
-        for record in records {
-            let allowed = match checks.get(&record.route.doc_id) {
-                Some(allowed) => *allowed,
-                None => {
-                    let checked = Self::allowed(
-                        self.access.as_ref(),
-                        context,
-                        authority,
-                        AccessRequest::Read(&record.route.doc_id),
-                    )
-                    .await?;
-                    checks.insert(record.route.doc_id.clone(), checked);
-                    checked
-                }
-            };
-            if allowed {
-                out.push(QueriedFacet::from(record));
-            }
-        }
-        Ok(out)
+        let candidates = records
+            .iter()
+            .map(|record| record.route.doc_id.clone())
+            .collect();
+        let readable = Self::allowed_docs(
+            self.access.as_ref(),
+            context,
+            authority,
+            &candidates,
+            big_cabinet_core::drawer::DrawerAccess::Read,
+        )
+        .await?;
+        Ok(records
+            .into_iter()
+            .filter(|record| readable.contains(&record.route.doc_id))
+            .map(QueriedFacet::from)
+            .collect())
     }
 
     async fn query_facet_refs(
@@ -219,65 +224,87 @@ impl DocsService {
         params: QueryFacetRefs,
     ) -> Result<Vec<QueriedFacetRef>, DocsError> {
         let caller = self.invocation(context, params.capability).await?;
+        use big_cabinet_core::drawer::DrawerAccess;
+        let drawer = if let Some(drawer_id) = &params.drawer_id {
+            let DomainAuthority::Scoped(scope) = &caller.authority else {
+                return Err(DocsError::Denied);
+            };
+            let access = scope
+                .drawers
+                .get(drawer_id)
+                .copied()
+                .filter(|held| *held >= DrawerAccess::Read)
+                .ok_or(DocsError::Denied)?;
+            Some(BTreeMap::from([(drawer_id.clone(), access)]))
+        } else {
+            None
+        };
+        let selector_doc = params.selector.doc_id();
+        match &drawer {
+            Some(drawers) => {
+                let candidates = BTreeSet::from([selector_doc.clone()]);
+                let readable = self
+                    .access
+                    .scoped_docs(context, drawers, Some(&candidates))
+                    .await
+                    .map_err(access_error)?;
+                if !readable
+                    .get(selector_doc)
+                    .is_some_and(|held| *held >= DrawerAccess::Read)
+                {
+                    return Ok(Vec::new());
+                }
+            }
+            None => {
+                self.authorize(
+                    context,
+                    &caller.authority,
+                    AccessRequest::Read(selector_doc),
+                )
+                .await?;
+            }
+        }
         let Some(store) = &self.facet_ref else {
             return Err(DocsError::Repository(
                 "facet-ref index is not configured on this repository".into(),
             ));
         };
-        if let Some(drawer_id) = &params.drawer_id {
-            let readable = Self::readable_in_drawer(
-                self.access.as_ref(),
-                context,
-                &caller.authority,
-                drawer_id,
-            )
-            .await?;
-            if !readable.contains(params.selector.doc_id()) {
-                return Ok(Vec::new());
-            }
-            let edges = store
-                .query(params.selector.into_query())
-                .await
-                .map_err(repository)?;
-            return Ok(edges
-                .into_iter()
-                .filter(|edge| readable.contains(&edge.origin.doc_id))
-                .map(QueriedFacetRef::from)
-                .collect());
-        }
-
-        self.authorize(
-            context,
-            &caller.authority,
-            AccessRequest::Read(params.selector.doc_id()),
-        )
-        .await?;
         let edges = store
             .query(params.selector.into_query())
             .await
             .map_err(repository)?;
-        let mut checks: BTreeMap<DocId, bool> = BTreeMap::new();
-        let mut out = Vec::new();
-        for edge in edges {
-            let allowed = match checks.get(&edge.origin.doc_id) {
-                Some(allowed) => *allowed,
-                None => {
-                    let checked = Self::allowed(
-                        self.access.as_ref(),
-                        context,
-                        &caller.authority,
-                        AccessRequest::Read(&edge.origin.doc_id),
-                    )
-                    .await?;
-                    checks.insert(edge.origin.doc_id.clone(), checked);
-                    checked
-                }
-            };
-            if allowed {
-                out.push(QueriedFacetRef::from(edge));
-            }
+        if edges.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(out)
+        let candidates = edges
+            .iter()
+            .map(|edge| edge.origin.doc_id.clone())
+            .collect();
+        let readable: BTreeSet<_> = match drawer {
+            Some(drawers) => self
+                .access
+                .scoped_docs(context, &drawers, Some(&candidates))
+                .await
+                .map_err(access_error)?
+                .into_iter()
+                .filter_map(|(doc, held)| (held >= DrawerAccess::Read).then_some(doc))
+                .collect(),
+            None => {
+                Self::allowed_docs(
+                    self.access.as_ref(),
+                    context,
+                    &caller.authority,
+                    &candidates,
+                    DrawerAccess::Read,
+                )
+                .await?
+            }
+        };
+        Ok(edges
+            .into_iter()
+            .filter(|edge| readable.contains(&edge.origin.doc_id))
+            .map(QueriedFacetRef::from)
+            .collect())
     }
 }
 

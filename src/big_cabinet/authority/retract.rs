@@ -8,11 +8,7 @@ impl AuthorityService {
         cap::walk(&state, &request.via)?;
         let target = cap::walk(&state, &request.capability)?;
         cap::may_retract(&target, &request.via)?;
-        state
-            .caps
-            .get_mut(&request.capability)
-            .expect("the target is live")
-            .retracted = true;
+        state.retract(request.capability);
         self.publish_change();
         Ok(())
     }

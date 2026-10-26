@@ -11,7 +11,7 @@ use big_sync_core::concurrent_delta_walker::{ConcurrentDeltaRead, ConcurrentDelt
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
 use big_sync_core::keyed_frontier::{FrontierEntry, KeyedFrontier, KeyedFrontierError};
 use big_sync_core::revisioned_store::{KeyedFrontierRevisionReader, RevisionedStore};
-use big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler;
+use futures::{StreamExt, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row, Sqlite};
 use sqlx_utils_rs::SqlCtx;
@@ -297,49 +297,6 @@ impl FacetSetStore {
         query.push(" ORDER BY doc_id, facet_key");
         query
             .build()
-            .fetch_all(&self.sql.read_pool)
-            .await?
-            .into_iter()
-            .map(facet_record)
-            .collect()
-    }
-
-    pub(crate) async fn query_drawer(
-        &self,
-        drawer_id: &DocId,
-        access: big_cabinet_core::drawer::DrawerAccess,
-        tag: Option<&FacetTag>,
-        key: Option<&FacetKey>,
-        doc_id: Option<&DocId>,
-    ) -> Res<Vec<FacetRecord>> {
-        use big_cabinet_core::drawer::DrawerAccess;
-        let level = match access {
-            DrawerAccess::Relay => 0_i64,
-            DrawerAccess::Read => 1,
-            DrawerAccess::Write => 2,
-            DrawerAccess::Admin => 3,
-        };
-        let mut sql = sqlx::QueryBuilder::<sqlx::Sqlite>::new(crate::drawer::SCOPED_DOCS_SQL);
-        sql.push(
-            " SELECT facets.doc_id
-                     , facets.facet_key
-                     , facets.doc_heads
-                     , facets.facet_heads
-                     , facets.clock
-                  FROM big_cabinet_facet_set_entries AS facets
-                  JOIN scoped_docs ON scoped_docs.doc_id = facets.doc_id
-                 WHERE scoped_docs.level >= 1
-                   AND (?3 IS NULL OR facets.facet_tag = ?3)
-                   AND (?4 IS NULL OR facets.facet_key = ?4)
-                   AND (?5 IS NULL OR facets.doc_id = ?5)
-                 ORDER BY facets.doc_id, facets.facet_key",
-        );
-        sql.build()
-            .bind(drawer_id.to_string())
-            .bind(level)
-            .bind(tag.map(|tag| tag.as_str().to_owned()))
-            .bind(key.map(ToString::to_string))
-            .bind(doc_id.map(ToString::to_string))
             .fetch_all(&self.sql.read_pool)
             .await?
             .into_iter()
@@ -703,7 +660,7 @@ impl FacetSetStore {
                 replace_all: false,
             }));
         }
-        let handle = match repo.get_doc(&work.doc_id).await? {
+        let handle = match repo.get_doc_for_projection(&work.doc_id).await? {
             DocLookup::Ready(handle) => handle,
             DocLookup::Missing | DocLookup::PendingMaterialization => return Ok(None),
         };
@@ -728,6 +685,17 @@ impl FacetSetStore {
     }
 
     pub async fn run(&self, repo: SharedBigRepo, concurrency: NonZeroUsize) -> Res<()> {
+        self.run_until(repo, concurrency, std::future::pending(), &mut None)
+            .await
+    }
+
+    pub(crate) async fn run_until(
+        &self,
+        repo: SharedBigRepo,
+        concurrency: NonZeroUsize,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+        ready: &mut Option<tokio::sync::oneshot::Sender<Res<()>>>,
+    ) -> Res<()> {
         let source = AutomergeFrontierRevisionStore::new(repo.frontier_part_store());
         self.drive(
             &source,
@@ -736,6 +704,8 @@ impl FacetSetStore {
             },
             repo,
             concurrency,
+            shutdown,
+            ready,
         )
         .await
     }
@@ -746,6 +716,8 @@ impl FacetSetStore {
         selector: S::Selector,
         repo: SharedBigRepo,
         concurrency: NonZeroUsize,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+        ready: &mut Option<tokio::sync::oneshot::Sender<Res<()>>>,
     ) -> Res<()>
     where
         S: RevisionedStore<
@@ -767,18 +739,67 @@ impl FacetSetStore {
             },
         )
         .await?;
-        let mut tasks = TokioKeyedScheduler::new(concurrency.get());
+        if let Some(ready) = ready.take() {
+            ready.send(Ok(())).expect("index boot waits for readiness");
+        }
+        let tasks = FuturesUnordered::new();
         let mut pending: BTreeMap<DocId, Work> = BTreeMap::new();
+        let mut running = BTreeSet::new();
+        let mut ready_work = BTreeSet::new();
+        let mut parked = BTreeSet::new();
         let mut early_wakes = BTreeSet::new();
-        let task = |work: Work| {
-            let store = self.clone();
-            let repo = Arc::clone(&repo);
-            async move { store.prepare(&repo, work).await }
-        };
+        let mut stopping = false;
+        tokio::pin!(shutdown, tasks);
         loop {
-            let available = concurrency.get().saturating_sub(tasks.active_count());
+            if !stopping {
+                while tasks.len() < concurrency.get() {
+                    let Some(doc_id) = ready_work.pop_first() else {
+                        break;
+                    };
+                    let work = pending
+                        .get(&doc_id)
+                        .expect("queued work is pending")
+                        .clone();
+                    assert!(running.insert(work.doc_id.clone()));
+                    let store = self.clone();
+                    let repo = Arc::clone(&repo);
+                    tasks.push(async move {
+                        let prepared = store.prepare(&repo, work.clone()).await;
+                        (work, prepared)
+                    });
+                }
+            } else if tasks.is_empty() {
+                return Ok(());
+            }
+            let available = concurrency.get().saturating_sub(tasks.len());
             tokio::select! {
-                read = walker.next(NonZeroUsize::new(available.max(1)).expect("positive batch")), if available > 0 => {
+                biased;
+                () = &mut shutdown, if !stopping => stopping = true,
+                completion = tasks.next(), if !tasks.is_empty() => {
+                    let (work, prepared) = completion.expect("active preparation completes");
+                    assert!(running.remove(&work.doc_id));
+                    let prepared = prepared?;
+                    if pending.get(&work.doc_id).is_some_and(|latest| latest.state.cursor > work.state.cursor) {
+                        ready_work.insert(work.doc_id);
+                        continue;
+                    }
+                    match prepared {
+                        Some(prepared) => {
+                            self.settle(prepared).await?;
+                            walker.ack(work.doc_id.clone(), work.state.cursor).await?;
+                            pending.remove(&work.doc_id);
+                            early_wakes.remove(&work.doc_id);
+                        }
+                        None => {
+                            if early_wakes.remove(&work.doc_id) {
+                                ready_work.insert(work.doc_id);
+                            } else {
+                                parked.insert(work.doc_id);
+                            }
+                        }
+                    }
+                }
+                read = walker.next(NonZeroUsize::new(available.max(1)).expect("positive batch")), if !stopping && available > 0 => {
                     match read? {
                         ConcurrentDeltaRead::ReplayComplete { .. } => {},
                         ConcurrentDeltaRead::Entries { entries, .. } => for delta in entries {
@@ -790,36 +811,26 @@ impl FacetSetStore {
                             };
                             let work = Work { doc_id: delta.key, state: DocState { heads, epoch, cursor: delta.cursor } };
                             if pending.get(&work.doc_id).is_some_and(|old| old.state.cursor >= work.state.cursor) { continue; }
-                            pending.insert(work.doc_id.clone(), work.clone());
-                            tasks.replace(work.doc_id.clone(), work.clone(), task(work))?;
+                            parked.remove(&work.doc_id);
+                            if !running.contains(&work.doc_id) {
+                                ready_work.insert(work.doc_id.clone());
+                            }
+                            pending.insert(work.doc_id.clone(), work);
                         },
                     }
                 }
-                completion = tasks.next_completion() => {
-                    let completion = completion?;
-                    let work = completion.command;
-                    match completion.result? {
-                        Some(prepared) => {
-                            self.settle(prepared).await?;
-                            walker.ack(work.doc_id.clone(), work.state.cursor).await?;
-                            pending.remove(&work.doc_id);
-                            early_wakes.remove(&work.doc_id);
-                        }
-                        None => {
-                            tasks.park(work.doc_id.clone(), work.clone());
-                            if early_wakes.remove(&work.doc_id) { tasks.wake(work.doc_id.clone(), task(work))?; }
-                        }
-                    }
-                }
-                notifications = wakes.recv() => {
+                notifications = wakes.recv(), if !stopping => {
                     for notification in notifications.ok_or_else(|| ferr!("facet-set materialization listener closed"))? {
                         let doc_id = match notification {
                             BigRepoLocalNotification::DocCreated { doc_id, .. } | BigRepoLocalNotification::DocImported { doc_id, .. }
                             | BigRepoLocalNotification::DocHeadsUpdated { doc_id, .. } | BigRepoLocalNotification::DocMaterializationReady { doc_id, .. } => doc_id,
                             BigRepoLocalNotification::DocMaterializationPending { .. } => continue,
                         };
-                        if let Some(work) = pending.get(&doc_id).cloned()
-                            && !tasks.wake(doc_id.clone(), task(work))? { early_wakes.insert(doc_id); }
+                        if parked.remove(&doc_id) {
+                            ready_work.insert(doc_id);
+                        } else if running.contains(&doc_id) {
+                            early_wakes.insert(doc_id);
+                        }
                     }
                 }
             }
@@ -1282,15 +1293,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn projection_does_not_acquire_sync_demand() {
+        let (document, _, _, _) = fixture();
+        let next = state(&document, 1);
+        let heads = next.heads.clone().unwrap();
+        let (_directory, repo, stop, doc_id) =
+            crate::index::test_support::reopen_document(document).await;
+        let mut demand = repo.sync_demand();
+        let sql = SqlCtx::memory().await.unwrap();
+        let store = FacetSetStore::new(sql.clone()).await.unwrap();
+        let prepared = store
+            .prepare(
+                &repo,
+                Work {
+                    doc_id: doc_id.clone(),
+                    state: next,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            prepared.slots.keys().cloned().collect::<Vec<_>>(),
+            [key("a"), key("b")]
+        );
+        assert!(demand.documents().is_empty());
+        store.settle(prepared).await.unwrap();
+        assert!(store.latest_revision().await.unwrap() > 0);
+        assert_eq!(
+            store
+                .query(FacetSetQuery::Doc(doc_id.clone()))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|record| (record.route.facet_key, record.doc_heads))
+                .collect::<Vec<_>>(),
+            [(key("a"), heads.clone()), (key("b"), heads)]
+        );
+        assert!(demand.documents().is_empty());
+        let mut changed = Box::pin(demand.changed());
+        assert!(futures::poll!(&mut changed).is_pending());
+        drop(changed);
+        let caller = repo
+            .get_doc(&doc_id)
+            .await
+            .unwrap()
+            .into_ready(doc_id.clone())
+            .unwrap();
+        assert_eq!(
+            *demand.documents(),
+            std::collections::HashSet::from([doc_id])
+        );
+        drop(caller);
+        let repo_sql = repo.sql_ctx();
+        drop(repo);
+        stop.stop().await.unwrap();
+        drop(store);
+        repo_sql.read_pool.close().await;
+        repo_sql.write_pool.close().await;
+        sql.read_pool.close().await;
+        sql.write_pool.close().await;
+    }
+
     struct ScriptSource {
         receiver: std::sync::Mutex<
             Option<tokio::sync::mpsc::UnboundedReceiver<RevisionRead<u64, AutomergeFrontierEvent>>>,
         >,
+        replay: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
     }
 
-    struct ScriptReader(
-        tokio::sync::mpsc::UnboundedReceiver<RevisionRead<u64, AutomergeFrontierEvent>>,
-    );
+    struct ScriptReader {
+        receiver: tokio::sync::mpsc::UnboundedReceiver<RevisionRead<u64, AutomergeFrontierEvent>>,
+        replay: Option<tokio::sync::oneshot::Sender<()>>,
+    }
 
     #[async_trait]
     impl RevisionedStore for ScriptSource {
@@ -1305,7 +1381,10 @@ mod tests {
         }
 
         async fn open<'a>(&'a self, (): (), _after: u64) -> Res<ScriptReader> {
-            Ok(ScriptReader(self.receiver.lock().unwrap().take().unwrap()))
+            Ok(ScriptReader {
+                receiver: self.receiver.lock().unwrap().take().unwrap(),
+                replay: self.replay.lock().unwrap().take(),
+            })
         }
     }
 
@@ -1317,7 +1396,19 @@ mod tests {
             &mut self,
             _limits: RevisionReadLimits,
         ) -> Res<RevisionRead<u64, AutomergeFrontierEvent>> {
-            Ok(self.0.recv().await.expect("script sender stays alive"))
+            let read = self
+                .receiver
+                .recv()
+                .await
+                .expect("script sender stays alive");
+            if matches!(read, RevisionRead::ReplayComplete { .. })
+                && let Some(replay) = self.replay.take()
+            {
+                replay
+                    .send(())
+                    .expect("script replay observer remains open");
+            }
+            Ok(read)
         }
     }
 
@@ -1352,6 +1443,33 @@ mod tests {
         .unwrap()
     }
 
+    async fn start_script(
+        store: FacetSetStore,
+        repo: SharedBigRepo,
+        source: ScriptSource,
+    ) -> (service_utils_rs::StopToken, service_utils_rs::Spawner) {
+        let (stop, tasks) = service_utils_rs::StopToken::new();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let owner = tasks.clone();
+        tasks
+            .spawn(async move {
+                store
+                    .drive(
+                        &source,
+                        (),
+                        repo,
+                        NonZeroUsize::new(2).unwrap(),
+                        owner.cancelled(),
+                        &mut Some(ready),
+                    )
+                    .await
+                    .unwrap();
+            })
+            .unwrap();
+        started.await.unwrap().unwrap();
+        (stop, tasks)
+    }
+
     #[tokio::test]
     async fn a_parked_doc_does_not_block_other_docs_and_newer_work_supersedes_it() {
         let (repo, stop) = boot_repo().await;
@@ -1361,17 +1479,10 @@ mod tests {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let source = ScriptSource {
             receiver: std::sync::Mutex::new(Some(receiver)),
+            replay: std::sync::Mutex::new(None),
         };
-        let worker = {
-            let store = store.clone();
-            let repo = Arc::clone(&repo);
-            tokio::spawn(async move {
-                store
-                    .drive(&source, (), repo, NonZeroUsize::new(2).unwrap())
-                    .await
-                    .unwrap();
-            })
-        };
+        let (worker_stop, worker_tasks) =
+            start_script(store.clone(), Arc::clone(&repo), source).await;
         let delayed_id = repo.allocate_id().await.unwrap();
         let (mut delayed, _, first, _) = fixture();
         sender.send(changed(&delayed_id, &delayed, 1)).unwrap();
@@ -1445,10 +1556,149 @@ mod tests {
                 .len(),
             2
         );
-        worker.abort();
-        assert!(worker.await.unwrap_err().is_cancelled());
+        worker_stop.stop().await;
+        assert_eq!(worker_tasks.live_tasks(), 0);
         drop(delayed);
         drop(other);
+        drop(repo);
+        stop.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cooperative_stop_preserves_parked_work_and_replays_without_duplicate_output() {
+        let (repo, stop) = boot_repo().await;
+        let sql = SqlCtx::memory().await.unwrap();
+        let store = FacetSetStore::new(sql.clone()).await.unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (worker_stop, worker_tasks) = start_script(
+            store.clone(),
+            Arc::clone(&repo),
+            ScriptSource {
+                receiver: std::sync::Mutex::new(Some(receiver)),
+                replay: std::sync::Mutex::new(None),
+            },
+        )
+        .await;
+        let delayed_id = repo.allocate_id().await.unwrap();
+        let (delayed, _, _, _) = fixture();
+        sender.send(changed(&delayed_id, &delayed, 1)).unwrap();
+        let other_id = repo.allocate_id().await.unwrap();
+        let (other, _, _, _) = fixture();
+        sender.send(changed(&other_id, &other, 2)).unwrap();
+        let other = repo
+            .commit_id(other_id.clone(), other, Vec::new(), &[])
+            .await
+            .unwrap();
+        let (revision, entries) = next_entries(&store, "org.example.note", 0).await;
+        assert!(entries.iter().all(|entry| entry.key.doc_id == other_id));
+        worker_stop.stop().await;
+        assert_eq!(worker_tasks.live_tasks(), 0);
+        assert_eq!(store.source_revision().await.unwrap(), 0);
+        assert!(store.doc_state(&delayed_id).await.unwrap().is_none());
+        let other_state = store.doc_state(&other_id).await.unwrap().unwrap();
+        assert_eq!(other_state.cursor, 2);
+        drop(sender);
+        drop(store);
+
+        let store = FacetSetStore::new(sql).await.unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender.send(changed(&delayed_id, &delayed, 1)).unwrap();
+        let delayed = repo
+            .commit_id(delayed_id.clone(), delayed, Vec::new(), &[])
+            .await
+            .unwrap();
+        sender
+            .send(RevisionRead::Entries {
+                revision: 2,
+                entries: vec![AutomergeFrontierEvent::Changed {
+                    doc_id: other_id.clone(),
+                    heads: other_state.heads.clone().unwrap().into(),
+                    causal_epoch: None,
+                    routes: Vec::new(),
+                    revision: 2,
+                }],
+            })
+            .unwrap();
+        let (replay, completed) = tokio::sync::oneshot::channel();
+        sender
+            .send(RevisionRead::ReplayComplete { through: 2 })
+            .unwrap();
+        let (worker_stop, worker_tasks) = start_script(
+            store.clone(),
+            Arc::clone(&repo),
+            ScriptSource {
+                receiver: std::sync::Mutex::new(Some(receiver)),
+                replay: std::sync::Mutex::new(Some(replay)),
+            },
+        )
+        .await;
+        completed.await.unwrap();
+        let (_, entries) = next_entries(&store, "org.example.note", revision).await;
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.key.doc_id == delayed_id));
+        worker_stop.stop().await;
+        assert_eq!(worker_tasks.live_tasks(), 0);
+        assert_eq!(store.source_revision().await.unwrap(), 2);
+        assert_eq!(
+            store.doc_state(&delayed_id).await.unwrap().unwrap().cursor,
+            1
+        );
+        assert_eq!(
+            store.doc_state(&other_id).await.unwrap().unwrap(),
+            other_state
+        );
+        drop(delayed);
+        drop(other);
+        drop(repo);
+        stop.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cooperative_stop_drains_an_inflight_preparation_before_acknowledging_it() {
+        let (repo, stop) = boot_repo().await;
+        let sql = SqlCtx::memory().await.unwrap();
+        let store = FacetSetStore::new(sql.clone()).await.unwrap();
+        let doc_id = repo.allocate_id().await.unwrap();
+        let (doc, _, _, _) = fixture();
+        let event = changed(&doc_id, &doc, 1);
+        let handle = repo
+            .commit_id(doc_id.clone(), doc, Vec::new(), &[])
+            .await
+            .unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (replay, completed) = tokio::sync::oneshot::channel();
+        let (worker_stop, worker_tasks) = start_script(
+            store.clone(),
+            Arc::clone(&repo),
+            ScriptSource {
+                receiver: std::sync::Mutex::new(Some(receiver)),
+                replay: std::sync::Mutex::new(Some(replay)),
+            },
+        )
+        .await;
+        let mut connections = Vec::new();
+        for _ in 0..sql.read_pool.options().get_max_connections() {
+            connections.push(sql.read_pool.acquire().await.unwrap());
+        }
+        sender.send(event).unwrap();
+        sender
+            .send(RevisionRead::ReplayComplete { through: 1 })
+            .unwrap();
+        completed.await.unwrap();
+        let mut stopping = Box::pin(worker_stop.stop());
+        assert!(futures::poll!(&mut stopping).is_pending());
+        assert!(worker_tasks.is_cancelled());
+        assert_eq!(worker_tasks.live_tasks(), 1);
+        drop(connections);
+        stopping.await;
+        assert_eq!(worker_tasks.live_tasks(), 0);
+        assert_eq!(store.doc_state(&doc_id).await.unwrap().unwrap().cursor, 1);
+        assert_eq!(store.source_revision().await.unwrap(), 1);
+        assert_eq!(
+            store.query(FacetSetQuery::Doc(doc_id)).await.unwrap().len(),
+            2
+        );
+        drop(handle);
         drop(repo);
         stop.stop().await.unwrap();
     }
@@ -1459,16 +1709,31 @@ mod tests {
         let store = FacetSetStore::new(SqlCtx::memory().await.unwrap())
             .await
             .unwrap();
-        let worker = {
+        let start_worker = || {
             let store = store.clone();
             let repo = Arc::clone(&repo);
-            tokio::spawn(async move {
-                store
-                    .run(repo, NonZeroUsize::new(2).unwrap())
-                    .await
-                    .unwrap()
-            })
+            async move {
+                let (stop, tasks) = service_utils_rs::StopToken::new();
+                let (ready, started) = tokio::sync::oneshot::channel();
+                let owner = tasks.clone();
+                tasks
+                    .spawn(async move {
+                        store
+                            .run_until(
+                                repo,
+                                NonZeroUsize::new(2).unwrap(),
+                                owner.cancelled(),
+                                &mut Some(ready),
+                            )
+                            .await
+                            .unwrap();
+                    })
+                    .unwrap();
+                started.await.unwrap().unwrap();
+                (stop, tasks)
+            }
         };
+        let (worker_stop, worker_tasks) = start_worker().await;
         let doc_id = repo.allocate_id().await.unwrap();
         let (doc, _, _, _) = fixture();
         let handle = repo
@@ -1479,8 +1744,8 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert!(entries.iter().all(|entry| entry.key.doc_id == doc_id));
         let before = store.doc_state(&doc_id).await.unwrap().unwrap();
-        worker.abort();
-        assert!(worker.await.unwrap_err().is_cancelled());
+        worker_stop.stop().await;
+        assert_eq!(worker_tasks.live_tasks(), 0);
         let work = Work {
             doc_id: doc_id.clone(),
             state: before.clone(),
@@ -1490,16 +1755,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.latest_revision().await.unwrap(), revision);
-        let worker = {
-            let store = store.clone();
-            let repo = Arc::clone(&repo);
-            tokio::spawn(async move {
-                store
-                    .run(repo, NonZeroUsize::new(2).unwrap())
-                    .await
-                    .unwrap()
-            })
-        };
+        let (worker_stop, worker_tasks) = start_worker().await;
         handle
             .with_document(|doc| {
                 let facets = doc.get(ROOT, "facets").unwrap().unwrap().1;
@@ -1518,8 +1774,8 @@ mod tests {
             panic!("live facet")
         };
         assert_eq!(Some(facet_heads.clone()), before.heads);
-        worker.abort();
-        assert!(worker.await.unwrap_err().is_cancelled());
+        worker_stop.stop().await;
+        assert_eq!(worker_tasks.live_tasks(), 0);
         drop(handle);
         drop(repo);
         stop.stop().await.unwrap();

@@ -723,9 +723,11 @@ async fn reopening_a_retracted_namespace_rotates_only_its_handle() {
     assert_eq!(reopened.namespace_id, namespace.namespace_id);
     assert_ne!(reopened.capability, namespace.capability);
     assert_eq!(test.namespace(reopened.namespace_id).await, reopened);
+    // The namespace handle, the minter, the object, and the leaf are gone; the reopened
+    // handle is the only new row, and the unrelated namespace kept its one capability.
     assert_eq!(
         test.authority.service.state.lock().await.caps.len(),
-        before + 1
+        before - 3
     );
     for capability in [
         namespace.capability,
@@ -1257,15 +1259,17 @@ async fn mint_publication_is_serialized_with_dependency_retraction() {
         drop(locked);
         let (minted, retracted) = tokio::join!(mint, retract);
         retracted.unwrap();
+        // Retraction deletes the gate and whatever depends on it, so either order leaves the
+        // table one row smaller than before the race.
         if retract_first {
             assert!(matches!(
                 minted,
                 Err(AuthorityServiceError::InvalidCapability)
             ));
-            assert_eq!(service.state.lock().await.caps.len(), before);
+            assert_eq!(service.state.lock().await.caps.len(), before - 1);
         } else {
             let minted = minted.unwrap().output;
-            assert_eq!(service.state.lock().await.caps.len(), before + 1);
+            assert_eq!(service.state.lock().await.caps.len(), before - 1);
             assert_refused!(
                 test.call(InspectCapability {
                     capability: minted.capability_id

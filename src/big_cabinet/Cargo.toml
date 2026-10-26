@@ -47,6 +47,10 @@ sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
+big_sync = { workspace = true, features = ["test-support"] }
+big_repo = { workspace = true, features = ["test-support"] }
+iroh.workspace = true
+subduction_iroh.workspace = true
 insta = { workspace = true, features = ["json"] }
 proptest.workspace = true
 keyring-core = { version = "1.0", default-features = false }

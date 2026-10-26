@@ -10,6 +10,7 @@ mod commands;
 mod gate;
 mod model;
 mod observe;
+mod peer;
 mod wire;
 mod writes;
 
@@ -71,11 +72,15 @@ struct Node {
     docs: Option<DocsRepo>,
     docs_stop: Option<StopToken>,
     facet_set: Arc<FacetSetStore>,
-    facet_task: Option<tokio::task::JoinHandle<()>>,
+    facet_stop: Option<StopToken>,
 }
 
 impl Node {
     async fn boot() -> Self {
+        Self::boot_with_seed(41).await
+    }
+
+    async fn boot_with_seed(seed: u8) -> Self {
         let keyring =
             keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
         let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
@@ -107,7 +112,7 @@ impl Node {
                 .unwrap(),
         );
         let (repo, repo_stop) = BigRepo::boot(Config {
-            node_identity_seed: [41; 32],
+            node_identity_seed: [seed; 32],
             storage: StorageConfig::Memory,
             scope_key: "documents-e2e".into(),
             hidden_parts: Default::default(),
@@ -122,16 +127,25 @@ impl Node {
                 .await
                 .unwrap(),
         );
-        let facet_task = {
+        let (facet_stop, facet_tasks) = StopToken::new();
+        {
             let store = Arc::clone(&facet_set);
             let repo = Arc::clone(&repo);
-            tokio::spawn(async move {
-                store
-                    .run(repo, std::num::NonZeroUsize::new(4).unwrap())
-                    .await
-                    .unwrap();
-            })
-        };
+            let owner = facet_tasks.clone();
+            facet_tasks
+                .spawn(async move {
+                    store
+                        .run_until(
+                            repo,
+                            std::num::NonZeroUsize::new(4).unwrap(),
+                            owner.cancelled(),
+                            &mut None,
+                        )
+                        .await
+                        .unwrap();
+                })
+                .unwrap();
+        }
         let mut node = Self {
             authority,
             authority_stop: Some(authority_stop),
@@ -144,7 +158,7 @@ impl Node {
             docs: None,
             docs_stop: None,
             facet_set,
-            facet_task: Some(facet_task),
+            facet_stop: Some(facet_stop),
         };
         node.start().await.unwrap();
         node
@@ -401,8 +415,8 @@ impl Node {
         if let Some(stop) = self.docs_stop.take() {
             stop.stop().await;
         }
-        if let Some(task) = self.facet_task.take() {
-            task.abort();
+        if let Some(stop) = self.facet_stop.take() {
+            stop.stop().await;
         }
         if let Some(stop) = self.repo_stop.take() {
             stop.stop().await.unwrap();

@@ -85,12 +85,11 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
     assert_ne!(bound.issuer_id, node.docs_actor.actor_id);
     let object: Value =
         serde_json::from_str(bound.object.strip_prefix("DocsRepo/scope/v2/").unwrap()).unwrap();
-    let binding_id: Uuid7 = serde_json::from_value(object["bindingId"].clone()).unwrap();
     assert_eq!(
         object,
         json!({
             "scope": scope,
-            "bindingId": binding_id,
+            "signer": signer.capability,
             "originatingActor": owner.actor_id,
         })
     );
@@ -454,23 +453,25 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                 .await),
             Err(DocsError::Denied)
         );
-        assert_eq!(
-            op(node
-                .client()
-                .call(
-                    RequestContext::root(),
-                    QueryFacetRefs {
-                        capability,
-                        drawer_id: None,
-                        selector: FacetRefSelector::Origin {
-                            doc_id: created.doc_id.clone(),
-                            facet_key: None
+        for drawer_id in [None, Some(created.doc_id.clone())] {
+            assert_eq!(
+                op(node
+                    .client()
+                    .call(
+                        RequestContext::root(),
+                        QueryFacetRefs {
+                            capability,
+                            drawer_id,
+                            selector: FacetRefSelector::Origin {
+                                doc_id: created.doc_id.clone(),
+                                facet_key: None,
+                            },
                         },
-                    }
-                )
-                .await),
-            Err(DocsError::Denied)
-        );
+                    )
+                    .await),
+                Err(DocsError::Denied),
+            );
+        }
         assert!(matches!(
             node.client()
                 .subscribe(
@@ -846,6 +847,233 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
             }
         }
     }
+    node.stop().await;
+}
+
+#[tokio::test]
+async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched() {
+    use crate::index::FacetRefStore;
+    use big_cabinet_core::drawer::DrawerAccess;
+    use std::sync::Mutex;
+
+    struct Policy {
+        sql: SqlCtx,
+        drawers: BTreeMap<DocId, DrawerAccess>,
+        selector: DocId,
+        denied: DocId,
+        origins: BTreeSet<DocId>,
+        calls: Mutex<Vec<BTreeSet<DocId>>>,
+    }
+
+    impl DocAccess for Policy {
+        fn prove<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _actor: Uuid7,
+            scope: &'a DocScope,
+        ) -> AccessFuture<'a, Vec<CapId>> {
+            assert_eq!(scope.drawers, self.drawers);
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn check<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _actor: Uuid7,
+            _request: AccessRequest<'a>,
+        ) -> AccessFuture<'a, bool> {
+            panic!("reference queries must not check identity grants")
+        }
+
+        fn place<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _actor: Option<Uuid7>,
+            _document: &'a DocId,
+            _placement: &'a str,
+        ) -> AccessFuture<'a, ()> {
+            panic!("reference queries must not place documents")
+        }
+
+        fn scoped_docs<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            drawers: &'a BTreeMap<DocId, DrawerAccess>,
+            documents: Option<&'a BTreeSet<DocId>>,
+        ) -> AccessFuture<'a, BTreeMap<DocId, DrawerAccess>> {
+            Box::pin(async move {
+                assert_eq!(drawers, &self.drawers);
+                let documents = documents.expect("reference authorization must be bounded");
+                self.calls.lock().unwrap().push(documents.clone());
+                if documents == &BTreeSet::from([self.denied.clone()]) {
+                    return Ok(BTreeMap::new());
+                }
+                if documents == &BTreeSet::from([self.selector.clone()]) {
+                    for origin in &self.origins {
+                        sqlx::query(
+                            "INSERT INTO big_cabinet_facet_ref_edges (
+                                 origin_doc
+                               , origin_facet
+                               , origin_path
+                               , target_doc
+                               , target_facet
+                               , ref_heads
+                             ) VALUES (?, ?, ?, ?, ?, ?)
+                             ON CONFLICT DO NOTHING",
+                        )
+                        .bind(origin.to_string())
+                        .bind(key("main").to_string())
+                        .bind("/link")
+                        .bind(self.selector.to_string())
+                        .bind(key("main").to_string())
+                        .bind("[]".as_bytes())
+                        .execute(&self.sql.write_pool)
+                        .await
+                        .unwrap();
+                    }
+                    return Ok(BTreeMap::from([(
+                        self.selector.clone(),
+                        DrawerAccess::Read,
+                    )]));
+                }
+                assert_eq!(documents, &self.origins);
+                Ok(self
+                    .origins
+                    .iter()
+                    .enumerate()
+                    .map(|(index, origin)| {
+                        (
+                            origin.clone(),
+                            if index == 0 {
+                                DrawerAccess::Read
+                            } else {
+                                DrawerAccess::Relay
+                            },
+                        )
+                    })
+                    .collect())
+            })
+        }
+    }
+
+    let mut node = Node::boot().await;
+    let owner = actor(&node, "owner", Rights::USE | Rights::NARROW).await;
+    let [selector, first_origin, second_origin, denied, drawer] =
+        [81_u8, 82, 83, 84, 85].map(|value| DocId::new([value; 32]));
+    let index_sql = SqlCtx::memory().await.unwrap();
+    let facet_ref = Arc::new(FacetRefStore::new(index_sql.clone()).await.unwrap());
+    let policy = Arc::new(Policy {
+        sql: index_sql.clone(),
+        drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Read)]),
+        selector: selector.clone(),
+        denied: denied.clone(),
+        origins: BTreeSet::from([first_origin.clone(), second_origin]),
+        calls: Mutex::new(Vec::new()),
+    });
+    node.docs.take();
+    node.docs_stop.take().unwrap().stop().await;
+    node.reopen_namespace().await;
+    let (docs, stop) = boot(DocsConfig {
+        big_repo: Arc::clone(&node.repo),
+        schema_repo: schemas(),
+        authority: node.authority.client.clone(),
+        issuer: node.docs_actor.capability,
+        namespace: node.docs_namespace,
+        node_issuer: node.authority.node_issuer.clone(),
+        access: Arc::<Policy>::clone(&policy),
+        sql: node.sql.clone(),
+        facet_set: Some(Arc::clone(&node.facet_set)),
+        facet_ref: Some(facet_ref),
+    })
+    .await
+    .unwrap();
+    node.docs = Some(docs);
+    node.docs_stop = Some(stop);
+    let capability = node
+        .capability(
+            &owner,
+            DocScope {
+                drawers: policy.drawers.clone(),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut expected_calls = Vec::new();
+    for drawer_id in [None, Some(drawer.clone())] {
+        assert_eq!(
+            op(node
+                .client()
+                .call(
+                    RequestContext::root(),
+                    QueryFacetRefs {
+                        capability,
+                        drawer_id,
+                        selector: FacetRefSelector::Target {
+                            doc_id: selector.clone(),
+                            facet_key: None,
+                        },
+                    },
+                )
+                .await),
+            Ok(vec![QueriedFacetRef {
+                origin_doc_id: first_origin.clone(),
+                origin_facet_key: key("main"),
+                path: "/link".to_owned(),
+                target_doc_id: selector.clone(),
+                target_facet_key: key("main"),
+                ref_heads: Vec::new(),
+            }]),
+        );
+        expected_calls.extend([BTreeSet::from([selector.clone()]), policy.origins.clone()]);
+    }
+    assert_eq!(*policy.calls.lock().unwrap(), expected_calls);
+    sqlx::query("DROP TABLE big_cabinet_facet_ref_edges")
+        .execute(&index_sql.write_pool)
+        .await
+        .unwrap();
+    for drawer_id in [None, Some(drawer)] {
+        for selector in [
+            FacetRefSelector::Origin {
+                doc_id: denied.clone(),
+                facet_key: None,
+            },
+            FacetRefSelector::Origin {
+                doc_id: denied.clone(),
+                facet_key: Some(key("main")),
+            },
+            FacetRefSelector::Target {
+                doc_id: denied.clone(),
+                facet_key: None,
+            },
+            FacetRefSelector::Target {
+                doc_id: denied.clone(),
+                facet_key: Some(key("main")),
+            },
+        ] {
+            let expected = if drawer_id.is_some() {
+                Ok(Vec::new())
+            } else {
+                Err(DocsError::Denied)
+            };
+            assert_eq!(
+                op(node
+                    .client()
+                    .call(
+                        RequestContext::root(),
+                        QueryFacetRefs {
+                            capability,
+                            drawer_id: drawer_id.clone(),
+                            selector
+                        },
+                    )
+                    .await),
+                expected,
+            );
+            expected_calls.push(BTreeSet::from([denied.clone()]));
+        }
+    }
+    assert_eq!(*policy.calls.lock().unwrap(), expected_calls);
     node.stop().await;
 }
 

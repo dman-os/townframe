@@ -1,3 +1,5 @@
+// FIXME: this dropped earlier design!
+
 # FDR 001: Drawers as Doc Collections
 
 **Status:** Accepted — functional design; self-doc and single-group drawers, child

@@ -147,6 +147,52 @@ async fn the_boot_pass_settles_interrupted_writes_from_their_commit_message() {
 }
 
 #[tokio::test]
+async fn the_boot_pass_fails_on_a_repository_error_and_leaves_the_row_for_the_next_pass() {
+    let mut node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let created = node
+        .create(&alice, "create", [(key("main"), note("x"))])
+        .await
+        .unwrap();
+    let document = &created.doc_id;
+    let ledger = Commands::open(node.sql.clone()).await.unwrap();
+    ledger
+        .begin(
+            &command("committed"),
+            Kind::Write,
+            [0; 32],
+            alice.actor_id,
+            Some(document),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let heads = node
+        .sabotage(document, |doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "touched", true).unwrap();
+            tx.commit_with(CommitOptions::default().with_message("committed"));
+        })
+        .await;
+    // A lookup the boot pass cannot classify (neither missing nor still materializing) is a
+    // repository failure: boot refuses rather than reporting a recovery it did not perform.
+    node.repo.fail_next_doc_lookup(document.clone());
+    let error = node.restart().await.unwrap_err();
+    assert!(
+        matches!(&error, DocsError::Repository(message) if message.contains("injected document lookup failure")),
+        "{error:?}"
+    );
+    let row = ledger.get(&command("committed")).await.unwrap().unwrap();
+    assert_eq!(row.state, State::Pending);
+    // The next pass, with the repository answering, settles it from the commit message.
+    node.start().await.unwrap();
+    let settled = ledger.get(&command("committed")).await.unwrap().unwrap();
+    assert_eq!((settled.state, settled.heads), (State::Done, heads));
+    node.stop().await;
+}
+
+#[tokio::test]
 async fn the_boot_pass_places_a_committed_create_and_abandons_an_uncommitted_one() {
     let mut node = Node::boot().await;
     let alice = node.writer("alice").await;

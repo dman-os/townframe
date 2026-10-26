@@ -158,22 +158,24 @@ impl Handler<ObserveFacets> for DocsService {
                                 break 'pump;
                             }
                         };
+                        let readable = match Self::allowed_docs(
+                            access.as_ref(),
+                            &context,
+                            &caller.authority,
+                            &delivered,
+                            big_cabinet_core::drawer::DrawerAccess::Read,
+                        )
+                        .await
+                        {
+                            Ok(readable) => readable,
+                            Err(error) => {
+                                drop(sender.send(Err(error)).await);
+                                break 'pump;
+                            }
+                        };
                         let mut restored = BTreeSet::new();
                         for doc_id in &delivered {
-                            let allowed = match Self::allowed(
-                                access.as_ref(),
-                                &context,
-                                &caller.authority,
-                                AccessRequest::Read(doc_id),
-                            )
-                            .await
-                            {
-                                Ok(allowed) => allowed,
-                                Err(error) => {
-                                    drop(sender.send(Err(error)).await);
-                                    break 'pump;
-                                }
-                            };
+                            let allowed = readable.contains(doc_id);
                             if matches!(&params.scope, ObserveScope::Doc { .. }) {
                                 if allowed && interest.is_none() {
                                     interest = match repo.interest(doc_id.clone()).await {
@@ -324,50 +326,48 @@ impl Handler<ObserveFacets> for DocsService {
                         break 'pump;
                     }
                 };
-                // Access may change between batches but not within one read of
-                // the committed projection, so checks memoize per batch.
-                let mut checks: BTreeMap<DocId, bool> = BTreeMap::new();
+                let entries: Vec<_> = entries
+                    .into_iter()
+                    .filter(|entry| match &params.scope {
+                        ObserveScope::Doc { doc_id } => &entry.key.doc_id == doc_id,
+                        ObserveScope::Tag { tag } => entry.key.facet_key.tag() == tag,
+                        ObserveScope::Drawer { tag, .. } => tag
+                            .as_ref()
+                            .is_none_or(|tag| entry.key.facet_key.tag() == tag),
+                    })
+                    .collect();
+                let batch_readable;
+                let readable = if let Some(readable) = &drawer_readable {
+                    readable
+                } else {
+                    let candidates = entries
+                        .iter()
+                        .map(|entry| entry.key.doc_id.clone())
+                        .collect();
+                    batch_readable = match Self::allowed_docs(
+                        access.as_ref(),
+                        &context,
+                        &caller.authority,
+                        &candidates,
+                        big_cabinet_core::drawer::DrawerAccess::Read,
+                    )
+                    .await
+                    {
+                        Ok(readable) => readable,
+                        Err(error) => {
+                            drop(sender.send(Err(error)).await);
+                            break 'pump;
+                        }
+                    };
+                    &batch_readable
+                };
                 for entry in entries {
                     let FrontierEntry {
                         revision,
                         key: route,
                         value,
                     } = entry;
-                    let in_scope = match &params.scope {
-                        ObserveScope::Doc { doc_id } => &route.doc_id == doc_id,
-                        ObserveScope::Tag { tag } => route.facet_key.tag() == tag,
-                        ObserveScope::Drawer { tag, .. } => {
-                            tag.as_ref().is_none_or(|tag| route.facet_key.tag() == tag)
-                        }
-                    };
-                    if !in_scope {
-                        continue;
-                    }
-                    let allowed = if let Some(readable) = &drawer_readable {
-                        readable.contains(&route.doc_id)
-                    } else {
-                        match checks.get(&route.doc_id) {
-                            Some(allowed) => *allowed,
-                            None => {
-                                let checked = match Self::allowed(
-                                    access.as_ref(),
-                                    &context,
-                                    &caller.authority,
-                                    AccessRequest::Read(&route.doc_id),
-                                )
-                                .await
-                                {
-                                    Ok(allowed) => allowed,
-                                    Err(error) => {
-                                        drop(sender.send(Err(error)).await);
-                                        break 'pump;
-                                    }
-                                };
-                                checks.insert(route.doc_id.clone(), checked);
-                                checked
-                            }
-                        }
-                    };
+                    let allowed = readable.contains(&route.doc_id);
                     if !allowed {
                         last_present.retain(|(doc, _), _| doc != &route.doc_id);
                         // Silent for never-delivered documents; one tombstone

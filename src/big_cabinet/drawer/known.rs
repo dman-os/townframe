@@ -20,28 +20,30 @@ impl Core {
     ) -> Result<BTreeMap<DrawerId, KnownDrawerEntry>, DrawersError> {
         let registry = self.state.local().registry_id;
         let read = self
-            .docs()
-            .call(
-                context.child(),
-                crate::doc::ReadFacets {
-                    capability: self
-                        .doc_capability(
-                            context,
-                            self.issuer,
-                            DocScope {
-                                read: [registry.clone()].into(),
-                                ..Default::default()
+            .as_signer(
+                context,
+                self.issuer,
+                DocScope {
+                    read: [registry.clone()].into(),
+                    ..Default::default()
+                },
+                |capability| async move {
+                    self.docs()
+                        .call(
+                            context.child(),
+                            crate::doc::ReadFacets {
+                                capability,
+                                doc_id: registry,
+                                at: At::Current,
+                                facets: None,
+                                optimistic: false,
                             },
                         )
-                        .await?,
-                    doc_id: registry,
-                    at: At::Current,
-                    facets: None,
-                    optimistic: false,
+                        .await
+                        .map_err(docs_error)
                 },
             )
-            .await
-            .map_err(docs_error)?;
+            .await?;
         let mut known = BTreeMap::new();
         for (key, facet) in read.facets {
             if key.tag().as_str() != DRAWER_KNOWN_ENTRY_FACET_TAG {

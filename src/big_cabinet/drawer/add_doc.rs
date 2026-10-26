@@ -18,9 +18,12 @@ fn drawer_access(access: KeyhiveAccess) -> Access {
 }
 
 impl Core {
-    /// The level `docs_group` holds on `doc` in Keyhive, `None` when it holds nothing. The doc id
-    /// is the doc's Keyhive identifier (an Ed25519 point), so an id of another width or off the
-    /// curve is refused here rather than at the grant.
+    /// The level `docs_group` is delegated on `doc` in Keyhive, `None` when it holds no
+    /// delegation of its own. Only the direct delegation counts: a child link makes the parent's
+    /// docs group reach every doc of the child, and that reach is neither this roster's grant to
+    /// revoke nor a substitute for granting it. The doc id is the doc's Keyhive identifier (an
+    /// Ed25519 point), so an id of another width or off the curve is refused here rather than at
+    /// the grant.
     pub(crate) async fn docs_group_level(
         &self,
         docs_group: &BigKeyhiveGroup,
@@ -32,7 +35,7 @@ impl Core {
         Ok(self
             .big_repo
             .keyhive()
-            .agent_access_on(&docs_group.id().into(), Identifier::from(key))
+            .direct_access_on(&docs_group.id().into(), Identifier::from(key))
             .await
             .map(drawer_access))
     }
@@ -45,28 +48,30 @@ impl Core {
         drawer: &DrawerId,
     ) -> Result<WriteReceipt, DrawersError> {
         let read = self
-            .docs()
-            .call(
-                context.child(),
-                ReadFacets {
-                    capability: self
-                        .doc_capability(
-                            context,
-                            self.issuer,
-                            DocScope {
-                                read: [drawer.clone()].into(),
-                                ..Default::default()
+            .as_signer(
+                context,
+                self.issuer,
+                DocScope {
+                    read: [drawer.clone()].into(),
+                    ..Default::default()
+                },
+                |capability| async move {
+                    self.docs()
+                        .call(
+                            context.child(),
+                            ReadFacets {
+                                capability,
+                                doc_id: drawer.clone(),
+                                at: At::Current,
+                                facets: Some(BTreeSet::new()),
+                                optimistic: false,
                             },
                         )
-                        .await?,
-                    doc_id: drawer.clone(),
-                    at: At::Current,
-                    facets: Some(BTreeSet::new()),
-                    optimistic: false,
+                        .await
+                        .map_err(docs_error)
                 },
             )
-            .await
-            .map_err(docs_error)?;
+            .await?;
         Ok(WriteReceipt {
             doc_id: drawer.clone(),
             heads: read.heads,
@@ -97,6 +102,8 @@ impl Core {
                 BTreeSet::new(),
             )
             .await?;
+        #[cfg(test)]
+        self.crash_at(super::CrashPoint::RosterWritten)?;
         self.state.put_doc(drawer, doc, access).await?;
         Ok(Some(receipt))
     }
@@ -137,6 +144,8 @@ impl Core {
             }
             _ => {
                 regrant(access).await?;
+                #[cfg(test)]
+                self.crash_at(super::CrashPoint::DocGranted)?;
                 self.publish_entry(context, drawer, doc, access).await?
             }
         };

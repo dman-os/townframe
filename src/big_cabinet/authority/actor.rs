@@ -27,7 +27,7 @@ pub(super) fn recognize(
     let actor = state
         .actors
         .get(&presented.cap.id)
-        .copied()
+        .map(|binding| binding.actor_id)
         .ok_or(AuthorityError::UnrecognizedActor)?;
     presented.require(right)?;
     Ok(actor)

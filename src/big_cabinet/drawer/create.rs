@@ -55,32 +55,37 @@ impl Core {
                 },
                 |_| async {
                     let receipt = self
-                        .docs()
-                        .call(
-                            context.child(),
-                            WriteFacets {
-                                capability: self
-                                    .doc_capability(
-                                        context,
-                                        actor.capability,
-                                        DocScope {
-                                            write: [doc_id.clone()].into(),
-                                            ..Default::default()
-                                        },
-                                    )
-                                    .await?,
-                                command: Some(command.clone()),
-                                doc_id: doc_id.clone(),
-                                mode: WriteMode::AtCurrent,
-                                set: BTreeMap::from([(
-                                    drawer_key(),
-                                    facet_value(&Drawer::self_doc()),
-                                )]),
-                                remove: Default::default(),
+                        .as_signer(
+                            context,
+                            actor.capability,
+                            DocScope {
+                                write: [doc_id.clone()].into(),
+                                ..Default::default()
+                            },
+                            |capability| {
+                                let (command, doc_id) = (&command, &doc_id);
+                                async move {
+                                    self.docs()
+                                        .call(
+                                            context.child(),
+                                            WriteFacets {
+                                                capability,
+                                                command: Some(command.clone()),
+                                                doc_id: doc_id.clone(),
+                                                mode: WriteMode::AtCurrent,
+                                                set: BTreeMap::from([(
+                                                    drawer_key(),
+                                                    facet_value(&Drawer::self_doc()),
+                                                )]),
+                                                remove: Default::default(),
+                                            },
+                                        )
+                                        .await
+                                        .map_err(docs_error)
+                                }
                             },
                         )
-                        .await
-                        .map_err(docs_error)?;
+                        .await?;
                     self.state.put_drawer(&doc_id, &Drawer::self_doc()).await?;
                     if let Some(owner_id) = owner_id {
                         self.grant(
@@ -112,28 +117,30 @@ impl Core {
             )
         };
         let read = self
-            .docs()
-            .call(
-                context.child(),
-                crate::doc::ReadFacets {
-                    capability: self
-                        .doc_capability(
-                            context,
-                            self.issuer,
-                            DocScope {
-                                read: [doc_id.clone()].into(),
-                                ..Default::default()
+            .as_signer(
+                context,
+                self.issuer,
+                DocScope {
+                    read: [doc_id.clone()].into(),
+                    ..Default::default()
+                },
+                |capability| async move {
+                    self.docs()
+                        .call(
+                            context.child(),
+                            crate::doc::ReadFacets {
+                                capability,
+                                doc_id: doc_id.clone(),
+                                at: crate::doc::At::Current,
+                                facets: Some(std::collections::BTreeSet::from([drawer_key()])),
+                                optimistic: false,
                             },
                         )
-                        .await?,
-                    doc_id: doc_id.clone(),
-                    at: crate::doc::At::Current,
-                    facets: Some(std::collections::BTreeSet::from([drawer_key()])),
-                    optimistic: false,
+                        .await
+                        .map_err(docs_error)
                 },
             )
-            .await
-            .map_err(docs_error)?;
+            .await?;
         match read.facets.get(&drawer_key()) {
             Some(crate::doc::FacetRead::Accepted { value, .. }) => {
                 let descriptor: Drawer =
@@ -242,30 +249,35 @@ impl Core {
         };
         let descriptor = Drawer::single_group(group_key(&meta), group_key(&docs));
         let receipt = self
-            .docs()
-            .call(
-                context.child(),
-                CreateDoc {
-                    capability: self
-                        .doc_capability(
-                            context,
-                            self.issuer,
-                            DocScope {
-                                create: [METADATA_PLACEMENT.into()].into(),
-                                ..Default::default()
-                            },
-                        )
-                        .await?,
-                    command: command.clone(),
-                    placement: METADATA_PLACEMENT.into(),
-                    facets: BTreeMap::from([
-                        (drawer_key(), facet_value(&descriptor)),
-                        (roster_key(), facet_value(&DrawerRoster::inline())),
-                    ]),
+            .as_signer(
+                context,
+                self.issuer,
+                DocScope {
+                    create: [METADATA_PLACEMENT.into()].into(),
+                    ..Default::default()
+                },
+                |capability| {
+                    let descriptor = &descriptor;
+                    async move {
+                        self.docs()
+                            .call(
+                                context.child(),
+                                CreateDoc {
+                                    capability,
+                                    command: command.clone(),
+                                    placement: METADATA_PLACEMENT.into(),
+                                    facets: BTreeMap::from([
+                                        (drawer_key(), facet_value(descriptor)),
+                                        (roster_key(), facet_value(&DrawerRoster::inline())),
+                                    ]),
+                                },
+                            )
+                            .await
+                            .map_err(docs_error)
+                    }
                 },
             )
-            .await
-            .map_err(docs_error)?;
+            .await?;
         self.big_repo
             .grant_doc_access(receipt.doc_id.clone(), meta, KeyhiveAccess::Admin)
             .await
@@ -353,28 +365,36 @@ impl DrawerService {
             .expect("the registry command is within bounds");
         let receipt = self
             .core
-            .docs()
-            .call(
-                context.child(),
-                CreateDoc {
-                    capability: self
-                        .core
-                        .doc_capability(
-                            &context,
-                            self.core.issuer,
-                            DocScope {
-                                create: [METADATA_PLACEMENT.into()].into(),
-                                ..Default::default()
-                            },
-                        )
-                        .await?,
-                    command: command.clone(),
-                    placement: METADATA_PLACEMENT.into(),
-                    facets: BTreeMap::from([(drawer_key(), facet_value(&Drawer::self_doc()))]),
+            .as_signer(
+                &context,
+                self.core.issuer,
+                DocScope {
+                    create: [METADATA_PLACEMENT.into()].into(),
+                    ..Default::default()
+                },
+                |capability| {
+                    let (command, context) = (&command, &context);
+                    async move {
+                        self.core
+                            .docs()
+                            .call(
+                                context.child(),
+                                CreateDoc {
+                                    capability,
+                                    command: command.clone(),
+                                    placement: METADATA_PLACEMENT.into(),
+                                    facets: BTreeMap::from([(
+                                        drawer_key(),
+                                        facet_value(&Drawer::self_doc()),
+                                    )]),
+                                },
+                            )
+                            .await
+                            .map_err(docs_error)
+                    }
                 },
             )
-            .await
-            .map_err(docs_error)?;
+            .await?;
         self.core
             .state
             .put_drawer(&receipt.doc_id, &Drawer::self_doc())

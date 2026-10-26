@@ -110,6 +110,13 @@ pub struct AuthorityService {
 }
 
 impl AuthorityService {
+    /// How many capabilities are live. Retraction deletes rows, so this is the number of
+    /// handles anyone can still present.
+    #[cfg(test)]
+    pub(crate) async fn live_capabilities(&self) -> usize {
+        self.state.lock().await.caps.len()
+    }
+
     pub async fn boot(
         secrets: &SecretStore,
         sql: SqlCtx,
@@ -157,7 +164,18 @@ impl AuthorityService {
         )?;
         let root_cap = root.id;
         state.insert(root);
-        assert!(state.actors.insert(root_cap, node.operator).is_none());
+        assert!(
+            state
+                .actors
+                .insert(
+                    root_cap,
+                    cap::ActorBinding {
+                        actor_id: node.operator,
+                        reuse_key: None,
+                    },
+                )
+                .is_none()
+        );
         Ok((
             Arc::new(Self {
                 sql,

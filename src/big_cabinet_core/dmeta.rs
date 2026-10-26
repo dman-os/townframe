@@ -141,6 +141,8 @@ impl schemars::JsonSchema for Uuid7 {
 pub struct ActorMetadata {
     pub pubkey: MultibaseKey,
     pub actor_url: String,
+    // FIXME: I don't like that this is an opaque bytes. can't we have some kind of standard
+    // json object thing around delegations that ucans or whatever use?
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<Bytes>,
 }
@@ -275,6 +277,12 @@ pub struct FacetMetadata {
 /// What the witness cannot prove on its own is that the actor was authorized on the origin at the
 /// frontier where the signature was made. That frontier lives on the origin document, and an origin
 /// that is unavailable leaves the witness pending rather than forged.
+/// FIXME: making "origin must be avail" as pending is 
+/// a bad ddesign because that prevents us from delting
+/// the origin document for the compaction usecase.
+/// well, techicnally, even if we do'nt hve the original
+/// document, we'd have the keyhive entry for it but still
+/// i think this might be a bit much
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -306,6 +314,13 @@ pub struct BranchPath {
     pub extra: crate::facet::Extra,
 }
 
+// FIXME: this isn't an open struct and yet i'm seeing
+// no requirements by the facet macro to declare it closed
+// this is an issue. first of all, this should be open
+// and second of all, for it to be closed, there should have been
+// an explicit closed marker on here
+// for third party types, the embedding site can declare it
+// as "i know this is closed"
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -330,6 +345,11 @@ pub struct FacetSignature {
     // introduction. A branch or a merge moves the entry to another document unchanged, so the
     // entry cannot assume the document holding it is the one its claim names. (A plain comment: a
     // doc comment would become a description beside the UUID's `$ref`, which Lexicon cannot state.)
+    // FIXME: why is this present on every signature?
+    // this is not needed since either it's the currrent
+    // document or the inherited witness would indicate the
+    // origin doc. though I think I remember authorizing
+    // this chagne for some reason, do the ADRs say why?
     pub doc_uuid: Uuid7,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<Bytes>,
@@ -361,10 +381,13 @@ pub struct FacetClaim {
     pub actor_uuid: Uuid7,
     pub operation: ClaimOperation,
     pub value_cid: Option<Cid>,
+    // FIXME: are predecessor CIDs or signatures??
     #[serde(default)]
     pub predecessors: Vec<Cid>,
 }
 
+// FIXME: calling them CID might be misleading since I don't think the official
+// CID spec supports blake3
 /// A CIDv1 with the `raw` codec and a BLAKE3-256 multihash: four header bytes and the 32-byte digest.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Cid([u8; CID_LENGTH]);
