@@ -527,7 +527,10 @@ async fn group_creation_succeeds_once_the_coparent_material_is_present() -> Res<
         .create_group_with_parents(vec![peer_authority], &protocol)
         .await?;
     assert!(
-        owner.document_ids_containing_group(group.id()).await.is_empty(),
+        owner
+            .document_ids_containing_group(group.id())
+            .await
+            .is_empty(),
         "a group created with no documents yet must still be a live handle"
     );
     Ok(())
