@@ -2,6 +2,7 @@ use super::*;
 use automerge::transaction::Transactable;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
+use big_cabinet_core::datum::DatumMember;
 
 fn route(doc: u8, name: &str) -> DatumRoute {
     DatumRoute {
@@ -189,7 +190,7 @@ async fn failed_settlement_preserves_edges_cursor_and_parked_replay_without_noti
 /// A document carrying one unsigned branch datum: a reference-declaring tag whose value the
 /// gate refuses, so it settles with no edges and exercises the route plumbing alone.
 fn branch_document() -> (Automerge, DatumKey) {
-    let datum_key = DatumKey::from_text(big_cabinet_core::dmeta::BRANCH_DATUM_TAG, "main").unwrap();
+    let datum_key = DatumKey::from_text(big_cabinet_core::dmeta::BranchPath::ID, "main").unwrap();
     let mut document = Automerge::new();
     let mut tx = document.transaction();
     let datums = tx
@@ -231,7 +232,7 @@ async fn a_newer_revision_releases_or_outranks_a_parked_route_and_parking_surviv
     let target = route(2, "other");
     let route = DatumRoute { doc_id, datum_key };
     let unknown = present(vec![ChangeHash([9; 32])]);
-    let tag = big_cabinet_core::dmeta::BRANCH_DATUM_TAG;
+    let tag = big_cabinet_core::dmeta::BranchPath::ID;
     let mut parked = BTreeMap::new();
 
     // Revision 1 parks (the heads are not local); revision 2 settles the route and releases
@@ -400,7 +401,7 @@ async fn reference_lookup_does_not_acquire_sync_demand() {
         .unwrap();
     assert!(parked.is_empty());
     assert_eq!(
-        progress(&store, big_cabinet_core::dmeta::BRANCH_DATUM_TAG).await,
+        progress(&store, big_cabinet_core::dmeta::BranchPath::ID).await,
         Some(1)
     );
     assert!(

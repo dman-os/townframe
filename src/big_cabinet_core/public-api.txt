@@ -68,15 +68,6 @@ pub big_cabinet_core::schema_compat::fn compare (old : & SchemaBundle , new : & 
 pub big_cabinet_core::schema_compat::fn compare_datum_bundles (old : & crate :: datum :: Bundle < '_ > , old_datum : & str , new : & crate :: datum :: Bundle < '_ > , new_datum : & str ,) -> Option < CompatibilityReport >
 pub big_cabinet_core::schema_compat::fn compare_schemas (old : & Value , new : & Value) -> CompatibilityReport
 pub const big_cabinet_core::authority::OPERATOR_OBJECT: & str
-pub const big_cabinet_core::dmeta::BRANCH_DATUM_TAG: & str
-pub const big_cabinet_core::dmeta::DMETA_DATUM_TAG: & str
-pub const big_cabinet_core::drawer::DRAWER_CHILD_ENTRY_DATUM_TAG: & str
-pub const big_cabinet_core::drawer::DRAWER_DATUM_TAG: & str
-pub const big_cabinet_core::drawer::DRAWER_DOC_ENTRY_DATUM_TAG: & str
-pub const big_cabinet_core::drawer::DRAWER_KNOWN_ENTRY_DATUM_TAG: & str
-pub const big_cabinet_core::drawer::DRAWER_ROSTER_DATUM_TAG: & str
-pub const big_cabinet_core::drawer::DRAWER_SELF_DOC_LAYOUT_TAG: & str
-pub const big_cabinet_core::drawer::DRAWER_SINGLE_GROUP_LAYOUT_TAG: & str
 pub const big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT: & str
 pub const big_cabinet_core::reference::CANONICAL_REFERENCE_UNICODE_VERSION: (u64 , u64 , u64)
 pub const big_cabinet_core::reference::DATUM_REFERENCE_SCHEME: & str
@@ -282,8 +273,10 @@ pub use big_cabinet_core::datum::codec :: codec_schema
 pub use big_cabinet_core::datum::codec :: declared_references
 pub use big_cabinet_core::datum::codec :: hydrate_value
 pub use big_cabinet_core::datum::codec :: reconcile_json_atomic
+pub use big_cabinet_core::datum::const_format
 pub use big_cabinet_core::datum::input :: LexiconAdmissionError
 pub use big_cabinet_core::datum::member :: DatumMember
+pub use big_cabinet_core::datum::member :: is_nsid
 pub use big_cabinet_core::datum::member :: str_eq
 pub use big_cabinet_core::datum::shape :: DatumShape
 pub use big_cabinet_core::datum::shape :: Openness

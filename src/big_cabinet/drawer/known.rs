@@ -46,7 +46,7 @@ impl Core {
             .await?;
         let mut known = BTreeMap::new();
         for (key, datum) in read.datums {
-            if key.tag().as_str() != DRAWER_KNOWN_ENTRY_DATUM_TAG {
+            if key.tag().as_str() != KnownDrawerEntry::ID {
                 continue;
             }
             let value = match datum {

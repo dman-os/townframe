@@ -7,7 +7,7 @@ use autosurgeon::Hydrate as _;
 /// The whole point of the facility: the codec reads what the schema says, not how the field is
 /// spelled. Two datums hold a field of the same name and the same Rust type, and the schema alone
 /// decides that one is bytes and the other an array of numbers.
-#[macros::datum(id = "org.example.named", closed)]
+#[macros::datum(authority = "org.example", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Named {
@@ -15,7 +15,7 @@ struct Named {
     vector: Bytes,
 }
 
-#[macros::datum(id = "org.example.unnamed", closed)]
+#[macros::datum(authority = "org.example", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Unnamed {
@@ -194,7 +194,7 @@ fn a_specialized_native_at_a_plain_declaration_is_refused() {
 /// the schema does not declare have no declaration to follow.
 #[test]
 fn a_member_the_schema_does_not_name_is_plain_json() {
-    #[macros::datum(id = "org.example.open")]
+    #[macros::datum(authority = "org.example")]
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     struct Open {
         named: Bytes,
@@ -855,7 +855,7 @@ fn a_rust_type_deserializes_the_json_the_document_repo_emits() {
     assert_eq!(value.plain_number, 2.5);
 }
 
-#[macros::datum(id = "org.example.nullable", closed)]
+#[macros::datum(authority = "org.example", name = "nullable", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct NullableCodecs {

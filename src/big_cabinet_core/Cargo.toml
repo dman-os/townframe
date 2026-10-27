@@ -46,6 +46,8 @@ ed25519-dalek.workspace = true
 coset = "0.4.2"
 ciborium = "0.2.2"
 macros = { path = "../macros" }
+# The `datum` macro joins a member's const authority to its name in a const.
+const_format = "0.2.37"
 
 [dev-dependencies]
 panproto-lens = "=0.74.4"

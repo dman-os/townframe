@@ -35,7 +35,7 @@ use serde_json::json;
 use std::borrow::Cow;
 
 /// Every storage form in one object, reached through a reference so the walk has to resolve one.
-#[macros::datum(id = "org.example.stored", closed)]
+#[macros::datum(authority = "org.example", name = "stored", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Stored0 {

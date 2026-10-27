@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 
-#[macros::datum(id_prefix = "org.example.daybook.")]
+#[macros::datum(authority = "org.example.daybook")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Note {
     content: String,
@@ -20,7 +20,7 @@ struct Note {
     extra: Extra,
 }
 
-#[macros::datum(closed, id_prefix = "org.example.daybook.")]
+#[macros::datum(closed, authority = "org.example.daybook")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Photo {
@@ -100,14 +100,29 @@ fn the_macro_reports_what_it_saw() {
     );
 }
 
-/// `id_prefix` plus the type name, lowerCamel: the same string `define_enum_and_tag!` builds, so a
-/// persisted datum key does not change when a type moves onto this declaration. That the string
-/// resolves back to a `WellKnownDatumTag` is a property of `DatumTag` and is asserted where it
-/// lives.
+const ATTACHMENT_AUTHORITY: &str = "org.example.daybook.attachment";
+
+#[macros::datum(closed, authority = ATTACHMENT_AUTHORITY, name = "voiceMemo")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct Memo {
+    seconds: u32,
+}
+
+/// The authority joined to the name. The name defaults to the type name in lowerCamel, the same
+/// string `define_enum_and_tag!` builds, so a persisted datum key does not change when a type moves
+/// onto this declaration. A const authority is joined at compile time, and the schema reads the id
+/// back from the impl rather than restating it. That the string resolves back to a
+/// `WellKnownDatumTag` is a property of `DatumTag` and is asserted where it lives.
 #[test]
-fn an_id_prefix_derives_the_key_from_the_type_name() {
+fn a_member_id_is_the_authority_joined_to_the_name() {
     assert_eq!(Note::ID, "org.example.daybook.note");
     assert_eq!(Photo::ID, "org.example.daybook.photo");
+    assert_eq!(Memo::ID, "org.example.daybook.attachment.voiceMemo");
+    assert_eq!(
+        schema_for!(Memo).get("x-lexicon-id"),
+        Some(&json!("org.example.daybook.attachment.voiceMemo"))
+    );
 }
 
 #[test]
@@ -298,7 +313,7 @@ fn a_string_vocabulary_whose_values_disagree_is_refused() {
 
 /// A datum whose schema names another type: the nested one is written at a position, so it is not a
 /// datum, but a peer still has to be able to resolve it.
-#[macros::datum(id_prefix = "org.example.daybook.")]
+#[macros::datum(authority = "org.example.daybook")]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct Nested {
     inner: Photo,
@@ -306,7 +321,7 @@ struct Nested {
     extra: Extra,
 }
 
-#[macros::datum(id_prefix = "org.example.daybook.")]
+#[macros::datum(authority = "org.example.daybook")]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct AlsoNested {
     photo: Photo,
@@ -488,7 +503,7 @@ fn a_spelling_is_derived_or_stated_and_never_rewritten() {
 
 /// A datum that carries a deliberate plain number: the codec reads it fine, so it assembles, and
 /// only the publish refuses it.
-#[macros::datum(id = "org.example.loose")]
+#[macros::datum(authority = "org.example")]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct Loose {
     #[schemars(extend("x-automerge" = "number"))]
@@ -499,11 +514,7 @@ struct Loose {
 
 /// An adjacent union is representable in the sidecar and is not a Lexicon union, so it assembles
 /// and is refused at both gates rather than published in a layout a peer cannot read.
-#[macros::datum(
-    closed,
-    tagging = "adjacent",
-    id = "org.example.daybook.wrappedAttachment"
-)]
+#[macros::datum(closed, tagging = "adjacent", authority = "org.example.daybook")]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "$type", content = "value")]
 enum WrappedAttachment {

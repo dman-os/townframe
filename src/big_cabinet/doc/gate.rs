@@ -43,11 +43,12 @@ use automerge::legacy::ObjectId;
 use automerge::legacy::OpId;
 use automerge::legacy::OpType;
 use big_cabinet_core::DatumKey;
+use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::ActorMetadata;
 use big_cabinet_core::dmeta::Attribution;
 use big_cabinet_core::dmeta::AttributionError;
 use big_cabinet_core::dmeta::ClaimOperation;
-use big_cabinet_core::dmeta::DMETA_DATUM_TAG;
+use big_cabinet_core::dmeta::Dmeta;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeReadBudget;
@@ -244,11 +245,7 @@ impl<'a> Gate<'a> {
     }
 
     pub(crate) fn verify(&self, key: &DatumKey) -> Verdict {
-        assert_ne!(
-            key.tag().as_str(),
-            DMETA_DATUM_TAG,
-            "dmeta is not a signed datum"
-        );
+        assert_ne!(key.tag().as_str(), Dmeta::ID, "dmeta is not a signed datum");
         let mut pending: Option<String> = None;
         let entries = match reconstruct_current_claims(self.doc, key, self.heads, self.budget) {
             Ok(entries) => entries,

@@ -591,7 +591,7 @@ impl Node {
             .unwrap();
         read.datums
             .into_iter()
-            .filter(|(key, _)| key.tag().as_str().starts_with(DRAWER_DATUM_TAG))
+            .filter(|(key, _)| key.tag().as_str().starts_with(Drawer::ID))
             .map(|(key, read)| match read {
                 DatumRead::Accepted { value, .. } => (key, value),
                 other => panic!("drawer datum {key} is not accepted: {other:?}"),

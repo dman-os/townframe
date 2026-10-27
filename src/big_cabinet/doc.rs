@@ -107,13 +107,13 @@ use big_cabinet_core::authority::ResolveActor;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::authority::SignDatumClaim;
 use big_cabinet_core::datum::CompiledSchema;
+use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::datum::hydrate_value;
 use big_cabinet_core::datum::reconcile_json_atomic;
 use big_cabinet_core::dmeta::ActorMetadata;
-use big_cabinet_core::dmeta::BRANCH_DATUM_TAG;
+use big_cabinet_core::dmeta::BranchPath;
 use big_cabinet_core::dmeta::Cid;
 use big_cabinet_core::dmeta::ClaimOperation;
-use big_cabinet_core::dmeta::DMETA_DATUM_TAG;
 use big_cabinet_core::dmeta::DatumClaim;
 use big_cabinet_core::dmeta::DatumMetadata;
 use big_cabinet_core::dmeta::DatumSignature;
@@ -238,7 +238,7 @@ pub struct DocsService {
 }
 
 fn branch_key(branch: &DocId) -> DatumKey {
-    format!("{BRANCH_DATUM_TAG}/{branch}")
+    format!("{}/{branch}", BranchPath::ID)
         .parse()
         .expect("a branch datum key is well formed")
 }
@@ -307,7 +307,7 @@ fn resolve(doc: &Automerge, at: &At) -> Result<Vec<ChangeHash>, DocsError> {
 /// Datums only the repository writes. The branch datums are readable like any other datum; dmeta
 /// is not a signed datum and is never read through the gate.
 fn is_system(key: &DatumKey) -> bool {
-    [DMETA_DATUM_TAG, BRANCH_DATUM_TAG].contains(&key.tag().as_str())
+    [Dmeta::ID, BranchPath::ID].contains(&key.tag().as_str())
 }
 
 fn unaccepted(verdict: Verdict) -> Result<Vec<ChangeHash>, Unaccepted> {
@@ -559,7 +559,7 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
             .resolve_for_read(tag)
             .expect("SchemaRepo always registers the core datums")
     };
-    let (dmeta, branch) = (core(DMETA_DATUM_TAG), core(BRANCH_DATUM_TAG));
+    let (dmeta, branch) = (core(Dmeta::ID), core(BranchPath::ID));
     let (service_stop, service_spawner) = StopToken::new();
     let service = Arc::new(DocsService {
         big_repo: config.big_repo,

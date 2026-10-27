@@ -30,7 +30,9 @@ never at decode, storage, or projection.
   skipped when `None`. Do not invent a one-variant vocabulary or a dummy field to satisfy
   the object rule; future fields land beside `empty` without a new tag.
 - **Members are identified by their datum id.** A union member payload declares
-  `#[macros::datum(id = "org.example.…")]`; the union references it by that id. Adding a
+  `#[macros::datum(authority = "org.example.…")]` (the id is the authority joined to `name`,
+  which defaults to the type name in lowerCamel; `authority` may be a `&str` const such as
+  `Drawer::ID`); the union references it by that id. Adding a
   member is a new payload type under the same enclosing datum id — never a new datum tag
   for the enclosing datum.
 - **Service-side closed mirrors are fine.** Operations need a closed vocabulary to switch

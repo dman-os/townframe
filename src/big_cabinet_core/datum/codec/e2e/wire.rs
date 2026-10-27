@@ -2,14 +2,14 @@
 
 use super::*;
 
-#[macros::datum(id = "org.example.bytesMember", closed)]
+#[macros::datum(authority = "org.example", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct BytesMember {
     data: Bytes,
 }
 
-#[macros::datum(id = "org.example.textMember", closed)]
+#[macros::datum(authority = "org.example", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TextMember {

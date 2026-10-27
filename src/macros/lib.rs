@@ -22,9 +22,9 @@ fn datum_path() -> Path {
 
 /// Declares a datum type.
 ///
-/// Emits `DatumShape`, and `DatumMember` when the type states an id. It does not generate the
-/// schema: `schemars` derives that from the same item, and the two are checked against each other
-/// where the type is published.
+/// Emits `DatumShape`, and `DatumMember` when the type states an authority. It does not generate
+/// the schema: `schemars` derives that from the same item, and the two are checked against each
+/// other where the type is published.
 ///
 /// A struct is **open** when it has exactly one `#[serde(flatten)]` overflow field of type `Extra`,
 /// which is what preserves the members the type does not know about, and **closed** when it says
@@ -48,11 +48,15 @@ fn datum_path() -> Path {
 /// needs none of this — derive serde and `schemars` and drop the macro.
 ///
 /// A union member is a declared type whose id is its tag, so a variant names a payload and nothing
-/// else. `#[datum(id = "…")]` states an id exactly; `#[datum(id_prefix = "org.example.daybook.")]`
-/// derives it from the type name, producing the same string `define_enum_and_tag!` builds.
+/// else. The id is an AT Proto NSID, stated as its two parts: `authority`, the reversed domain, and
+/// `name`, the last segment. `name` defaults to the type name in lowerCamel, the string
+/// `define_enum_and_tag!` builds, so `Note` under `authority = "org.example.daybook"` is
+/// `org.example.daybook.note`. `authority` is a string literal, or the path of a `&str` const that
+/// several declarations share, joined to the name at compile time. Either way the id is asserted to
+/// be an NSID where the type is declared.
 ///
 /// ```ignore
-/// #[datum(id_prefix = "org.example.daybook.")]
+/// #[datum(authority = "org.example.daybook")]
 /// #[derive(Serialize, Deserialize, JsonSchema)]
 /// pub struct Note {
 ///     pub content: String,
@@ -73,8 +77,15 @@ struct Args {
     closed: bool,
     open_string: bool,
     tagging: Option<String>,
-    id: Option<String>,
-    prefix: Option<String>,
+    authority: Option<Authority>,
+    name: Option<syn::LitStr>,
+}
+
+/// The reversed-domain authority a member's NSID is published under: a string literal, or the
+/// path of a `&str` const that several declarations share.
+enum Authority {
+    Literal(syn::LitStr),
+    Path(syn::Path),
 }
 
 impl Args {
@@ -99,48 +110,70 @@ impl Args {
                     ));
                 }
                 args.tagging = Some(value);
-            } else if meta.path().is_ident("id") {
-                if args.id.is_some() || args.prefix.is_some() {
+            } else if meta.path().is_ident("authority") {
+                if args.authority.is_some() {
+                    return Err(syn::Error::new_spanned(&meta, "`authority` is stated once"));
+                }
+                args.authority = Some(match meta_value(&meta)? {
+                    Expr::Lit(ExprLit {
+                        lit: Lit::Str(lit), ..
+                    }) => Authority::Literal(lit.clone()),
+                    Expr::Path(path) if path.qself.is_none() => Authority::Path(path.path.clone()),
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            &meta,
+                            "`authority` is a string literal or the path of a `&str` const, e.g. \
+                             \"org.example.daybook\"",
+                        ));
+                    }
+                });
+            } else if meta.path().is_ident("name") {
+                if args.name.is_some() {
+                    return Err(syn::Error::new_spanned(&meta, "`name` is stated once"));
+                }
+                let Expr::Lit(ExprLit {
+                    lit: Lit::Str(lit), ..
+                }) = meta_value(&meta)?
+                else {
+                    return Err(syn::Error::new_spanned(&meta, "expected a string literal"));
+                };
+                if lit.value().contains('.') {
                     return Err(syn::Error::new_spanned(
-                        &meta,
-                        "a type states either `id` or `id_prefix`, once",
+                        lit,
+                        "`name` is the last segment of the NSID, without a separator: the segments \
+                         before it belong in `authority`",
                     ));
                 }
-                args.id = Some(meta_string(&meta)?);
-            } else if meta.path().is_ident("id_prefix") {
-                if args.id.is_some() || args.prefix.is_some() {
-                    return Err(syn::Error::new_spanned(
-                        &meta,
-                        "a type states either `id` or `id_prefix`, once",
-                    ));
-                }
-                let prefix = meta_string(&meta)?;
-                if !prefix.ends_with('.') {
-                    return Err(syn::Error::new_spanned(
-                        &meta,
-                        "`id_prefix` ends with the separator, e.g. \"org.example.daybook.\"",
-                    ));
-                }
-                args.prefix = Some(prefix);
+                args.name = Some(lit.clone());
             } else {
                 return Err(syn::Error::new_spanned(
                     &meta,
                     "unknown datum argument: expected `closed`, `open_string`, `tagging = \
-                     \"…\"`, `id = \"…\"` or `id_prefix = \"…\"`",
+                     \"…\"`, `authority = …` or `name = \"…\"`",
                 ));
             }
+        }
+        if let (None, Some(name)) = (&args.authority, &args.name) {
+            return Err(syn::Error::new_spanned(
+                name,
+                "`name` is the last segment of an NSID under an `authority`: state the authority",
+            ));
         }
         Ok(args)
     }
 }
 
+fn meta_value(meta: &Meta) -> syn::Result<&Expr> {
+    match meta {
+        Meta::NameValue(named) => Ok(&named.value),
+        _ => Err(syn::Error::new_spanned(meta, "expected `key = value`")),
+    }
+}
+
 fn meta_string(meta: &Meta) -> syn::Result<String> {
-    let Meta::NameValue(named) = meta else {
-        return Err(syn::Error::new_spanned(meta, "expected a string literal"));
-    };
     let Expr::Lit(ExprLit {
         lit: Lit::Str(lit), ..
-    }) = &named.value
+    }) = meta_value(meta)?
     else {
         return Err(syn::Error::new_spanned(meta, "expected a string literal"));
     };
@@ -249,12 +282,24 @@ fn lower_camel(name: &str) -> String {
     }
 }
 
-fn member_id(name: &syn::Ident, args: &Args) -> Option<String> {
-    match (&args.id, &args.prefix) {
-        (Some(id), _) => Some(id.clone()),
-        (None, Some(prefix)) => Some(format!("{prefix}{}", lower_camel(&name.to_string()))),
-        (None, None) => None,
-    }
+/// The member's id: one literal when the authority is a literal, else the authority const joined to
+/// the name at compile time. `None` for a type that states no authority and so is no union member.
+fn member_id(name: &syn::Ident, args: &Args) -> Option<proc_macro2::TokenStream> {
+    let authority = args.authority.as_ref()?;
+    let segment = args
+        .name
+        .as_ref()
+        .map_or_else(|| lower_camel(&name.to_string()), syn::LitStr::value);
+    Some(match authority {
+        Authority::Literal(lit) => {
+            let id = syn::LitStr::new(&format!("{}.{segment}", lit.value()), lit.span());
+            quote!(#id)
+        }
+        Authority::Path(path) => {
+            let datum = datum_path();
+            quote!(#datum::const_format::concatcp!(#path, ".", #segment))
+        }
+    })
 }
 
 fn last_type_ident(ty: &syn::Type) -> Option<&syn::Ident> {
@@ -264,20 +309,35 @@ fn last_type_ident(ty: &syn::Type) -> Option<&syn::Ident> {
     path.path.segments.last().map(|segment| &segment.ident)
 }
 
-fn lexicon_attr(id: &str) -> syn::Attribute {
-    let lit = syn::LitStr::new(id, proc_macro2::Span::call_site());
-    syn::parse_quote!(#[schemars(extend("x-lexicon-id" = #lit))])
+/// Reads the id back from the `DatumMember` impl, so the schema states the string the impl does.
+fn lexicon_attr(name: &syn::Ident) -> syn::Attribute {
+    let datum = datum_path();
+    syn::parse_quote!(#[schemars(extend("x-lexicon-id" = (<#name as #datum::DatumMember>::ID)))])
 }
 
+/// `DatumMember`, and the assert that its id is an NSID. The assert runs where the type is
+/// declared, so an id built from a const authority is checked by the same rule as a literal one.
 fn member_impl(name: &syn::Ident, args: &Args) -> proc_macro2::TokenStream {
     let datum = datum_path();
-    let Some(id) = member_id(name, args) else {
+    let (Some(id), Some(authority)) = (member_id(name, args), &args.authority) else {
         return proc_macro2::TokenStream::new();
+    };
+    let span = match authority {
+        Authority::Literal(lit) => lit.span(),
+        Authority::Path(path) => syn::spanned::Spanned::span(path),
+    };
+    let check = quote::quote_spanned! {span=>
+        const _: () = assert!(
+            #datum::is_nsid(<#name as #datum::DatumMember>::ID),
+            "a datum id is an NSID: a reversed-domain authority of two or more labels, then one \
+             name segment of ASCII letters and digits that starts with a letter",
+        );
     };
     quote! {
         impl #datum::DatumMember for #name {
             const ID: &'static str = #id;
         }
+        #check
     }
 }
 
@@ -317,10 +377,10 @@ fn struct_shape(
 ) -> syn::Result<(syn::Ident, proc_macro2::TokenStream)> {
     let name = item.ident.clone();
     no_generics(&name, &item.generics)?;
-    if let Some(id) = member_id(&name, args) {
+    if args.authority.is_some() {
         let derived = derived_traits(&item.attrs)?;
         if derived.iter().any(|name| name == "JsonSchema") {
-            item.attrs.push(lexicon_attr(&id));
+            item.attrs.push(lexicon_attr(&name));
         }
     }
     datum_fields::check_field_datums(&item.fields)?;
@@ -988,4 +1048,74 @@ fn string_enum_shape(
             }
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use super::member_id;
+
+    fn id(args: &str, ty: &str) -> String {
+        let args = Args::parse(args.parse().expect("tokens")).expect("accepted");
+        let ty = syn::parse_str(ty).expect("ident");
+        member_id(&ty, &args).expect("a member").to_string()
+    }
+
+    fn refused(args: &str, expected: &str) {
+        let error = Args::parse(args.parse().expect("tokens"))
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+
+    /// A literal authority is joined at expansion into one literal; a const authority is joined in
+    /// a const, because the macro cannot read its value.
+    #[test]
+    fn the_id_is_the_authority_joined_to_the_name() {
+        assert_eq!(
+            id("authority = \"org.example.daybook\"", "OcrResult"),
+            "\"org.example.daybook.ocrResult\""
+        );
+        assert_eq!(
+            id(
+                "authority = \"org.example.daybook\", name = \"branch\"",
+                "BranchPath"
+            ),
+            "\"org.example.daybook.branch\""
+        );
+        assert_eq!(
+            id("authority = Drawer::ID, name = \"roster\"", "DrawerRoster"),
+            quote::quote!(::big_cabinet_core::datum::const_format::concatcp!(
+                Drawer::ID,
+                ".",
+                "roster"
+            ))
+            .to_string(),
+        );
+    }
+
+    #[test]
+    fn a_type_without_an_authority_is_no_member() {
+        let args = Args::parse("closed".parse().expect("tokens")).expect("accepted");
+        assert!(member_id(&syn::parse_str("Note").expect("ident"), &args).is_none());
+    }
+
+    #[test]
+    fn the_id_arguments_are_refused_when_they_cannot_name_an_nsid() {
+        refused("name = \"note\"", "state the authority");
+        refused(
+            "authority = \"org.example\", name = \"daybook.note\"",
+            "without a separator",
+        );
+        refused(
+            "authority = concat!(\"org.\", \"example\")",
+            "a string literal or the path of a `&str` const",
+        );
+        refused(
+            "authority = \"org.example\", authority = \"org.other\"",
+            "stated once",
+        );
+        refused("id = \"org.example.note\"", "unknown datum argument");
+    }
 }

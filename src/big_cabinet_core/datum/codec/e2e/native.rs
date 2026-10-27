@@ -25,7 +25,7 @@ use serde_json::json;
 
 /// An open datum: its title is what it declares, and everything else is what a peer's version
 /// carried that this schema does not name.
-#[macros::datum(id = "org.example.nativeOpen")]
+#[macros::datum(authority = "org.example", name = "nativeOpen")]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct OpenDatum {
     title: String,
@@ -39,7 +39,7 @@ fn open_document() -> Json {
     serde_json::to_value(bundle.document("OpenDatum").unwrap()).unwrap()
 }
 
-#[macros::datum(id = "org.example.listDatum", closed)]
+#[macros::datum(authority = "org.example", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListDatum {
@@ -229,7 +229,7 @@ fn an_undeclared_native_text_keeps_its_object_while_a_neighbor_changes() {
 /// equal or changed, before anything reads a drifted position as its declaration.
 #[test]
 fn a_declared_plain_string_wins_over_a_native_text() {
-    #[macros::datum(id = "org.example.plainNote", closed)]
+    #[macros::datum(authority = "org.example", closed)]
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     struct PlainNote {

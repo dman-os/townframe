@@ -1,4 +1,5 @@
 use super::*;
+use crate::datum::DatumMember;
 #[cfg(feature = "schemars")]
 use crate::datum::DatumShape;
 use ed25519_dalek::Signer;
@@ -205,7 +206,7 @@ fn deleted_at_is_a_required_list_even_when_empty() {
 #[test]
 fn dmeta_publishes_as_an_ordinary_datum() {
     let declaration = crate::datum::Declaration::of::<Dmeta>().expect("dmeta is lexicon-aligned");
-    assert_eq!(declaration.datum.id, DMETA_DATUM_TAG);
+    assert_eq!(declaration.datum.id, Dmeta::ID);
     assert_eq!(
         Dmeta::SHAPE,
         crate::datum::Shape::Object {
@@ -217,7 +218,7 @@ fn dmeta_publishes_as_an_ordinary_datum() {
         .lexicons()
         .expect("an aligned declaration publishes");
     assert_eq!(published.len(), 1);
-    assert_eq!(published[0].file["id"], DMETA_DATUM_TAG);
+    assert_eq!(published[0].file["id"], Dmeta::ID);
     assert_eq!(published[0].file["defs"]["main"]["type"], "object");
 }
 

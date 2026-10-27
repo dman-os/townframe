@@ -83,12 +83,9 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
     let mirror = reader.repo.interest(drawer.clone()).await.unwrap();
     mirror.wait_until_ready().await.unwrap();
     reader
-        .wait_indexed(
-            big_cabinet_core::drawer::DRAWER_DATUM_TAG,
-            |route, membership| {
-                route.doc_id == drawer && matches!(membership, DatumMembership::Present { .. })
-            },
-        )
+        .wait_indexed(big_cabinet_core::drawer::Drawer::ID, |route, membership| {
+            route.doc_id == drawer && matches!(membership, DatumMembership::Present { .. })
+        })
         .await;
 
     let bob = reader.actor("bob").await;

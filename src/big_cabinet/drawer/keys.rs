@@ -5,36 +5,37 @@
 //! the target from the key alone.
 
 use big_cabinet_core::DatumKey;
+use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::DocId;
-use big_cabinet_core::drawer::DRAWER_CHILD_ENTRY_DATUM_TAG;
-use big_cabinet_core::drawer::DRAWER_DATUM_TAG;
-use big_cabinet_core::drawer::DRAWER_DOC_ENTRY_DATUM_TAG;
-use big_cabinet_core::drawer::DRAWER_KNOWN_ENTRY_DATUM_TAG;
-use big_cabinet_core::drawer::DRAWER_ROSTER_DATUM_TAG;
+use big_cabinet_core::drawer::Drawer;
+use big_cabinet_core::drawer::DrawerChildEntry;
+use big_cabinet_core::drawer::DrawerDocEntry;
+use big_cabinet_core::drawer::DrawerRoster;
 use big_cabinet_core::drawer::GroupKey;
+use big_cabinet_core::drawer::KnownDrawerEntry;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_repo::BigKeyhiveGroup;
 
 pub(crate) fn drawer_key() -> DatumKey {
-    DatumKey::from_text(DRAWER_DATUM_TAG, "main").expect("the drawer key is well formed")
+    DatumKey::from_text(Drawer::ID, "main").expect("the drawer key is well formed")
 }
 
 pub(crate) fn known_entry_key(drawer_id: &DrawerId) -> DatumKey {
-    DatumKey::from_text(DRAWER_KNOWN_ENTRY_DATUM_TAG, drawer_id.to_string())
+    DatumKey::from_text(KnownDrawerEntry::ID, drawer_id.to_string())
         .expect("a known entry key is well formed")
 }
 
 pub(crate) fn roster_key() -> DatumKey {
-    DatumKey::from_text(DRAWER_ROSTER_DATUM_TAG, "main").expect("the roster key is well formed")
+    DatumKey::from_text(DrawerRoster::ID, "main").expect("the roster key is well formed")
 }
 
 pub(crate) fn doc_entry_key(doc: &DocId) -> DatumKey {
-    DatumKey::from_text(DRAWER_DOC_ENTRY_DATUM_TAG, doc.to_string())
+    DatumKey::from_text(DrawerDocEntry::ID, doc.to_string())
         .expect("a doc entry key is well formed")
 }
 
 pub(crate) fn child_entry_key(child: &DrawerId) -> DatumKey {
-    DatumKey::from_text(DRAWER_CHILD_ENTRY_DATUM_TAG, child.to_string())
+    DatumKey::from_text(DrawerChildEntry::ID, child.to_string())
         .expect("a child entry key is well formed")
 }
 

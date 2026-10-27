@@ -26,7 +26,7 @@ impl DocsService {
             .datums
             .iter()
             .flatten()
-            .find(|key| key.tag().as_str() == DMETA_DATUM_TAG)
+            .find(|key| key.tag().as_str() == Dmeta::ID)
         {
             return Err(DocsError::SystemDatum {
                 datum_key: key.clone(),

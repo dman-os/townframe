@@ -176,7 +176,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::str::FromStr;
 
-    #[macros::datum(id = "org.example.reffed", closed)]
+    #[macros::datum(authority = "org.example", closed)]
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct Reffed {

@@ -281,14 +281,22 @@ The id is declared on the **member type**, never on the variant, so the same typ
 tag wherever it is used and a variant needs no rename at all:
 
 ```rust
-#[datum(id_prefix = "org.example.daybook.")]     // + the type name, lowerCamel: `…daybook.note`
-#[datum(id = "org.example.daybook.note")]        // exactly, for a key that is not the type name
+#[datum(authority = "org.example.daybook")]                  // + the type name, lowerCamel: `…daybook.note`
+#[datum(authority = "org.example.daybook", name = "note")]   // for a name that is not the type name
+#[datum(authority = Drawer::ID, name = "roster")]            // a `&str` const: `…daybook.drawer.roster`
 ```
 
-`id_prefix` derives `prefix + lowerCamel(TypeName)`, which is the string `define_enum_and_tag!`
+The id is an NSID and is stated as its two parts: `authority`, the reversed domain, and `name`, the
+last segment. `name` defaults to `lowerCamel(TypeName)`, which is the string `define_enum_and_tag!`
 already builds, so the tag a persisted datum key holds does not change when a type moves to this
-declaration. `DatumTag::from(id)` resolves that string to the well-known tag it names, so one id
-serves as both the `$type` value and the key tag, and neither is written twice.
+declaration. A literal authority is joined to the name at expansion; a const authority, which the
+macro cannot read, is joined in a const, which is how a family of members is published under the id
+of the datum that owns them without restating it. Either way the macro emits a const assertion that
+the result is an NSID, spanned on the authority, so the two spellings are checked by one rule — the
+rule admission applies to a carried Lexicon's ids. The schema's `x-lexicon-id` is read back from
+`<T as DatumMember>::ID` rather than restated. `DatumTag::from(id)` resolves that string to the
+well-known tag it names, so one id serves as both the `$type` value and the key tag, and neither is
+written twice.
 
 That splits the two cases cleanly:
 
@@ -585,8 +593,9 @@ being the const assertion the compiler evaluates; a `serde` key on a carrier or 
 macro does not read; a bare number field that states no spelling, the marker being the field's
 `#[schemars(extend("x-automerge" = "number"))]`, since a plain number that is not deliberate is
 invisible in a JSON document (§9); a bare byte-array field that states none, the same way, because a
-CRDT list of scalars is one op per byte and the doc grows per edit (§9); `id` and `id_prefix`
-together; an `id_prefix` that does not end in the separator; and a generic datum type.
+CRDT list of scalars is one op per byte and the doc grows per edit (§9); a `name` without an
+`authority`, a `name` of more than one segment, and an id that is not an NSID; and a generic datum
+type.
 
 **At the plug level**, where the two artifacts meet. Two checks live here, and they are different
 kinds of check:
@@ -736,8 +745,8 @@ order (ADR 020 §2).
 
 1. Whether `Blob.digest` stays a `Multihash` or migrates to a link, and whether a reference frontier
    becomes its own type or stays a sibling field.
-2. ~~The member id, the codec keyword, and the shape of the published artifact.~~ Settled: `id` or
-   `id_prefix` on the type, validation at the plug level, definitions hoisted into the manifest flat
+2. ~~The member id, the codec keyword, and the shape of the published artifact.~~ Settled: `authority` and
+   `name` on the type, validation at the plug level, definitions hoisted into the manifest flat
    and resolved in a `Bundle`, a stock validator served the assembled document. And the codec is now
    built rather than planned: the vocabulary is one standard keyword (`format`, for the timestamp)
    plus `x-automerge` for the shapes JSON Schema cannot describe, a value is checked into a `Stored`

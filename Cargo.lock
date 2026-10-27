@@ -1452,6 +1452,7 @@ dependencies = [
  "big_sync_core",
  "blake3",
  "ciborium",
+ "const_format",
  "coset",
  "data-encoding",
  "displaydoc",

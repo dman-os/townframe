@@ -1,6 +1,7 @@
 use super::Bundle;
 use super::CodecError;
 use super::CompiledSchema;
+use super::is_nsid;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
@@ -79,7 +80,7 @@ impl Bundle<'_> {
                 ));
             }
             let id = string(object, "id", "$")?;
-            if !nsid(id) {
+            if !is_nsid(id) {
                 return Err(invalid("id", "invalid NSID"));
             }
             if compiler.files.insert(id.to_owned(), file).is_some() {
@@ -1642,7 +1643,7 @@ impl jsonschema::Keyword for Constraint {
             }),
             Some("tag") => instance.as_str().is_some_and(|value| {
                 let (id, name) = value.split_once('#').unwrap_or((value, ""));
-                nsid(id)
+                is_nsid(id)
                     && name != "main"
                     && !name.contains('#')
                     && (!value.contains('#') || !name.is_empty())
@@ -1747,22 +1748,6 @@ fn label(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
-fn nsid(value: &str) -> bool {
-    let Some((authority, name)) = value.rsplit_once('.') else {
-        return false;
-    };
-    !value.is_empty()
-        && value.len() <= 317
-        && authority.len() <= 253
-        && authority.contains('.')
-        && authority.starts_with(|character: char| character.is_ascii_alphabetic())
-        && authority.split('.').all(label)
-        && !name.is_empty()
-        && name.len() <= 63
-        && name.starts_with(|character: char| character.is_ascii_alphabetic())
-        && name.bytes().all(|byte| byte.is_ascii_alphanumeric())
-}
-
 fn handle(value: &str) -> bool {
     value.len() <= 253
         && value.contains('.')
@@ -1802,7 +1787,7 @@ fn record_key(value: &str) -> bool {
 fn valid_format(format: &str, value: &str) -> bool {
     match format {
         "cid" => cid(value),
-        "nsid" => nsid(value),
+        "nsid" => is_nsid(value),
         "did" => did(value),
         "handle" => handle(value),
         "at-identifier" => did(value) || handle(value),
@@ -1827,7 +1812,7 @@ fn valid_format(format: &str, value: &str) -> bool {
             let mut parts = rest.split('/');
             let authority = parts.next().expect("split has first entry");
             (did(authority) || handle(authority))
-                && parts.next().is_none_or(nsid)
+                && parts.next().is_none_or(is_nsid)
                 && parts.next().is_none_or(record_key)
                 && parts.next().is_none()
         }

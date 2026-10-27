@@ -9,14 +9,14 @@ use super::super::commands::State;
 use super::*;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use big_cabinet_core::dmeta::BRANCH_DATUM_TAG;
+use big_cabinet_core::dmeta::BranchPath;
 
 fn command(text: &str) -> CommandId {
     CommandId::try_from(text.to_owned()).unwrap()
 }
 
 fn branch_key(branch: &DocId) -> DatumKey {
-    format!("{BRANCH_DATUM_TAG}/{branch}").parse().unwrap()
+    format!("{}/{branch}", BranchPath::ID).parse().unwrap()
 }
 
 fn branch_value(path: &str, origin: &WriteReceipt) -> Value {

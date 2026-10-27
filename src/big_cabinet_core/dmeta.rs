@@ -56,7 +56,6 @@ pub use verification::signature_id;
 
 use crate::reference::DatumKey;
 
-pub const DMETA_DATUM_TAG: &str = "org.example.daybook.dmeta";
 const CLAIM_DOMAIN: &[u8] = b"daybook.datum-claim.v2\0";
 const CLAIM_ID_DOMAIN: &[u8] = b"daybook.datum-claim-id.v2\0";
 const CID_VERSION_RAW_BLAKE3: [u8; 4] = [0x01, 0x55, 0x1e, 0x20];
@@ -163,7 +162,7 @@ pub struct ActorMetadata {
 /// be a second copy of the same facts, and the two copies are exactly what a merge can pull apart.
 /// The chosen alias for a signature — the lexicographically smallest one visible in the writing
 /// transaction — is derived from this index by the repository, which holds the reverse lookup.
-#[cfg_attr(feature = "schemars", macros::datum(id = "org.example.daybook.dmeta"))]
+#[macros::datum(authority = "org.example.daybook")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -304,15 +303,13 @@ pub struct InheritedWitness {
     pub value: Option<Bytes>,
 }
 
-pub const BRANCH_DATUM_TAG: &str = "org.example.daybook.branch";
-
 /// The branch side of a branch: `org.example.daybook.branch/<docid>` on the branch document,
 /// naming that document's branch path.
 ///
 /// The datum id carries the document id, not the value, because a branch merged back brings this
 /// datum along: the origin then holds the branch's entry under the branch's id, and still finds
 /// its own path (if it is itself a branch) under its own id. Only Branch writes it.
-#[cfg_attr(feature = "schemars", macros::datum(id = "org.example.daybook.branch"))]
+#[macros::datum(authority = "org.example.daybook", name = "branch")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

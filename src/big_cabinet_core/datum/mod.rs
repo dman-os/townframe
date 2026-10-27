@@ -29,7 +29,11 @@ mod wire;
 #[cfg(all(test, feature = "schemars"))]
 mod e2e;
 
+/// For the `datum` macro, which joins a const authority to a member's name at compile time.
+#[doc(hidden)]
+pub use const_format;
 pub use member::DatumMember;
+pub use member::is_nsid;
 pub use member::str_eq;
 pub use shape::DatumShape;
 pub use shape::Openness;

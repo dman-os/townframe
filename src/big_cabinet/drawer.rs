@@ -77,6 +77,7 @@ use big_cabinet_core::authority::CapId;
 use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::Rights;
+use big_cabinet_core::datum::DatumMember;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::doc::CommandId;
@@ -86,11 +87,9 @@ use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::doc::WriteReceipt;
-use big_cabinet_core::drawer::DRAWER_CHILD_ENTRY_DATUM_TAG;
-use big_cabinet_core::drawer::DRAWER_DATUM_TAG;
-use big_cabinet_core::drawer::DRAWER_DOC_ENTRY_DATUM_TAG;
-use big_cabinet_core::drawer::DRAWER_KNOWN_ENTRY_DATUM_TAG;
 use big_cabinet_core::drawer::DrawerAccess as Access;
+use big_cabinet_core::drawer::DrawerChildEntry;
+use big_cabinet_core::drawer::DrawerDocEntry;
 use big_cabinet_core::drawer::DrawerGroups;
 use big_cabinet_core::drawer::GroupKey;
 use big_cabinet_core::drawer::protocol::AddChild;
@@ -743,7 +742,7 @@ impl Core {
         let mut children = BTreeMap::new();
         for (key, datum) in read.datums {
             let tag = key.tag().as_str();
-            if tag != DRAWER_DOC_ENTRY_DATUM_TAG && tag != DRAWER_CHILD_ENTRY_DATUM_TAG {
+            if tag != DrawerDocEntry::ID && tag != DrawerChildEntry::ID {
                 continue;
             }
             let value = match datum {
@@ -765,7 +764,7 @@ impl Core {
             let unreadable = |error: serde_json::Error| {
                 DrawersError::RosterUnreadable(format!("{key} on {}: {error}", record.drawer_id))
             };
-            if tag == DRAWER_DOC_ENTRY_DATUM_TAG {
+            if tag == DrawerDocEntry::ID {
                 let entry: big_cabinet_core::drawer::DrawerDocEntry =
                     serde_json::from_value(value).map_err(unreadable)?;
                 if let Some(access) = entry.access.known() {
@@ -899,7 +898,7 @@ impl Core {
         let announced = self
             .datum_set
             .query(crate::index::DatumSetQuery::Tag(
-                big_cabinet_core::DatumTag::new(DRAWER_DATUM_TAG)
+                big_cabinet_core::DatumTag::new(Drawer::ID)
                     .expect("the drawer datum tag is a valid tag"),
             ))
             .await
