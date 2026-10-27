@@ -26,18 +26,33 @@
 //! owns the transaction and must discard it rather than commit it; this generic API cannot rollback
 //! an arbitrary `Transactable`, and it propagates that error unchanged.
 
+use super::Codec;
+use super::CodecError;
+use super::bytes_value;
+use super::instant_millis;
+use super::kind;
 use super::validation::CompiledSchema;
-use super::walk::{
-    Declared, Kind, Number, Path, PathKey, Position, at, discriminant_matches, number_kind,
-    type_mentions,
-};
-use super::{Codec, CodecError, bytes_value, instant_millis, kind};
+use super::walk::Declared;
+use super::walk::Kind;
+use super::walk::Number;
+use super::walk::Path;
+use super::walk::PathKey;
+use super::walk::Position;
+use super::walk::at;
+use super::walk::discriminant_matches;
+use super::walk::number_kind;
+use super::walk::type_mentions;
+use automerge::ObjId;
+use automerge::ObjType;
+use automerge::ScalarValue;
 #[cfg(test)]
 use automerge::transaction::Transactable;
-use automerge::{ObjId, ObjType, ScalarValue, transaction::Transaction};
+use automerge::transaction::Transaction;
+use autosurgeon::Prop;
 use autosurgeon::ReadDoc as AutoDoc;
-use autosurgeon::reconcile::{CounterReconciler, TextReconciler};
-use autosurgeon::{Prop, Reconciler};
+use autosurgeon::Reconciler;
+use autosurgeon::reconcile::CounterReconciler;
+use autosurgeon::reconcile::TextReconciler;
 use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::HashMap;

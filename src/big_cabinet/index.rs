@@ -1,16 +1,24 @@
 pub mod facet_ref;
 pub mod facet_set;
 
-pub use facet_ref::{FacetRefEdge, FacetRefQuery, FacetRefStore};
-pub use facet_set::{FacetMembership, FacetRecord, FacetRoute, FacetSetQuery, FacetSetStore};
+pub use facet_ref::FacetRefEdge;
+pub use facet_ref::FacetRefQuery;
+pub use facet_ref::FacetRefStore;
+pub use facet_set::FacetMembership;
+pub use facet_set::FacetRecord;
+pub use facet_set::FacetRoute;
+pub use facet_set::FacetSetQuery;
+pub use facet_set::FacetSetStore;
 
 use crate::schema::SchemaRepo;
 use big_repo::SharedBigRepo;
 use futures::FutureExt;
-use service_utils_rs::{Spawner, StopToken as ComponentStopToken};
-use sqlx_utils_rs::SqlCtx;
+use service_utils_rs::Spawner;
+use service_utils_rs::StopToken as ComponentStopToken;
+use sqlite_rs::Database;
+use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::sync::Arc;
 use utils_rs::prelude::Res;
 
 pub struct Indexes {
@@ -24,7 +32,7 @@ impl Indexes {
     pub async fn boot(
         repo: SharedBigRepo,
         schemas: Arc<SchemaRepo>,
-        sql: SqlCtx,
+        sql: Database,
         concurrency: NonZeroUsize,
     ) -> Res<(Arc<Self>, StopToken)> {
         let facet_set = Arc::new(FacetSetStore::new(sql.clone()).await?);
@@ -139,16 +147,16 @@ mod test_support {
             causal_checkpoint_group_scope: Default::default(),
             group_part_group_scope: Default::default(),
         };
-        let (repo, stop) = big_repo::BigRepo::boot(config.clone()).await.unwrap();
+        let runtime = Arc::new(sqlite_rs::SqliteRuntime::new(Default::default()));
+        let (repo, stop) = big_repo::BigRepo::boot(Arc::clone(&runtime), config.clone())
+            .await
+            .unwrap();
         let handle = repo.create_doc(document).await.unwrap();
         let doc_id = handle.document_id();
-        let sql = repo.sql_ctx();
         drop(handle);
         drop(repo);
         stop.stop().await.unwrap();
-        sql.read_pool.close().await;
-        sql.write_pool.close().await;
-        let (repo, stop) = big_repo::BigRepo::boot(config).await.unwrap();
+        let (repo, stop) = big_repo::BigRepo::boot(runtime, config).await.unwrap();
         assert!(repo.sync_demand().documents().is_empty());
         (directory, repo, stop, doc_id)
     }

@@ -1,6 +1,11 @@
-use super::{AuthorityError, CapId, Capability, Namespace, Rights};
+use super::AuthorityError;
+use super::CapId;
+use super::Capability;
+use super::Namespace;
+use super::Rights;
 use big_cabinet_core::dmeta::Uuid7;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 pub(super) const MAX_CHAIN_DEPTH: usize = 64;
 pub(super) const MAX_CHAIN_NODES: usize = 4096;

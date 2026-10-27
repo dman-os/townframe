@@ -1,6 +1,8 @@
 //! MergeDoc: merge one history-sharing document into another.
 
-use super::commands::{Detail, Kind, State};
+use super::commands::Detail;
+use super::commands::Kind;
+use super::commands::State;
 use super::pipeline::digest;
 use super::*;
 

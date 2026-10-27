@@ -7,8 +7,11 @@
 //! `drawer_id` is omitted, each candidate document is checked against `AccessRequest::Read`.
 
 use super::*;
-use crate::index::facet_ref::{FacetRefEdge, FacetRefQuery};
-use crate::index::facet_set::{FacetRecord, FacetRoute, FacetSetQuery};
+use crate::index::facet_ref::FacetRefEdge;
+use crate::index::facet_ref::FacetRefQuery;
+use crate::index::facet_set::FacetRecord;
+use crate::index::facet_set::FacetRoute;
+use crate::index::facet_set::FacetSetQuery;
 
 impl From<FacetRecord> for QueriedFacet {
     fn from(record: FacetRecord) -> Self {

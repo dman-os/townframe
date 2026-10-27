@@ -1,22 +1,37 @@
 //! What the storage codec has to get right: a value sits in a document the way its *schema* says,
 //! whichever field holds it, and what a peer's document holds comes back as the JSON it was.
 
-use super::{
-    Bytes, Codec, CompiledSchema, Counter, Float64, Stored, Text, hydrate_value, reconcile_json,
-    reconcile_json_atomic,
-};
+use super::Bytes;
+use super::Codec;
+use super::CompiledSchema;
+use super::Counter;
+use super::Float64;
+use super::Stored;
+use super::Text;
+use super::hydrate_value;
+use super::reconcile_json;
+use super::reconcile_json_atomic;
 
 mod atomic;
 mod authoring;
 mod native;
 mod wire;
-use crate::facet::{Bundle, Declaration, Extra, Universe};
-use automerge::{
-    AutoCommit, Automerge, ObjType, ROOT, ReadDoc, ScalarValue, transaction::Transactable,
-};
+use crate::facet::Bundle;
+use crate::facet::Declaration;
+use crate::facet::Extra;
+use crate::facet::Universe;
+use automerge::AutoCommit;
+use automerge::Automerge;
+use automerge::ObjType;
+use automerge::ROOT;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::transaction::Transactable;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
 use std::borrow::Cow;
 
 /// Every storage form in one object, reached through a reference so the walk has to resolve one.

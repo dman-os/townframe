@@ -8,9 +8,15 @@
 // FIXME: so we get a CBOR from the automerge values here, does that mean it's not a drisl
 // anymore? more hints we should drop the CID naming which has canonical meaning?
 
-use automerge::{
-    ChangeHash, ObjId, ObjType, Prop, ReadDoc, ScalarValue, ScalarValueRef, Value, ValueRef,
-};
+use automerge::ChangeHash;
+use automerge::ObjId;
+use automerge::ObjType;
+use automerge::Prop;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::ScalarValueRef;
+use automerge::Value;
+use automerge::ValueRef;
 use std::collections::BTreeMap;
 
 /// A binary64 with canonical NaN bits and distinct signed zeros.
@@ -395,11 +401,12 @@ fn head(out: &mut Vec<u8>, major: u8, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use automerge::{
-        AutoCommit, Automerge, ScalarValue,
-        marks::{ExpandMark, Mark},
-        transaction::Transactable,
-    };
+    use automerge::AutoCommit;
+    use automerge::Automerge;
+    use automerge::ScalarValue;
+    use automerge::marks::ExpandMark;
+    use automerge::marks::Mark;
+    use automerge::transaction::Transactable;
     use ciborium::Value as Cbor;
 
     #[test]

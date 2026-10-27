@@ -1,7 +1,17 @@
-use super::{ActorMetadata, Bytes, MultibaseKey, SignatureBytes, Uuid7};
+use super::ActorMetadata;
+use super::Bytes;
+use super::MultibaseKey;
+use super::SignatureBytes;
+use super::Uuid7;
 use ciborium::Value;
-use coset::{AsCborValue, CborSerializable, CoseSign1, CoseSign1Builder, HeaderBuilder, iana};
-use ed25519_dalek::{Signature, VerifyingKey};
+use coset::AsCborValue;
+use coset::CborSerializable;
+use coset::CoseSign1;
+use coset::CoseSign1Builder;
+use coset::HeaderBuilder;
+use coset::iana;
+use ed25519_dalek::Signature;
+use ed25519_dalek::VerifyingKey;
 
 const PRIVATE_UNREGISTERED_MEDIA_TYPE: &str = "application/vnd.daybook.actor-attribution.v1+cwt";
 const PURPOSE: &str = "daybook.actor-attribution";
@@ -354,7 +364,8 @@ fn decode(bytes: &[u8]) -> Result<Value, AttributionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
+    use ed25519_dalek::Signer;
+    use ed25519_dalek::SigningKey;
 
     fn fixture() -> (Attribution, ActorMetadata, SigningKey) {
         let seed = data_encoding::HEXLOWER

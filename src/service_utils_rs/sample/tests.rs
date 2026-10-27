@@ -2,11 +2,18 @@
 //! transport-independent contracts (parity, admission, shutdown) live in the
 //! crate's `e2e` module and use the sample as their subject.
 
-use super::{
-    GetValue, PutValue, ReadState, SampleError, SampleProtocol, SubscribeEvents, boot,
-    service::TEST_TASK_MARKER,
-};
-use crate::{Client, ClientError, ContextError, RequestContext};
+use super::GetValue;
+use super::PutValue;
+use super::ReadState;
+use super::SampleError;
+use super::SampleProtocol;
+use super::SubscribeEvents;
+use super::boot;
+use super::service::TEST_TASK_MARKER;
+use crate::Client;
+use crate::ClientError;
+use crate::ContextError;
+use crate::RequestContext;
 use std::sync::Arc;
 
 fn nsid_log(nsid: &str) -> Vec<String> {

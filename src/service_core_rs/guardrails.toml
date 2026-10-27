@@ -1,0 +1,7 @@
+version = 1
+role = "foundation"
+dependency_reason = "Service protocol, request context, and transport-neutral message contracts have no internal runtime dependencies."
+allowed_dependencies = []
+allow_external_api_types = false
+
+[builds.native]

@@ -1,7 +1,12 @@
 //! BranchDoc: fork a document into a new one and announce it on its origin.
 
-use super::commands::{Detail, Kind, Row, State};
-use super::pipeline::{Failure, Plan, digest};
+use super::commands::Detail;
+use super::commands::Kind;
+use super::commands::Row;
+use super::commands::State;
+use super::pipeline::Failure;
+use super::pipeline::Plan;
+use super::pipeline::digest;
 use super::*;
 
 impl DocsService {

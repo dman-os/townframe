@@ -7,9 +7,12 @@
 //! been, so a position whose schema does not resolve for the value, and a string that does not
 //! parse, are skipped rather than refusing the rest of the walk.
 
+use super::Codec;
+use super::CodecError;
 use super::validation::CompiledSchema;
-use super::walk::{Kind, Position, discriminant_matches};
-use super::{Codec, CodecError};
+use super::walk::Kind;
+use super::walk::Position;
+use super::walk::discriminant_matches;
 use crate::FacetReference;
 use automerge::ChangeHash;
 use serde_json::Value;
@@ -167,7 +170,8 @@ fn pointer(path: &[Segment<'_>]) -> String {
 mod tests {
     use super::*;
     use schemars::JsonSchema;
-    use serde::{Deserialize, Serialize};
+    use serde::Deserialize;
+    use serde::Serialize;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::str::FromStr;

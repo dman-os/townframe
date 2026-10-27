@@ -1,7 +1,12 @@
-use base64::{Engine, engine::general_purpose::STANDARD};
-use sha1::{Digest, Sha1};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use sha1::Digest;
+use sha1::Sha1;
 use std::io;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::AsyncRead;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWrite;
+use tokio::io::AsyncWriteExt;
 
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;

@@ -18,15 +18,26 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-use self::store::{ActorRow, NodeRow};
-use big_cabinet_core::dmeta::{
-    AttributionError, DmetaError, MultibaseKey, SignedFacetClaim, Uuid7,
-};
+use self::store::ActorRow;
+use self::store::NodeRow;
+use big_cabinet_core::dmeta::AttributionError;
+use big_cabinet_core::dmeta::DmetaError;
+use big_cabinet_core::dmeta::MultibaseKey;
+use big_cabinet_core::dmeta::SignedFacetClaim;
+use big_cabinet_core::dmeta::Uuid7;
 use ed25519_dalek::SigningKey;
-use secrets_rs::{SecretStore, SecretsError};
-use service_utils_rs::{Client, Envelope, Handler, Host, ResponseEnvelope, StopToken};
-use sqlx::{Sqlite, Transaction};
-use sqlx_utils_rs::SqlCtx;
+use secrets_rs::SecretStore;
+use secrets_rs::SecretsError;
+use service_utils_rs::Client;
+use service_utils_rs::Envelope;
+use service_utils_rs::Handler;
+use service_utils_rs::Host;
+use service_utils_rs::ResponseEnvelope;
+use service_utils_rs::StopToken;
+use sqlite_rs::Database;
+use sqlite_rs::QueryExecutor;
+use sqlite_rs::ReadTx;
+use sqlite_rs::Tx;
 use std::sync::Arc;
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -67,7 +78,7 @@ pub enum AuthorityError {
     #[error("persisted authority state is corrupt: {0}")]
     StateCorrupt(String),
     #[error("authority storage failed: {0}")]
-    Storage(#[from] sqlx::Error),
+    Storage(#[from] sqlite_rs::SqlError),
     #[error("secret store failed: {0}")]
     Secrets(#[from] SecretsError),
     #[error("facet claim is invalid: {0}")]
@@ -99,7 +110,7 @@ impl From<AuthorityError> for AuthorityServiceError {
 const NODE_KEY_OWNER: &str = "node";
 
 pub struct AuthorityService {
-    sql: SqlCtx,
+    sql: Database,
     wrapping: Zeroizing<[u8; 32]>,
     node_key: SigningKey,
     operator: Uuid7,
@@ -119,14 +130,14 @@ impl AuthorityService {
 
     pub async fn boot(
         secrets: &SecretStore,
-        sql: SqlCtx,
+        sql: Database,
     ) -> Result<(Arc<Self>, StopToken), AuthorityError> {
         let (stop, _spawner) = StopToken::new();
-        store::migrate(&sql.write_pool).await?;
+        store::migrate(&sql).await?;
         // The keyring read happens under the write reservation so two first
         // boots cannot each create a wrapping key and a node.
-        let mut transaction = sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-        let existing = store::node(&mut transaction).await?;
+        let transaction = sql.begin_write().await?;
+        let existing = store::node(&transaction).await?;
         let wrapping = Zeroizing::new(match &existing {
             // Sealed keys exist, so only the key that sealed them will do: a
             // fresh one would turn every actor into an unopenable row.
@@ -149,7 +160,7 @@ impl AuthorityService {
         })?);
         let node = match existing {
             Some(node) => node,
-            None => Self::first_boot(&mut transaction, &wrapping).await?,
+            None => Self::first_boot(&transaction, &wrapping).await?,
         };
         let node_key = actor::unseal(&wrapping, NODE_KEY_OWNER, &node.sealed, &node.public_key)?;
         transaction.commit().await?;
@@ -191,10 +202,7 @@ impl AuthorityService {
         ))
     }
 
-    async fn first_boot(
-        transaction: &mut Transaction<'static, Sqlite>,
-        wrapping: &[u8; 32],
-    ) -> Result<NodeRow, AuthorityError> {
+    async fn first_boot(transaction: &Tx, wrapping: &[u8; 32]) -> Result<NodeRow, AuthorityError> {
         let node_key = actor::generate_key();
         let node_public_key = node_key.verifying_key().to_bytes();
         let operator = Uuid7::new();
@@ -247,17 +255,17 @@ impl AuthorityService {
         actor::key_text(&self.node_public_key()).expect("an Ed25519 key is a valid multibase key")
     }
 
-    async fn write(&self) -> Result<Transaction<'static, Sqlite>, AuthorityError> {
-        Ok(self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?)
+    async fn write(&self) -> Result<Tx, AuthorityError> {
+        Ok(self.sql.begin_write().await?)
     }
 
     /// A read snapshot: every query in it sees one committed state.
-    async fn read(&self) -> Result<Transaction<'static, Sqlite>, AuthorityError> {
-        Ok(self.sql.read_pool.begin().await?)
+    async fn read(&self) -> Result<ReadTx, AuthorityError> {
+        Ok(self.sql.begin_read().await?)
     }
 
     async fn actor_row(
-        transaction: &mut Transaction<'static, Sqlite>,
+        transaction: &impl QueryExecutor,
         uuid: Uuid7,
     ) -> Result<ActorRow, AuthorityError> {
         Ok(store::actor(transaction, uuid)
@@ -301,7 +309,7 @@ pub struct Authority {
 /// the host (joining in-flight calls) before the service.
 pub async fn boot(
     secrets: &SecretStore,
-    sql: SqlCtx,
+    sql: Database,
 ) -> Result<(Authority, StopToken), AuthorityError> {
     let (service, service_stop) = AuthorityService::boot(secrets, sql).await?;
     let (host, host_stop) = Host::new(Arc::clone(&service) as AuthorityHandler);

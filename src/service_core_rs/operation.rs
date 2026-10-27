@@ -1,7 +1,12 @@
-use crate::context::{ContextError, HttpMetadata, RequestContext};
+use crate::context::ContextError;
+use crate::context::HttpMetadata;
+use crate::context::RequestContext;
 use futures::Stream;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{fmt, pin::Pin};
+use serde::Deserialize;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use std::fmt;
+use std::pin::Pin;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum XrpcKind {

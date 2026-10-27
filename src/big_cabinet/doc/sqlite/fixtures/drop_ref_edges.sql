@@ -1,0 +1,1 @@
+DROP TABLE big_cabinet_facet_ref_edges;

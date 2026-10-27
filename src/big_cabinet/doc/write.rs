@@ -1,7 +1,10 @@
 //! WriteFacets: set and remove whole facet values under an explicit write condition.
 
-use super::commands::{Kind, State};
-use super::pipeline::{Failure, Plan, digest};
+use super::commands::Kind;
+use super::commands::State;
+use super::pipeline::Failure;
+use super::pipeline::Plan;
+use super::pipeline::digest;
 use super::*;
 
 impl DocsService {

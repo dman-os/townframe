@@ -6,11 +6,10 @@
 //! cancels them cooperatively (handlers observe it through
 //! [`Host::invoke`](crate::Host::invoke)) and then joins them.
 
-use crate::{
-    admission::Admission,
-    host::{Dispatch, ServerBinding},
-    lifecycle::StopToken,
-};
+use crate::admission::Admission;
+use crate::host::Dispatch;
+use crate::host::ServerBinding;
+use crate::lifecycle::StopToken;
 use std::sync::Arc;
 
 pub struct IrpcAdapter;

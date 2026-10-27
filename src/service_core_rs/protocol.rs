@@ -1,4 +1,6 @@
-use crate::{Subscription, Unary, XrpcOperation};
+use crate::Subscription;
+use crate::Unary;
+use crate::XrpcOperation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtocolOperations {

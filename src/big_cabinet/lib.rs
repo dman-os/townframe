@@ -1,3 +1,5 @@
+use sqlite_rs as sqlite_rs_alias;
+
 pub mod authority;
 mod capability;
 pub mod doc;
@@ -8,20 +10,40 @@ pub mod index;
 mod peer_net;
 pub mod schema;
 
-pub use authority::{
-    Actor, Authority, AuthorityError, AuthorityHandler, AuthorityProtocol, AuthorityService,
-    AuthorityServiceError, CapId, Capability, Rights, boot,
-};
-pub use doc::{
-    DocAccess, DocsConfig, DocsError, DocsHandler, DocsProtocol, DocsRepo, DocsService,
-    LedgerAccess, boot as boot_docs,
-};
-pub use drawer::{
-    DrawerAccess, DrawerConfig, DrawerId, DrawerService, Drawers, DrawersError, DrawersHandler,
-    DrawersProtocol, LocalDrawers, boot as boot_drawers,
-};
+pub use authority::Actor;
+pub use authority::Authority;
+pub use authority::AuthorityError;
+pub use authority::AuthorityHandler;
+pub use authority::AuthorityProtocol;
+pub use authority::AuthorityService;
+pub use authority::AuthorityServiceError;
+pub use authority::CapId;
+pub use authority::Capability;
+pub use authority::Rights;
+pub use authority::boot;
+pub use doc::DocAccess;
+pub use doc::DocsConfig;
+pub use doc::DocsError;
+pub use doc::DocsHandler;
+pub use doc::DocsProtocol;
+pub use doc::DocsRepo;
+pub use doc::DocsService;
+pub use doc::LedgerAccess;
+pub use doc::boot as boot_docs;
+pub use drawer::DrawerAccess;
+pub use drawer::DrawerConfig;
+pub use drawer::DrawerId;
+pub use drawer::DrawerService;
+pub use drawer::Drawers;
+pub use drawer::DrawersError;
+pub use drawer::DrawersHandler;
+pub use drawer::DrawersProtocol;
+pub use drawer::LocalDrawers;
+pub use drawer::boot as boot_drawers;
 pub use index::facet_ref::FacetRefStore;
 pub use index::facet_set::FacetSetStore;
-pub use schema::{
-    SchemaHandle, SchemaRegistration, SchemaRegistrationGroup, SchemaRepo, SchemaRepoError,
-};
+pub use schema::SchemaHandle;
+pub use schema::SchemaRegistration;
+pub use schema::SchemaRegistrationGroup;
+pub use schema::SchemaRepo;
+pub use schema::SchemaRepoError;

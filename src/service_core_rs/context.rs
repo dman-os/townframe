@@ -1,11 +1,15 @@
-use crate::cancellation::{CancellationSignal, CancellationTransport};
-use opentelemetry::{Context, propagation::TextMapPropagator, trace::TraceContextExt};
+use crate::cancellation::CancellationSignal;
+use crate::cancellation::CancellationTransport;
+use opentelemetry::Context;
+use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry::trace::TraceContextExt;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tokio::time::Instant;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;

@@ -1,14 +1,27 @@
 //! What a write inside a base-selected transaction keeps, converges and takes: the evidence for
 //! native preservation, skipped unchanged values, checked counter deltas and omission at the base.
 
-use super::{facet, shape};
-use crate::facet::codec::{hydrate_value, reconcile_json, reconcile_json_atomic};
-use crate::facet::{Bundle, Declaration, Extra, Universe};
+use super::facet;
+use super::shape;
+use crate::facet::Bundle;
+use crate::facet::Declaration;
+use crate::facet::Extra;
+use crate::facet::Universe;
+use crate::facet::codec::hydrate_value;
+use crate::facet::codec::reconcile_json;
+use crate::facet::codec::reconcile_json_atomic;
+use automerge::ActorId;
+use automerge::Automerge;
+use automerge::ObjType;
+use automerge::ROOT;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
 use automerge::transaction::Transactable;
-use automerge::{ActorId, Automerge, ObjType, ROOT, ReadDoc, ScalarValue};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value as Json, json};
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value as Json;
+use serde_json::json;
 
 /// An open facet: its title is what it declares, and everything else is what a peer's version
 /// carried that this schema does not name.

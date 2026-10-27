@@ -3,9 +3,17 @@
 mod facet_fields;
 
 use proc_macro::TokenStream;
-use quote::{ToTokens, quote};
+use quote::ToTokens;
+use quote::quote;
+use syn::Attribute;
+use syn::Expr;
+use syn::ExprLit;
+use syn::Item;
+use syn::Lit;
+use syn::Meta;
+use syn::Path;
+use syn::Token;
 use syn::punctuated::Punctuated;
-use syn::{Attribute, Expr, ExprLit, Item, Lit, Meta, Path, Token};
 
 /// The module every emitted item resolves through, so moving it is one edit.
 fn facet_path() -> Path {

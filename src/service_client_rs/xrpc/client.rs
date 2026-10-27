@@ -1,12 +1,24 @@
-use super::{
-    AUTHORIZATION_HEADER, DOMAIN_ERROR_FIELD, IDEMPOTENCY_KEY_HEADER, REQUEST_ID_HEADER,
-    TIMEOUT_HEADER, TRACEPARENT_HEADER, XrpcErrorEnvelope,
-};
-use crate::{HttpInput, HttpMetadata, HttpMethod, RequestContext, XrpcKind, XrpcOperation};
+use super::AUTHORIZATION_HEADER;
+use super::DOMAIN_ERROR_FIELD;
+use super::IDEMPOTENCY_KEY_HEADER;
+use super::REQUEST_ID_HEADER;
+use super::TIMEOUT_HEADER;
+use super::TRACEPARENT_HEADER;
+use super::XrpcErrorEnvelope;
+use crate::HttpInput;
+use crate::HttpMetadata;
+use crate::HttpMethod;
+use crate::RequestContext;
+use crate::XrpcKind;
+use crate::XrpcOperation;
 use futures::StreamExt;
-use http::{HeaderMap, HeaderValue, StatusCode, header};
+use http::HeaderMap;
+use http::HeaderValue;
+use http::StatusCode;
+use http::header;
 use reqwest::Url;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use thiserror::Error;
 
@@ -249,7 +261,8 @@ impl XrpcClient {
     where
         P: crate::Subscription,
     {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
         let operation = P::XRPC;
         let query = serde_urlencoded::to_string(params)
             .map_err(|error| XrpcClientError::Encode(error.to_string()))?;

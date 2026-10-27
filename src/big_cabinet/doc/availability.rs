@@ -1,6 +1,9 @@
 use super::*;
-use crate::authority::{CapabilityStatus, ObserveCapability};
-use big_repo::{BigRepoDocIdFilter, BigRepoLocalFilter, MaterializationState};
+use crate::authority::CapabilityStatus;
+use crate::authority::ObserveCapability;
+use big_repo::BigRepoDocIdFilter;
+use big_repo::BigRepoLocalFilter;
+use big_repo::MaterializationState;
 use futures::StreamExt;
 
 async fn authorize_availability(
@@ -330,8 +333,12 @@ impl Handler<ObserveDocAvailability> for DocsService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{Authority, RetractCapability};
-    use big_repo::{BigRepo, BigRepoStopToken, Config, StorageConfig};
+    use crate::authority::Authority;
+    use crate::authority::RetractCapability;
+    use big_repo::BigRepo;
+    use big_repo::BigRepoStopToken;
+    use big_repo::Config;
+    use big_repo::StorageConfig;
     use secrets_rs::SecretStore;
 
     struct ScopeAccess {
@@ -421,7 +428,7 @@ mod tests {
                 keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
             let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
             let (authority, authority_stop) =
-                crate::authority::boot(&secrets, SqlCtx::memory().await.unwrap())
+                crate::authority::boot(&secrets, sqlite_rs::test_support::db(&[]).unwrap().clone())
                     .await
                     .unwrap();
             let namespace = authority
@@ -429,15 +436,18 @@ mod tests {
                 .open_namespace(Uuid7::new())
                 .await
                 .unwrap();
-            let (big_repo, repo_stop) = BigRepo::boot(Config {
-                node_identity_seed: [73; 32],
-                storage: StorageConfig::Memory,
-                scope_key: "availability-tests".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            })
+            let (big_repo, repo_stop) = BigRepo::boot(
+                Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
+                Config {
+                    node_identity_seed: [73; 32],
+                    storage: StorageConfig::Memory,
+                    scope_key: "availability-tests".into(),
+                    hidden_parts: Default::default(),
+                    automerge_frontier_group_scope: Default::default(),
+                    causal_checkpoint_group_scope: Default::default(),
+                    group_part_group_scope: Default::default(),
+                },
+            )
             .await
             .unwrap();
             let access = Arc::new(ScopeAccess {
@@ -452,7 +462,7 @@ mod tests {
                 namespace,
                 node_issuer: authority.node_issuer.clone(),
                 access: Arc::<ScopeAccess>::clone(&access),
-                sql: SqlCtx::memory().await.unwrap(),
+                sql: sqlite_rs::test_support::db(&[]).unwrap().clone(),
                 facet_set: None,
                 facet_ref: None,
             })

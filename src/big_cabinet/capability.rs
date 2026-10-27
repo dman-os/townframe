@@ -1,11 +1,25 @@
-use crate::authority::{
-    Actor, AuthorityProtocol, AuthorityServiceError, Authorization, CapId, Capability,
-    DomainAuthority, InspectCapability, MintCapability, Namespace, ResolveActor, ResolveAuthority,
-    RetractCapability, Rights,
-};
+use crate::authority::Actor;
+use crate::authority::AuthorityProtocol;
+use crate::authority::AuthorityServiceError;
+use crate::authority::Authorization;
+use crate::authority::CapId;
+use crate::authority::Capability;
+use crate::authority::DomainAuthority;
+use crate::authority::InspectCapability;
+use crate::authority::MintCapability;
+use crate::authority::Namespace;
+use crate::authority::ResolveActor;
+use crate::authority::ResolveAuthority;
+use crate::authority::RetractCapability;
+use crate::authority::Rights;
 use big_cabinet_core::dmeta::Uuid7;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use service_utils_rs::{Client, ClientError, RequestContext, StopToken};
+use serde::Deserialize;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use service_utils_rs::Client;
+use service_utils_rs::ClientError;
+use service_utils_rs::RequestContext;
+use service_utils_rs::StopToken;
 
 type Error = ClientError<AuthorityServiceError>;
 

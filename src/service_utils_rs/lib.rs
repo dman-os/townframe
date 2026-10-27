@@ -40,26 +40,58 @@ pub mod operation;
 pub mod sample;
 pub mod xrpc;
 
-pub use admission::{
-    Admission, CancellationKey, CancellationReceiver, CancellationRequestGuard, CancellationSignal,
-    CancellationTransport, TaskActivity, cancellation_channel,
-};
-pub use client::{Client, ClientStream, InlineRoute};
-pub use context::{ContextError, HttpMetadata, RequestContext, TraceContext};
-pub use host::{Dispatch, Host, Route, ServerBinding};
+pub use admission::Admission;
+pub use admission::CancellationKey;
+pub use admission::CancellationReceiver;
+pub use admission::CancellationRequestGuard;
+pub use admission::CancellationSignal;
+pub use admission::CancellationTransport;
+pub use admission::TaskActivity;
+pub use admission::cancellation_channel;
+pub use client::Client;
+pub use client::ClientStream;
+pub use client::InlineRoute;
+pub use context::ContextError;
+pub use context::HttpMetadata;
+pub use context::RequestContext;
+pub use context::TraceContext;
+pub use host::Dispatch;
+pub use host::Host;
+pub use host::Route;
+pub use host::ServerBinding;
 pub use irpc as __irpc;
 pub use irpc_adapter::IrpcAdapter;
-pub use lifecycle::{Spawner, StopToken};
-pub use middleware::{Handler, Identity, Layer, ServiceBuilder, Stack};
-pub use operation::{
-    ClientError, Envelope, EventFrame, EventReply, EventStream, HttpInput, HttpMethod, Operation,
-    Reply, ResponseEnvelope, ResponseMetadata, ServiceError, Subscription, TransportContext, Unary,
-    Wire, XrpcKind, XrpcOperation,
-};
-pub use service_core_rs::{
-    Protocol, ProtocolOperations, declare_service_protocol, service_operation,
-};
-pub use xrpc::{XrpcClient, XrpcRouter};
+pub use lifecycle::Spawner;
+pub use lifecycle::StopToken;
+pub use middleware::Handler;
+pub use middleware::Identity;
+pub use middleware::Layer;
+pub use middleware::ServiceBuilder;
+pub use middleware::Stack;
+pub use operation::ClientError;
+pub use operation::Envelope;
+pub use operation::EventFrame;
+pub use operation::EventReply;
+pub use operation::EventStream;
+pub use operation::HttpInput;
+pub use operation::HttpMethod;
+pub use operation::Operation;
+pub use operation::Reply;
+pub use operation::ResponseEnvelope;
+pub use operation::ResponseMetadata;
+pub use operation::ServiceError;
+pub use operation::Subscription;
+pub use operation::TransportContext;
+pub use operation::Unary;
+pub use operation::Wire;
+pub use operation::XrpcKind;
+pub use operation::XrpcOperation;
+pub use service_core_rs::Protocol;
+pub use service_core_rs::ProtocolOperations;
+pub use service_core_rs::declare_service_protocol;
+pub use service_core_rs::service_operation;
+pub use xrpc::XrpcClient;
+pub use xrpc::XrpcRouter;
 
 #[cfg(test)]
 mod e2e;

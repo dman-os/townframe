@@ -1,18 +1,32 @@
 use super::*;
-use big_cabinet::authority::{Authorization, CapId};
-use big_cabinet::index::{FacetMembership, FacetRoute, FacetSetQuery, FacetSetStore};
-use big_cabinet::{SchemaRegistration, SchemaRegistrationGroup};
-use big_cabinet_core::doc::{
-    At, CommandId, CreateDoc, DocScope, FacetRead, FacetsRead, MintDocCapability, ReadFacets,
-    WriteReceipt,
-};
-use big_cabinet_core::{DocId, FacetKey};
+use big_cabinet::SchemaRegistration;
+use big_cabinet::SchemaRegistrationGroup;
+use big_cabinet::authority::Authorization;
+use big_cabinet::authority::CapId;
+use big_cabinet::index::FacetMembership;
+use big_cabinet::index::FacetRoute;
+use big_cabinet::index::FacetSetQuery;
+use big_cabinet::index::FacetSetStore;
+use big_cabinet_core::DocId;
+use big_cabinet_core::FacetKey;
+use big_cabinet_core::doc::At;
+use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::FacetRead;
+use big_cabinet_core::doc::FacetsRead;
+use big_cabinet_core::doc::MintDocCapability;
+use big_cabinet_core::doc::ReadFacets;
+use big_cabinet_core::doc::WriteReceipt;
 use big_repo::StorageConfig;
-use big_sync_core::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStore;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
+use serde_json::Value;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 const NOTE: &str = "org.example.note";
 
@@ -47,8 +61,14 @@ async fn secrets() -> SecretStore {
     SecretStore::boot_with_store(keyring).await.unwrap()
 }
 
-fn config<'a>(secrets: &'a SecretStore, sql: SqlCtx, storage: StorageConfig) -> Config<'a> {
+fn config<'a>(
+    secrets: &'a SecretStore,
+    runtime: &Arc<SqliteRuntime>,
+    sql: Database,
+    storage: StorageConfig,
+) -> Config<'a> {
     Config {
+        sqlite_runtime: Arc::clone(runtime),
         repo: big_repo::Config {
             node_identity_seed: [47; 32],
             storage,
@@ -189,19 +209,19 @@ async fn shutdown(node: BigNode, stop: StopToken) {
     assert!(authority_service.upgrade().is_none());
 }
 
-async fn close(sql: SqlCtx) {
-    sql.read_pool.close().await;
-    sql.write_pool.close().await;
-}
-
 #[tokio::test]
 async fn memory_boot_owns_and_joins_every_component() {
     let secrets = secrets().await;
-    let sql = SqlCtx::memory().await.unwrap();
-    let (node, stop) = BigNode::boot(config(&secrets, sql.clone(), StorageConfig::Memory))
-        .await
-        .unwrap();
-    let repo_sql = node.repo.sql_ctx();
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let sql = runtime.ephemeral(&[]).unwrap();
+    let (node, stop) = BigNode::boot(config(
+        &secrets,
+        &runtime,
+        sql.clone(),
+        StorageConfig::Memory,
+    ))
+    .await
+    .unwrap();
     let value = json!({"$type": NOTE, "value": "memory"});
     let receipt = create(&node, "memory-note", value.clone()).await;
     let read = read(&node, &receipt.doc_id).await;
@@ -210,22 +230,20 @@ async fn memory_boot_owns_and_joins_every_component() {
     );
     indexed(&node, &receipt).await;
     shutdown(node, stop).await;
-    close(repo_sql).await;
-    close(sql).await;
+    drop(sql);
 }
 
 #[tokio::test]
 async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_cursor() {
     let directory = tempfile::tempdir().unwrap();
     let repo_path = directory.path().join("repo");
-    let sql_url = format!(
-        "sqlite://{}",
-        directory.path().join("cabinet.sqlite").display()
-    );
+    let sql_path = directory.path().join("cabinet.sqlite");
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let secrets = secrets().await;
-    let sql = SqlCtx::url(&sql_url).await.unwrap();
+    let sql = runtime.database(&sql_path, &[], "_sqlite_rs_migrations");
     let (node, stop) = BigNode::boot(config(
         &secrets,
+        &runtime,
         sql.clone(),
         StorageConfig::Disk {
             path: repo_path.clone(),
@@ -233,7 +251,6 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
     ))
     .await
     .unwrap();
-    let repo_sql = node.repo.sql_ctx();
     let identity = (
         node.repo.local_peer_id(),
         node.authority.node_issuer.clone(),
@@ -264,10 +281,11 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
         .unwrap();
     assert!(!records.is_empty());
     drop(index);
-    close(repo_sql).await;
-    close(sql).await;
+    drop(sql);
+    drop(runtime);
 
-    let sql = SqlCtx::url(&sql_url).await.unwrap();
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let sql = runtime.database(&sql_path, &[], "_sqlite_rs_migrations");
     let persisted = FacetSetStore::new(sql.clone()).await.unwrap();
     assert_eq!(persisted.source_revision().await.unwrap(), cursor);
     assert_eq!(persisted.latest_revision().await.unwrap(), output_revision);
@@ -281,12 +299,12 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
     drop(persisted);
     let (node, stop) = BigNode::boot(config(
         &secrets,
+        &runtime,
         sql.clone(),
         StorageConfig::Disk { path: repo_path },
     ))
     .await
     .unwrap();
-    let repo_sql = node.repo.sql_ctx();
     assert_eq!(
         (
             node.repo.local_peer_id(),
@@ -312,20 +330,32 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
     assert_ne!(new_receipt.doc_id, receipt.doc_id);
     indexed(&node, &new_receipt).await;
     shutdown(node, stop).await;
-    close(repo_sql).await;
-    close(sql).await;
+    drop(sql);
 }
 
 #[tokio::test]
 async fn failed_docs_recovery_unwinds_the_partial_node() {
     let secrets = secrets().await;
-    let sql = SqlCtx::memory().await.unwrap();
-    let database = sql.read_pool.connect_options().get_filename().to_owned();
-    sqlx::query("CREATE TABLE big_cabinet_commands (command_id TEXT PRIMARY KEY) STRICT")
-        .execute(&sql.write_pool)
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let sql = runtime.ephemeral(&[]).unwrap();
+    let (_, _, filename): (i64, String, String) = sql
+        .query("PRAGMA database_list", &[])
+        .await
+        .unwrap()
+        .one()
+        .unwrap();
+    let database = std::path::PathBuf::from(filename);
+    sql.execute_batch("CREATE TABLE big_cabinet_commands (command_id TEXT PRIMARY KEY) STRICT")
         .await
         .unwrap();
-    let error = match BigNode::boot(config(&secrets, sql.clone(), StorageConfig::Memory)).await {
+    let error = match BigNode::boot(config(
+        &secrets,
+        &runtime,
+        sql.clone(),
+        StorageConfig::Memory,
+    ))
+    .await
+    {
         Err(error) => error,
         Ok((node, stop)) => {
             shutdown(node, stop).await;
@@ -341,7 +371,7 @@ async fn failed_docs_recovery_unwinds_the_partial_node() {
         "unexpected boot error: {error:#}"
     );
     assert!(database.exists());
-    close(sql).await;
+    drop(sql);
     assert!(
         !database.exists(),
         "partial-node cleanup retained a Cabinet SQL context"
@@ -350,19 +380,24 @@ async fn failed_docs_recovery_unwinds_the_partial_node() {
 
 #[tokio::test]
 async fn failed_reference_initialization_joins_the_started_facet_worker() {
-    let sql = SqlCtx::memory().await.unwrap();
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let sql = runtime.ephemeral(&[]).unwrap();
     big_cabinet::index::FacetRefStore::new(sql.clone())
         .await
         .unwrap();
-    sqlx::query("INSERT INTO big_cabinet_facet_ref_progress VALUES (?, -1)")
-        .bind(NOTE)
-        .execute(&sql.write_pool)
-        .await
-        .unwrap();
+    sql.execute(
+        "INSERT INTO big_cabinet_facet_ref_progress VALUES (?, -1)",
+        (NOTE,),
+    )
+    .await
+    .unwrap();
     let secrets = secrets().await;
-    let (repo, stop) = BigRepo::boot(config(&secrets, sql.clone(), StorageConfig::Memory).repo)
-        .await
-        .unwrap();
+    let (repo, stop) = BigRepo::boot(
+        Arc::clone(&runtime),
+        config(&secrets, &runtime, sql.clone(), StorageConfig::Memory).repo,
+    )
+    .await
+    .unwrap();
     let references = Arc::strong_count(&repo);
     match Indexes::boot(
         Arc::clone(&repo),
@@ -380,33 +415,31 @@ async fn failed_reference_initialization_joins_the_started_facet_worker() {
         Ok(_) => panic!("a negative reference cursor must reject index startup"),
     }
     assert_eq!(Arc::strong_count(&repo), references);
-    let repo_sql = repo.sql_ctx();
     drop(repo);
     stop.stop().await.unwrap();
-    close(repo_sql).await;
-    close(sql).await;
+    drop(sql);
 }
 
 #[tokio::test]
 async fn failed_reference_initialization_unwinds_disk_node_and_allows_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let repo_path = directory.path().join("repo");
-    let sql_url = format!(
-        "sqlite://{}",
-        directory.path().join("cabinet.sqlite").display()
-    );
+    let sql_path = directory.path().join("cabinet.sqlite");
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let secrets = secrets().await;
-    let sql = SqlCtx::url(&sql_url).await.unwrap();
+    let sql = runtime.database(&sql_path, &[], "_sqlite_rs_migrations");
     big_cabinet::index::FacetRefStore::new(sql.clone())
         .await
         .unwrap();
-    sqlx::query("INSERT INTO big_cabinet_facet_ref_progress (facet_tag, revision) VALUES (?, -1)")
-        .bind(NOTE)
-        .execute(&sql.write_pool)
-        .await
-        .unwrap();
+    sql.execute(
+        "INSERT INTO big_cabinet_facet_ref_progress (facet_tag, revision) VALUES (?, -1)",
+        (NOTE,),
+    )
+    .await
+    .unwrap();
     match BigNode::boot(config(
         &secrets,
+        &runtime,
         sql.clone(),
         StorageConfig::Disk {
             path: repo_path.clone(),
@@ -416,41 +449,43 @@ async fn failed_reference_initialization_unwinds_disk_node_and_allows_reopen() {
     {
         Err(error) => assert_eq!(error.to_string(), "facet-ref revision is out of range"),
         Ok((node, stop)) => {
-            let repo_sql = node.repo.sql_ctx();
             shutdown(node, stop).await;
-            close(repo_sql).await;
             panic!("a negative reference cursor must reject node startup");
         }
     }
-    let repaired =
-        sqlx::query("UPDATE big_cabinet_facet_ref_progress SET revision = 0 WHERE facet_tag = ?")
-            .bind(NOTE)
-            .execute(&sql.write_pool)
-            .await
-            .unwrap();
-    assert_eq!(repaired.rows_affected(), 1);
-    close(sql).await;
+    let repaired = sql
+        .execute(
+            "UPDATE big_cabinet_facet_ref_progress SET revision = 0 WHERE facet_tag = ?",
+            (NOTE,),
+        )
+        .await
+        .unwrap();
+    assert_eq!(repaired.rows_affected, 1);
+    drop(sql);
+    drop(runtime);
 
-    let sql = SqlCtx::url(&sql_url).await.unwrap();
-    let revision: i64 = sqlx::query_scalar(
-        "SELECT revision FROM big_cabinet_facet_ref_progress WHERE facet_tag = ?",
-    )
-    .bind(NOTE)
-    .fetch_one(&sql.read_pool)
-    .await
-    .unwrap();
+    let runtime = Arc::new(SqliteRuntime::new(Default::default()));
+    let sql = runtime.database(&sql_path, &[], "_sqlite_rs_migrations");
+    let revision: i64 = sql
+        .query(
+            "SELECT revision FROM big_cabinet_facet_ref_progress WHERE facet_tag = ?",
+            (NOTE,),
+        )
+        .await
+        .unwrap()
+        .one()
+        .unwrap();
     assert_eq!(revision, 0);
     let (node, stop) = BigNode::boot(config(
         &secrets,
+        &runtime,
         sql.clone(),
         StorageConfig::Disk { path: repo_path },
     ))
     .await
     .unwrap();
-    let repo_sql = node.repo.sql_ctx();
     shutdown(node, stop).await;
-    close(repo_sql).await;
-    close(sql).await;
+    drop(sql);
 }
 
 #[tokio::test]

@@ -1,8 +1,18 @@
-use super::{
-    Additional, CompatibilityOutcome, Findings, SchemaBundle, additional, branch_tag_resolved,
-    child, contradictory_annotation, is_open_fallback_tag, resolve, scan_unsupported_bundle,
-    union_branches, union_operator, unsupported_keyword, validate_union,
-};
+use super::Additional;
+use super::CompatibilityOutcome;
+use super::Findings;
+use super::SchemaBundle;
+use super::additional;
+use super::branch_tag_resolved;
+use super::child;
+use super::contradictory_annotation;
+use super::is_open_fallback_tag;
+use super::resolve;
+use super::scan_unsupported_bundle;
+use super::union_branches;
+use super::union_operator;
+use super::unsupported_keyword;
+use super::validate_union;
 use serde_json::Value;
 use std::collections::BTreeSet;
 

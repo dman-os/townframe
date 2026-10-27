@@ -18,11 +18,11 @@ impl AuthorityService {
             cap::Kind::Object,
             [self.actors_namespace.capability, request.parent],
         )?;
-        let mut transaction = self.write().await?;
-        let parent_row = Self::actor_row(&mut transaction, parent_actor).await?;
+        let transaction = self.write().await?;
+        let parent_row = Self::actor_row(&transaction, parent_actor).await?;
         actor::check_child_path(&parent_row.path, &request.path)?;
 
-        let row = match store::actor_at(&mut transaction, &request.path).await? {
+        let row = match store::actor_at(&transaction, &request.path).await? {
             Some(row) => {
                 assert_eq!(row.parent, Some(parent_actor), "a path names its parent");
                 row
@@ -42,7 +42,7 @@ impl AuthorityService {
                     sealed: actor::seal(&self.wrapping, &uuid.to_string(), &key)?,
                     certificate: certificate.as_slice().to_vec(),
                 };
-                store::insert_actor(&mut transaction, &row).await?;
+                store::insert_actor(&transaction, &row).await?;
                 row
             }
         };

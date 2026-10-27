@@ -11,13 +11,25 @@
 //! `create document in <placement>`). It is a complete policy for an embedding without drawers and
 //! for tests, not a stand-in.
 
-use crate::authority::{AuthorityProtocol, CapId, DomainAuthority, Namespace, Rights};
-use crate::doc::{DocScope, DocsError, DocsService, MintDocCapability};
-use crate::grants::{GrantError, Grants};
-use big_cabinet_core::dmeta::{DocId, Uuid7};
-use service_utils_rs::{Client, ClientError, RequestContext};
-use sqlx_utils_rs::SqlCtx;
-use std::collections::{BTreeMap, BTreeSet};
+use crate::authority::AuthorityProtocol;
+use crate::authority::CapId;
+use crate::authority::DomainAuthority;
+use crate::authority::Namespace;
+use crate::authority::Rights;
+use crate::doc::DocScope;
+use crate::doc::DocsError;
+use crate::doc::DocsService;
+use crate::doc::MintDocCapability;
+use crate::grants::GrantError;
+use crate::grants::Grants;
+use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::dmeta::Uuid7;
+use service_utils_rs::Client;
+use service_utils_rs::ClientError;
+use service_utils_rs::RequestContext;
+use sqlite_rs::Database;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -107,7 +119,7 @@ pub struct LedgerAccess {
 
 impl LedgerAccess {
     pub async fn open(
-        sql: SqlCtx,
+        sql: Database,
         authority: Client<AuthorityProtocol>,
         namespace: Namespace,
     ) -> Result<Self, AccessError> {
@@ -307,7 +319,8 @@ impl service_utils_rs::Handler<MintDocCapability> for DocsService {
 mod tests {
     use super::*;
     use big_cabinet_core::drawer::DrawerAccess;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     struct BoundedAccess {
         drawers: BTreeMap<DocId, DrawerAccess>,

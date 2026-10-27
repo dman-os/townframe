@@ -14,21 +14,41 @@
 //! newest frontier revision seen for it; a retry of an older revision after a newer one settled or
 //! parked is dropped, so a late materialization never replaces newer edges with older ones.
 
-use automerge::{Automerge, ChangeHash, ObjType, PatchLog, ReadDoc, Value};
+use automerge::Automerge;
+use automerge::ChangeHash;
+use automerge::ObjType;
+use automerge::PatchLog;
+use automerge::ReadDoc;
+use automerge::Value;
 use big_cabinet_core::FacetTag;
-use big_cabinet_core::facet::{CompiledSchema, declared_references, hydrate_value};
-use big_repo::{BigRepoLocalFilter, BigRepoLocalNotification, DocLookup, SharedBigRepo};
+use big_cabinet_core::facet::CompiledSchema;
+use big_cabinet_core::facet::declared_references;
+use big_cabinet_core::facet::hydrate_value;
+use big_repo::BigRepoLocalFilter;
+use big_repo::BigRepoLocalNotification;
+use big_repo::DocLookup;
+use big_repo::SharedBigRepo;
 use big_sync_core::keyed_frontier::FrontierEntry;
-use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits, RevisionedStoreReader};
-use sqlx::{QueryBuilder, Row, Sqlite};
-use sqlx_utils_rs::SqlCtx;
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
+use sqlite_rs::Database;
+use sqlite_rs::Sql;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use utils_rs::prelude::{Res, ferr};
+use utils_rs::prelude::Res;
+use utils_rs::prelude::ferr;
 
-use super::facet_set::{FacetMembership, FacetRoute, FacetSetStore};
-use crate::doc::gate::{Gate, Verdict};
+use super::facet_set::FacetMembership;
+use super::facet_set::FacetRoute;
+use super::facet_set::FacetSetStore;
+use crate::doc::gate::Gate;
+use crate::doc::gate::Verdict;
 use crate::schema::SchemaRepo;
+
+mod queries {
+    include!("facet_ref/sqlite/gen.rs");
+}
 
 /// One recorded reference: a position in one facet's value that addresses another facet.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,7 +78,7 @@ pub enum FacetRefQuery {
 
 #[derive(Clone)]
 pub struct FacetRefStore {
-    sql: SqlCtx,
+    sql: Database,
     /// Bumped after every committed settle, so a test can wait for the edge set it expects by
     /// re-querying on each change instead of polling the table.
     #[cfg(test)]
@@ -72,35 +92,9 @@ struct Parked {
 }
 
 impl FacetRefStore {
-    pub async fn new(sql: SqlCtx) -> Res<Self> {
-        for statement in [
-            r#"CREATE TABLE IF NOT EXISTS big_cabinet_facet_ref_edges (
-                origin_doc TEXT NOT NULL
-                , origin_facet TEXT NOT NULL
-                , origin_path TEXT NOT NULL
-                , target_doc TEXT NOT NULL
-                , target_facet TEXT NOT NULL
-                , ref_heads BLOB NOT NULL
-                , PRIMARY KEY (origin_doc, origin_facet, origin_path, target_doc, target_facet)
-            ) STRICT"#,
-            r#"CREATE INDEX IF NOT EXISTS big_cabinet_facet_ref_edges_origin_idx
-                 ON big_cabinet_facet_ref_edges (origin_doc, origin_facet)"#,
-            r#"CREATE INDEX IF NOT EXISTS big_cabinet_facet_ref_edges_target_idx
-                 ON big_cabinet_facet_ref_edges (target_doc, target_facet)"#,
-            r#"CREATE TABLE IF NOT EXISTS big_cabinet_facet_ref_progress (
-                facet_tag TEXT PRIMARY KEY NOT NULL
-                , revision INTEGER NOT NULL
-            ) STRICT"#,
-            r#"CREATE TABLE IF NOT EXISTS big_cabinet_facet_ref_parked (
-                origin_doc TEXT NOT NULL
-                , origin_facet TEXT NOT NULL
-                , revision INTEGER NOT NULL
-                , membership BLOB NOT NULL
-                , PRIMARY KEY (origin_doc, origin_facet)
-            ) STRICT"#,
-        ] {
-            sqlx::query(statement).execute(&sql.write_pool).await?;
-        }
+    pub async fn new(sql: Database) -> Res<Self> {
+        sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+            .await?;
         Ok(Self {
             sql,
             #[cfg(test)]
@@ -116,7 +110,7 @@ impl FacetRefStore {
     }
 
     pub async fn query(&self, selector: FacetRefQuery) -> Res<Vec<FacetRefEdge>> {
-        let mut query = QueryBuilder::<Sqlite>::new(
+        let mut query = Sql::new(
             r#"SELECT origin_doc
                  , origin_facet
                  , origin_path
@@ -130,78 +124,69 @@ impl FacetRefStore {
             FacetRefQuery::Origin(route) => {
                 query
                     .push("origin_doc = ")
-                    .push_bind(route.doc_id.to_string())
+                    .bind(route.doc_id.to_string())
                     .push(" AND origin_facet = ")
-                    .push_bind(route.facet_key.to_string());
+                    .bind(route.facet_key.to_string());
             }
             FacetRefQuery::OriginDoc(doc_id) => {
-                query.push("origin_doc = ").push_bind(doc_id.to_string());
+                query.push("origin_doc = ").bind(doc_id.to_string());
             }
             FacetRefQuery::Target(route) => {
                 query
                     .push("target_doc = ")
-                    .push_bind(route.doc_id.to_string())
+                    .bind(route.doc_id.to_string())
                     .push(" AND target_facet = ")
-                    .push_bind(route.facet_key.to_string());
+                    .bind(route.facet_key.to_string());
             }
             FacetRefQuery::TargetDoc(doc_id) => {
-                query.push("target_doc = ").push_bind(doc_id.to_string());
+                query.push("target_doc = ").bind(doc_id.to_string());
             }
         }
         query.push(" ORDER BY origin_doc, origin_facet, origin_path, target_doc, target_facet");
-        let rows = query.build().fetch_all(&self.sql.read_pool).await?;
+        let rows = query.query(&self.sql).await?.rows;
         rows.into_iter()
             .map(|row| {
                 Ok(FacetRefEdge {
                     origin: FacetRoute {
-                        doc_id: row.get::<String, _>("origin_doc").parse()?,
-                        facet_key: row.get::<String, _>("origin_facet").parse()?,
+                        doc_id: row.get::<String>("origin_doc")?.parse()?,
+                        facet_key: row.get::<String>("origin_facet")?.parse()?,
                     },
-                    path: row.get("origin_path"),
+                    path: row.get("origin_path")?,
                     target: FacetRoute {
-                        doc_id: row.get::<String, _>("target_doc").parse()?,
-                        facet_key: row.get::<String, _>("target_facet").parse()?,
+                        doc_id: row.get::<String>("target_doc")?.parse()?,
+                        facet_key: row.get::<String>("target_facet")?.parse()?,
                     },
-                    ref_heads: serde_json::from_slice(row.get("ref_heads"))?,
+                    ref_heads: serde_json::from_slice(&row.get::<Vec<u8>>("ref_heads")?)?,
                 })
             })
             .collect()
     }
 
     async fn cursors(&self) -> Res<BTreeMap<String, u64>> {
-        let rows = sqlx::query("SELECT facet_tag, revision FROM big_cabinet_facet_ref_progress")
-            .fetch_all(&self.sql.read_pool)
-            .await?;
-        rows.into_iter()
+        queries::cursors(&self.sql)
+            .await?
+            .into_iter()
             .map(|row| {
-                let tag: String = row.get("facet_tag");
-                let revision = u64::try_from(row.get::<i64, _>("revision"))
+                let revision = u64::try_from(row.revision)
                     .map_err(|_| ferr!("facet-ref revision is out of range"))?;
-                Ok((tag, revision))
+                Ok((row.facet_tag, revision))
             })
             .collect()
     }
 
     /// The routes a previous run parked, newest revision per route.
     async fn parked(&self) -> Res<BTreeMap<FacetRoute, Parked>> {
-        let rows = sqlx::query(
-            r#"SELECT origin_doc
-                 , origin_facet
-                 , revision
-                 , membership
-              FROM big_cabinet_facet_ref_parked"#,
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await?;
-        rows.into_iter()
+        queries::parked(&self.sql)
+            .await?
+            .into_iter()
             .map(|row| {
                 let route = FacetRoute {
-                    doc_id: row.get::<String, _>("origin_doc").parse()?,
-                    facet_key: row.get::<String, _>("origin_facet").parse()?,
+                    doc_id: row.origin_doc.parse()?,
+                    facet_key: row.origin_facet.parse()?,
                 };
-                let revision = u64::try_from(row.get::<i64, _>("revision"))
+                let revision = u64::try_from(row.revision)
                     .map_err(|_| ferr!("facet-ref parked revision is out of range"))?;
-                let membership = serde_json::from_slice(row.get("membership"))?;
+                let membership = serde_json::from_slice(&row.membership)?;
                 Ok((
                     route,
                     Parked {
@@ -222,22 +207,13 @@ impl FacetRefStore {
         revision: u64,
         parked: &mut BTreeMap<FacetRoute, Parked>,
     ) -> Res<()> {
-        sqlx::query(
-            r#"INSERT INTO big_cabinet_facet_ref_parked (
-                origin_doc
-                , origin_facet
-                , revision
-                , membership
-            ) VALUES (?, ?, ?, ?)
-            ON CONFLICT (origin_doc, origin_facet) DO UPDATE
-               SET revision = excluded.revision
-                 , membership = excluded.membership"#,
+        queries::park(
+            &self.sql,
+            route.doc_id.to_string(),
+            route.facet_key.to_string(),
+            i64::try_from(revision).map_err(|_| ferr!("facet-ref revision is out of range"))?,
+            serde_json::to_vec(&membership)?,
         )
-        .bind(route.doc_id.to_string())
-        .bind(route.facet_key.to_string())
-        .bind(i64::try_from(revision).map_err(|_| ferr!("facet-ref revision is out of range"))?)
-        .bind(serde_json::to_vec(&membership)?)
-        .execute(&self.sql.write_pool)
         .await?;
         parked.insert(
             route,
@@ -259,48 +235,36 @@ impl FacetRefStore {
         revision: u64,
         parked: &mut BTreeMap<FacetRoute, Parked>,
     ) -> Res<()> {
-        let mut transaction = self.sql.write_pool.begin().await?;
-        sqlx::query(
-            "DELETE FROM big_cabinet_facet_ref_edges WHERE origin_doc = ? AND origin_facet = ?",
+        let transaction = self.sql.begin_write().await?;
+        queries::delete_edges(
+            &transaction,
+            route.doc_id.to_string(),
+            route.facet_key.to_string(),
         )
-        .bind(route.doc_id.to_string())
-        .bind(route.facet_key.to_string())
-        .execute(&mut *transaction)
         .await?;
-        sqlx::query(
-            "DELETE FROM big_cabinet_facet_ref_parked WHERE origin_doc = ? AND origin_facet = ?",
+        queries::delete_parked(
+            &transaction,
+            route.doc_id.to_string(),
+            route.facet_key.to_string(),
         )
-        .bind(route.doc_id.to_string())
-        .bind(route.facet_key.to_string())
-        .execute(&mut *transaction)
         .await?;
         for edge in edges {
-            sqlx::query(
-                r#"INSERT INTO big_cabinet_facet_ref_edges (
-                    origin_doc
-                    , origin_facet
-                    , origin_path
-                    , target_doc
-                    , target_facet
-                    , ref_heads
-                ) VALUES (?, ?, ?, ?, ?, ?)"#,
+            queries::insert_edge(
+                &transaction,
+                edge.origin.doc_id.to_string(),
+                edge.origin.facet_key.to_string(),
+                edge.path.clone(),
+                edge.target.doc_id.to_string(),
+                edge.target.facet_key.to_string(),
+                serde_json::to_vec(&edge.ref_heads)?,
             )
-            .bind(edge.origin.doc_id.to_string())
-            .bind(edge.origin.facet_key.to_string())
-            .bind(&edge.path)
-            .bind(edge.target.doc_id.to_string())
-            .bind(edge.target.facet_key.to_string())
-            .bind(serde_json::to_vec(&edge.ref_heads)?)
-            .execute(&mut *transaction)
             .await?;
         }
-        sqlx::query(
-            r#"INSERT INTO big_cabinet_facet_ref_progress (facet_tag, revision) VALUES (?, ?)
-               ON CONFLICT (facet_tag) DO UPDATE SET revision = MAX(revision, excluded.revision)"#,
+        queries::advance_cursor(
+            &transaction,
+            route.facet_key.tag().to_string(),
+            i64::try_from(revision).map_err(|_| ferr!("facet-ref revision is out of range"))?,
         )
-        .bind(route.facet_key.tag().as_str())
-        .bind(i64::try_from(revision).map_err(|_| ferr!("facet-ref revision is out of range"))?)
-        .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
         #[cfg(test)]
@@ -535,7 +499,9 @@ mod tests {
 
     #[tokio::test]
     async fn settlement_replaces_edges_serves_both_directions_and_never_regresses() {
-        let sql = SqlCtx::memory().await.unwrap();
+        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .unwrap();
         let store = FacetRefStore::new(sql.clone()).await.unwrap();
         let mut parked = BTreeMap::new();
         let origin = route(1, "main");
@@ -568,6 +534,23 @@ mod tests {
         assert_eq!(
             store
                 .query(FacetRefQuery::Target(first.clone()))
+                .await
+                .unwrap(),
+            vec![edge(&origin, "/link", &first, &[7; 2])]
+        );
+        assert_eq!(
+            store
+                .query(FacetRefQuery::OriginDoc(origin.doc_id.clone()))
+                .await
+                .unwrap(),
+            vec![
+                edge(&origin, "/link", &first, &[7; 2]),
+                edge(&origin, "/nested/inner", &second, &[]),
+            ]
+        );
+        assert_eq!(
+            store
+                .query(FacetRefQuery::TargetDoc(first.doc_id.clone()))
                 .await
                 .unwrap(),
             vec![edge(&origin, "/link", &first, &[7; 2])]
@@ -609,6 +592,73 @@ mod tests {
         assert_eq!(progress(&reopened, "org.example.note").await, Some(2));
     }
 
+    #[tokio::test]
+    async fn failed_settlement_preserves_edges_cursor_and_parked_replay_without_notification() {
+        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .unwrap();
+        let store = FacetRefStore::new(sql.clone()).await.unwrap();
+        let origin = route(1, "main");
+        let original = vec![edge(&origin, "/link", &route(2, "first"), &[7])];
+        let replacement = vec![edge(&origin, "/link", &route(3, "second"), &[])];
+        let mut parked = BTreeMap::new();
+        store
+            .settle(&origin, &original, 3, &mut parked)
+            .await
+            .unwrap();
+        store
+            .park(
+                origin.clone(),
+                present(vec![ChangeHash([9; 32])]),
+                5,
+                &mut parked,
+            )
+            .await
+            .unwrap();
+        let expected_parked = parked.clone();
+        let mut settled = store.subscribe_settled();
+        sql.execute_batch("CREATE TRIGGER reject_facet_ref BEFORE INSERT ON big_cabinet_facet_ref_progress BEGIN SELECT RAISE(ABORT, 'injected'); END")
+            .await.unwrap();
+        assert!(
+            store
+                .settle(&origin, &replacement, 6, &mut parked)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .query(FacetRefQuery::Origin(origin.clone()))
+                .await
+                .unwrap(),
+            original
+        );
+        assert_eq!(
+            store.cursors().await.unwrap(),
+            BTreeMap::from([("org.example.note".into(), 3)])
+        );
+        assert_eq!(store.parked().await.unwrap(), expected_parked);
+        assert_eq!(parked, expected_parked);
+        assert!(!settled.has_changed().unwrap());
+        sql.execute_batch("DROP TRIGGER reject_facet_ref")
+            .await
+            .unwrap();
+        store
+            .settle(&origin, &replacement, 6, &mut parked)
+            .await
+            .unwrap();
+        settled.changed().await.unwrap();
+        assert_eq!(
+            store.query(FacetRefQuery::Origin(origin)).await.unwrap(),
+            replacement
+        );
+        assert_eq!(
+            store.cursors().await.unwrap(),
+            BTreeMap::from([("org.example.note".into(), 6)])
+        );
+        assert!(store.parked().await.unwrap().is_empty());
+        assert!(parked.is_empty());
+    }
+
     /// A document carrying one unsigned branch facet: a reference-declaring tag whose value the
     /// gate refuses, so it settles with no edges and exercises the route plumbing alone.
     fn branch_document() -> (Automerge, FacetKey) {
@@ -636,14 +686,10 @@ mod tests {
         }
     }
 
-    async fn close(repo: SharedBigRepo, stop: big_repo::BigRepoStopToken, sql: SqlCtx) {
-        let repo_sql = repo.sql_ctx();
+    async fn close(repo: SharedBigRepo, stop: big_repo::BigRepoStopToken, sql: Database) {
         drop(repo);
         stop.stop().await.unwrap();
-        repo_sql.read_pool.close().await;
-        repo_sql.write_pool.close().await;
-        sql.read_pool.close().await;
-        sql.write_pool.close().await;
+        drop(sql);
     }
 
     #[tokio::test]
@@ -652,7 +698,9 @@ mod tests {
         let (document, facet_key) = branch_document();
         let (_directory, repo, stop, doc_id) =
             crate::index::test_support::reopen_document(document).await;
-        let sql = SqlCtx::memory().await.unwrap();
+        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .unwrap();
         let store = FacetRefStore::new(sql.clone()).await.unwrap();
         let target = route(2, "other");
         let route = FacetRoute { doc_id, facet_key };
@@ -800,7 +848,9 @@ mod tests {
         let (_directory, repo, stop, doc_id) =
             crate::index::test_support::reopen_document(document).await;
         let mut demand = repo.sync_demand();
-        let sql = SqlCtx::memory().await.unwrap();
+        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .unwrap();
         let store = FacetRefStore::new(sql.clone()).await.unwrap();
         let route = FacetRoute {
             doc_id: doc_id.clone(),

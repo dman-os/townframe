@@ -11,8 +11,8 @@ impl AuthorityService {
         let actor = match state.actors.get(&chain.cap.id) {
             Some(binding) => {
                 let actor_id = binding.actor_id;
-                let mut transaction = self.read().await?;
-                let row = Self::actor_row(&mut transaction, actor_id).await?;
+                let transaction = self.read().await?;
+                let row = Self::actor_row(&transaction, actor_id).await?;
                 Some(actor::public_actor(
                     &self.node_public_key(),
                     &row,

@@ -1,17 +1,31 @@
 //! Structural storage traversal and hydration for a compiled facet schema.
 
+use super::Codec;
+use super::CodecError;
+use super::JS_SAFE_INTEGER_MAX;
+use super::KEYWORD;
+use super::bytes_value;
+use super::declared_member;
+use super::instant_string;
+use super::kind;
 use super::target::Plan;
-use super::validation::{CompiledSchema, ValidationProof};
-use super::{
-    Codec, CodecError, JS_SAFE_INTEGER_MAX, KEYWORD, bytes_value, declared_member, instant_string,
-    kind,
-};
-use automerge::{ObjId, ObjType, ReadDoc, ScalarValue};
-use autosurgeon::reconcile::{MapReconciler, NoKey, SeqReconciler};
-use autosurgeon::{HydrateError, Prop, Reconcile, Reconciler};
+use super::validation::CompiledSchema;
+use super::validation::ValidationProof;
+use automerge::ObjId;
+use automerge::ObjType;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use autosurgeon::HydrateError;
+use autosurgeon::Prop;
+use autosurgeon::Reconcile;
+use autosurgeon::Reconciler;
+use autosurgeon::reconcile::MapReconciler;
+use autosurgeon::reconcile::NoKey;
+use autosurgeon::reconcile::SeqReconciler;
 use serde_json::Value;
 use std::borrow::Cow;
-use std::fmt::{self, Display};
+use std::fmt::Display;
+use std::fmt::{self};
 
 const HOPS: usize = 16;
 

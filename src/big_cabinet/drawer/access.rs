@@ -1,20 +1,39 @@
 //! The [`DocAccess`] policy for an embedding with drawers: a doc is reachable through the drawers
 //! that list it, and a placement is a drawer.
 
-use super::{
-    Core, DrawerId, DrawersError, METADATA_PLACEMENT, Projection, authority_error, drawer_object,
-    ledger::Ledger, parse_placement, state::State,
-};
-use crate::authority::{AuthorityProtocol, CapId, Namespace, ResolveActor};
-use crate::doc::{AccessError, AccessFuture, AccessRequest, DocAccess, DocsProtocol};
-use big_cabinet_core::dmeta::{DocId, Uuid7};
+use super::Core;
+use super::DrawerId;
+use super::DrawersError;
+use super::METADATA_PLACEMENT;
+use super::Projection;
+use super::authority_error;
+use super::drawer_object;
+use super::ledger::Ledger;
+use super::parse_placement;
+use super::state::State;
+use crate::authority::AuthorityProtocol;
+use crate::authority::CapId;
+use crate::authority::Namespace;
+use crate::authority::ResolveActor;
+use crate::doc::AccessError;
+use crate::doc::AccessFuture;
+use crate::doc::AccessRequest;
+use crate::doc::DocAccess;
+use crate::doc::DocsProtocol;
+use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::drawer::DrawerAccess as Access;
 use big_repo::SharedBigRepo;
-use service_utils_rs::{Client, ContextError, RequestContext, StopToken};
-use sqlx_utils_rs::SqlCtx;
-use std::collections::{BTreeMap, BTreeSet};
+use service_utils_rs::Client;
+use service_utils_rs::ContextError;
+use service_utils_rs::RequestContext;
+use service_utils_rs::StopToken;
+use sqlite_rs::Database;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 pub struct DrawerAccess {
     pub(crate) core: Arc<Projection>,
@@ -282,7 +301,7 @@ fn access_error(error: DrawersError) -> AccessError {
 
 impl DrawerAccess {
     /// `issuer` is DrawerService's own actor capability, carrying `use` and `delegate`. `sql` is
-    /// the projection and ledger store; DocsRepo may share the same `SqlCtx`. `facet_set` is
+    /// the projection and ledger store; DocsRepo may share the same `Database`. `facet_set` is
     /// where drawer docs that arrived by sync are discovered: a doc carrying the drawer facet is
     /// a drawer this node can project without anyone having remembered it.
     pub async fn open(
@@ -290,7 +309,7 @@ impl DrawerAccess {
         authority: Client<AuthorityProtocol>,
         issuer: CapId,
         namespace: Namespace,
-        sql: SqlCtx,
+        sql: Database,
         facet_set: Arc<crate::index::FacetSetStore>,
     ) -> Result<(Arc<Self>, DrawerProvider, StopToken), DrawersError> {
         let actor = authority

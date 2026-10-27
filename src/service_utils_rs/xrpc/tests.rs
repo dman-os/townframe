@@ -1,28 +1,32 @@
 //! Transport tests for the HTTP router, client, and TCP server. Shared
 //! fixtures live at the top; the Iroh wire reuses them from `iroh_wire`.
 
-use super::{
-    serve::{AcceptFuture, ConnectionAcceptor, serve_with_acceptor},
-    *,
-};
-use crate::{
-    context::{HttpMetadata, RequestContext},
-    operation::{HttpInput, HttpMethod, XrpcKind, XrpcOperation},
-};
-use axum::http::{HeaderMap, HeaderValue, header};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::oneshot,
-};
+use super::serve::AcceptFuture;
+use super::serve::ConnectionAcceptor;
+use super::serve::serve_with_acceptor;
+use super::*;
+use crate::context::HttpMetadata;
+use crate::context::RequestContext;
+use crate::operation::HttpInput;
+use crate::operation::HttpMethod;
+use crate::operation::XrpcKind;
+use crate::operation::XrpcOperation;
+use axum::http::HeaderMap;
+use axum::http::HeaderValue;
+use axum::http::header;
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio::net::TcpStream;
+use tokio::sync::oneshot;
 use url::Url;
 
 #[cfg(feature = "iroh-http")]
@@ -261,7 +265,8 @@ async fn loopback_query_and_procedure_map_http_and_context() {
 
 #[tokio::test]
 async fn optional_error_message_decodes_on_public_client_path() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
     for (body, expected_message, malformed) in [
         (r#"{"error":"NotReady","field":"queued"}"#, None, false),
         (
@@ -398,7 +403,8 @@ async fn response_body_limit_is_enforced() {
 
 #[tokio::test]
 async fn loopback_connection_loss_marks_only_procedures_ambiguous() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -457,7 +463,8 @@ async fn loopback_connection_loss_marks_only_procedures_ambiguous() {
 
 #[tokio::test]
 async fn malformed_procedure_error_body_is_ambiguous_protocol_failure() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -742,7 +749,8 @@ async fn chunked_request_and_response_limits_are_exact() {
         let request_id = context.request_id;
         let task = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept client");
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::io::AsyncReadExt;
+            use tokio::io::AsyncWriteExt;
             let mut request = [0_u8; 4096];
             let _bytes_read = stream.read(&mut request).await.expect("read request");
             let headers = format!(
@@ -865,7 +873,8 @@ async fn fragmented_request_exact_boundary_and_overflow_are_bounded() {
 
 #[tokio::test]
 async fn fragmented_response_pauses_between_wire_chunks() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
@@ -1044,7 +1053,8 @@ async fn peer_disconnect_drops_blocked_body_and_recovers_capacity() {
 
 #[tokio::test(start_paused = true)]
 async fn body_deadline_drops_incomplete_upload_and_recovers_capacity() {
-    use futures::{StreamExt, stream};
+    use futures::StreamExt;
+    use futures::stream;
     use hyper::service::Service;
     use hyper_util::service::TowerToHyperService;
 
@@ -1158,7 +1168,8 @@ async fn handler_timeout_drops_guard_before_receipt() {
 
 #[tokio::test]
 async fn procedure_timeout_domain_error_remains_ambiguous() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
@@ -1209,7 +1220,8 @@ async fn procedure_timeout_domain_error_remains_ambiguous() {
 #[tokio::test]
 async fn procedure_server_error_after_effect_remains_ambiguous() {
     use std::sync::atomic::AtomicBool;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
     let effect = Arc::new(AtomicBool::new(false));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -1337,7 +1349,8 @@ async fn response_request_id_must_correlate() {
     let address = listener.local_addr().expect("listener address");
     let task = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept client");
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
         let mut request = [0_u8; 4096];
         let _bytes_read = stream.read(&mut request).await.expect("read request");
         stream
@@ -1375,7 +1388,8 @@ async fn response_request_id_must_correlate() {
 
 #[tokio::test]
 async fn response_without_request_id_remains_compatible() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");
@@ -1609,10 +1623,11 @@ async fn unsupported_subscription_is_explicit() {
 
 #[tokio::test]
 async fn websocket_subscription_streams_hosted_events() {
-    use crate::{
-        Client, Route,
-        sample::{PutValue, SampleProtocol, SubscribeEvents},
-    };
+    use crate::Client;
+    use crate::Route;
+    use crate::sample::PutValue;
+    use crate::sample::SampleProtocol;
+    use crate::sample::SubscribeEvents;
     use futures::StreamExt;
     let (sample, stop) = crate::sample::boot("initial");
     let mut router = XrpcRouter::new(1024);

@@ -5,7 +5,11 @@
 //! branch the content fits, and a member the schema does not name is plain JSON — which is what
 //! makes an open object open.
 
-use super::{Codec, CodecError, KEYWORD, declared_member, keyed_map};
+use super::Codec;
+use super::CodecError;
+use super::KEYWORD;
+use super::declared_member;
+use super::keyed_map;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;

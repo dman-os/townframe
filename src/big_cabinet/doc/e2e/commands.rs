@@ -1,8 +1,12 @@
 //! The command ledger: replays, reuse, and what the boot pass settles after a crash.
 
-use super::super::commands::{Commands, Detail, Kind, State};
+use super::super::commands::Commands;
+use super::super::commands::Detail;
+use super::super::commands::Kind;
+use super::super::commands::State;
 use super::*;
-use automerge::transaction::{CommitOptions, Transactable};
+use automerge::transaction::CommitOptions;
+use automerge::transaction::Transactable;
 
 fn command(text: &str) -> CommandId {
     CommandId::try_from(text.to_owned()).unwrap()

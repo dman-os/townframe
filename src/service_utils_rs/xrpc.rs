@@ -1,4 +1,5 @@
-use crate::context::{HttpMetadata, RequestContext};
+use crate::context::HttpMetadata;
+use crate::context::RequestContext;
 use axum::http::StatusCode;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -14,15 +15,22 @@ mod serve;
 mod tests;
 mod ws;
 
-pub use client::{XrpcClient, XrpcClientError};
+pub use client::XrpcClient;
+pub use client::XrpcClientError;
 #[cfg(feature = "iroh-http")]
-pub use iroh::{
-    IROH_XRPC_HTTP_ALPN, IrohXrpcClient, IrohXrpcProtocolHandler, iroh_protocol_handler,
-};
-pub use router::{
-    XrpcOperationHandler, XrpcRegistrationError, XrpcRouter, XrpcSubscriptionHandler,
-};
-pub use serve::{serve, serve_with_connection_limit};
+pub use iroh::IROH_XRPC_HTTP_ALPN;
+#[cfg(feature = "iroh-http")]
+pub use iroh::IrohXrpcClient;
+#[cfg(feature = "iroh-http")]
+pub use iroh::IrohXrpcProtocolHandler;
+#[cfg(feature = "iroh-http")]
+pub use iroh::iroh_protocol_handler;
+pub use router::XrpcOperationHandler;
+pub use router::XrpcRegistrationError;
+pub use router::XrpcRouter;
+pub use router::XrpcSubscriptionHandler;
+pub use serve::serve;
+pub use serve::serve_with_connection_limit;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XrpcRequest {

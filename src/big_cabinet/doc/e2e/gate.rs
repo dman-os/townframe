@@ -2,9 +2,18 @@
 
 use super::*;
 use crate::authority::SignFacetClaim;
+use automerge::ActorId;
+use automerge::ObjId;
+use automerge::ObjType;
+use automerge::PatchLog;
+use automerge::ROOT;
+use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use automerge::{ActorId, ObjId, ObjType, PatchLog, ROOT, ReadDoc};
-use big_cabinet_core::dmeta::{ClaimOperation, FacetClaim, NativeValue, cid_of, encode_native};
+use big_cabinet_core::dmeta::ClaimOperation;
+use big_cabinet_core::dmeta::FacetClaim;
+use big_cabinet_core::dmeta::NativeValue;
+use big_cabinet_core::dmeta::cid_of;
+use big_cabinet_core::dmeta::encode_native;
 
 const DMETA: &str = "org.example.daybook.dmeta/main";
 

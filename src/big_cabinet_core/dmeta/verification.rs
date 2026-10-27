@@ -1,11 +1,25 @@
-use super::{
-    ActorMetadata, Attribution, AttributionError, Bytes, CLAIM_ID_DOMAIN, Cid, ClaimOperation,
-    Dmeta, DmetaError, FacetClaim, FacetSignature, MultibaseKey, NativeValue, SignatureBytes,
-    Uuid7, cid_of, encode_native,
-};
+use super::ActorMetadata;
+use super::Attribution;
+use super::AttributionError;
+use super::Bytes;
+use super::CLAIM_ID_DOMAIN;
+use super::Cid;
+use super::ClaimOperation;
+use super::Dmeta;
+use super::DmetaError;
+use super::FacetClaim;
+use super::FacetSignature;
+use super::MultibaseKey;
+use super::NativeValue;
+use super::SignatureBytes;
+use super::Uuid7;
+use super::cid_of;
+use super::encode_native;
 use crate::FacetKey;
-use ed25519_dalek::{Signature, VerifyingKey};
-use serde::{Deserialize, Serialize};
+use ed25519_dalek::Signature;
+use ed25519_dalek::VerifyingKey;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

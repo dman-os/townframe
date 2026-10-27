@@ -769,6 +769,8 @@ fn generate(table: &str, migrations: &[MigrationSpec], queries: &[QuerySpec]) ->
         }
         out.push_str(&format!("pub async fn {}(db: &impl crate::sqlite_rs_alias::{receiver}{args}) -> {ret} {{\n{body}}}\n\n", query.name));
     }
+    out.truncate(out.trim_end().len());
+    out.push('\n');
     out
 }
 
@@ -911,6 +913,8 @@ mod tests {
         process_unit(Mode::GenCheck, root.path(), &dir)?;
         let generated = std::fs::read_to_string(dir.join("sqlite/gen.rs"))?;
         assert!(generated.contains("pub const MIGRATIONS: &[Migration<'static>] = &[\n];"));
+        assert!(generated.ends_with('\n'));
+        assert!(!generated.ends_with("\n\n"));
         Ok(())
     }
 
@@ -958,6 +962,8 @@ mod tests {
         assert!(output.contains("set.optional()"));
         assert!(output.contains("queries/different_filename.sql"));
         assert!(!output.contains("get_item_tx"));
+        assert!(output.ends_with('\n'));
+        assert!(!output.ends_with("\n\n"));
         let mut query = parse_query(&file)?;
         query.into = Some("crate::domain::Item".into());
         for (kind, terminal) in [

@@ -4,8 +4,11 @@
 //! Nothing here knows how the service is implemented. A consumer that only
 //! talks to the sample over IRPC or HTTP needs exactly this module.
 
-use crate::{ContextError, HttpMetadata, RequestContext};
-use serde::{Deserialize, Serialize};
+use crate::ContextError;
+use crate::HttpMetadata;
+use crate::RequestContext;
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValueSnapshot {

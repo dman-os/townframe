@@ -1,7 +1,10 @@
 //! CreateDoc: create a document, place it, and settle its command row.
 
-use super::commands::{Detail, Kind, State};
-use super::pipeline::{Plan, digest};
+use super::commands::Detail;
+use super::commands::Kind;
+use super::commands::State;
+use super::pipeline::Plan;
+use super::pipeline::digest;
 use super::*;
 
 impl DocsService {

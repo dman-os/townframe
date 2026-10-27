@@ -1,11 +1,30 @@
-use automerge::{Automerge, ChangeHash, ObjId, ObjType, ReadDoc, ScalarValue, Value};
+use automerge::Automerge;
+use automerge::ChangeHash;
+use automerge::ObjId;
+use automerge::ObjType;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::Value;
 use big_cabinet_core::FacetKey;
-use big_cabinet_core::dmeta::{
-    Bytes, Cid, ClaimOperation, DocId, FacetClaim, FacetSignature, InheritedWitness, MultibaseKey,
-    NativeReadBudget, NativeReadError, NativeValue, SignatureBytes, SignedFacetClaim, Uuid7,
-    cid_of, encode_native, signature_id,
-};
-use std::collections::{HashMap, HashSet};
+use big_cabinet_core::dmeta::Bytes;
+use big_cabinet_core::dmeta::Cid;
+use big_cabinet_core::dmeta::ClaimOperation;
+use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::dmeta::FacetClaim;
+use big_cabinet_core::dmeta::FacetSignature;
+use big_cabinet_core::dmeta::InheritedWitness;
+use big_cabinet_core::dmeta::MultibaseKey;
+use big_cabinet_core::dmeta::NativeReadBudget;
+use big_cabinet_core::dmeta::NativeReadError;
+use big_cabinet_core::dmeta::NativeValue;
+use big_cabinet_core::dmeta::SignatureBytes;
+use big_cabinet_core::dmeta::SignedFacetClaim;
+use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::dmeta::cid_of;
+use big_cabinet_core::dmeta::encode_native;
+use big_cabinet_core::dmeta::signature_id;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy)]
 pub struct HistoryBudget {
@@ -771,9 +790,11 @@ impl Reconstruction<'_> {
 mod tests {
     use super::*;
     use automerge::Prop;
-    use automerge::transaction::{Transactable, Transaction};
+    use automerge::transaction::Transactable;
+    use automerge::transaction::Transaction;
     use big_cabinet_core::dmeta::CanonicalF64;
-    use ed25519_dalek::{Signer, SigningKey};
+    use ed25519_dalek::Signer;
+    use ed25519_dalek::SigningKey;
     use std::collections::BTreeMap;
 
     const FACET: &str = "org.example.note/main";

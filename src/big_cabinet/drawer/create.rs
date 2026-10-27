@@ -2,9 +2,11 @@
 //! doc declared a self-doc drawer.
 
 use super::*;
+use crate::doc::CreateDoc;
+use crate::doc::WriteFacets;
 use crate::doc::pipeline::digest;
-use crate::doc::{CreateDoc, WriteFacets};
-use big_cabinet_core::drawer::{Drawer, DrawerRoster};
+use big_cabinet_core::drawer::Drawer;
+use big_cabinet_core::drawer::DrawerRoster;
 use ledger::Op;
 
 fn facet_value(facet: &impl Serialize) -> serde_json::Value {

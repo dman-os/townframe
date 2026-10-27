@@ -15,16 +15,23 @@
 
 use big_cabinet_core::dmeta::BranchPath;
 use big_cabinet_core::dmeta::Dmeta;
-use big_cabinet_core::drawer::{
-    Drawer, DrawerChildEntry, DrawerDocEntry, DrawerRoster, KnownDrawerEntry, SelfDocLayout,
-    SingleGroupLayout,
-};
-use big_cabinet_core::facet::{
-    Bundle, CompiledSchema, Declaration, LexiconAdmissionError, Universe, UniverseError,
-};
+use big_cabinet_core::drawer::Drawer;
+use big_cabinet_core::drawer::DrawerChildEntry;
+use big_cabinet_core::drawer::DrawerDocEntry;
+use big_cabinet_core::drawer::DrawerRoster;
+use big_cabinet_core::drawer::KnownDrawerEntry;
+use big_cabinet_core::drawer::SelfDocLayout;
+use big_cabinet_core::drawer::SingleGroupLayout;
+use big_cabinet_core::facet::Bundle;
+use big_cabinet_core::facet::CompiledSchema;
+use big_cabinet_core::facet::Declaration;
+use big_cabinet_core::facet::LexiconAdmissionError;
+use big_cabinet_core::facet::Universe;
+use big_cabinet_core::facet::UniverseError;
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::LazyLock;
-use std::{collections::BTreeMap, sync::Arc};
 use thiserror::Error;
 
 static CORE: LazyLock<Universe> = LazyLock::new(|| {
@@ -292,7 +299,9 @@ impl SchemaRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use big_cabinet_core::facet::{FacetDecl, Stored, TypeDecl};
+    use big_cabinet_core::facet::FacetDecl;
+    use big_cabinet_core::facet::Stored;
+    use big_cabinet_core::facet::TypeDecl;
     use serde_json::json;
 
     fn record(tag: &str, value: Value) -> Value {

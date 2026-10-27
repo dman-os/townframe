@@ -8,7 +8,8 @@
 
 pub mod protocol;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::fmt;
 use std::str::FromStr;
 
@@ -563,7 +564,9 @@ mod tests {
     #[cfg(feature = "schemars")]
     mod declaration {
         use super::*;
-        use crate::facet::{Bundle, Declaration, Universe};
+        use crate::facet::Bundle;
+        use crate::facet::Declaration;
+        use crate::facet::Universe;
 
         fn universe() -> Universe {
             Universe::collect([

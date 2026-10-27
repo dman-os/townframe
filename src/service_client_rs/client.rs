@@ -1,19 +1,28 @@
+use crate::CancellationRequestGuard;
+use crate::ClientError;
+use crate::Envelope;
+use crate::EventReply;
+use crate::Reply;
+use crate::RequestContext;
+use crate::Subscription;
+use crate::Unary;
 #[cfg(feature = "http")]
-use crate::xrpc::{XrpcClient, XrpcClientError};
-use crate::{
-    CancellationRequestGuard, ClientError, Envelope, EventReply, Reply, RequestContext,
-    Subscription, Unary,
-};
-use futures::{Stream, future::BoxFuture, stream::BoxStream};
-use irpc::{
-    Channels, Service, WithChannels,
-    channel::{mpsc, none::NoReceiver, oneshot},
-};
-use std::{
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use crate::xrpc::XrpcClient;
+#[cfg(feature = "http")]
+use crate::xrpc::XrpcClientError;
+use futures::Stream;
+use futures::future::BoxFuture;
+use futures::stream::BoxStream;
+use irpc::Channels;
+use irpc::Service;
+use irpc::WithChannels;
+use irpc::channel::mpsc;
+use irpc::channel::none::NoReceiver;
+use irpc::channel::oneshot;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
 
 const DEFAULT_EVENT_BUFFER: usize = 64;
 

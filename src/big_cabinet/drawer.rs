@@ -36,37 +36,64 @@ mod remove_child;
 mod remove_doc;
 mod revoke;
 mod state;
+mod sqlite {
+    include!("drawer/sqlite/gen.rs");
+}
 
 #[cfg(test)]
 mod e2e;
 
-pub use self::access::{DrawerAccess, DrawerProvider, DrawerWorker};
-pub use big_cabinet_core::drawer::{Drawer, DrawerLayout, LayoutKind};
+pub use self::access::DrawerAccess;
+pub use self::access::DrawerProvider;
+pub use self::access::DrawerWorker;
+pub use big_cabinet_core::drawer::Drawer;
+pub use big_cabinet_core::drawer::DrawerLayout;
+pub use big_cabinet_core::drawer::LayoutKind;
 
 use self::ledger::Ledger;
 use self::state::State;
-use crate::authority::{
-    Actor, AuthorityServiceError, Authorization, CapId, Capability, DomainAuthority, Namespace,
-    Rights,
-};
-use crate::capability::{DomainCapabilities, Invocation};
-use crate::doc::{
-    CommandId, DocScope, DocsError, DocsProtocol, MintDocCapability, WriteMode, WriteReceipt,
-};
-use crate::grants::{GrantError, Grants};
+use crate::authority::Actor;
+use crate::authority::AuthorityServiceError;
+use crate::authority::Authorization;
+use crate::authority::CapId;
+use crate::authority::Capability;
+use crate::authority::DomainAuthority;
+use crate::authority::Namespace;
+use crate::authority::Rights;
+use crate::capability::DomainCapabilities;
+use crate::capability::Invocation;
+use crate::doc::CommandId;
+use crate::doc::DocScope;
+use crate::doc::DocsError;
+use crate::doc::DocsProtocol;
+use crate::doc::MintDocCapability;
+use crate::doc::WriteMode;
+use crate::doc::WriteReceipt;
+use crate::grants::GrantError;
+use crate::grants::Grants;
 use big_cabinet_core::FacetKey;
-use big_cabinet_core::dmeta::{DocId, Uuid7};
-use big_cabinet_core::drawer::{
-    DRAWER_CHILD_ENTRY_FACET_TAG, DRAWER_DOC_ENTRY_FACET_TAG, DRAWER_FACET_TAG,
-    DRAWER_KNOWN_ENTRY_FACET_TAG, DRAWER_ROSTER_FACET_TAG, DrawerAccess as Access, DrawerGroups,
-    GroupKey,
-};
+use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::drawer::DRAWER_CHILD_ENTRY_FACET_TAG;
+use big_cabinet_core::drawer::DRAWER_DOC_ENTRY_FACET_TAG;
+use big_cabinet_core::drawer::DRAWER_FACET_TAG;
+use big_cabinet_core::drawer::DRAWER_KNOWN_ENTRY_FACET_TAG;
+use big_cabinet_core::drawer::DRAWER_ROSTER_FACET_TAG;
+use big_cabinet_core::drawer::DrawerAccess as Access;
+use big_cabinet_core::drawer::DrawerGroups;
+use big_cabinet_core::drawer::GroupKey;
+use big_repo::BigKeyhiveGroup;
+use big_repo::SharedBigRepo;
 use big_repo::keyhive_core::access::Access as KeyhiveAccess;
-use big_repo::{BigKeyhiveGroup, SharedBigRepo};
 use serde::Serialize;
-use service_utils_rs::{
-    Client, ClientError, Envelope, Handler, Host, RequestContext, ResponseEnvelope, StopToken,
-};
+use service_utils_rs::Client;
+use service_utils_rs::ClientError;
+use service_utils_rs::Envelope;
+use service_utils_rs::Handler;
+use service_utils_rs::Host;
+use service_utils_rs::RequestContext;
+use service_utils_rs::ResponseEnvelope;
+use service_utils_rs::StopToken;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 

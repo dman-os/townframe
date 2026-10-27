@@ -27,19 +27,38 @@
 //! Checks are facet-local: a forgery in another facet changes nothing here.
 
 use super::FacetVersion;
-use super::claim_history::{
-    ClaimHistoryError, ClaimHistoryResult, HistoryBudget, ReconstructedClaim, reconstruct_claim,
-    reconstruct_current_claims,
-};
-use automerge::legacy::{Key, ObjectId, OpId, OpType};
-use automerge::{ActorId, Automerge, ChangeHash, ObjType, ReadDoc, Value};
+use super::claim_history::ClaimHistoryError;
+use super::claim_history::ClaimHistoryResult;
+use super::claim_history::HistoryBudget;
+use super::claim_history::ReconstructedClaim;
+use super::claim_history::reconstruct_claim;
+use super::claim_history::reconstruct_current_claims;
+use automerge::ActorId;
+use automerge::Automerge;
+use automerge::ChangeHash;
+use automerge::ObjType;
+use automerge::ReadDoc;
+use automerge::Value;
+use automerge::legacy::Key;
+use automerge::legacy::ObjectId;
+use automerge::legacy::OpId;
+use automerge::legacy::OpType;
 use big_cabinet_core::FacetKey;
-use big_cabinet_core::dmeta::{
-    ActorMetadata, Attribution, AttributionError, ClaimOperation, DMETA_FACET_TAG, DocId,
-    MultibaseKey, NativeReadBudget, NativeValue, cid_of, encode_native,
-};
+use big_cabinet_core::dmeta::ActorMetadata;
+use big_cabinet_core::dmeta::Attribution;
+use big_cabinet_core::dmeta::AttributionError;
+use big_cabinet_core::dmeta::ClaimOperation;
+use big_cabinet_core::dmeta::DMETA_FACET_TAG;
+use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::dmeta::MultibaseKey;
+use big_cabinet_core::dmeta::NativeReadBudget;
+use big_cabinet_core::dmeta::NativeValue;
+use big_cabinet_core::dmeta::cid_of;
+use big_cabinet_core::dmeta::encode_native;
 use std::cell::OnceCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 pub(super) const DMETA_KEY: &str = "org.example.daybook.dmeta/main";
 

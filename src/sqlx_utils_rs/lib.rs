@@ -1,7 +1,10 @@
-use color_eyre::eyre::{Result as Res, WrapErr};
+use color_eyre::eyre::Result as Res;
+use color_eyre::eyre::WrapErr;
 use sqlx::ConnectOptions;
 use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqliteJournalMode;
+use sqlx::sqlite::SqlitePoolOptions;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;

@@ -1,0 +1,8 @@
+version = 1
+role = "domain"
+dependency_reason = "Cabinet facet and service contracts use shared sync identifiers, portable utilities, and facet declaration macros."
+allowed_dependencies = ["big_sync_core", "macros", "service_core_rs", "utils_rs"]
+allow_external_api_types = false
+
+[builds.native]
+features = ["manifest", "schemars"]

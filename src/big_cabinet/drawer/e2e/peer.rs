@@ -2,7 +2,8 @@
 //! authorization boundary for its documents on the other, once the drawer doc has synced.
 
 use super::*;
-use crate::peer_net::{Network, link};
+use crate::peer_net::Network;
+use crate::peer_net::link;
 use big_cabinet_core::drawer::protocol::Principal;
 use std::collections::HashSet;
 

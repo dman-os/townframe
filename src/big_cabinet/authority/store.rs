@@ -7,9 +7,16 @@
 //! reader pool beside it. Nothing here interprets an object string or decides
 //! whether an operation is allowed.
 
-use super::{ActorPublicKey, AuthorityError};
+use super::ActorPublicKey;
+use super::AuthorityError;
 use big_cabinet_core::dmeta::Uuid7;
-use sqlx::{Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
+use sqlite_rs::Database;
+use sqlite_rs::Executor;
+use sqlite_rs::QueryExecutor;
+
+mod queries {
+    include!("sqlite/gen.rs");
+}
 
 /// A signing seed encrypted under the node's wrapping key. The row identity is
 /// the AEAD's associated data, so a sealed key moved to another row does not
@@ -36,68 +43,28 @@ pub(super) struct ActorRow {
     pub(super) certificate: Vec<u8>,
 }
 
-pub(super) async fn migrate(pool: &SqlitePool) -> Result<(), AuthorityError> {
-    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let legacy: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM sqlite_schema
-              WHERE type = 'table'
-                AND name IN ('authority_caps', 'authority_actor_issuances')
-             UNION ALL
-             SELECT 1 FROM pragma_table_info('authority_node') WHERE name = 'root_cap'
-             UNION ALL
-             SELECT 1 FROM pragma_table_info('authority_grants') WHERE name = 'granted_via'
-         )",
-    )
-    .fetch_one(&mut *transaction)
-    .await?;
-    if legacy {
+pub(super) async fn migrate(database: &Database) -> Result<(), AuthorityError> {
+    let transaction = database.begin_write().await?;
+    if queries::legacy_schema(&transaction).await? {
         return Err(AuthorityError::StateCorrupt(
             "legacy durable capability schema requires explicit migration; preserve actors, node keys, actors_issuer and issuer-authored grants before removing durable handles".into(),
         ));
     }
-    let central_grants: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1
-               FROM sqlite_schema
-              WHERE type = 'table'
-                AND name = 'authority_grants'
-         )",
-    )
-    .fetch_one(&mut *transaction)
-    .await?;
-    if central_grants {
-        let populated: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM authority_grants)")
-            .fetch_one(&mut *transaction)
-            .await?;
+    if queries::central_grants(&transaction).await? {
+        let populated: bool = transaction
+            .query(include_str!("sqlite/central_grants_populated.sql"), ())
+            .await?
+            .one()?;
         if populated {
             return Err(AuthorityError::StateCorrupt(
                 "central authority_grants rows require explicit domain-grant migration; preserve issuer, subject, object and rights in the owning domain before removing central grants".into(),
             ));
         }
     }
-    for statement in [
-        "CREATE TABLE IF NOT EXISTS authority_actors (
-             uuid TEXT PRIMARY KEY
-           , path TEXT NOT NULL UNIQUE
-           , parent_uuid TEXT REFERENCES authority_actors (uuid)
-           , public_key BLOB NOT NULL UNIQUE
-           , sealed_key BLOB NOT NULL
-           , key_nonce BLOB NOT NULL
-           , certificate BLOB NOT NULL
-         )",
-        "CREATE TABLE IF NOT EXISTS authority_node (
-             node_id INTEGER PRIMARY KEY CHECK (node_id = 1)
-           , public_key BLOB NOT NULL
-           , sealed_key BLOB NOT NULL
-           , key_nonce BLOB NOT NULL
-           , operator_uuid TEXT NOT NULL REFERENCES authority_actors (uuid)
-           , actors_issuer TEXT NOT NULL
-         )",
-    ] {
-        sqlx::query(statement).execute(&mut *transaction).await?;
-    }
-    transaction.commit().await?;
+    transaction.rollback().await?;
+    database
+        .apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+        .await?;
     Ok(())
 }
 
@@ -114,142 +81,85 @@ fn fixed<const N: usize>(bytes: Vec<u8>, what: &str) -> Result<[u8; N], Authorit
         .map_err(|_| AuthorityError::StateCorrupt(format!("{what} is not {N} bytes")))
 }
 
-fn sealed(row: &SqliteRow) -> Result<SealedKey, AuthorityError> {
-    Ok(SealedKey {
-        ciphertext: row.try_get("sealed_key")?,
-        nonce: fixed(row.try_get("key_nonce")?, "a key nonce")?,
-    })
-}
-
-pub(super) async fn node(conn: &mut SqliteConnection) -> Result<Option<NodeRow>, AuthorityError> {
-    let Some(row) = sqlx::query(
-        "SELECT public_key
-              , sealed_key
-              , key_nonce
-              , operator_uuid
-              , actors_issuer
-           FROM authority_node
-          WHERE node_id = 1",
-    )
-    .fetch_optional(conn)
-    .await?
-    else {
+pub(super) async fn node(conn: &impl QueryExecutor) -> Result<Option<NodeRow>, AuthorityError> {
+    let Some(row) = queries::node(conn).await? else {
         return Ok(None);
     };
     Ok(Some(NodeRow {
-        public_key: fixed(row.try_get("public_key")?, "the node key")?,
-        sealed: sealed(&row)?,
-        operator: uuid(row.try_get("operator_uuid")?)?,
-        actors_issuer: uuid(row.try_get("actors_issuer")?)?,
+        public_key: fixed(row.public_key, "the node key")?,
+        sealed: SealedKey {
+            ciphertext: row.sealed_key,
+            nonce: fixed(row.key_nonce, "a key nonce")?,
+        },
+        operator: uuid(row.operator_uuid)?,
+        actors_issuer: uuid(row.actors_issuer)?,
     }))
 }
 
 pub(super) async fn insert_node(
-    conn: &mut SqliteConnection,
+    conn: &impl Executor,
     node: &NodeRow,
 ) -> Result<(), AuthorityError> {
-    sqlx::query(
-        "INSERT INTO authority_node
-              ( node_id
-              , public_key
-              , sealed_key
-              , key_nonce
-              , operator_uuid
-              , actors_issuer
-              )
-         VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+    queries::insert_node(
+        conn,
+        node.public_key.to_vec(),
+        node.sealed.ciphertext.clone(),
+        node.sealed.nonce.to_vec(),
+        node.operator.to_string(),
+        node.actors_issuer.to_string(),
     )
-    .bind(node.public_key.as_slice())
-    .bind(node.sealed.ciphertext.as_slice())
-    .bind(node.sealed.nonce.as_slice())
-    .bind(node.operator.to_string())
-    .bind(node.actors_issuer.to_string())
-    .execute(conn)
     .await?;
     Ok(())
 }
 
-fn actor_row(row: SqliteRow) -> Result<ActorRow, AuthorityError> {
+fn actor_row(row: queries::ActorRow) -> Result<ActorRow, AuthorityError> {
     Ok(ActorRow {
-        actor_id: uuid(row.try_get("uuid")?)?,
-        path: row.try_get("path")?,
-        parent: row
-            .try_get::<Option<String>, _>("parent_uuid")?
-            .map(uuid)
-            .transpose()?,
-        public_key: fixed(row.try_get("public_key")?, "an actor key")?,
-        sealed: sealed(&row)?,
-        certificate: row.try_get("certificate")?,
+        actor_id: uuid(row.uuid)?,
+        path: row.path,
+        parent: row.parent_uuid.map(uuid).transpose()?,
+        public_key: fixed(row.public_key, "an actor key")?,
+        sealed: SealedKey {
+            ciphertext: row.sealed_key,
+            nonce: fixed(row.key_nonce, "a key nonce")?,
+        },
+        certificate: row.certificate,
     })
 }
 
-/// One actor row selected by `$filter`, spelled as a literal so the query
-/// stays a static string.
-macro_rules! select_actor {
-    ($filter:literal) => {
-        concat!(
-            "SELECT uuid
-              , path
-              , parent_uuid
-              , public_key
-              , sealed_key
-              , key_nonce
-              , certificate
-           FROM authority_actors
-          WHERE ",
-            $filter
-        )
-    };
-}
-
 pub(super) async fn actor(
-    conn: &mut SqliteConnection,
+    conn: &impl QueryExecutor,
     actor: Uuid7,
 ) -> Result<Option<ActorRow>, AuthorityError> {
-    sqlx::query(select_actor!("uuid = ?1"))
-        .bind(actor.to_string())
-        .fetch_optional(conn)
+    queries::actor(conn, actor.to_string())
         .await?
         .map(actor_row)
         .transpose()
 }
 
 pub(super) async fn actor_at(
-    conn: &mut SqliteConnection,
+    conn: &impl QueryExecutor,
     path: &str,
 ) -> Result<Option<ActorRow>, AuthorityError> {
-    sqlx::query(select_actor!("path = ?1"))
-        .bind(path)
-        .fetch_optional(conn)
+    queries::actor_at(conn, path.to_owned())
         .await?
         .map(actor_row)
         .transpose()
 }
 
 pub(super) async fn insert_actor(
-    conn: &mut SqliteConnection,
+    conn: &impl Executor,
     actor: &ActorRow,
 ) -> Result<(), AuthorityError> {
-    sqlx::query(
-        "INSERT INTO authority_actors
-              ( uuid
-              , path
-              , parent_uuid
-              , public_key
-              , sealed_key
-              , key_nonce
-              , certificate
-              )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    queries::insert_actor(
+        conn,
+        actor.actor_id.to_string(),
+        actor.path.clone(),
+        actor.parent.map(|parent| parent.to_string()),
+        actor.public_key.to_vec(),
+        actor.sealed.ciphertext.clone(),
+        actor.sealed.nonce.to_vec(),
+        actor.certificate.clone(),
     )
-    .bind(actor.actor_id.to_string())
-    .bind(&actor.path)
-    .bind(actor.parent.map(|parent| parent.to_string()))
-    .bind(actor.public_key.as_slice())
-    .bind(actor.sealed.ciphertext.as_slice())
-    .bind(actor.sealed.nonce.as_slice())
-    .bind(actor.certificate.as_slice())
-    .execute(conn)
     .await?;
     Ok(())
 }

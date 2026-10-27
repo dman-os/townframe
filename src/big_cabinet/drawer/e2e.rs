@@ -2,26 +2,52 @@
 //! booted over [`DrawerAccess`], and the DrawerService on top, the way an embedder assembles them.
 
 use super::*;
-use crate::authority::{Authority, OpenActor};
-use crate::doc::{
-    At, CreateDoc, DocsConfig, DocsRepo, FacetObserved, FacetRead, FacetRefSelector, FacetSelector,
-    ObserveFacets, ObserveScope, ObservedFacet, QueriedFacetRef, QueryFacetRefs, QueryFacets,
-    ReadFacets, WriteFacets,
-};
-use crate::index::{FacetMembership, FacetRefQuery, FacetRefStore, FacetRoute, FacetSetStore};
+use crate::authority::Authority;
+use crate::authority::OpenActor;
+use crate::doc::At;
+use crate::doc::CreateDoc;
+use crate::doc::DocsConfig;
+use crate::doc::DocsRepo;
+use crate::doc::FacetObserved;
+use crate::doc::FacetRead;
+use crate::doc::FacetRefSelector;
+use crate::doc::FacetSelector;
+use crate::doc::ObserveFacets;
+use crate::doc::ObserveScope;
+use crate::doc::ObservedFacet;
+use crate::doc::QueriedFacetRef;
+use crate::doc::QueryFacetRefs;
+use crate::doc::QueryFacets;
+use crate::doc::ReadFacets;
+use crate::doc::WriteFacets;
+use crate::index::FacetMembership;
+use crate::index::FacetRefQuery;
+use crate::index::FacetRefStore;
+use crate::index::FacetRoute;
+use crate::index::FacetSetStore;
 use crate::schema::SchemaRepo;
 use automerge::ChangeHash;
 use big_cabinet_core::FacetTag;
-use big_cabinet_core::drawer::{Drawer, LayoutKind};
-use big_cabinet_core::facet::{Bundle, FacetDecl, Universe};
-use big_repo::{BigRepo, BigRepoStopToken, Config, StorageConfig};
+use big_cabinet_core::drawer::Drawer;
+use big_cabinet_core::drawer::LayoutKind;
+use big_cabinet_core::facet::Bundle;
+use big_cabinet_core::facet::FacetDecl;
+use big_cabinet_core::facet::Universe;
+use big_repo::BigRepo;
+use big_repo::BigRepoStopToken;
+use big_repo::Config;
+use big_repo::StorageConfig;
 use big_sync_core::keyed_frontier::FrontierEntry;
-use big_sync_core::revisioned_store::{RevisionRead, RevisionReadLimits, RevisionedStoreReader};
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
 use futures::StreamExt;
 use secrets_rs::SecretStore;
-use serde_json::{Value, json};
+use serde_json::Value;
+use serde_json::json;
 use service_utils_rs::RequestContext;
-use sqlx_utils_rs::SqlCtx;
+use sqlite_rs::Database;
+use sqlite_rs::SqliteRuntime;
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
@@ -98,7 +124,7 @@ struct Node {
     drawers_namespace: Namespace,
     repo: SharedBigRepo,
     repo_stop: Option<BigRepoStopToken>,
-    sql: SqlCtx,
+    sql: Database,
     facet_set: Arc<FacetSetStore>,
     facet_set_task: Option<tokio::task::JoinHandle<()>>,
     facet_ref: Arc<FacetRefStore>,
@@ -121,8 +147,9 @@ impl Node {
         let keyring =
             keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
         let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
+        let runtime = Arc::new(SqliteRuntime::new(Default::default()));
         let (authority, authority_stop) =
-            crate::authority::boot(&secrets, SqlCtx::memory().await.unwrap())
+            crate::authority::boot(&secrets, runtime.ephemeral(&[]).unwrap())
                 .await
                 .unwrap();
         let open = |path: &str| {
@@ -147,18 +174,21 @@ impl Node {
             .open_namespace(drawers_actor.actor_id)
             .await
             .unwrap();
-        let (repo, repo_stop) = BigRepo::boot(Config {
-            node_identity_seed: [seed; 32],
-            storage: StorageConfig::Memory,
-            scope_key: "drawers-e2e".into(),
-            hidden_parts: Default::default(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-        })
+        let (repo, repo_stop) = BigRepo::boot(
+            Arc::clone(&runtime),
+            Config {
+                node_identity_seed: [seed; 32],
+                storage: StorageConfig::Memory,
+                scope_key: "drawers-e2e".into(),
+                hidden_parts: Default::default(),
+                automerge_frontier_group_scope: Default::default(),
+                causal_checkpoint_group_scope: Default::default(),
+                group_part_group_scope: Default::default(),
+            },
+        )
         .await
         .unwrap();
-        let sql = SqlCtx::memory().await.unwrap();
+        let sql = runtime.ephemeral(&[]).unwrap();
         let facet_set = Arc::new(FacetSetStore::new(sql.clone()).await.unwrap());
         let facet_set_task = {
             let store = (*facet_set).clone();

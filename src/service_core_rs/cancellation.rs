@@ -1,13 +1,14 @@
 use crate::ContextError;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeStruct};
-use std::{
-    collections::HashMap,
-    fmt,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
+use serde::Serializer;
+use serde::ser::SerializeStruct;
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

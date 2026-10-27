@@ -1,12 +1,12 @@
 use super::serve::expected_peer_error;
 use axum::Router;
+pub use service_client_rs::xrpc::iroh::IROH_XRPC_HTTP_ALPN;
 use service_client_rs::xrpc::iroh::IrohHttpStream;
-pub use service_client_rs::xrpc::iroh::{IROH_XRPC_HTTP_ALPN, IrohXrpcClient};
+pub use service_client_rs::xrpc::iroh::IrohXrpcClient;
 use std::sync::Arc;
-use tokio::{
-    sync::{Semaphore, watch},
-    task::JoinSet,
-};
+use tokio::sync::Semaphore;
+use tokio::sync::watch;
+use tokio::task::JoinSet;
 
 #[derive(Clone)]
 pub struct IrohXrpcProtocolHandler {

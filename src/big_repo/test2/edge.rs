@@ -75,7 +75,8 @@ fn doc_identifier(doc_id: crate::DocumentId) -> keyhive_core::principal::identif
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_interest_fetches_missing_bytes_without_manual_doc_sync() -> crate::Res<()> {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
+    use std::collections::HashSet;
 
     utils_rs::testing::setup_tracing_once();
     let pair = Pair::boot(160, 161, "Owner", "Reader").await?;

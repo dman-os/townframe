@@ -889,24 +889,27 @@ async fn synced_in_drawer_docs_are_discovered_and_projected_without_polluting_kn
         .await
         .unwrap();
 
+    let transaction = node.sql.begin_write().await.unwrap();
     for id in [&parent, &child] {
-        sqlx::query("DELETE FROM big_cabinet_drawer_docs WHERE drawer_id = ?")
-            .bind(id.to_string())
-            .execute(&node.sql.write_pool)
+        sqlite::clear_docs(&transaction, id.to_string())
             .await
             .unwrap();
-        sqlx::query("DELETE FROM big_cabinet_drawer_children WHERE parent_id = ? OR child_id = ?")
-            .bind(id.to_string())
-            .bind(id.to_string())
-            .execute(&node.sql.write_pool)
+        transaction
+            .execute(
+                "DELETE FROM big_cabinet_drawer_children WHERE parent_id = :id OR child_id = :id",
+                (id.to_string(),),
+            )
             .await
             .unwrap();
-        sqlx::query("DELETE FROM big_cabinet_drawers WHERE drawer_id = ?")
-            .bind(id.to_string())
-            .execute(&node.sql.write_pool)
+        transaction
+            .execute(
+                "DELETE FROM big_cabinet_drawers WHERE drawer_id = :id",
+                (id.to_string(),),
+            )
             .await
             .unwrap();
     }
+    transaction.commit().await.unwrap();
 
     // Grant Bob Read on `parent`. Neither `parent` nor `child` is in `big_cabinet_drawers`.
     node.grant(&alice, &parent, &bob, Access::Read).await;

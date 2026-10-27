@@ -250,7 +250,8 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
 
 #[tokio::test]
 async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
-    use crate::authority::{AttenuateCapability, RetractCapability};
+    use crate::authority::AttenuateCapability;
+    use crate::authority::RetractCapability;
 
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
@@ -412,12 +413,11 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
         )
         .await
         .unwrap();
-    let signer: String =
-        sqlx::query_scalar("SELECT actor_uuid FROM big_cabinet_drawer_ops WHERE command_id = ?")
-            .bind("plug removes entry")
-            .fetch_one(&node.sql.read_pool)
-            .await
-            .unwrap();
+    let signer = sqlite::get_op(&node.sql, "plug removes entry".to_owned())
+        .await
+        .unwrap()
+        .unwrap()
+        .actor_uuid;
     assert_eq!(signer, plug.actor_id.to_string());
     node.authority
         .client
@@ -449,7 +449,8 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
 
 #[tokio::test]
 async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
-    use crate::authority::{AttenuateCapability, RetractCapability};
+    use crate::authority::AttenuateCapability;
+    use crate::authority::RetractCapability;
 
     let mut node = Node::boot().await;
     let alice = node.creator("alice").await;
@@ -907,18 +908,12 @@ async fn delegated_creation_preserves_owner_and_records_the_bound_signer() {
             )
             .await
             .unwrap();
-        let (actor, operation): (String, String) = sqlx::query_as(
-            "SELECT actor_uuid
-                  , op_json
-               FROM big_cabinet_drawer_ops
-              WHERE command_id = ?",
-        )
-        .bind(name)
-        .fetch_one(&node.sql.read_pool)
-        .await
-        .unwrap();
-        assert_eq!(actor, plug.actor_id.to_string());
-        let operation: ledger::Op = serde_json::from_str(&operation).unwrap();
+        let row = sqlite::get_op(&node.sql, name.to_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.actor_uuid, plug.actor_id.to_string());
+        let operation: ledger::Op = serde_json::from_str(&row.op_json).unwrap();
         match operation {
             ledger::Op::Create { owner_id, .. } | ledger::Op::CreateSelfDoc { owner_id, .. } => {
                 assert_eq!(owner_id, Some(alice.actor_id));
@@ -1174,25 +1169,17 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
         ),
         (&self_doc_command, &self_doc_op, Drawer::self_doc()),
     ] {
-        let (actor, operation, step, receipt): (String, String, String, String) = sqlx::query_as(
-            "SELECT actor_uuid
-                  , op_json
-                  , step
-                  , receipt_json
-               FROM big_cabinet_drawer_ops
-              WHERE command_id = ?",
-        )
-        .bind(command.as_str())
-        .fetch_one(&node.sql.read_pool)
-        .await
-        .unwrap();
-        assert_eq!(actor, plug.actor_id.to_string());
+        let row = sqlite::get_op(&node.sql, command.as_str().to_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.actor_uuid, plug.actor_id.to_string());
         assert_eq!(
-            serde_json::from_str::<ledger::Op>(&operation).unwrap(),
+            serde_json::from_str::<ledger::Op>(&row.op_json).unwrap(),
             *expected_op
         );
-        assert_eq!(step, "done");
-        let created: DrawerCreated = serde_json::from_str(&receipt).unwrap();
+        assert_eq!(row.step, "done");
+        let created: DrawerCreated = serde_json::from_str(&row.receipt_json.unwrap()).unwrap();
         if command == &self_doc_command {
             assert_eq!(
                 created,

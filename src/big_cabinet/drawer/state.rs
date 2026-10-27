@@ -6,18 +6,24 @@
 //! "which drawers hold doc X" — the question every DocsRepo access check asks — is one indexed
 //! query rather than a scan of every drawer doc on the node.
 
-use super::{DrawerId, DrawersError};
+use super::DrawerId;
+use super::DrawersError;
+use super::sqlite;
 use big_cabinet_core::dmeta::DocId;
-use big_cabinet_core::drawer::{Drawer, DrawerAccess as Access};
-use sqlx::Row as _;
-use sqlx_utils_rs::SqlCtx;
-use std::collections::{BTreeMap, BTreeSet};
+use big_cabinet_core::drawer::Drawer;
+use big_cabinet_core::drawer::DrawerAccess as Access;
+use sqlite_rs::Database;
+use sqlite_rs::Sql;
+use sqlite_rs::SqlError;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
-use big_cabinet_core::drawer::protocol::{DrawerRecord, LocalDrawers};
+use big_cabinet_core::drawer::protocol::DrawerRecord;
+use big_cabinet_core::drawer::protocol::LocalDrawers;
 
 pub(crate) struct State {
-    sql: SqlCtx,
+    sql: Database,
     local: OnceLock<LocalDrawers>,
     changes: tokio::sync::watch::Sender<u64>,
 }
@@ -26,68 +32,6 @@ pub(crate) enum ScopeTarget<'a> {
     Drawer(&'a DrawerId),
     Doc(&'a DocId),
 }
-
-const SCOPED_DOCS_SQL: &str = r#"
-WITH RECURSIVE levels(access, level) AS (
-    VALUES ('Relay', 0), ('Read', 1), ('Write', 2), ('Admin', 3)
-), reachable(drawer_id, level) AS (
-    SELECT ?1, ?2
-    UNION
-    SELECT links.child_id
-         , MIN(reachable.level, levels.level)
-      FROM reachable
-      JOIN big_cabinet_drawer_children AS links ON links.parent_id = reachable.drawer_id
-      JOIN levels ON levels.access = links.access
-      JOIN big_cabinet_drawers AS parent ON parent.drawer_id = reachable.drawer_id
-     WHERE json_extract(parent.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
-), entries(doc_id, level, via) AS (
-    SELECT docs.doc_id
-         , MIN(reachable.level, levels.level)
-         , CASE WHEN reachable.drawer_id = ?1 THEN NULL ELSE reachable.drawer_id END
-      FROM reachable
-      JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = reachable.drawer_id
-      JOIN big_cabinet_drawer_docs AS docs ON docs.drawer_id = reachable.drawer_id
-      JOIN levels ON levels.access = docs.access
-     WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
-    UNION ALL
-    SELECT reachable.drawer_id
-         , reachable.level
-         , CASE WHEN reachable.drawer_id = ?1 THEN NULL ELSE reachable.drawer_id END
-      FROM reachable
-      JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = reachable.drawer_id
-     WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'
-), ranked AS (
-    SELECT doc_id
-         , level
-         , via
-         , ROW_NUMBER() OVER (PARTITION BY doc_id ORDER BY level DESC, via IS NOT NULL, via) AS ordinal
-      FROM entries
-), scoped_docs AS (
-    SELECT doc_id
-         , level
-         , via
-      FROM ranked
-     WHERE ordinal = 1
-)
-"#;
-
-const SCOPED_REACHABLE_SQL: &str = r#"
-WITH RECURSIVE levels(access, level) AS (
-    VALUES ('Relay', 0), ('Read', 1), ('Write', 2), ('Admin', 3)
-), reachable(drawer_id, level) AS (
-    SELECT json_extract(value, '$[0]')
-         , json_extract(value, '$[1]')
-      FROM json_each(?1)
-    UNION
-    SELECT links.child_id
-         , MIN(reachable.level, levels.level)
-      FROM reachable
-      JOIN big_cabinet_drawer_children AS links ON links.parent_id = reachable.drawer_id
-      JOIN levels ON levels.access = links.access
-      JOIN big_cabinet_drawers AS parent ON parent.drawer_id = reachable.drawer_id
-     WHERE json_extract(parent.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
-)
-"#;
 
 fn scoped_roots(drawers: &BTreeMap<DrawerId, Access>) -> String {
     serde_json::to_string(
@@ -118,70 +62,38 @@ fn access_level(value: i64) -> Access {
     }
 }
 
-fn storage(error: sqlx::Error) -> DrawersError {
+fn storage(error: SqlError) -> DrawersError {
     DrawersError::Storage(error.to_string())
 }
 
-fn access_text(access: Access) -> &'static str {
-    access.as_str()
-}
-
-fn access_column(row: &sqlx::sqlite::SqliteRow, column: &str) -> Access {
-    row.get::<String, _>(column)
+fn access_column(value: &str) -> Access {
+    value
         .parse()
         .expect("the access column is constrained to the drawer access vocabulary")
 }
 
-fn id_column(row: &sqlx::sqlite::SqliteRow, column: &str) -> DocId {
-    row.get::<String, _>(column)
+fn id_column(value: &str) -> DocId {
+    value
         .parse()
         .expect("an id column holds the text form of a doc id")
 }
 
-fn drawer_record(row: &sqlx::sqlite::SqliteRow) -> DrawerRecord {
+fn drawer_record(drawer_id: &str, descriptor_json: &str) -> DrawerRecord {
     DrawerRecord {
-        drawer_id: id_column(row, "drawer_id"),
-        descriptor: serde_json::from_str(&row.get::<String, _>("descriptor_json"))
+        drawer_id: id_column(drawer_id),
+        descriptor: serde_json::from_str(descriptor_json)
             .expect("a stored descriptor was written by this service"),
     }
 }
 
 impl State {
-    pub(crate) async fn open(sql: SqlCtx) -> Result<Self, DrawersError> {
-        for statement in [
-            // The descriptor is stored verbatim, not decomposed: it is an open facet, and a
-            // column per field (or a CHECK on the layout tag) would reject exactly the future
-            // members carrying exists to survive. Interpretation happens at read time.
-            "CREATE TABLE IF NOT EXISTS big_cabinet_drawers (
-                 drawer_id TEXT PRIMARY KEY
-               , descriptor_json TEXT NOT NULL
-             ) STRICT",
-            "CREATE TABLE IF NOT EXISTS big_cabinet_drawer_docs (
-                 drawer_id TEXT NOT NULL
-               , doc_id TEXT NOT NULL
-               , access TEXT NOT NULL CHECK (access IN ('Relay', 'Read', 'Write', 'Admin'))
-               , PRIMARY KEY (drawer_id, doc_id)
-             ) STRICT",
-            "CREATE INDEX IF NOT EXISTS big_cabinet_drawer_docs_by_doc
-                 ON big_cabinet_drawer_docs (doc_id)",
-            "CREATE TABLE IF NOT EXISTS big_cabinet_drawer_children (
-                 parent_id TEXT NOT NULL
-               , child_id TEXT NOT NULL
-               , access TEXT NOT NULL CHECK (access IN ('Relay', 'Read', 'Write', 'Admin'))
-               , PRIMARY KEY (parent_id, child_id)
-             ) STRICT",
-            "CREATE INDEX IF NOT EXISTS big_cabinet_drawer_children_by_child
-                 ON big_cabinet_drawer_children (child_id)",
-            "CREATE TABLE IF NOT EXISTS big_cabinet_drawer_local (
-                 role TEXT PRIMARY KEY CHECK (role IN ('present', 'originated', 'registry'))
-               , drawer_id TEXT NOT NULL
-             ) STRICT",
-        ] {
-            sqlx::query(statement)
-                .execute(&sql.write_pool)
-                .await
-                .map_err(storage)?;
-        }
+    pub(crate) async fn open(sql: Database) -> Result<Self, DrawersError> {
+        // The descriptor is stored verbatim, not decomposed: it is an open facet, and a
+        // column per field (or a CHECK on the layout tag) would reject exactly the future
+        // members carrying exists to survive. Interpretation happens at read time.
+        sql.apply_migrations(sqlite::MIGRATION_TABLE, sqlite::MIGRATIONS)
+            .await
+            .map_err(storage)?;
         let (changes, _) = tokio::sync::watch::channel(0);
         let state = Self {
             sql,
@@ -218,20 +130,13 @@ impl State {
     }
 
     async fn load_local(&self) -> Result<Option<LocalDrawers>, DrawersError> {
-        let rows = sqlx::query(
-            "SELECT role
-                  , drawer_id
-               FROM big_cabinet_drawer_local",
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
+        let rows = sqlite::load_local(&self.sql).await.map_err(storage)?;
         let mut present = None;
         let mut originated = None;
         let mut registry = None;
         for row in rows {
-            let id = id_column(&row, "drawer_id");
-            match row.get::<String, _>("role").as_str() {
+            let id = id_column(&row.drawer_id);
+            match row.role.as_str() {
                 "present" => present = Some(id),
                 "originated" => originated = Some(id),
                 "registry" => registry = Some(id),
@@ -250,22 +155,15 @@ impl State {
     }
 
     pub(crate) async fn set_local(&self, local: LocalDrawers) -> Result<(), DrawersError> {
-        let mut transaction = self.sql.write_pool.begin().await.map_err(storage)?;
+        let transaction = self.sql.begin_write().await.map_err(storage)?;
         for (role, id) in [
             ("present", &local.present_id),
             ("originated", &local.originated_id),
             ("registry", &local.registry_id),
         ] {
-            sqlx::query(
-                "INSERT INTO big_cabinet_drawer_local (role, drawer_id)
-                 VALUES (?, ?)
-                 ON CONFLICT (role) DO UPDATE SET drawer_id = excluded.drawer_id",
-            )
-            .bind(role)
-            .bind(id.to_string())
-            .execute(&mut *transaction)
-            .await
-            .map_err(storage)?;
+            sqlite::set_local(&transaction, role.to_owned(), id.to_string())
+                .await
+                .map_err(storage)?;
         }
         transaction.commit().await.map_err(storage)?;
         self.local
@@ -275,30 +173,18 @@ impl State {
     }
 
     pub(crate) async fn drawer(&self, id: &DrawerId) -> Result<Option<DrawerRecord>, DrawersError> {
-        let row = sqlx::query(
-            "SELECT drawer_id
-                  , descriptor_json
-               FROM big_cabinet_drawers
-              WHERE drawer_id = ?",
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
-        Ok(row.as_ref().map(drawer_record))
+        let row = sqlite::drawer(&self.sql, id.to_string())
+            .await
+            .map_err(storage)?;
+        Ok(row.map(|row| drawer_record(&row.drawer_id, &row.descriptor_json)))
     }
 
     pub(crate) async fn drawers(&self) -> Result<Vec<DrawerRecord>, DrawersError> {
-        let rows = sqlx::query(
-            "SELECT drawer_id
-                  , descriptor_json
-               FROM big_cabinet_drawers
-              ORDER BY drawer_id",
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
-        Ok(rows.iter().map(drawer_record).collect())
+        let rows = sqlite::drawers(&self.sql).await.map_err(storage)?;
+        Ok(rows
+            .iter()
+            .map(|row| drawer_record(&row.drawer_id, &row.descriptor_json))
+            .collect())
     }
 
     pub(crate) async fn scoped_docs(
@@ -306,68 +192,18 @@ impl State {
         drawer_id: &DrawerId,
         access: Access,
     ) -> Result<BTreeMap<DocId, (Access, Option<DrawerId>)>, DrawersError> {
-        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(SCOPED_DOCS_SQL);
-        query.push(" SELECT doc_id, level, via FROM scoped_docs ORDER BY doc_id");
-        let rows = query
-            .build()
-            .bind(drawer_id.to_string())
-            .bind(level(access))
-            .fetch_all(&self.sql.read_pool)
+        let rows = sqlite::scoped_docs(&self.sql, drawer_id.to_string(), level(access))
             .await
             .map_err(storage)?;
         Ok(rows
             .into_iter()
             .map(|row| {
-                let via: Option<String> = row.get("via");
                 (
-                    id_column(&row, "doc_id"),
-                    (
-                        access_level(row.get("level")),
-                        via.map(|id| id.parse().expect("projected drawer id is valid")),
-                    ),
+                    id_column(&row.doc_id),
+                    (access_level(row.level), row.via.as_deref().map(id_column)),
                 )
             })
             .collect())
-    }
-
-    fn scoped_doc_query(documents: Option<&BTreeSet<DocId>>) -> sqlx::QueryBuilder<sqlx::Sqlite> {
-        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(SCOPED_REACHABLE_SQL);
-        query.push(
-            r#", candidates(doc_id) AS (
-                SELECT value
-                  FROM json_each(?2)
-            ), entries(doc_id, level) AS (
-                SELECT docs.doc_id
-                     , MIN(reachable.level, levels.level)
-                  FROM reachable
-                  JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = reachable.drawer_id
-                  CROSS JOIN big_cabinet_drawer_docs AS docs ON docs.drawer_id = reachable.drawer_id
-                  JOIN levels ON levels.access = docs.access
-                 WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'"#,
-        );
-        if documents.is_some() {
-            query.push(" AND docs.doc_id IN (SELECT doc_id FROM candidates)");
-        }
-        query.push(
-            r#" UNION ALL
-                SELECT reachable.drawer_id
-                     , reachable.level
-                  FROM reachable
-                  JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = reachable.drawer_id
-                 WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.selfDoc'"#,
-        );
-        if documents.is_some() {
-            query.push(" AND reachable.drawer_id IN (SELECT doc_id FROM candidates)");
-        }
-        query.push(
-            " )
-            SELECT doc_id
-                 , MAX(level) AS level
-              FROM entries
-             GROUP BY doc_id
-             ORDER BY doc_id",
-        );
-        query
     }
 
     pub(crate) async fn scoped_doc_access(
@@ -378,19 +214,22 @@ impl State {
         if drawers.is_empty() || documents.is_some_and(BTreeSet::is_empty) {
             return Ok(BTreeMap::new());
         }
-        let mut query = Self::scoped_doc_query(documents);
-        let rows = query
-            .build()
-            .bind(scoped_roots(drawers))
-            .bind(documents.map(|documents| {
-                serde_json::to_string(documents).expect("candidate document ids serialize")
-            }))
-            .fetch_all(&self.sql.read_pool)
-            .await
-            .map_err(storage)?;
+        let roots = scoped_roots(drawers);
+        let rows = match documents {
+            Some(documents) => {
+                sqlite::scoped_doc_candidates(
+                    &self.sql,
+                    roots,
+                    serde_json::to_string(documents).expect("candidate document ids serialize"),
+                )
+                .await
+            }
+            None => sqlite::scoped_doc_access(&self.sql, roots).await,
+        }
+        .map_err(storage)?;
         Ok(rows
             .into_iter()
-            .map(|row| (id_column(&row, "doc_id"), access_level(row.get("level"))))
+            .map(|row| (id_column(&row.doc_id), access_level(row.level)))
             .collect())
     }
 
@@ -401,25 +240,17 @@ impl State {
         if drawers.is_empty() {
             return Ok(Vec::new());
         }
-        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(SCOPED_REACHABLE_SQL);
-        query.push(
-            " SELECT drawer.drawer_id
-                   , drawer.descriptor_json
-                   , MAX(reachable.level) AS level
-                FROM reachable
-                JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = reachable.drawer_id
-               GROUP BY drawer.drawer_id
-               ORDER BY drawer.drawer_id",
-        );
-        let rows = query
-            .build()
-            .bind(scoped_roots(drawers))
-            .fetch_all(&self.sql.read_pool)
+        let rows = sqlite::scoped_drawers(&self.sql, scoped_roots(drawers))
             .await
             .map_err(storage)?;
         Ok(rows
             .iter()
-            .map(|row| (drawer_record(row), access_level(row.get("level"))))
+            .map(|row| {
+                (
+                    drawer_record(&row.drawer_id, &row.descriptor_json),
+                    access_level(row.level),
+                )
+            })
             .collect())
     }
 
@@ -431,45 +262,12 @@ impl State {
             ScopeTarget::Drawer(drawer_id) => (drawer_id, false),
             ScopeTarget::Doc(doc_id) => (doc_id, true),
         };
-        let rows = sqlx::query(
-            r#"WITH RECURSIVE levels(access, level) AS (
-                   VALUES ('Relay', 0), ('Read', 1), ('Write', 2), ('Admin', 3)
-               ), reached(drawer_id, level) AS (
-                   SELECT drawer_id
-                        , 3
-                     FROM big_cabinet_drawers
-                    WHERE drawer_id = ?1
-                   UNION
-                   SELECT docs.drawer_id
-                        , levels.level
-                     FROM big_cabinet_drawer_docs AS docs
-                     JOIN levels ON levels.access = docs.access
-                     JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = docs.drawer_id
-                    WHERE ?2 AND docs.doc_id = ?1
-                      AND json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
-                   UNION
-                   SELECT links.parent_id
-                        , MIN(reached.level, levels.level)
-                     FROM reached
-                     JOIN big_cabinet_drawer_children AS links ON links.child_id = reached.drawer_id
-                     JOIN levels ON levels.access = links.access
-                     JOIN big_cabinet_drawers AS drawer ON drawer.drawer_id = links.parent_id
-                    WHERE json_extract(drawer.descriptor_json, '$.layout.$type') = 'org.example.daybook.drawer.singleGroup'
-               )
-               SELECT drawer_id
-                    , MAX(level) AS level
-                 FROM reached
-                GROUP BY drawer_id
-                ORDER BY drawer_id"#,
-        )
-        .bind(target_id.to_string())
-        .bind(document)
-        .fetch_all(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
+        let rows = sqlite::ancestors(&self.sql, target_id.to_string(), document)
+            .await
+            .map_err(storage)?;
         Ok(rows
             .into_iter()
-            .map(|row| (id_column(&row, "drawer_id"), access_level(row.get("level"))))
+            .map(|row| (id_column(&row.drawer_id), access_level(row.level)))
             .collect())
     }
 
@@ -479,18 +277,8 @@ impl State {
         &self,
         announced: &BTreeSet<DrawerId>,
     ) -> Result<Vec<DrawerId>, DrawersError> {
-        let rows = sqlx::query(
-            r#"SELECT child_id AS drawer_id
-                 FROM big_cabinet_drawer_children
-                UNION
-               SELECT value
-                 FROM json_each(?1)
-               EXCEPT
-               SELECT drawer_id
-                 FROM big_cabinet_drawers
-                ORDER BY drawer_id"#,
-        )
-        .bind(
+        let rows = sqlite::unprojected(
+            &self.sql,
             serde_json::to_string(
                 &announced
                     .iter()
@@ -499,10 +287,9 @@ impl State {
             )
             .expect("drawer ids serialize"),
         )
-        .fetch_all(&self.sql.read_pool)
         .await
         .map_err(storage)?;
-        Ok(rows.iter().map(|row| id_column(row, "drawer_id")).collect())
+        Ok(rows.iter().map(|id| id_column(id)).collect())
     }
 
     pub(crate) async fn put_drawer(
@@ -510,24 +297,25 @@ impl State {
         id: &DrawerId,
         descriptor: &Drawer,
     ) -> Result<(), DrawersError> {
-        if self
-            .drawer(id)
-            .await?
-            .is_some_and(|existing| &existing.descriptor == descriptor)
+        let transaction = self.sql.begin_write().await.map_err(storage)?;
+        if sqlite::drawer(&transaction, id.to_string())
+            .await
+            .map_err(storage)?
+            .is_some_and(|row| {
+                &drawer_record(&row.drawer_id, &row.descriptor_json).descriptor == descriptor
+            })
         {
+            transaction.rollback().await.map_err(storage)?;
             return Ok(());
         }
-        sqlx::query(
-            "INSERT INTO big_cabinet_drawers (drawer_id, descriptor_json)
-             VALUES (?, ?)
-             ON CONFLICT (drawer_id) DO UPDATE
-                SET descriptor_json = excluded.descriptor_json",
+        sqlite::put_drawer(
+            &transaction,
+            id.to_string(),
+            serde_json::to_string(descriptor).expect("a descriptor serializes"),
         )
-        .bind(id.to_string())
-        .bind(serde_json::to_string(descriptor).expect("a descriptor serializes"))
-        .execute(&self.sql.write_pool)
         .await
         .map_err(storage)?;
+        transaction.commit().await.map_err(storage)?;
         self.notify_changed();
         Ok(())
     }
@@ -538,15 +326,12 @@ impl State {
         doc: &DocId,
         access: Access,
     ) -> Result<(), DrawersError> {
-        sqlx::query(
-            "INSERT INTO big_cabinet_drawer_docs (drawer_id, doc_id, access)
-             VALUES (?, ?, ?)
-             ON CONFLICT (drawer_id, doc_id) DO UPDATE SET access = excluded.access",
+        sqlite::put_doc(
+            &self.sql,
+            drawer.to_string(),
+            doc.to_string(),
+            access.as_str().to_owned(),
         )
-        .bind(drawer.to_string())
-        .bind(doc.to_string())
-        .bind(access_text(access))
-        .execute(&self.sql.write_pool)
         .await
         .map_err(storage)?;
         self.notify_changed();
@@ -558,16 +343,9 @@ impl State {
         drawer: &DrawerId,
         doc: &DocId,
     ) -> Result<(), DrawersError> {
-        sqlx::query(
-            "DELETE FROM big_cabinet_drawer_docs
-              WHERE drawer_id = ?
-                AND doc_id = ?",
-        )
-        .bind(drawer.to_string())
-        .bind(doc.to_string())
-        .execute(&self.sql.write_pool)
-        .await
-        .map_err(storage)?;
+        sqlite::remove_doc(&self.sql, drawer.to_string(), doc.to_string())
+            .await
+            .map_err(storage)?;
         self.notify_changed();
         Ok(())
     }
@@ -577,18 +355,10 @@ impl State {
         drawer: &DrawerId,
         doc: &DocId,
     ) -> Result<Option<Access>, DrawersError> {
-        let row = sqlx::query(
-            "SELECT access
-               FROM big_cabinet_drawer_docs
-              WHERE drawer_id = ?
-                AND doc_id = ?",
-        )
-        .bind(drawer.to_string())
-        .bind(doc.to_string())
-        .fetch_optional(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
-        Ok(row.map(|row| access_column(&row, "access")))
+        let access = sqlite::doc_entry(&self.sql, drawer.to_string(), doc.to_string())
+            .await
+            .map_err(storage)?;
+        Ok(access.as_deref().map(access_column))
     }
 
     /// The roster's doc entries, as this node last saw them.
@@ -596,20 +366,12 @@ impl State {
         &self,
         drawer: &DrawerId,
     ) -> Result<BTreeMap<DocId, Access>, DrawersError> {
-        let rows = sqlx::query(
-            "SELECT doc_id
-                  , access
-               FROM big_cabinet_drawer_docs
-              WHERE drawer_id = ?
-              ORDER BY doc_id",
-        )
-        .bind(drawer.to_string())
-        .fetch_all(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
+        let rows = sqlite::docs_of(&self.sql, drawer.to_string())
+            .await
+            .map_err(storage)?;
         Ok(rows
             .iter()
-            .map(|row| (id_column(row, "doc_id"), access_column(row, "access")))
+            .map(|row| (id_column(&row.doc_id), access_column(&row.access)))
             .collect())
     }
 
@@ -619,15 +381,12 @@ impl State {
         child: &DrawerId,
         access: Access,
     ) -> Result<(), DrawersError> {
-        sqlx::query(
-            "INSERT INTO big_cabinet_drawer_children (parent_id, child_id, access)
-             VALUES (?, ?, ?)
-             ON CONFLICT (parent_id, child_id) DO UPDATE SET access = excluded.access",
+        sqlite::put_child(
+            &self.sql,
+            parent.to_string(),
+            child.to_string(),
+            access.as_str().to_owned(),
         )
-        .bind(parent.to_string())
-        .bind(child.to_string())
-        .bind(access_text(access))
-        .execute(&self.sql.write_pool)
         .await
         .map_err(storage)?;
         self.notify_changed();
@@ -639,16 +398,9 @@ impl State {
         parent: &DrawerId,
         child: &DrawerId,
     ) -> Result<(), DrawersError> {
-        sqlx::query(
-            "DELETE FROM big_cabinet_drawer_children
-              WHERE parent_id = ?
-                AND child_id = ?",
-        )
-        .bind(parent.to_string())
-        .bind(child.to_string())
-        .execute(&self.sql.write_pool)
-        .await
-        .map_err(storage)?;
+        sqlite::remove_child(&self.sql, parent.to_string(), child.to_string())
+            .await
+            .map_err(storage)?;
         self.notify_changed();
         Ok(())
     }
@@ -658,38 +410,22 @@ impl State {
         parent: &DrawerId,
         child: &DrawerId,
     ) -> Result<Option<Access>, DrawersError> {
-        let row = sqlx::query(
-            "SELECT access
-               FROM big_cabinet_drawer_children
-              WHERE parent_id = ?
-                AND child_id = ?",
-        )
-        .bind(parent.to_string())
-        .bind(child.to_string())
-        .fetch_optional(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
-        Ok(row.map(|row| access_column(&row, "access")))
+        let access = sqlite::child_entry(&self.sql, parent.to_string(), child.to_string())
+            .await
+            .map_err(storage)?;
+        Ok(access.as_deref().map(access_column))
     }
 
     pub(crate) async fn children_of(
         &self,
         parent: &DrawerId,
     ) -> Result<BTreeMap<DrawerId, Access>, DrawersError> {
-        let rows = sqlx::query(
-            "SELECT child_id
-                  , access
-               FROM big_cabinet_drawer_children
-              WHERE parent_id = ?
-              ORDER BY child_id",
-        )
-        .bind(parent.to_string())
-        .fetch_all(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
+        let rows = sqlite::children_of(&self.sql, parent.to_string())
+            .await
+            .map_err(storage)?;
         Ok(rows
             .iter()
-            .map(|row| (id_column(row, "child_id"), access_column(row, "access")))
+            .map(|row| (id_column(&row.child_id), access_column(&row.access)))
             .collect())
     }
 
@@ -701,27 +437,30 @@ impl State {
         docs: &BTreeMap<DocId, Access>,
         children: &BTreeMap<DrawerId, Access>,
     ) -> Result<(), DrawersError> {
-        if &self.docs_of(drawer).await? == docs && &self.children_of(drawer).await? == children {
+        let transaction = self.sql.begin_write().await.map_err(storage)?;
+        let id = drawer.to_string();
+        let stored_docs: BTreeMap<_, _> = sqlite::docs_of(&transaction, id.clone())
+            .await
+            .map_err(storage)?
+            .into_iter()
+            .map(|row| (id_column(&row.doc_id), access_column(&row.access)))
+            .collect();
+        let stored_children: BTreeMap<_, _> = sqlite::children_of(&transaction, id.clone())
+            .await
+            .map_err(storage)?
+            .into_iter()
+            .map(|row| (id_column(&row.child_id), access_column(&row.access)))
+            .collect();
+        if &stored_docs == docs && &stored_children == children {
+            transaction.rollback().await.map_err(storage)?;
             return Ok(());
         }
-        let mut transaction = self.sql.write_pool.begin().await.map_err(storage)?;
-        let id = drawer.to_string();
-        sqlx::query(
-            "DELETE FROM big_cabinet_drawer_docs
-              WHERE drawer_id = ?",
-        )
-        .bind(&id)
-        .execute(&mut *transaction)
-        .await
-        .map_err(storage)?;
-        sqlx::query(
-            "DELETE FROM big_cabinet_drawer_children
-              WHERE parent_id = ?",
-        )
-        .bind(&id)
-        .execute(&mut *transaction)
-        .await
-        .map_err(storage)?;
+        sqlite::clear_docs(&transaction, id.clone())
+            .await
+            .map_err(storage)?;
+        sqlite::clear_children(&transaction, id.clone())
+            .await
+            .map_err(storage)?;
         for (table, source, target, entries) in [
             ("big_cabinet_drawer_docs", "drawer_id", "doc_id", docs),
             (
@@ -733,23 +472,28 @@ impl State {
         ] {
             let mut entries = entries.iter().peekable();
             while entries.peek().is_some() {
-                let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(format!(
-                    "INSERT INTO {table} ({source}, {target}, access) "
-                ));
-                query.push_values(
-                    entries.by_ref().take(256),
-                    |mut values, (target_id, access)| {
-                        values
-                            .push_bind(&id)
-                            .push_bind(target_id.to_string())
-                            .push_bind(access_text(*access));
-                    },
-                );
+                let mut query = Sql::new("INSERT INTO ");
                 query
-                    .build()
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(storage)?;
+                    .ident(table)
+                    .push(" (")
+                    .ident(source)
+                    .push(", ")
+                    .ident(target)
+                    .push(", access) VALUES ");
+                for (index, (target_id, access)) in entries.by_ref().take(256).enumerate() {
+                    if index != 0 {
+                        query.push(", ");
+                    }
+                    query
+                        .push("(")
+                        .bind(&id)
+                        .push(", ")
+                        .bind(target_id.to_string())
+                        .push(", ")
+                        .bind(access.as_str())
+                        .push(")");
+                }
+                query.execute(&transaction).await.map_err(storage)?;
             }
         }
         transaction.commit().await.map_err(storage)?;
@@ -762,10 +506,155 @@ impl State {
 mod tests {
     use super::*;
     use big_cabinet_core::drawer::GroupKey;
+    use sqlite_rs::SqliteRuntime;
+
+    #[tokio::test]
+    async fn roster_batches_rollback_together_and_notify_only_after_commit() {
+        let runtime = SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).unwrap();
+        let state = State::open(sql.clone()).await.unwrap();
+        let [drawer, old_doc, old_child] = [240_u8, 241, 242].map(|value| DocId::new([value; 32]));
+        let before_docs = BTreeMap::from([(old_doc.clone(), Access::Read)]);
+        let before_children = BTreeMap::from([(old_child.clone(), Access::Write)]);
+        state
+            .replace_roster(&drawer, &before_docs, &before_children)
+            .await
+            .unwrap();
+        let mut changes = state.subscribe_changes();
+        let snapshot = sql.begin_read().await.unwrap();
+        let docs: BTreeMap<_, _> = (1_u16..=513)
+            .map(|value| {
+                let mut bytes = [0; 32];
+                bytes[..2].copy_from_slice(&value.to_be_bytes());
+                (DocId::new(bytes), Access::Admin)
+            })
+            .collect();
+        let mut children: BTreeMap<_, _> = docs
+            .keys()
+            .take(257)
+            .cloned()
+            .map(|id| (id, Access::Read))
+            .collect();
+        *children.last_entry().unwrap().get_mut() = Access::Relay;
+        sql.execute_batch(
+            "CREATE TRIGGER fail_roster_child BEFORE INSERT ON big_cabinet_drawer_children
+             WHEN NEW.access = 'Relay'
+             BEGIN SELECT RAISE(ABORT, 'injected roster failure'); END;",
+        )
+        .await
+        .unwrap();
+        let error = state
+            .replace_roster(&drawer, &docs, &children)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, DrawersError::Storage(ref message) if message.contains("injected roster failure"))
+        );
+        assert!(!changes.has_changed().unwrap());
+        assert_eq!(state.docs_of(&drawer).await.unwrap(), before_docs);
+        assert_eq!(state.children_of(&drawer).await.unwrap(), before_children);
+        sql.execute_batch("DROP TRIGGER fail_roster_child")
+            .await
+            .unwrap();
+        state
+            .replace_roster(&drawer, &docs, &children)
+            .await
+            .unwrap();
+        changes.changed().await.unwrap();
+        assert_eq!(*changes.borrow_and_update(), 2);
+        assert_eq!(state.docs_of(&drawer).await.unwrap(), docs);
+        assert_eq!(state.children_of(&drawer).await.unwrap(), children);
+        assert_eq!(
+            sqlite::doc_entry(&snapshot, drawer.to_string(), old_doc.to_string())
+                .await
+                .unwrap(),
+            Some(Access::Read.as_str().to_owned()),
+        );
+        assert_eq!(
+            sqlite::child_entry(&snapshot, drawer.to_string(), old_child.to_string())
+                .await
+                .unwrap(),
+            Some(Access::Write.as_str().to_owned()),
+        );
+        snapshot.rollback().await.unwrap();
+        state
+            .replace_roster(&drawer, &docs, &children)
+            .await
+            .unwrap();
+        assert!(!changes.has_changed().unwrap());
+        state
+            .replace_roster(&drawer, &BTreeMap::new(), &BTreeMap::new())
+            .await
+            .unwrap();
+        assert!(changes.has_changed().unwrap());
+        assert!(state.docs_of(&drawer).await.unwrap().is_empty());
+        assert!(state.children_of(&drawer).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn migrations_reopen_existing_projection_and_local_drawers() {
+        let runtime = SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).unwrap();
+        sql.execute_batch(sqlite::MIGRATIONS[0].sql).await.unwrap();
+        let [present_id, originated_id, registry_id, announced_id] =
+            [10_u8, 11, 12, 13].map(|value| DocId::new([value; 32]));
+        let local = LocalDrawers {
+            present_id,
+            originated_id,
+            registry_id,
+        };
+        let descriptor: Drawer = serde_json::from_value(serde_json::json!({
+            "$type": "org.example.daybook.drawer",
+            "layout": {"$type": "org.example.future.layout", "opaque": [1, 2, 3]}
+        }))
+        .unwrap();
+        sqlite::put_drawer(
+            &sql,
+            local.present_id.to_string(),
+            serde_json::to_string(&descriptor).unwrap(),
+        )
+        .await
+        .unwrap();
+        let state = State::open(sql.clone()).await.unwrap();
+        assert_eq!(
+            state
+                .drawer(&local.present_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .descriptor,
+            descriptor
+        );
+        state.set_local(local.clone()).await.unwrap();
+        state
+            .put_child(&local.present_id, &local.originated_id, Access::Read)
+            .await
+            .unwrap();
+        drop(state);
+        let reopened = State::open(sql).await.unwrap();
+        assert_eq!(reopened.local(), local);
+        assert_eq!(
+            reopened.drawers().await.unwrap(),
+            vec![DrawerRecord {
+                drawer_id: local.present_id.clone(),
+                descriptor,
+            }]
+        );
+        let mut expected = vec![local.originated_id.clone(), announced_id.clone()];
+        expected.sort();
+        assert_eq!(
+            reopened
+                .unprojected(&BTreeSet::from([local.present_id.clone(), announced_id]))
+                .await
+                .unwrap(),
+            expected,
+        );
+    }
 
     #[tokio::test]
     async fn scoped_sql_terminates_cycles_and_selects_the_strongest_path() {
-        let state = State::open(SqlCtx::memory().await.unwrap()).await.unwrap();
+        let runtime = SqliteRuntime::new(Default::default());
+        let state = State::open(runtime.ephemeral(&[]).unwrap()).await.unwrap();
         let [root, left, right, leaf, doc] =
             [1_u8, 2, 3, 4, 5].map(|value| DocId::new([value; 32]));
         for id in [&root, &left, &right] {

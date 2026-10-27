@@ -914,7 +914,8 @@ where
 
 #[tokio::test]
 async fn subscription_sources_incremental_union_peer_scope_drop_and_reconnect() -> Res<()> {
-    use crate::{SubscriptionEvent, SubscriptionUpdate};
+    use crate::SubscriptionEvent;
+    use crate::SubscriptionUpdate;
 
     let world = Arc::new(TestWorld::default());
     let local = boot_node(Arc::clone(&world), 10).await?;

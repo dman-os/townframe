@@ -8,12 +8,23 @@
 //! exists without its registry row, so there is nothing to reconcile after a
 //! crash.
 
-use super::cap::{Chain, State};
-use super::store::{ActorRow, SealedKey};
-use super::{Actor, CapId, Rights};
-use super::{ActorPublicKey, AuthorityError, NODE_SERVICE};
-use big_cabinet_core::dmeta::{Attribution, Bytes, MultibaseKey, SignatureBytes, Uuid7};
-use ed25519_dalek::{Signer, SigningKey};
+use super::Actor;
+use super::ActorPublicKey;
+use super::AuthorityError;
+use super::CapId;
+use super::NODE_SERVICE;
+use super::Rights;
+use super::cap::Chain;
+use super::cap::State;
+use super::store::ActorRow;
+use super::store::SealedKey;
+use big_cabinet_core::dmeta::Attribution;
+use big_cabinet_core::dmeta::Bytes;
+use big_cabinet_core::dmeta::MultibaseKey;
+use big_cabinet_core::dmeta::SignatureBytes;
+use big_cabinet_core::dmeta::Uuid7;
+use ed25519_dalek::Signer;
+use ed25519_dalek::SigningKey;
 use rand::RngCore;
 use zeroize::Zeroizing;
 

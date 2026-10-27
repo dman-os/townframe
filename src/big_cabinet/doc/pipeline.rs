@@ -1,6 +1,9 @@
 //! The two-phase write pipeline and boot recovery shared by create, write, and branch.
 
-use super::commands::{Detail, Kind, Row, State};
+use super::commands::Detail;
+use super::commands::Kind;
+use super::commands::Row;
+use super::commands::State;
 use super::*;
 
 /// What a write intends, fixed before its first transaction so that the transaction it signs and

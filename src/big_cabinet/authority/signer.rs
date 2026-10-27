@@ -5,9 +5,11 @@
 //! actor's sealed key, opened for this one signature and checked against the
 //! registered public identity.
 
+use super::AuthorityError;
+use super::actor;
 use super::store::ActorRow;
-use super::{AuthorityError, actor};
-use big_cabinet_core::dmeta::{FacetClaim, SignedFacetClaim};
+use big_cabinet_core::dmeta::FacetClaim;
+use big_cabinet_core::dmeta::SignedFacetClaim;
 
 pub(super) fn sign_claim(
     wrapping: &[u8; 32],

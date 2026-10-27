@@ -1,7 +1,8 @@
 //! The field-level checks the `facet` macro runs: what a field may state, and the bare number that
 //! must state itself.
 
-use syn::{Token, Type};
+use syn::Token;
+use syn::Type;
 
 /// The storage annotation keyword, spelled here because this crate does not depend on the core that
 /// owns it: a field's marker is read at expansion time, where the core is not in scope.

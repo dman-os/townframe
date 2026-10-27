@@ -4,7 +4,8 @@
 use super::*;
 use proptest::collection::vec as prop_vec;
 use proptest::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 const DRAWERS: usize = 3;
 const DOCS: usize = 2;

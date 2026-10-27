@@ -1,24 +1,56 @@
 //! Service-level tests: every assertion goes through `Client<AuthorityProtocol>`,
 //! so they exercise the same hosted path a real consumer uses.
 
-use super::{
-    Actor, AttenuateCapability, Authority, AuthorityError, AuthorityProtocol,
-    AuthorityServiceError, CapId, Capability, InspectCapability, MintCapability, Namespace,
-    OPERATOR_OBJECT, OpenActor, ResolveActor, ResolveAuthority, ResolvedAuthority,
-    RetractCapability, Rights, SignFacetClaim, boot,
-};
-use super::{AuthorityBinding, AuthorityMessage};
+use super::Actor;
+use super::AttenuateCapability;
+use super::Authority;
+use super::AuthorityBinding;
+use super::AuthorityError;
+use super::AuthorityMessage;
+use super::AuthorityProtocol;
+use super::AuthorityServiceError;
+use super::CapId;
+use super::Capability;
+use super::InspectCapability;
+use super::MintCapability;
+use super::Namespace;
+use super::OPERATOR_OBJECT;
+use super::OpenActor;
+use super::ResolveActor;
+use super::ResolveAuthority;
+use super::ResolvedAuthority;
+use super::RetractCapability;
+use super::Rights;
+use super::SignFacetClaim;
+use super::boot;
 use big_cabinet_core::FacetKey;
-use big_cabinet_core::dmeta::{
-    ActorMetadata, Attribution, Cid, ClaimOperation, DocId, FacetClaim, Uuid7,
-};
-use irpc::{Channels, WithChannels, channel::none::NoReceiver};
+use big_cabinet_core::dmeta::ActorMetadata;
+use big_cabinet_core::dmeta::Attribution;
+use big_cabinet_core::dmeta::Cid;
+use big_cabinet_core::dmeta::ClaimOperation;
+use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::dmeta::FacetClaim;
+use big_cabinet_core::dmeta::Uuid7;
+use irpc::Channels;
+use irpc::WithChannels;
+use irpc::channel::none::NoReceiver;
 use secrets_rs::SecretStore;
-use service_utils_rs::{
-    Admission, Client, ClientError, Envelope, IrpcAdapter, Operation, Reply, RequestContext,
-    ServerBinding, StopToken, XrpcClient, XrpcRouter, xrpc,
-};
-use sqlx_utils_rs::SqlCtx;
+use service_utils_rs::Admission;
+use service_utils_rs::Client;
+use service_utils_rs::ClientError;
+use service_utils_rs::Envelope;
+use service_utils_rs::IrpcAdapter;
+use service_utils_rs::Operation;
+use service_utils_rs::Reply;
+use service_utils_rs::RequestContext;
+use service_utils_rs::ServerBinding;
+use service_utils_rs::StopToken;
+use service_utils_rs::XrpcClient;
+use service_utils_rs::XrpcRouter;
+use service_utils_rs::xrpc;
+use sqlite_rs::RuntimeConfig;
+use sqlite_rs::SqliteRuntime;
+use sqlite_rs::test_support;
 use std::sync::Arc;
 
 const OBJECT: Rights = Rights::all();
@@ -37,8 +69,10 @@ struct TestAuthority {
 }
 
 async fn boot_authority() -> TestAuthority {
-    let sql = SqlCtx::memory().await.expect("authority database");
-    let (authority, stop) = boot(&keyring().await, sql).await.expect("authority boot");
+    let sql = test_support::db(&[]).expect("authority database");
+    let (authority, stop) = boot(&keyring().await, sql.clone())
+        .await
+        .expect("authority boot");
     TestAuthority { authority, stop }
 }
 
@@ -885,11 +919,9 @@ async fn unknown_capability_ids_are_refused() {
 async fn reboot_loses_handles_but_preserves_actors_and_keys() {
     let secrets = keyring().await;
     let directory = tempfile::tempdir().expect("authority state directory");
-    let url = format!(
-        "sqlite://{}",
-        directory.path().join("authority.sqlite").display()
-    );
-    let sql = SqlCtx::url(&url).await.unwrap();
+    let path = directory.path().join("authority.sqlite");
+    let runtime = SqliteRuntime::new(RuntimeConfig::default());
+    let sql = runtime.database(&path, &[], "_test_migrations");
     let (authority, stop) = boot(&secrets, sql.clone()).await.unwrap();
     let first = TestAuthority { authority, stop };
     let docs = first.subsystem("docs").await;
@@ -917,9 +949,11 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
     first.stop.stop().await;
     drop(first.authority);
 
-    let (authority, stop) = boot(&secrets, SqlCtx::url(&url).await.unwrap())
-        .await
-        .unwrap();
+    drop(sql);
+    drop(runtime);
+    let runtime = SqliteRuntime::new(RuntimeConfig::default());
+    let sql = runtime.database(&path, &[], "_test_migrations");
+    let (authority, stop) = boot(&secrets, sql.clone()).await.unwrap();
     let reopened = TestAuthority { authority, stop };
     assert_ne!(reopened.root(), root);
     assert_eq!(reopened.authority.service.operator_uuid(), operator);
@@ -965,26 +999,32 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
         .unwrap();
     assert_eq!(reopened_signature, signature);
     reopened_signature.verify().unwrap();
-    let forbidden: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM sqlite_schema
-          WHERE name IN ('authority_caps', 'authority_actor_issuances', 'authority_grants')",
-    )
-    .fetch_one(&sql.read_pool)
-    .await
-    .unwrap();
+    let forbidden: i64 = sql
+        .query(
+            "SELECT count(*) FROM sqlite_schema
+              WHERE name IN ('authority_caps', 'authority_actor_issuances', 'authority_grants')",
+            (),
+        )
+        .await
+        .unwrap()
+        .one()
+        .unwrap();
     assert_eq!(forbidden, 0);
-    let durable_root: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pragma_table_info('authority_node') WHERE name = 'root_cap'",
-    )
-    .fetch_one(&sql.read_pool)
-    .await
-    .unwrap();
+    let durable_root: i64 = sql
+        .query(
+            "SELECT count(*) FROM pragma_table_info('authority_node') WHERE name = 'root_cap'",
+            (),
+        )
+        .await
+        .unwrap()
+        .one()
+        .unwrap();
     assert_eq!(durable_root, 0);
     reopened.stop.stop().await;
 
     // The sealed keys open only under the wrapping key that sealed them, so a
     // keyring that lost it is refused rather than given fresh identities.
-    let refused = boot(&keyring().await, SqlCtx::url(&url).await.unwrap()).await;
+    let refused = boot(&keyring().await, sql).await;
     assert!(
         matches!(refused, Err(AuthorityError::StateCorrupt(_))),
         "{:?}",
@@ -1532,8 +1572,13 @@ async fn gate_graph_union_is_bounded_and_duplicate_roots_are_stored_once() {
 #[tokio::test]
 async fn simultaneous_service_instances_share_identities_not_handles() {
     let secrets = keyring().await;
-    let sql = SqlCtx::memory().await.unwrap();
-    let (first, second) = tokio::join!(boot(&secrets, sql.clone()), boot(&secrets, sql.clone()));
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("authority.sqlite");
+    let first_runtime = SqliteRuntime::new(RuntimeConfig::default());
+    let second_runtime = SqliteRuntime::new(RuntimeConfig::default());
+    let sql = first_runtime.database(&path, &[], "_test_migrations");
+    let second_sql = second_runtime.database(&path, &[], "_test_migrations");
+    let (first, second) = tokio::join!(boot(&secrets, sql.clone()), boot(&secrets, second_sql));
     let (authority, stop) = first.unwrap();
     let first = TestAuthority { authority, stop };
     let subject = first.subsystem("subject").await;
@@ -1623,11 +1668,11 @@ async fn obsolete_schemas_are_refused_without_destroying_durable_data() {
         None,
     ] {
         let secrets = keyring().await;
-        let sql = SqlCtx::memory().await.unwrap();
+        let sql = test_support::db(&[]).unwrap();
         let (authority, stop) = boot(&secrets, sql.clone()).await.unwrap();
         let first = TestAuthority { authority, stop };
         let subject = first.subsystem("subject").await;
-        sqlx::query(
+        sql.execute_batch(
             "CREATE TABLE authority_grants (
                  issuer TEXT NOT NULL
                , subject TEXT NOT NULL REFERENCES authority_actors (uuid)
@@ -1636,29 +1681,30 @@ async fn obsolete_schemas_are_refused_without_destroying_durable_data() {
                , PRIMARY KEY (issuer, subject, object)
              )",
         )
-        .execute(&sql.write_pool)
         .await
         .unwrap();
-        sqlx::query(
+        sql.execute(
             "INSERT INTO authority_grants
                   ( issuer
                   , subject
                   , object
                   , rights
                   )
-             VALUES (?1, ?2, 'kept', ?3)",
+             VALUES ( :issuer
+                    , :subject
+                    , 'kept'
+                    , :rights
+                    )",
+            (
+                Uuid7::new().to_string(),
+                subject.actor_id.to_string(),
+                Rights::USE.bits_i64(),
+            ),
         )
-        .bind(Uuid7::new().to_string())
-        .bind(subject.actor_id.to_string())
-        .bind(Rights::USE.bits_i64())
-        .execute(&sql.write_pool)
         .await
         .unwrap();
         if let Some(statement) = statement {
-            sqlx::query(statement)
-                .execute(&sql.write_pool)
-                .await
-                .unwrap();
+            sql.execute_batch(statement).await.unwrap();
         }
         let snapshot = async || {
             let mut tables = Vec::new();
@@ -1697,12 +1743,7 @@ async fn obsolete_schemas_are_refused_without_destroying_durable_data() {
                  ))
                    FROM sqlite_schema",
             ] {
-                tables.push(
-                    sqlx::query_scalar::<_, String>(query)
-                        .fetch_one(&sql.read_pool)
-                        .await
-                        .unwrap(),
-                );
+                tables.push(sql.query(query, ()).await.unwrap().one::<String>().unwrap());
             }
             tables
         };
@@ -1727,9 +1768,102 @@ async fn obsolete_schemas_are_refused_without_destroying_durable_data() {
 }
 
 #[tokio::test]
+async fn unversioned_identities_gain_migration_history_without_replacing_keys() {
+    let secrets = keyring().await;
+    let sql = test_support::db(&[]).unwrap();
+    sql.execute_batch(include_str!("sqlite/migrations/001_authority.sql"))
+        .await
+        .unwrap();
+    let wrapping = zeroize::Zeroizing::new(
+        secrets
+            .get_or_create_secret(super::NODE_SERVICE, super::WRAPPING_KEY, 32)
+            .await
+            .unwrap(),
+    );
+    let wrapping = zeroize::Zeroizing::new(<[u8; 32]>::try_from(wrapping.as_slice()).unwrap());
+    let transaction = sql.begin_write().await.unwrap();
+    let node = super::AuthorityService::first_boot(&transaction, &wrapping)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let operator = super::store::actor(&sql, node.operator)
+        .await
+        .unwrap()
+        .unwrap();
+    let claim = facet_claim(node.operator, 11);
+    let signed = super::signer::sign_claim(&wrapping, &operator, claim.clone()).unwrap();
+    let before = sql.query("SELECT * FROM authority_node", ()).await.unwrap();
+    let (authority, stop) = boot(&secrets, sql.clone()).await.unwrap();
+    let test = TestAuthority { authority, stop };
+    assert_eq!(test.authority.service.operator_uuid(), node.operator);
+    assert_eq!(
+        test.authority.service.actors_namespace.namespace_id,
+        node.actors_issuer
+    );
+    assert_eq!(
+        test.call(SignFacetClaim {
+            actor: test.root(),
+            claim,
+        })
+        .await
+        .unwrap(),
+        signed
+    );
+    assert_eq!(
+        sql.query("SELECT * FROM authority_node", ()).await.unwrap(),
+        before
+    );
+    let versions: Vec<i64> = sql
+        .query(
+            "SELECT version FROM _big_cabinet_authority_migrations ORDER BY version",
+            (),
+        )
+        .await
+        .unwrap()
+        .all()
+        .unwrap();
+    assert_eq!(versions, vec![1]);
+    super::store::migrate(&sql).await.unwrap();
+    assert_eq!(
+        sql.query("SELECT * FROM authority_node", ()).await.unwrap(),
+        before
+    );
+    test.stop.stop().await;
+}
+
+#[tokio::test]
+async fn obsolete_schemas_are_refused_before_recording_migrations() {
+    for schema in [
+        "CREATE TABLE authority_node (root_cap BLOB)",
+        "CREATE TABLE authority_grants (granted_via BLOB)",
+        "CREATE TABLE authority_caps (cap_id BLOB PRIMARY KEY)",
+        "CREATE TABLE authority_actor_issuances (cap_id BLOB PRIMARY KEY)",
+        "CREATE TABLE authority_grants (object TEXT); INSERT INTO authority_grants VALUES ('kept')",
+    ] {
+        let secrets = keyring().await;
+        let sql = test_support::db(&[]).unwrap();
+        sql.execute_batch(schema).await.unwrap();
+        let before = sql.query("SELECT * FROM sqlite_schema", ()).await.unwrap();
+        let result = boot(&secrets, sql.clone()).await;
+        assert!(matches!(result, Err(AuthorityError::StateCorrupt(_))));
+        assert_eq!(
+            sql.query("SELECT * FROM sqlite_schema", ()).await.unwrap(),
+            before
+        );
+        assert!(
+            secrets
+                .get_secret(super::NODE_SERVICE, super::WRAPPING_KEY)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
 async fn an_empty_central_grant_table_does_not_block_boot_or_get_dropped() {
     let secrets = keyring().await;
-    let sql = SqlCtx::memory().await.unwrap();
+    let sql = test_support::db(&[]).unwrap();
     let (first, first_stop) = boot(&secrets, sql.clone()).await.unwrap();
     let schema = "CREATE TABLE authority_grants (
          issuer TEXT NOT NULL
@@ -1738,7 +1872,7 @@ async fn an_empty_central_grant_table_does_not_block_boot_or_get_dropped() {
        , rights INTEGER NOT NULL
        , PRIMARY KEY (issuer, subject, object)
      )";
-    sqlx::query(schema).execute(&sql.write_pool).await.unwrap();
+    sql.execute_batch(schema).await.unwrap();
     let (second, second_stop) = boot(&secrets, sql.clone()).await.unwrap();
     assert_ne!(first.root, second.root);
     assert_eq!(
@@ -1746,11 +1880,15 @@ async fn an_empty_central_grant_table_does_not_block_boot_or_get_dropped() {
         second.service.operator_uuid()
     );
     assert_eq!(first.node_issuer, second.node_issuer);
-    let persisted: String =
-        sqlx::query_scalar("SELECT sql FROM sqlite_schema WHERE name = 'authority_grants'")
-            .fetch_one(&sql.read_pool)
-            .await
-            .unwrap();
+    let persisted: String = sql
+        .query(
+            "SELECT sql FROM sqlite_schema WHERE name = 'authority_grants'",
+            (),
+        )
+        .await
+        .unwrap()
+        .one()
+        .unwrap();
     assert_eq!(persisted, schema);
     second_stop.stop().await;
     first_stop.stop().await;

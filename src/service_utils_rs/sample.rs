@@ -23,4 +23,10 @@ mod service;
 mod tests;
 
 pub use protocol::*;
-pub use service::{CallLog, Log, Logged, Sample, SampleHandler, SampleService, boot};
+pub use service::CallLog;
+pub use service::Log;
+pub use service::Logged;
+pub use service::Sample;
+pub use service::SampleHandler;
+pub use service::SampleService;
+pub use service::boot;

@@ -29,20 +29,30 @@ mod verification;
 #[cfg(test)]
 mod e2e;
 
-pub use attribution::{Attribution, AttributionError};
+pub use attribution::Attribution;
+pub use attribution::AttributionError;
 #[cfg(feature = "schemars")]
 pub use storage::StorageError;
 
 use jiff::Timestamp;
-pub use native::{CanonicalF64, NativeReadBudget, NativeReadError, NativeValue, encode_native};
-use serde::{Deserialize, Serialize};
+pub use native::CanonicalF64;
+pub use native::NativeReadBudget;
+pub use native::NativeReadError;
+pub use native::NativeValue;
+pub use native::encode_native;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use uuid::Uuid;
-pub use verification::{
-    Evidence, FacetValue, SignatureChecks, SignedFacetClaim, VerificationState, facet_verification,
-    fold_checks, signature_id,
-};
+pub use verification::Evidence;
+pub use verification::FacetValue;
+pub use verification::SignatureChecks;
+pub use verification::SignedFacetClaim;
+pub use verification::VerificationState;
+pub use verification::facet_verification;
+pub use verification::fold_checks;
+pub use verification::signature_id;
 
 use crate::reference::FacetKey;
 
@@ -277,7 +287,7 @@ pub struct FacetMetadata {
 /// What the witness cannot prove on its own is that the actor was authorized on the origin at the
 /// frontier where the signature was made. That frontier lives on the origin document, and an origin
 /// that is unavailable leaves the witness pending rather than forged.
-/// FIXME: making "origin must be avail" as pending is 
+/// FIXME: making "origin must be avail" as pending is
 /// a bad ddesign because that prevents us from delting
 /// the origin document for the compaction usecase.
 /// well, techicnally, even if we do'nt hve the original
@@ -955,9 +965,12 @@ mod tests {
     use super::*;
     #[cfg(feature = "schemars")]
     use crate::facet::FacetShape;
-    use ed25519_dalek::{Signer, SigningKey};
+    use ed25519_dalek::Signer;
+    use ed25519_dalek::SigningKey;
 
-    use crate::{FacetReference, ReferenceDocId, ReferenceError};
+    use crate::FacetReference;
+    use crate::ReferenceDocId;
+    use crate::ReferenceError;
 
     fn facet_key(value: &str) -> FacetKey {
         FacetKey::from_str(value).unwrap()
@@ -1436,8 +1449,13 @@ mod tests {
 
     #[test]
     fn missing_invalid_and_uncovered_evidence_remain_distinct() {
-        use Evidence::{Invalid, Missing, Present};
-        use VerificationState::{Accepted, Pending, Rejected, Uncovered};
+        use Evidence::Invalid;
+        use Evidence::Missing;
+        use Evidence::Present;
+        use VerificationState::Accepted;
+        use VerificationState::Pending;
+        use VerificationState::Rejected;
+        use VerificationState::Uncovered;
 
         for (checks, expected) in [
             ([Present, Present, Present], Accepted),
@@ -1642,7 +1660,10 @@ mod tests {
 
     #[test]
     fn empty_signature_sets_are_uncovered_and_competitors_do_not_poison_acceptance() {
-        use VerificationState::{Accepted, Pending, Rejected, Uncovered};
+        use VerificationState::Accepted;
+        use VerificationState::Pending;
+        use VerificationState::Rejected;
+        use VerificationState::Uncovered;
 
         assert_eq!(facet_verification([]), Uncovered);
         assert_eq!(facet_verification([Uncovered]), Uncovered);

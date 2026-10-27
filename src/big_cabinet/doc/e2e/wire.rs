@@ -1,17 +1,28 @@
 //! Snapshots pinning the serde wire form of every public DTO in [`super::protocol`], so a wire
 //! change shows up as a reviewable snapshot diff. Fixtures are deterministic byte patterns.
 
-use super::{NOTE, PLACEMENT, facet_map, key, note};
+use super::NOTE;
+use super::PLACEMENT;
+use super::facet_map;
+use super::key;
+use super::note;
 use automerge::ChangeHash;
 use big_cabinet_core::DocId;
-use big_cabinet_core::authority::{AuthorityServiceError, CapId};
-use big_cabinet_core::dmeta::{
-    Bytes, ClaimOperation, FacetClaim, FacetSignature, MultibaseKey, SignatureBytes, Uuid7, cid_of,
-};
+use big_cabinet_core::authority::AuthorityServiceError;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::dmeta::Bytes;
+use big_cabinet_core::dmeta::ClaimOperation;
+use big_cabinet_core::dmeta::FacetClaim;
+use big_cabinet_core::dmeta::FacetSignature;
+use big_cabinet_core::dmeta::MultibaseKey;
+use big_cabinet_core::dmeta::SignatureBytes;
+use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::dmeta::cid_of;
 use big_cabinet_core::doc::*;
 use serde_json::json;
 use service_utils_rs::ContextError;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 fn hash(byte: u8) -> ChangeHash {
     ChangeHash([byte; 32])

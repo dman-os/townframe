@@ -1,10 +1,32 @@
-use super::{
-    ActorMetadata, Attribution, Cid, ClaimOperation, Dmeta, DmetaError, DocId, Evidence,
-    FacetClaim, FacetMetadata, FacetSignature, FacetValue, MultibaseKey, NativeValue,
-    SignatureBytes, SignedFacetClaim, Uuid7, VerificationState, cid_of, encode_native,
-};
-use automerge::{ActorId, Automerge, ObjId, ObjType, ROOT, ReadDoc, transaction::Transactable};
-use ed25519_dalek::{Signer, SigningKey};
+use super::ActorMetadata;
+use super::Attribution;
+use super::Cid;
+use super::ClaimOperation;
+use super::Dmeta;
+use super::DmetaError;
+use super::DocId;
+use super::Evidence;
+use super::FacetClaim;
+use super::FacetMetadata;
+use super::FacetSignature;
+use super::FacetValue;
+use super::MultibaseKey;
+use super::NativeValue;
+use super::SignatureBytes;
+use super::SignedFacetClaim;
+use super::Uuid7;
+use super::VerificationState;
+use super::cid_of;
+use super::encode_native;
+use automerge::ActorId;
+use automerge::Automerge;
+use automerge::ObjId;
+use automerge::ObjType;
+use automerge::ROOT;
+use automerge::ReadDoc;
+use automerge::transaction::Transactable;
+use ed25519_dalek::Signer;
+use ed25519_dalek::SigningKey;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 

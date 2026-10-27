@@ -1,20 +1,41 @@
 use crate::DocId;
-use crate::authority::{
-    Actor, AuthorityProtocol, CapId, Capability, MintCapability, Namespace, ResolveAuthority,
-    ResolvedAuthority, Rights,
-};
-use crate::dmeta::{Bytes, MultibaseKey, Uuid7};
-use crate::doc::{
-    At, DocAvailability, DocsProtocol, GetDocAvailability, LocalDocUsability,
-    ObserveDocAvailability, ObserveFacets, ObserveScope, ReadFacets,
-};
-use crate::drawer::protocol::{DrawersProtocol, GetDrawer};
-use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
-use service_core_rs::{
-    Envelope, EventReply, HttpInput, HttpMethod, Operation, Reply, RequestContext, Subscription,
-    Unary, XrpcKind,
-};
+use crate::authority::Actor;
+use crate::authority::AuthorityProtocol;
+use crate::authority::CapId;
+use crate::authority::Capability;
+use crate::authority::MintCapability;
+use crate::authority::Namespace;
+use crate::authority::ResolveAuthority;
+use crate::authority::ResolvedAuthority;
+use crate::authority::Rights;
+use crate::dmeta::Bytes;
+use crate::dmeta::MultibaseKey;
+use crate::dmeta::Uuid7;
+use crate::doc::At;
+use crate::doc::DocAvailability;
+use crate::doc::DocsProtocol;
+use crate::doc::GetDocAvailability;
+use crate::doc::LocalDocUsability;
+use crate::doc::ObserveDocAvailability;
+use crate::doc::ObserveFacets;
+use crate::doc::ObserveScope;
+use crate::doc::ReadFacets;
+use crate::drawer::protocol::DrawersProtocol;
+use crate::drawer::protocol::GetDrawer;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use serde_json::json;
+use service_core_rs::Envelope;
+use service_core_rs::EventReply;
+use service_core_rs::HttpInput;
+use service_core_rs::HttpMethod;
+use service_core_rs::Operation;
+use service_core_rs::Reply;
+use service_core_rs::RequestContext;
+use service_core_rs::Subscription;
+use service_core_rs::Unary;
+use service_core_rs::XrpcKind;
 
 fn wire<T: Serialize + DeserializeOwned>(value: &T, expected: Value) {
     let encoded = serde_json::to_value(value).unwrap();

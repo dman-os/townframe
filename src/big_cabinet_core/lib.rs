@@ -10,10 +10,14 @@ pub mod facet;
 pub mod reference;
 pub mod schema_compat;
 
-pub use reference::{
-    DocId, FACET_REFERENCE_SCHEME, FacetKey, FacetReference, FacetTag, ReferenceDocId,
-    ReferenceError, SELF_DOC,
-};
+pub use reference::DocId;
+pub use reference::FACET_REFERENCE_SCHEME;
+pub use reference::FacetKey;
+pub use reference::FacetReference;
+pub use reference::FacetTag;
+pub use reference::ReferenceDocId;
+pub use reference::ReferenceError;
+pub use reference::SELF_DOC;
 
 #[cfg(test)]
 mod panproto_schema_store_poc;

@@ -2,7 +2,10 @@
 //! Automerge's merge of one history-sharing document into another. Nothing is copied by value, so
 //! every signature verifies wherever its change travels.
 
-use super::super::commands::{Commands, Detail, Kind, State};
+use super::super::commands::Commands;
+use super::super::commands::Detail;
+use super::super::commands::Kind;
+use super::super::commands::State;
 use super::*;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;

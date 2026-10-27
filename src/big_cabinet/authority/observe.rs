@@ -1,5 +1,6 @@
 use super::*;
-use futures::{StreamExt, stream};
+use futures::StreamExt;
+use futures::stream;
 use service_utils_rs::EventStream;
 
 impl AuthorityService {
@@ -58,7 +59,8 @@ impl Handler<ObserveCapability> for AuthorityService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use service_utils_rs::{ClientError, RequestContext};
+    use service_utils_rs::ClientError;
+    use service_utils_rs::RequestContext;
 
     async fn boot_authority() -> (Authority, StopToken) {
         let keyring = keyring_core::mock::Store::new().expect("mock keyring")
@@ -68,7 +70,9 @@ mod tests {
             .expect("secret store");
         boot(
             &secrets,
-            SqlCtx::memory().await.expect("authority database"),
+            sqlite_rs::test_support::db(&[])
+                .expect("authority database")
+                .clone(),
         )
         .await
         .expect("authority boot")

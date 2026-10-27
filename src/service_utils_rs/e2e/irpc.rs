@@ -2,11 +2,18 @@
 //! independent unary and stream capacity, cooperative cancellation, and a
 //! stop that joins every admitted task.
 
-use super::{Stack, wait_for_activity};
-use crate::{
-    Client, ClientError, ContextError, RequestContext,
-    sample::{GetValue, PutValue, SampleError, SampleMessage, SampleProtocol, SubscribeEvents},
-};
+use super::Stack;
+use super::wait_for_activity;
+use crate::Client;
+use crate::ClientError;
+use crate::ContextError;
+use crate::RequestContext;
+use crate::sample::GetValue;
+use crate::sample::PutValue;
+use crate::sample::SampleError;
+use crate::sample::SampleMessage;
+use crate::sample::SampleProtocol;
+use crate::sample::SubscribeEvents;
 use futures::future::join_all;
 
 #[tokio::test]

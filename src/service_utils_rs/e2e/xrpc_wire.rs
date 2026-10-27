@@ -3,11 +3,17 @@
 //! kind. The HTTP server and client themselves are tested in `xrpc::tests`.
 
 use super::Stack;
-use crate::{
-    Client, ClientError, Operation, RequestContext, XrpcClient,
-    sample::{GetValue, PutValue, SampleError, SampleProtocol},
-    xrpc::{DOMAIN_ERROR_FIELD, DOMAIN_ERROR_STATUS},
-};
+use crate::Client;
+use crate::ClientError;
+use crate::Operation;
+use crate::RequestContext;
+use crate::XrpcClient;
+use crate::sample::GetValue;
+use crate::sample::PutValue;
+use crate::sample::SampleError;
+use crate::sample::SampleProtocol;
+use crate::xrpc::DOMAIN_ERROR_FIELD;
+use crate::xrpc::DOMAIN_ERROR_STATUS;
 use url::Url;
 
 #[tokio::test]

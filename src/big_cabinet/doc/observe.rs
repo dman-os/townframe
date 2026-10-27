@@ -2,12 +2,16 @@
 //! filtered by the same read access as gated reads (ADR 009 §6).
 
 use super::*;
-use crate::authority::{CapabilityStatus, ObserveCapability};
-use crate::index::facet_set::{FacetMembership, FacetRoute};
-use big_sync_core::keyed_frontier::{FrontierEntry, KeyedFrontierError};
-use big_sync_core::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use crate::authority::CapabilityStatus;
+use crate::authority::ObserveCapability;
+use crate::index::facet_set::FacetMembership;
+use crate::index::facet_set::FacetRoute;
+use big_sync_core::keyed_frontier::FrontierEntry;
+use big_sync_core::keyed_frontier::KeyedFrontierError;
+use big_sync_core::revisioned_store::RevisionRead;
+use big_sync_core::revisioned_store::RevisionReadLimits;
+use big_sync_core::revisioned_store::RevisionedStore;
+use big_sync_core::revisioned_store::RevisionedStoreReader;
 use futures::StreamExt;
 
 impl Handler<ObserveFacets> for DocsService {

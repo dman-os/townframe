@@ -203,26 +203,55 @@ impl Handler<InspectFacetClaims> for DocsService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{
-        Actor, AttenuateCapability, Authority, CapId, Capability, MintCapability, OpenActor,
-        RetractCapability, Rights,
-    };
+    use crate::authority::Actor;
+    use crate::authority::AttenuateCapability;
+    use crate::authority::Authority;
+    use crate::authority::CapId;
+    use crate::authority::Capability;
+    use crate::authority::MintCapability;
+    use crate::authority::OpenActor;
+    use crate::authority::RetractCapability;
+    use crate::authority::Rights;
     use crate::schema::SchemaRepo;
+    use automerge::Automerge;
+    use automerge::ChangeHash;
+    use automerge::ObjId;
+    use automerge::ObjType;
+    use automerge::ReadDoc;
     use automerge::transaction::Transactable;
-    use automerge::{Automerge, ChangeHash, ObjId, ObjType, ReadDoc};
     use big_cabinet_core::FacetKey;
-    use big_cabinet_core::dmeta::{
-        Bytes, ClaimOperation, DocId, FacetClaim, FacetSignature, MultibaseKey, NativeValue,
-        SignatureBytes, SignedFacetClaim, Uuid7, cid_of, encode_native,
-    };
-    use big_repo::{BigDocHandle, BigRepo, BigRepoStopToken, Config, SharedBigRepo, StorageConfig};
-    use ed25519_dalek::{Signer, SigningKey};
+    use big_cabinet_core::dmeta::Bytes;
+    use big_cabinet_core::dmeta::ClaimOperation;
+    use big_cabinet_core::dmeta::DocId;
+    use big_cabinet_core::dmeta::FacetClaim;
+    use big_cabinet_core::dmeta::FacetSignature;
+    use big_cabinet_core::dmeta::MultibaseKey;
+    use big_cabinet_core::dmeta::NativeValue;
+    use big_cabinet_core::dmeta::SignatureBytes;
+    use big_cabinet_core::dmeta::SignedFacetClaim;
+    use big_cabinet_core::dmeta::Uuid7;
+    use big_cabinet_core::dmeta::cid_of;
+    use big_cabinet_core::dmeta::encode_native;
+    use big_repo::BigDocHandle;
+    use big_repo::BigRepo;
+    use big_repo::BigRepoStopToken;
+    use big_repo::Config;
+    use big_repo::SharedBigRepo;
+    use big_repo::StorageConfig;
+    use ed25519_dalek::Signer;
+    use ed25519_dalek::SigningKey;
     use secrets_rs::SecretStore;
-    use service_utils_rs::{
-        Admission, Client, ClientError, ContextError, IrpcAdapter, RequestContext, ServerBinding,
-        StopToken, XrpcClient, XrpcRouter, xrpc,
-    };
-    use sqlx_utils_rs::SqlCtx;
+    use service_utils_rs::Admission;
+    use service_utils_rs::Client;
+    use service_utils_rs::ClientError;
+    use service_utils_rs::ContextError;
+    use service_utils_rs::IrpcAdapter;
+    use service_utils_rs::RequestContext;
+    use service_utils_rs::ServerBinding;
+    use service_utils_rs::StopToken;
+    use service_utils_rs::XrpcClient;
+    use service_utils_rs::XrpcRouter;
+    use service_utils_rs::xrpc;
     use std::sync::Arc;
 
     const FACET: &str = "org.example.note/main";
@@ -249,7 +278,7 @@ mod tests {
                 keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
             let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
             let (authority, authority_stop) =
-                crate::authority::boot(&secrets, SqlCtx::memory().await.unwrap())
+                crate::authority::boot(&secrets, sqlite_rs::test_support::db(&[]).unwrap().clone())
                     .await
                     .unwrap();
             let issuer = authority
@@ -269,21 +298,24 @@ mod tests {
                 .open_namespace(Uuid7::new())
                 .await
                 .unwrap();
-            let (repo, repo_stop) = BigRepo::boot(Config {
-                node_identity_seed: [31; 32],
-                storage: StorageConfig::Memory,
-                scope_key: "document-service-tests".into(),
-                hidden_parts: Default::default(),
-                automerge_frontier_group_scope: Default::default(),
-                causal_checkpoint_group_scope: Default::default(),
-                group_part_group_scope: Default::default(),
-            })
+            let (repo, repo_stop) = BigRepo::boot(
+                Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
+                Config {
+                    node_identity_seed: [31; 32],
+                    storage: StorageConfig::Memory,
+                    scope_key: "document-service-tests".into(),
+                    hidden_parts: Default::default(),
+                    automerge_frontier_group_scope: Default::default(),
+                    causal_checkpoint_group_scope: Default::default(),
+                    group_part_group_scope: Default::default(),
+                },
+            )
             .await
             .unwrap();
             let schemas = Arc::new(SchemaRepo::open([]).unwrap());
             let access = Arc::new(
                 LedgerAccess::open(
-                    SqlCtx::memory().await.unwrap(),
+                    sqlite_rs::test_support::db(&[]).unwrap().clone(),
                     authority.client.clone(),
                     namespace,
                 )
@@ -541,7 +573,7 @@ mod tests {
             namespace,
             node_issuer: authority.node_issuer.clone(),
             access,
-            sql: SqlCtx::memory().await.unwrap(),
+            sql: sqlite_rs::test_support::db(&[]).unwrap().clone(),
             facet_set: None,
             facet_ref: None,
         }

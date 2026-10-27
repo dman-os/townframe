@@ -13,18 +13,15 @@
 //! on it is still running.
 
 use futures::FutureExt;
-use std::{
-    future::Future,
-    panic::AssertUnwindSafe,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-};
-use tokio_util::{
-    sync::CancellationToken,
-    task::{TaskTracker, task_tracker::TaskTrackerToken},
-};
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 use tracing::instrument::WithSubscriber;
 
 #[derive(Debug, Clone)]

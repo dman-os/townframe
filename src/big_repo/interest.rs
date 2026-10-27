@@ -1,8 +1,12 @@
+use crate::BigDocHandle;
+use crate::BigRepo;
+use crate::DocumentId;
 use crate::interlude::*;
-use crate::{BigDocHandle, BigRepo, DocumentId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::watch;
 
 const SYNC_INTEREST_GRACE: Duration = Duration::from_secs(30);
@@ -313,19 +317,25 @@ mod tests {
 
     #[tokio::test]
     async fn repo_sync_demand_incremental_peer_scope_and_consumer_grace() -> Res<()> {
-        use automerge::{ReadDoc, transaction::Transactable};
-        use big_sync::{HostPartStore, SubscriptionUpdate};
+        use automerge::ReadDoc;
+        use automerge::transaction::Transactable;
+        use big_sync::HostPartStore;
+        use big_sync::SubscriptionUpdate;
 
-        let (repo, repo_stop) = BigRepo::boot(crate::Config {
-            node_identity_seed: [201; 32],
-            storage: crate::StorageConfig::Memory,
-            scope_key: Arc::from("subscription-boundary-test"),
-            hidden_parts: HashSet::new(),
-            automerge_frontier_group_scope: crate::WorkerGroupScope::disabled(),
-            causal_checkpoint_group_scope: crate::WorkerGroupScope::disabled(),
-            group_part_group_scope: crate::WorkerGroupScope::disabled(),
-            keyhive_change_notifs: true,
-        })
+        let runtime = Arc::new(sqlite_rs::SqliteRuntime::new(Default::default()));
+        let (repo, repo_stop) = BigRepo::boot(
+            runtime,
+            crate::Config {
+                node_identity_seed: [201; 32],
+                storage: crate::StorageConfig::Memory,
+                scope_key: Arc::from("subscription-boundary-test"),
+                hidden_parts: HashSet::new(),
+                automerge_frontier_group_scope: crate::WorkerGroupScope::disabled(),
+                causal_checkpoint_group_scope: crate::WorkerGroupScope::disabled(),
+                group_part_group_scope: crate::WorkerGroupScope::disabled(),
+                keyhive_change_notifs: true,
+            },
+        )
         .await?;
         let missing = DocumentId::random();
         assert!(matches!(

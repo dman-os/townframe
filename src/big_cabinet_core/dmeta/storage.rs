@@ -1,10 +1,20 @@
-use super::{Bytes, Dmeta};
+use super::Bytes;
+use super::Dmeta;
 use crate::FacetKey;
-use crate::facet::{CodecError, CompiledSchema, Stored, hydrate_value, reconcile_json_atomic};
-use automerge::transaction::{Transactable, Transaction};
-use automerge::{ObjId, ObjType, ReadDoc, ScalarValue};
+use crate::facet::CodecError;
+use crate::facet::CompiledSchema;
+use crate::facet::Stored;
+use crate::facet::hydrate_value;
+use crate::facet::reconcile_json_atomic;
+use automerge::ObjId;
+use automerge::ObjType;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::transaction::Transactable;
+use automerge::transaction::Transaction;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -304,12 +314,19 @@ fn reconcile_set(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dmeta::{
-        ActorMetadata, FacetMetadata, FacetSignature, InheritedWitness, MultibaseKey,
-        SignatureBytes, Uuid7,
-    };
-    use crate::facet::{Bundle, Declaration, Universe};
-    use automerge::{ActorId, Automerge, ROOT};
+    use crate::dmeta::ActorMetadata;
+    use crate::dmeta::FacetMetadata;
+    use crate::dmeta::FacetSignature;
+    use crate::dmeta::InheritedWitness;
+    use crate::dmeta::MultibaseKey;
+    use crate::dmeta::SignatureBytes;
+    use crate::dmeta::Uuid7;
+    use crate::facet::Bundle;
+    use crate::facet::Declaration;
+    use crate::facet::Universe;
+    use automerge::ActorId;
+    use automerge::Automerge;
+    use automerge::ROOT;
     use serde_json::json;
 
     fn schema() -> CompiledSchema {

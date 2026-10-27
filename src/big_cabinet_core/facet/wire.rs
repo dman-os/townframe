@@ -10,12 +10,21 @@
 //! enum encoding is not the contract. An open union has a fallback that keeps a member this build
 //! does not know about, and no serde attribute expresses that.
 
-use crate::facet::{Extra, FacetMember};
+use crate::facet::Extra;
+use crate::facet::FacetMember;
 #[cfg(feature = "schemars")]
-use schemars::{JsonSchema, Schema, SchemaGenerator};
+use schemars::JsonSchema;
+#[cfg(feature = "schemars")]
+use schemars::Schema;
+#[cfg(feature = "schemars")]
+use schemars::SchemaGenerator;
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
+use serde::Serializer;
 use serde::de::Error as _;
-use serde::ser::{Error as _, SerializeMap};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::ser::Error as _;
+use serde::ser::SerializeMap;
 #[cfg(feature = "schemars")]
 use serde_json::Map;
 use serde_json::Value;

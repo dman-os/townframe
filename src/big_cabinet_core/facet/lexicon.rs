@@ -15,9 +15,13 @@
 //! an error naming the position; it is never quietly turned into an `unknown` that admits more than
 //! the author declared.
 
-use super::codec::{KEYWORD, keyed_map};
-use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use super::codec::KEYWORD;
+use super::codec::keyed_map;
+use serde_json::Map;
+use serde_json::Value;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 /// The object keys the canonical data model reserves. An application `$` key is refused everywhere,
 /// including inside content no schema describes, so that relaxing this later stays possible.

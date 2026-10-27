@@ -1,5 +1,8 @@
 use super::*;
-use crate::authority::{AttenuateCapability, InspectCapability, MintCapability, RetractCapability};
+use crate::authority::AttenuateCapability;
+use crate::authority::InspectCapability;
+use crate::authority::MintCapability;
+use crate::authority::RetractCapability;
 use futures::StreamExt;
 
 async fn actor(node: &Node, path: &str, rights: Rights) -> Actor {
@@ -493,7 +496,10 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
 
 #[tokio::test]
 async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
-    use super::super::commands::{Commands, Detail, Kind, State};
+    use super::super::commands::Commands;
+    use super::super::commands::Detail;
+    use super::super::commands::Kind;
+    use super::super::commands::State;
 
     struct InterruptedPlacement {
         ledger: Arc<LedgerAccess>,
@@ -854,10 +860,11 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
 async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched() {
     use crate::index::FacetRefStore;
     use big_cabinet_core::drawer::DrawerAccess;
+    use sqlite_rs::IntoValue;
     use std::sync::Mutex;
 
     struct Policy {
-        sql: SqlCtx,
+        sql: Database,
         drawers: BTreeMap<DocId, DrawerAccess>,
         selector: DocId,
         denied: DocId,
@@ -910,26 +917,18 @@ async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
                 }
                 if documents == &BTreeSet::from([self.selector.clone()]) {
                     for origin in &self.origins {
-                        sqlx::query(
-                            "INSERT INTO big_cabinet_facet_ref_edges (
-                                 origin_doc
-                               , origin_facet
-                               , origin_path
-                               , target_doc
-                               , target_facet
-                               , ref_heads
-                             ) VALUES (?, ?, ?, ?, ?, ?)
-                             ON CONFLICT DO NOTHING",
-                        )
-                        .bind(origin.to_string())
-                        .bind(key("main").to_string())
-                        .bind("/link")
-                        .bind(self.selector.to_string())
-                        .bind(key("main").to_string())
-                        .bind("[]".as_bytes())
-                        .execute(&self.sql.write_pool)
-                        .await
-                        .unwrap();
+                        self.sql
+                            .execute(
+                                include_str!("../sqlite/fixtures/insert_ref_edge.sql"),
+                                &[
+                                    origin.to_string().into_value(),
+                                    key("main").to_string().into_value(),
+                                    self.selector.to_string().into_value(),
+                                    "[]".as_bytes().into_value(),
+                                ],
+                            )
+                            .await
+                            .unwrap();
                     }
                     return Ok(BTreeMap::from([(
                         self.selector.clone(),
@@ -960,7 +959,7 @@ async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
     let owner = actor(&node, "owner", Rights::USE | Rights::NARROW).await;
     let [selector, first_origin, second_origin, denied, drawer] =
         [81_u8, 82, 83, 84, 85].map(|value| DocId::new([value; 32]));
-    let index_sql = SqlCtx::memory().await.unwrap();
+    let index_sql = sqlite_rs::test_support::db(&[]).unwrap().clone();
     let facet_ref = Arc::new(FacetRefStore::new(index_sql.clone()).await.unwrap());
     let policy = Arc::new(Policy {
         sql: index_sql.clone(),
@@ -1028,8 +1027,8 @@ async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
         expected_calls.extend([BTreeSet::from([selector.clone()]), policy.origins.clone()]);
     }
     assert_eq!(*policy.calls.lock().unwrap(), expected_calls);
-    sqlx::query("DROP TABLE big_cabinet_facet_ref_edges")
-        .execute(&index_sql.write_pool)
+    index_sql
+        .execute_batch(include_str!("../sqlite/fixtures/drop_ref_edges.sql"))
         .await
         .unwrap();
     for drawer_id in [None, Some(drawer)] {

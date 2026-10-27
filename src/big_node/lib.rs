@@ -1,21 +1,34 @@
-use big_cabinet::authority::{Actor, Namespace, OpenActor};
+use big_cabinet::Authority;
+use big_cabinet::DocAccess;
+use big_cabinet::DocsConfig;
+use big_cabinet::DocsRepo;
+use big_cabinet::DrawerAccess;
+use big_cabinet::DrawerConfig;
+use big_cabinet::Drawers;
+use big_cabinet::Rights;
+use big_cabinet::SchemaRepo;
+use big_cabinet::authority::Actor;
+use big_cabinet::authority::Namespace;
+use big_cabinet::authority::OpenActor;
 use big_cabinet::drawer::access::DrawerWorker;
 use big_cabinet::index::Indexes;
-use big_cabinet::{
-    Authority, DocAccess, DocsConfig, DocsRepo, DrawerAccess, DrawerConfig, Drawers, Rights,
-    SchemaRepo,
-};
-use big_repo::{BigRepo, BigRepoStopToken, SharedBigRepo};
+use big_repo::BigRepo;
+use big_repo::BigRepoStopToken;
+use big_repo::SharedBigRepo;
 use futures::FutureExt;
 use secrets_rs::SecretStore;
 use service_utils_rs::RequestContext;
-use sqlx_utils_rs::SqlCtx;
-use std::{num::NonZeroUsize, panic::AssertUnwindSafe, sync::Arc};
+use sqlite_rs::Database;
+use sqlite_rs::SqliteRuntime;
+use std::num::NonZeroUsize;
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use utils_rs::prelude::Res;
 
 pub struct Config<'a> {
     pub repo: big_repo::Config,
-    pub sql: SqlCtx,
+    pub sql: Database,
+    pub sqlite_runtime: Arc<SqliteRuntime>,
     pub schemas: Arc<SchemaRepo>,
     pub secrets: &'a SecretStore,
     pub index_concurrency: NonZeroUsize,
@@ -62,7 +75,7 @@ impl BigNode {
                 .open_namespace(drawers_actor.actor_id)
                 .await?;
 
-            let (repo, repo_stop) = BigRepo::boot(config.repo).await?;
+            let (repo, repo_stop) = BigRepo::boot(config.sqlite_runtime, config.repo).await?;
             stop.stages.push(Stage::Repo(repo_stop));
             let (indexes, index_stop) = Indexes::boot(
                 Arc::clone(&repo),

@@ -1,18 +1,29 @@
-use crate::authority::{
-    AuthorityProtocol, AuthorityServiceError, CapId, InspectCapability, MintCapability, Namespace,
-    RetractCapability, Rights,
-};
+use crate::authority::AuthorityProtocol;
+use crate::authority::AuthorityServiceError;
+use crate::authority::CapId;
+use crate::authority::InspectCapability;
+use crate::authority::MintCapability;
+use crate::authority::Namespace;
+use crate::authority::RetractCapability;
+use crate::authority::Rights;
 use big_cabinet_core::dmeta::Uuid7;
-use service_utils_rs::{Client, ClientError, RequestContext};
-use sqlx::Row;
-use sqlx_utils_rs::SqlCtx;
+use service_utils_rs::Client;
+use service_utils_rs::ClientError;
+use service_utils_rs::RequestContext;
+use sqlite_rs::Database;
+use sqlite_rs::Json;
+use sqlite_rs::SqlError;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
+
+mod sqlite {
+    include!("grants/sqlite/gen.rs");
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum GrantError {
     #[error("grant storage failed: {0}")]
-    Storage(#[from] sqlx::Error),
+    Storage(#[from] SqlError),
     #[error("grant capability failed: {0}")]
     Authority(#[from] ClientError<AuthorityServiceError>),
 }
@@ -24,7 +35,7 @@ struct State {
 }
 
 pub struct Grants {
-    sql: SqlCtx,
+    sql: Database,
     authority: Client<AuthorityProtocol>,
     namespace: Namespace,
     state: Mutex<State>,
@@ -37,21 +48,12 @@ pub struct GrantProof {
 
 impl Grants {
     pub async fn open(
-        sql: SqlCtx,
+        sql: Database,
         authority: Client<AuthorityProtocol>,
         namespace: Namespace,
     ) -> Result<Self, GrantError> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS cabinet_domain_grants (
-                 namespace TEXT NOT NULL
-               , subject TEXT NOT NULL
-               , object TEXT NOT NULL
-               , rights INTEGER NOT NULL
-               , PRIMARY KEY (namespace, subject, object)
-             )",
-        )
-        .execute(&sql.write_pool)
-        .await?;
+        sql.apply_migrations(sqlite::MIGRATION_TABLE, sqlite::MIGRATIONS)
+            .await?;
         Ok(Self {
             sql,
             authority,
@@ -127,40 +129,25 @@ impl Grants {
                 .or_default()
                 .insert(source, rights);
         } else {
-            let mut transaction = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            let existing: Option<i64> = sqlx::query_scalar(
-                "SELECT rights
-                   FROM cabinet_domain_grants
-                  WHERE namespace = ?1
-                    AND subject = ?2
-                    AND object = ?3",
+            let existing = sqlite::get_grant(
+                &self.sql,
+                self.namespace.namespace_id.to_string(),
+                subject.to_string(),
+                key.1.clone(),
             )
-            .bind(self.namespace.namespace_id.to_string())
-            .bind(subject.to_string())
-            .bind(&key.1)
-            .fetch_optional(&mut *transaction)
             .await?;
             if existing == Some(rights.bits_i64()) {
-                transaction.commit().await?;
                 return Ok(());
             }
             self.retract_gate(context, &mut state, &key).await?;
-            sqlx::query(
-                "INSERT INTO cabinet_domain_grants
-                       ( namespace
-                       , subject
-                       , object
-                       , rights
-                       )
-                 VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT (namespace, subject, object)
-                     DO UPDATE SET rights = excluded.rights",
+            let transaction = self.sql.begin_write().await?;
+            sqlite::put_grant(
+                &transaction,
+                self.namespace.namespace_id.to_string(),
+                subject.to_string(),
+                key.1,
+                rights.bits_i64(),
             )
-            .bind(self.namespace.namespace_id.to_string())
-            .bind(subject.to_string())
-            .bind(&key.1)
-            .bind(rights.bits_i64())
-            .execute(&mut *transaction)
             .await?;
             transaction.commit().await?;
         }
@@ -175,22 +162,18 @@ impl Grants {
     ) -> Result<(), GrantError> {
         let mut state = self.state.lock().await;
         self.ensure_live(context).await?;
-        let mut transaction = self.sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
         for object in objects {
             let key = (subject, object.clone());
             self.retract_gate(context, &mut state, &key).await?;
             state.temporary.remove(&key);
         }
-        sqlx::query(
-            "DELETE FROM cabinet_domain_grants
-              WHERE namespace = ?1
-                AND subject = ?2
-                AND object IN (SELECT value FROM json_each(?3))",
+        let transaction = self.sql.begin_write().await?;
+        sqlite::revoke_grants(
+            &transaction,
+            self.namespace.namespace_id.to_string(),
+            subject.to_string(),
+            Json(objects.to_vec()),
         )
-        .bind(self.namespace.namespace_id.to_string())
-        .bind(subject.to_string())
-        .bind(serde_json::to_string(objects).expect("grant objects serialize"))
-        .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
         Ok(())
@@ -204,26 +187,17 @@ impl Grants {
     ) -> Result<Vec<GrantProof>, GrantError> {
         let mut state = self.state.lock().await;
         self.ensure_live(context).await?;
-        let rows = sqlx::query(
-            "SELECT requested.value AS object
-                  , COALESCE(grants.rights, 0) AS rights
-               FROM json_each(?3) AS requested
-               LEFT JOIN cabinet_domain_grants AS grants
-                 ON grants.namespace = ?1
-                AND grants.subject = ?2
-                AND grants.object = requested.value
-              ORDER BY CAST(requested.key AS INTEGER)",
+        let rows = sqlite::matching_grants(
+            &self.sql,
+            Json(objects.to_vec()),
+            self.namespace.namespace_id.to_string(),
+            subject.to_string(),
         )
-        .bind(self.namespace.namespace_id.to_string())
-        .bind(subject.to_string())
-        .bind(serde_json::to_string(objects).expect("grant objects serialize"))
-        .fetch_all(&self.sql.read_pool)
         .await?;
         let mut proofs = Vec::with_capacity(rows.len());
         for row in rows {
-            let object: String = row.try_get("object")?;
-            let key = (subject, object);
-            let mut rights = Rights::from_bits(row.try_get("rights")?)
+            let key = (subject, row.object);
+            let mut rights = Rights::from_bits(row.rights)
                 .expect("domain grant rights are validated at insertion");
             let mut dependencies = Vec::new();
             if let Some(grants) = state.temporary.get_mut(&key) {
@@ -287,14 +261,17 @@ impl Grants {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authority::{self, AttenuateCapability, Authority, Capability};
+    use crate::authority::AttenuateCapability;
+    use crate::authority::Authority;
+    use crate::authority::Capability;
+    use crate::authority::{self};
     use crate::capability::DomainCapabilities;
     use secrets_rs::SecretStore;
     use service_utils_rs::StopToken;
     use std::sync::Arc;
 
     struct Fixture {
-        sql: SqlCtx,
+        sql: Database,
         secrets: SecretStore,
         authority: Authority,
         namespace: Namespace,
@@ -304,7 +281,7 @@ mod tests {
 
     impl Fixture {
         async fn new() -> Self {
-            let sql = SqlCtx::memory().await.unwrap();
+            let sql = sqlite_rs::test_support::db(&[]).unwrap().clone();
             let store =
                 keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
             let secrets = SecretStore::boot_with_store(store).await.unwrap();
@@ -534,6 +511,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grant_changes_retract_before_waiting_for_the_shared_writer() {
+        use crate::authority::CapabilityStatus;
+        use crate::authority::ObserveCapability;
+        use futures::StreamExt;
+
+        let fixture = Fixture::new().await;
+        let context = RequestContext::root();
+        let subject = Uuid7::new();
+        for replacement in [Some(Rights::USE | Rights::NARROW), None] {
+            fixture
+                .grants
+                .grant(&context, subject, "document".into(), Rights::USE, None)
+                .await
+                .unwrap();
+            let capability = fixture
+                .mint(fixture.proof(subject, "document").await.dependencies)
+                .await
+                .unwrap();
+            let mut events = fixture
+                .authority
+                .client
+                .subscribe(
+                    context.child(),
+                    ObserveCapability {
+                        capability: capability.capability_id,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(events.next().await, Some(Ok(CapabilityStatus::Live)));
+            let writer = fixture.sql.begin_write().await.unwrap();
+            let change = async {
+                match replacement {
+                    Some(rights) => {
+                        fixture
+                            .grants
+                            .grant(&context, subject, "document".into(), rights, None)
+                            .await
+                    }
+                    None => {
+                        fixture
+                            .grants
+                            .revoke(&context, subject, &["document".into()])
+                            .await
+                    }
+                }
+            };
+            tokio::pin!(change);
+            tokio::select! {
+                result = &mut change => panic!("grant change completed while writer was leased: {result:?}"),
+                event = events.next() => assert_eq!(event, Some(Ok(CapabilityStatus::Retracted))),
+            }
+            assert_eq!(
+                sqlite::get_grant(
+                    &fixture.sql,
+                    fixture.namespace.namespace_id.to_string(),
+                    subject.to_string(),
+                    "document".into(),
+                )
+                .await
+                .unwrap(),
+                Some(Rights::USE.bits_i64()),
+            );
+            writer.rollback().await.unwrap();
+            change.await.unwrap();
+            assert_eq!(
+                fixture.proof(subject, "document").await.rights,
+                replacement.unwrap_or_else(Rights::empty),
+            );
+            fixture.assert_dead(capability.capability_id).await;
+        }
+        fixture.stop.stop().await;
+    }
+
+    #[tokio::test]
     async fn temporary_delegation_tracks_its_source_without_promoting_to_durable() {
         let fixture = Fixture::new().await;
         let context = RequestContext::root();
@@ -613,13 +665,17 @@ mod tests {
             )
             .await
             .unwrap();
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM cabinet_domain_grants WHERE object = 'temporary'",
-        )
-        .fetch_one(&fixture.sql.read_pool)
-        .await
-        .unwrap();
-        assert_eq!(count, 0);
+        assert_eq!(
+            sqlite::get_grant(
+                &fixture.sql,
+                fixture.namespace.namespace_id.to_string(),
+                subject.to_string(),
+                "temporary".into(),
+            )
+            .await
+            .unwrap(),
+            None,
+        );
         let weak = fixture.mint(Vec::new()).await.unwrap();
         assert!(matches!(
             fixture

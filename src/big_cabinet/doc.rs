@@ -40,45 +40,110 @@ mod observe;
 pub(crate) mod pipeline;
 mod query;
 mod read;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "generated SQL includes test-only command fixtures"
+    )
+)]
+mod sqlite {
+    include!("doc/sqlite/gen.rs");
+}
 mod write;
 
 #[cfg(test)]
 mod e2e;
 
-pub use self::access::{AccessError, AccessFuture, AccessRequest, DocAccess, LedgerAccess};
-pub use self::claim_history::{
-    ClaimHistoryEntry, ClaimHistoryError, ClaimHistoryResult, HistoryBudget, ReconstructedClaim,
-    SignatureIntroduction, predecessor_ids, reconstruct_claim, reconstruct_claim_for_marker,
-    reconstruct_current_claims,
-};
+pub use self::access::AccessError;
+pub use self::access::AccessFuture;
+pub use self::access::AccessRequest;
+pub use self::access::DocAccess;
+pub use self::access::LedgerAccess;
+pub use self::claim_history::ClaimHistoryEntry;
+pub use self::claim_history::ClaimHistoryError;
+pub use self::claim_history::ClaimHistoryResult;
+pub use self::claim_history::HistoryBudget;
+pub use self::claim_history::ReconstructedClaim;
+pub use self::claim_history::SignatureIntroduction;
+pub use self::claim_history::predecessor_ids;
+pub use self::claim_history::reconstruct_claim;
+pub use self::claim_history::reconstruct_claim_for_marker;
+pub use self::claim_history::reconstruct_current_claims;
 
 use self::commands::Commands;
-use self::gate::{DMETA_KEY, Gate, Verdict, doc_actor, facet_version, signature_heads};
-use crate::authority::{
-    Actor, AuthorityProtocol, AuthorityServiceError, Authorization, CapId, Capability,
-    DomainAuthority, Namespace, ResolveActor, Rights, SignFacetClaim,
-};
-use crate::capability::{DomainCapabilities, Invocation};
+use self::gate::DMETA_KEY;
+use self::gate::Gate;
+use self::gate::Verdict;
+use self::gate::doc_actor;
+use self::gate::facet_version;
+use self::gate::signature_heads;
+use crate::authority::Actor;
+use crate::authority::AuthorityProtocol;
+use crate::authority::AuthorityServiceError;
+use crate::authority::Authorization;
+use crate::authority::CapId;
+use crate::authority::Capability;
+use crate::authority::DomainAuthority;
+use crate::authority::Namespace;
+use crate::authority::ResolveActor;
+use crate::authority::Rights;
+use crate::authority::SignFacetClaim;
+use crate::capability::DomainCapabilities;
+use crate::capability::Invocation;
 use crate::index::facet_ref::FacetRefStore;
 use crate::index::facet_set::FacetSetStore;
-use crate::schema::{SchemaHandle, SchemaRepo};
-use automerge::transaction::{CommitOptions, Transactable, Transaction};
-use automerge::{Automerge, ChangeHash, ObjId, ObjType, PatchLog, ReadDoc, Value};
+use crate::schema::SchemaHandle;
+use crate::schema::SchemaRepo;
+use automerge::Automerge;
+use automerge::ChangeHash;
+use automerge::ObjId;
+use automerge::ObjType;
+use automerge::PatchLog;
+use automerge::ReadDoc;
+use automerge::Value;
+use automerge::transaction::CommitOptions;
+use automerge::transaction::Transactable;
+use automerge::transaction::Transaction;
 use big_cabinet_core::FacetKey;
-use big_cabinet_core::dmeta::{
-    ActorMetadata, BRANCH_FACET_TAG, Cid, ClaimOperation, DMETA_FACET_TAG, Dmeta, DocId,
-    FacetClaim, FacetMetadata, FacetSignature, MultibaseKey, NativeReadBudget, NativeValue,
-    SignatureBytes, Uuid7, cid_of, encode_native,
-};
-use big_cabinet_core::facet::{CompiledSchema, hydrate_value, reconcile_json_atomic};
-use big_repo::{BigDocHandle, DocLookup, SharedBigRepo};
+use big_cabinet_core::dmeta::ActorMetadata;
+use big_cabinet_core::dmeta::BRANCH_FACET_TAG;
+use big_cabinet_core::dmeta::Cid;
+use big_cabinet_core::dmeta::ClaimOperation;
+use big_cabinet_core::dmeta::DMETA_FACET_TAG;
+use big_cabinet_core::dmeta::Dmeta;
+use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::dmeta::FacetClaim;
+use big_cabinet_core::dmeta::FacetMetadata;
+use big_cabinet_core::dmeta::FacetSignature;
+use big_cabinet_core::dmeta::MultibaseKey;
+use big_cabinet_core::dmeta::NativeReadBudget;
+use big_cabinet_core::dmeta::NativeValue;
+use big_cabinet_core::dmeta::SignatureBytes;
+use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::dmeta::cid_of;
+use big_cabinet_core::dmeta::encode_native;
+use big_cabinet_core::facet::CompiledSchema;
+use big_cabinet_core::facet::hydrate_value;
+use big_cabinet_core::facet::reconcile_json_atomic;
+use big_repo::BigDocHandle;
+use big_repo::DocLookup;
+use big_repo::SharedBigRepo;
 use serde_json::Value as Json;
-use service_utils_rs::{
-    Client, ClientError, ContextError, Envelope, EventStream, Handler, Host, RequestContext,
-    ResponseEnvelope, Spawner, StopToken,
-};
-use sqlx_utils_rs::SqlCtx;
-use std::collections::{BTreeMap, BTreeSet};
+use service_utils_rs::Client;
+use service_utils_rs::ClientError;
+use service_utils_rs::ContextError;
+use service_utils_rs::Envelope;
+use service_utils_rs::EventStream;
+use service_utils_rs::Handler;
+use service_utils_rs::Host;
+use service_utils_rs::RequestContext;
+use service_utils_rs::ResponseEnvelope;
+use service_utils_rs::Spawner;
+use service_utils_rs::StopToken;
+use sqlite_rs::Database;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub use big_cabinet_core::doc::*;
@@ -95,7 +160,7 @@ pub struct DocsConfig {
     /// attribution certificates the change carries.
     pub node_issuer: MultibaseKey,
     pub access: Arc<dyn DocAccess>,
-    pub sql: SqlCtx,
+    pub sql: Database,
     /// The facet-set projection backing `ObserveFacets` and `QueryFacets`, if
     /// the embedder runs one. The embedder owns `FacetSetStore::run`; DocsRepo
     /// only reads the committed projection. Without it, `ObserveFacets` and

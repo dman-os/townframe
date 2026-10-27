@@ -18,7 +18,7 @@ big_sync.workspace = true
 big_repo.workspace = true
 secrets_rs.workspace = true
 service_utils_rs.workspace = true
-sqlx_utils_rs.workspace = true
+sqlite_rs.workspace = true
 
 # service protocol declaration: `service_protocol!` expands to irpc and tracing
 irpc.workspace = true
@@ -43,7 +43,6 @@ futures.workspace = true
 
 # errors and durable authority state
 thiserror.workspace = true
-sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]

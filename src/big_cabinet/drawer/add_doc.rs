@@ -2,8 +2,9 @@
 
 use super::ledger::Op;
 use super::*;
+use crate::doc::At;
+use crate::doc::ReadFacets;
 use crate::doc::pipeline::digest;
-use crate::doc::{At, ReadFacets};
 use big_cabinet_core::drawer::DrawerDocEntry;
 use big_repo::keyhive_core::principal::identifier::Identifier;
 use std::collections::BTreeSet;

@@ -23,13 +23,27 @@
 //! on its own account, and a field named `createdAt` is an instant because its schema says so, not
 //! because of the way it is spelled.
 
-use automerge::{ObjId, ObjType, ReadDoc, ScalarValue};
-use autosurgeon::reconcile::{CounterReconciler, TextReconciler};
-use autosurgeon::{HydrateError, Reconciler};
-use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
-use serde::ser::{Error as SerError, SerializeMap};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{Map, Value, json};
+use automerge::ObjId;
+use automerge::ObjType;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use autosurgeon::HydrateError;
+use autosurgeon::Reconciler;
+use autosurgeon::reconcile::CounterReconciler;
+use autosurgeon::reconcile::TextReconciler;
+use schemars::JsonSchema;
+use schemars::Schema;
+use schemars::SchemaGenerator;
+use schemars::json_schema;
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
+use serde::Serializer;
+use serde::ser::Error as SerError;
+use serde::ser::SerializeMap;
+use serde_json::Map;
+use serde_json::Value;
+use serde_json::json;
 use std::borrow::Cow;
 use std::num::FpCategory;
 
@@ -41,12 +55,14 @@ mod walk;
 #[cfg(test)]
 mod e2e;
 
-pub use references::{DeclaredReference, declared_references};
+pub use references::DeclaredReference;
+pub use references::declared_references;
 #[cfg(test)]
 pub(crate) use target::reconcile_json;
 pub use target::reconcile_json_atomic;
 pub use validation::CompiledSchema;
-pub use walk::{Stored, hydrate_value};
+pub use walk::Stored;
+pub use walk::hydrate_value;
 
 /// The keyword for the storage forms JSON Schema cannot describe.
 pub const KEYWORD: &str = "x-automerge";

@@ -1,7 +1,10 @@
 //! An iroh endpoint, a big_sync worker, and the repo/sync RPC services around one BigRepo: the
 //! two-peer wiring an embedder does, for end-to-end tests of what crosses between nodes.
 
-use big_repo::{BigRepo, BigRepoConnection, BigRepoSyncBackend, SharedBigRepo};
+use big_repo::BigRepo;
+use big_repo::BigRepoConnection;
+use big_repo::BigRepoSyncBackend;
+use big_repo::SharedBigRepo;
 use std::collections::HashMap;
 use std::sync::Arc;
 

@@ -1,7 +1,9 @@
 use super::*;
-use crate::peer_net::{Network, link};
+use crate::peer_net::Network;
+use crate::peer_net::link;
 use futures::StreamExt;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn observation_fetches_remote_document_without_manual_document_sync() {

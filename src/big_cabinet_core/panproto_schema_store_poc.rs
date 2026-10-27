@@ -5,10 +5,14 @@ use std::path::Path;
 use panproto_mig::Migration;
 use panproto_protocols::data_schema::json_schema::parse_json_schema_bundle;
 use panproto_schema::Schema;
-use panproto_vcs::{
-    FsStore, Object, ObjectId, Repository, Store, VcsError, hash::hash_schema,
-    tree::resolve_commit_schema,
-};
+use panproto_vcs::FsStore;
+use panproto_vcs::Object;
+use panproto_vcs::ObjectId;
+use panproto_vcs::Repository;
+use panproto_vcs::Store;
+use panproto_vcs::VcsError;
+use panproto_vcs::hash::hash_schema;
+use panproto_vcs::tree::resolve_commit_schema;
 
 /// The read-only surface DocsRepo needs. PlugsRepo owns `Repository` and
 /// publishes commits; document reads are pinned to an exact commit ID.
@@ -67,7 +71,8 @@ impl SchemaStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::Value;
+    use serde_json::json;
 
     const COMMON_SCHEMA: &str = r#"
         {

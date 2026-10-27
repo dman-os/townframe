@@ -1,9 +1,15 @@
 //! End to end: a declaration, the wire form it produces, and the schema it publishes.
 
 use super::*;
-use crate::facet::{Bundle, Declaration, FacetDecl, Universe, UniverseError};
-use schemars::{JsonSchema, schema_for};
-use serde::{Deserialize, Serialize};
+use crate::facet::Bundle;
+use crate::facet::Declaration;
+use crate::facet::FacetDecl;
+use crate::facet::Universe;
+use crate::facet::UniverseError;
+use schemars::JsonSchema;
+use schemars::schema_for;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 
 #[macros::facet(id_prefix = "org.example.daybook.")]

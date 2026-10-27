@@ -3,11 +3,17 @@
 //! an HTTP server — and talks to it through `Client<SampleProtocol>` the way a
 //! consumer would, so a regression in any adapter shows up as a parity break.
 
-use crate::{
-    Admission, Client, IrpcAdapter, ServerBinding, StopToken, XrpcClient, XrpcRouter,
-    sample::{Sample, SampleProtocol, boot},
-    xrpc,
-};
+use crate::Admission;
+use crate::Client;
+use crate::IrpcAdapter;
+use crate::ServerBinding;
+use crate::StopToken;
+use crate::XrpcClient;
+use crate::XrpcRouter;
+use crate::sample::Sample;
+use crate::sample::SampleProtocol;
+use crate::sample::boot;
+use crate::xrpc;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use url::Url;

@@ -184,12 +184,16 @@ async fn drawer_drop_and_stop_reclaim_state_and_recover_interrupted_placement() 
             drawers_host.upgrade().is_none(),
             "Drawers host was retained"
         );
-        let state: String = sqlx::query_scalar(
-            "SELECT state FROM big_cabinet_commands WHERE command_id = 'interrupted-note'",
-        )
-        .fetch_one(&node.sql.read_pool)
-        .await
-        .unwrap();
+        let state: String = node
+            .sql
+            .query(
+                "SELECT state FROM big_cabinet_commands WHERE command_id = :command_id",
+                ("interrupted-note",),
+            )
+            .await
+            .unwrap()
+            .one()
+            .unwrap();
         assert_eq!(state, "committed");
         node.restart().await.unwrap();
         assert_eq!(node.local(), local);
@@ -212,12 +216,16 @@ async fn drawer_drop_and_stop_reclaim_state_and_recover_interrupted_placement() 
             node.read_note(&alice, &document).await.unwrap(),
             note("interrupted-note").1
         );
-        let state: String = sqlx::query_scalar(
-            "SELECT state FROM big_cabinet_commands WHERE command_id = 'interrupted-note'",
-        )
-        .fetch_one(&node.sql.read_pool)
-        .await
-        .unwrap();
+        let state: String = node
+            .sql
+            .query(
+                "SELECT state FROM big_cabinet_commands WHERE command_id = :command_id",
+                ("interrupted-note",),
+            )
+            .await
+            .unwrap()
+            .one()
+            .unwrap();
         assert_eq!(state, "done");
         node.stop().await;
     }

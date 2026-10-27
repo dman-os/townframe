@@ -29,24 +29,76 @@ mod wire;
 #[cfg(all(test, feature = "schemars"))]
 mod e2e;
 
-pub use member::{FacetMember, str_eq};
-pub use shape::{FacetShape, Openness, Shape, Tagging};
+pub use member::FacetMember;
+pub use member::str_eq;
+pub use shape::FacetShape;
+pub use shape::Openness;
+pub use shape::Shape;
+pub use shape::Tagging;
 pub use value::Extra;
-pub use wire::{
-    KnownString, Member, UnionLayout, UnknownMember, deserialize_known_str, deserialize_union,
-    serialize_member,
-};
+pub use wire::KnownString;
+pub use wire::Member;
+pub use wire::UnionLayout;
+pub use wire::UnknownMember;
+pub use wire::deserialize_known_str;
+pub use wire::deserialize_union;
+pub use wire::serialize_member;
 
 #[cfg(feature = "schemars")]
-pub use codec::{
-    Bytes, Codec, CodecError, CompiledSchema, Counter, DeclaredReference, Float32, Float64,
-    KEYWORD, Stored, Text, codec_schema, declared_references, hydrate_value, reconcile_json_atomic,
-};
+pub use codec::Bytes;
 #[cfg(feature = "schemars")]
-pub use shape::{ShapeError, ShapeFlag, check_shape};
+pub use codec::Codec;
 #[cfg(feature = "schemars")]
-pub use universe::{
-    Bundle, Declaration, FacetDecl, Lexicon, LexiconError, TypeDecl, Universe, UniverseError,
-};
+pub use codec::CodecError;
 #[cfg(feature = "schemars")]
-pub use wire::{MemberSchema, open_string_schema, union_schema};
+pub use codec::CompiledSchema;
+#[cfg(feature = "schemars")]
+pub use codec::Counter;
+#[cfg(feature = "schemars")]
+pub use codec::DeclaredReference;
+#[cfg(feature = "schemars")]
+pub use codec::Float32;
+#[cfg(feature = "schemars")]
+pub use codec::Float64;
+#[cfg(feature = "schemars")]
+pub use codec::KEYWORD;
+#[cfg(feature = "schemars")]
+pub use codec::Stored;
+#[cfg(feature = "schemars")]
+pub use codec::Text;
+#[cfg(feature = "schemars")]
+pub use codec::codec_schema;
+#[cfg(feature = "schemars")]
+pub use codec::declared_references;
+#[cfg(feature = "schemars")]
+pub use codec::hydrate_value;
+#[cfg(feature = "schemars")]
+pub use codec::reconcile_json_atomic;
+#[cfg(feature = "schemars")]
+pub use shape::ShapeError;
+#[cfg(feature = "schemars")]
+pub use shape::ShapeFlag;
+#[cfg(feature = "schemars")]
+pub use shape::check_shape;
+#[cfg(feature = "schemars")]
+pub use universe::Bundle;
+#[cfg(feature = "schemars")]
+pub use universe::Declaration;
+#[cfg(feature = "schemars")]
+pub use universe::FacetDecl;
+#[cfg(feature = "schemars")]
+pub use universe::Lexicon;
+#[cfg(feature = "schemars")]
+pub use universe::LexiconError;
+#[cfg(feature = "schemars")]
+pub use universe::TypeDecl;
+#[cfg(feature = "schemars")]
+pub use universe::Universe;
+#[cfg(feature = "schemars")]
+pub use universe::UniverseError;
+#[cfg(feature = "schemars")]
+pub use wire::MemberSchema;
+#[cfg(feature = "schemars")]
+pub use wire::open_string_schema;
+#[cfg(feature = "schemars")]
+pub use wire::union_schema;

@@ -1,13 +1,23 @@
-use crate::{
-    admission::Admission,
-    context::{ContextError, RequestContext},
-    lifecycle::{Spawner, StopToken},
-    middleware::Handler,
-    operation::{Envelope, EventReply, Operation, Reply, Subscription, TransportContext, Unary},
-    xrpc::{XrpcRegistrationError, XrpcRouter},
-};
-use futures::{StreamExt, future::BoxFuture};
-use irpc::{Channels, Service, WithChannels};
+use crate::admission::Admission;
+use crate::context::ContextError;
+use crate::context::RequestContext;
+use crate::lifecycle::Spawner;
+use crate::lifecycle::StopToken;
+use crate::middleware::Handler;
+use crate::operation::Envelope;
+use crate::operation::EventReply;
+use crate::operation::Operation;
+use crate::operation::Reply;
+use crate::operation::Subscription;
+use crate::operation::TransportContext;
+use crate::operation::Unary;
+use crate::xrpc::XrpcRegistrationError;
+use crate::xrpc::XrpcRouter;
+use futures::StreamExt;
+use futures::future::BoxFuture;
+use irpc::Channels;
+use irpc::Service;
+use irpc::WithChannels;
 use std::sync::Arc;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -412,10 +422,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        EventFrame, ResponseEnvelope, ResponseMetadata,
-        sample::{SampleEvent, SubscribeEvents},
-    };
+    use crate::EventFrame;
+    use crate::ResponseEnvelope;
+    use crate::ResponseMetadata;
+    use crate::sample::SampleEvent;
+    use crate::sample::SubscribeEvents;
 
     #[tokio::test]
     async fn finite_subscription_delivers_end_after_all_events() {

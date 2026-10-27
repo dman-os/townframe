@@ -11,15 +11,21 @@
 //! that left no side effect — denied, unknown drawer, not an entry — drops the row so the id is
 //! free again; a failure that may have left one — transport, Keyhive, storage — keeps it.
 
-use super::{DrawerId, DrawersError, LedgerFailure};
+use super::DrawerId;
+use super::DrawersError;
+use super::LedgerFailure;
+use super::sqlite;
 use crate::doc::CommandId;
-use big_cabinet_core::dmeta::{DocId, Uuid7};
-use big_cabinet_core::drawer::{DrawerAccess as Access, DrawerGroups};
+use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::drawer::DrawerAccess as Access;
+use big_cabinet_core::drawer::DrawerGroups;
+use serde::Deserialize;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::Row as _;
-use sqlx_utils_rs::SqlCtx;
+use sqlite_rs::Database;
+use sqlite_rs::SqlError;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Mutex;
@@ -102,7 +108,7 @@ pub(crate) struct Row {
 }
 
 pub(crate) struct Ledger {
-    sql: SqlCtx,
+    sql: Database,
     /// Commands executing in this process right now: the one thing a retry must not race.
     running: Mutex<BTreeSet<CommandId>>,
 }
@@ -123,7 +129,7 @@ impl Drop for Running<'_> {
     }
 }
 
-fn storage(error: sqlx::Error) -> DrawersError {
+fn storage(error: SqlError) -> DrawersError {
     DrawersError::Storage(format!("op ledger: {error}"))
 }
 
@@ -134,46 +140,33 @@ fn now_micros() -> i64 {
         .as_micros() as i64
 }
 
-fn decode(row: sqlx::sqlite::SqliteRow) -> Row {
+fn decode(row: sqlite::GetOpRow) -> Row {
     Row {
-        command: CommandId::try_from(row.get::<String, _>("command_id"))
+        command: CommandId::try_from(row.command_id)
             .expect("a stored command id was valid when stored"),
         digest: row
-            .get::<Vec<u8>, _>("request_digest")
+            .request_digest
             .try_into()
             .expect("a stored digest is 32 bytes"),
         actor: Uuid7::try_from(
-            row.get::<String, _>("actor_uuid")
+            row.actor_uuid
                 .parse::<uuid::Uuid>()
                 .expect("a stored actor uuid parses"),
         )
         .expect("a stored actor uuid is a v7 uuid"),
-        op: serde_json::from_str(&row.get::<String, _>("op_json"))
-            .expect("a stored op was written by this service"),
-        step: Step::parse(&row.get::<String, _>("step")),
+        op: serde_json::from_str(&row.op_json).expect("a stored op was written by this service"),
+        step: Step::parse(&row.step),
         receipt: row
-            .get::<Option<String>, _>("receipt_json")
+            .receipt_json
             .map(|json| serde_json::from_str(&json).expect("a stored receipt is JSON")),
     }
 }
 
 impl Ledger {
-    pub(crate) async fn open(sql: SqlCtx) -> Result<Self, DrawersError> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS big_cabinet_drawer_ops (
-                 command_id TEXT PRIMARY KEY
-               , request_digest BLOB NOT NULL
-               , actor_uuid TEXT NOT NULL
-               , op_json TEXT NOT NULL
-               , step TEXT NOT NULL CHECK (step IN ('begun', 'done'))
-               , receipt_json TEXT
-               , created_at INTEGER NOT NULL
-               , done_at INTEGER
-             ) STRICT",
-        )
-        .execute(&sql.write_pool)
-        .await
-        .map_err(storage)?;
+    pub(crate) async fn open(sql: Database) -> Result<Self, DrawersError> {
+        sql.apply_migrations(sqlite::MIGRATION_TABLE, sqlite::MIGRATIONS)
+            .await
+            .map_err(storage)?;
         Ok(Self {
             sql,
             running: Mutex::new(BTreeSet::new()),
@@ -249,23 +242,11 @@ impl Ledger {
     }
 
     async fn get(&self, command: &CommandId) -> Result<Option<(Row, Option<i64>)>, DrawersError> {
-        let row = sqlx::query(
-            "SELECT command_id
-                  , request_digest
-                  , actor_uuid
-                  , op_json
-                  , step
-                  , receipt_json
-                  , done_at
-               FROM big_cabinet_drawer_ops
-              WHERE command_id = ?",
-        )
-        .bind(command.as_str())
-        .fetch_optional(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
+        let row = sqlite::get_op(&self.sql, command.as_str().to_owned())
+            .await
+            .map_err(storage)?;
         Ok(row.map(|row| {
-            let done_at = row.get::<Option<i64>, _>("done_at");
+            let done_at = row.done_at;
             (decode(row), done_at)
         }))
     }
@@ -277,29 +258,18 @@ impl Ledger {
         actor: Uuid7,
         op: &Op,
     ) -> Result<(), DrawersError> {
-        let inserted = sqlx::query(
-            "INSERT INTO big_cabinet_drawer_ops
-                 ( command_id
-                 , request_digest
-                 , actor_uuid
-                 , op_json
-                 , step
-                 , created_at
-                 )
-             VALUES (?, ?, ?, ?, 'begun', ?)
-             ON CONFLICT (command_id) DO NOTHING",
+        let inserted = sqlite::begin_op(
+            &self.sql,
+            command.as_str().to_owned(),
+            digest.to_vec(),
+            actor.to_string(),
+            serde_json::to_string(op).expect("an op serializes"),
+            now_micros(),
         )
-        .bind(command.as_str())
-        .bind(digest.as_slice())
-        .bind(actor.to_string())
-        .bind(serde_json::to_string(op).expect("an op serializes"))
-        .bind(now_micros())
-        .execute(&self.sql.write_pool)
         .await
         .map_err(storage)?;
         assert_eq!(
-            inserted.rows_affected(),
-            1,
+            inserted.rows_affected, 1,
             "a command is begun under the in-flight set, after its row was found absent"
         );
         Ok(())
@@ -307,14 +277,11 @@ impl Ledger {
 
     /// Update what the row knows about its op: a create records its groups once they exist.
     pub(crate) async fn record(&self, command: &CommandId, op: &Op) -> Result<(), DrawersError> {
-        sqlx::query(
-            "UPDATE big_cabinet_drawer_ops
-                SET op_json = ?
-              WHERE command_id = ?",
+        sqlite::record_op(
+            &self.sql,
+            serde_json::to_string(op).expect("an op serializes"),
+            command.as_str().to_owned(),
         )
-        .bind(serde_json::to_string(op).expect("an op serializes"))
-        .bind(command.as_str())
-        .execute(&self.sql.write_pool)
         .await
         .map_err(storage)?;
         Ok(())
@@ -326,50 +293,27 @@ impl Ledger {
         command: &CommandId,
         receipt: &T,
     ) -> Result<(), DrawersError> {
-        sqlx::query(
-            "UPDATE big_cabinet_drawer_ops
-                SET step = 'done'
-                  , receipt_json = ?
-                  , done_at = ?
-              WHERE command_id = ?",
+        sqlite::finish_op(
+            &self.sql,
+            serde_json::to_string(receipt).expect("a receipt serializes"),
+            now_micros(),
+            command.as_str().to_owned(),
         )
-        .bind(serde_json::to_string(receipt).expect("a receipt serializes"))
-        .bind(now_micros())
-        .bind(command.as_str())
-        .execute(&self.sql.write_pool)
         .await
         .map_err(storage)?;
         Ok(())
     }
 
     pub(crate) async fn forget(&self, command: &CommandId) -> Result<(), DrawersError> {
-        sqlx::query(
-            "DELETE FROM big_cabinet_drawer_ops
-              WHERE command_id = ?",
-        )
-        .bind(command.as_str())
-        .execute(&self.sql.write_pool)
-        .await
-        .map_err(storage)?;
+        sqlite::forget_op(&self.sql, command.as_str().to_owned())
+            .await
+            .map_err(storage)?;
         Ok(())
     }
 
     /// Every row a crash left short of `done`, oldest first.
     pub(crate) async fn unfinished(&self) -> Result<Vec<Row>, DrawersError> {
-        let rows = sqlx::query(
-            "SELECT command_id
-                  , request_digest
-                  , actor_uuid
-                  , op_json
-                  , step
-                  , receipt_json
-               FROM big_cabinet_drawer_ops
-              WHERE step != 'done'
-              ORDER BY created_at",
-        )
-        .fetch_all(&self.sql.read_pool)
-        .await
-        .map_err(storage)?;
+        let rows = sqlite::unfinished_ops(&self.sql).await.map_err(storage)?;
         Ok(rows.into_iter().map(decode).collect())
     }
 
@@ -383,5 +327,171 @@ impl Ledger {
         op: &Op,
     ) -> Result<(), DrawersError> {
         self.begin(command, digest, actor, op).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use big_cabinet_core::drawer::GroupKey;
+    use sqlite_rs::SqliteRuntime;
+
+    #[tokio::test]
+    async fn ledger_reopens_resumes_replays_and_expires_receipts() {
+        let runtime = SqliteRuntime::new(Default::default());
+        let sql = runtime.ephemeral(&[]).unwrap();
+        let ledger = Ledger::open(sql.clone()).await.unwrap();
+        let command = CommandId::try_from("create ' drawer".to_owned()).unwrap();
+        let actor = Uuid7::new();
+        let op = Op::Create {
+            groups: None,
+            owner_id: Some(actor),
+        };
+        let recorded = Op::Create {
+            groups: Some(DrawerGroups {
+                meta_group: GroupKey([1; 32]),
+                docs_group: GroupKey([2; 32]),
+            }),
+            owner_id: Some(actor),
+        };
+        let failure = DrawersError::Storage("interrupted".to_owned());
+        let result = ledger
+            .run::<Value, _, _>(&command, [3; 32], actor, op.clone(), |_| async {
+                ledger.record(&command, &recorded).await.unwrap();
+                Err(failure.clone())
+            })
+            .await;
+        assert_eq!(result, Err(failure));
+        drop(ledger);
+        let ledger = Ledger::open(sql.clone()).await.unwrap();
+        let mut expected = Row {
+            command: command.clone(),
+            digest: [3; 32],
+            actor,
+            op: recorded.clone(),
+            step: Step::Begun,
+            receipt: None,
+        };
+        assert_eq!(ledger.unfinished().await.unwrap(), vec![expected.clone()]);
+        let receipt = serde_json::json!({"recovered": true});
+        assert_eq!(
+            ledger
+                .run(&command, [3; 32], actor, op.clone(), |resumed| {
+                    assert_eq!(resumed, recorded);
+                    async { Ok(receipt.clone()) }
+                })
+                .await
+                .unwrap(),
+            receipt
+        );
+        expected.step = Step::Done;
+        expected.receipt = Some(receipt.clone());
+        let (stored, done_at) = ledger.get(&command).await.unwrap().unwrap();
+        assert_eq!(stored, expected);
+        assert!(done_at.is_some());
+        assert!(ledger.unfinished().await.unwrap().is_empty());
+        assert_eq!(
+            ledger
+                .run::<Value, _, _>(&command, [3; 32], actor, op.clone(), |_| async {
+                    panic!("a completed command must not execute again")
+                })
+                .await
+                .unwrap(),
+            receipt
+        );
+        assert_eq!(
+            ledger
+                .run::<Value, _, _>(&command, [4; 32], actor, op.clone(), |_| async {
+                    panic!("a reused command must not execute")
+                })
+                .await
+                .unwrap_err(),
+            DrawersError::CommandReused {
+                command: command.clone()
+            }
+        );
+        sql.execute(
+            "UPDATE big_cabinet_drawer_ops SET done_at = :done_at WHERE command_id = :command_id",
+            (now_micros() - DONE_TTL_MICROS - 1, command.as_str()),
+        )
+        .await
+        .unwrap();
+        let renewed = serde_json::json!({"renewed": true});
+        assert_eq!(
+            ledger
+                .run(&command, [3; 32], actor, op.clone(), |resumed| {
+                    assert_eq!(resumed, op);
+                    async { Ok(renewed.clone()) }
+                })
+                .await
+                .unwrap(),
+            renewed
+        );
+        ledger.forget(&command).await.unwrap();
+        assert_eq!(
+            ledger
+                .run::<Value, _, _>(&command, [3; 32], actor, op, |_| async {
+                    Err(DrawersError::Denied)
+                })
+                .await
+                .unwrap_err(),
+            DrawersError::Denied
+        );
+        assert!(ledger.get(&command).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_command_retains_recovery_row_but_releases_in_flight_guard() {
+        let runtime = SqliteRuntime::new(Default::default());
+        let ledger = Ledger::open(runtime.ephemeral(&[]).unwrap()).await.unwrap();
+        let command = CommandId::try_from("cancelled".to_owned()).unwrap();
+        let actor = Uuid7::new();
+        let op = Op::RemoveDoc {
+            drawer_id: DocId::new([1; 32]),
+            doc_id: DocId::new([2; 32]),
+        };
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let mut running =
+            Box::pin(
+                ledger.run::<(), _, _>(&command, [5; 32], actor, op.clone(), |_| async {
+                    started.send(()).unwrap();
+                    std::future::pending().await
+                }),
+            );
+        tokio::select! {
+            result = &mut running => panic!("command completed before cancellation: {result:?}"),
+            result = ready => result.unwrap(),
+        }
+        assert_eq!(
+            ledger
+                .run::<(), _, _>(&command, [5; 32], actor, op.clone(), |_| async {
+                    panic!("an in-flight command cannot execute twice")
+                })
+                .await
+                .unwrap_err(),
+            DrawersError::CommandInFlight {
+                command: command.clone()
+            }
+        );
+        drop(running);
+        assert_eq!(
+            ledger.unfinished().await.unwrap(),
+            vec![Row {
+                command: command.clone(),
+                digest: [5; 32],
+                actor,
+                op: op.clone(),
+                step: Step::Begun,
+                receipt: None,
+            }]
+        );
+        ledger
+            .run(&command, [5; 32], actor, op.clone(), |resumed| {
+                assert_eq!(resumed, op);
+                async { Ok(()) }
+            })
+            .await
+            .unwrap();
+        assert!(ledger.unfinished().await.unwrap().is_empty());
     }
 }

@@ -1,8 +1,12 @@
 use super::*;
-use crate::{
-    ContextError, EventFrame, HttpMetadata, Operation, ResponseEnvelope, ResponseMetadata,
-};
-use serde::{Deserialize, Serialize};
+use crate::ContextError;
+use crate::EventFrame;
+use crate::HttpMetadata;
+use crate::Operation;
+use crate::ResponseEnvelope;
+use crate::ResponseMetadata;
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SampleEvent {

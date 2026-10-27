@@ -1,5 +1,7 @@
-use crate::operation::{Envelope, Operation};
-use std::{future::Future, sync::Arc};
+use crate::operation::Envelope;
+use crate::operation::Operation;
+use std::future::Future;
+use std::sync::Arc;
 
 /// Serves one operation, including its native envelope and response metadata.
 pub trait Handler<P: Operation>: Send + Sync + 'static {
@@ -89,8 +91,12 @@ impl<L> ServiceBuilder<L> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ContextError, RequestContext, ResponseEnvelope, XrpcOperation};
-    use serde::{Deserialize, Serialize};
+    use crate::ContextError;
+    use crate::RequestContext;
+    use crate::ResponseEnvelope;
+    use crate::XrpcOperation;
+    use serde::Deserialize;
+    use serde::Serialize;
     use std::sync::Mutex;
 
     #[derive(Serialize, Deserialize)]

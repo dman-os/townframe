@@ -29,7 +29,8 @@ mod native;
 
 use native::compare_native;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 /// A schema document together with the definitions available while resolving local references.
 #[derive(Debug, Clone, PartialEq)]

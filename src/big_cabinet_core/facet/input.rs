@@ -1,6 +1,12 @@
-use super::{Bundle, CodecError, CompiledSchema};
-use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use super::Bundle;
+use super::CodecError;
+use super::CompiledSchema;
+use serde_json::Map;
+use serde_json::Value;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub(super) const KEYWORD: &str = "x-cabinet-lexicon";
@@ -1790,8 +1796,14 @@ pub(super) fn datetime(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::facet::{FacetDecl, Stored, Universe, hydrate_value, reconcile_json_atomic};
-    use automerge::{Automerge, ROOT, ReadDoc};
+    use crate::facet::FacetDecl;
+    use crate::facet::Stored;
+    use crate::facet::Universe;
+    use crate::facet::hydrate_value;
+    use crate::facet::reconcile_json_atomic;
+    use automerge::Automerge;
+    use automerge::ROOT;
+    use automerge::ReadDoc;
 
     const TAG: &str = "org.example.authored";
     const CID: &str = "bafyreidfayvfuwqa7qlnopdjiqrxzs6blmoeu4rujcjtnci5beludirz2a";

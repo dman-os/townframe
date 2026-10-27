@@ -3,10 +3,15 @@
 //! metadata the handler observes.
 
 use super::Stack;
-use crate::{
-    ClientError, ContextError, Envelope, HttpMetadata, RequestContext,
-    sample::{GetValue, PutValue, SampleError, SubscribeEvents},
-};
+use crate::ClientError;
+use crate::ContextError;
+use crate::Envelope;
+use crate::HttpMetadata;
+use crate::RequestContext;
+use crate::sample::GetValue;
+use crate::sample::PutValue;
+use crate::sample::SampleError;
+use crate::sample::SubscribeEvents;
 use std::time::Duration;
 
 #[tokio::test]

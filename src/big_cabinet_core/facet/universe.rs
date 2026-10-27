@@ -21,10 +21,17 @@
 //! claiming one tag, two definitions disagreeing about a name they both declare, and a reference
 //! that resolves in neither this plug nor a dependency.
 
+use crate::facet::FacetMember;
+use crate::facet::FacetShape;
+use crate::facet::Shape;
+use crate::facet::ShapeFlag;
+use crate::facet::Tagging;
+use crate::facet::check_shape;
 use crate::facet::lexicon::project_facet;
-use crate::facet::{FacetMember, FacetShape, Shape, ShapeFlag, Tagging, check_shape};
-use schemars::{JsonSchema, Schema};
-use serde_json::{Map, Value};
+use schemars::JsonSchema;
+use schemars::Schema;
+use serde_json::Map;
+use serde_json::Value;
 use std::collections::HashSet;
 
 /// A facet a plug declares: the tag a facet key carries, the name a definition refers to it by, its

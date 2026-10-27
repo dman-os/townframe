@@ -1,12 +1,26 @@
-use crate::authority::{AuthorityServiceError, Authorization, CapId, Capability, Rights};
-use crate::dmeta::{Bytes, DocId, FacetClaim, FacetSignature, MultibaseKey};
+use crate::FacetKey;
+use crate::FacetTag;
+use crate::authority::AuthorityServiceError;
+use crate::authority::Authorization;
+use crate::authority::CapId;
+use crate::authority::Capability;
+use crate::authority::Rights;
+use crate::dmeta::Bytes;
+use crate::dmeta::DocId;
+use crate::dmeta::FacetClaim;
+use crate::dmeta::FacetSignature;
+use crate::dmeta::MultibaseKey;
 use crate::drawer::DrawerAccess;
-use crate::{FacetKey, FacetTag};
 use automerge::ChangeHash;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value as Json;
-use service_core_rs::{ContextError, Operation, XrpcOperation, declare_service_protocol};
-use std::collections::{BTreeMap, BTreeSet};
+use service_core_rs::ContextError;
+use service_core_rs::Operation;
+use service_core_rs::XrpcOperation;
+use service_core_rs::declare_service_protocol;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]

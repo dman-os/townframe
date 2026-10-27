@@ -7,8 +7,12 @@ use std::fmt;
 use std::str::FromStr;
 
 use big_sync_core::ObjKey;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
+use serde::Serializer;
+use unicode_properties::GeneralCategory;
+use unicode_properties::UnicodeGeneralCategory;
 use url::Url;
 
 pub const FACET_REFERENCE_SCHEME: &str = "db+facet";

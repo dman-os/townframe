@@ -63,13 +63,14 @@ pub use worker::BackendId;
 pub use worker::BigSyncWorkerError;
 pub use worker::BigSyncWorkerHandle;
 pub use worker::StopToken;
+pub use worker::SubscriptionEvent;
+pub use worker::SubscriptionSource;
+pub use worker::SubscriptionUpdate;
 pub use worker::SyncTaskRunOutcome;
 #[cfg(any(test, feature = "test-support"))]
 pub use worker::WorkerSnapshot;
-pub use worker::{
-    SubscriptionEvent, SubscriptionSource, SubscriptionUpdate, spawn_big_sync_worker,
-    spawn_big_sync_worker_with_options,
-};
+pub use worker::spawn_big_sync_worker;
+pub use worker::spawn_big_sync_worker_with_options;
 
 #[derive(Clone)]
 pub struct Ctx {

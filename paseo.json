@@ -1,10 +1,7 @@
 {
   "worktree": {
     "arenaCopy": {
-      "exclude": [
-        ".jj",
-        ".jj/**"
-      ]
+      "exclude": [".jj", ".jj/**"]
     }
   }
 }

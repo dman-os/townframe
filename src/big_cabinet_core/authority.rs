@@ -1,6 +1,16 @@
-use crate::dmeta::{Bytes, FacetClaim, MultibaseKey, SignedFacetClaim, Uuid7};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use service_core_rs::{ContextError, Operation, XrpcOperation, declare_service_protocol};
+use crate::dmeta::Bytes;
+use crate::dmeta::FacetClaim;
+use crate::dmeta::MultibaseKey;
+use crate::dmeta::SignedFacetClaim;
+use crate::dmeta::Uuid7;
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
+use serde::Serializer;
+use service_core_rs::ContextError;
+use service_core_rs::Operation;
+use service_core_rs::XrpcOperation;
+use service_core_rs::declare_service_protocol;
 
 pub const OPERATOR_OBJECT: &str = "is operator";
 

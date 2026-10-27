@@ -8,9 +8,13 @@
 //! already accepts the member the other side has not named. Anything this walk cannot prove is
 //! `not established`, never silently compatible.
 
-use super::{Compatibility, CompatibilityOutcome, Diagnostic};
-use serde_json::{Map, Value};
-use std::collections::{BTreeSet, HashSet};
+use super::Compatibility;
+use super::CompatibilityOutcome;
+use super::Diagnostic;
+use serde_json::Map;
+use serde_json::Value;
+use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 pub(super) fn evolve_projected(old: &Value, new: &Value) -> CompatibilityOutcome {
     let (old_position, old_defs) = unwrap_projected(old);

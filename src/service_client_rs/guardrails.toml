@@ -1,0 +1,8 @@
+version = 1
+role = "interface"
+dependency_reason = "Service clients implement the service-core message contracts over direct and optional HTTP transports."
+allowed_dependencies = ["service_core_rs"]
+allow_external_api_types = false
+
+[builds.native]
+features = ["http", "iroh-http"]

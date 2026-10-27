@@ -1,16 +1,31 @@
 //! The sample implementation: a source revision, an owned projector that
 //! interprets it, and the four handlers that read, write, and observe it.
 
-use super::protocol::{
-    GetValue, GetValueOutput, PutValue, PutValueOutput, ReadState, SampleError, SampleEvent,
-    StatePage, SubscribeEvents, ValueSnapshot,
-};
-use crate::{
-    ContextError, Envelope, EventStream, Handler, Host, Layer, Operation, ServiceBuilder, Spawner,
-    StopToken,
-};
-use std::sync::{Arc, Mutex, RwLock};
-use tokio::sync::{broadcast, watch};
+use super::protocol::GetValue;
+use super::protocol::GetValueOutput;
+use super::protocol::PutValue;
+use super::protocol::PutValueOutput;
+use super::protocol::ReadState;
+use super::protocol::SampleError;
+use super::protocol::SampleEvent;
+use super::protocol::StatePage;
+use super::protocol::SubscribeEvents;
+use super::protocol::ValueSnapshot;
+use crate::ContextError;
+use crate::Envelope;
+use crate::EventStream;
+use crate::Handler;
+use crate::Host;
+use crate::Layer;
+use crate::Operation;
+use crate::ServiceBuilder;
+use crate::Spawner;
+use crate::StopToken;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::RwLock;
+use tokio::sync::broadcast;
+use tokio::sync::watch;
 
 /// Events a slow subscriber may fall behind by before it is told to reread.
 const EVENT_REPLAY_WINDOW: usize = 64;

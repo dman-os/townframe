@@ -7,8 +7,8 @@ impl AuthorityService {
         let state = self.state.lock().await;
         let chain = cap::walk(&state, &request.actor)?;
         let uuid = actor::recognize(&state, &chain, Rights::USE)?;
-        let mut transaction = self.read().await?;
-        let row = Self::actor_row(&mut transaction, uuid).await?;
+        let transaction = self.read().await?;
+        let row = Self::actor_row(&transaction, uuid).await?;
         drop(transaction);
         signer::sign_claim(&self.wrapping, &row, request.claim)
     }

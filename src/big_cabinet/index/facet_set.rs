@@ -1,25 +1,54 @@
-use automerge::{Automerge, ChangeHash, ObjId, ObjType, Prop, ROOT, ReadDoc, Value};
-use big_cabinet_core::{DocId, FacetKey, FacetTag};
-use big_repo::{
-    AutomergeFrontierEvent, AutomergeFrontierRevisionStore, AutomergeFrontierSelector,
-    AutomergeFrontierTarget, BigRepoLocalFilter, BigRepoLocalNotification, DocLookup,
-    SharedBigRepo,
-};
+use automerge::Automerge;
+use automerge::ChangeHash;
+use automerge::ObjId;
+use automerge::ObjType;
+use automerge::Prop;
+use automerge::ROOT;
+use automerge::ReadDoc;
+use automerge::Value;
+use big_cabinet_core::DocId;
+use big_cabinet_core::FacetKey;
+use big_cabinet_core::FacetTag;
+use big_repo::AutomergeFrontierEvent;
+use big_repo::AutomergeFrontierRevisionStore;
+use big_repo::AutomergeFrontierSelector;
+use big_repo::AutomergeFrontierTarget;
+use big_repo::BigRepoLocalFilter;
+use big_repo::BigRepoLocalNotification;
+use big_repo::DocLookup;
+use big_repo::SharedBigRepo;
 use big_sync::SqliteDeltaWalkerStateRepo;
-use big_sync::keyed_frontier::{SqliteFrontierCodec, SqliteFrontierSelector, SqliteKeyedFrontier};
-use big_sync_core::concurrent_delta_walker::{ConcurrentDeltaRead, ConcurrentDeltaWalker};
+use big_sync::keyed_frontier::SqliteFrontierCodec;
+use big_sync::keyed_frontier::SqliteFrontierSelector;
+use big_sync::keyed_frontier::SqliteKeyedFrontier;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
-use big_sync_core::keyed_frontier::{FrontierEntry, KeyedFrontier, KeyedFrontierError};
-use big_sync_core::revisioned_store::{KeyedFrontierRevisionReader, RevisionedStore};
-use futures::{StreamExt, stream::FuturesUnordered};
-use serde::{Deserialize, Serialize};
-use sqlx::{QueryBuilder, Row, Sqlite};
-use sqlx_utils_rs::SqlCtx;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use big_sync_core::keyed_frontier::FrontierEntry;
+use big_sync_core::keyed_frontier::KeyedFrontier;
+use big_sync_core::keyed_frontier::KeyedFrontierError;
+use big_sync_core::revisioned_store::KeyedFrontierRevisionReader;
+use big_sync_core::revisioned_store::RevisionedStore;
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
+use serde::Deserialize;
+use serde::Serialize;
+use sqlite_rs::Database;
+use sqlite_rs::Row;
+use sqlite_rs::Sql;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tokio::sync::Notify;
-use utils_rs::prelude::{Res, async_trait, ferr};
+use utils_rs::prelude::Res;
+use utils_rs::prelude::async_trait;
+use utils_rs::prelude::ferr;
+
+mod queries {
+    include!("facet_set/sqlite/gen.rs");
+}
 
 const FACET_SET_ID: &str = "big-cabinet-facet-set-v2";
 const DMETA_KEY: &str = "org.example.daybook.dmeta/main";
@@ -63,15 +92,15 @@ pub enum FacetSetQuery {
     Key(FacetKey),
 }
 
-fn facet_record(row: sqlx::sqlite::SqliteRow) -> Res<FacetRecord> {
+fn facet_record(row: Row) -> Res<FacetRecord> {
     Ok(FacetRecord {
         route: FacetRoute {
-            doc_id: row.get::<String, _>("doc_id").parse()?,
-            facet_key: row.get::<String, _>("facet_key").parse()?,
+            doc_id: row.get::<String>("doc_id")?.parse()?,
+            facet_key: row.get::<String>("facet_key")?.parse()?,
         },
-        doc_heads: serde_json::from_slice(row.get("doc_heads"))?,
-        facet_heads: serde_json::from_slice(row.get("facet_heads"))?,
-        clock: u64::try_from(row.get::<i64, _>("clock"))
+        doc_heads: serde_json::from_slice(&row.get::<Vec<u8>>("doc_heads")?)?,
+        facet_heads: serde_json::from_slice(&row.get::<Vec<u8>>("facet_heads")?)?,
+        clock: u64::try_from(row.get::<i64>("clock")?)
             .map_err(|_| utils_rs::prelude::ferr!("facet-set clock is out of range"))?,
     })
 }
@@ -132,49 +161,25 @@ struct Prepared {
 
 #[derive(Clone)]
 pub struct FacetSetStore {
-    sql: SqlCtx,
+    sql: Database,
     frontier: SqliteKeyedFrontier<FacetSetCodec>,
     input_state: SqliteDeltaWalkerStateRepo,
 }
 
 impl FacetSetStore {
-    pub async fn new(sql: SqlCtx) -> Res<Self> {
-        for statement in [
-            r#"CREATE TABLE IF NOT EXISTS big_cabinet_facet_set_docs (
-                doc_id TEXT PRIMARY KEY NOT NULL
-                , state BLOB NOT NULL
-            ) STRICT"#,
-            r#"CREATE TABLE IF NOT EXISTS big_cabinet_facet_set_entries (
-                doc_id TEXT NOT NULL
-                , facet_key TEXT NOT NULL
-                , facet_tag TEXT NOT NULL
-                , doc_heads BLOB NOT NULL
-                , facet_heads BLOB NOT NULL
-                , clock INTEGER NOT NULL
-                , PRIMARY KEY (doc_id, facet_key)
-            ) STRICT"#,
-            r#"CREATE INDEX IF NOT EXISTS big_cabinet_facet_set_entries_tag_idx
-                 ON big_cabinet_facet_set_entries (facet_tag, doc_id)"#,
-            r#"CREATE INDEX IF NOT EXISTS big_cabinet_facet_set_entries_key_idx
-                 ON big_cabinet_facet_set_entries (facet_key, doc_id)"#,
-        ] {
-            sqlx::query(statement).execute(&sql.write_pool).await?;
-        }
+    pub async fn new(sql: Database) -> Res<Self> {
+        sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+            .await?;
         let frontier = SqliteKeyedFrontier::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
+            sql.clone(),
             FACET_SET_ID,
             FacetSetCodec,
             Arc::new(Notify::new()),
         )
         .await?;
-        let input_state = SqliteDeltaWalkerStateRepo::new(
-            sql.read_pool.clone(),
-            sql.write_pool.clone(),
-            FACET_SET_ID,
-            "automerge-frontier",
-        )
-        .await?;
+        let input_state =
+            SqliteDeltaWalkerStateRepo::new(sql.clone(), FACET_SET_ID, "automerge-frontier")
+                .await?;
         Ok(Self {
             sql,
             frontier,
@@ -218,18 +223,14 @@ impl FacetSetStore {
     }
 
     async fn doc_state(&self, doc_id: &DocId) -> Res<Option<DocState>> {
-        let bytes: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT state FROM big_cabinet_facet_set_docs WHERE doc_id = ?")
-                .bind(doc_id.to_string())
-                .fetch_optional(&self.sql.read_pool)
-                .await?;
+        let bytes = queries::doc_state(&self.sql, doc_id.to_string()).await?;
         bytes
             .map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
             .transpose()
     }
 
     pub async fn query(&self, selector: FacetSetQuery) -> Res<Vec<FacetRecord>> {
-        let mut query = QueryBuilder::<Sqlite>::new(
+        let mut query = Sql::new(
             r#"SELECT doc_id
                  , facet_key
                  , doc_heads
@@ -240,27 +241,27 @@ impl FacetSetStore {
         );
         match selector {
             FacetSetQuery::Doc(doc) => {
-                query.push("doc_id = ").push_bind(doc.to_string());
+                query.push("doc_id = ").bind(doc.to_string());
             }
             FacetSetQuery::Tag(tag) => {
-                query.push("facet_tag = ").push_bind(tag.to_string());
+                query.push("facet_tag = ").bind(tag.to_string());
             }
             FacetSetQuery::Route(route) => {
                 query
                     .push("doc_id = ")
-                    .push_bind(route.doc_id.to_string())
+                    .bind(route.doc_id.to_string())
                     .push(" AND facet_key = ")
-                    .push_bind(route.facet_key.to_string());
+                    .bind(route.facet_key.to_string());
             }
             FacetSetQuery::Key(key) => {
-                query.push("facet_key = ").push_bind(key.to_string());
+                query.push("facet_key = ").bind(key.to_string());
             }
         }
         query.push(" ORDER BY doc_id, facet_key");
         query
-            .build()
-            .fetch_all(&self.sql.read_pool)
+            .query(&self.sql)
             .await?
+            .rows
             .into_iter()
             .map(facet_record)
             .collect()
@@ -276,7 +277,7 @@ impl FacetSetStore {
         if docs.is_empty() {
             return Ok(Vec::new());
         }
-        let mut query = QueryBuilder::<Sqlite>::new(
+        let mut query = Sql::new(
             r#"SELECT doc_id
                  , facet_key
                  , doc_heads
@@ -285,33 +286,29 @@ impl FacetSetStore {
               FROM big_cabinet_facet_set_entries
               WHERE doc_id IN (SELECT value FROM json_each("#,
         );
-        query.push_bind(serde_json::to_string(docs)?).push("))");
+        query.bind(serde_json::to_string(docs)?).push("))");
         if let Some(tag) = tag {
             query
                 .push(" AND facet_tag = ")
-                .push_bind(tag.as_str().to_owned());
+                .bind(tag.as_str().to_owned());
         }
         if let Some(key) = key {
-            query.push(" AND facet_key = ").push_bind(key.to_string());
+            query.push(" AND facet_key = ").bind(key.to_string());
         }
         query.push(" ORDER BY doc_id, facet_key");
         query
-            .build()
-            .fetch_all(&self.sql.read_pool)
+            .query(&self.sql)
             .await?
+            .rows
             .into_iter()
             .map(facet_record)
             .collect()
     }
 
     async fn settle(&self, prepared: Prepared) -> Res<()> {
-        let mut transaction = self.sql.write_pool.begin().await?;
+        let mut transaction = self.sql.begin_write().await?;
         let doc_id = prepared.work.doc_id.to_string();
-        let stored: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT state FROM big_cabinet_facet_set_docs WHERE doc_id = ?")
-                .bind(&doc_id)
-                .fetch_optional(&mut *transaction)
-                .await?;
+        let stored = queries::doc_state(&transaction, doc_id.clone()).await?;
         let stored: Option<DocState> = stored
             .map(|bytes| serde_json::from_slice(&bytes))
             .transpose()?;
@@ -329,12 +326,7 @@ impl FacetSetStore {
         }
         let mut slots = prepared.slots;
         if prepared.replace_all {
-            let old: Vec<String> = sqlx::query_scalar(
-                "SELECT facet_key FROM big_cabinet_facet_set_entries WHERE doc_id = ?",
-            )
-            .bind(&doc_id)
-            .fetch_all(&mut *transaction)
-            .await?;
+            let old = queries::doc_keys(&transaction, doc_id.clone()).await?;
             for key in old {
                 slots
                     .entry(key.parse()?)
@@ -366,46 +358,29 @@ impl FacetSetStore {
                     facet_heads,
                     clock,
                 } => {
-                    sqlx::query(
-                        r#"INSERT INTO big_cabinet_facet_set_entries (
-                        doc_id
-                        , facet_key
-                        , facet_tag
-                        , doc_heads
-                        , facet_heads
-                        , clock
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (doc_id, facet_key) DO UPDATE SET
-                        doc_heads = excluded.doc_heads
-                        , facet_heads = excluded.facet_heads
-                        , clock = excluded.clock"#,
-                    )
-                    .bind(&doc_id)
-                    .bind(key.to_string())
-                    .bind(key.tag().as_str())
-                    .bind(serde_json::to_vec(&doc_heads)?)
-                    .bind(serde_json::to_vec(&facet_heads)?)
-                    .bind(
+                    queries::put_entry(
+                        &transaction,
+                        doc_id.clone(),
+                        key.to_string(),
+                        key.tag().to_string(),
+                        serde_json::to_vec(&doc_heads)?,
+                        serde_json::to_vec(&facet_heads)?,
                         i64::try_from(clock).map_err(|_| {
                             utils_rs::prelude::ferr!("facet-set clock is out of range")
                         })?,
                     )
-                    .execute(&mut *transaction)
                     .await?;
                 }
                 FacetMembership::Removed { .. } => {
-                    sqlx::query("DELETE FROM big_cabinet_facet_set_entries WHERE doc_id = ? AND facet_key = ?")
-                        .bind(&doc_id).bind(key.to_string()).execute(&mut *transaction).await?;
+                    queries::delete_entry(&transaction, doc_id.clone(), key.to_string()).await?;
                 }
             }
         }
-        sqlx::query(
-            r#"INSERT INTO big_cabinet_facet_set_docs (doc_id, state) VALUES (?, ?)
-            ON CONFLICT (doc_id) DO UPDATE SET state = excluded.state"#,
+        queries::put_doc(
+            &transaction,
+            doc_id,
+            serde_json::to_vec(&prepared.work.state)?,
         )
-        .bind(doc_id)
-        .bind(serde_json::to_vec(&prepared.work.state)?)
-        .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
         self.frontier.notify_changed();
@@ -870,9 +845,9 @@ impl RevisionedStore for FacetSetStore {
 mod tests {
     use super::*;
     use automerge::transaction::Transactable;
-    use big_sync_core::revisioned_store::{
-        RevisionRead, RevisionReadLimits, RevisionedStoreReader,
-    };
+    use big_sync_core::revisioned_store::RevisionRead;
+    use big_sync_core::revisioned_store::RevisionReadLimits;
+    use big_sync_core::revisioned_store::RevisionedStoreReader;
 
     fn key(name: &str) -> FacetKey {
         format!("org.example.note/{name}").parse().unwrap()
@@ -1122,7 +1097,9 @@ mod tests {
 
     #[tokio::test]
     async fn key_query_returns_records_with_signature_clocks() {
-        let sql = SqlCtx::memory().await.unwrap();
+        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .unwrap();
         let store = FacetSetStore::new(sql).await.unwrap();
         let (mut doc, _, first, _) = fixture();
         let initial = state(&doc, 1);
@@ -1150,6 +1127,109 @@ mod tests {
         assert!(
             store
                 .query(FacetSetQuery::Key(key("missing")))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn selectors_and_document_batches_preserve_routes_and_filter_intersections() {
+        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .unwrap();
+        let store = FacetSetStore::new(sql).await.unwrap();
+        let (doc, _, _, _) = fixture();
+        let tag = FacetTag::new("org.example.note").unwrap();
+        let first_id = DocId::new([1; 32]);
+        let second_id = DocId::new([2; 32]);
+        store.settle(project(&doc, None, 1)).await.unwrap();
+        let mut second = project(&doc, None, 2);
+        second.work.doc_id = second_id.clone();
+        store.settle(second).await.unwrap();
+        let heads = state(&doc, 1).heads.unwrap();
+        let expected: Vec<_> = [first_id.clone(), second_id.clone()]
+            .into_iter()
+            .flat_map(|doc_id| {
+                [
+                    FacetRecord {
+                        route: FacetRoute {
+                            doc_id: doc_id.clone(),
+                            facet_key: key("a"),
+                        },
+                        doc_heads: heads.clone(),
+                        facet_heads: heads.clone(),
+                        clock: heads_clock(&doc, &heads),
+                    },
+                    FacetRecord {
+                        route: FacetRoute {
+                            doc_id,
+                            facet_key: key("b"),
+                        },
+                        doc_heads: heads.clone(),
+                        facet_heads: Vec::new(),
+                        clock: 0,
+                    },
+                ]
+            })
+            .collect();
+        let mut expected = expected;
+        expected.sort_by(|left, right| left.route.cmp(&right.route));
+        assert_eq!(
+            store.query(FacetSetQuery::Tag(tag.clone())).await.unwrap(),
+            expected
+        );
+        for record in &expected {
+            assert_eq!(
+                store
+                    .query(FacetSetQuery::Route(record.route.clone()))
+                    .await
+                    .unwrap(),
+                vec![record.clone()]
+            );
+        }
+        let docs = BTreeSet::from([first_id, second_id, DocId::new([3; 32])]);
+        assert_eq!(store.query_docs(&docs, None, None).await.unwrap(), expected);
+        assert_eq!(
+            store.query_docs(&docs, Some(&tag), None).await.unwrap(),
+            expected
+        );
+        let selected: Vec<_> = expected
+            .into_iter()
+            .filter(|record| record.route.facet_key == key("a"))
+            .collect();
+        assert_eq!(
+            store.query(FacetSetQuery::Key(key("a"))).await.unwrap(),
+            selected
+        );
+        assert_eq!(
+            store
+                .query_docs(&docs, None, Some(&key("a")))
+                .await
+                .unwrap(),
+            selected
+        );
+        assert_eq!(
+            store
+                .query_docs(&docs, Some(&tag), Some(&key("a")))
+                .await
+                .unwrap(),
+            selected
+        );
+        assert!(
+            store
+                .query_docs(
+                    &docs,
+                    Some(&FacetTag::new("org.example.other").unwrap()),
+                    Some(&key("a"))
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .query_docs(&BTreeSet::new(), Some(&tag), Some(&key("a")))
                 .await
                 .unwrap()
                 .is_empty()
@@ -1199,12 +1279,14 @@ mod tests {
 
     #[tokio::test]
     async fn settlements_are_atomic_idempotent_and_removals_preserve_tombstone_heads() {
-        let sql = SqlCtx::memory().await.unwrap();
+        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .unwrap();
         let store = FacetSetStore::new(sql.clone()).await.unwrap();
         let (mut doc, facets, _, _) = fixture();
         let initial = state(&doc, 1);
-        sqlx::query("CREATE TRIGGER reject_facet_set BEFORE INSERT ON big_cabinet_facet_set_docs BEGIN SELECT RAISE(ABORT, 'injected'); END")
-            .execute(&sql.write_pool).await.unwrap();
+        sql.execute_batch("CREATE TRIGGER reject_facet_set BEFORE INSERT ON big_cabinet_facet_set_docs BEGIN SELECT RAISE(ABORT, 'injected'); END")
+            .await.unwrap();
         assert!(store.settle(project(&doc, None, 1)).await.is_err());
         assert_eq!(store.latest_revision().await.unwrap(), 0);
         assert_eq!(store.doc_state(&DocId::new([1; 32])).await.unwrap(), None);
@@ -1217,8 +1299,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        sqlx::query("DROP TRIGGER reject_facet_set")
-            .execute(&sql.write_pool)
+        sql.execute_batch("DROP TRIGGER reject_facet_set")
             .await
             .unwrap();
         store.settle(project(&doc, None, 1)).await.unwrap();
@@ -1265,9 +1346,13 @@ mod tests {
 
     #[tokio::test]
     async fn replacement_and_physical_removal_remove_all_old_routes_without_regressing_state() {
-        let store = FacetSetStore::new(SqlCtx::memory().await.unwrap())
-            .await
-            .unwrap();
+        let store = FacetSetStore::new(
+            sqlite_rs::SqliteRuntime::new(Default::default())
+                .ephemeral(&[])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         let (mut doc, _, _, _) = fixture();
         let initial = state(&doc, 1);
         store.settle(project(&doc, None, 1)).await.unwrap();
@@ -1301,7 +1386,9 @@ mod tests {
         let (_directory, repo, stop, doc_id) =
             crate::index::test_support::reopen_document(document).await;
         let mut demand = repo.sync_demand();
-        let sql = SqlCtx::memory().await.unwrap();
+        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .unwrap();
         let store = FacetSetStore::new(sql.clone()).await.unwrap();
         let prepared = store
             .prepare(
@@ -1346,14 +1433,10 @@ mod tests {
             std::collections::HashSet::from([doc_id])
         );
         drop(caller);
-        let repo_sql = repo.sql_ctx();
         drop(repo);
         stop.stop().await.unwrap();
         drop(store);
-        repo_sql.read_pool.close().await;
-        repo_sql.write_pool.close().await;
-        sql.read_pool.close().await;
-        sql.write_pool.close().await;
+        drop(sql);
     }
 
     struct ScriptSource {
@@ -1430,15 +1513,18 @@ mod tests {
     }
 
     async fn boot_repo() -> (SharedBigRepo, big_repo::BigRepoStopToken) {
-        big_repo::BigRepo::boot(big_repo::Config {
-            node_identity_seed: [31; 32],
-            storage: big_repo::StorageConfig::Memory,
-            scope_key: "facet-set-test".into(),
-            hidden_parts: Default::default(),
-            automerge_frontier_group_scope: Default::default(),
-            causal_checkpoint_group_scope: Default::default(),
-            group_part_group_scope: Default::default(),
-        })
+        big_repo::BigRepo::boot(
+            Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
+            big_repo::Config {
+                node_identity_seed: [31; 32],
+                storage: big_repo::StorageConfig::Memory,
+                scope_key: "facet-set-test".into(),
+                hidden_parts: Default::default(),
+                automerge_frontier_group_scope: Default::default(),
+                causal_checkpoint_group_scope: Default::default(),
+                group_part_group_scope: Default::default(),
+            },
+        )
         .await
         .unwrap()
     }
@@ -1473,9 +1559,13 @@ mod tests {
     #[tokio::test]
     async fn a_parked_doc_does_not_block_other_docs_and_newer_work_supersedes_it() {
         let (repo, stop) = boot_repo().await;
-        let store = FacetSetStore::new(SqlCtx::memory().await.unwrap())
-            .await
-            .unwrap();
+        let store = FacetSetStore::new(
+            sqlite_rs::SqliteRuntime::new(Default::default())
+                .ephemeral(&[])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let source = ScriptSource {
             receiver: std::sync::Mutex::new(Some(receiver)),
@@ -1567,7 +1657,9 @@ mod tests {
     #[tokio::test]
     async fn cooperative_stop_preserves_parked_work_and_replays_without_duplicate_output() {
         let (repo, stop) = boot_repo().await;
-        let sql = SqlCtx::memory().await.unwrap();
+        let sql = sqlite_rs::SqliteRuntime::new(Default::default())
+            .ephemeral(&[])
+            .unwrap();
         let store = FacetSetStore::new(sql.clone()).await.unwrap();
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let (worker_stop, worker_tasks) = start_script(
@@ -1656,7 +1748,14 @@ mod tests {
     #[tokio::test]
     async fn cooperative_stop_drains_an_inflight_preparation_before_acknowledging_it() {
         let (repo, stop) = boot_repo().await;
-        let sql = SqlCtx::memory().await.unwrap();
+        let config = sqlite_rs::RuntimeConfig {
+            max_readers_per_db: 1,
+            ..Default::default()
+        };
+        let reader_count = config.max_readers_per_db;
+        let sql = sqlite_rs::SqliteRuntime::new(config)
+            .ephemeral(&[])
+            .unwrap();
         let store = FacetSetStore::new(sql.clone()).await.unwrap();
         let doc_id = repo.allocate_id().await.unwrap();
         let (doc, _, _, _) = fixture();
@@ -1676,9 +1775,9 @@ mod tests {
             },
         )
         .await;
-        let mut connections = Vec::new();
-        for _ in 0..sql.read_pool.options().get_max_connections() {
-            connections.push(sql.read_pool.acquire().await.unwrap());
+        let mut readers: Vec<sqlite_rs::ReadTx> = Vec::new();
+        for _ in 0..reader_count {
+            readers.push(sql.begin_read().await.unwrap());
         }
         sender.send(event).unwrap();
         sender
@@ -1689,7 +1788,9 @@ mod tests {
         assert!(futures::poll!(&mut stopping).is_pending());
         assert!(worker_tasks.is_cancelled());
         assert_eq!(worker_tasks.live_tasks(), 1);
-        drop(connections);
+        for reader in readers {
+            reader.rollback().await.unwrap();
+        }
         stopping.await;
         assert_eq!(worker_tasks.live_tasks(), 0);
         assert_eq!(store.doc_state(&doc_id).await.unwrap().unwrap().cursor, 1);
@@ -1706,9 +1807,13 @@ mod tests {
     #[tokio::test]
     async fn live_afw_projection_needs_no_docs_service_and_replays_without_duplicate_output() {
         let (repo, stop) = boot_repo().await;
-        let store = FacetSetStore::new(SqlCtx::memory().await.unwrap())
-            .await
-            .unwrap();
+        let store = FacetSetStore::new(
+            sqlite_rs::SqliteRuntime::new(Default::default())
+                .ephemeral(&[])
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         let start_worker = || {
             let store = store.clone();
             let repo = Arc::clone(&repo);
