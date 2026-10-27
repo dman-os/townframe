@@ -7,16 +7,32 @@ writes — §2 codec declarations, §4 claim canonicalization, §6 verification)
 
 ## 1. What a datum schema has to do, and the three layers it is made of
 
+A datum value is described twice. The host needs a Rust type it can read, write and hand to
+Automerge; a peer needs the schema it validates against. Publishing a datum also has to be able to
+refuse — at the moment a developer adds a type, not months later when a round trip silently drops a
+peer's field.
+
 A datum has three related representations with different jobs:
 
 - **Automerge storage** preserves collaborative semantics: `Text`, `Counter`, object
   identity, lists, timestamps, bytes, and scalar kinds. It is not constrained to JSON's
-  value distinctions.
+  value distinctions. `ObjType` is `Map`, `List` and `Text` (`Table` is retained for backwards
+  compatibility and behaves as a `Map`), over the scalars `Bytes`, `Str`, `Int`, `Uint`, `F64`,
+  `Counter`, `Timestamp`, `Boolean`, `Null`, and an `Unknown` scalar for values from a future
+  Automerge. This model — not a JSON-shaped one — is what a datum holds, which is why a `Counter`
+  accumulates concurrent increments where an `Int` is last-writer-wins, and a `Text` merges
+  character edits where a `Str` does not. JSON is the transfer representation, not the storage
+  model.
 - **Lexicon describes canonical JSON.** Rust-authored datums emit values compatible with
   the ATProto data model by default. The datum tag identifies the Lexicon definition.
 - **Sidecar JSON Schema** supplies the supported supplementary constraints and
   `x-automerge` storage annotations that Lexicon cannot express. It may narrow a Lexicon
-  `unknown` map but never admit a value outside the canonical data model.
+  `unknown` map but never admit a value outside the canonical data model. Its conventions are
+  not a divergence from JSON Schema: an unknown keyword is an annotation by specification — "A
+  JSON Schema MAY contain properties which are not schema keywords. Unknown keywords SHOULD be
+  treated as annotations" — and a vocabulary "need not be published outside of its scope of use".
+  A conforming validator collects and ignores `x-automerge`, so the sidecar stays readable by
+  anyone else's tooling.
 
 `schemars` remains the Rust authoring mechanism for the sidecar schema and storage walk.
 The declaration macro checks that the Rust wire representation, Lexicon-facing shape, and
@@ -402,7 +418,9 @@ authoring opt-out described above.
 A type declares the complete representation it owns. No registry guesses from a field name, and
 neither `chrono` nor an arbitrary bytes type gains native storage merely because its JSON happens to
 look similar. Map and List remain ordinary Automerge objects; unsupported native shapes are not
-exposed as authoring shortcuts.
+exposed as authoring shortcuts. A transport or validator that ignores the storage declarations still
+reads a valid canonical value — a number, a string, or a `$bytes` object — so it degrades merge
+semantics rather than corrupting the value.
 
 The boundary is three data models, and each one states its own part:
 
@@ -691,9 +709,22 @@ layout. Lexicon references use one optional `#definition` fragment; `main` is re
 
 Rust-authored datums emit only the canonical spelling. A foreign schema that needs renaming,
 wrapping, plain base64, or incompatible `$` keys uses an explicit embedder-selected adapter. Ordinary
-datum reconciliation neither guesses such mappings nor invokes Panproto. Third-party Rust types whose
-wire form is already canonical may still use `schemars`'s `with` or `schema_with`; incompatible types
-need a wrapper owned by the authoring crate.
+datum reconciliation neither guesses such mappings nor invokes Panproto.
+
+**Third-party Rust types are handled at the use site, using what `schemars` already provides.** For a
+field whose wire form is already canonical, `#[schemars(with = "TheirType")]` describes it using their
+schema — schema only, leaving `serde` alone — and `#[schemars(schema_with = "fn")]` does the same when
+the type has no `JsonSchema` impl at all. Because that path goes through `subschema_for`, a type that
+does not inline itself gets a `$defs` entry named by its own `schema_name` and a `$ref` at the field,
+which is how a foreign type ends up named in our schema without us declaring anything;
+`#[schemars(inline)]` forces the other way, and `crate = "…"` controls the reference path. `with` and
+`schema_with` are mutually exclusive.
+
+Where the wire form needs translating, a wrapper owned by the authoring crate is required, because the
+codec belongs to the type (§9). A foreign type cannot be a **union member** either, because a member
+needs an id and ids can be assigned only to declared types; it becomes one through a wrapper of ours,
+or through its own declaration if it came from a plug that published an id for it. That is the
+boundary: **field positions take foreign types, union members take declared ones.**
 
 Using Lexicon for datum values does not adopt PDS publication, record keys, repositories, XRPC, or
 node discovery. Those remain separate protocols around the same values.

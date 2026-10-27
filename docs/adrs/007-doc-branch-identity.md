@@ -13,6 +13,12 @@ Branches, drawer entries, and Keyhive authority are independent facts. A branch 
 available without its origin, may be admitted to a different drawer, or may remain local.
 The origin and branch may also be received independently.
 
+There is also a creation-time cycle. A doc's datums should name the doc's own ID, but
+BigRepo used to learn that ID only after creating initial Automerge content. Writing it
+afterward needs a second Automerge change and so a second Sedimentree commit. Small docs,
+drawer descriptors especially, may otherwise stay at one commit for their whole lifetime,
+so avoiding a mandatory second commit is a real storage and sync saving, not cosmetic.
+
 ## Decision
 
 ### Every branch is a doc
@@ -31,6 +37,12 @@ change the branch doc ID.
 
 Public APIs address the branch doc directly by `DocumentId`. They do not expose a
 logical-document wrapper whose identity differs from the physical doc.
+
+The equality of doc ID and physical BigRepo ID is an implementation invariant, not
+permission for Daybook APIs to hand out raw BigRepo, Automerge, Keyhive, or Sedimentree
+handles. Public APIs expose Daybook IDs and operations, so the identifiers can stop being
+byte-identical under a future backend without application callers having to understand
+that migration.
 
 ### Branch links are weak, local relationships
 
@@ -103,6 +115,21 @@ through branch metadata.
 Consequently branch datums contain neither `BranchPublication` nor `AuthorityScope`.
 Publication, retention, and access are drawer and Keyhive concerns.
 
+### Drawers are idiocentric contexts
+
+A `DrawerId` is the `DocumentId` of a doc carrying the drawer descriptor datum (ADR 019),
+not a Keyhive group ID. The descriptor names the groups and whatever provider hints its
+author knows, but there is no global `DrawerId → provider` or `DrawerId → authority
+state` mapping. A peer learns about a drawer through a grant, local configuration, sync,
+or an explicit share, and two peers can legitimately know different authority history and
+provider sets for the same drawer. Provider identity, current reachability, and
+authorization are separate facts: knowing that node N may serve a drawer neither proves
+that N is online nor grants the requester access.
+
+One doc may be entered in several drawers. An entry makes the drawer a context through
+which the doc is synced, retained, organized, authorized, or resolved; it does not clone
+the doc or change its identity.
+
 ### Initial identity precedes publication
 
 BigRepo allocates the final doc identity before initial content. DocsRepo can then
@@ -123,8 +150,35 @@ IdentityAllocatedLocally
 ```
 
 A successful creation never advertises a doc whose initial bytes were not persisted.
-IDs are globally unique and never reused. A pending allocation with durable content or
-Keyhive state is completed rather than reclaimed.
+The earlier pipeline built the initial heads, then called Keyhive `generate_doc` and
+persisted its CGKA and delegation events, and only then persisted the doc: besides
+learning the ID too late for the first change, it could publish the doc to its groups
+before any peer could retrieve its Sedimentree. Allocation is therefore separate from
+publication. `IdentityAllocatedLocally` reserves the final ID and doc keys without
+attaching the doc to any intended external group; BigRepo's doc reservation
+(`allocate_id` / `abandon_allocation`) and DocsRepo's command ledger are the durable
+records recovery reads. A checkout-local Keyhive group may additionally make pending docs
+enumerable but must never be the only record. Because the initial Sedimentree is persisted
+before Keyhive state exists, learning the doc's authority from Keyhive implies the
+creating checkout already stored its first commit. Retrying any completed transition is
+safe.
+
+The rules are:
+
+- IDs are globally unique and never reused.
+- A pending allocation may be reclaimed only while it has neither local Sedimentree
+  content nor replicated Keyhive doc state.
+- Once either exists, recovery completes publication instead of reclaiming the ID or
+  keys.
+- Any Sedimentree content, authority reference, drawer entry, or other durable reference
+  prevents reclamation.
+- Drawer access and the drawer entry are always the last steps. The initial Keyhive
+  creation path never receives drawer groups merely because the create request named a
+  drawer.
+
+Allocation, content, and publication are not one distributed transaction. The
+requirement is explicit, recoverable intermediate states, so a crash never leaves an
+ambiguous object.
 
 ### Discovery is contextual
 
@@ -167,8 +221,17 @@ A datum address is only an address. It grants no access, implies no retention, a
 not establish that the target exists or is reachable. Node/provider locators are a later,
 separate URL design.
 
+Whatever that design adds, each locator form selects one strict resolution strategy (local
+knowledge, one drawer context, or bootstrap from one named node) and resolution never
+falls through from one strategy to another. A failed drawer-context resolution does not
+trigger an implicit global search or reinterpret the drawer as a node; any global naming
+system uses its own explicit locator form.
+
 ## Consequences
 
+- A new doc or branch is self-identifying in its first Automerge commit, so tiny docs
+  avoid an otherwise mandatory second Sedimentree commit.
+- BigRepo and DocsRepo carry an explicit allocation, recovery, and reclamation lifecycle.
 - Branches use the same doc APIs, authority substrate, and datum machinery as other docs.
 - Branch creation and drawer admission remain separately observable operations.
 - Branch links tolerate partial replication and asymmetric access.
@@ -183,3 +246,6 @@ separate URL design.
 - Explicit branch-link removal or branch-doc deletion policy.
 - Node/provider URL syntax and public discovery.
 - Future non-Automerge doc representations.
+- Retention duration and the reclamation sweep for allocations abandoned before any
+  content or Keyhive state existed.
+- Any optional global identity or naming overlay.

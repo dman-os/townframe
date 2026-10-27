@@ -12,6 +12,11 @@ containing one or more datum tags. Feeding all document changes to each
 consumer and asking it to filter after loading the document repeats expensive
 work and creates unnecessary cursor and per-object state.
 
+An index that only answers current membership queries, with ephemeral listener
+notifications on the side, is a lookup table and not a durable routing layer:
+it cannot replay a tag's changes, reconstruct a late-added consumer, or
+atomically describe a document leaving a tag, all of which ADR 008 requires.
+
 Consumers need the latest routed state for each `(doc, datum)`, not every
 obsolete intermediate payload forever, and removal must remain observable long
 enough for every interested consumer to remove its derived state. KeyedFrontier
@@ -118,26 +123,50 @@ retention contract; logically there is one latest collapsed state per route.
 ### 5. Queries and the frontier read the same committed projection
 
 Current-state queries and frontier entries become visible in the same commit.
-Keyed-frontier replay is latest-state catch-up, not an append-only audit log:
-a late-added consumer opens at revision zero for its tags and receives the
-current matching set, then follows new revisions.
+A reader must never query membership at revision R while the frontier still
+reports the projection at R-1, nor receive a route entry before its membership
+row is readable. Keyed-frontier replay is latest-state catch-up, not an
+append-only audit log: a late-added consumer opens at revision zero for its
+tags and receives the current matching set, then follows new revisions.
 
-### 6. Observation is a DocsRepo operation
+As in ADR 008, a commit notification is only a wakeup; durable frontier state
+and the reader's cursor decide what is read. There is no separate lossy watch:
+a UI that wants refresh latency observes through `ObserveDatums` (§6) like any
+other caller. **Deferred:** a lossy watch for UI refresh, added only where its
+latency benefit over the durable stream is shown.
+
+### 6. Observation and queries are DocsRepo operations
 
 `DatumSetStore` is trusted-subsystem-only and is never exposed to callers
-directly. Doc-scoped observation is a DocsRepo subscription operation
-(`ObserveDatums`, scopes `Doc(id)` / `Tag(tag)`, resuming after a frontier
-revision) carrying the same authority model as doc reads: a `Doc` scope is
-authorized before the stream opens, a `Tag` scope opens only its tag's
-frontier namespace and checks each document as its entries arrive, and the
-stream marks the end of its opening replay with `ReplayComplete`. Entries
-for documents the observer has never been delivered are silently omitted —
-naming one would disclose its existence — while losing access to a
-document the stream has delivered (a `Doc` scope names its own document)
-emits one `AccessLost` tombstone per loss, surfaced on the next entry for
-that document after the loss rather than at the moment access is revoked;
-observation resumes if access returns. This keeps the index
-ungated while making every caller-visible stream authority-filtered.
+directly. Callers reach it through DocsRepo operations carrying the same
+authority model as doc reads:
+
+- `QueryDatums` and `QueryDatumRefs` answer current-state queries over the
+  datum-set and `datum_ref` projections. With a `drawer_id`, membership comes
+  from the drawer's verified roster (`readable_in_drawer`), never from
+  unverified datum-set tag presence; without one, each candidate document is
+  checked for read access.
+- `ObserveDatums` subscribes to the frontier, resuming after a frontier
+  revision, with one of three scopes:
+  - `Doc { doc_id }` is authorized before the stream opens and holds a sync
+    interest in the document while the caller can read it;
+  - `Tag { tag }` opens only its tag's frontier namespace and checks each batch
+    of entries as it arrives;
+  - `Drawer { drawer_id, tag }` resolves the drawer's readable documents when
+    the stream opens and keeps that set current across access changes; the
+    optional tag narrows it to one namespace.
+
+  The stream marks the end of its opening replay with `ReplayComplete`.
+
+Entries for documents the observer has never been delivered are silently
+omitted — naming one would disclose its existence. Losing access to a document
+the stream has delivered (a `Doc` scope names its own document) emits one
+`AccessLost` per loss, either when a capability or access-policy change is
+re-checked against the delivered documents (policy changes are re-checked once
+the opening replay completes) or on the next entry for that document, whichever
+comes first. If access returns, the stream delivers the document's current
+datums and observation resumes. This keeps the index ungated while making every
+caller-visible read and stream authority-filtered.
 
 ### 7. Broad consumers run downstream of the routing frontier
 
@@ -149,6 +178,34 @@ their own consumer progress where possible. The datum-set projection is not a
 semantic event bus; it supplies durable dirty routes, and each downstream
 consumer owns the mapping from explicit document versions to its typed domain
 events or index rows.
+
+A consumer interested in one document does not need a tag filter, but it still
+reads the corpus-wide frontier: a `Doc` scope (and a `Drawer` scope without a
+tag) opens every tag namespace and filters entries by document, so its opening
+replay reads every route committed after its resume revision. **Deferred:** a
+per-document frontier selector, so a single-document observer's cost tracks its
+document rather than the corpus.
+
+### 8. Tag filters are independent consumer scopes
+
+A durable consumer owns its own scope and progress: the set of tags it follows
+and one cursor per tag. It opens the frontier with `open_tags`, one resume
+revision per tag namespace, and commits its cursors with its derived state;
+`datum_ref` keeps one cursor per reference-declaring tag and advances it in the
+transaction that replaces the route's edges. The projection stores routes only
+and keeps no outbox or acknowledgement state per consumer.
+
+- Adding a tag to a consumer's scope starts that tag at cursor zero and replays
+  its current routes; `datum_ref` does this on its next run after a schema
+  newly declares a reference position.
+- A route's key carries its tag, so a route lives in exactly one namespace and
+  overlapping tag filters never deliver one route twice. A consumer that works
+  per logical document collapses routes by `DocId` itself.
+- **Deferred:** removing a tag from a consumer's scope has no projection-side
+  support. The consumer must remove the derived state it built from that tag;
+  the intended design emits logical removals for documents whose last route to
+  the consumer disappears, and re-adding the tag bootstraps it again from
+  cursor zero.
 
 ## Consequences
 
@@ -167,6 +224,8 @@ events or index rows.
 - Tombstones require a safe retention/pruning policy in the frontier.
 - The ungated index must only be reachable from trusted subsystems; the
   authority boundary is the observation layer (§6).
+- Single-document and untagged drawer observation filter the corpus-wide
+  frontier by document (§7) until a per-document selector exists.
 
 ## Performance expectations
 
