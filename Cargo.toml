@@ -15,6 +15,7 @@ members = [
   "./src/mltools/",
   "./src/plug_dayledger/",
   "./src/secrets_rs",
+  "./src/service_utils_rs/",
   "./src/plug_plabels/",
   "./src/plug_test/",
   "./src/sqlx_utils_rs/",
@@ -47,6 +48,7 @@ am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 secrets_rs = { path = "./src/secrets_rs" }
+service_utils_rs = { path = "./src/service_utils_rs", default-features = false }
 # daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
 daybook_pdk = { path = "./src/daybook_pdk", default-features = false }

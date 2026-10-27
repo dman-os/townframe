@@ -1,0 +1,53 @@
+[package]
+name = "service_utils_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[features]
+default = []
+# HTTP/1 XRPC served over Iroh connections, in addition to TCP.
+iroh-http = ["dep:iroh"]
+
+[dependencies]
+#
+# async
+futures.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time", "net", "io-util"] }
+tokio-util = { workspace = true, features = ["rt"] }
+irpc.workspace = true
+
+#
+# http
+axum = { workspace = true, default-features = false, features = ["http1", "json", "query", "tokio"] }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+http-body-util = "0.1"
+reqwest = { workspace = true, default-features = false, features = ["stream", "rustls-tls"] }
+mime = "0.3"
+url.workspace = true
+iroh = { workspace = true, optional = true }
+
+#
+# encoding
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded = "0.7"
+uuid = { version = "1", features = ["serde", "v7"] }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["trace"] }
+tracing-opentelemetry = "0.32"
+
+#
+# error and log
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "tracing"] }
+tracing-subscriber.workspace = true
