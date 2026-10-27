@@ -888,14 +888,14 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_slashes_percent_and_versioned_key_ids() {
-        for id in [
+    fn round_trips_slashes_percent_and_versioned_key_slots() {
+        for slot in [
             b"main/notes/v1.2".as_slice(),
             b"/photos/beach.jpg".as_slice(),
             b"100%/literal".as_slice(),
             b"self".as_slice(),
         ] {
-            let key = DatumKey::new("org.example.dpath", id.to_vec()).unwrap();
+            let key = DatumKey::new("org.example.dpath", slot.to_vec()).unwrap();
             let reference = DatumReference::new(ReferenceDocId::SelfDoc, key).unwrap();
             let uri = reference.to_uri_string().unwrap();
             assert_eq!(DatumReference::parse(&uri).unwrap(), reference, "{uri}");

@@ -57,7 +57,7 @@ Schema expresses this directly as `{"type":"object","additionalProperties": <sch
 keys necessarily strings, which is also what Automerge's `Map` allows. `DatumKey` and `Uuid` already
 produce their string form, so nothing is strained.
 
-**A datum URL names a datum; an optional sibling `refHeads` selects a frontier.** The URL uses `db+datum:/<doc-id>/<tag>/<key-slot...>` with no authority component. `self` resolves against the containing doc, and the entire path remainder after the tag is the key ID.
+**A datum URL names a datum; an optional sibling `refHeads` selects a frontier.** The URL uses `db+datum:/<doc-id>/<tag>/<key-slot...>` with no authority component. `self` resolves against the containing doc, and the entire path remainder after the tag is the key slot.
 
 **Non-integer numbers appear in exactly three places**, all of which already have a better
 representation, and none of which is a reason to remove `F64` from the storage model.
