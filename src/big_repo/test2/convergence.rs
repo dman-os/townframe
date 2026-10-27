@@ -1,7 +1,11 @@
 //! Tier 4 — convergence and delta-sync regressions.
 
-use super::harness::{Pair, fixtures, heads};
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use super::harness::Pair;
+use super::harness::fixtures;
+use super::harness::heads;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::transaction::Transactable;
 use keyhive_core::access::Access;
 
 async fn read_text(handle: &crate::BigDocHandle, key: &str) -> Option<String> {

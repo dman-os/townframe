@@ -1,0 +1,211 @@
+@utility df-column-rack {
+  @apply flex w-full max-w-full min-w-0 flex-col gap-3;
+}
+
+@utility df-column-rack-window {
+  @apply grid w-full max-w-full min-w-0 items-start gap-6;
+}
+
+@utility df-column {
+  @apply flex min-w-0 flex-col gap-3 px-3;
+}
+
+@utility df-column-scroll {
+  @apply flex min-w-0 flex-col gap-3;
+}
+
+@utility df-column-section {
+  @apply flex min-h-0 flex-col gap-3;
+}
+
+@utility df-column-section-header {
+  @apply py-1 px-2 text-lg font-semibold text-foreground;
+}
+
+@utility df-column-header {
+  @apply flex min-h-10 items-center justify-between gap-3 py-2;
+}
+
+@utility df-column-title {
+  @apply min-w-0 overflow-hidden text-2xl font-semibold text-foreground text-ellipsis whitespace-nowrap;
+}
+
+@utility df-column-count {
+  @apply text-sm text-foreground-muted;
+}
+
+@utility df-column-state {
+  @apply text-sm text-foreground-muted;
+}
+
+@utility df-column-pagination {
+  @apply text-sm text-foreground-muted;
+}
+
+@utility df-column-list {
+  @apply flex min-w-0 flex-col gap-1;
+}
+
+@utility df-column-gallery {
+  @apply grid min-w-0 gap-1;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+}
+
+@utility df-tile {
+  @apply min-w-0;
+}
+
+@utility df-tile-line {
+  @apply grid min-h-16 min-w-0 items-start gap-3 px-2 py-2 text-foreground;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+}
+
+@utility df-tile-toggle {
+  @apply grid size-10 cursor-pointer place-items-center rounded-md border-0 bg-transparent p-0 text-foreground-muted;
+}
+
+@utility df-inline-children {
+  @apply min-w-0 pb-2 pl-4 pr-2;
+}
+
+@utility df-gallery-tile {
+  @apply min-w-0 overflow-hidden rounded-sm bg-surface-container transition-colors duration-150;
+}
+
+@utility df-gallery-media {
+  @apply relative aspect-square w-full overflow-hidden bg-surface-container;
+}
+
+@utility df-gallery-copy {
+  @apply flex min-w-0 flex-col gap-1 p-2;
+}
+
+@utility df-gallery-toggle {
+  @apply absolute right-1 top-1 grid size-8 cursor-pointer place-items-center rounded-md border-0 bg-surface-container-high/90 p-0 text-foreground-muted;
+}
+
+@utility df-gallery-placeholder {
+  @apply grid size-full place-items-center text-sm text-foreground-muted;
+}
+
+@utility df-tile-leading {
+  @apply grid size-8 place-items-center text-foreground-muted;
+}
+
+@utility df-tile-copy {
+  @apply flex min-w-0 flex-col gap-1;
+}
+
+@utility df-tile-title {
+  @apply overflow-hidden text-ellipsis whitespace-nowrap;
+}
+
+@utility df-tile-subtitle {
+  @apply text-xs leading-tight text-foreground-muted break-words;
+}
+
+@utility df-tile-body {
+  @apply text-sm leading-relaxed text-foreground break-words;
+}
+
+@utility df-tile-trailing {
+  @apply text-foreground-muted;
+}
+
+@utility df-widget {
+  @apply grid items-start gap-3 rounded-md bg-surface-container-low p-4;
+  grid-template-columns: 2rem minmax(0, 1fr);
+}
+
+@utility df-widget-leading {
+  @apply grid size-8 place-items-center text-foreground-muted;
+}
+
+@layer components {
+  .df-gallery-media img {
+    @apply block size-full object-cover;
+  }
+
+  .df-gallery-tile:hover {
+    @apply ring-2 ring-primary;
+  }
+
+  .df-column-rack[data-height="bounded"] .df-column {
+    @apply min-h-0 max-h-[calc(100dvh-calc(var(--spacing)*12))];
+  }
+
+  .df-column-rack[data-height="bounded"] .df-column-scroll {
+    @apply min-h-0 flex-1 overflow-y-auto;
+  }
+
+  .df-column-state-error {
+    @apply text-destructive;
+  }
+
+  .df-tile[data-kind="app"],
+  .df-tile[data-kind="group"] {
+    @apply cursor-pointer;
+  }
+
+  .df-tile-line {
+    @apply rounded-md transition-colors duration-150;
+  }
+
+  .df-tile-line:hover {
+    @apply bg-surface-container-high;
+  }
+
+  .df-tile-inline-parent[data-expanded="true"][data-depth="0"] {
+    @apply rounded-md bg-surface-container-low;
+  }
+
+  .df-tile-inline-parent[data-expanded="true"][data-depth="1"] {
+    @apply rounded-md bg-surface-container;
+  }
+
+  .df-tile-inline-parent[data-expanded="true"][data-depth="2"] {
+    @apply rounded-md bg-surface-container-high;
+  }
+
+  .df-tile-inline-parent[data-expanded="true"][data-depth="3"] {
+    @apply rounded-md bg-surface-container-highest;
+  }
+
+  .df-inline-children .df-column-section-header {
+    @apply px-2 text-sm font-medium text-foreground-muted;
+  }
+
+  .df-tile-body + .df-tile-body {
+    @apply mt-2;
+  }
+
+  .df-widget {
+    @apply transition-colors duration-150;
+  }
+
+  .df-widget:hover {
+    @apply bg-surface-container-high;
+  }
+
+  .df-tile[data-kind="app"]:hover .df-tile-title,
+  .df-tile[data-kind="group"]:hover .df-tile-title {
+    @apply text-primary;
+  }
+
+  .df-tile:focus-visible {
+    @apply outline-2 outline-offset-1 outline-ring;
+  }
+
+  .df-widget[data-content="media"] .df-widget-leading {
+    @apply text-primary;
+  }
+
+  .df-widget[data-content="sticky-note"] .df-widget-leading {
+    @apply text-secondary;
+  }
+
+  .df-column[data-state="loading"] .df-column-list,
+  .df-column[data-state="stale"] .df-column-list {
+    @apply opacity-40;
+  }
+}

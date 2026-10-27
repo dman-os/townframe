@@ -1,0 +1,7 @@
+version = 1
+role = "application"
+dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
+allowed_dependencies = [
+    "ui",
+]
+allow_external_api_types = false

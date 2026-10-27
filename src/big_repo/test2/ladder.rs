@@ -5,9 +5,15 @@
 //! `sync_*` call per barrier, no retry loops. A missed post-condition
 //! surfaces as an `Err`, exposing runtime2 ordering bugs.
 
-use super::harness::{Pair, fixtures, heads};
-use crate::{BigRepoChangeFilter, BigRepoDocIdFilter, StorageConfig};
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use super::harness::Pair;
+use super::harness::fixtures;
+use super::harness::heads;
+use crate::BigRepoChangeFilter;
+use crate::BigRepoDocIdFilter;
+use crate::StorageConfig;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::transaction::Transactable;
 use keyhive_core::access::Access;
 
 #[tokio::test(flavor = "multi_thread")]

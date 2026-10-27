@@ -1,0 +1,35 @@
+version = 1
+role = "tooling"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = [
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/xtask/plug.rs"
+symbol = "module::build_oci"
+ceiling = 194
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/xtask/main.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/xtask/main.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"

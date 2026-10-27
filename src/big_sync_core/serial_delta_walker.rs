@@ -11,12 +11,13 @@
 //! [`SerialDeltaWalker::open`].
 
 use crate::delta_walker_sparse_state::DeltaWalkerSparseStateTransaction;
-use crate::delta_walker_state::{
-    DeltaWalkerStateError, DeltaWalkerStateRepo, DeltaWalkerStateTransaction,
-};
-use crate::revisioned_store::{
-    RevisionRead, RevisionReadLimits, RevisionedStore, RevisionedStoreReader,
-};
+use crate::delta_walker_state::DeltaWalkerStateError;
+use crate::delta_walker_state::DeltaWalkerStateRepo;
+use crate::delta_walker_state::DeltaWalkerStateTransaction;
+use crate::revisioned_store::RevisionRead;
+use crate::revisioned_store::RevisionReadLimits;
+use crate::revisioned_store::RevisionedStore;
+use crate::revisioned_store::RevisionedStoreReader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SerialDeltaPhase {
@@ -271,12 +272,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delta_walker_sparse_state::{
-        DeltaWalkerSparseStateRepo, DeltaWalkerSparseStateTransaction,
-    };
-    use crate::delta_walker_state::{DeltaWalkerProgress, DeltaWalkerStateResult};
+    use crate::delta_walker_sparse_state::DeltaWalkerSparseStateRepo;
+    use crate::delta_walker_sparse_state::DeltaWalkerSparseStateTransaction;
+    use crate::delta_walker_state::DeltaWalkerProgress;
+    use crate::delta_walker_state::DeltaWalkerStateResult;
     use async_trait::async_trait;
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::BTreeMap;
+    use std::collections::VecDeque;
     use std::ops::Bound;
     use std::sync::Mutex;
 

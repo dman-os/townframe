@@ -1,9 +1,8 @@
 use crate::interlude::*;
 
-use std::{
-    borrow::Cow,
-    hash::{Hash, Hasher},
-};
+use std::borrow::Cow;
+use std::hash::Hash;
+use std::hash::Hasher;
 // lifted from github.com/bevyengine/bevy 's bevy_core/Name struct
 // MIT/APACHE2 licence
 #[derive(Clone, Serialize, Deserialize)]

@@ -24,9 +24,8 @@ tests = []
 [dependencies]
 #
 # internal
-utils_rs = { workspace = true, default-features = false, features = [
-  "downloader",
-] }
+utils_rs.workspace = true
+native_utils_rs.workspace = true
 
 #
 # encoding

@@ -1,0 +1,47 @@
+---
+source: src/clay_mdk/manifest.rs
+expression: "serde_json::to_string_pretty(&canonical_manifest()).unwrap()"
+---
+{
+  "id": "dayframe.counter",
+  "version": 1,
+  "requirements": [
+    {
+      "id": "dayframe.shelf",
+      "version": 1
+    }
+  ],
+  "provisions": [],
+  "config": {
+    "name": "counter",
+    "facets": [
+      {
+        "owner_plug_id": null,
+        "tag": "org.dayframe.counter.config",
+        "key_id": "count",
+        "read": true,
+        "write": false,
+        "create": false,
+        "delete": false
+      }
+    ]
+  },
+  "contributions": [
+    {
+      "provision": "dayframe.shelf",
+      "payload": {
+        "badges": [
+          1,
+          null,
+          "beta"
+        ],
+        "enabled": true,
+        "label": {
+          "en": "Counter"
+        },
+        "order": 2,
+        "slot": "toolbar"
+      }
+    }
+  ]
+}

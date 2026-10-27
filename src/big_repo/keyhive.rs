@@ -1,8 +1,8 @@
 use crate::interlude::*;
 
-use crate::{
-    DocumentId, handler::BigRepoKeyhiveProtocol, keyhive_listener::BigRepoKeyhiveListener,
-};
+use crate::DocumentId;
+use crate::handler::BigRepoKeyhiveProtocol;
+use crate::keyhive_listener::BigRepoKeyhiveListener;
 use keyhive_core::access::Access;
 use keyhive_core::event::static_event::StaticEvent;
 use keyhive_core::principal::document::id::DocumentId as KhDocumentId;
@@ -11,8 +11,11 @@ use keyhive_core::principal::identifier::Identifier;
 use keyhive_core::principal::membered::Membered;
 use keyhive_crypto::signer::memory::MemorySigner;
 use nonempty::NonEmpty;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt::{Debug, Formatter};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::fmt::Formatter;
 use std::sync::Arc;
 use subduction_keyhive::message::EventHash;
 

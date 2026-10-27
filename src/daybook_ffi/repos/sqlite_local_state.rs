@@ -1,8 +1,10 @@
 use crate::interlude::*;
 
-use crate::ffi::{FfiError, SharedFfiCtx};
+use crate::ffi::FfiError;
+use crate::ffi::SharedFfiCtx;
 
-use daybook_core::local_state::{LocalStateEvent, SqliteLocalStateRepo};
+use daybook_core::local_state::LocalStateEvent;
+use daybook_core::local_state::SqliteLocalStateRepo;
 
 #[derive(uniffi::Object)]
 pub struct SqliteLocalStateRepoFfi {
@@ -31,6 +33,7 @@ impl SqliteLocalStateRepoFfi {
     async fn load(fcx: SharedFfiCtx) -> Result<Arc<Self>, FfiError> {
         let (repo, stop_token) = fcx
             .do_on_rt(SqliteLocalStateRepo::boot(
+                Arc::clone(&fcx.rcx.sqlite_runtime),
                 fcx.rcx.layout.repo_root.join("local_state"),
             ))
             .await

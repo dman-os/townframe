@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 529be0a336f742dbfd87bdaafbebf334fbccb09e4bcb67228b112e9e24f1b16d # shrinks to ops = [Write { hop: 0, key: 0, value: None }, Write { hop: 0, key: 0, value: None }, Write { hop: 0, key: 0, value: None }, Write { hop: 0, key: 0, value: None }, Write { hop: 0, key: 0, value: None }, Write { hop: 0, key: 0, value: None }, Write { hop: 0, key: 0, value: None }, Write { hop: 0, key: 0, value: None }, Write { hop: 0, key: 0, value: Some(0) }, Settle { pick: 15730914020109161469, durable: false }, Write { hop: 2, key: 5, value: None }, Demand { hop: 1 }, Dispose { hop: 0, scope: 2 }, Release { pick: 4786883999739552252 }, Reset { rows: [] }, Settle { pick: 462020308141578274, durable: false }, Write { hop: 1, key: 0, value: Some(3) }, Write { hop: 1, key: 3, value: None }, Cover { pick: 13899660743987382962 }, Dispose { hop: 2, scope: 2 }]

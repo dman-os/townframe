@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use wflow_core::{
-    r#gen::types::PartitionId,
-    log, metastore,
-    partition::{effects, log::PartitionLogEntry},
-};
+use wflow_core::r#gen::types::PartitionId;
+use wflow_core::log;
+use wflow_core::metastore;
+use wflow_core::partition::effects;
+use wflow_core::partition::log::PartitionLogEntry;
 
 use wflow_core::snapstore::SnapStore;
 

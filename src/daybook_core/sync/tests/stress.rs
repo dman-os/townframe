@@ -1,9 +1,11 @@
 use super::*;
 
+use rand::Rng;
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Once;
 
@@ -295,6 +297,7 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
     tokio::fs::create_dir_all(&paths[0]).await?;
     let device_name = "stress-test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &paths[0],
         RepoOpenOptions {
             sync_max_task_backoff: Some(Duration::from_millis(500)),
@@ -315,6 +318,7 @@ async fn init_and_copy_repo_cluster(root: &std::path::Path) -> Res<Vec<PathBuf>>
             bootstrap_clone_repo_from_url_for_tests(&ticket, dst).await?;
 
             let ctx = RepoCtx::open(
+                Arc::new(sqlite_rs::SqliteRuntime::new(default())),
                 dst,
                 RepoOpenOptions {
                     sync_max_task_backoff: Some(Duration::from_millis(500)),
@@ -604,7 +608,8 @@ async fn collect_diagnostic_report(
             let mut hashes = blobs
                 .iter()
                 .map(|blob| {
-                    use std::hash::{Hash, Hasher};
+                    use std::hash::Hash;
+                    use std::hash::Hasher;
                     let mut hasher = std::collections::hash_map::DefaultHasher::new();
                     blob.hash(&mut hasher);
                     format!("{:016x}", hasher.finish())
@@ -1594,7 +1599,8 @@ async fn apply_event(
 // A peer's delete can therefore leave this node still listing a branch whose
 // branch doc this node may no longer write, and the product refuses that write.
 async fn branch_doc_writable(node: &SyncTestNode, branch_doc_id: &DocumentId) -> bool {
-    use big_repo::keyhive_core::principal::{identifier::Identifier, public::Public};
+    use big_repo::keyhive_core::principal::identifier::Identifier;
+    use big_repo::keyhive_core::principal::public::Public;
 
     // Same derivation as the keyhive diagnostics above: the local keyhive agent
     // is this node's iroh endpoint identity.

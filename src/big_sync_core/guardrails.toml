@@ -1,0 +1,154 @@
+version = 1
+role = "domain"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = ["utils_rs"]
+allow_external_api_types = false
+
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync_core/lib.rs"
+symbol = "module::BigSyncMachine::drain_bucket_machine_cmds"
+ceiling = 203
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync_core/lib.rs"
+symbol = "module::BigSyncMachine::drain_cursor_machine_cmds"
+ceiling = 188
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync_core/lib.rs"
+symbol = "module::BigSyncMachine::handle_set_peer_evt"
+ceiling = 195
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync_core/lib.rs"
+symbol = "module::BigSyncMachine::handle_set_peer_strat"
+ceiling = 168
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/big_sync_core/tasks/decide_peer_strat.rs"
+symbol = "module::DecidePeerStrategyTask::run_run"
+ceiling = 245
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/big_sync_core/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync_core/concurrent_delta_walker.rs"
+symbol = "module::tests"
+ceiling = 425
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync_core/cursor.rs"
+symbol = "module::tests"
+ceiling = 619
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync_core/lib.rs"
+symbol = "module::tests"
+ceiling = 2165
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync_core/serial_delta_walker.rs"
+symbol = "module::tests"
+ceiling = 483
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync_core/tasks/decide_peer_strat.rs"
+symbol = "module::tests"
+ceiling = 378
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/big_sync_core/watermark.rs"
+symbol = "module::tests"
+ceiling = 366
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_LINT_REASON"
+path = "src/big_sync_core/fingerprint.rs"
+symbol = "module::FingerprintSeed as serde :: Deserialize < 'de >::deserialize::SeedVisitor as serde :: de :: Visitor < '_ >::visit_bytes"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: give the lint expectation a nonempty reason"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MATCH_ARM_LENGTH"
+path = "src/big_sync_core/lib.rs"
+symbol = "module::BigSyncMachine::drain_cursor_machine_cmds::match(CursorMachineCommand :: SyncObj { obj_id , remot)"
+ceiling = 98
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: delegate large match arms to dedicated handlers to avoid dispatch-hub merge conflicts"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_MODULE_ITEMS"
+path = "src/big_sync_core/rpc.rs"
+symbol = "module"
+ceiling = 45
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: split responsibilities; imports and impl blocks do not count"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_TYPE_ITEMS"
+path = "src/big_sync_core/lib.rs"
+symbol = "module::BigSyncMachine"
+ceiling = 59
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: reduce the type/trait surface, not just the number of impl blocks"
+reference = "docs/scratch/agent-guardrails-open-items.md"

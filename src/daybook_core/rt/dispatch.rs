@@ -1,6 +1,7 @@
 use tokio_util::sync::CancellationToken;
 
 use crate::interlude::*;
+use crate::rt::sqlite::queries;
 
 #[derive(Hydrate, Reconcile, Serialize, Deserialize, Debug, Clone)]
 pub struct ActiveDispatch {
@@ -158,7 +159,7 @@ struct DispatchState {
 pub struct DispatchRepo {
     pub registry: Arc<crate::repos::ListenersRegistry>,
 
-    repo_sql: SqlCtx,
+    repo_sql: Database,
     state: tokio::sync::Mutex<DispatchState>,
     transition_mutex: tokio::sync::Mutex<()>,
     cancel_token: CancellationToken,
@@ -188,7 +189,7 @@ impl DispatchRepo {
         _big_repo: SharedBigRepo,
         _app_doc_id: DocumentId,
         local_user_path: UserPathBuf,
-        repo_sql: SqlCtx,
+        repo_sql: Database,
     ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         init_schema(&repo_sql).await?;
 
@@ -308,12 +309,11 @@ impl DispatchRepo {
     }
 
     pub async fn set_wflow_part_frontier(&self, wflow_part_id: String, frontier: u64) -> Res<()> {
-        sqlx::query(
-            "INSERT INTO wflow_partition_frontier(wflow_partition_id, frontier, updated_at)\n             VALUES (?1, ?2, unixepoch())\n             ON CONFLICT(wflow_partition_id) DO UPDATE SET\n                 frontier = excluded.frontier,\n                 updated_at = excluded.updated_at",
+        queries::set_wflow_part_frontier(
+            &self.repo_sql,
+            wflow_part_id.clone(),
+            i64::try_from(frontier).expect("frontier exceeds sqlite INTEGER range"),
         )
-        .bind(&wflow_part_id)
-        .bind(i64::try_from(frontier).expect("frontier exceeds sqlite INTEGER range"))
-        .execute(&self.repo_sql.write_pool)
         .await?;
 
         let mut state = self.state.lock().await;
@@ -375,13 +375,9 @@ impl DispatchRepo {
         let _transition_guard = self.transition_mutex.lock().await;
         let ActiveDispatchArgs::FacetRoutine(_args) = &dispatch.args;
 
-        let mut tx = self
-            .repo_sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        persist_dispatch_tx(&mut tx, &id, &dispatch).await?;
-        clear_cancelled_mark_tx(&mut tx, &id).await?;
+        let tx = self.repo_sql.begin_write().await?;
+        persist_dispatch_tx(&tx, &id, &dispatch).await?;
+        clear_cancelled_mark_tx(&tx, &id).await?;
         tx.commit().await?;
 
         let mut state = self.state.lock().await;
@@ -450,13 +446,9 @@ impl DispatchRepo {
         next.status = status;
         let next = Arc::new(next);
 
-        let mut tx = self
-            .repo_sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        persist_dispatch_tx(&mut tx, &id, &next).await?;
-        clear_cancelled_mark_tx(&mut tx, &id).await?;
+        let tx = self.repo_sql.begin_write().await?;
+        persist_dispatch_tx(&tx, &id, &next).await?;
+        clear_cancelled_mark_tx(&tx, &id).await?;
         tx.commit().await?;
 
         let mut state = self.state.lock().await;
@@ -525,18 +517,10 @@ impl DispatchRepo {
         }
         drop(state);
 
-        let mut tx = self
-            .repo_sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        let inserted = sqlx::query(
-            "INSERT OR IGNORE INTO dispatch_cancelled_marks(dispatch_id, created_at)\n             VALUES (?1, unixepoch())",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
+        let tx = self.repo_sql.begin_write().await?;
+        let inserted = queries::mark_dispatch_cancelled(&tx, id.to_owned())
+            .await?
+            .rows_affected
             > 0;
         tx.commit().await?;
 
@@ -600,12 +584,8 @@ impl DispatchRepo {
         let ready = updated.waiting_on_dispatch_ids.is_empty();
         let updated = Arc::new(updated);
 
-        let mut tx = self
-            .repo_sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
+        let tx = self.repo_sql.begin_write().await?;
+        persist_dispatch_tx(&tx, dispatch_id, &updated).await?;
         tx.commit().await?;
 
         let mut state = self.state.lock().await;
@@ -654,12 +634,8 @@ impl DispatchRepo {
         updated.deets = deets;
         let updated = Arc::new(updated);
 
-        let mut tx = self
-            .repo_sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
+        let tx = self.repo_sql.begin_write().await?;
+        persist_dispatch_tx(&tx, dispatch_id, &updated).await?;
         tx.commit().await?;
 
         let mut state = self.state.lock().await;
@@ -723,12 +699,8 @@ impl DispatchRepo {
         updated.deets = deets;
         let updated = Arc::new(updated);
 
-        let mut tx = self
-            .repo_sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
+        let tx = self.repo_sql.begin_write().await?;
+        persist_dispatch_tx(&tx, dispatch_id, &updated).await?;
         tx.commit().await?;
 
         let mut state = self.state.lock().await;
@@ -791,13 +763,9 @@ impl DispatchRepo {
         updated.status = DispatchStatus::Failed;
         let updated = Arc::new(updated);
 
-        let mut tx = self
-            .repo_sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        persist_dispatch_tx(&mut tx, dispatch_id, &updated).await?;
-        clear_cancelled_mark_tx(&mut tx, dispatch_id).await?;
+        let tx = self.repo_sql.begin_write().await?;
+        persist_dispatch_tx(&tx, dispatch_id, &updated).await?;
+        clear_cancelled_mark_tx(&tx, dispatch_id).await?;
         tx.commit().await?;
 
         let mut state = self.state.lock().await;
@@ -857,57 +825,19 @@ fn dispatch_heads_for_dispatches<'a>(
     ChangeHashSet(Arc::from(heads))
 }
 
-async fn init_schema(repo_sql: &SqlCtx) -> Res<()> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS dispatches (
-            id TEXT PRIMARY KEY NOT NULL,
-            status TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            wflow_job_id TEXT,
-            updated_at INTEGER NOT NULL
-        ) STRICT",
-    )
-    .execute(&repo_sql.write_pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_dispatches_wflow_job_id
-         ON dispatches(wflow_job_id)",
-    )
-    .execute(&repo_sql.write_pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS dispatch_cancelled_marks (
-            dispatch_id TEXT PRIMARY KEY NOT NULL,
-            created_at INTEGER NOT NULL
-        ) STRICT",
-    )
-    .execute(&repo_sql.write_pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS wflow_partition_frontier (
-            wflow_partition_id TEXT PRIMARY KEY NOT NULL,
-            frontier INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        ) STRICT",
-    )
-    .execute(&repo_sql.write_pool)
-    .await?;
-
+async fn init_schema(repo_sql: &Database) -> Res<()> {
+    repo_sql
+        .apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+        .await?;
     Ok(())
 }
 
-async fn load_state(repo_sql: &SqlCtx) -> Res<DispatchState> {
+async fn load_state(repo_sql: &Database) -> Res<DispatchState> {
     let mut state = DispatchState::default();
 
-    let rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT id, payload_json FROM dispatches ORDER BY id")
-            .fetch_all(&repo_sql.write_pool)
-            .await?;
-
-    for (id, payload_json) in rows {
+    for queries::ListDispatchesRow { id, payload_json } in
+        queries::list_dispatches(repo_sql).await?
+    {
         let dispatch: ActiveDispatch = serde_json::from_str(&payload_json)?;
         let dispatch = Arc::new(dispatch);
         state
@@ -931,17 +861,16 @@ async fn load_state(repo_sql: &SqlCtx) -> Res<DispatchState> {
         state.dispatches.insert(id, dispatch);
     }
 
-    let cancelled_ids: Vec<String> =
-        sqlx::query_scalar("SELECT dispatch_id FROM dispatch_cancelled_marks")
-            .fetch_all(&repo_sql.write_pool)
-            .await?;
-    state.cancelled_dispatches = cancelled_ids.into_iter().collect();
+    state.cancelled_dispatches = queries::list_cancelled_dispatches(repo_sql)
+        .await?
+        .into_iter()
+        .collect();
 
-    let frontier_rows: Vec<(String, i64)> =
-        sqlx::query_as("SELECT wflow_partition_id, frontier FROM wflow_partition_frontier")
-            .fetch_all(&repo_sql.write_pool)
-            .await?;
-    for (part_id, frontier) in frontier_rows {
+    for queries::ListWflowPartFrontiersRow {
+        wflow_partition_id: part_id,
+        frontier,
+    } in queries::list_wflow_part_frontiers(repo_sql).await?
+    {
         let frontier = match u64::try_from(frontier) {
             Ok(value) => value,
             Err(_) => {
@@ -957,7 +886,7 @@ async fn load_state(repo_sql: &SqlCtx) -> Res<DispatchState> {
 }
 
 async fn persist_dispatch_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    tx: &sqlite_rs::Tx,
     id: &str,
     dispatch: &Arc<ActiveDispatch>,
 ) -> Res<()> {
@@ -977,33 +906,13 @@ async fn persist_dispatch_tx(
         ActiveDispatchDeets::Wflow { wflow_job_id, .. } => wflow_job_id.clone(),
     };
 
-    sqlx::query(
-        "INSERT INTO dispatches(id, status, payload_json, wflow_job_id, updated_at)
-         VALUES (?1, ?2, ?3, ?4, unixepoch())
-         ON CONFLICT(id) DO UPDATE SET
-            status = excluded.status,
-            payload_json = excluded.payload_json,
-            wflow_job_id = excluded.wflow_job_id,
-            updated_at = excluded.updated_at",
-    )
-    .bind(id)
-    .bind(status)
-    .bind(payload_json)
-    .bind(wflow_job_id)
-    .execute(&mut **tx)
-    .await?;
+    queries::upsert_dispatch(tx, id.to_owned(), status, payload_json, wflow_job_id).await?;
 
     Ok(())
 }
 
-async fn clear_cancelled_mark_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    dispatch_id: &str,
-) -> Res<()> {
-    sqlx::query("DELETE FROM dispatch_cancelled_marks WHERE dispatch_id = ?1")
-        .bind(dispatch_id)
-        .execute(&mut **tx)
-        .await?;
+async fn clear_cancelled_mark_tx(tx: &sqlite_rs::Tx, dispatch_id: &str) -> Res<()> {
+    queries::clear_dispatch_cancelled(tx, dispatch_id.to_owned()).await?;
     Ok(())
 }
 
@@ -1012,10 +921,11 @@ mod tests {
     use automerge::transaction::Transactable;
 
     use super::*;
-    use crate::repos::{Repo, SubscribeOpts};
+    use crate::repos::Repo;
+    use crate::repos::SubscribeOpts;
 
     async fn setup_repo_with_sql(
-        repo_sql: SqlCtx,
+        repo_sql: Database,
     ) -> Res<(Arc<DispatchRepo>, daybook_types::doc::UserPathBuf)> {
         let local_user_path = daybook_types::doc::UserPathBuf::from("/test-user/test-device");
         let (big_repo, _part_store, _acx_stop) = crate::test_support::boot_repo().await?;
@@ -1104,7 +1014,8 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_dispatch_lifecycle_and_event_parity() -> Res<()> {
-        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+        let sql = crate::app::open_database(&runtime, crate::app::SqlConfig::memory()).await?;
         let (repo, _) = setup_repo_with_sql(sql.clone()).await?;
         let sub = repo.subscribe(SubscribeOpts::new(8));
 
@@ -1155,7 +1066,8 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_waiting_dependency_flow() -> Res<()> {
-        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::memory()).await?;
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+        let sql = crate::app::open_database(&runtime, crate::app::SqlConfig::memory()).await?;
         let (repo, _) = setup_repo_with_sql(sql.clone()).await?;
 
         repo.add("wait-1".into(), waiting_dispatch("job-wait-1", &["dep-1"]))
@@ -1192,8 +1104,9 @@ mod tests {
     async fn sqlite_reload_persists_dispatch_rows_and_frontier() -> Res<()> {
         let temp = tempfile::tempdir()?;
         let sql_cfg = crate::app::SqlConfig::file(temp.path().join("dispatch.sqlite"));
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
 
-        let sql = crate::app::open_sql_ctx(sql_cfg.clone()).await?;
+        let sql = crate::app::open_database(&runtime, sql_cfg.clone()).await?;
         let (repo, _) = setup_repo_with_sql(sql.clone()).await?;
         repo.add("disp-a".into(), active_dispatch("job-a")).await?;
         repo.set_wflow_part_frontier("part-1".into(), 44).await?;
@@ -1201,7 +1114,7 @@ mod tests {
         drop(repo);
         drop(sql);
 
-        let sql = crate::app::open_sql_ctx(sql_cfg.clone()).await?;
+        let sql = crate::app::open_database(&runtime, sql_cfg.clone()).await?;
         let (repo, _) = setup_repo_with_sql(sql.clone()).await?;
         let loaded = repo
             .get_any("disp-a")

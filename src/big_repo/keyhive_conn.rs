@@ -8,13 +8,13 @@ use core::convert::Infallible;
 use future_form::Sendable;
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use subduction_core::{authenticated::Authenticated, connection::Connection};
-use subduction_keyhive::{
-    KeyhiveMessage,
-    connection::KeyhiveConnection,
-    peer_id::KeyhivePeerId,
-    signed_message::{CborError, SignedMessage},
-};
+use subduction_core::authenticated::Authenticated;
+use subduction_core::connection::Connection;
+use subduction_keyhive::KeyhiveMessage;
+use subduction_keyhive::connection::KeyhiveConnection;
+use subduction_keyhive::peer_id::KeyhivePeerId;
+use subduction_keyhive::signed_message::CborError;
+use subduction_keyhive::signed_message::SignedMessage;
 
 /// Errors from [`BigRepoKeyhiveConnAdapter::send`].
 #[derive(Debug, thiserror::Error)]

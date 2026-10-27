@@ -12,7 +12,7 @@ path = "lib.rs"
 crate-type = ["rlib"]
 
 [features]
-default = ["uniffi", "wit", "manifest"]
+default = ["wit", "manifest"]
 uniffi = ["dep:uniffi", "dep:uuid"]
 wit = []
 schemars = ["dep:schemars"]
@@ -21,7 +21,7 @@ manifest = ["dep:garde", "dep:semver", "schemars"]
 [dependencies]
 #
 # internal
-api_utils_rs = { workspace = true, default-features = false }
+wasm_utils_rs = { workspace = true, default-features = false }
 utils_rs = { workspace = true, default-features = false }
 am_utils_rs = { workspace = true }
 

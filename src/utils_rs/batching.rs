@@ -15,8 +15,10 @@
 //! differs. The primitive knows nothing about Keyhive, BigSync, RPC, Tokio, or
 //! the concrete batch representation.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::time::Duration;
+use std::time::Instant;
 
 /// Decides when a keyed batch is due.
 pub trait FlushPolicy {

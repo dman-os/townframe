@@ -1,7 +1,9 @@
 use crate::interlude::*;
 
-use crate::kvstore::{CasError, KvStore};
-use crate::snapstore::{PartitionSnapshot, PartitionSnapshotRef};
+use crate::kvstore::CasError;
+use crate::kvstore::KvStore;
+use crate::snapstore::PartitionSnapshot;
+use crate::snapstore::PartitionSnapshotRef;
 
 /// Snapshot with metadata stored together
 #[derive(Debug, Deserialize)]

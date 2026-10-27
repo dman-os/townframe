@@ -2,10 +2,11 @@ use crate::interlude::*;
 
 use crate::drawer::DrawerRepo;
 use automerge::ActorId;
-use big_repo::{
-    BigDocHandle, BigRepoChangeFilter, BigRepoChangeListenerRegistration,
-    BigRepoChangeNotification, BigRepoDocIdFilter,
-};
+use big_repo::BigDocHandle;
+use big_repo::BigRepoChangeFilter;
+use big_repo::BigRepoChangeListenerRegistration;
+use big_repo::BigRepoChangeNotification;
+use big_repo::BigRepoDocIdFilter;
 use futures::future::BoxFuture;
 
 #[async_trait]

@@ -1,0 +1,22 @@
+version = 1
+role = "plugin"
+dependency_reason = "WASM workflows consume portable ledger types and helpers from the native manifest crate"
+allowed_dependencies = [
+    "daybook_types",
+    "plug_dayledger_manifest",
+    "utils_rs",
+    "wasm_utils_rs",
+    "wflow_sdk",
+]
+allow_external_api_types = false
+
+[builds.wasm32-wasip2]
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/plug_dayledger_routines/wflows/parse_hledger.rs"
+symbol = "module::run"
+ceiling = 330
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"

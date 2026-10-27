@@ -3,7 +3,11 @@ use crate::interlude::*;
 use automerge::ObjId;
 
 use automerge::*;
-use autosurgeon::{Hydrate, HydrateError, Prop, ReadDoc, Reconciler};
+use autosurgeon::Hydrate;
+use autosurgeon::HydrateError;
+use autosurgeon::Prop;
+use autosurgeon::ReadDoc;
+use autosurgeon::Reconciler;
 use std::borrow::Cow;
 use std::collections::HashSet;
 

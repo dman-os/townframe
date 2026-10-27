@@ -1,0 +1,16 @@
+[package]
+name = "dayframe_web"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dioxus = { workspace = true }
+ui = { workspace = true }
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
+
+[[bin]]
+name = "dayframe_web"
+path = "main.rs"

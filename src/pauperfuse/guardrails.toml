@@ -1,0 +1,83 @@
+version = 1
+role = "runtime"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = [
+    "sqlite_rs",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/pauperfuse/lib.rs"
+symbol = "module::tests::test_backend_edit_emits_provider_observation_effect"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/pauperfuse/lib.rs"
+symbol = "module::tests::test_effects_drain_semantics"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/pauperfuse/lib.rs"
+symbol = "module::tests::test_ordering_backend_then_provider_same_object_is_deterministic"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/pauperfuse/lib.rs"
+symbol = "module::tests::test_provider_remove_emits_backend_remove_effect"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/pauperfuse/lib.rs"
+symbol = "module::tests::test_provider_update_emits_backend_materialize_effect"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/pauperfuse/lib.rs"
+symbol = "module::tests::test_reconcile_no_changes_emits_no_effects"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/pauperfuse/lib.rs"
+symbol = "module::tests::test_state_ids_advance_only_on_effective_transitions"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/pauperfuse/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[migrations]
+"src/pauperfuse/sqlite/migrations/001_init.sql" = "3796829ddd63c3b12d4f03d8f982c2346ca58cd18a9b91414f3fc31a4a5e29f8"

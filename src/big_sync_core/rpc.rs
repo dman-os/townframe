@@ -1,11 +1,17 @@
 //! TODO: rate limiting
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
+use serde::Serializer;
 
 use crate::interlude::*;
 
-use crate::fingerprint::{Fingerprint, FingerprintSeed};
-use crate::part_store::{CursorIndex, ObjPayload, PartDirtyCount};
+use crate::fingerprint::Fingerprint;
+use crate::fingerprint::FingerprintSeed;
+use crate::part_store::CursorIndex;
+use crate::part_store::ObjPayload;
+use crate::part_store::PartDirtyCount;
 
 pub trait BigSyncRpcClient<K: FutureForm> {
     /// A per-part answer: readable parts appear in [`PeerSummaryResult::parts`], and a

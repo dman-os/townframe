@@ -2,35 +2,41 @@ use super::*;
 mod ladder;
 mod stress;
 
-use crate::blobs::{BlobId, BlobsRepo};
-use crate::drawer::{DrawerRepo, types::DrawerError};
+use crate::blobs::BlobId;
+use crate::blobs::BlobsRepo;
+use crate::drawer::DrawerRepo;
+use crate::drawer::types::DrawerError;
 use crate::local_state::SqliteLocalStateRepo;
 use crate::plugs::PlugsRepo;
 use crate::progress::ProgressRepo;
-use crate::repo::{RepoCtx, RepoOpenOptions};
-use crate::repos::{Repo, SubscribeOpts};
-use daybook_types::doc::{
-    AddDocArgs, BlobPin, BranchPath, BranchPathBuf, DocId, DocPatch, FacetKey, FacetRaw,
-    WellKnownFacet, WellKnownFacetTag,
-};
+use crate::repo::RepoCtx;
+use crate::repo::RepoOpenOptions;
+use crate::repos::Repo;
+use crate::repos::SubscribeOpts;
+use daybook_types::doc::AddDocArgs;
+use daybook_types::doc::BlobPin;
+use daybook_types::doc::BranchPath;
+use daybook_types::doc::BranchPathBuf;
+use daybook_types::doc::DocId;
+use daybook_types::doc::DocPatch;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetRaw;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
 
-async fn facet_set_hash_rows(
-    sql: &sqlx::SqlitePool,
-    doc_id: &DocId,
-    facet_tag: &str,
-) -> Res<Vec<String>> {
-    Ok(sqlx::query_scalar::<_, String>(
-        r#"
+async fn facet_set_hash_rows(sql: &Database, doc_id: &DocId, facet_tag: &str) -> Res<Vec<String>> {
+    Ok(sql
+        .query(
+            r#"
         SELECT DISTINCT facet_id
           FROM facet_set_doc_facets
          WHERE document_id = ?1
            AND facet_tag = ?2
         "#,
-    )
-    .bind(doc_id)
-    .bind(facet_tag)
-    .fetch_all(sql)
-    .await?)
+            (doc_id, facet_tag),
+        )
+        .await?
+        .all()?)
 }
 
 struct SyncTestNode {
@@ -207,6 +213,7 @@ async fn shutdown_stops_the_inventory_writer_after_the_workers_that_serve_from_i
     let repo_path = temp_root.path().join("repo-a");
     tokio::fs::create_dir_all(&repo_path).await?;
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_path,
         RepoOpenOptions::default(),
         "test-device".to_string(),
@@ -304,6 +311,7 @@ async fn iroh_live_sync_propagates_repeated_doc_updates() -> Res<()> {
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -390,6 +398,7 @@ async fn cloned_repo_registers_core_docs_partition_on_open() -> Res<()> {
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -447,6 +456,7 @@ async fn bootstrap_ticket_in_tests_omits_relay_addresses() -> Res<()> {
 
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -548,6 +558,7 @@ async fn iroh_clone_bootstrap_syncs_blob_scope() -> Res<()> {
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -650,6 +661,7 @@ async fn iroh_clone_bootstrap_syncs_encrypted_representation_inventory() -> Res<
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -990,6 +1002,7 @@ async fn peer_partition_ids_advertise_every_blob_inventory() -> Res<()> {
     tokio::fs::create_dir_all(&repo_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -1190,13 +1203,13 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
     let blob_pin_tag = daybook_types::doc::WellKnownFacetTag::BlobPin.as_str();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
-        let hashes = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
+        let hashes = facet_set_hash_rows(&facet_set_sql, &doc_id, blob_pin_tag).await?;
         if hashes.contains(&hash_1) && hashes.contains(&hash_2) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let hashes_b = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
+    let hashes_b = facet_set_hash_rows(&facet_set_sql, &doc_id, blob_pin_tag).await?;
     assert!(hashes_b.contains(&hash_1));
     assert!(hashes_b.contains(&hash_2));
 
@@ -1239,13 +1252,13 @@ async fn iroh_blob_pin_sync_replicates_and_fetches_blobs() -> Res<()> {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
-        let hashes = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
+        let hashes = facet_set_hash_rows(&facet_set_sql, &doc_id, blob_pin_tag).await?;
         if hashes.len() == 1 && hashes.contains(&hash_1) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let hashes_after = facet_set_hash_rows(&facet_set_sql.read_pool, &doc_id, blob_pin_tag).await?;
+    let hashes_after = facet_set_hash_rows(&facet_set_sql, &doc_id, blob_pin_tag).await?;
     assert_eq!(hashes_after, vec![hash_1.clone()]);
 
     node_b.stop().await?;
@@ -1263,6 +1276,7 @@ async fn iroh_sync_after_bootstrap_clone_converges() -> Res<()> {
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -1321,6 +1335,7 @@ async fn init_and_copy_repo_pair(
     tokio::fs::create_dir_all(repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -1338,6 +1353,7 @@ async fn init_and_copy_repo_pair(
         bootstrap_clone_repo_from_url_for_tests(&ticket, repo_b_path).await?;
 
         let ctx = RepoCtx::open(
+            Arc::new(sqlite_rs::SqliteRuntime::new(default())),
             repo_b_path,
             RepoOpenOptions::default(),
             "test-device".into(),
@@ -1376,6 +1392,7 @@ async fn bootstrap_clone_repo_from_url_for_tests(
     destination: &std::path::Path,
 ) -> Res<()> {
     crate::sync::clone_repo_init_from_url(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         source_url,
         destination,
         crate::sync::CloneRepoInitOptions {
@@ -1395,6 +1412,7 @@ async fn bootstrap_clone_repo_from_url_for_tests(
 /// production does.
 async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
     let rtx = RepoCtx::open(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         repo_root,
         RepoOpenOptions {
             sync_max_task_backoff: Some(Duration::from_millis(500)),
@@ -1419,6 +1437,7 @@ async fn open_sync_node(repo_root: &std::path::Path) -> Res<SyncTestNode> {
 ///   finding about the production shape under load, not hidden test cost.
 async fn open_sync_node_without_blob_workers(repo_root: &std::path::Path) -> Res<SyncTestNode> {
     let rtx = RepoCtx::open(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         repo_root,
         RepoOpenOptions {
             sync_max_task_backoff: Some(Duration::from_millis(500)),
@@ -1489,8 +1508,11 @@ async fn boot_sync_node(rtx: Arc<RepoCtx>, blob_workers: bool) -> Res<SyncTestNo
         None,
     )
     .await?;
-    let (sqlite_local_state_repo, sqlite_local_state_stop) =
-        SqliteLocalStateRepo::boot(rtx.layout.repo_root.join("local_state")).await?;
+    let (sqlite_local_state_repo, sqlite_local_state_stop) = SqliteLocalStateRepo::boot(
+        Arc::clone(&rtx.sqlite_runtime),
+        rtx.layout.repo_root.join("local_state"),
+    )
+    .await?;
 
     let (rt, rt_stop) = crate::rt::Rt::boot(
         crate::rt::RtConfig {
@@ -2213,6 +2235,7 @@ async fn init_told_sync_node(
     //    re-points the node's inventories at the told ones, and the local
     //    leftovers stay as inert drawer-only docs nothing watches.
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         repo_root,
         RepoOpenOptions::default(),
         "told-node".to_string(),
@@ -2285,26 +2308,36 @@ async fn init_told_sync_node(
     // inventoried ids live in config.
     let result: Res<SyncTestNode> = async {
         let lock_guard = crate::repo::RepoLockGuard::acquire(layout.lock_path.clone()).await?;
-        let sql = crate::app::open_sql_ctx(crate::app::SqlConfig::file(layout.sqlite_path.clone()))
-            .await?;
+        let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
+        let sql = crate::app::open_database(
+            &sqlite_runtime,
+            crate::app::SqlConfig::file(layout.sqlite_path.clone()),
+        )
+        .await?;
         let (sqlite_local_state_repo, sqlite_local_state_stop) =
-            crate::local_state::SqliteLocalStateRepo::boot(layout.repo_root.join("local_state"))
-                .await?;
+            crate::local_state::SqliteLocalStateRepo::boot(
+                Arc::clone(&sqlite_runtime),
+                layout.repo_root.join("local_state"),
+            )
+            .await?;
         let secret_store = secrets_rs::SecretStore::boot().await?;
         let identity = crate::secrets::load_identity(&secret_store, &checkout_id.clone())
             .await?
             .ok_or_else(|| eyre::eyre!("told node identity missing from the secret store"))?;
-        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(big_repo::Config {
-            node_identity_seed: identity.iroh_secret_key.to_bytes(),
-            storage: big_repo::StorageConfig::Disk {
-                path: layout.big_repo_root.clone(),
+        let (big_repo, big_repo_stop) = big_repo::BigRepo::boot(
+            Arc::clone(&sqlite_runtime),
+            big_repo::Config {
+                node_identity_seed: identity.iroh_secret_key.to_bytes(),
+                storage: big_repo::StorageConfig::Disk {
+                    path: layout.big_repo_root.clone(),
+                },
+                scope_key: Arc::from("daybook-core"),
+                hidden_parts: default(),
+                automerge_frontier_group_scope: default(),
+                causal_checkpoint_group_scope: default(),
+                group_part_group_scope: default(),
             },
-            scope_key: Arc::from("daybook-core"),
-            hidden_parts: default(),
-            automerge_frontier_group_scope: default(),
-            causal_checkpoint_group_scope: default(),
-            group_part_group_scope: default(),
-        })
+        )
         .await?;
         let parts = crate::repo::RepoCtxParts {
             layout: layout.clone(),
@@ -2313,11 +2346,12 @@ async fn init_told_sync_node(
                 sync_max_task_backoff: Some(Duration::from_millis(500)),
             },
             sql: sql.clone(),
+            sqlite_runtime,
             sqlite_local_state_repo: Arc::clone(&sqlite_local_state_repo),
             sqlite_local_state_stop: std::sync::Mutex::new(Some(sqlite_local_state_stop)),
             part_store: big_repo.shared_part_store(),
-            blob_part_store: crate::repo::open_blob_part_store(big_repo.sql_ctx()).await?,
-            blob_presence_store: crate::repo::open_blob_presence_part_store(big_repo.sql_ctx())
+            blob_part_store: crate::repo::open_blob_part_store(big_repo.database()).await?,
+            blob_presence_store: crate::repo::open_blob_presence_part_store(big_repo.database())
                 .await?,
             frontier_part_store: big_repo.frontier_part_store(),
             derived_part_store: big_repo.derived_part_store(),
@@ -2352,15 +2386,15 @@ async fn init_told_sync_node(
 /// The access rows of one blob-inventory part, read from the repository's own
 /// blob part store (scope-keyed; the shape the permission writer's tests use).
 async fn inventory_part_rows(
-    sql: &SqlCtx,
+    sql: &Database,
     scope: &str,
     part: &PartKey,
 ) -> Res<Vec<(PeerKey, String)>> {
     let scope_id =
-        big_sync::sqlite_core::SqliteCore::ensure_scope_id(&sql.write_pool, &Arc::from(scope))
-            .await?;
-    let rows = sqlx::query(
-        r#"
+        big_sync::sqlite_core::SqliteCore::ensure_scope_id(sql, &Arc::from(scope)).await?;
+    let rows = sql
+        .query(
+            r#"
         SELECT s.principal_id AS principal_id
              , s.access_level AS access_level
           FROM big_sync_syncable s
@@ -2368,16 +2402,15 @@ async fn inventory_part_rows(
          WHERE p.scope_id = ?1
            AND p.part_id = ?2
         "#,
-    )
-    .bind(scope_id)
-    .bind(big_sync::sqlite_core::SqliteCore::part_blob(part.clone()))
-    .fetch_all(&sql.read_pool)
-    .await?;
-    use sqlx::Row as _;
+            (
+                scope_id,
+                big_sync::sqlite_core::SqliteCore::part_blob(part.clone()),
+            ),
+        )
+        .await?
+        .all::<(Vec<u8>, i64)>()?;
     rows.into_iter()
-        .map(|row| {
-            let principal: Vec<u8> = row.get("principal_id");
-            let level: i64 = row.get("access_level");
+        .map(|(principal, level)| {
             let principal =
                 PeerKey::new(<[u8; 32]>::try_from(principal.as_slice()).map_err(|_| {
                     eyre::eyre!(
@@ -2513,6 +2546,7 @@ async fn long_test_told_not_cloned_inventory_part_is_refused_until_the_inventory
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -2734,7 +2768,7 @@ async fn long_test_told_not_cloned_inventory_part_is_refused_until_the_inventory
     let row_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let rows = inventory_part_rows(
-            &node_a.ctx.big_repo.sql_ctx(),
+            &node_a.ctx.big_repo.database(),
             "daybook-blobs",
             &encryption_part,
         )
@@ -2937,6 +2971,7 @@ async fn relay_granted_only_the_encrypted_inventory_cannot_decrypt_but_retains_a
     tokio::fs::create_dir_all(&repo_a_path).await?;
     let device_name = "test-device".to_string();
     let rtx = RepoCtx::init(
+        Arc::new(sqlite_rs::SqliteRuntime::new(default())),
         &repo_a_path,
         RepoOpenOptions::default(),
         device_name.clone(),
@@ -3407,7 +3442,8 @@ async fn wait_for_part_row_including(
 ) -> Res<()> {
     let deadline = tokio::time::Instant::now() + utils_rs::scale_timeout(timeout);
     loop {
-        let rows = inventory_part_rows(&node.ctx.big_repo.sql_ctx(), "daybook-blobs", part).await?;
+        let rows =
+            inventory_part_rows(&node.ctx.big_repo.database(), "daybook-blobs", part).await?;
         if rows.iter().any(|principal| principal.0 == *peer) {
             return Ok(());
         }

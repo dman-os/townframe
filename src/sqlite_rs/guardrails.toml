@@ -1,0 +1,26 @@
+version = 1
+role = "foundation"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = ["utils_rs"]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/sqlite_rs/lib.rs"
+symbol = "module::tests"
+ceiling = 582
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_SHARED_ASYNC_STATE"
+path = "src/sqlite_rs/lib.rs"
+symbol = "module"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use single-owner state/message passing; do not mechanically replace async locks with blocking locks"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[migrations]
+"src/sqlite_rs/sqlite/migrations/001_init.sql" = "4b120de9406d4a70fa7fcedaf8df15b1cd54dbcc1b8704af0197d420691bc1d3"

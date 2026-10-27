@@ -35,71 +35,38 @@ pub mod doc_version_updates {
     }
 }
 
+use super::BranchKind;
+use super::BranchRefRow;
 #[cfg(test)]
 use super::BranchStateRow;
-use super::{BranchKind, BranchRefRow, DrawerRepo};
-use crate::drawer::types::{DocEntry, DocNBranches, StoredBranchRef};
+use super::DrawerRepo;
+use crate::drawer::sqlite::queries;
+use crate::drawer::types::DocEntry;
+use crate::drawer::types::DocNBranches;
+use crate::drawer::types::StoredBranchRef;
 use crate::stores::VersionTag;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use daybook_types::doc::{
-    ChangeHashSet, DocId, FacetKey, FacetTag, WellKnownFacet, WellKnownFacetTag,
-};
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::FacetTag;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
 use daybook_types::url::parse_facet_ref;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
-/// Create the local-branch SQL tables if the db predates them. Idempotent;
-/// also called by the boot reconciliation's registration read, which can run before
-/// a drawer boot ever created the schema.
-pub(crate) async fn ensure_local_branch_schema(sql: &SqlCtx) -> Res<()> {
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS drawer_local_branches (
-            doc_id TEXT NOT NULL,
-            branch_path TEXT NOT NULL,
-            branch_doc_id BLOB NOT NULL,
-            vtag_version TEXT NOT NULL,
-            vtag_actor_id TEXT NOT NULL,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY (doc_id, branch_path)
-        ) STRICT
-        "#,
-    )
-    .execute(&sql.write_pool)
-    .await?;
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS drawer_local_branches_deleted (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            doc_id TEXT NOT NULL,
-            branch_path TEXT NOT NULL,
-            branch_doc_id BLOB NOT NULL,
-            branch_heads_json TEXT NOT NULL,
-            vtag_version TEXT NOT NULL,
-            vtag_actor_id TEXT NOT NULL,
-            deleted_at INTEGER NOT NULL
-        ) STRICT
-        "#,
-    )
-    .execute(&sql.write_pool)
-    .await?;
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_doc_id ON drawer_local_branches(doc_id)",
-    )
-    .execute(&sql.write_pool)
-    .await?;
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_drawer_local_branches_deleted_doc_path ON drawer_local_branches_deleted(doc_id, branch_path, deleted_at DESC)",
-    )
-    .execute(&sql.write_pool)
-    .await?;
+/// Apply the drawer's SQLite unit (local branch refs, tombstones and the add
+/// outbox) to the repository database. Idempotent; called at drawer boot and
+/// by the boot sweeps that may run before a drawer has booted.
+pub(crate) async fn ensure_schema(sql: &Database) -> Res<()> {
+    sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
+        .await?;
     Ok(())
 }
 
 impl DrawerRepo {
-    pub(super) async fn ensure_local_branch_schema(&self) -> Res<()> {
-        ensure_local_branch_schema(&self.meta_store_sql).await
-    }
     pub(super) async fn upsert_local_branch_ref(
         &self,
         doc_id: &DocId,
@@ -108,25 +75,15 @@ impl DrawerRepo {
         vtag: &VersionTag,
     ) -> Res<()> {
         let updated_at = jiff::Timestamp::now().as_microsecond();
-        sqlx::query(
-            r#"
-            INSERT INTO "drawer_local_branches" (
-                doc_id, branch_path, branch_doc_id, vtag_version, vtag_actor_id, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            ON CONFLICT(doc_id, branch_path) DO UPDATE SET
-                branch_doc_id = excluded.branch_doc_id,
-                vtag_version = excluded.vtag_version,
-                vtag_actor_id = excluded.vtag_actor_id,
-                updated_at = excluded.updated_at
-            "#,
+        queries::upsert_local_branch(
+            &self.meta_store_sql,
+            doc_id.clone(),
+            branch_path.to_string(),
+            branch_doc_id.as_bytes().to_vec(),
+            vtag.version.to_string(),
+            vtag.actor_id.to_string(),
+            updated_at,
         )
-        .bind(doc_id)
-        .bind(branch_path.to_string())
-        .bind(branch_doc_id.as_bytes())
-        .bind(vtag.version.to_string())
-        .bind(vtag.actor_id.to_string())
-        .bind(updated_at)
-        .execute(&self.meta_store_sql.write_pool)
         .await?;
         Ok(())
     }
@@ -136,14 +93,12 @@ impl DrawerRepo {
         doc_id: &DocId,
         branch_path: &daybook_types::doc::BranchPath,
     ) -> Res<Option<DocumentId>> {
-        let rec = sqlx::query_scalar::<_, Vec<u8>>(
-            r#"SELECT branch_doc_id FROM "drawer_local_branches" WHERE doc_id = ?1 AND branch_path = ?2"#
+        let rec = queries::local_branch_doc_id(
+            &self.meta_store_sql,
+            doc_id.clone(),
+            branch_path.to_string(),
         )
-        .bind(doc_id)
-        .bind(branch_path.to_string())
-        .fetch_optional(&self.meta_store_sql.write_pool)
         .await?;
-
         Ok(rec.map(DocumentId::new))
     }
 
@@ -151,17 +106,13 @@ impl DrawerRepo {
         &self,
         doc_id: &DocId,
     ) -> Res<Vec<(String, DocumentId)>> {
-        Ok(sqlx::query_as::<_, (String, Vec<u8>)>(
-            r#"SELECT branch_path, branch_doc_id 
-                FROM "drawer_local_branches" 
-                WHERE doc_id = ?1 ORDER BY branch_path ASC"#,
+        Ok(
+            queries::list_local_branches(&self.meta_store_sql, doc_id.clone())
+                .await?
+                .into_iter()
+                .map(|row| (row.branch_path, DocumentId::new(row.branch_doc_id)))
+                .collect(),
         )
-        .bind(doc_id)
-        .fetch_all(&self.meta_store_sql.write_pool)
-        .await?
-        .into_iter()
-        .map(|(path, id)| (path, DocumentId::new(id)))
-        .collect())
     }
 
     pub(super) async fn delete_local_branch_ref_with_tombstone(
@@ -177,34 +128,19 @@ impl DrawerRepo {
             serde_json::to_string(&am_utils_rs::serialize_commit_heads(branch_heads.as_ref()))
                 .expect(ERROR_JSON);
 
-        let mut tx = self
-            .meta_store_sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO "drawer_local_branches_deleted" (
-                doc_id, branch_path, branch_doc_id, branch_heads_json, vtag_version, vtag_actor_id, deleted_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            "#
+        let tx = self.meta_store_sql.begin_write().await?;
+        queries::insert_deleted_local_branch(
+            &tx,
+            doc_id.clone(),
+            branch_path.to_string(),
+            branch_doc_id.as_bytes().to_vec(),
+            branch_heads_json,
+            vtag.version.to_string(),
+            vtag.actor_id.to_string(),
+            deleted_at,
         )
-        .bind(doc_id)
-        .bind(branch_path.to_string())
-        .bind(branch_doc_id.as_bytes())
-        .bind(branch_heads_json)
-        .bind(vtag.version.to_string())
-        .bind(vtag.actor_id.to_string())
-        .bind(deleted_at)
-        .execute(tx.as_mut())
         .await?;
-        sqlx::query(
-            r#"DELETE FROM "drawer_local_branches" WHERE doc_id = ?1 AND branch_path = ?2"#,
-        )
-        .bind(doc_id)
-        .bind(branch_path.to_string())
-        .execute(tx.as_mut())
-        .await?;
+        queries::delete_local_branch(&tx, doc_id.clone(), branch_path.to_string()).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -439,7 +375,7 @@ pub(crate) enum RegisteredAllocationShape {
 /// reconciliation then keeps every surviving row instead of replaying, since a
 /// registered-but-unreadable entry must never be re-committed blind.
 pub(crate) async fn registered_allocation_shapes(
-    sql: &SqlCtx,
+    sql: &Database,
     big_repo: &big_repo::SharedBigRepo,
     drawer_doc_id: &big_repo::DocumentId,
     claim_candidates: &[big_repo::DocumentId],
@@ -493,12 +429,8 @@ pub(crate) async fn registered_allocation_shapes(
         })
         .await?;
 
-    ensure_local_branch_schema(sql).await?;
-    let local_rows: Vec<(Vec<u8>,)> =
-        sqlx::query_as("SELECT branch_doc_id FROM drawer_local_branches")
-            .fetch_all(&sql.write_pool)
-            .await?;
-    for (branch_doc_id,) in local_rows {
+    ensure_schema(sql).await?;
+    for branch_doc_id in queries::all_local_branch_doc_ids(sql).await? {
         let branch_doc_id: [u8; 32] = branch_doc_id
             .try_into()
             .map_err(|err| ferr!("drawer local branch doc id is not 32 bytes: {err:?}"))?;

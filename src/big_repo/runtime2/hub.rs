@@ -3,15 +3,23 @@
 use crate::interlude::*;
 
 use crate::DocumentId;
+use crate::runtime2::DocWorkerEntry;
+use crate::runtime2::DocWorkerHandle;
+use crate::runtime2::DocWorkerInternalLease;
+use crate::runtime2::Runtime2Config;
+use crate::runtime2::Runtime2Handle;
+use crate::runtime2::TaskRuntime;
+use crate::runtime2::TaskSet;
 use crate::runtime2::doc_worker::DocWorkerLoop;
-use crate::runtime2::{
-    DocWorkerEntry, DocWorkerHandle, DocWorkerInternalLease, Runtime2Config, Runtime2Handle,
-    TaskRuntime, TaskSet,
-    messages::{DocWorkerMsg, Runtime2Cmd, Runtime2Evt},
-};
+use crate::runtime2::messages::DocWorkerMsg;
+use crate::runtime2::messages::Runtime2Cmd;
+use crate::runtime2::messages::Runtime2Evt;
 use big_sync_core::PeerKey;
-use future_form::{FutureForm, Local, Sendable};
-use std::collections::{HashMap, HashSet};
+use future_form::FutureForm;
+use future_form::Local;
+use future_form::Sendable;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use tracing::Instrument;
 // Re-export the ephemeral so embedders can subscribe.
 
@@ -4018,8 +4026,12 @@ mod tests {
     /// future without polling it, which is the shape reproduced here.
     #[tokio::test]
     async fn tracked_work_aborted_before_first_poll_still_emits_done() {
-        use crate::runtime2::{TaskRuntime, TaskSet, TokioTaskRuntime, TrackedWorkKind};
-        use future_form::{FutureForm, Sendable};
+        use crate::runtime2::TaskRuntime;
+        use crate::runtime2::TaskSet;
+        use crate::runtime2::TokioTaskRuntime;
+        use crate::runtime2::TrackedWorkKind;
+        use future_form::FutureForm;
+        use future_form::Sendable;
 
         // Current-thread runtime: there is no await between `spawn` and
         // `abort`, so the task cannot have been polled yet.

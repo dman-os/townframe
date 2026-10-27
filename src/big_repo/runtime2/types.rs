@@ -610,7 +610,8 @@ impl GroupScopeHandle {
 #[cfg(test)]
 mod worker_scope_tests {
     use super::WorkerGroupScope;
-    use std::collections::{BTreeSet, HashSet};
+    use std::collections::BTreeSet;
+    use std::collections::HashSet;
 
     #[test]
     fn all_and_selective_scopes_match_group_membership() {

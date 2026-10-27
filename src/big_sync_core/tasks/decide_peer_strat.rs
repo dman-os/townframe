@@ -1,15 +1,21 @@
 use crate::interlude::*;
 
-use crate::{
-    SyncMode,
-    bucket::{BucketMachine, calc_working_level},
-    part_store::{CursorIndex, PartStoreReadOnly},
-    rpc::{
-        BigSyncRpcClient, BuckLevel, BucketSummary, GetChangedBucketsRequest, ListPartsError,
-        PartStratSummary, PeerSummaryError, PeerSummaryRequest, RpcError,
-    },
-    tasks::{TaskCtx, TaskResultDeets},
-};
+use crate::SyncMode;
+use crate::bucket::BucketMachine;
+use crate::bucket::calc_working_level;
+use crate::part_store::CursorIndex;
+use crate::part_store::PartStoreReadOnly;
+use crate::rpc::BigSyncRpcClient;
+use crate::rpc::BuckLevel;
+use crate::rpc::BucketSummary;
+use crate::rpc::GetChangedBucketsRequest;
+use crate::rpc::ListPartsError;
+use crate::rpc::PartStratSummary;
+use crate::rpc::PeerSummaryError;
+use crate::rpc::PeerSummaryRequest;
+use crate::rpc::RpcError;
+use crate::tasks::TaskCtx;
+use crate::tasks::TaskResultDeets;
 
 #[derive(Debug, Clone)]
 pub struct DecidePeerStrategyTask {
@@ -342,16 +348,29 @@ impl DecidePeerStrategyTask {
 mod tests {
     use super::*;
 
-    use crate::{
-        BuckId, ObjKey, PartKey, PeerKey, Set, SyncMode, mpsc,
-        part_store::{ObjPayload, PartDirtyCount, PartStoreReadOnly},
-        rpc::{
-            BigSyncRpcResult, BucketPartSummary, BucketSummary, CursorPartSummary,
-            LeafBucketResult, LeafBucketsError, ListPartsError, PartStratSummary,
-            PeerSummaryRequest, PeerSummaryResult,
-        },
-        tasks::{MachineTaskMsg, TaskCtx, TaskResultDeets},
-    };
+    use crate::BuckId;
+    use crate::ObjKey;
+    use crate::PartKey;
+    use crate::PeerKey;
+    use crate::Set;
+    use crate::SyncMode;
+    use crate::mpsc;
+    use crate::part_store::ObjPayload;
+    use crate::part_store::PartDirtyCount;
+    use crate::part_store::PartStoreReadOnly;
+    use crate::rpc::BigSyncRpcResult;
+    use crate::rpc::BucketPartSummary;
+    use crate::rpc::BucketSummary;
+    use crate::rpc::CursorPartSummary;
+    use crate::rpc::LeafBucketResult;
+    use crate::rpc::LeafBucketsError;
+    use crate::rpc::ListPartsError;
+    use crate::rpc::PartStratSummary;
+    use crate::rpc::PeerSummaryRequest;
+    use crate::rpc::PeerSummaryResult;
+    use crate::tasks::MachineTaskMsg;
+    use crate::tasks::TaskCtx;
+    use crate::tasks::TaskResultDeets;
     use future_form::Local;
     use futures::future::LocalBoxFuture;
     use std::cell::Cell;

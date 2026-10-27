@@ -2,7 +2,9 @@
 
 use crate::interlude::*;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -611,8 +613,11 @@ mod tests {
 
 #[cfg(test)]
 mod loom_tests {
-    use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use loom::sync::{Arc, Mutex};
+    use loom::sync::Arc;
+    use loom::sync::Mutex;
+    use loom::sync::atomic::AtomicBool;
+    use loom::sync::atomic::AtomicU64;
+    use loom::sync::atomic::Ordering;
     use loom::thread;
     use std::collections::VecDeque;
 

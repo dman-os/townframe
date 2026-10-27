@@ -5,8 +5,12 @@
 #![allow(dead_code)]
 use crate::index::doc_delta_store::DocDelta;
 use crate::interlude::*;
-use daybook_types::doc::{BranchId, ChangeHashSet, DocId, FacetKey};
-use serde::{Deserialize, Serialize};
+use daybook_types::doc::BranchId;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::FacetKey;
+use serde::Deserialize;
+use serde::Serialize;
 use std::cmp::Ordering;
 
 /// Stable identity of a facet on one logical branch.

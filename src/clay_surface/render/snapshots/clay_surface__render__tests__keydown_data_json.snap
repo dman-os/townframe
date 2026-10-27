@@ -1,0 +1,16 @@
+---
+source: src/clay_surface/render.rs
+expression: "serde_json::from_str::<serde_json::Value>(&keydown.data_json).unwrap()"
+---
+alt_key: false
+char_code: 97
+code: KeyA
+ctrl_key: false
+is_composing: false
+key: a
+key_code: 65
+location: 0
+meta_key: false
+repeat: false
+shift_key: false
+which: 97

@@ -1,0 +1,18 @@
+---
+source: src/clay_surface/render.rs
+expression: "serde_json::from_str::<serde_json::Value>(&click.data_json).unwrap()"
+---
+alt_key: false
+button: 0
+buttons: 0
+client_x: 0
+client_y: 0
+ctrl_key: false
+meta_key: false
+offset_x: 0
+offset_y: 0
+page_x: 0
+page_y: 0
+screen_x: 0
+screen_y: 0
+shift_key: false

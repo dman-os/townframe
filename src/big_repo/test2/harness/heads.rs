@@ -11,7 +11,8 @@
 //! head-divergence flake violated.
 
 use super::topo::Pair;
-use crate::{DocumentId, Res};
+use crate::DocumentId;
+use crate::Res;
 use utils_rs::prelude::*;
 /// Sort heads into a canonical order for order-independent comparison.
 fn sorted(heads: &mut [automerge::ChangeHash]) {

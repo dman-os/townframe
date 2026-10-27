@@ -1,9 +1,12 @@
 use super::*;
-use big_sync_core::rpc::{
-    BUCKET_DEAD_FP_SEED, BUCKET_LIVE_FP_SEED, BucketSummary, GetChangedBucketsRequest,
-    LeafBucketRequest, LeafBucketsRequest,
-};
-use big_sync_core::{Fingerprint, FingerprintSeed};
+use big_sync_core::Fingerprint;
+use big_sync_core::FingerprintSeed;
+use big_sync_core::rpc::BUCKET_DEAD_FP_SEED;
+use big_sync_core::rpc::BUCKET_LIVE_FP_SEED;
+use big_sync_core::rpc::BucketSummary;
+use big_sync_core::rpc::GetChangedBucketsRequest;
+use big_sync_core::rpc::LeafBucketRequest;
+use big_sync_core::rpc::LeafBucketsRequest;
 use std::collections::BTreeSet;
 
 /// The peer every bucket read in the contract modules is asked as.

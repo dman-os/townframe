@@ -8,13 +8,14 @@
 
 use crate::interlude::*;
 
+use super::DrawerRepo;
+use super::meta;
 use super::mutations::StagedAdd;
 use super::outbox;
-use super::{DrawerRepo, meta};
 
 impl DrawerRepo {
     pub(crate) async fn reconcile_add_outbox_at_boot(&self) -> Res<()> {
-        outbox::ensure_outbox_schema(&self.meta_store_sql).await?;
+        meta::ensure_schema(&self.meta_store_sql).await?;
         let reserved: std::collections::HashSet<DocumentId> = self
             .big_repo
             .reserved_doc_ids()

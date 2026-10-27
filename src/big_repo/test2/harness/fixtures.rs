@@ -6,8 +6,13 @@
 //! diagnostic `Err` results rather than hanging indefinitely.
 
 use super::log_nickname;
-use super::topo::{Node, Pair};
-use crate::{BigKeyhiveAgent, BigKeyhiveGroup, DocumentId, PeerKey, Res};
+use super::topo::Node;
+use super::topo::Pair;
+use crate::BigKeyhiveAgent;
+use crate::BigKeyhiveGroup;
+use crate::DocumentId;
+use crate::PeerKey;
+use crate::Res;
 use keyhive_core::access::Access;
 use std::sync::Arc;
 use subduction_keyhive::KeyhivePeerId;

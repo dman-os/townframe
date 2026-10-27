@@ -3,29 +3,47 @@ use crate::interlude::*;
 use crate::SyncBackend;
 use std::cmp::Ordering;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering as AtomicOrdering;
 
 #[cfg(test)]
 mod stress;
 
-use big_sync_core::rpc::{
-    BigSyncRpcResult, BucketSummary, GetChangedBucketsRequest, LeafBucketResult, LeafBucketsError,
-    LeafBucketsRequest, ListPartsError, PeerSummaryRequest, PeerSummaryResult,
-};
-use big_sync_core::{
-    BuckId, ByteKey, FingerprintSeed, ObjKey, PartKey, PeerKey, SyncMode, SyncStatEvent,
-    SyncTaskCompletion,
-};
+use big_sync_core::BuckId;
+use big_sync_core::ByteKey;
+use big_sync_core::FingerprintSeed;
+use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
+use big_sync_core::PeerKey;
+use big_sync_core::SyncMode;
+use big_sync_core::SyncStatEvent;
+use big_sync_core::SyncTaskCompletion;
+use big_sync_core::rpc::BigSyncRpcResult;
+use big_sync_core::rpc::BucketSummary;
+use big_sync_core::rpc::GetChangedBucketsRequest;
+use big_sync_core::rpc::LeafBucketResult;
+use big_sync_core::rpc::LeafBucketsError;
+use big_sync_core::rpc::LeafBucketsRequest;
+use big_sync_core::rpc::ListPartsError;
+use big_sync_core::rpc::PeerSummaryRequest;
+use big_sync_core::rpc::PeerSummaryResult;
+use rand::Rng;
+use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng, seq::SliceRandom};
-use serde::{Deserialize, Serialize};
+use rand::seq::SliceRandom;
+use serde::Deserialize;
+use serde::Serialize;
 
-use crate::backend::contract::{self, SyncBackendHarness, SyncBackendScenario};
+use crate::Ctx;
+use crate::SyncTaskRunOutcome;
+use crate::backend::contract::SyncBackendHarness;
+use crate::backend::contract::SyncBackendScenario;
+use crate::backend::contract::{self};
 use crate::part_store::HostPartStore;
 use crate::part_store::memory::MemoryPartStore;
-use crate::test_support::{ObservedStore, ObservedStoreSnapshot};
+use crate::test_support::ObservedStore;
+use crate::test_support::ObservedStoreSnapshot;
 use crate::worker::WorkerSnapshot;
-use crate::{Ctx, SyncTaskRunOutcome};
 
 const TEST_BACKEND_ID: &str = "MemorySyncBackend";
 
@@ -2852,7 +2870,8 @@ async fn memory_sync_offline_evolution_reconnects_cleanly() -> Res<()> {
 async fn hidden_part_page_answers_unknown() -> Res<()> {
     use crate::HostPartStoreConfig;
     use crate::part_store::host_contract::SingleTargetPageStore;
-    use big_sync_core::rpc::{SubscriptionTarget, TargetVerdict};
+    use big_sync_core::rpc::SubscriptionTarget;
+    use big_sync_core::rpc::TargetVerdict;
 
     let part = test_part();
     let hidden = PartKey(ByteKey::new([99u8; 32]));

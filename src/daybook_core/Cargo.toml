@@ -22,7 +22,6 @@ test-support = ["dep:tempfile", "big_repo/test-support", "big_sync/test-support"
 #
 # internal
 am_utils_rs = { workspace = true }
-api_utils_rs = { workspace = true, features = ["automerge"] }
 daybook_types = { workspace = true, features = [
     "uniffi",
     "wit",
@@ -31,7 +30,8 @@ daybook_types = { workspace = true, features = [
 ] }
 daybook_pdk = { workspace = true }
 mltools = { workspace = true, features = ["hf_hub", "tests"] }
-utils_rs = { workspace = true, features = ["hash", "native", "downloader"] }
+utils_rs = { workspace = true, features = ["hash"] }
+native_utils_rs.workspace = true
 secrets_rs = { workspace = true }
 wash_plugin_wflow.workspace = true
 wash_plugin_sqlite.workspace = true
@@ -39,7 +39,7 @@ wflow = { workspace = true }
 big_sync.workspace = true
 big_sync_core = { workspace = true, features = ["automerge", "uniffi"] }
 big_repo.workspace = true
-sqlx_utils_rs.workspace = true
+sqlite_rs.workspace = true
 
 #
 # encoding
@@ -100,10 +100,6 @@ oci-client = { version = "0.15.0", default-features = false, features = ["rustls
 oci-spec = "0.8.4"
 
 #
-
-#
-# db
-sqlx = { workspace = true, features = ["sqlite"] }
 
 #
 # wasm

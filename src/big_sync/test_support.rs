@@ -3,8 +3,9 @@ use crate::part_store::HostPartStore;
 
 #[cfg(test)]
 use big_sync_core::ObjKey;
+use big_sync_core::PartKey;
+use big_sync_core::PeerKey;
 use big_sync_core::part_store::CursorIndex;
-use big_sync_core::{PartKey, PeerKey};
 
 use std::collections::BTreeMap;
 #[cfg(test)]

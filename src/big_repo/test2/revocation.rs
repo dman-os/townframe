@@ -1,7 +1,10 @@
 //! Tier 6 — explicit-frontier revocation regressions.
 
-use super::harness::{Pair, fixtures};
-use automerge::{ReadDoc, ScalarValue, transaction::Transactable};
+use super::harness::Pair;
+use super::harness::fixtures;
+use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::transaction::Transactable;
 use big_sync::HostPartStore;
 use keyhive_core::access::Access;
 use std::collections::BTreeSet;

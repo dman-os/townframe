@@ -1,0 +1,14 @@
+version = 1
+role = "interface"
+dependency_reason = "dayframe microkernel layering: engine-neutral contracts at the bottom, micros above them, composition roots on top"
+allowed_dependencies = [
+    "clay_collection",
+    "clay_dioxus",
+    "clay_docs",
+    "clay_host",
+    "clay_micro_core",
+    "clay_rt_wasmtime",
+    "clay_surface",
+    "daybook_types",
+]
+allow_external_api_types = false

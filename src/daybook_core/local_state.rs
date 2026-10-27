@@ -10,7 +10,8 @@ pub enum LocalStateEvent {
 
 pub struct SqliteLocalStateRepo {
     local_state_root: PathBuf,
-    sqlite_ctxs: tokio::sync::RwLock<HashMap<String, sqlx_utils_rs::SqlCtx>>,
+    sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+    sqlite_dbs: tokio::sync::RwLock<HashMap<String, sqlite_rs::Database>>,
     pub registry: Arc<crate::repos::ListenersRegistry>,
     cancel_token: CancellationToken,
 }
@@ -28,7 +29,10 @@ impl crate::repos::Repo for SqliteLocalStateRepo {
 }
 
 impl SqliteLocalStateRepo {
-    pub async fn boot(local_state_root: PathBuf) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
+    pub async fn boot(
+        sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+        local_state_root: PathBuf,
+    ) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let main_cancel_token = CancellationToken::new();
         tokio::fs::create_dir_all(&local_state_root)
             .await
@@ -41,7 +45,8 @@ impl SqliteLocalStateRepo {
 
         let repo = Arc::new(Self {
             local_state_root,
-            sqlite_ctxs: tokio::sync::RwLock::new(HashMap::new()),
+            sqlite_runtime,
+            sqlite_dbs: tokio::sync::RwLock::new(HashMap::new()),
             registry: crate::repos::ListenersRegistry::new(),
             cancel_token: main_cancel_token.child_token(),
         });
@@ -95,31 +100,78 @@ impl SqliteLocalStateRepo {
         Ok(file_dir.join(format!("{local_state_key}.sqlite")))
     }
 
-    pub async fn ensure_sqlite_ctx(&self, local_state_id: &str) -> Res<sqlx_utils_rs::SqlCtx> {
-        if let Some(sql) = self.sqlite_ctxs.read().await.get(local_state_id).cloned() {
-            return Ok(sql);
+    pub async fn ensure_sqlite_db(&self, local_state_id: &str) -> Res<sqlite_rs::Database> {
+        if let Some(db) = self.sqlite_dbs.read().await.get(local_state_id).cloned() {
+            return Ok(db);
         }
 
         let sqlite_file_path = self.get_sqlite_file_path(local_state_id).await?;
-        let sqlite_url = format!("sqlite://{}", sqlite_file_path.display());
 
-        sqlx_utils_rs::init_sqlite_vec();
-        // FIXME:: this is creating 5 threads for every sql ctx.
-        // Most sql local state has single ownres so a single thread should be enough
-        let sql = sqlx_utils_rs::SqlCtx::url(&sqlite_url)
-            .await
-            .wrap_err("error initializing sqlite local state connection")?;
+        sqlite_rs::init_sqlite_vec();
+        let db = self
+            .sqlite_runtime
+            .database(sqlite_file_path, &[], "_sqlite_rs_migrations");
 
-        sqlx::query("select vec_version()")
-            .execute(&sql.write_pool)
-            .await
-            .wrap_err("sqlite-vec extension not available")?;
-
-        let mut sql_ctxs = self.sqlite_ctxs.write().await;
-        let pooled = sql_ctxs
+        let mut sqlite_dbs = self.sqlite_dbs.write().await;
+        let pooled = sqlite_dbs
             .entry(local_state_id.to_string())
-            .or_insert_with(|| sql.clone())
+            .or_insert_with(|| db.clone())
             .clone();
         Ok(pooled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn repositories_share_the_injected_runtime() -> Res<()> {
+        let temp = tempfile::tempdir()?;
+        let runtime = Arc::new(sqlite_rs::SqliteRuntime::new(sqlite_rs::RuntimeConfig {
+            workers: 1,
+            max_readers_per_db: 1,
+            cache_size_kib: -256,
+            ..default()
+        }));
+        let (first, first_stop) =
+            SqliteLocalStateRepo::boot(Arc::clone(&runtime), temp.path().join("first")).await?;
+        let (second, second_stop) =
+            SqliteLocalStateRepo::boot(Arc::clone(&runtime), temp.path().join("second")).await?;
+        assert!(Arc::ptr_eq(&first.sqlite_runtime, &runtime));
+        assert!(Arc::ptr_eq(&second.sqlite_runtime, &runtime));
+        let first_db = first.ensure_sqlite_db("@test/plug/state").await?;
+        let second_db = second.ensure_sqlite_db("@test/plug/state").await?;
+        assert_eq!(runtime.open_connection_count(), 0);
+
+        for db in [&first_db, &second_db] {
+            assert_eq!(db.query("PRAGMA cache_size", ()).await?.one::<i64>()?, -256);
+            assert!(
+                !db.query("SELECT vec_version()", ())
+                    .await?
+                    .one::<String>()?
+                    .is_empty()
+            );
+        }
+        assert!(runtime.open_connection_count() >= 2);
+        let connections = runtime.open_connection_count();
+        let cached_db = first.ensure_sqlite_db("@test/plug/state").await?;
+        assert_eq!(
+            cached_db
+                .query("PRAGMA cache_size", ())
+                .await?
+                .one::<i64>()?,
+            -256
+        );
+        assert_eq!(runtime.open_connection_count(), connections);
+        drop(cached_db);
+        drop(first_db);
+        drop(second_db);
+        second_stop.stop().await?;
+        first_stop.stop().await?;
+        drop(second);
+        drop(first);
+        assert_eq!(runtime.open_connection_count(), 0);
+        Ok(())
     }
 }

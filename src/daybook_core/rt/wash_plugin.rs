@@ -47,7 +47,8 @@ use daybook_types::doc::DocId;
 use daybook_types::wit::doc as wit_doc;
 use wash_runtime::engine::ctx::SharedCtx as SharedWashCtx;
 use wash_runtime::plugin::WitInterfaces;
-use wash_runtime::wit::{WitInterface, WitWorld};
+use wash_runtime::wit::WitInterface;
+use wash_runtime::wit::WitWorld;
 
 pub struct DaybookPlugin {
     drawer_repo: Arc<crate::drawer::DrawerRepo>,
@@ -240,7 +241,8 @@ impl drawer::Host for SharedWashCtx {
         doc_id: drawer::DocId,
         heads: drawer::Heads,
     ) -> wasmtime::Result<Result<drawer::Doc, drawer::GetDocError>> {
-        use crate::rt::dispatch::{ActiveDispatchArgs, FacetRoutineArgs};
+        use crate::rt::dispatch::ActiveDispatchArgs;
+        use crate::rt::dispatch::FacetRoutineArgs;
 
         let heads = match am_utils_rs::parse_commit_heads(&heads) {
             Ok(val) => val,
@@ -565,20 +567,20 @@ impl facet_routine::Host for SharedWashCtx {
                         "error resolving sqlite file path for {local_state_id}: {err}"
                     ))
                 })?;
-            let sql = dayook_plugin
+            let db = dayook_plugin
                 .sqlite_local_state_repo
-                .ensure_sqlite_ctx(&local_state_id)
+                .ensure_sqlite_db(&local_state_id)
                 .await
                 .map_err(|err| {
                     wasmtime_err(format!(
-                        "error initializing sqlite ctx for {local_state_id}: {err}"
+                        "error initializing sqlite db for {local_state_id}: {err}"
                     ))
                 })?;
             let handle = wash_plugin_sqlite::SqlPlugin::create_connection(
                 self,
                 wash_plugin_sqlite::SqliteConnectionToken {
                     sqlite_file_path: sqlite_file_path.to_string_lossy().to_string(),
-                    sql,
+                    db,
                 },
             )?;
             sqlite_connections.push((

@@ -1,0 +1,23 @@
+[package]
+name = "plug_dayledger_routines"
+workspace = "../wasm_utils_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+plug_dayledger_manifest.workspace = true
+utils_rs.workspace = true
+wasm_utils_rs.workspace = true
+wflow_sdk.workspace = true
+daybook_types = { workspace = true, features = ["wit"] }
+serde_json.workspace = true
+color-eyre.workspace = true
+url.workspace = true
+wit-bindgen.workspace = true

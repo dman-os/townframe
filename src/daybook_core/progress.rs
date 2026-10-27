@@ -2,8 +2,19 @@
 
 use crate::interlude::*;
 use jiff::Timestamp;
-use std::collections::{HashMap, HashSet, VecDeque};
-use tokio::sync::{mpsc, oneshot};
+
+/// Repository-database tables owned by the progress repo.
+pub(crate) mod sqlite {
+    pub(crate) mod queries {
+        include!("progress/sqlite/gen.rs");
+    }
+}
+use sqlite::queries;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 const MAX_UPDATES_PER_TASK: usize = 256;
@@ -211,7 +222,7 @@ impl Default for ProgressCache {
 }
 
 struct ProgressWorker {
-    repo_sql: SqlCtx,
+    repo_sql: Database,
     cache: ProgressCache,
     persist: ProgressPersistQueue,
 }
@@ -235,7 +246,7 @@ impl ProgressRepo {
         err(Debug),
         fields(worker = "progress-worker")
     )]
-    pub async fn boot(repo_sql: SqlCtx) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
+    pub async fn boot(repo_sql: Database) -> Res<(Arc<Self>, crate::repos::RepoStopToken)> {
         let mut worker = ProgressWorker {
             repo_sql,
             cache: ProgressCache::default(),
@@ -527,134 +538,29 @@ impl ProgressWorker {
     }
 
     async fn init_schema(&self) -> Res<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS progress_tasks (
-                id TEXT PRIMARY KEY,
-                title TEXT,
-                created_at_unix_secs INTEGER NOT NULL,
-                updated_at_unix_secs INTEGER NOT NULL,
-                viewed_at_unix_secs INTEGER,
-                dismissed_at_unix_secs INTEGER,
-                state_json TEXT NOT NULL,
-                retention_json TEXT NOT NULL,
-                retention_override_json TEXT,
-                latest_update_sequence INTEGER,
-                latest_update_at_unix_secs INTEGER,
-                latest_update_json TEXT
-            ) STRICT
-            "#,
-        )
-        .execute(&self.repo_sql.write_pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS progress_task_updates (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id TEXT NOT NULL,
-                at_unix_secs INTEGER NOT NULL,
-                update_json TEXT NOT NULL,
-                FOREIGN KEY(task_id) REFERENCES progress_tasks(id) ON DELETE CASCADE
-            ) STRICT
-            "#,
-        )
-        .execute(&self.repo_sql.write_pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS progress_task_tags (
-                task_id TEXT NOT NULL,
-                tag_path TEXT NOT NULL,
-                PRIMARY KEY(task_id, tag_path),
-                FOREIGN KEY(task_id) REFERENCES progress_tasks(id) ON DELETE CASCADE
-            ) STRICT
-            "#,
-        )
-        .execute(&self.repo_sql.write_pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_progress_tasks_state ON progress_tasks(state_json)",
-        )
-        .execute(&self.repo_sql.write_pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_progress_tasks_updated ON progress_tasks(updated_at_unix_secs DESC)",
-        )
-        .execute(&self.repo_sql.write_pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_progress_task_tags_path ON progress_task_tags(tag_path)",
-        )
-        .execute(&self.repo_sql.write_pool)
-        .await?;
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_progress_task_updates_task_seq ON progress_task_updates(task_id, sequence DESC)",
-        )
-        .execute(&self.repo_sql.write_pool)
-        .await?;
-
-        self.ensure_progress_tasks_column("latest_update_sequence", "INTEGER")
+        self.repo_sql
+            .apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
             .await?;
-        self.ensure_progress_tasks_column("latest_update_at_unix_secs", "INTEGER")
-            .await?;
-        self.ensure_progress_tasks_column("latest_update_json", "TEXT")
-            .await?;
-
         Ok(())
     }
 
     async fn preload_cache(&mut self) -> Res<()> {
-        type TaskRow = (
-            String,
-            Option<String>,
-            i64,
-            i64,
-            Option<i64>,
-            Option<i64>,
-            String,
-            String,
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
-            Option<String>,
-        );
-
-        let rows: Vec<TaskRow> = sqlx::query_as(
-            r#"
-            SELECT id, title, created_at_unix_secs, updated_at_unix_secs, viewed_at_unix_secs,
-                   dismissed_at_unix_secs, state_json, retention_json, retention_override_json,
-                   latest_update_sequence, latest_update_at_unix_secs, latest_update_json
-            FROM progress_tasks
-            "#,
-        )
-        .fetch_all(&self.repo_sql.write_pool)
-        .await?;
-
-        for row in rows {
-            let (
-                id,
-                title,
-                created_at_unix_secs,
-                updated_at_unix_secs,
-                viewed_at_unix_secs,
-                dismissed_at_unix_secs,
-                state_json,
-                retention_json,
-                retention_override_json,
-                latest_update_sequence,
-                latest_update_at_unix_secs,
-                latest_update_json,
-            ) = row;
-
-            let tags: Vec<String> = sqlx::query_scalar(
-                "SELECT tag_path FROM progress_task_tags WHERE task_id = ?1 ORDER BY tag_path ASC",
-            )
-            .bind(&id)
-            .fetch_all(&self.repo_sql.write_pool)
-            .await?;
+        for queries::AllTasksRow {
+            id,
+            title,
+            created_at_unix_secs,
+            updated_at_unix_secs,
+            viewed_at_unix_secs,
+            dismissed_at_unix_secs,
+            state_json,
+            retention_json,
+            retention_override_json,
+            latest_update_sequence,
+            latest_update_at_unix_secs,
+            latest_update_json,
+        } in queries::all_tasks(&self.repo_sql).await?
+        {
+            let tags = queries::task_tags(&self.repo_sql, id.clone()).await?;
 
             let latest_update = match (
                 latest_update_sequence,
@@ -695,10 +601,7 @@ impl ProgressWorker {
             );
         }
 
-        let max_sequence: Option<i64> =
-            sqlx::query_scalar("SELECT MAX(sequence) FROM progress_task_updates")
-                .fetch_one(&self.repo_sql.write_pool)
-                .await?;
+        let max_sequence = queries::max_update_sequence(&self.repo_sql).await?;
         self.cache.next_sequence = max_sequence.unwrap_or(0) + 1;
 
         Ok(())
@@ -928,25 +831,22 @@ impl ProgressWorker {
             return Ok(());
         }
 
-        let rows = sqlx::query_as::<_, (i64, i64, String)>(
-            "SELECT sequence, at_unix_secs, update_json FROM progress_task_updates WHERE task_id = ?1 ORDER BY sequence DESC LIMIT ?2",
+        let rows = queries::latest_task_updates(
+            &self.repo_sql,
+            task_id.to_owned(),
+            MAX_UPDATES_PER_TASK as i64,
         )
-        .bind(task_id)
-        .bind(MAX_UPDATES_PER_TASK as i64)
-        .fetch_all(&self.repo_sql.write_pool)
         .await?;
 
         let mut from_db: Vec<ProgressUpdateEntry> = rows
             .into_iter()
-            .map(
-                |(sequence, at_unix_secs, update_json)| -> Res<ProgressUpdateEntry> {
-                    Ok(ProgressUpdateEntry {
-                        sequence,
-                        at: Timestamp::from_second(at_unix_secs)?,
-                        update: serde_json::from_str(&update_json)?,
-                    })
-                },
-            )
+            .map(|row| -> Res<ProgressUpdateEntry> {
+                Ok(ProgressUpdateEntry {
+                    sequence: row.sequence,
+                    at: Timestamp::from_second(row.at_unix_secs)?,
+                    update: serde_json::from_str(&row.update_json)?,
+                })
+            })
             .collect::<Res<Vec<_>>>()?;
         from_db.reverse();
 
@@ -981,18 +881,11 @@ impl ProgressWorker {
             return Ok(());
         }
 
-        let mut tx = self
-            .repo_sql
-            .write_pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let tx = self.repo_sql.begin_write().await?;
 
         let deleted_tasks: Vec<String> = self.persist.deleted_tasks.drain().collect();
         for task_id in deleted_tasks {
-            sqlx::query("DELETE FROM progress_tasks WHERE id = ?1")
-                .bind(task_id)
-                .execute(&mut *tx)
-                .await?;
+            queries::delete_task(&tx, task_id).await?;
         }
 
         let dirty_tasks: Vec<String> = self.persist.dirty_tasks.drain().collect();
@@ -1001,53 +894,29 @@ impl ProgressWorker {
                 continue;
             };
 
-            sqlx::query(
-                r#"
-                INSERT INTO progress_tasks(
-                    id, title, created_at_unix_secs, updated_at_unix_secs, viewed_at_unix_secs,
-                    dismissed_at_unix_secs, state_json, retention_json, retention_override_json,
-                    latest_update_sequence, latest_update_at_unix_secs, latest_update_json
-                ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                ON CONFLICT(id) DO UPDATE SET
-                    title = excluded.title,
-                    updated_at_unix_secs = excluded.updated_at_unix_secs,
-                    viewed_at_unix_secs = excluded.viewed_at_unix_secs,
-                    dismissed_at_unix_secs = excluded.dismissed_at_unix_secs,
-                    state_json = excluded.state_json,
-                    retention_json = excluded.retention_json,
-                    retention_override_json = excluded.retention_override_json,
-                    latest_update_sequence = excluded.latest_update_sequence,
-                    latest_update_at_unix_secs = excluded.latest_update_at_unix_secs,
-                    latest_update_json = excluded.latest_update_json
-                "#,
-            )
-            .bind(&task.id)
-            .bind(task.title.clone().unwrap_or_default())
-            .bind(task.created_at.as_second())
-            .bind(task.updated_at.as_second())
-            .bind(task.viewed_at.map(|ts| ts.as_second()))
-            .bind(task.dismissed_at.map(|ts| ts.as_second()))
-            .bind(serde_json::to_string(&task.state)?)
-            .bind(serde_json::to_string(&task.retention)?)
-            .bind(
+            queries::upsert_task(
+                &tx,
+                task.id.clone(),
+                task.title.clone().unwrap_or_default(),
+                task.created_at.as_second(),
+                task.updated_at.as_second(),
+                task.viewed_at.map(|ts| ts.as_second()),
+                task.dismissed_at.map(|ts| ts.as_second()),
+                serde_json::to_string(&task.state)?,
+                serde_json::to_string(&task.retention)?,
                 task.retention_override
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
-            )
-            .bind(task.latest_update.as_ref().map(|update| update.sequence))
-            .bind(
+                task.latest_update.as_ref().map(|update| update.sequence),
                 task.latest_update
                     .as_ref()
                     .map(|update| update.at.as_second()),
-            )
-            .bind(
                 task.latest_update
                     .as_ref()
                     .map(|update| serde_json::to_string(&update.update))
                     .transpose()?,
             )
-            .execute(&mut *tx)
             .await?;
         }
 
@@ -1057,76 +926,29 @@ impl ProgressWorker {
                 continue;
             };
 
-            sqlx::query("DELETE FROM progress_task_tags WHERE task_id = ?1")
-                .bind(&task_id)
-                .execute(&mut *tx)
-                .await?;
-
+            queries::delete_task_tags(&tx, task_id.clone()).await?;
             for tag in &task.tags {
-                sqlx::query(
-                    "INSERT INTO progress_task_tags(task_id, tag_path) VALUES(?1, ?2) ON CONFLICT(task_id, tag_path) DO NOTHING",
-                )
-                .bind(&task_id)
-                .bind(tag)
-                .execute(&mut *tx)
-                .await?;
+                queries::insert_task_tag(&tx, task_id.clone(), tag.clone()).await?;
             }
         }
 
         for (task_id, update) in self.persist.pending_updates.drain(..) {
-            sqlx::query(
-                "INSERT OR REPLACE INTO progress_task_updates(sequence, task_id, at_unix_secs, update_json) VALUES(?1, ?2, ?3, ?4)",
+            queries::put_task_update(
+                &tx,
+                update.sequence,
+                task_id,
+                update.at.as_second(),
+                serde_json::to_string(&update.update)?,
             )
-            .bind(update.sequence)
-            .bind(task_id)
-            .bind(update.at.as_second())
-            .bind(serde_json::to_string(&update.update)?)
-            .execute(&mut *tx)
             .await?;
         }
 
         let touched_update_tasks: Vec<String> = self.persist.touched_update_tasks.drain().collect();
         for task_id in touched_update_tasks {
-            sqlx::query(
-                r#"
-                DELETE FROM progress_task_updates
-                WHERE task_id = ?1
-                  AND sequence <= COALESCE(
-                        (
-                            SELECT sequence
-                            FROM progress_task_updates
-                            WHERE task_id = ?1
-                            ORDER BY sequence DESC
-                            LIMIT 1 OFFSET ?2
-                        ),
-                        -1
-                    )
-                "#,
-            )
-            .bind(task_id)
-            .bind((MAX_UPDATES_PER_TASK - 1) as i64)
-            .execute(&mut *tx)
-            .await?;
+            queries::trim_task_updates(&tx, task_id, (MAX_UPDATES_PER_TASK - 1) as i64).await?;
         }
 
         tx.commit().await?;
-        Ok(())
-    }
-
-    async fn ensure_progress_tasks_column(&self, name: &str, ty: &str) -> Res<()> {
-        let exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pragma_table_info('progress_tasks') WHERE name = ?1",
-        )
-        .bind(name)
-        .fetch_one(&self.repo_sql.write_pool)
-        .await?;
-        if exists == 0 {
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "ALTER TABLE progress_tasks ADD COLUMN {name} {ty}"
-            )))
-            .execute(&self.repo_sql.write_pool)
-            .await?;
-        }
         Ok(())
     }
 }

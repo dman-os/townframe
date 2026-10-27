@@ -1,23 +1,37 @@
 use crate::interlude::*;
 
-use super::outbox::{self, OutboxState};
-use super::{BranchKind, DrawerRepo, FacetRaw, FacetWriteScope};
+use super::BranchKind;
+use super::DrawerRepo;
+use super::FacetRaw;
+use super::FacetWriteScope;
+use super::outbox::OutboxState;
+use super::outbox::{self};
 
-use crate::drawer::{
-    dmeta,
-    types::{
-        BranchDeleteTombstone, DocDeleteTombstone, DocEntry, DrawerError, StoredBranchRef,
-        UpdateDocArgsV2, UpdateDocBatchErrV2,
-    },
-};
+use crate::drawer::dmeta;
+use crate::drawer::types::BranchDeleteTombstone;
+use crate::drawer::types::DocDeleteTombstone;
+use crate::drawer::types::DocEntry;
+use crate::drawer::types::DrawerError;
+use crate::drawer::types::StoredBranchRef;
+use crate::drawer::types::UpdateDocArgsV2;
+use crate::drawer::types::UpdateDocBatchErrV2;
 
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use daybook_types::doc::{
-    AddDocArgs, AuthorityScope, Branch, BranchDeclaration, BranchId, BranchPublication,
-    BranchVersion, Branches, ChangeHashSet, DocId, DocPatch, FacetKey, WellKnownFacet,
-    WellKnownFacetTag,
-};
+use daybook_types::doc::AddDocArgs;
+use daybook_types::doc::AuthorityScope;
+use daybook_types::doc::Branch;
+use daybook_types::doc::BranchDeclaration;
+use daybook_types::doc::BranchId;
+use daybook_types::doc::BranchPublication;
+use daybook_types::doc::BranchVersion;
+use daybook_types::doc::Branches;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::DocPatch;
+use daybook_types::doc::FacetKey;
+use daybook_types::doc::WellKnownFacet;
+use daybook_types::doc::WellKnownFacetTag;
 
 /// The receipt of [`DrawerRepo::add_temporary`]: a document staged purely
 /// locally. Nothing about the staging is replicated — no coparent grants at

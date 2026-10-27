@@ -1,20 +1,37 @@
 mod interlude {
-    pub use big_sync_core::{ObjKey, PartKey, PeerKey};
+    pub use big_sync_core::ObjKey;
+    pub use big_sync_core::PartKey;
+    pub use big_sync_core::PeerKey;
 
-    pub use future_form::{FutureForm, Local, Sendable};
+    pub use future_form::FutureForm;
+    pub use future_form::Local;
+    pub use future_form::Sendable;
     pub use utils_rs::prelude::*;
 }
 
 use crate::interlude::*;
-use crate::keyhive_storage::{BigRepoKeyhiveStorage, KEYHIVE_SUBDIR};
-use sqlx_utils_rs::SqlCtx;
+use crate::keyhive_storage::BigRepoKeyhiveStorage;
+use crate::keyhive_storage::KEYHIVE_SUBDIR;
+use sqlite_rs as sqlite_rs_alias;
+use sqlite_rs::Database;
+mod sqlite {
+    #[expect(dead_code)]
+    pub(crate) mod queries {
+        include!("sqlite/gen.rs");
+    }
+}
 use tracing::Instrument;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use automerge::ChangeHash;
-use autosurgeon::{Hydrate, Prop, Reconcile};
+use autosurgeon::Hydrate;
+use autosurgeon::Prop;
+use autosurgeon::Reconcile;
 use sedimentree_core::loose_commit::id::CommitId;
 
 pub(crate) mod access_policy;
@@ -33,27 +50,38 @@ pub(crate) mod keyhive_storage;
 pub mod rpc;
 
 mod runtime2;
-pub use runtime2::doc_revision_store::{
-    AutomergeFrontierEvent, AutomergeFrontierRevisionStore, AutomergeFrontierSelector,
-    AutomergeFrontierTarget,
-};
-pub use runtime2::keyhive_access_stream::{
-    AccessSubject, AccessSubjectSet, KeyhiveAccessDelta, KeyhiveAccessMemory,
-    KeyhiveAccessRevisionStore, KeyhiveAccessSelector,
-};
-pub use runtime2::types::{
-    CreateDocError, DocLookup, GetDocError, GroupScopeController, GroupScopeHandle,
-    KeyhiveSyncCancelled, PutDocError, SyncDocError, SyncDocOutcome, SyncDocPolicyError,
-    SyncDocReceipt, WorkerGroupScope,
-};
-pub use runtime2::{DocHeadState, MaterializationState};
+pub use runtime2::DocHeadState;
+pub use runtime2::MaterializationState;
+pub use runtime2::doc_revision_store::AutomergeFrontierEvent;
+pub use runtime2::doc_revision_store::AutomergeFrontierRevisionStore;
+pub use runtime2::doc_revision_store::AutomergeFrontierSelector;
+pub use runtime2::doc_revision_store::AutomergeFrontierTarget;
+pub use runtime2::keyhive_access_stream::AccessSubject;
+pub use runtime2::keyhive_access_stream::AccessSubjectSet;
+pub use runtime2::keyhive_access_stream::KeyhiveAccessDelta;
+pub use runtime2::keyhive_access_stream::KeyhiveAccessMemory;
+pub use runtime2::keyhive_access_stream::KeyhiveAccessRevisionStore;
+pub use runtime2::keyhive_access_stream::KeyhiveAccessSelector;
+pub use runtime2::types::CreateDocError;
+pub use runtime2::types::DocLookup;
+pub use runtime2::types::GetDocError;
+pub use runtime2::types::GroupScopeController;
+pub use runtime2::types::GroupScopeHandle;
+pub use runtime2::types::KeyhiveSyncCancelled;
+pub use runtime2::types::PutDocError;
+pub use runtime2::types::SyncDocError;
+pub use runtime2::types::SyncDocOutcome;
+pub use runtime2::types::SyncDocPolicyError;
+pub use runtime2::types::SyncDocReceipt;
+pub use runtime2::types::WorkerGroupScope;
 // The test-seam accessors below take this event type in `pub` signatures, so it
 // has to be nameable from the crates whose tests drive those seams; the
 // `runtime2` module itself stays private.
 #[cfg(any(test, feature = "test-support"))]
 pub use runtime2::Runtime2Evt;
 mod store;
-pub use runtime2::{automerge_doc_obj_id, automerge_obj_to_doc_id};
+pub use runtime2::automerge_doc_obj_id;
+pub use runtime2::automerge_obj_to_doc_id;
 #[cfg(feature = "test-support")]
 pub use store::sqlite::BigSyncStoreSnapshot;
 pub use store::sqlite::SqliteBigRepoStore;
@@ -81,14 +109,20 @@ pub(crate) mod test;
 pub(crate) mod test2;
 
 pub use backend::BigRepoSyncBackend;
-pub use ephemeral::{
-    BigEphemeral, BigEphemeralEvent, BigEphemeralFilter, BigEphemeralSubscription,
-    BigEphemeralTopic,
-};
-pub use keyhive::{BigKeyhiveAgent, BigKeyhiveAuthority, BigKeyhiveGroup, BigKeyhiveHandle};
+pub use ephemeral::BigEphemeral;
+pub use ephemeral::BigEphemeralEvent;
+pub use ephemeral::BigEphemeralFilter;
+pub use ephemeral::BigEphemeralSubscription;
+pub use ephemeral::BigEphemeralTopic;
+pub use keyhive::BigKeyhiveAgent;
+pub use keyhive::BigKeyhiveAuthority;
+pub use keyhive::BigKeyhiveGroup;
+pub use keyhive::BigKeyhiveHandle;
 pub use keyhive_core;
 
-pub use changes::{BigRepoAccess, BigRepoDomainNotification, GroupId};
+pub use changes::BigRepoAccess;
+pub use changes::BigRepoDomainNotification;
+pub use changes::GroupId;
 
 /// Test-only guard for [`BigRepo::hold_hub_events`]: drops reopen hub event
 /// processing, so a failed assertion cannot leave the hub holding events (and
@@ -113,16 +147,18 @@ impl Drop for HubEventsHold {
         self.runtime.resume_events_for_test_on_drop();
     }
 }
-pub use changes::{
-    BigRepoChangeNotification, BigRepoChangeOrigin, BigRepoLocalNotification,
-    ChangeFilter as BigRepoChangeFilter,
-    ChangeListenerRegistration as BigRepoChangeListenerRegistration,
-    DocIdFilter as BigRepoDocIdFilter, DomainFilter as BigRepoDomainFilter,
-    DomainListenerRegistration as BigRepoDomainListenerRegistration,
-    LocalFilter as BigRepoLocalFilter,
-    LocalListenerRegistration as BigRepoLocalListenerRegistration,
-    OriginFilter as BigRepoOriginFilter, path_prefix_matches as big_repo_path_prefix_matches,
-};
+pub use changes::BigRepoChangeNotification;
+pub use changes::BigRepoChangeOrigin;
+pub use changes::BigRepoLocalNotification;
+pub use changes::ChangeFilter as BigRepoChangeFilter;
+pub use changes::ChangeListenerRegistration as BigRepoChangeListenerRegistration;
+pub use changes::DocIdFilter as BigRepoDocIdFilter;
+pub use changes::DomainFilter as BigRepoDomainFilter;
+pub use changes::DomainListenerRegistration as BigRepoDomainListenerRegistration;
+pub use changes::LocalFilter as BigRepoLocalFilter;
+pub use changes::LocalListenerRegistration as BigRepoLocalListenerRegistration;
+pub use changes::OriginFilter as BigRepoOriginFilter;
+pub use changes::path_prefix_matches as big_repo_path_prefix_matches;
 
 pub type DocumentId = big_sync_core::ObjKey;
 pub type SharedPartStore = Arc<dyn big_sync::HostPartStore>;
@@ -240,7 +276,10 @@ impl BigRepo {
     ///
     /// The [`Config::scope_key`] isolates this instance's data from other
     /// BigRepo instances sharing the same SQLite database.
-    pub async fn boot(config: Config) -> Res<(Arc<Self>, BigRepoStopToken)> {
+    pub async fn boot(
+        sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+        config: Config,
+    ) -> Res<(Arc<Self>, BigRepoStopToken)> {
         #[cfg(test)]
         let keyhive_change_notifs = config.keyhive_change_notifs;
         let Config {
@@ -254,13 +293,13 @@ impl BigRepo {
             ..
         } = config;
         let sql = match &storage {
-            StorageConfig::Memory => SqlCtx::memory().await?,
+            StorageConfig::Memory => sqlite_runtime.ephemeral(&[])?,
             StorageConfig::Disk { path } => {
                 std::fs::create_dir_all(path).wrap_err_with(|| {
                     format!("failed creating BigRepo data directory: {}", path.display())
                 })?;
                 let db_path = path.join("big_repo.sqlite");
-                SqlCtx::url(&format!("sqlite://{}", db_path.display())).await?
+                sqlite_runtime.database(db_path, &[], "_sqlite_rs_migrations")
             }
         };
         let store = SqliteBigRepoStore::new_with_config(
@@ -319,7 +358,7 @@ impl BigRepo {
     /// The SQLite context backing this BigRepo's storage. Consumers that need
     /// additional scopes in the same database (e.g. the blob partitions)
     /// construct their scoped store from this context.
-    pub fn sql_ctx(&self) -> SqlCtx {
+    pub fn database(&self) -> Database {
         self.sqlite_store.sql.clone()
     }
     #[cfg(feature = "test-support")]

@@ -5,11 +5,13 @@ use daybook_types::manifest;
 
 use self::cache::PlugsCache;
 
+pub(crate) use self::events::PLUG_MANIFEST_CONSUMER_STATE_ID;
+pub(crate) use self::events::PLUGS_CONFIG_CONSUMER_STATE_ID;
+pub(crate) use self::events::PlugsConfigEventStore;
+pub(crate) use self::events::PlugsConfigRevision;
 pub use self::events::PlugsEvent;
-pub(crate) use self::events::{
-    PLUG_MANIFEST_CONSUMER_STATE_ID, PLUGS_CONFIG_CONSUMER_STATE_ID, PlugsConfigEventStore,
-    PlugsConfigRevision, spawn_facet_set_plugs_manifest_consumer, spawn_plugs_config_consumer,
-};
+pub(crate) use self::events::spawn_facet_set_plugs_manifest_consumer;
+pub(crate) use self::events::spawn_plugs_config_consumer;
 pub use self::oci::OciImportOptions;
 
 mod cache;
@@ -24,10 +26,11 @@ mod tests;
 
 pub fn system_plugs() -> Vec<manifest::PlugManifest> {
     use daybook_types::doc::*;
-    use manifest::{
-        FacetDisplayDeets, FacetDisplayHint, FacetManifest, FacetReferenceManifest,
-        LocalStateManifest,
-    };
+    use manifest::FacetDisplayDeets;
+    use manifest::FacetDisplayHint;
+    use manifest::FacetManifest;
+    use manifest::FacetReferenceManifest;
+    use manifest::LocalStateManifest;
 
     let plugs = vec![manifest::PlugManifest {
         namespace: "daybook".into(),

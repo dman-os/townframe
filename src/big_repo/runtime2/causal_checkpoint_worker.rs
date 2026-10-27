@@ -6,10 +6,12 @@
 
 use crate::interlude::*;
 use crate::keyhive::BigKeyhiveHandle;
-use crate::runtime2::{WorkerGroupScope, keyhive_admission};
+use crate::runtime2::WorkerGroupScope;
+use crate::runtime2::keyhive_admission;
 use crate::store::sqlite::SqliteBigRepoStore;
 use big_sync::delta_walker_state::SqliteDeltaWalkerStateRepo;
-use big_sync_core::concurrent_delta_walker::{ConcurrentDeltaRead, ConcurrentDeltaWalker};
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
 use big_sync_core::delta_walker_state::DeltaWalkerStateRepo;
 use big_sync_core::revisioned_store::RevisionedStore;
 use future_form::Sendable;
@@ -49,13 +51,8 @@ pub fn spawn_causal_checkpoint_worker(
     let run = Sendable::from_future(async move {
         let fut = async move {
             let identity = crate::store::sqlite::KEYHIVE_ADMISSION_CONSUMER_CAUSAL_CHECKPOINT;
-            let state = SqliteDeltaWalkerStateRepo::new(
-                store.sql.read_pool.clone(),
-                store.sql.write_pool.clone(),
-                identity.0,
-                identity.1,
-            )
-            .await?;
+            let state =
+                SqliteDeltaWalkerStateRepo::new(store.sql.clone(), identity.0, identity.1).await?;
 
             // The walker's durable revision is the authority on what has been
             // reconciled, so a fresh consumer is the one at revision zero.

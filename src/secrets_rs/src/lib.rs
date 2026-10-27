@@ -9,11 +9,16 @@
 
 use std::sync::Arc;
 
+use chacha20poly1305::ChaCha20Poly1305;
+use chacha20poly1305::Key;
+use chacha20poly1305::KeyInit;
+use chacha20poly1305::Nonce;
 use chacha20poly1305::aead::Aead;
-use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use rand::RngCore;
-use utils_rs::expect_tags::{ERROR_IMPOSSIBLE, ERROR_TOKIO};
-use utils_rs::hash::{decode_base58_multibase, encode_base58_multibase};
+use utils_rs::expect_tags::ERROR_IMPOSSIBLE;
+use utils_rs::expect_tags::ERROR_TOKIO;
+use utils_rs::hash::decode_base58_multibase;
+use utils_rs::hash::encode_base58_multibase;
 use utils_rs::prelude::eyre;
 
 pub type Res<T> = eyre::Result<T>;

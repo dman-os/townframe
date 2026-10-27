@@ -1,10 +1,16 @@
 use crate::interlude::*;
 
-use crate::blobs::{BlobId, BlobsRepo, blob_id_to_iroh_hash};
+use crate::blobs::BlobId;
+use crate::blobs::BlobsRepo;
+use crate::blobs::blob_id_to_iroh_hash;
 use big_repo::SharedPartStore;
 
-use big_sync::{SyncBackend, SyncTaskRunOutcome};
-use big_sync_core::{ObjKey, PeerKey, SyncCompletionDeets, SyncTaskCompletion};
+use big_sync::SyncBackend;
+use big_sync::SyncTaskRunOutcome;
+use big_sync_core::ObjKey;
+use big_sync_core::PeerKey;
+use big_sync_core::SyncCompletionDeets;
+use big_sync_core::SyncTaskCompletion;
 
 #[derive(Clone)]
 pub struct BlobSyncBackend {
@@ -207,9 +213,10 @@ mod tests {
 
     use big_sync::HostPartStore;
     use big_sync::MemoryPartStore;
-    use big_sync::backend::contract::{
-        self, SyncBackendHarness, SyncBackendOutcome, SyncBackendScenario,
-    };
+    use big_sync::backend::contract::SyncBackendHarness;
+    use big_sync::backend::contract::SyncBackendOutcome;
+    use big_sync::backend::contract::SyncBackendScenario;
+    use big_sync::backend::contract::{self};
     use tempfile::tempdir;
 
     fn test_part() -> PartKey {
@@ -746,8 +753,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn blob_sync_obj_settles_for_a_virtually_possessed_cipher_representation() -> Res<()> {
         let (backend, _part_store, blobs_repo, _temp_root) = build_blob_backend().await?;
-        let pair_roots =
-            crate::blobs::pair_roots::PairRoots::boot(crate::app::SqlCtx::memory().await?).await?;
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+        let pair_roots = crate::blobs::pair_roots::PairRoots::boot(runtime.ephemeral(&[])?).await?;
         let key = crate::blobs::encrypt::MasterKey::random();
         // The full add pass installs and registers as one act: P gets stored
         // bytes, C gets the virtual entry, and the pair roots both under the
@@ -859,8 +866,8 @@ mod tests {
             address_lookup_b.clone(),
         );
 
-        let pair_roots =
-            crate::blobs::pair_roots::PairRoots::boot(crate::app::SqlCtx::memory().await?).await?;
+        let runtime = sqlite_rs::SqliteRuntime::new(default());
+        let pair_roots = crate::blobs::pair_roots::PairRoots::boot(runtime.ephemeral(&[])?).await?;
         let key = crate::blobs::encrypt::MasterKey::random();
         let (c, _p_hash) = crate::blobs::encrypt::add_encrypted(
             &blobs_repo_a.iroh_store(),

@@ -4,29 +4,53 @@
 
 #[expect(unused)]
 mod interlude {
-    pub use crate::app::SqlCtx;
-    pub use crate::stores::{AmStore, VersionTag, Versioned};
+    pub use crate::app::Database;
+    pub use crate::stores::AmStore;
+    pub use crate::stores::VersionTag;
+    pub use crate::stores::Versioned;
 
-    pub use daybook_types::doc::{BranchPath, BranchPathBuf, ChangeHashSet, UserPath, UserPathBuf};
+    pub use daybook_types::doc::BranchPath;
+    pub use daybook_types::doc::BranchPathBuf;
+    pub use daybook_types::doc::ChangeHashSet;
+    pub use daybook_types::doc::UserPath;
+    pub use daybook_types::doc::UserPathBuf;
 
     pub use am_utils_rs::prelude::*;
-    pub use api_utils_rs::prelude::*;
     pub use automerge::ActorId;
-    pub use autosurgeon::{Hydrate, Reconcile};
-    pub use big_repo::{DocumentId, SharedBigRepo};
-    pub use big_sync_core::{ObjKey, PartKey, PeerKey};
-    pub use std::{
-        borrow::Cow,
-        collections::{HashMap, HashSet},
-        path::{Path, PathBuf},
-        rc::Rc,
-        sync::{Arc, LazyLock, RwLock},
-    };
+    pub use autosurgeon::Hydrate;
+    pub use autosurgeon::Reconcile;
+    pub use big_repo::DocumentId;
+    pub use big_repo::SharedBigRepo;
+    pub use big_sync_core::ObjKey;
+    pub use big_sync_core::PartKey;
+    pub use big_sync_core::PeerKey;
+    pub use garde::Validate;
+    pub use std::borrow::Cow;
+    pub use std::collections::HashMap;
+    pub use std::collections::HashSet;
+    pub use std::path::Path;
+    pub use std::path::PathBuf;
+    pub use std::rc::Rc;
+    pub use std::sync::Arc;
+    pub use std::sync::LazyLock;
+    pub use std::sync::RwLock;
     pub use struct_patch::Patch;
+    pub use tokio;
     pub use utils_rs::CHeapStr;
+    pub use utils_rs::prelude::*;
 }
 
 use crate::interlude::*;
+
+use sqlite_rs as sqlite_rs_alias;
+/// Repo-wide and app-wide key/value globals (`kvstore`). Both the app
+/// globals database and each repository database carry this unit as their
+/// primary migration list; see `app::open_database`.
+mod sqlite {
+    pub(crate) mod queries {
+        include!("sqlite/gen.rs");
+    }
+}
 
 pub(crate) mod authority;
 pub mod blobs;
@@ -103,6 +127,7 @@ pub fn part_id_from_label(label: &str) -> PartKey {
     PartKey::new(*digest.as_bytes())
 }
 
-pub use blobs::{blob_inventory_part_id, blob_inventory_part_id_from_doc_id};
+pub use blobs::blob_inventory_part_id;
+pub use blobs::blob_inventory_part_id_from_doc_id;
 
 pub mod app;

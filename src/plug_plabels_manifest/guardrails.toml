@@ -1,0 +1,37 @@
+version = 1
+role = "plugin"
+dependency_reason = "native manifest, portable labeling algorithms and types, and plug tests"
+allowed_dependencies = [
+    "daybook_core",
+    "daybook_types",
+    "utils_rs",
+]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/plug_plabels_manifest/lib.rs"
+symbol = "module::plug_manifest"
+ceiling = 437
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/plug_plabels_manifest/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[builds.native]
+features = []
+required_features = []
+default_features = true
+
+[builds.wasm32-wasip2]
+features = []
+required_features = []
+default_features = true

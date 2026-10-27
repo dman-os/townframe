@@ -5,7 +5,8 @@ use crate::sync::PeerId;
 
 use big_repo::BigDocHandle;
 use big_repo::SharedPartStore;
-use daybook_types::doc::{UserPath, UserPathBuf};
+use daybook_types::doc::UserPath;
+use daybook_types::doc::UserPathBuf;
 use fs4::fs_std::FileExt;
 
 const REPO_MARKER_FILE: &str = "db.repo.txt";
@@ -96,7 +97,8 @@ pub struct RepoCtx {
     pub lock_guard: RepoLockGuard,
     pub options: RepoOpenOptions,
 
-    pub sql: SqlCtx,
+    pub sql: Database,
+    pub sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
     pub sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     sqlite_local_state_stop: std::sync::Mutex<Option<crate::repos::RepoStopToken>>,
     pub part_store: SharedPartStore,
@@ -141,7 +143,8 @@ pub(crate) struct RepoCtxParts {
     pub layout: RepoLayout,
     pub lock_guard: RepoLockGuard,
     pub options: RepoOpenOptions,
-    pub sql: SqlCtx,
+    pub sql: Database,
+    pub sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
     pub sqlite_local_state_repo: Arc<crate::local_state::SqliteLocalStateRepo>,
     pub sqlite_local_state_stop: std::sync::Mutex<Option<crate::repos::RepoStopToken>>,
     pub part_store: SharedPartStore,
@@ -171,7 +174,7 @@ pub(crate) struct RepoCtxParts {
 /// SQLite scope key of the standalone part store backing the blob partitions.
 ///
 /// A part's identity is the `(scope, part_id)` pair, so anything that addresses
-/// blob-part rows directly needs this key: `SqlCtx` is shared by every scope in the
+/// blob-part rows directly needs this key: `Database` is shared by every scope in the
 /// database and carries none of them.
 pub(crate) const BLOB_SCOPE_KEY: &str = "daybook-blobs";
 
@@ -189,7 +192,7 @@ pub(crate) fn blob_presence_part_id() -> PartKey {
     PartKey::new("/blobs")
 }
 
-pub(crate) async fn open_blob_presence_part_store(sql: SqlCtx) -> Res<SharedPartStore> {
+pub(crate) async fn open_blob_presence_part_store(sql: Database) -> Res<SharedPartStore> {
     let store = big_sync::SqlitePartStore::new(
         sql,
         BLOB_PRESENCE_SCOPE_KEY,
@@ -203,7 +206,7 @@ pub(crate) async fn open_blob_presence_part_store(sql: SqlCtx) -> Res<SharedPart
 /// Blob data is content-addressed (possession of the hash is authorization);
 /// the keyhive membership policy lives on the doc store and is deliberately
 /// absent here.
-pub(crate) async fn open_blob_part_store(sql: SqlCtx) -> Res<SharedPartStore> {
+pub(crate) async fn open_blob_part_store(sql: Database) -> Res<SharedPartStore> {
     let store =
         big_sync::SqlitePartStore::new(sql, BLOB_SCOPE_KEY, big_sync_core::BuckId::MAX_LEVEL)
             .await?;
@@ -228,6 +231,7 @@ impl RepoCtx {
             lock_guard: parts.lock_guard,
             options: parts.options,
             sql: parts.sql,
+            sqlite_runtime: parts.sqlite_runtime,
             sqlite_local_state_repo: parts.sqlite_local_state_repo,
             sqlite_local_state_stop: parts.sqlite_local_state_stop,
             part_store: parts.part_store,
@@ -309,6 +313,7 @@ impl RepoCtx {
     }
 
     pub async fn open(
+        sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
         repo_root: &std::path::Path,
         options: RepoOpenOptions,
         local_device_name: String,
@@ -325,10 +330,20 @@ impl RepoCtx {
             );
         }
         info!(repo_root = %layout.repo_root.display(), "repo open: marker check passed");
-        Self::open_inner(layout, lock_guard, options, local_device_name, false, None).await
+        Self::open_inner(
+            sqlite_runtime,
+            layout,
+            lock_guard,
+            options,
+            local_device_name,
+            false,
+            None,
+        )
+        .await
     }
 
     pub async fn init(
+        sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
         repo_root: &std::path::Path,
         options: RepoOpenOptions,
         repo_name: String,
@@ -346,6 +361,7 @@ impl RepoCtx {
         }
         info!(repo_root = %layout.repo_root.display(), "repo init: marker absent, continuing");
         Self::open_inner(
+            sqlite_runtime,
             layout,
             lock_guard,
             options,
@@ -357,6 +373,7 @@ impl RepoCtx {
     }
 
     async fn open_inner(
+        sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
         layout: RepoLayout,
         lock_guard: RepoLockGuard,
         options: RepoOpenOptions,
@@ -372,10 +389,15 @@ impl RepoCtx {
         cleanup_blobs_staging_dir(&layout.blobs_root).await?;
         info!(repo_root = %layout.repo_root.display(), "repo open_inner: blobs staging cleaned");
 
-        let sql = crate::app::open_sql_ctx(SqlConfig::file(layout.sqlite_path.clone())).await?;
-        let (sqlite_local_state_repo, sqlite_local_state_stop) =
-            crate::local_state::SqliteLocalStateRepo::boot(layout.repo_root.join("local_state"))
+        let sql =
+            crate::app::open_database(&sqlite_runtime, SqlConfig::file(layout.sqlite_path.clone()))
                 .await?;
+        let (sqlite_local_state_repo, sqlite_local_state_stop) =
+            crate::local_state::SqliteLocalStateRepo::boot(
+                Arc::clone(&sqlite_runtime),
+                layout.repo_root.join("local_state"),
+            )
+            .await?;
         info!(
             repo_root = %layout.repo_root.display(),
             sqlite_path = %layout.sqlite_path.display(),
@@ -444,10 +466,11 @@ impl RepoCtx {
             local_actor_id,
         } = compute_user_info(&repo_id, &repo_user_id, &identity);
 
-        let (big_repo, big_repo_stop) = boot_big_repo(&layout, &identity).await?;
+        let (big_repo, big_repo_stop) =
+            boot_big_repo(Arc::clone(&sqlite_runtime), &layout, &identity).await?;
         let part_store = big_repo.shared_part_store();
-        let blob_part_store = open_blob_part_store(big_repo.sql_ctx()).await?;
-        let blob_presence_store = open_blob_presence_part_store(big_repo.sql_ctx()).await?;
+        let blob_part_store = open_blob_part_store(big_repo.database()).await?;
+        let blob_presence_store = open_blob_presence_part_store(big_repo.database()).await?;
         let frontier_part_store = big_repo.frontier_part_store();
         let derived_part_store = big_repo.derived_part_store();
         let authority = crate::authority::ensure(&big_repo, &sql, None).await?;
@@ -567,6 +590,7 @@ impl RepoCtx {
             lock_guard,
             options,
             sql,
+            sqlite_runtime,
             sqlite_local_state_repo,
             sqlite_local_state_stop: std::sync::Mutex::new(Some(sqlite_local_state_stop)),
             part_store,
@@ -609,7 +633,7 @@ impl RepoCtx {
         authority: &crate::authority::RepoAuthority,
         local_user_path: &UserPath,
         sqlite_local_state_repo: &Arc<crate::local_state::SqliteLocalStateRepo>,
-        sql: &SqlCtx,
+        sql: &Database,
         blobs_root: PathBuf,
     ) -> Res<(DocumentId, DocumentId, DocumentId)> {
         info!(
@@ -989,6 +1013,7 @@ fn compute_user_info(
 }
 
 async fn boot_big_repo(
+    sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
     layout: &RepoLayout,
     identity: &crate::secrets::RepoIdentity,
 ) -> Res<(SharedBigRepo, big_repo::BigRepoStopToken)> {
@@ -1003,7 +1028,7 @@ async fn boot_big_repo(
         causal_checkpoint_group_scope: Default::default(),
         group_part_group_scope: Default::default(),
     };
-    big_repo::BigRepo::boot(config).await
+    big_repo::BigRepo::boot(sqlite_runtime, config).await
 }
 
 async fn cleanup_blobs_staging_dir(blobs_root: &Path) -> Res<()> {
@@ -1213,10 +1238,13 @@ pub async fn mark_repo_initialized(repo_root: &std::path::Path) -> Res<()> {
 }
 pub async fn is_repo_initialized(repo_root: &std::path::Path) -> Res<bool> {
     let layout = repo_layout(repo_root)?;
-    Ok(utils_rs::file_exists(&layout.marker_path).await?)
+    Ok(native_utils_rs::file_exists(&layout.marker_path).await?)
 }
 
-pub async fn is_repo_bootstrapped(repo_root: &std::path::Path) -> Res<bool> {
+pub async fn is_repo_bootstrapped(
+    sqlite_runtime: &sqlite_rs::SqliteRuntime,
+    repo_root: &std::path::Path,
+) -> Res<bool> {
     if !is_repo_initialized(repo_root).await? {
         return Ok(false);
     }
@@ -1224,14 +1252,15 @@ pub async fn is_repo_bootstrapped(repo_root: &std::path::Path) -> Res<bool> {
     if !layout.sqlite_path.exists() {
         return Ok(false);
     }
-    let sql = crate::app::open_sql_ctx(SqlConfig::file(layout.sqlite_path.clone()))
-        .await
-        .wrap_err_with(|| {
-            format!(
-                "failed opening repo sqlite while checking bootstrap state: {}",
-                layout.sqlite_path.display()
-            )
-        })?;
+    let sql =
+        crate::app::open_database(sqlite_runtime, SqlConfig::file(layout.sqlite_path.clone()))
+            .await
+            .wrap_err_with(|| {
+                format!(
+                    "failed opening repo sqlite while checking bootstrap state: {}",
+                    layout.sqlite_path.display()
+                )
+            })?;
     let init_state = globals::get_init_state(&sql).await?;
     Ok(matches!(init_state, globals::InitState::Created { .. }))
 }
@@ -1260,7 +1289,7 @@ async fn get_ready_doc(
 
 async fn load_core_docs(
     big_repo: &SharedBigRepo,
-    repo_sql: &SqlCtx,
+    repo_sql: &Database,
 ) -> Res<(
     BigDocHandle,
     BigDocHandle,
@@ -1357,7 +1386,9 @@ async fn init_core_docs(
 }
 
 pub mod globals {
-    use crate::{app::SqlCtx, interlude::*};
+    use crate::app::Database;
+    use crate::interlude::*;
+    use crate::sqlite::queries;
 
     #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
     pub enum InitState {
@@ -1380,65 +1411,38 @@ pub mod globals {
     }
     const INIT_STATE_KEY: &str = "global.init_state";
 
-    pub async fn get_init_state(sql: &SqlCtx) -> Res<InitState> {
-        let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-            .bind(INIT_STATE_KEY)
-            .fetch_optional(&sql.write_pool)
-            .await?;
+    pub async fn get_init_state(sql: &Database) -> Res<InitState> {
+        let rec = queries::kv_get(sql, INIT_STATE_KEY.to_owned()).await?;
         let state = match rec {
             Some(json) => serde_json::from_str::<InitState>(&json)?,
             None => InitState::None,
         };
         Ok(state)
     }
-    pub async fn set_init_state(sql: &SqlCtx, state: &InitState) -> Res<()> {
+    pub async fn set_init_state(sql: &Database, state: &InitState) -> Res<()> {
         let json = serde_json::to_string(state)?;
-        sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-            .bind(INIT_STATE_KEY)
-            .bind(&json)
-            .execute(&sql.write_pool)
-            .await?;
+        queries::kv_upsert(sql, INIT_STATE_KEY.to_owned(), json).await?;
         Ok(())
     }
 
-    pub async fn get_string_global(sql: &SqlCtx, key: &str) -> Res<Option<String>> {
-        let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-            .bind(key)
-            .fetch_optional(&sql.write_pool)
-            .await?;
-        Ok(rec)
+    pub async fn get_string_global(sql: &Database, key: &str) -> Res<Option<String>> {
+        Ok(queries::kv_get(sql, key.to_owned()).await?)
     }
 
-    pub async fn set_string_global(sql: &SqlCtx, key: &str, value: &str) -> Res<()> {
-        let mut tx = sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
+    pub async fn set_string_global(sql: &Database, key: &str, value: &str) -> Res<()> {
+        let tx = sql.begin_write().await?;
 
-        if let Some(existing) =
-            sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-                .bind(key)
-                .fetch_optional(&mut *tx)
-                .await?
-        {
+        if let Some(existing) = queries::kv_get(&tx, key.to_owned()).await? {
             eyre::bail!("{key} already set: {existing}");
         }
-
-        sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2)")
-            .bind(key)
-            .bind(value)
-            .execute(&mut *tx)
-            .await?;
+        queries::kv_insert(&tx, key.to_owned(), value.to_owned()).await?;
 
         tx.commit().await?;
         Ok(())
     }
 
-    pub async fn upsert_string_global(sql: &SqlCtx, key: &str, value: &str) -> Res<()> {
-        sqlx::query(
-            "INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
-        .bind(key)
-        .bind(value)
-        .execute(&sql.write_pool)
-        .await?;
+    pub async fn upsert_string_global(sql: &Database, key: &str, value: &str) -> Res<()> {
+        queries::kv_upsert(sql, key.to_owned(), value.to_owned()).await?;
         Ok(())
     }
     const SYNC_CONFIG_KEY: &str = "global.sync_config";
@@ -1456,11 +1460,8 @@ pub mod globals {
         pub added_at: Timestamp,
         pub last_connected_at: Option<Timestamp>,
     }
-    pub async fn get_sync_config(sql: &SqlCtx) -> Res<SyncConfig> {
-        let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-            .bind(SYNC_CONFIG_KEY)
-            .fetch_optional(&sql.write_pool)
-            .await?;
+    pub async fn get_sync_config(sql: &Database) -> Res<SyncConfig> {
+        let rec = queries::kv_get(sql, SYNC_CONFIG_KEY.to_owned()).await?;
         let state = match rec {
             Some(json) => serde_json::from_str::<SyncConfig>(&json)?,
             None => SyncConfig::default(),
@@ -1468,13 +1469,9 @@ pub mod globals {
         Ok(state)
     }
 
-    pub async fn set_sync_config(sql: &SqlCtx, state: &SyncConfig) -> Res<()> {
+    pub async fn set_sync_config(sql: &Database, state: &SyncConfig) -> Res<()> {
         let json = serde_json::to_string(state)?;
-        sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-            .bind(SYNC_CONFIG_KEY)
-            .bind(&json)
-            .execute(&sql.write_pool)
-            .await?;
+        queries::kv_upsert(sql, SYNC_CONFIG_KEY.to_owned(), json).await?;
         Ok(())
     }
 }

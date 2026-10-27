@@ -1,9 +1,9 @@
 use crate::interlude::*;
 
-use sedimentree_core::{
-    fragment::Fragment, id::SedimentreeId, loose_commit::LooseCommit,
-    sedimentree::minimized::MinimizedSedimentree,
-};
+use sedimentree_core::fragment::Fragment;
+use sedimentree_core::id::SedimentreeId;
+use sedimentree_core::loose_commit::LooseCommit;
+use sedimentree_core::sedimentree::minimized::MinimizedSedimentree;
 use utils_rs::lru::KeyedLruPool;
 
 /// Metadata-weighted capacity of the tree projection cache, in metadata
@@ -15,11 +15,13 @@ pub(crate) const TREE_CACHE_METADATA_CAPACITY: usize = 4096;
 ///
 /// This synchronous mutex is intentional and SQLite-specific.
 ///
-/// The tree projection cache is accessed only while holding a successfully
-/// acquired `BEGIN IMMEDIATE` write transaction. SQLite serializes writers
-/// before this mutex is reached, so lock acquisition is uncontended and never
-/// waits for async work performed by another task. The mutex protects ordinary
-/// in-memory access; it is not the write-serialization mechanism.
+/// Tree hydration and mutation require a successfully acquired `BEGIN
+/// IMMEDIATE` write transaction. SQLite serializes writers before this mutex
+/// is reached, but guard finalization can race a subsequent writer after the
+/// previous transaction releases the SQLite lock. Speculative epochs prevent
+/// adoption of unresolved entries and protect newer entries from stale guards.
+/// The mutex protects synchronous in-memory access and is never held across
+/// async work; it is not the write-serialization mechanism.
 ///
 /// Do not reuse this design for a backend that permits concurrent write
 /// transactions. Such a backend needs per-tree coordination or another cache
@@ -32,7 +34,7 @@ pub(crate) const TREE_CACHE_METADATA_CAPACITY: usize = 4096;
 pub(crate) struct TreeCache {
     lru: KeyedLruPool<SedimentreeId>,
     pub(crate) entries: HashMap<SedimentreeId, MinimizedSedimentree>,
-    epochs: HashMap<SedimentreeId, u64>,
+    speculative_epochs: HashMap<SedimentreeId, u64>,
     next_epoch: u64,
 }
 
@@ -41,7 +43,7 @@ impl TreeCache {
         Self {
             lru: KeyedLruPool::new(capacity),
             entries: HashMap::new(),
-            epochs: HashMap::new(),
+            speculative_epochs: HashMap::new(),
             next_epoch: 1,
         }
     }
@@ -52,17 +54,21 @@ impl TreeCache {
         self.entries.get(id)
     }
 
-    /// Advance and return the installation epoch for `id`.
+    /// Mark `id` speculative with a fresh installation epoch.
     pub(crate) fn bump_epoch(&mut self, id: SedimentreeId) -> u64 {
         let epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.wrapping_add(1);
-        self.epochs.insert(id, epoch);
+        self.speculative_epochs.insert(id, epoch);
         epoch
     }
 
-    /// The current installation epoch for `id`, if present.
-    pub(crate) fn current_epoch(&self, id: &SedimentreeId) -> Option<u64> {
-        self.epochs.get(id).copied()
+    pub(crate) fn adopt_committed(&mut self, id: &SedimentreeId) -> Option<u64> {
+        if self.speculative_epochs.contains_key(id) {
+            self.remove(id);
+            return None;
+        }
+        self.get(id)?;
+        Some(self.bump_epoch(*id))
     }
 
     /// Insert an entry without touching the LRU. The caller derives heads
@@ -87,7 +93,7 @@ impl TreeCache {
         let pruned = self.lru.insert_key(id, cost);
         for key in pruned {
             self.entries.remove(&key);
-            self.epochs.remove(&key);
+            self.speculative_epochs.remove(&key);
         }
     }
 
@@ -96,12 +102,12 @@ impl TreeCache {
     pub(crate) fn remove(&mut self, id: &SedimentreeId) {
         self.lru.remove_key(id);
         self.entries.remove(id);
-        self.epochs.remove(id);
+        self.speculative_epochs.remove(id);
     }
 
     /// Remove an entry only if its installation epoch matches `epoch`.
     pub(crate) fn remove_if_epoch(&mut self, id: &SedimentreeId, epoch: u64) {
-        if self.epochs.get(id).copied() == Some(epoch) {
+        if self.speculative_epochs.get(id).copied() == Some(epoch) {
             self.remove(id);
         }
     }
@@ -185,8 +191,12 @@ impl<'a> TreeCacheGuard<'a> {
         }
     }
 
-    /// Mark the transaction as committed; the entry is retained.
+    /// Mark the matching epoch committed so subsequent writers can reuse it.
     pub(crate) fn disarm(mut self) {
+        let mut cache = self.cache.lock().expect(ERROR_MUTEX);
+        if cache.speculative_epochs.get(&self.id).copied() == Some(self.epoch) {
+            cache.speculative_epochs.remove(&self.id);
+        }
         self.armed = false;
     }
 }

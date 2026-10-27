@@ -69,7 +69,7 @@ fn new_suite() -> TestCases {
     suite.env("NO_COLOR", "1");
     suite.register_bin("daybook_cli", trycmd::schema::Bin::Path(daybook_cli));
     // The test plug OCI artifact lives outside the sandbox (built by
-    // `xtask build-plug-oci` into target/oci). Register `sh` so cases can
+    // `cargo x plug build-oci` into target/oci). Register `sh` so cases can
     // copy it in with `$ sh -c 'cp -r "$PLUG_OCI" ./plug-oci'`, keeping the
     // whole flow in trycmd while staying portable.
     suite.register_bin("sh", trycmd::schema::Bin::Path("/bin/sh".into()));

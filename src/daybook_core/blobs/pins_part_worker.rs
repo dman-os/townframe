@@ -1,17 +1,36 @@
 use crate::drawer::DrawerRepo;
 use crate::index::facet_delta::FacetDelta;
-use crate::index::facet_set::{FacetSetRevisionStore, FacetSetSelector};
+use crate::index::facet_set::FacetSetRevisionStore;
+use crate::index::facet_set::FacetSetSelector;
 use crate::interlude::*;
 use big_repo::SharedPartStore;
-use big_sync::{DeltaWalkerStateRepo as _, DeltaWalkerStateTransaction};
-use big_sync_core::concurrent_delta_walker::{
-    ConcurrentDelta, ConcurrentDeltaRead, ConcurrentDeltaWalker,
-};
+
+/// The `doc_blob_pins` projection, kept in its own local-state database
+/// (`DOC_BLOB_PINS_LOCAL_STATE_ID`).
+pub(crate) mod sqlite {
+    // `doc_blob_hashes`/`count_doc_pins` are test probes.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) mod queries {
+        include!("pins_part_worker/sqlite/gen.rs");
+    }
+}
+use big_sync::DeltaWalkerStateRepo as _;
+use big_sync::DeltaWalkerStateTransaction;
+use big_sync_core::concurrent_delta_walker::ConcurrentDelta;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaRead;
+use big_sync_core::concurrent_delta_walker::ConcurrentDeltaWalker;
 use big_sync_core::revisioned_store::RevisionedStore as _;
-use big_sync_core::tokio_keyed_scheduler::{TokioKeyedScheduler, TokioTaskCompletion};
-use daybook_types::doc::{BranchId, ChangeHashSet, DocId, WellKnownFacetTag};
-use sqlx::{QueryBuilder, Row, Sqlite, Transaction};
-use std::collections::{BTreeMap, BTreeSet};
+use big_sync_core::tokio_keyed_scheduler::TokioKeyedScheduler;
+use big_sync_core::tokio_keyed_scheduler::TokioTaskCompletion;
+use daybook_types::doc::BranchId;
+use daybook_types::doc::ChangeHashSet;
+use daybook_types::doc::DocId;
+use daybook_types::doc::WellKnownFacetTag;
+use sqlite::queries;
+use sqlite_rs::Sql;
+use sqlite_rs::Tx;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(test)]
@@ -37,7 +56,7 @@ pub(crate) async fn spawn_blob_pins_part_worker(
     parent_cancel_token: CancellationToken,
 ) -> Res<crate::repos::RepoStopToken> {
     let sql = sqlite_local_state_repo
-        .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
+        .ensure_sqlite_db(DOC_BLOB_PINS_LOCAL_STATE_ID)
         .await?;
     let ctx = Arc::new(Ctx::new(part_store, sql).await?);
     let cancel_token = parent_cancel_token.child_token();
@@ -59,7 +78,7 @@ pub(crate) async fn spawn_blob_pins_part_worker(
 /// tasks hold this Arc.
 struct Ctx {
     part_store: SharedPartStore,
-    sql: SqlCtx,
+    sql: Database,
 }
 
 /// Private machine owner. Mutable walker state stays local to the machine;
@@ -88,92 +107,26 @@ impl Ctx {
     /// The schema belongs to the state it describes: the spawn path and a test
     /// that drives the machine directly must both be unable to observe a
     /// missing table.
-    async fn new(part_store: SharedPartStore, sql: SqlCtx) -> Res<Self> {
+    async fn new(part_store: SharedPartStore, sql: Database) -> Res<Self> {
         Self::init_schema(&sql).await?;
         Ok(Self { part_store, sql })
     }
 
-    async fn init_schema(sql: &SqlCtx) -> Res<()> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS doc_blob_pins (
-                doc_id TEXT NOT NULL,
-                branch_id TEXT NOT NULL,
-                blob_hash TEXT NOT NULL,
-                length_octets INTEGER NOT NULL DEFAULT 0,
-                origin_heads TEXT NOT NULL,
-                PRIMARY KEY(doc_id, branch_id, blob_hash)
-            ) STRICT
-            "#,
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
-        let has_branch_id_col: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM pragma_table_info('doc_blob_pins') WHERE name = 'branch_id'",
-        )
-        .fetch_optional(&sql.write_pool)
-        .await?;
-        if has_branch_id_col.is_none() {
-            let mut tx = sql.write_pool.begin_with("BEGIN IMMEDIATE").await?;
-            sqlx::query("ALTER TABLE doc_blob_pins RENAME TO doc_blob_pins_legacy")
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query(
-                r#"CREATE TABLE doc_blob_pins (
-                    doc_id TEXT NOT NULL
-                  , branch_id TEXT NOT NULL
-                  , blob_hash TEXT NOT NULL
-                  , length_octets INTEGER NOT NULL DEFAULT 0
-                  , origin_heads TEXT NOT NULL
-                  , PRIMARY KEY(doc_id, branch_id, blob_hash)
-                ) STRICT"#,
-            )
-            .execute(&mut *tx)
+    async fn init_schema(sql: &Database) -> Res<()> {
+        sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
             .await?;
-            sqlx::query(
-                r#"INSERT INTO doc_blob_pins(
-                    doc_id, branch_id, blob_hash, length_octets, origin_heads
-                )
-                SELECT doc_id
-                     , CASE WHEN branch_path = 'main' THEN doc_id ELSE branch_path END
-                     , blob_hash
-                     , length_octets
-                     , origin_heads
-                  FROM doc_blob_pins_legacy"#,
-            )
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query("DROP TABLE doc_blob_pins_legacy")
-                .execute(&mut *tx)
-                .await?;
-            tx.commit().await?;
-        }
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_doc_blob_pins_doc_branch ON doc_blob_pins(doc_id, branch_id)",
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_doc_blob_pins_blob_hash ON doc_blob_pins(blob_hash)",
-        )
-        .execute(&sql.write_pool)
-        .await?;
-
         Ok(())
     }
 
-    async fn load_branch_states_in<'a>(
+    async fn load_branch_states_in(
         &self,
-        tx: &mut Transaction<'a, Sqlite>,
+        tx: &impl sqlite_rs::QueryExecutor,
         branches: &[(DocId, String)],
     ) -> Res<BTreeMap<(DocId, String), BTreeMap<String, u64>>> {
         if branches.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let mut query = QueryBuilder::<Sqlite>::new(
+        let mut query = Sql::new(
             "SELECT doc_id, branch_id, blob_hash, length_octets FROM doc_blob_pins WHERE ",
         );
         for (index, (doc_id, branch_id)) in branches.iter().enumerate() {
@@ -182,17 +135,17 @@ impl Ctx {
             }
             query
                 .push("(doc_id = ")
-                .push_bind(doc_id)
+                .bind(doc_id)
                 .push(" AND branch_id = ")
-                .push_bind(branch_id)
+                .bind(branch_id)
                 .push(")");
         }
         let mut out = BTreeMap::<(DocId, String), BTreeMap<String, u64>>::new();
-        for row in query.build().fetch_all(&mut **tx).await? {
-            let doc_id: DocId = row.try_get("doc_id")?;
-            let branch_id: String = row.try_get("branch_id")?;
-            let hash: String = row.try_get("blob_hash")?;
-            let length = u64::try_from(row.try_get::<i64, _>("length_octets")?)?;
+        for row in query.query(tx).await?.rows {
+            let doc_id: DocId = row.get("doc_id")?;
+            let branch_id: String = row.get("branch_id")?;
+            let hash: String = row.get("blob_hash")?;
+            let length = row.get::<u64>("length_octets")?;
             out.entry((doc_id, branch_id))
                 .or_default()
                 .insert(hash, length);
@@ -207,21 +160,17 @@ impl Ctx {
         if documents.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let mut tx = self.sql.read_pool.begin().await?;
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT doc_id, branch_id, blob_hash, length_octets FROM doc_blob_pins WHERE doc_id IN (",
+        let tx = self.sql.begin_read().await?;
+        let mut query = Sql::new(
+            "SELECT doc_id, branch_id, blob_hash, length_octets FROM doc_blob_pins WHERE doc_id IN ",
         );
-        let mut values = query.separated(", ");
-        for document_id in documents {
-            values.push_bind(document_id);
-        }
-        values.push_unseparated(")");
+        query.bind_list(documents);
         let mut out = BTreeMap::<(DocId, String), BTreeMap<String, u64>>::new();
-        for row in query.build().fetch_all(&mut *tx).await? {
-            let document_id: DocId = row.try_get("doc_id")?;
-            let branch_id: String = row.try_get("branch_id")?;
-            let hash: String = row.try_get("blob_hash")?;
-            let length = u64::try_from(row.try_get::<i64, _>("length_octets")?)?;
+        for row in query.query(&tx).await?.rows {
+            let document_id: DocId = row.get("doc_id")?;
+            let branch_id: String = row.get("branch_id")?;
+            let hash: String = row.get("blob_hash")?;
+            let length = row.get::<u64>("length_octets")?;
             out.entry((document_id, branch_id))
                 .or_default()
                 .insert(hash, length);
@@ -247,8 +196,8 @@ impl Ctx {
         }
 
         let branches = grouped.keys().cloned().collect::<Vec<_>>();
-        let mut read_tx = self.sql.read_pool.begin().await?;
-        let prior_states = self.load_branch_states_in(&mut read_tx, &branches).await?;
+        let read_tx = self.sql.begin_read().await?;
+        let prior_states = self.load_branch_states_in(&read_tx, &branches).await?;
         read_tx.rollback().await?;
 
         let mut prepared = Vec::with_capacity(grouped.len());
@@ -329,17 +278,17 @@ impl Ctx {
         Ok(Preparation::Ready(prepared))
     }
 
-    async fn replace_branch_state_in<'a>(
+    async fn replace_branch_state_in(
         &self,
-        tx: &mut Transaction<'a, Sqlite>,
+        tx: &mut Tx,
         prepared: &PreparedBranchDelta,
     ) -> Res<()> {
-        // FIXME: this file is noto using query macros
-        sqlx::query("DELETE FROM doc_blob_pins WHERE doc_id = ? AND branch_id = ?")
-            .bind(&prepared.document_id)
-            .bind(&prepared.branch_id.0)
-            .execute(&mut **tx)
-            .await?;
+        queries::delete_branch_pins(
+            tx,
+            prepared.document_id.clone(),
+            prepared.branch_id.0.clone(),
+        )
+        .await?;
         let Some(branch_heads) = &prepared.branch_heads else {
             return Ok(());
         };
@@ -349,36 +298,37 @@ impl Ctx {
         let serialized_heads =
             serde_json::to_string(&am_utils_rs::serialize_commit_heads(&branch_heads.0))
                 .expect(ERROR_JSON);
-        let rows: Vec<(&str, i64)> = prepared
-            .next
-            .iter()
-            .map(|(hash, length)| {
-                Ok((
-                    hash.as_str(),
-                    i64::try_from(*length)
-                        .map_err(|_| ferr!("BlobPin length exceeds SQLite INTEGER range"))?,
-                ))
-            })
-            .collect::<Res<_>>()?;
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "INSERT INTO doc_blob_pins(doc_id, branch_id, blob_hash, length_octets, origin_heads) ",
+        let mut query = Sql::new(
+            "INSERT INTO doc_blob_pins(doc_id, branch_id, blob_hash, length_octets, origin_heads) VALUES ",
         );
-        query.push_values(rows.iter(), |mut row, (hash, length)| {
-            row.push_bind(&prepared.document_id)
-                .push_bind(&prepared.branch_id.0)
-                .push_bind(hash)
-                .push_bind(*length)
-                .push_bind(&serialized_heads);
-        });
+        for (index, (hash, length)) in prepared.next.iter().enumerate() {
+            if index != 0 {
+                query.push(", ");
+            }
+            let length = i64::try_from(*length)
+                .map_err(|_| ferr!("BlobPin length exceeds SQLite INTEGER range"))?;
+            query
+                .push("(")
+                .bind(&prepared.document_id)
+                .push(", ")
+                .bind(&prepared.branch_id.0)
+                .push(", ")
+                .bind(hash)
+                .push(", ")
+                .bind(length)
+                .push(", ")
+                .bind(&serialized_heads)
+                .push(")");
+        }
         query.push(" ON CONFLICT(doc_id, branch_id, blob_hash) DO UPDATE SET");
         query.push(" length_octets = excluded.length_octets, origin_heads = excluded.origin_heads");
-        query.build().execute(&mut **tx).await?;
+        query.execute(tx).await?;
         Ok(())
     }
 
-    async fn apply_prepared_in_context<'a>(
+    async fn apply_prepared_in_context(
         &self,
-        tx: &mut Transaction<'a, Sqlite>,
+        tx: &mut Tx,
         prepared: &[PreparedBranchDelta],
     ) -> Res<()> {
         let branches = prepared
@@ -492,7 +442,8 @@ const BLOB_PINS_PART_TASK_BUDGET: usize = 64;
 struct BlobPinsPartKey(u64);
 
 fn blob_pins_part_key(branch_id: &BranchId) -> BlobPinsPartKey {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hash;
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     branch_id.0.hash(&mut hasher);
     BlobPinsPartKey(hasher.finish())
@@ -580,8 +531,7 @@ impl Worker {
         cancel_token: CancellationToken,
     ) -> Res<()> {
         let state = big_sync::SqliteDeltaWalkerStateRepo::new(
-            self.sql.read_pool.clone(),
-            self.sql.write_pool.clone(),
+            self.sql.clone(),
             "@daybook/core/blob-pins-part-worker",
             "facets",
         )
@@ -751,31 +701,25 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::facet_delta::{FacetRouteKey, FacetSnapshot};
+    use crate::index::facet_delta::FacetRouteKey;
+    use crate::index::facet_delta::FacetSnapshot;
     use crate::test_support::test_cx;
-    use daybook_types::doc::{AddDocArgs, BlobPin, BranchPath, DocPatch, FacetRaw, WellKnownFacet};
+    use daybook_types::doc::AddDocArgs;
+    use daybook_types::doc::BlobPin;
+    use daybook_types::doc::BranchPath;
+    use daybook_types::doc::DocPatch;
+    use daybook_types::doc::FacetRaw;
+    use daybook_types::doc::WellKnownFacet;
 
     /// Distinct blob hashes pinned for one document (the machine's
     /// `doc_blob_pins` SQLite projection).
-    async fn list_hashes_for_doc(sql: &SqlCtx, doc_id: &DocId) -> Res<Vec<String>> {
-        Ok(sqlx::query_scalar(
-            r#"SELECT DISTINCT blob_hash
-                 FROM doc_blob_pins
-                WHERE doc_id = ?
-                ORDER BY blob_hash ASC"#,
-        )
-        .bind(doc_id)
-        .fetch_all(&sql.read_pool)
-        .await?)
+    async fn list_hashes_for_doc(sql: &Database, doc_id: &DocId) -> Res<Vec<String>> {
+        Ok(queries::doc_blob_hashes(sql, doc_id.clone()).await?)
     }
 
-    async fn wait_for_pin_row_count(sql: &SqlCtx, doc_id: &DocId, expected: i64) -> Res<()> {
+    async fn wait_for_pin_row_count(sql: &Database, doc_id: &DocId, expected: i64) -> Res<()> {
         loop {
-            let count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM doc_blob_pins WHERE doc_id = ?")
-                    .bind(doc_id)
-                    .fetch_one(&sql.read_pool)
-                    .await?;
+            let count = queries::count_doc_pins(sql, doc_id.clone()).await?;
             if count == expected {
                 return Ok(());
             }
@@ -808,7 +752,7 @@ mod tests {
         let sql = test_context
             .rt
             .sqlite_local_state_repo
-            .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
+            .ensure_sqlite_db(DOC_BLOB_PINS_LOCAL_STATE_ID)
             .await?;
         let ctx = Ctx::new(Arc::clone(&test_context.rt.rcx.blob_part_store), sql).await?;
         let blob_id_1 = crate::blobs::BlobId::random();
@@ -934,7 +878,7 @@ mod tests {
         let sql = test_context
             .rt
             .sqlite_local_state_repo
-            .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
+            .ensure_sqlite_db(DOC_BLOB_PINS_LOCAL_STATE_ID)
             .await?;
         let blob_part_store = &test_context.rt.rcx.blob_part_store;
         let _part_worker = spawn_part_worker_for_test(&test_context).await?;
@@ -1123,7 +1067,7 @@ mod tests {
         let sql = test_context
             .rt
             .sqlite_local_state_repo
-            .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
+            .ensure_sqlite_db(DOC_BLOB_PINS_LOCAL_STATE_ID)
             .await?;
         let blob_part_store = &test_context.rt.rcx.blob_part_store;
         // The reconcile the observation loop below reads lives in the part
@@ -1206,7 +1150,7 @@ mod tests {
         let sql = test_context
             .rt
             .sqlite_local_state_repo
-            .ensure_sqlite_ctx(DOC_BLOB_PINS_LOCAL_STATE_ID)
+            .ensure_sqlite_db(DOC_BLOB_PINS_LOCAL_STATE_ID)
             .await?;
         let blob_part_store = &test_context.rt.rcx.blob_part_store;
         let _part_worker = spawn_part_worker_for_test(&test_context).await?;

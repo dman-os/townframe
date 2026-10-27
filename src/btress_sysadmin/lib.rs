@@ -35,7 +35,9 @@ pub fn hydrate() {
 #[cfg(feature = "ssr")]
 use crate::interlude::*;
 #[cfg(feature = "ssr")]
-use wasip2::http::types::{IncomingRequest, ResponseOutparam};
+use wasip2::http::types::IncomingRequest;
+#[cfg(feature = "ssr")]
+use wasip2::http::types::ResponseOutparam;
 
 #[cfg(feature = "ssr")]
 struct Component;

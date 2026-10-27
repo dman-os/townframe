@@ -1,4 +1,5 @@
-//! @generated
+//! Wflow metadata and identifier types. Formerly emitted by the retired
+//! `cargo x gen` type generator; now maintained by hand like any other module.
 use super::*;
 
 pub mod metastore {

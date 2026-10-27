@@ -1669,7 +1669,7 @@ private fun plugTestOciPath(): Path {
     }
     error(
         "Missing OCI plug artifact at target/oci/@daybook/test. Build it with: " +
-            "cargo run -p xtask -- build-plug-oci --plug-root ./src/plug_test",
+            "cargo x plug build-oci --plug-root ./src/plug_test",
     )
 }
 
@@ -1684,6 +1684,6 @@ private fun dayledgerOciPath(): Path {
     }
     error(
         "Missing OCI plug artifact at target/oci/@daybook/dayledger. Build it with: " +
-            "cargo x build-plug-oci --plug-root ./src/plug_dayledger",
+            "cargo x plug build-oci --plug-root ./src/plug_dayledger",
     )
 }

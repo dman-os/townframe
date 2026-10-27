@@ -1,8 +1,9 @@
 use crate::interlude::*;
 
 use crate::repo::RepoCtx;
+use crate::sqlite::queries;
 
-pub use sqlx_utils_rs::SqlCtx;
+pub use sqlite_rs::Database;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -24,7 +25,7 @@ impl SqlConfig {
     }
 }
 
-pub async fn open_sql_ctx(config: SqlConfig) -> Res<SqlCtx> {
+pub async fn open_database(runtime: &sqlite_rs::SqliteRuntime, config: SqlConfig) -> Res<Database> {
     let sql = match config.database_path {
         Some(database_path) => {
             if let Some(parent) = database_path.parent() {
@@ -32,23 +33,11 @@ pub async fn open_sql_ctx(config: SqlConfig) -> Res<SqlCtx> {
                     format!("Failed to create database directory: {}", parent.display())
                 })?;
             }
-            let database_url = format!("sqlite://{}", database_path.display());
-            SqlCtx::url(&database_url).await?
+            runtime.database(database_path, queries::MIGRATIONS, queries::MIGRATION_TABLE)
         }
-        None => SqlCtx::memory().await?,
+        None => runtime.ephemeral(queries::MIGRATIONS)?,
     };
-
-    sqlx::query(
-        r#"
-            CREATE TABLE IF NOT EXISTS kvstore (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            ) STRICT
-            "#,
-    )
-    .execute(&sql.write_pool)
-    .await?;
-
+    sql.migrate().await?;
     Ok(sql)
 }
 
@@ -94,13 +83,19 @@ fn app_data_dir() -> Res<std::path::PathBuf> {
 
 pub struct AppCtx {
     pub config: AppConfig,
-    pub sql: SqlCtx,
+    pub sql: Database,
+    pub sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
 }
 
 impl AppCtx {
     pub async fn new(config: AppConfig) -> Res<Self> {
-        let sql = open_sql_ctx(config.sql.clone()).await?;
-        Ok(Self { config, sql })
+        let sqlite_runtime = Arc::new(sqlite_rs::SqliteRuntime::new(default()));
+        let sql = open_database(&sqlite_runtime, config.sql.clone()).await?;
+        Ok(Self {
+            config,
+            sql,
+            sqlite_runtime,
+        })
     }
 
     pub async fn load() -> Res<Self> {
@@ -113,8 +108,15 @@ impl AppCtx {
         repo_name: String,
         local_device_name: String,
     ) -> Res<Arc<RepoCtx>> {
-        let rcx = RepoCtx::init(repo_root, options, repo_name, local_device_name).await?;
-        if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.write_pool, &rcx).await {
+        let rcx = RepoCtx::init(
+            Arc::clone(&self.sqlite_runtime),
+            repo_root,
+            options,
+            repo_name,
+            local_device_name,
+        )
+        .await?;
+        if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql, &rcx).await {
             rcx.shutdown()
                 .await
                 .inspect_err(|err| error!("error shutting down repo: {err}"))
@@ -130,8 +132,14 @@ impl AppCtx {
         options: crate::repo::RepoOpenOptions,
         local_device_name: String,
     ) -> Res<Arc<RepoCtx>> {
-        let rcx = RepoCtx::open(repo_root, options, local_device_name).await?;
-        if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql.write_pool, &rcx).await {
+        let rcx = RepoCtx::open(
+            Arc::clone(&self.sqlite_runtime),
+            repo_root,
+            options,
+            local_device_name,
+        )
+        .await?;
+        if let Err(err) = crate::app::globals::upsert_known_repo(&self.sql, &rcx).await {
             rcx.shutdown()
                 .await
                 .inspect_err(|err| error!("error shutting down repo: {err}"))
@@ -145,7 +153,8 @@ impl AppCtx {
 pub mod version_updates {
     use crate::interlude::*;
 
-    use automerge::{ROOT, transaction::Transactable};
+    use automerge::ROOT;
+    use automerge::transaction::Transactable;
     use autosurgeon::reconcile_prop;
 
     use crate::config::ConfigStore;
@@ -182,9 +191,8 @@ pub mod version_updates {
 }
 
 pub mod globals {
-    use sqlx::SqlitePool;
-
     use crate::interlude::*;
+    use crate::sqlite::queries;
 
     #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
     #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -198,7 +206,7 @@ pub mod globals {
         pub last_opened_at_unix_secs: i64,
     }
     pub async fn upsert_known_repo(
-        sql: &SqlitePool,
+        sql: &Database,
         rcx: &crate::repo::RepoCtx,
     ) -> Res<KnownRepoEntry> {
         let repo_path = rcx.layout.repo_root.display().to_string();
@@ -240,11 +248,8 @@ pub mod globals {
         pub known_repos: Vec<KnownRepoEntry>,
         pub last_used_repo_id: Option<String>,
     }
-    pub async fn get_repo_config(sql: &SqlitePool) -> Res<RepoConfig> {
-        let rec = sqlx::query_scalar::<_, String>("SELECT value FROM kvstore WHERE key = ?1")
-            .bind(REPO_CONFIG_KEY)
-            .fetch_optional(sql)
-            .await?;
+    pub async fn get_repo_config(sql: &Database) -> Res<RepoConfig> {
+        let rec = queries::kv_get(sql, REPO_CONFIG_KEY.to_owned()).await?;
         let state = match rec {
             Some(json) => serde_json::from_str::<RepoConfig>(&json)?,
             None => RepoConfig::default(),
@@ -252,13 +257,9 @@ pub mod globals {
         Ok(state)
     }
 
-    pub async fn set_repo_config(sql: &SqlitePool, state: &RepoConfig) -> Res<()> {
+    pub async fn set_repo_config(sql: &Database, state: &RepoConfig) -> Res<()> {
         let json = serde_json::to_string(state)?;
-        sqlx::query("INSERT INTO kvstore(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-        .bind(REPO_CONFIG_KEY)
-        .bind(&json)
-        .execute(sql)
-        .await?;
+        queries::kv_upsert(sql, REPO_CONFIG_KEY.to_owned(), json).await?;
         Ok(())
     }
 }

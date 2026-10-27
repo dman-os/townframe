@@ -3,20 +3,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 mod plugins;
-use plugins::{MailPlugin, ServicePlugin};
+use plugins::MailPlugin;
+use plugins::ServicePlugin;
 use wash_plugin_sqlite::SqlPlugin;
-use wash_runtime::{
-    engine::Engine,
-    host::{
-        HostApi, HostBuilder,
-        http::{DevRouter, Ingress},
-    },
-    types::{
-        Component, HostPathVolume, LocalResources, Volume, VolumeMount, VolumeType, Workload,
-        WorkloadStartRequest, WorkloadStopRequest,
-    },
-    wit::WitInterface,
-};
+use wash_runtime::engine::Engine;
+use wash_runtime::host::HostApi;
+use wash_runtime::host::HostBuilder;
+use wash_runtime::host::http::DevRouter;
+use wash_runtime::host::http::Ingress;
+use wash_runtime::types::Component;
+use wash_runtime::types::HostPathVolume;
+use wash_runtime::types::LocalResources;
+use wash_runtime::types::Volume;
+use wash_runtime::types::VolumeMount;
+use wash_runtime::types::VolumeType;
+use wash_runtime::types::Workload;
+use wash_runtime::types::WorkloadStartRequest;
+use wash_runtime::types::WorkloadStopRequest;
+use wash_runtime::wit::WitInterface;
 
 /// Run the `btress_auth` wash host (playground).
 ///
@@ -26,15 +30,28 @@ use wash_runtime::{
 /// `btress_auth` component (which exports `wasi:http/incoming-handler`), and
 /// serves it on `0.0.0.0:8071`.
 ///
-/// Playground: the sqlite path is hardcoded inside [`ServicePlugin`] and the
+/// Playground: the sqlite path is supplied to [`ServicePlugin`] at boot and the
 /// component env vars are hardcoded below — not config-driven yet.
 pub async fn run() -> Res<ExitCode> {
-    run_inner()
+    let config = crate::lazy::config().await?;
+    run_inner(Arc::clone(&config.sqlite_runtime))
         .await
         .map_err(|err| eyre::eyre!(err.to_string()))
 }
 
-async fn run_inner() -> wash_runtime::wasmtime::anyhow::Result<ExitCode> {
+/// Where the btress_sysadmin workspace writes cargo-leptos output: `CARGO_TARGET_DIR` when
+/// the dev shell scoped it per worktree, otherwise the crate workspace's own `target/`.
+fn wasm_workspace_target_dir() -> std::path::PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../btress_sysadmin/target")
+        })
+}
+
+async fn run_inner(
+    sqlite_runtime: Arc<sqlite_rs::SqliteRuntime>,
+) -> wash_runtime::wasmtime::anyhow::Result<ExitCode> {
     // ---- btress_auth host (port 8071) ----
     let auth_engine = Engine::builder().with_pooling_allocator(true).build()?;
     let auth_http_handler = Ingress::new(DevRouter::default(), "0.0.0.0:8071".parse()?).await?;
@@ -43,7 +60,10 @@ async fn run_inner() -> wash_runtime::wasmtime::anyhow::Result<ExitCode> {
         .with_friendly_name("btress-auth-host")
         .with_http_handler(Arc::new(auth_http_handler))
         .with_plugin(Arc::new(SqlPlugin::new()))?
-        .with_plugin(Arc::new(ServicePlugin::new()))?
+        .with_plugin(Arc::new(ServicePlugin::new(
+            sqlite_runtime,
+            std::env::temp_dir().join("townframe-auth.sqlite"),
+        )))?
         .with_plugin(Arc::new(MailPlugin::new()))?
         .with_plugin(Arc::new(
             wash_runtime::plugin::wasi_logging::TracingLogger::default(),
@@ -120,11 +140,10 @@ async fn run_inner() -> wash_runtime::wasmtime::anyhow::Result<ExitCode> {
     let sysadmin_host = sysadmin_host.start().await?;
     println!("Host started: {}", sysadmin_host.friendly_name());
 
-    // Load the btress_sysadmin component from disk (built by `cargo leptos build --release`)
-    let sysadmin_component_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/wasm/wasm32-wasip2/wasm-release/btress_sysadmin.wasm");
-    let sysadmin_component_bytes = std::fs::read(&sysadmin_component_path)?;
-    let site_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/site");
+    let target_dir = wasm_workspace_target_dir();
+    let component_path = target_dir.join("wasm/wasm32-wasip2/wasm-release/btress_sysadmin.wasm");
+    let component_bytes = std::fs::read(&component_path)?;
+    let site_dir = target_dir.join("site");
 
     // Start the btress_sysadmin workload (mirrors the `.wash/config.yaml` dev
     // setup: site assets volume-mounted at /public + LEPTOS env vars)
@@ -138,7 +157,7 @@ async fn run_inner() -> wash_runtime::wasmtime::anyhow::Result<ExitCode> {
             service: None,
             components: vec![Component {
                 name: "btress-sysadmin".to_string(),
-                bytes: sysadmin_component_bytes.into(),
+                bytes: component_bytes.into(),
                 digest: None,
                 local_resources: LocalResources {
                     environment: HashMap::from([

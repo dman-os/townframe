@@ -1,6 +1,7 @@
 use crate::interlude::*;
 
-use crate::partition::effects::{EffectId, PartitionEffect};
+use crate::partition::effects::EffectId;
+use crate::partition::effects::PartitionEffect;
 use crate::partition::state::PartitionJobsState;
 use std::collections::HashMap;
 
@@ -21,7 +22,9 @@ pub struct PartitionSnapshotRef<'a, 'b> {
 
 mod effect_map_serde {
     use super::*;
-    use serde::{Deserializer, Serializer, ser::SerializeMap};
+    use serde::Deserializer;
+    use serde::Serializer;
+    use serde::ser::SerializeMap;
     use std::collections::HashMap;
 
     pub fn serialize<S>(

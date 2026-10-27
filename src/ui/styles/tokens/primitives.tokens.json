@@ -1,0 +1,156 @@
+{
+  "$description": "Dayframe foundation primitives. Values are DTCG-compatible and may be consumed by semantic.tokens.json.",
+  "dimension": {
+    "$type": "dimension",
+    "spacing": {
+      "0": { "$value": { "value": 0, "unit": "rem" } },
+      "1": { "$value": { "value": 0.25, "unit": "rem" } },
+      "2": { "$value": { "value": 0.5, "unit": "rem" } },
+      "3": { "$value": { "value": 0.75, "unit": "rem" } },
+      "4": { "$value": { "value": 1, "unit": "rem" } },
+      "6": { "$value": { "value": 1.5, "unit": "rem" } },
+      "8": { "$value": { "value": 2, "unit": "rem" } },
+      "12": { "$value": { "value": 3, "unit": "rem" } }
+    },
+    "radius": {
+      "sm": { "$value": { "value": 0.25, "unit": "rem" } },
+      "md": { "$value": { "value": 0.5, "unit": "rem" } },
+      "lg": { "$value": { "value": 0.75, "unit": "rem" } },
+      "xl": { "$value": { "value": 1, "unit": "rem" } },
+      "pill": { "$value": { "value": 999, "unit": "px" } }
+    },
+    "border": {
+      "hairline": { "$value": { "value": 1, "unit": "px" } },
+      "thin": { "$value": { "value": 1, "unit": "px" } },
+      "thick": { "$value": { "value": 2, "unit": "px" } }
+    }
+  },
+  "color": {
+    "$type": "color",
+    "neutral": {
+      "0": {
+        "$value": { "colorSpace": "srgb", "components": [1, 1, 1], "alpha": 1 }
+      },
+      "50": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.98, 0.98, 0.99],
+          "alpha": 1
+        }
+      },
+      "100": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.94, 0.94, 0.96],
+          "alpha": 1
+        }
+      },
+      "600": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.36, 0.36, 0.42],
+          "alpha": 1
+        }
+      },
+      "900": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.12, 0.12, 0.16],
+          "alpha": 1
+        }
+      },
+      "1000": {
+        "$value": { "colorSpace": "srgb", "components": [0, 0, 0], "alpha": 1 }
+      }
+    },
+    "blue": {
+      "100": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.86, 0.91, 1],
+          "alpha": 1
+        }
+      },
+      "600": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.16, 0.32, 0.78],
+          "alpha": 1
+        }
+      },
+      "900": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.06, 0.12, 0.38],
+          "alpha": 1
+        }
+      }
+    },
+    "red": {
+      "100": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [1, 0.88, 0.88],
+          "alpha": 1
+        }
+      },
+      "600": {
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [0.74, 0.12, 0.12],
+          "alpha": 1
+        }
+      }
+    }
+  },
+  "font": {
+    "family": {
+      "$type": "fontFamily",
+      "sans": { "$value": ["system-ui", "sans-serif"] }
+    },
+    "weight": {
+      "$type": "fontWeight",
+      "regular": { "$value": 400 },
+      "medium": { "$value": 500 },
+      "semibold": { "$value": 600 },
+      "bold": { "$value": 700 }
+    }
+  },
+  "shadow": {
+    "$type": "shadow",
+    "none": { "$value": [] },
+    "sm": {
+      "$value": [
+        {
+          "color": "{color.neutral.1000}",
+          "offsetX": { "value": 0, "unit": "px" },
+          "offsetY": { "value": 1, "unit": "px" },
+          "blur": { "value": 2, "unit": "px" },
+          "spread": { "value": 0, "unit": "px" }
+        }
+      ]
+    },
+    "md": {
+      "$value": [
+        {
+          "color": "{color.neutral.1000}",
+          "offsetX": { "value": 0, "unit": "px" },
+          "offsetY": { "value": 4, "unit": "px" },
+          "blur": { "value": 12, "unit": "px" },
+          "spread": { "value": 0, "unit": "px" }
+        }
+      ]
+    },
+    "raised": {
+      "$value": [
+        {
+          "color": "{color.neutral.1000}",
+          "offsetX": { "value": 0, "unit": "px" },
+          "offsetY": { "value": 8, "unit": "px" },
+          "blur": { "value": 24, "unit": "px" },
+          "spread": { "value": 0, "unit": "px" }
+        }
+      ]
+    }
+  }
+}

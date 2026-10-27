@@ -24,7 +24,10 @@ use rand::RngCore;
 use iroh_blobs::Hash;
 
 use super::Res;
-use super::codec::{Cipher, MASTER_KEY_LEN, SALT_LEN, cipher_from_ikm};
+use super::codec::Cipher;
+use super::codec::MASTER_KEY_LEN;
+use super::codec::SALT_LEN;
+use super::codec::cipher_from_ikm;
 use super::params::EncodingParams;
 
 /// Master key for one cipherblob family: the 32-octet input-keying material

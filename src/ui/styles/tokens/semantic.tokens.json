@@ -1,0 +1,42 @@
+{
+  "$description": "Dayframe semantic foundation roles. These values alias primitives and are the intended authoring vocabulary for generated runtime aliases.",
+  "color": {
+    "$type": "color",
+    "canvas": { "$value": "{color.neutral.50}" },
+    "surface": { "$value": "{color.neutral.0}" },
+    "surface-raised": { "$value": "{color.surface}" },
+    "surface-sunken": { "$value": "{color.neutral.100}" },
+    "text": { "$value": "{color.neutral.900}" },
+    "text-muted": { "$value": "{color.neutral.600}" },
+    "text-subtle": { "$value": "{color.text-muted}" },
+    "border": { "$value": "{color.neutral.600}" },
+    "focus": { "$value": "{color.blue.600}" },
+    "primary": { "$value": "{color.blue.600}" },
+    "on-primary": { "$value": "{color.neutral.0}" },
+    "accent": { "$value": "{color.primary}" },
+    "on-accent": { "$value": "{color.on-primary}" },
+    "accent-container": { "$value": "{color.blue.100}" },
+    "on-accent-container": { "$value": "{color.blue.900}" },
+    "danger": { "$value": "{color.red.600}" },
+    "on-danger": { "$value": "{color.neutral.0}" }
+  },
+  "dimension": {
+    "$type": "dimension",
+    "spacing": { "$value": "{dimension.spacing.1}" },
+    "radius-sm": { "$value": "{dimension.radius.sm}" },
+    "radius-md": { "$value": "{dimension.radius.md}" },
+    "radius-lg": { "$value": "{dimension.radius.lg}" },
+    "radius-xl": { "$value": "{dimension.radius.xl}" },
+    "radius-pill": { "$value": "{dimension.radius.pill}" },
+    "border-width-hairline": { "$value": "{dimension.border.hairline}" },
+    "border-width-thin": { "$value": "{dimension.border.thin}" },
+    "border-width-thick": { "$value": "{dimension.border.thick}" }
+  },
+  "elevation": {
+    "$type": "shadow",
+    "none": { "$value": "{shadow.none}" },
+    "sm": { "$value": "{shadow.sm}" },
+    "md": { "$value": "{shadow.md}" },
+    "raised": { "$value": "{shadow.raised}" }
+  }
+}

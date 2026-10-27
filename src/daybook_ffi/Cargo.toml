@@ -36,7 +36,6 @@ mltools = { workspace = true, features = ["hf_hub"] }
 #
 # encoding
 serde_json.workspace = true
-api_utils_rs.workspace = true
 
 #
 # error

@@ -2,14 +2,12 @@
 resolver = "3"
 members = [
   "./src/am_utils_rs",
-  "./src/api_utils_rs",
   "./src/big_cabinet/",
   "./src/big_cabinet_core/",
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
   "./src/big_node/",
-  "./src/btress_sysadmin/",
   "./src/daybook_cli",
   "./src/daybook_core",
   "./src/daybook_ffi",
@@ -17,15 +15,17 @@ members = [
   "./src/daybook_types",
   "./src/macros",
   "./src/mltools/",
-  "./src/plug_dayledger/",
+  "./src/pauperfuse/",
+  "./src/native_utils_rs",
+  "./src/plug_test_manifest",
+  "./src/plug_plabels_manifest",
+  "./src/plug_dayledger_manifest",
   "./src/secrets_rs",
   "./src/service_core_rs/",
   "./src/service_client_rs/",
   "./src/service_utils_rs/",
-  "./src/plug_plabels/",
-  "./src/plug_test/",
+  "./src/sqlite_rs/",
   "./src/sqlx_utils_rs/",
-  "./src/test_wflows",
   "./src/utils_rs",
   "./src/wash_plugin_sqlite/",
   "./src/wash_plugin_wflow/",
@@ -34,6 +34,33 @@ members = [
   "./src/wflow_sdk",
   "./src/wflow_tokio/",
   "./src/xtask",
+  "./src/clay_surface",
+  "./src/clay_host",
+  "./src/clay_docs",
+  "./src/clay_collection",
+  "./src/clay_micro_core",
+  "./src/clay_dioxus",
+  "./src/clay_mdk",
+  "./src/clay_rt_wasmtime",
+  "./src/clay_guest_session",
+  "./src/micro_settings_manifest",
+  "./src/micro_settings",
+  "./src/micro_sample",
+  "./src/micro_counter",
+  "./src/micro_counter_manifest",
+  "./src/ui",
+  "./src/dayframe_web",
+  "./src/dayframe_desktop",
+  "./src/dayframe_mobile",
+  "./src/dayframe_showcase",
+]
+exclude = [
+  "src/wasm_utils_rs",
+  "src/plug_test_routines",
+  "src/plug_plabels_routines",
+  "src/plug_dayledger_routines",
+  "src/test_wflows",
+  "src/btress_sysadmin",
 ]
 
 [workspace.package]
@@ -45,11 +72,15 @@ license = ""
 repository = ""
 
 [workspace.dependencies]
+getrandom = { version = "0.4" }
+getrandom03 = { package = "getrandom", version = "0.3" }
 #
 # internal
 utils_rs = { path = "./src/utils_rs", default-features = false }
+native_utils_rs = { path = "./src/native_utils_rs" }
+sqlite_rs = { path = "./src/sqlite_rs", default-features = false }
 sqlx_utils_rs = { path = "./src/sqlx_utils_rs", default-features = false }
-api_utils_rs = { path = "./src/api_utils_rs", default-features = false  }
+wasm_utils_rs = { path = "./src/wasm_utils_rs", default-features = false }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
@@ -208,7 +239,6 @@ loom = "0.7.2"
 sqlite-vec = "0.1.6" # "0.2.4-alpha"
 sqlx = { version = "0.9.0", features = [
   "runtime-tokio",
-  # "tls-rustls-ring-webpki",
   "time",
   "uuid",
   "macros",
@@ -250,11 +280,36 @@ irpc-iroh = "0.17.0"
 
 #
 # gui
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-core = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-html = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-native-dom = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+blitz-dom = "=0.3.0-beta.4"
+ui = { path = "./src/ui" }
 # xilem = { path = "../xilem/xilem/" }
+#
+# dayframe internal
+clay_collection = { path = "./src/clay_collection" }
+clay_host = { path = "./src/clay_host" }
+clay_docs = { path = "./src/clay_docs" }
+clay_micro_core = { path = "./src/clay_micro_core" }
+clay_surface = { path = "./src/clay_surface" }
+clay_dioxus = { path = "./src/clay_dioxus" }
+clay_rt_wasmtime = { path = "./src/clay_rt_wasmtime" }
+clay_guest_session = { path = "./src/clay_guest_session" }
+clay_mdk = { path = "./src/clay_mdk", default-features = false }
+micro_settings_manifest = { path = "./src/micro_settings_manifest" }
+micro_settings = { path = "./src/micro_settings" }
+micro_sample = { path = "./src/micro_sample" }
+micro_counter = { path = "./src/micro_counter" }
+micro_counter_manifest = { path = "./src/micro_counter_manifest" }
 
 [patch.crates-io]
 autosurgeon = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
 autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a1df66f667667f1d14bc2272c4d426815de66b8" }
+dioxus = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
+dioxus-native = { git = "https://github.com/dman-os/dioxus", rev = "a3e1e68334b7dfa68cead38e9e8795ec7a6b534a" }
 # automerge = { git = "https://github.com/automerge/automerge", branch = "fragments" }
 # leptos = { path = "../leptos/leptos/" }
 # leptos_meta = { path = "../leptos/meta/" }
@@ -264,25 +319,158 @@ autosurgeon-derive = { git = "https://github.com/dman-os/autosurgeon", rev = "6a
 # sqlite-vec = { git = "https://github.com/vlasky/sqlite-vec", rev = "9facf1ab84f2a360c0f1e62db3a7f3eca5bc099a" }
 
 
-# Optimize for size in the wasm-release profile to reduce load times and bandwidth usage on web.
-# # NOTE: the comment above is now stale
+# Keep the application debuggable while optimizing the native UI hot path in dev.
+# These overrides apply to desktop/native builds only; the app and shared UI remain
+# at the normal dev profile for fast iteration and useful debug information.
+[profile.dev.package."accesskit"]
+opt-level = 3
+[profile.dev.package."anyrender"]
+opt-level = 3
+[profile.dev.package."anyrender_vello"]
+opt-level = 3
+[profile.dev.package."anyrender_vello_cpu"]
+opt-level = 3
+[profile.dev.package."anyrender_vello_hybrid"]
+opt-level = 3
+[profile.dev.package."blitz-dom"]
+opt-level = 3
+[profile.dev.package."blitz-html"]
+opt-level = 3
+[profile.dev.package."blitz-net"]
+opt-level = 3
+[profile.dev.package."blitz-paint"]
+opt-level = 3
+[profile.dev.package."blitz-shell"]
+opt-level = 3
+[profile.dev.package."blitz-traits"]
+opt-level = 3
+[profile.dev.package."dioxus-native"]
+opt-level = 3
+[profile.dev.package."dioxus-native-dom"]
+opt-level = 3
+[profile.dev.package."stylo"]
+opt-level = 3
+[profile.dev.package."stylo_taffy"]
+opt-level = 3
+[profile.dev.package."taffy"]
+opt-level = 3
+[profile.dev.package."vello"]
+opt-level = 3
+[profile.dev.package."vello_common"]
+opt-level = 3
+[profile.dev.package."vello_cpu"]
+opt-level = 3
+[profile.dev.package."vello_hybrid"]
+opt-level = 3
+[profile.dev.package."wgpu"]
+opt-level = 3
+[profile.dev.package."wgpu-core"]
+opt-level = 3
+[profile.dev.package."wgpu-hal"]
+opt-level = 3
+[profile.dev.package."wgpu-types"]
+opt-level = 3
+[profile.dev.package."wgpu_context"]
+opt-level = 3
+[profile.dev.package."winit"]
+opt-level = 3
+
+# dx serve uses this profile for the native desktop development binary.
+[profile.desktop-dev]
+inherits = "dev"
+
+[profile.desktop-dev.package."accesskit"]
+opt-level = 3
+[profile.desktop-dev.package."accesskit_xplat"]
+opt-level = 3
+[profile.desktop-dev.package."anyrender"]
+opt-level = 3
+[profile.desktop-dev.package."anyrender_svg"]
+opt-level = 3
+[profile.desktop-dev.package."anyrender_vello"]
+opt-level = 3
+[profile.desktop-dev.package."anyrender_vello_cpu"]
+opt-level = 3
+[profile.desktop-dev.package."anyrender_vello_hybrid"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-dom"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-html"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-net"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-paint"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-shell"]
+opt-level = 3
+[profile.desktop-dev.package."blitz-traits"]
+opt-level = 3
+[profile.desktop-dev.package."dioxus-native"]
+opt-level = 3
+[profile.desktop-dev.package."dioxus-native-dom"]
+opt-level = 3
+[profile.desktop-dev.package."stylo"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_atoms"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_derive"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_dom"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_malloc_size_of"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_static_prefs"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_taffy"]
+opt-level = 3
+[profile.desktop-dev.package."stylo_traits"]
+opt-level = 3
+[profile.desktop-dev.package."taffy"]
+opt-level = 3
+[profile.desktop-dev.package."vello"]
+opt-level = 3
+[profile.desktop-dev.package."vello_common"]
+opt-level = 3
+[profile.desktop-dev.package."vello_cpu"]
+opt-level = 3
+[profile.desktop-dev.package."vello_encoding"]
+opt-level = 3
+[profile.desktop-dev.package."vello_hybrid"]
+opt-level = 3
+[profile.desktop-dev.package."vello_shaders"]
+opt-level = 3
+[profile.desktop-dev.package."vello_sparse_shaders"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu_context"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu-core"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu-core-deps-windows-linux-android"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu-hal"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu-naga-bridge"]
+opt-level = 3
+[profile.desktop-dev.package."wgpu-types"]
+opt-level = 3
+[profile.desktop-dev.package."winit"]
+opt-level = 3
+[profile.desktop-dev.package."winit-common"]
+opt-level = 3
+[profile.desktop-dev.package."winit-core"]
+opt-level = 3
+[profile.desktop-dev.package."winit-wayland"]
+opt-level = 3
+[profile.desktop-dev.package."winit-x11"]
+opt-level = 3
 [profile.wasm-release]
 inherits = "release"
-# Compile the entire crate as one unit.
-# Slows compile times, marginal improvements.
 codegen-units = 1
-# Do a second optimization pass over the entire program, including dependencies.
-# Slows compile times, marginal improvements.
 lto = "thin"
-# lto = true
-# Optimize with size in mind (also try "z", sometimes it is better).
-# Slightly slows compile times, great improvements to file size and runtime performance.
-opt-level = "s"
-# opt-level = 'z'
-# Strip all debugging information from the binary to slightly reduce file size.
-strip = "none"
-# panic = "abort"
-debug = true
+opt-level = 3
+debug = "line-tables-only"
 
 [workspace.lints]
 clippy.clone_on_ref_ptr = "warn"

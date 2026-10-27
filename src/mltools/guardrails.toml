@@ -1,0 +1,41 @@
+version = 1
+role = "runtime"
+dependency_reason = "initial guardrail baseline"
+allowed_dependencies = ["native_utils_rs", "utils_rs"]
+allow_external_api_types = false
+
+[[exemptions]]
+code = "ERROR_FIXED_TEMP_PATH"
+path = "src/mltools/lib.rs"
+symbol = "module::tests::test_embed_image_api_contract_rejects_missing_backend"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: use a per-run temporary directory instead of shared process-global state"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_FN_LENGTH"
+path = "src/mltools/models.rs"
+symbol = "module::mobile_default_with_observer"
+ceiling = 191
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: extract focused helpers so independent changes do not collide inside one large function"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_GLOB_EXPORT"
+path = "src/mltools/lib.rs"
+symbol = "module::interlude"
+ceiling = 1
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: export named items so interface changes have an explicit source"
+reference = "docs/scratch/agent-guardrails-open-items.md"
+
+[[exemptions]]
+code = "ERROR_INLINE_TEST_MOD"
+path = "src/mltools/lib.rs"
+symbol = "module::tests"
+ceiling = 453
+class = "LEGACY_DEBT"
+reason = "initial guardrail baseline: move large inline #[cfg(test)] modules to a sibling file so test and production edits do not conflict"
+reference = "docs/scratch/agent-guardrails-open-items.md"

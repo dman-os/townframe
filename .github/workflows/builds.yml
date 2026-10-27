@@ -39,10 +39,8 @@ env:
   OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
   OLLAMA_USERNAME: ${{ secrets.OLLAMA_USERNAME }}
   OLLAMA_PASSWORD: ${{ secrets.OLLAMA_PASSWORD }}
-  DAYBOOK_ANDROID_CLI_TARGET: aarch64-linux-android
   DAYBOOK_PRERELEASE_TAG: dev
   RUST_VERSION: 2026-04-16
-  SQLX_OFFLINE: true
 
 jobs:
   resolve-release-meta:
@@ -57,8 +55,6 @@ jobs:
       is_release_build: ${{ steps.meta.outputs.is_release_build }}
       compose_profile: ${{ steps.meta.outputs.compose_profile }}
       rust_profile_dir: ${{ steps.meta.outputs.rust_profile_dir }}
-      windows_gradle_task: ${{ steps.meta.outputs.windows_gradle_task }}
-      macos_gradle_task: ${{ steps.meta.outputs.macos_gradle_task }}
     steps:
       - name: Setup tmate session
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
@@ -105,12 +101,6 @@ jobs:
           fi
 
           rust_profile_dir="${compose_profile}"
-          windows_gradle_task=":composeApp:packageMsi"
-          macos_gradle_task=":composeApp:packageDmg"
-          if [[ "${compose_profile}" == "release" ]]; then
-            windows_gradle_task=":composeApp:packageReleaseMsi"
-            macos_gradle_task=":composeApp:packageReleaseDmg"
-          fi
 
           cargo_version="$(
             python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])'
@@ -153,8 +143,6 @@ jobs:
             echo "is_release_build=${is_release_build}"
             echo "compose_profile=${compose_profile}"
             echo "rust_profile_dir=${rust_profile_dir}"
-            echo "windows_gradle_task=${windows_gradle_task}"
-            echo "macos_gradle_task=${macos_gradle_task}"
           } >> "${GITHUB_OUTPUT}"
 
   linux:
@@ -194,15 +182,6 @@ jobs:
 
       - uses: DeterminateSystems/flakehub-cache-action@v3
 
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
@@ -239,36 +218,19 @@ jobs:
             cargo build -p daybook_cli
           fi
 
-      - name: build appimage
-        run: |
-          export PROTOC="$(command -v protoc)"
-          deno run -A ./x/build-appimage-dayb.ts
-
       - id: archive-linux
         name: archive linux artifacts
         shell: bash
         run: |
           set -euo pipefail
           archive_dir="./target/release-archives"
-          compose_stage_dir="./target/release-bundles/linux-compose"
           cli_stage_dir="./target/release-bundles/linux-cli"
-          compose_archive_path="${archive_dir}/daybook-compose-linux-x64-${DAYBOOK_COMPOSE_PROFILE}.tar.xz"
           cli_archive_path="${archive_dir}/daybook-cli-linux-x64-${DAYBOOK_COMPOSE_PROFILE}.tar.xz"
-          rm -rf "${compose_stage_dir}" "${cli_stage_dir}"
-          mkdir -p "${compose_stage_dir}/appimage" "${cli_stage_dir}" "${archive_dir}"
-          cp -a ./target/appimage/. "${compose_stage_dir}/appimage/"
+          rm -rf "${cli_stage_dir}"
+          mkdir -p "${cli_stage_dir}" "${archive_dir}"
           cp "./target/${DAYBOOK_RUST_PROFILE_DIR}/daybook_cli" "${cli_stage_dir}/"
-          bsdtar -a -cf "${compose_archive_path}" -C "${compose_stage_dir}" .
           bsdtar -a -cf "${cli_archive_path}" -C "${cli_stage_dir}" .
-          echo "compose_archive_path=${compose_archive_path}" >> "${GITHUB_OUTPUT}"
           echo "cli_archive_path=${cli_archive_path}" >> "${GITHUB_OUTPUT}"
-
-      - uses: actions/upload-artifact@v6
-        if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
-        with:
-          name: daybook-compose-linux-x64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
-          path: ${{ steps.archive-linux.outputs.compose_archive_path }}
-          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
       - uses: actions/upload-artifact@v6
         if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
@@ -277,7 +239,7 @@ jobs:
           path: ${{ steps.archive-linux.outputs.cli_archive_path }}
           retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
 
-      - name: upload appimage to github release
+      - name: upload cli to github release
         if: needs.resolve-release-meta.outputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
@@ -286,455 +248,6 @@ jobs:
           prerelease: ${{ needs.resolve-release-meta.outputs.is_prerelease == 'true' }}
           target_commitish: ${{ github.sha }}
           files: |
-            ${{ steps.archive-linux.outputs.compose_archive_path }}
             ${{ steps.archive-linux.outputs.cli_archive_path }}
-          fail_on_unmatched_files: true
-          overwrite_files: true
-
-  android:
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    needs: resolve-release-meta
-    env:
-      DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
-      DAYBOOK_COMPOSE_PROFILE: ${{ needs.resolve-release-meta.outputs.compose_profile }}
-      DAYBOOK_RUST_PROFILE_DIR: ${{ needs.resolve-release-meta.outputs.rust_profile_dir }}
-      DAYBOOK_CLEAN_ORT_ANDROID_BUILD: "1"
-    steps:
-      - name: Setup tmate session
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-
-      - name: remove unused files
-        # based on https://dev.to/mathio/squeezing-disk-space-from-github-actions-runners-an-engineers-guide-3pjg
-        run: |
-          sudo rm -rf /usr/lib/jvm
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /opt/microsoft /opt/google
-          sudo rm -rf /opt/az
-          sudo rm -rf /usr/local/share/powershell
-          # sudo rm -rf /opt/hostedtoolcache
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-
-      - uses: DeterminateSystems/nix-installer-action@v16
-
-      - uses: DeterminateSystems/flakehub-cache-action@v3
-
-      - uses: denoland/setup-deno@v2
-      - name: Setup wash CLI
-        uses: wasmCloud/setup-wash-action@v2.1.0
-        with:
-          wash-version: v2.6.1
-      - name: fetch WIT dependencies
-        run: deno run -A ./x/wit-fetch.ts --clean
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: install archive tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libarchive-tools
-
-      - name: verify archive tools
-        run: |
-          command -v bsdtar
-
-      - name: Restore ONNX Runtime cache
-        id: ort-cache
-        uses: actions/cache/restore@v4
-        with:
-          path: target/ort-cache.tar.xz
-          key: ort-android-${{ runner.os }}-${{ env.DAYBOOK_COMPOSE_PROFILE }}-${{ hashFiles('x/build-a-dayb.ts', 'flake.nix') }}
-      - name: Extract ONNX Runtime cache
-        if: steps.ort-cache.outputs.cache-hit == 'true'
-        run: |
-          mkdir -p target
-          bsdtar -xf target/ort-cache.tar.xz -C target
-      - name: materialize android release keystore
-        if: env.DAYBOOK_COMPOSE_PROFILE == 'release'
-        shell: bash
-        env:
-          DAYBOOK_ANDROID_RELEASE_KEYSTORE_B64: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEYSTORE_B64 }}
-          DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD }}
-          DAYBOOK_ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEY_ALIAS }}
-          DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          keystore_path="${RUNNER_TEMP}/daybook-release.jks"
-          printf '%s' "${DAYBOOK_ANDROID_RELEASE_KEYSTORE_B64}" | base64 --decode > "${keystore_path}"
-          chmod 600 "${keystore_path}"
-          printf 'DAYBOOK_ANDROID_RELEASE_KEYSTORE_PATH=%s\n' "${keystore_path}" >> "${GITHUB_ENV}"
-          printf 'DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD=%s\n' "${DAYBOOK_ANDROID_RELEASE_KEYSTORE_PASSWORD}" >> "${GITHUB_ENV}"
-          printf 'DAYBOOK_ANDROID_RELEASE_KEY_ALIAS=%s\n' "${DAYBOOK_ANDROID_RELEASE_KEY_ALIAS}" >> "${GITHUB_ENV}"
-          printf 'DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD=%s\n' "${DAYBOOK_ANDROID_RELEASE_KEY_PASSWORD}" >> "${GITHUB_ENV}"
-
-      - name: build daybook cli (android termux)
-        run: |
-          nix develop .#ci-android --command bash -lc 'set -euo pipefail; if [[ "$DAYBOOK_COMPOSE_PROFILE" == "release" ]]; then cargo build -p daybook_cli --target "$DAYBOOK_ANDROID_CLI_TARGET" --release; else cargo build -p daybook_cli --target "$DAYBOOK_ANDROID_CLI_TARGET"; fi'
-
-      - name: build android apk
-        run: |
-          nix develop .#ci-android --command bash -lc 'export PROTOC="$(command -v protoc)"; deno run -A ./x/build-a-dayb.ts'
-
-      - name: Package ONNX Runtime cache
-        if: github.ref == 'refs/heads/main' && steps.ort-cache.outputs.cache-hit != 'true'
-        run: |
-          bsdtar -a -cf target/ort-cache.tar.xz -C target ort
-      - name: Save ONNX Runtime cache
-        if: github.ref == 'refs/heads/main' && steps.ort-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: target/ort-cache.tar.xz
-          key: ort-android-${{ runner.os }}-${{ env.DAYBOOK_COMPOSE_PROFILE }}-${{ hashFiles('x/build-a-dayb.ts', 'flake.nix') }}
-
-      - id: archive-android
-        name: archive android artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          compose_stage_dir="src/daybook_compose/composeApp/build/release-bundles/android-compose"
-          cli_stage_dir="target/release-bundles/android-cli"
-          archive_dir="src/daybook_compose/composeApp/build/release-archives"
-          compose_archive_path="${archive_dir}/daybook-compose-android-${DAYBOOK_COMPOSE_PROFILE}.tar.xz"
-          cli_archive_path="${archive_dir}/daybook-cli-android-termux-aarch64-${DAYBOOK_COMPOSE_PROFILE}.tar.xz"
-          rm -rf "${compose_stage_dir}" "${cli_stage_dir}"
-          mkdir -p "${compose_stage_dir}" "${cli_stage_dir}" "${archive_dir}"
-          cp -a src/daybook_compose/composeApp/build/outputs/apk "${compose_stage_dir}/"
-          cp "target/${DAYBOOK_ANDROID_CLI_TARGET}/${DAYBOOK_RUST_PROFILE_DIR}/daybook_cli" "${cli_stage_dir}/"
-          bsdtar -a -cf "${compose_archive_path}" -C "${compose_stage_dir}" .
-          bsdtar -a -cf "${cli_archive_path}" -C "${cli_stage_dir}" .
-          echo "compose_archive_path=${compose_archive_path}" >> "${GITHUB_OUTPUT}"
-          echo "cli_archive_path=${cli_archive_path}" >> "${GITHUB_OUTPUT}"
-
-      - uses: actions/upload-artifact@v6
-        name: upload app
-        if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
-        with:
-          name: daybook-compose-android-${{ env.DAYBOOK_COMPOSE_PROFILE }}
-          path: ${{ steps.archive-android.outputs.compose_archive_path }}
-          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
-
-      - uses: actions/upload-artifact@v6
-        name: upload cli
-        if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
-        with:
-          name: daybook-cli-android-termux-aarch64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
-          path: ${{ steps.archive-android.outputs.cli_archive_path }}
-          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
-
-      - name: upload apk to github release
-        if: needs.resolve-release-meta.outputs.release_tag != ''
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.resolve-release-meta.outputs.release_tag }}
-          name: ${{ needs.resolve-release-meta.outputs.release_name }}
-          prerelease: ${{ needs.resolve-release-meta.outputs.is_prerelease == 'true' }}
-          target_commitish: ${{ github.sha }}
-          files: |
-            ${{ steps.archive-android.outputs.compose_archive_path }}
-            ${{ steps.archive-android.outputs.cli_archive_path }}
-          fail_on_unmatched_files: true
-          overwrite_files: true
-
-  windows:
-    runs-on: windows-latest
-    timeout-minutes: 90
-    needs: resolve-release-meta
-    env:
-      DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
-      DAYBOOK_COMPOSE_PROFILE: ${{ needs.resolve-release-meta.outputs.compose_profile }}
-      DAYBOOK_RUST_PROFILE_DIR: ${{ needs.resolve-release-meta.outputs.rust_profile_dir }}
-      DAYBOOK_WINDOWS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.windows_gradle_task }}
-      DAYBOOK_MACOS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.macos_gradle_task }}
-    steps:
-      - name: Setup tmate session
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
- 
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: denoland/setup-deno@v2
-      - name: Setup wash CLI
-        uses: wasmCloud/setup-wash-action@v2.1.0
-        with:
-          wash-version: v2.6.1
-      - name: fetch WIT dependencies
-        run: deno run -A ./x/wit-fetch.ts --clean
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-          toolchain: nightly-${{ env.RUST_VERSION }}
-          target: wasm32-wasip2
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: set up protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "32.x"
-
-      - name: ensure 7z
-        shell: pwsh
-        run: |
-          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
-            choco install 7zip -y
-            $env:Path += ";C:\Program Files\7-Zip"
-          }
-          7z i | Out-Null
-
-      - name: build daybook cli
-        shell: pwsh
-        run: |
-          if ($env:DAYBOOK_COMPOSE_PROFILE -eq 'release') {
-            cargo build -p daybook_cli --release
-          } else {
-            cargo build -p daybook_cli
-          }
-
-      - name: build windows installer
-        shell: pwsh
-        run: |
-          $env:PROTOC = (Get-Command protoc).Source
-          .\gradlew.bat $env:DAYBOOK_WINDOWS_GRADLE_TASK "-PdaybookProfile=$env:DAYBOOK_COMPOSE_PROFILE" --no-daemon --no-configuration-cache
-        working-directory: src/daybook_compose
-
-      - id: archive-windows
-        name: archive windows artifacts
-        shell: pwsh
-        run: |
-          $archiveDir = "target/release-archives"
-          $composeStageDir = "target/release-bundles/windows-compose"
-          $cliStageDir = "target/release-bundles/windows-cli"
-          $composeArchivePath = "$archiveDir/daybook-compose-windows-x64-$env:DAYBOOK_COMPOSE_PROFILE.7z"
-          $cliArchivePath = "$archiveDir/daybook-cli-windows-x64-$env:DAYBOOK_COMPOSE_PROFILE.7z"
-          if (Test-Path $composeStageDir) { Remove-Item -Recurse -Force $composeStageDir }
-          if (Test-Path $cliStageDir) { Remove-Item -Recurse -Force $cliStageDir }
-          New-Item -ItemType Directory -Force -Path "$composeStageDir/binaries" | Out-Null
-          New-Item -ItemType Directory -Force -Path $cliStageDir | Out-Null
-          New-Item -ItemType Directory -Force -Path $archiveDir | Out-Null
-          Copy-Item -Recurse -Force "src/daybook_compose/composeApp/build/compose/binaries/*" "$composeStageDir/binaries/"
-          Copy-Item -Force "target/$env:DAYBOOK_RUST_PROFILE_DIR/daybook_cli.exe" "$cliStageDir/"
-          if (-not (Test-Path "$composeStageDir/binaries")) { throw "Missing compose stage dir: $composeStageDir\\binaries" }
-          if (-not (Test-Path "$cliStageDir/daybook_cli.exe")) { throw "Missing CLI exe in stage dir: $cliStageDir" }
-          Push-Location $composeStageDir
-          try {
-            7z a -t7z -mx=9 -m0=lzma2 "..\\..\\release-archives\\daybook-compose-windows-x64-$env:DAYBOOK_COMPOSE_PROFILE.7z" ".\\*"
-          } finally {
-            Pop-Location
-          }
-          Push-Location $cliStageDir
-          try {
-            7z a -t7z -mx=9 -m0=lzma2 "..\\..\\release-archives\\daybook-cli-windows-x64-$env:DAYBOOK_COMPOSE_PROFILE.7z" ".\\*"
-          } finally {
-            Pop-Location
-          }
-          "compose_archive_path=$composeArchivePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "cli_archive_path=$cliArchivePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
-      - uses: actions/upload-artifact@v6
-        name: upload app
-        if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
-        with:
-          name: daybook-compose-windows-x64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
-          path: ${{ steps.archive-windows.outputs.compose_archive_path }}
-          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
-
-      - uses: actions/upload-artifact@v6
-        name: upload cli
-        if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
-        with:
-          name: daybook-cli-windows-x64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
-          path: ${{ steps.archive-windows.outputs.cli_archive_path }}
-          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
-
-      - name: upload msi to github release
-        if: needs.resolve-release-meta.outputs.release_tag != ''
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.resolve-release-meta.outputs.release_tag }}
-          name: ${{ needs.resolve-release-meta.outputs.release_name }}
-          prerelease: ${{ needs.resolve-release-meta.outputs.is_prerelease == 'true' }}
-          target_commitish: ${{ github.sha }}
-          files: |
-            ${{ steps.archive-windows.outputs.compose_archive_path }}
-            ${{ steps.archive-windows.outputs.cli_archive_path }}
-          fail_on_unmatched_files: true
-          overwrite_files: true
-
-  macos:
-    runs-on: macos-14
-    timeout-minutes: 90
-    needs: resolve-release-meta
-    env:
-      DAYBOOK_IS_RELEASE_BUILD: ${{ needs.resolve-release-meta.outputs.is_release_build }}
-      DAYBOOK_COMPOSE_PROFILE: ${{ needs.resolve-release-meta.outputs.compose_profile }}
-      DAYBOOK_RUST_PROFILE_DIR: ${{ needs.resolve-release-meta.outputs.rust_profile_dir }}
-      DAYBOOK_WINDOWS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.windows_gradle_task }}
-      DAYBOOK_MACOS_GRADLE_TASK: ${{ needs.resolve-release-meta.outputs.macos_gradle_task }}
-    steps:
-      - name: Setup tmate session
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tmate_enabled }}
-        uses: mxschmitt/action-tmate@v3
-        with:
-          detached: true
-
-      - name: remove unused files
-        # based on https://dev.to/mathio/squeezing-disk-space-from-github-actions-runners-an-engineers-guide-3pjg
-        run: |
-          sudo rm -rf /usr/lib/jvm
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/local/share/chromium
-          sudo rm -rf /opt/microsoft /opt/google
-          sudo rm -rf /opt/az
-          sudo rm -rf /usr/local/share/powershell
-          # sudo rm -rf /opt/hostedtoolcache
-
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: denoland/setup-deno@v2
-      - name: Setup wash CLI
-        uses: wasmCloud/setup-wash-action@v2.1.0
-        with:
-          wash-version: v2.6.1
-      - name: fetch WIT dependencies
-        run: deno run -A ./x/wit-fetch.ts --clean
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-          toolchain: nightly-${{ env.RUST_VERSION }}
-          target: wasm32-wasip2
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: install deps
-        run: |
-          brew update
-          brew install protobuf
-
-      - name: ensure bsdtar
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v bsdtar >/dev/null 2>&1; then
-            brew install libarchive
-          fi
-          command -v bsdtar
-
-      - name: build daybook cli
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "${DAYBOOK_COMPOSE_PROFILE}" == "release" ]]; then
-            cargo build -p daybook_cli --release
-          else
-            cargo build -p daybook_cli
-          fi
-
-      - name: build macos dmg
-        run: |
-          set -euo pipefail
-          export PROTOC="$(command -v protoc)"
-          ./gradlew "$DAYBOOK_MACOS_GRADLE_TASK" -PdaybookProfile="$DAYBOOK_COMPOSE_PROFILE" --no-daemon --no-configuration-cache
-        working-directory: src/daybook_compose
-
-      - id: archive-macos
-        name: archive macos artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          archive_dir="./target/release-archives"
-          compose_stage_dir="./target/release-bundles/macos-compose"
-          cli_stage_dir="./target/release-bundles/macos-cli"
-          compose_archive_path="${archive_dir}/daybook-compose-macos-arm64-${DAYBOOK_COMPOSE_PROFILE}.tar.xz"
-          cli_archive_path="${archive_dir}/daybook-cli-macos-arm64-${DAYBOOK_COMPOSE_PROFILE}.tar.xz"
-          rm -rf "${compose_stage_dir}" "${cli_stage_dir}"
-          mkdir -p "${compose_stage_dir}/binaries" "${cli_stage_dir}" "${archive_dir}"
-          cp -a src/daybook_compose/composeApp/build/compose/binaries/. "${compose_stage_dir}/binaries/"
-          cp "./target/${DAYBOOK_RUST_PROFILE_DIR}/daybook_cli" "${cli_stage_dir}/"
-          bsdtar -a -cf "${compose_archive_path}" -C "${compose_stage_dir}" .
-          bsdtar -a -cf "${cli_archive_path}" -C "${cli_stage_dir}" .
-          echo "compose_archive_path=${compose_archive_path}" >> "${GITHUB_OUTPUT}"
-          echo "cli_archive_path=${cli_archive_path}" >> "${GITHUB_OUTPUT}"
-
-      - uses: actions/upload-artifact@v6
-        name: upload app
-        if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
-        with:
-          name: daybook-compose-macos-arm64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
-          path: ${{ steps.archive-macos.outputs.compose_archive_path }}
-          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
-
-      - uses: actions/upload-artifact@v6
-        name: upload cli
-        if: env.DAYBOOK_IS_RELEASE_BUILD != '1'
-        with:
-          name: daybook-cli-macos-arm64-${{ env.DAYBOOK_COMPOSE_PROFILE }}
-          path: ${{ steps.archive-macos.outputs.cli_archive_path }}
-          retention-days: ${{ env.DAYBOOK_COMPOSE_PROFILE == 'debug' && 7 || 90 }}
-
-      - name: upload dmg to github release
-        if: needs.resolve-release-meta.outputs.release_tag != ''
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.resolve-release-meta.outputs.release_tag }}
-          name: ${{ needs.resolve-release-meta.outputs.release_name }}
-          prerelease: ${{ needs.resolve-release-meta.outputs.is_prerelease == 'true' }}
-          target_commitish: ${{ github.sha }}
-          files: |
-            ${{ steps.archive-macos.outputs.compose_archive_path }}
-            ${{ steps.archive-macos.outputs.cli_archive_path }}
           fail_on_unmatched_files: true
           overwrite_files: true

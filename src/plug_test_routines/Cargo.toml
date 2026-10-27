@@ -1,0 +1,24 @@
+[package]
+name = "plug_test_routines"
+workspace = "../wasm_utils_rs"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+plug_test_manifest.workspace = true
+utils_rs.workspace = true
+wasm_utils_rs.workspace = true
+am_utils_rs.workspace = true
+daybook_pdk.workspace = true
+daybook_types = { workspace = true, features = ["wit"] }
+wflow_sdk.workspace = true
+serde_json.workspace = true
+color-eyre.workspace = true
+wit-bindgen.workspace = true

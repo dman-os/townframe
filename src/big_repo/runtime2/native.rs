@@ -14,58 +14,73 @@
 
 use crate::interlude::*;
 use crate::keyhive_storage::BigRepoKeyhiveStorage;
+use crate::runtime2::CausalDecryptResult;
+use crate::runtime2::DocIo;
+use crate::runtime2::KeyhiveSyncOutcome;
+use crate::runtime2::MaterializationBlocker;
+use crate::runtime2::RuntimeIo;
+use crate::runtime2::SyncDocAttempt;
+use crate::runtime2::TaskSet;
 use crate::runtime2::support::BigRepoCiphertextLocator;
-use crate::runtime2::{
-    CausalDecryptResult, DocIo, KeyhiveSyncOutcome, MaterializationBlocker, RuntimeIo,
-    SyncDocAttempt, TaskSet,
-};
 use crate::store::sqlite::KeyhiveIncorporationSink;
 use tracing::Instrument;
 
 /// Period between archive/prune/WAL maintenance passes.
 pub(crate) const KEYHIVE_MAINTENANCE_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(300);
-use crate::{
-    BigEphemeral, BigKeyhiveHandle, DocumentId,
-    encrypted_blob::decode_encrypted_blob,
-    ephemeral::{BigEphemeralBackend, BigEphemeralSwitchboard, BigRepoEphemeralBackend},
-    handler::{
-        BigRepoComposedHandler, BigRepoEphemeralHandler, BigRepoKeyhiveHandler,
-        BigRepoKeyhiveProtocol,
-    },
-    keyhive_conn::BigRepoKeyhiveConnAdapter,
-    runtime2::support::{
-        BigRepoIrohTransport, BigRepoSubduction, BigRepoSubductionStorage, IrohConnectResult,
-        SubductionSedimentrees, accept_incoming, connect_outgoing_to, encrypt_fragment_blob,
-        encrypt_loose_commit_with_update_op, encrypt_staged_automerge_ingest,
-        persist_cgka_updates_durably, sedimentree_heads_payload,
-    },
-    runtime2::types::BigRepoSyncPolicy,
-};
-use keyhive_core::principal::document::{DecryptError, DocCausalDecryptionError, EncryptError};
-use keyhive_core::{
-    crypto::envelope::Envelope, principal::document::id::DocumentId as KhDocumentId,
-    principal::identifier::Identifier, store::ciphertext::CiphertextStore,
-};
+use crate::BigEphemeral;
+use crate::BigKeyhiveHandle;
+use crate::DocumentId;
+use crate::encrypted_blob::decode_encrypted_blob;
+use crate::ephemeral::BigEphemeralBackend;
+use crate::ephemeral::BigEphemeralSwitchboard;
+use crate::ephemeral::BigRepoEphemeralBackend;
+use crate::handler::BigRepoComposedHandler;
+use crate::handler::BigRepoEphemeralHandler;
+use crate::handler::BigRepoKeyhiveHandler;
+use crate::handler::BigRepoKeyhiveProtocol;
+use crate::keyhive_conn::BigRepoKeyhiveConnAdapter;
+use crate::runtime2::support::BigRepoIrohTransport;
+use crate::runtime2::support::BigRepoSubduction;
+use crate::runtime2::support::BigRepoSubductionStorage;
+use crate::runtime2::support::IrohConnectResult;
+use crate::runtime2::support::SubductionSedimentrees;
+use crate::runtime2::support::accept_incoming;
+use crate::runtime2::support::connect_outgoing_to;
+use crate::runtime2::support::encrypt_fragment_blob;
+use crate::runtime2::support::encrypt_loose_commit_with_update_op;
+use crate::runtime2::support::encrypt_staged_automerge_ingest;
+use crate::runtime2::support::persist_cgka_updates_durably;
+use crate::runtime2::support::sedimentree_heads_payload;
+use crate::runtime2::types::BigRepoSyncPolicy;
+use keyhive_core::crypto::envelope::Envelope;
+use keyhive_core::principal::document::DecryptError;
+use keyhive_core::principal::document::DocCausalDecryptionError;
+use keyhive_core::principal::document::EncryptError;
+use keyhive_core::principal::document::id::DocumentId as KhDocumentId;
+use keyhive_core::principal::identifier::Identifier;
+use keyhive_core::store::ciphertext::CiphertextStore;
 use nonempty::NonEmpty;
-use sedimentree_core::{
-    blob::BlobMeta,
-    depth::CountLeadingZeroBytes,
-    id::SedimentreeId,
-    loose_commit::id::CommitId,
-    sedimentree::{Sedimentree, minimized::MinimizedSedimentree},
-};
-use subduction_core::{
-    authenticated::Authenticated, handler::sync::SyncHandler, nonce_cache::NonceCache,
-    storage::powerbox::StoragePowerbox, subduction::Subduction,
-    subduction::request::FragmentRequested,
-};
-use subduction_ephemeral::{
-    clock::std_clock::StdClock, config::EphemeralConfig, handler::EphemeralHandler,
-    policy::OpenEphemeralPolicy,
-};
-use subduction_keyhive::{KeyhiveConnection, KeyhivePeerId};
-use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn};
+use sedimentree_core::blob::BlobMeta;
+use sedimentree_core::depth::CountLeadingZeroBytes;
+use sedimentree_core::id::SedimentreeId;
+use sedimentree_core::loose_commit::id::CommitId;
+use sedimentree_core::sedimentree::Sedimentree;
+use sedimentree_core::sedimentree::minimized::MinimizedSedimentree;
+use subduction_core::authenticated::Authenticated;
+use subduction_core::handler::sync::SyncHandler;
+use subduction_core::nonce_cache::NonceCache;
+use subduction_core::storage::powerbox::StoragePowerbox;
+use subduction_core::subduction::Subduction;
+use subduction_core::subduction::request::FragmentRequested;
+use subduction_ephemeral::clock::std_clock::StdClock;
+use subduction_ephemeral::config::EphemeralConfig;
+use subduction_ephemeral::handler::EphemeralHandler;
+use subduction_ephemeral::policy::OpenEphemeralPolicy;
+use subduction_keyhive::KeyhiveConnection;
+use subduction_keyhive::KeyhivePeerId;
+use subduction_websocket::tokio::TimeoutTokio;
+use subduction_websocket::tokio::TokioSpawn;
 // ═══════════════════════════════════════════════════════════════════════════
 // CONTEXT
 // ═══════════════════════════════════════════════════════════════════════════
@@ -454,7 +469,8 @@ where
         >,
     > {
         Sendable::from_future(async move {
-            use crate::runtime2::support::{CausalCheckpoint, causal_checkpoint_id};
+            use crate::runtime2::support::CausalCheckpoint;
+            use crate::runtime2::support::causal_checkpoint_id;
 
             let kh_doc_id = kh_doc_id_from_sed_id(sed_id)?;
             let keyhive = self.keyhive.clone_keyhive();
@@ -1004,7 +1020,8 @@ where
             let encrypted =
                 decode_encrypted_blob(&raw).wrap_err("failed decoding encrypted blob")?;
             let key_tag = |key: &keyhive_crypto::symmetric_key::SymmetricKey| {
-                use std::hash::{Hash, Hasher};
+                use std::hash::Hash;
+                use std::hash::Hasher;
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 hasher.write(b"townframe_key_tag_domain_spec_v1");
                 key.as_slice().hash(&mut hasher);
@@ -1736,7 +1753,8 @@ where
             };
 
             let end_fut_inner = Sendable::from_future(async move {
-                use futures::future::{Either, select};
+                use futures::future::Either;
+                use futures::future::select;
                 match select(
                     Box::pin(async { listener.await.map_err(|err| eyre::eyre!("{err}")) }),
                     Box::pin(async { sender.await.map_err(|err| eyre::eyre!("{err}")) }),
@@ -1887,7 +1905,8 @@ where
             };
 
             let end_fut_inner = Sendable::from_future(async move {
-                use futures::future::{Either, select};
+                use futures::future::Either;
+                use futures::future::select;
                 match select(
                     Box::pin(async { listener.await.map_err(|err| eyre::eyre!("{err}")) }),
                     Box::pin(async { sender.await.map_err(|err| eyre::eyre!("{err}")) }),
@@ -2499,7 +2518,8 @@ mod tests {
     use sedimentree_core::blob::verified::VerifiedBlobMeta;
     use sedimentree_core::fragment::Fragment;
     use sedimentree_core::loose_commit::LooseCommit;
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use subduction_core::storage::memory::MemoryStorage;
     use subduction_core::storage::traits::Storage;
