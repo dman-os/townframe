@@ -558,10 +558,6 @@ impl BigRepo {
         self.automerge_frontier_group_scope.set(scope);
     }
 
-    /// The current live Automerge frontier worker scope.
-    pub fn automerge_frontier_group_scope(&self) -> WorkerGroupScope {
-        self.automerge_frontier_group_scope.get()
-    }
     pub fn keyhive(&self) -> &BigKeyhiveHandle {
         &self.keyhive
     }

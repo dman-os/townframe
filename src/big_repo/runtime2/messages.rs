@@ -313,6 +313,53 @@ pub enum Runtime2Cmd {
     },
 }
 
+impl Runtime2Cmd {
+    /// Whether the command does no domain work: control and read-only query
+    /// commands must not bump hub activity, or they would restart a pending
+    /// quiescence probe.
+    pub(super) fn is_control_only(&self) -> bool {
+        let control_only = matches!(
+            self,
+            Runtime2Cmd::WaitForQuiescence { .. }
+                | Runtime2Cmd::Unfreeze
+                | Runtime2Cmd::RegisterDocLease { .. }
+                | Runtime2Cmd::ReleaseDocLease { .. }
+                | Runtime2Cmd::ReleaseInternalLease { .. }
+                // Read-only doc-worker queries: never restart a pending probe,
+                // or a caller polling head state while waiting for quiescence
+                // would restart it forever. Everything that routes *work* into
+                // a worker — `PutDoc`, `CommitDelta`, `GetDocHandle`'s
+                // `AcquireHandle`, `ApplySyncSession`, and
+                // `EnsureCausalCoverage`'s `ReconcileCausalCoverage` — is
+                // activity and must bump, so a probe placed before that routing
+                // restarts and fences the work rather than resolving over it.
+                | Runtime2Cmd::DocHeadState { .. }
+                | Runtime2Cmd::InspectDocHeadState { .. }
+        );
+        // The test-only event-hold seam performs no domain work, so it must not
+        // restart a quiescence probe either; the same goes for the test-only
+        // state/barrier queries below.
+        #[cfg(any(test, feature = "test-support"))]
+        let control_only = control_only
+            || matches!(
+                self,
+                Runtime2Cmd::HoldEvents { .. }
+                    | Runtime2Cmd::ResumeEvents { .. }
+                    | Runtime2Cmd::HasDocWorker { .. }
+            );
+        // The in-crate-only state/barrier queries are `cfg(test)`: no consumer
+        // crate reaches them through `test-support`.
+        #[cfg(test)]
+        let control_only = control_only
+            || matches!(
+                self,
+                Runtime2Cmd::HasConnectedPeer { .. }
+                    | Runtime2Cmd::QuiescenceProbeBarrierForTest { .. }
+            );
+        control_only
+    }
+}
+
 /// Events from background workers / keyhive listener / sync sessions / doc-workers.
 #[derive(educe::Educe)]
 #[educe(Debug)]

@@ -492,18 +492,6 @@ impl BigKeyhiveHandle {
         BTreeMap::new()
     }
 
-    /// Whether this hive holds a document node for `id`.
-    ///
-    /// The `Identifier`-addressed twin of [`Self::get_group`]: an id is a
-    /// membered subject when it names either, and a caller that resolves the
-    /// kind itself must ask in the same order `agents_for_membered` does.
-    pub(crate) async fn has_document(&self, id: Identifier) -> bool {
-        self.keyhive
-            .get_document(KhDocumentId::from(id))
-            .await
-            .is_some()
-    }
-
     /// The graph an admitted event names, or why it names none.
     ///
     /// A `CgkaOperation` names its document; a `Delegated`/`Revoked` names the

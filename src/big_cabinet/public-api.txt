@@ -8,7 +8,6 @@ impl DocAccess for big_cabinet::drawer::access::DrawerAccess
 impl Drop for big_cabinet::drawer::access::DrawerWorker
 impl From < AuthorityError > for big_cabinet::authority::AuthorityServiceError
 impl Handler < MintDrawerCapability > for big_cabinet::drawer::DrawerService
-impl LedgerFailure for big_cabinet::drawer::DrawersError
 impl RevisionedStore for big_cabinet::index::facet_set::FacetSetStore
 impl SqliteFrontierCodec for big_cabinet::index::facet_set::FacetSetCodec
 impl service_utils_rs :: Handler < MintDocCapability > for big_cabinet::doc::access::DocsService
@@ -108,28 +107,18 @@ pub type big_cabinet::authority::AuthorityHandler = Arc < AuthorityService >
 pub type big_cabinet::doc::DocsHandler = Arc < DocsService >
 pub type big_cabinet::doc::access::AccessFuture< 'a , T > = Pin < Box < dyn Future < Output = Result < T , AccessError > > + Send + 'a > >
 pub type big_cabinet::drawer::DrawersHandler = Arc < DrawerService >
-pub use big_cabinet::authority :: Actor
 pub use big_cabinet::authority :: Authority
 pub use big_cabinet::authority :: AuthorityError
 pub use big_cabinet::authority :: AuthorityHandler
-pub use big_cabinet::authority :: AuthorityProtocol
 pub use big_cabinet::authority :: AuthorityService
-pub use big_cabinet::authority :: AuthorityServiceError
-pub use big_cabinet::authority :: CapId
-pub use big_cabinet::authority :: Capability
-pub use big_cabinet::authority :: Rights
 pub use big_cabinet::authority :: boot
-pub use big_cabinet::authority::big_cabinet_core :: authority :: *
 pub use big_cabinet::doc :: DocAccess
 pub use big_cabinet::doc :: DocsConfig
-pub use big_cabinet::doc :: DocsError
 pub use big_cabinet::doc :: DocsHandler
-pub use big_cabinet::doc :: DocsProtocol
 pub use big_cabinet::doc :: DocsRepo
 pub use big_cabinet::doc :: DocsService
 pub use big_cabinet::doc :: LedgerAccess
 pub use big_cabinet::doc :: boot as boot_docs
-pub use big_cabinet::doc::big_cabinet_core :: doc :: *
 pub use big_cabinet::doc::self :: access :: AccessError
 pub use big_cabinet::doc::self :: access :: AccessFuture
 pub use big_cabinet::doc::self :: access :: AccessRequest
@@ -147,18 +136,13 @@ pub use big_cabinet::doc::self :: claim_history :: reconstruct_claim_for_marker
 pub use big_cabinet::doc::self :: claim_history :: reconstruct_current_claims
 pub use big_cabinet::drawer :: DrawerAccess
 pub use big_cabinet::drawer :: DrawerConfig
-pub use big_cabinet::drawer :: DrawerId
 pub use big_cabinet::drawer :: DrawerService
 pub use big_cabinet::drawer :: Drawers
-pub use big_cabinet::drawer :: DrawersError
 pub use big_cabinet::drawer :: DrawersHandler
-pub use big_cabinet::drawer :: DrawersProtocol
-pub use big_cabinet::drawer :: LocalDrawers
 pub use big_cabinet::drawer :: boot as boot_drawers
 pub use big_cabinet::drawer::big_cabinet_core :: drawer :: Drawer
 pub use big_cabinet::drawer::big_cabinet_core :: drawer :: DrawerLayout
 pub use big_cabinet::drawer::big_cabinet_core :: drawer :: LayoutKind
-pub use big_cabinet::drawer::big_cabinet_core :: drawer :: protocol :: *
 pub use big_cabinet::drawer::self :: access :: DrawerAccess
 pub use big_cabinet::drawer::self :: access :: DrawerProvider
 pub use big_cabinet::drawer::self :: access :: DrawerWorker
