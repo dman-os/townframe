@@ -119,7 +119,7 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     /// this document by closing the worker's mailbox, reproducing the
     /// worker-stopping race deterministically (see
     /// [`Runtime2Cmd::FailNextContentApplyRoute`]).
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     poisoned_content_apply: Option<DocumentId>,
     /// Set once the commands channel closes (the stop token dropped its
     /// sender); no new background work is admitted and the machine loop
@@ -748,7 +748,7 @@ where
         );
         // The test-only event-hold seam performs no domain work, so it must not
         // restart a quiescence probe either; the same goes for the test-only
-        // state/barrier queries.
+        // state/barrier queries below.
         #[cfg(any(test, feature = "test-support"))]
         let control_only = control_only
             || matches!(
@@ -756,7 +756,14 @@ where
                 Runtime2Cmd::HoldEvents { .. }
                     | Runtime2Cmd::ResumeEvents { .. }
                     | Runtime2Cmd::HasDocWorker { .. }
-                    | Runtime2Cmd::HasConnectedPeer { .. }
+            );
+        // The in-crate-only state/barrier queries are `cfg(test)`: no consumer
+        // crate reaches them through `test-support`.
+        #[cfg(test)]
+        let control_only = control_only
+            || matches!(
+                &cmd,
+                Runtime2Cmd::HasConnectedPeer { .. }
                     | Runtime2Cmd::QuiescenceProbeBarrierForTest { .. }
             );
         if !control_only {
@@ -1101,7 +1108,7 @@ where
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             Runtime2Cmd::HasConnectedPeer { peer_id, resp } => {
                 resp.send(Ok(self.connected_peers.contains_key(&peer_id)))
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -1139,7 +1146,7 @@ where
                 }
                 resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
             }
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             Runtime2Cmd::FailNextContentApplyRoute { doc_id, resp } => {
                 self.poisoned_content_apply = Some(doc_id);
                 debug!(
@@ -1148,7 +1155,7 @@ where
                 );
                 resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
             }
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             Runtime2Cmd::InjectKeyhiveCompletionForTest { peer_id, resp } => {
                 let result = match self.active_keyhive_syncs.get(&peer_id) {
                     Some(round) => {
@@ -1166,14 +1173,14 @@ where
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             Runtime2Cmd::InjectRuntime2EvtForTest { evt, resp } => {
                 let result = self.handle_evt(*evt);
                 resp.send(result)
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             Runtime2Cmd::QuiescenceProbeBarrierForTest { resp } => {
                 resp.send(self.quiescence_probe.as_ref().map(|probe| probe.barrier_id))
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
@@ -2439,7 +2446,7 @@ where
         // Test-only: close the resolved worker's mailbox so the send below
         // fails, standing in for the worker-stopping race that cannot be
         // reached deterministically from a test.
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         if content_carrying && self.poisoned_content_apply.as_ref() == Some(&doc_id) {
             self.poisoned_content_apply = None;
             worker.msg_tx.close();
@@ -3915,7 +3922,7 @@ where
         hold_events: false,
         #[cfg(any(test, feature = "test-support"))]
         held_events: Vec::new(),
-        #[cfg(any(test, feature = "test-support"))]
+        #[cfg(test)]
         poisoned_content_apply: None,
         cmd_closed: false,
         activity_generation: 0,

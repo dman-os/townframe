@@ -662,7 +662,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// Test-only: whether `peer_id` currently has a registered connection in
     /// the hub. Lets a connection-lifecycle test assert the deregistration
     /// invariant directly instead of inferring it from a sync failure.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub async fn has_connected_peer_for_test(&self, peer_id: PeerKey) -> eyre::Result<bool> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -675,7 +675,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// Test-only: deliver a synthetic keyhive sync completion for `peer_id`'s
     /// active round, stamped one seq ahead of the hub's admitted head. Returns
     /// the seq so the test can inject the matching admission event.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub async fn inject_keyhive_completion_for_test(&self, peer_id: PeerKey) -> eyre::Result<u64> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -687,7 +687,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
 
     /// Test-only: hand an event directly to the hub's event handler, bypassing
     /// the event channel so a test can drive event ordering deterministically.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub async fn inject_runtime2_evt_for_test(
         &self,
         evt: crate::runtime2::Runtime2Evt,
@@ -704,7 +704,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     }
 
     /// Test-only: the active quiescence probe's barrier id (`None` if resolved).
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub async fn quiescence_probe_barrier_for_test(&self) -> eyre::Result<Option<u64>> {
         let (resp, rx) = futures::channel::oneshot::channel();
         self.cmd_tx
@@ -717,7 +717,7 @@ impl<F: FutureForm> Runtime2Handle<F> {
     /// Test-only seam: close the doc worker's mailbox for `doc_id` on the next
     /// content-carrying sync-session apply, so the route fails the way the
     /// worker-stopping race would.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub async fn fail_next_content_apply_route_for_test(
         &self,
         doc_id: DocumentId,

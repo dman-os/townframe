@@ -226,7 +226,7 @@ pub enum Runtime2Cmd {
     /// Test-only: whether `peer_id` currently has a registered connection in
     /// the hub. Lets a lifecycle test assert the deregistration invariant
     /// directly instead of inferring it from an asynchronous sync failure.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     HasConnectedPeer {
         peer_id: PeerKey,
         #[educe(Debug(ignore))]
@@ -278,7 +278,7 @@ pub enum Runtime2Cmd {
     /// content-carrying sync-session apply route, reproducing the
     /// worker-stopping race (handle resolved, then the receiver dropped)
     /// deterministically.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     FailNextContentApplyRoute {
         doc_id: DocumentId,
         #[educe(Debug(ignore))]
@@ -288,7 +288,7 @@ pub enum Runtime2Cmd {
     /// `peer_id`'s active round, stamped one seq ahead of the hub's current
     /// `admitted_head`. The reply carries that seq so the test can then inject
     /// the matching admission event and prove the completion was deferred.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     InjectKeyhiveCompletionForTest {
         peer_id: PeerKey,
         #[educe(Debug(ignore))]
@@ -297,7 +297,7 @@ pub enum Runtime2Cmd {
     /// Test-only seam: hand an event directly to the hub's event handler,
     /// bypassing the event channel so a test can drive event ordering
     /// deterministically (no peer, no scheduler, no hold).
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     InjectRuntime2EvtForTest {
         evt: Box<Runtime2Evt>,
         #[educe(Debug(ignore))]
@@ -306,7 +306,7 @@ pub enum Runtime2Cmd {
     /// Test-only seam: report the currently active quiescence probe's barrier
     /// id (`None` once resolved), so a test can assert a pending probe restarted
     /// rather than resolving over work routed behind its fence.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     QuiescenceProbeBarrierForTest {
         #[educe(Debug(ignore))]
         resp: futures::channel::oneshot::Sender<Option<u64>>,
