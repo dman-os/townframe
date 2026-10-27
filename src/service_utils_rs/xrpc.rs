@@ -11,6 +11,13 @@
 //!   shutdown that joins.
 //! * `iroh` (feature `iroh-http`) — the same HTTP/1 wire over Iroh streams.
 //!
+//! Subscription operations are served as a WebSocket upgrade of the same
+//! `/xrpc/{nsid}` route (JSON text frames: `{"open":…}`, then `{"event":…}`,
+//! then `{"error":…}` or close). Tracked limitation: the Iroh HTTP client has
+//! no WebSocket transport yet, so subscriptions over `iroh-http` are not
+//! available from this crate's client even though the router code is shared;
+//! same-node consumers should use IRPC subscriptions there.
+//!
 //! Typed errors cross HTTP inside the standard XRPC error envelope: the body is
 //! `{"error", "message", ..}` and the operation's own error value is carried in
 //! the [`DOMAIN_ERROR_FIELD`] detail, so a client decodes exactly the
@@ -84,13 +91,16 @@ mod router;
 mod serve;
 #[cfg(test)]
 mod tests;
+mod ws;
 
 pub use client::{XrpcClient, XrpcClientError};
 #[cfg(feature = "iroh-http")]
 pub use iroh::{
     IROH_XRPC_HTTP_ALPN, IrohXrpcClient, IrohXrpcProtocolHandler, iroh_protocol_handler,
 };
-pub use router::{XrpcOperationHandler, XrpcRegistrationError, XrpcRouter};
+pub use router::{
+    XrpcOperationHandler, XrpcRegistrationError, XrpcRouter, XrpcSubscriptionHandler,
+};
 pub use serve::{serve, serve_with_connection_limit};
 
 const REQUEST_ID_HEADER: &str = "x-request-id";

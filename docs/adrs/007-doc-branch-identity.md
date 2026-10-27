@@ -1,6 +1,6 @@
 # ADR 007: Doc and Branch Identity
 
-**Status:** Proposed.
+**Status:** Partially implemented — `DocumentId` unification, `db+facet` references, `BranchDoc`/`MergeDoc`, the `org.example.daybook.branch` core facet with concrete parent references and pinned fork heads, and `dmeta.branchUuids` provenance across branches and merges are implemented in `big_cabinet_core` and `big_cabinet`. Explicit branch-link removal and physical document deletion remain deferred.
 
 ## Context
 
@@ -34,22 +34,61 @@ logical-document wrapper whose identity differs from the physical doc.
 
 ### Branch links are weak, local relationships
 
-Creating branch B from doc A records the relationship in A and B:
+A normal branch is a new `DocumentId` whose initial Automerge state is forked (`fork_at`)
+from the origin document at the requested heads, and a merge (`MergeDoc`) merges one
+history-sharing document's Automerge changes into another (`doc.merge`). Because the
+Automerge changes themselves travel between origin and branch, facets are not copied by
+value and signatures authored on either document reconstruct at their introducing changes
+wherever those changes land (ADR 015 §5). History-truncating compaction is not a branch:
+documents that do not share genesis changes cannot be merged (`UnrelatedHistory`).
 
-```text
-A --created branch--> B
-B --created from A at heads H--> A
+Creating branch B from doc A at path `/draft` writes B's identity facet on B and, unless
+the branch is stealth, announces B on A:
+
+On B, and on A when non-stealth, `org.example.daybook.branch/<B>` holds:
+
+```json
+{
+  "path": "/draft",
+  "from": {
+    "facetRef": "db+facet:/<A>/org.example.daybook.branch/<A>",
+    "heads": ["<fork-head>"]
+  }
+}
 ```
+
+The reference names the concrete parent document, not `self`: the target must remain A
+when this facet travels between documents. The pinned heads are the selected fork frontier,
+not A's current frontier when the announcement is written. The initial branch change is the
+durable source of this value during crash recovery. `from` is optional for root metadata;
+like every facet reference it is a weak address and does not assert the parent facet exists.
+
+Keying B's facet by `<B>` (`org.example.daybook.branch/<B>`) rather than `/main` keeps the
+facet merge-safe: when B is merged back into A, or a nested branch C is merged into B, the
+target acquires the source's `branch/<source-id>` facet without overwriting its own
+`branch/<self-id>`. Any document resolves its own branch path by reading
+`org.example.daybook.branch/<self-id>`. There is no `branches/main`, `byId`, or `byPath`
+map. Per-branch keys preserve concurrent branches with the same label; generic facet-reference
+backlinks can discover children through their `from.facetRef`.
+
+Announcing a branch on A (`stealth: false`) mutates A and therefore requires `Write`
+access on A (in addition to `Read` on A and `Create` for B's placement); a caller with
+only `Read` access on A is refused with `Denied`. Setting `stealth: true` skips the
+`org.example.daybook.branch/<B>` write on A and requires only `Read` on A plus
+`Create` for B's placement.
 
 The links are weak. Reading either side does not require the other doc to be locally
 present, readable, or still available. A branch created from B records the new
 relationship in B and the new branch; branch information is not propagated through every
 ancestor or sibling.
 
-Branch-management operations own these system facets. Ordinary facet writes cannot
-mutate them. Dmeta records their provenance like other privileged facet claims.
+`BranchDoc` owns `org.example.daybook.branch/*` and signs these facets with `DocsRepo`'s
+system actor after
+checking the caller's access. Ordinary `CreateDoc` and `WriteFacets` calls cannot
+set or remove them (`SystemFacet`), while `ReadFacets` and `ListFacets` read them like any
+other facet.
 
-Merging B's Automerge changes into A does not delete B or remove the relationship. A merge
+Merging B's Automerge changes into A does not delete B or remove either facet. A merge
 is not branch destruction: B remains an ordinary doc with its own ID and history. Any
 later lifecycle operation that removes a branch link is explicit and is not implied by a
 merge.
@@ -66,7 +105,7 @@ Publication, retention, and access are drawer and Keyhive concerns.
 
 ### Initial identity precedes publication
 
-BigRepo allocates the final doc identity before initial content. DocumentsRepo can then
+BigRepo allocates the final doc identity before initial content. DocsRepo can then
 write final IDs, initial content, dmeta, and branch metadata in the first Automerge
 change, persist its Sedimentree, initialize Keyhive state, and only then expose it through
 its requested drawer.

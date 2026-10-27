@@ -1,0 +1,12 @@
+---
+source: src/big_cabinet/document/e2e/wire.rs
+expression: request
+---
+{
+  "capability": "01010101-0101-0101-0101-010101010101",
+  "docId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+  "at": {
+    "at": "current"
+  },
+  "optimistic": false
+}

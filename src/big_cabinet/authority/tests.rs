@@ -1,7 +1,7 @@
 //! Service-level tests: every assertion goes through `Client<AuthorityProtocol>`,
 //! so they exercise the same hosted path a real consumer uses.
 
-use super::protocol::AuthorityMessage;
+use super::AuthorityMessage;
 use super::{
     Actor, AttenuateCapability, Authority, AuthorityError, AuthorityProtocol,
     AuthorityServiceError, CapId, Capability, CheckGrant, GrantAccess, InspectCapability,
@@ -10,7 +10,7 @@ use super::{
 };
 use big_cabinet_core::FacetKey;
 use big_cabinet_core::dmeta::{
-    ActorMetadata, Attribution, Cid, ClaimOperation, DocumentId, FacetClaim, Uuid7,
+    ActorMetadata, Attribution, Cid, ClaimOperation, DocId, FacetClaim, Uuid7,
 };
 use irpc::{Channels, WithChannels, channel::none::NoReceiver};
 use secrets_rs::SecretStore;
@@ -181,7 +181,7 @@ fn facet_claim(actor: Uuid7, seed: u8) -> FacetClaim {
     let mut digest = vec![0x01, 0x55, 0x1e, 0x20];
     digest.extend([seed; 32]);
     FacetClaim {
-        origin_document: DocumentId::new(b"mutation-document"),
+        origin_document: DocId::new(b"mutation-document"),
         facet_key: FacetKey::from_text("org.example.note", "main").expect("facet key"),
         chosen_uuid: Uuid7::new(),
         actor_uuid: actor,

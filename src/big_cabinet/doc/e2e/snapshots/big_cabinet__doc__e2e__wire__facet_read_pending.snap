@@ -1,0 +1,15 @@
+---
+source: src/big_cabinet/doc/e2e/wire.rs
+expression: read
+---
+{
+  "status": "pending",
+  "reason": "verification could not complete",
+  "version": {
+    "heads": [
+      "0303030303030303030303030303030303030303030303030303030303030303"
+    ],
+    "clock": 0
+  },
+  "value": null
+}

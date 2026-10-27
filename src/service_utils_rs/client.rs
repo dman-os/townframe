@@ -230,10 +230,19 @@ impl<Proto: Service> Client<Proto> {
                         .map_err(|error| ClientError::transport(error, true))?;
                     ClientStream::open(receiver, scope, context.clone()).await
                 }
-                Transport::Xrpc(_) => Err(ClientError::transport(
-                    "subscriptions are not supported by the unary HTTP transport",
-                    false,
-                )),
+                Transport::Xrpc(client) => {
+                    let Envelope {
+                        context,
+                        metadata,
+                        params,
+                        ..
+                    } = request;
+                    let receiver = client
+                        .subscribe::<P>(context.clone(), &metadata, &params, self.event_buffer)
+                        .await
+                        .map_err(ClientError::from)?;
+                    ClientStream::open(receiver, None, context.clone()).await
+                }
             }
         };
         tokio::select! {

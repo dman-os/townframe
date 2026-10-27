@@ -12,7 +12,7 @@ use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 use url::Url;
 
 pub const FACET_REFERENCE_SCHEME: &str = "db+facet";
-pub const SELF_DOCUMENT: &str = "self";
+pub const SELF_DOC: &str = "self";
 
 /// Unicode data used when serializing canonical Go-style facet references.
 ///
@@ -30,7 +30,7 @@ const _: () = match unicode_properties::UNICODE_VERSION {
 };
 
 /// The concrete document identity used by Cabinet and BigRepo.
-pub type DocumentId = ObjKey;
+pub type DocId = ObjKey;
 
 /// The stable, schema-independent identity of a facet vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -165,6 +165,29 @@ impl<'de> Deserialize<'de> for FacetKey {
 }
 
 #[cfg(feature = "schemars")]
+impl schemars::JsonSchema for FacetReference {
+    /// A reference is a position, never a name a peer points at, so it is inlined.
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "FacetReference".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::FacetReference").into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        crate::facet::codec_schema(
+            crate::facet::Codec::Reference,
+            schemars::json_schema!({ "type": "string" }),
+        )
+    }
+}
+
+#[cfg(feature = "schemars")]
 impl schemars::JsonSchema for FacetKey {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "FacetKey".into()
@@ -181,44 +204,44 @@ impl schemars::JsonSchema for FacetKey {
 
 /// Whether a facet reference names a concrete document or its containing one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ReferenceDocumentId {
-    Concrete(DocumentId),
-    SelfDocument,
+pub enum ReferenceDocId {
+    Concrete(DocId),
+    SelfDoc,
 }
 
-impl Serialize for ReferenceDocumentId {
+impl Serialize for ReferenceDocId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         match self {
             Self::Concrete(document) => serializer.serialize_str(&document.to_string()),
-            Self::SelfDocument => serializer.serialize_str(SELF_DOCUMENT),
+            Self::SelfDoc => serializer.serialize_str(SELF_DOC),
         }
     }
 }
 
-impl<'de> Deserialize<'de> for ReferenceDocumentId {
+impl<'de> Deserialize<'de> for ReferenceDocId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        if value == SELF_DOCUMENT {
-            return Ok(Self::SelfDocument);
+        if value == SELF_DOC {
+            return Ok(Self::SelfDoc);
         }
-        DocumentId::from_str(&value)
+        DocId::from_str(&value)
             .map(Self::Concrete)
             .map_err(serde::de::Error::custom)
     }
 }
 
-impl ReferenceDocumentId {
+impl ReferenceDocId {
     /// Resolve `self` against the document containing the referencing facet.
-    pub fn resolve(&self, containing_document: &DocumentId) -> DocumentId {
+    pub fn resolve(&self, containing_document: &DocId) -> DocId {
         match self {
-            Self::Concrete(document_id) => document_id.clone(),
-            Self::SelfDocument => containing_document.clone(),
+            Self::Concrete(doc_id) => doc_id.clone(),
+            Self::SelfDoc => containing_document.clone(),
         }
     }
 }
@@ -226,16 +249,16 @@ impl ReferenceDocumentId {
 /// A schema-independent address for one facet key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FacetReference {
-    document: ReferenceDocumentId,
+    document: ReferenceDocId,
     key: FacetKey,
 }
 
 impl FacetReference {
-    pub fn new(document: ReferenceDocumentId, key: FacetKey) -> Result<Self, ReferenceError> {
+    pub fn new(document: ReferenceDocId, key: FacetKey) -> Result<Self, ReferenceError> {
         Ok(Self { document, key })
     }
 
-    pub fn document(&self) -> &ReferenceDocumentId {
+    pub fn document(&self) -> &ReferenceDocId {
         &self.document
     }
 
@@ -289,9 +312,7 @@ impl FacetReference {
     }
 
     fn parse_path(path: &str) -> Result<Self, ReferenceError> {
-        let (document, remainder) = path
-            .split_once('/')
-            .ok_or(ReferenceError::MissingDocument)?;
+        let (document, remainder) = path.split_once('/').ok_or(ReferenceError::MissingDoc)?;
         let (tag, key_tail) = remainder
             .split_once('/')
             .ok_or(ReferenceError::MissingFacetKey)?;
@@ -304,12 +325,11 @@ impl FacetReference {
         let key_tail = decode_uri_component(key_tail)?;
         let key = FacetKey::new(tag, go_string_unescape(key_tail.as_bytes())?)?;
 
-        let document = if document == SELF_DOCUMENT {
-            ReferenceDocumentId::SelfDocument
+        let document = if document == SELF_DOC {
+            ReferenceDocId::SelfDoc
         } else {
-            ReferenceDocumentId::Concrete(
-                DocumentId::from_str(&document)
-                    .map_err(|_| ReferenceError::InvalidDocumentId(document))?,
+            ReferenceDocId::Concrete(
+                DocId::from_str(&document).map_err(|_| ReferenceError::InvalidDocId(document))?,
             )
         };
 
@@ -319,8 +339,8 @@ impl FacetReference {
     /// Return the canonical authorityless URI text.
     pub fn to_uri_string(&self) -> Result<String, ReferenceError> {
         let document = match &self.document {
-            ReferenceDocumentId::Concrete(document) => document.to_string(),
-            ReferenceDocumentId::SelfDocument => SELF_DOCUMENT.to_owned(),
+            ReferenceDocId::Concrete(document) => document.to_string(),
+            ReferenceDocId::SelfDoc => SELF_DOC.to_owned(),
         };
         let tag = encode_uri_component(self.key.tag.as_str().as_bytes(), false);
         let key = encode_uri_component(go_string_escape(self.key.id_bytes()).as_bytes(), true);
@@ -391,7 +411,7 @@ pub enum ReferenceError {
     #[error("facet reference path must be absolute")]
     MissingPath,
     #[error("facet reference is missing a document id")]
-    MissingDocument,
+    MissingDoc,
     #[error("facet reference is missing a facet tag or key id")]
     MissingFacetKey,
     #[error("facet reference has an empty facet tag")]
@@ -405,7 +425,7 @@ pub enum ReferenceError {
     #[error("invalid UTF-8 in facet reference component")]
     InvalidUtf8,
     #[error("invalid document id {0:?}")]
-    InvalidDocumentId(String),
+    InvalidDocId(String),
     #[error("dot segments are not valid in facet reference paths")]
     DotSegment,
     #[error("URL normalization would change facet reference {value:?} to {normalized:?}")]
@@ -721,8 +741,8 @@ fn hex_char(value: u8) -> char {
 mod tests {
     use super::*;
 
-    fn doc() -> DocumentId {
-        DocumentId::from_str("z11111111111111111111111111111111").unwrap()
+    fn doc() -> DocId {
+        DocId::from_str("z11111111111111111111111111111111").unwrap()
     }
 
     #[test]
@@ -853,7 +873,7 @@ mod tests {
         ];
         for (id, expected) in cases {
             let key = FacetKey::new("org.example.note", id.to_vec()).unwrap();
-            let reference = FacetReference::new(ReferenceDocumentId::SelfDocument, key).unwrap();
+            let reference = FacetReference::new(ReferenceDocId::SelfDoc, key).unwrap();
             assert_eq!(reference.to_uri_string().unwrap(), *expected);
             assert_eq!(FacetReference::parse(expected).unwrap(), reference);
             assert_eq!(
@@ -872,7 +892,7 @@ mod tests {
             b"self".as_slice(),
         ] {
             let key = FacetKey::new("org.example.dpath", id.to_vec()).unwrap();
-            let reference = FacetReference::new(ReferenceDocumentId::SelfDocument, key).unwrap();
+            let reference = FacetReference::new(ReferenceDocId::SelfDoc, key).unwrap();
             let uri = reference.to_uri_string().unwrap();
             assert_eq!(FacetReference::parse(&uri).unwrap(), reference, "{uri}");
             assert_eq!(
@@ -928,7 +948,7 @@ mod tests {
         assert!(serde_json::from_str::<FacetKey>("\"tag/\"").is_err());
 
         let key = FacetKey::new("org.example.note", b"main".to_vec()).unwrap();
-        let reference = FacetReference::new(ReferenceDocumentId::SelfDocument, key).unwrap();
+        let reference = FacetReference::new(ReferenceDocId::SelfDoc, key).unwrap();
         let encoded = serde_json::to_string(&reference).unwrap();
         assert_eq!(
             serde_json::from_str::<FacetReference>(&encoded).unwrap(),
@@ -939,20 +959,14 @@ mod tests {
     #[test]
     fn contextual_self_and_concrete_objkey_identity_are_distinct() {
         let self_reference = FacetReference::parse("db+facet:/self/org.example.note/main").unwrap();
-        assert_eq!(
-            self_reference.document(),
-            &ReferenceDocumentId::SelfDocument
-        );
+        assert_eq!(self_reference.document(), &ReferenceDocId::SelfDoc);
         assert_eq!(self_reference.document().resolve(&doc()), doc());
 
         let concrete = FacetReference::parse(
             "db+facet:/z11111111111111111111111111111111/org.example.note/main",
         )
         .unwrap();
-        assert!(matches!(
-            concrete.document(),
-            ReferenceDocumentId::Concrete(_)
-        ));
+        assert!(matches!(concrete.document(), ReferenceDocId::Concrete(_)));
     }
 
     #[test]
@@ -977,7 +991,7 @@ mod tests {
     #[test]
     fn to_url_refuses_normalization_instead_of_changing_identity() {
         let key = FacetKey::new("org.example.note", b"%2E/v1".to_vec()).unwrap();
-        let reference = FacetReference::new(ReferenceDocumentId::SelfDocument, key).unwrap();
+        let reference = FacetReference::new(ReferenceDocId::SelfDoc, key).unwrap();
         let uri = reference.to_uri_string().unwrap();
         assert_eq!(uri, "db+facet:/self/org.example.note/%252E/v1");
         let url = reference.to_url();

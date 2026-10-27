@@ -116,7 +116,7 @@ async fn serve_iroh_stream(
             // QUIC connection itself remains reusable and is owned by the client.
             .keep_alive(false)
             .half_close(true)
-            .serve_connection(io, hyper_util::service::TowerToHyperService::new(router)) => result,
+            .serve_connection(io, hyper_util::service::TowerToHyperService::new(router)).with_upgrades() => result,
         _ = stopped => Ok(()),
     }
 }

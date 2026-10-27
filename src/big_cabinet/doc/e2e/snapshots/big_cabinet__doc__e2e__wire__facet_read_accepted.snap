@@ -1,0 +1,17 @@
+---
+source: src/big_cabinet/doc/e2e/wire.rs
+expression: read
+---
+{
+  "status": "accepted",
+  "value": {
+    "$type": "org.example.note",
+    "value": "hello"
+  },
+  "version": {
+    "heads": [
+      "0101010101010101010101010101010101010101010101010101010101010101"
+    ],
+    "clock": 0
+  }
+}

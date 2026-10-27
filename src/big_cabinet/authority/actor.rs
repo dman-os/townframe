@@ -9,8 +9,8 @@
 //! crash.
 
 use super::cap::Chain;
-use super::protocol::{Actor, CapId, Rights};
 use super::store::{self, ActorRow, SealedKey};
+use super::{Actor, CapId, Rights};
 use super::{ActorPublicKey, AuthorityError, NODE_SERVICE};
 use big_cabinet_core::dmeta::{Attribution, Bytes, MultibaseKey, SignatureBytes, Uuid7};
 use ed25519_dalek::{Signer, SigningKey};

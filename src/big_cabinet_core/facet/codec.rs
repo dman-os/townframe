@@ -33,6 +33,7 @@ use serde_json::{Map, Value, json};
 use std::borrow::Cow;
 use std::num::FpCategory;
 
+mod references;
 mod target;
 mod validation;
 mod walk;
@@ -40,6 +41,7 @@ mod walk;
 #[cfg(test)]
 mod e2e;
 
+pub use references::{DeclaredReference, declared_references};
 #[cfg(test)]
 pub(crate) use target::reconcile_json;
 pub use target::reconcile_json_atomic;
@@ -134,7 +136,10 @@ pub(super) fn keyed_map(object: &Map<String, Value>) -> Result<Option<&Value>, &
     Ok(Some(values))
 }
 
-/// A shape whose storage in a document is not its JSON form.
+/// A shape whose storage in a document is not its JSON form — with one exception: a reference is
+/// a string on both sides, and its marker declares what the string *is* (a `db+facet:` address)
+/// so that a malformed one is refused on write and the reference index can find every declared
+/// position from the schema alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     /// Bytes in the document, the protocol `{ "$bytes": "…" }` object in JSON.
@@ -148,16 +153,25 @@ pub enum Codec {
     Float,
     /// A collaborative text in the document, a string in JSON.
     Text,
+    Uint,
+    Datetime,
+    /// A facet reference: a string in the document and in JSON, which must parse as a
+    /// [`crate::FacetReference`]. An optional `refHeads` sibling of the marked member pins the
+    /// referenced facet's frontier (ADR 016).
+    Reference,
 }
 
 impl Codec {
     /// Every shape a declaration can state.
-    pub const ALL: [Codec; 5] = [
+    pub const ALL: [Codec; 8] = [
         Codec::Bytes,
         Codec::Timestamp,
         Codec::Counter,
         Codec::Text,
         Codec::Float,
+        Codec::Uint,
+        Codec::Datetime,
+        Codec::Reference,
     ];
 
     /// How this shape is spelled in our keyword, and how it is named in a message.
@@ -168,6 +182,9 @@ impl Codec {
             Codec::Counter => "counter",
             Codec::Float => "float",
             Codec::Text => "text",
+            Codec::Uint => "uint",
+            Codec::Datetime => "datetime",
+            Codec::Reference => "reference",
         }
     }
 
@@ -220,6 +237,17 @@ impl Codec {
                 let stated = value.as_str().expect("checked");
                 reconciler.timestamp(instant_millis(stated).expect("checked"))
             }
+            Codec::Datetime => {
+                let stated = value.as_str().expect("checked");
+                match instant_millis(stated).filter(|millis| instant_string(*millis) == stated) {
+                    Some(millis) => reconciler.timestamp(millis),
+                    None => reconciler.str(stated),
+                }
+            }
+            Codec::Uint => {
+                reconciler.u64(value.as_str().expect("checked").parse().expect("checked"))
+            }
+            Codec::Reference => reconciler.str(value.as_str().expect("checked")),
             Codec::Counter => reconciler.counter()?.set(value.as_i64().expect("checked")),
             Codec::Text => reconciler.text()?.update(value.as_str().expect("checked")),
             Codec::Float => {
@@ -253,6 +281,20 @@ impl Codec {
                 }
                 other => Err(unexpected(stored_scalar(other))),
             },
+            (Codec::Uint, automerge::Value::Scalar(stated)) => match stated.as_ref() {
+                ScalarValue::Uint(value) => Ok(Value::String(value.to_string())),
+                ScalarValue::Int(value) if *value >= 0 => Ok(Value::String(value.to_string())),
+                other => Err(unexpected(stored_scalar(other))),
+            },
+            (Codec::Datetime, automerge::Value::Scalar(stated)) => match stated.as_ref() {
+                ScalarValue::Timestamp(millis) => Ok(Value::String(instant_string(*millis))),
+                ScalarValue::Str(value) => Ok(Value::String(value.to_string())),
+                other => Err(unexpected(stored_scalar(other))),
+            },
+            (Codec::Reference, automerge::Value::Scalar(stated)) => match stated.as_ref() {
+                ScalarValue::Str(value) => Ok(Value::String(value.to_string())),
+                other => Err(unexpected(stored_scalar(other))),
+            },
             (Codec::Timestamp, automerge::Value::Scalar(stated)) => match stated.as_ref() {
                 ScalarValue::Timestamp(millis) => Ok(Value::String(instant_string(*millis))),
                 other => Err(unexpected(stored_scalar(other))),
@@ -271,7 +313,8 @@ impl Codec {
             },
             (Codec::Counter, automerge::Value::Scalar(stated)) => match stated.as_ref() {
                 ScalarValue::Counter(value)
-                    if i64::from(value).unsigned_abs() <= JS_SAFE_INTEGER_MAX as u64 =>
+                    if schema.get(crate::facet::input::KEYWORD).is_some()
+                        || i64::from(value).unsigned_abs() <= JS_SAFE_INTEGER_MAX as u64 =>
                 {
                     Ok(Value::Number(i64::from(value).into()))
                 }
@@ -305,6 +348,40 @@ impl Codec {
                 },
                 None => Err(CodecError::NotAnInstant {
                     stated: found.to_owned(),
+                }),
+            },
+            Codec::Datetime => value
+                .as_str()
+                .filter(|value| crate::facet::input::datetime(value))
+                .map(|_| ())
+                .ok_or_else(|| CodecError::NotAnInstant {
+                    stated: found.to_owned(),
+                }),
+            Codec::Uint => value
+                .as_str()
+                .filter(|value| {
+                    !value.is_empty()
+                        && value.bytes().all(|byte| byte.is_ascii_digit())
+                        && (value.len() == 1 || !value.starts_with('0'))
+                })
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|_| ())
+                .ok_or_else(|| CodecError::SchemaViolation {
+                    path: String::new(),
+                    message: "expected a stringified uint64".to_owned(),
+                }),
+            Codec::Reference => match value.as_str() {
+                Some(stated) => {
+                    crate::FacetReference::parse(stated)
+                        .map(|_| ())
+                        .map_err(|reason| CodecError::NotAFacetReference {
+                            stated: stated.to_owned(),
+                            reason: reason.to_string(),
+                        })
+                }
+                None => Err(CodecError::NotAFacetReference {
+                    stated: kind(value).to_owned(),
+                    reason: "a facet reference is a `db+facet:` address string".to_owned(),
                 }),
             },
             Codec::Counter => value
@@ -392,6 +469,11 @@ fn instant_string(millis: i64) -> String {
 /// this was never a whole number) and the three values JSON cannot state at all by the names every
 /// parser reads.
 pub(super) fn float_string(stated: f64, at_f32: bool) -> String {
+    let stated = if at_f32 {
+        (stated as f32) as f64
+    } else {
+        stated
+    };
     match stated.classify() {
         FpCategory::Nan => return "NaN".to_owned(),
         FpCategory::Infinite if stated.is_sign_negative() => return "-Infinity".to_owned(),
@@ -433,7 +515,12 @@ pub fn codec_schema(codec: Codec, schema: Schema) -> Schema {
         Codec::Timestamp => {
             schema.insert(FORMAT.to_owned(), DATE_TIME.into());
         }
-        Codec::Counter | Codec::Text | Codec::Float => {
+        Codec::Counter
+        | Codec::Text
+        | Codec::Float
+        | Codec::Uint
+        | Codec::Datetime
+        | Codec::Reference => {
             schema.insert(KEYWORD.to_owned(), codec.name().into());
         }
     };
@@ -475,6 +562,10 @@ pub enum CodecError {
     /// the position is declared as a text, and the value is not a string
     #[error("this position is stored as text, so it is a string, not {found}")]
     NotAText { found: &'static str },
+
+    /// the position is declared a facet reference, and the value is not a `db+facet:` address
+    #[error("this position is declared a facet reference, and {stated} is not one: {reason}")]
+    NotAFacetReference { stated: String, reason: String },
 
     /// the position is declared as a float, and the value does not spell a number
     #[error(

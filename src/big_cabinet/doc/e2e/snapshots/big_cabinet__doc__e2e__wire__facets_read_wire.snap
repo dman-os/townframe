@@ -1,0 +1,31 @@
+---
+source: src/big_cabinet/doc/e2e/wire.rs
+expression: "FacetsRead\n{\n    heads: vec![hash(1)], facets:\n    BTreeMap::from([(key(\"main\"), FacetRead::Accepted\n    { value: note(\"hello\"), version: version(&[2]), },),\n    (key(\"extra\"), FacetRead::Absent { version: version(&[]), }),]),\n}"
+---
+{
+  "heads": [
+    "0101010101010101010101010101010101010101010101010101010101010101"
+  ],
+  "facets": {
+    "org.example.note/extra": {
+      "status": "absent",
+      "version": {
+        "heads": [],
+        "clock": 0
+      }
+    },
+    "org.example.note/main": {
+      "status": "accepted",
+      "value": {
+        "$type": "org.example.note",
+        "value": "hello"
+      },
+      "version": {
+        "heads": [
+          "0202020202020202020202020202020202020202020202020202020202020202"
+        ],
+        "clock": 0
+      }
+    }
+  }
+}

@@ -1,16 +1,15 @@
 use super::{Bytes, Dmeta};
-use crate::facet::codec::{
-    CodecError, CompiledSchema, Stored, hydrate_value, reconcile_json_atomic,
-};
+use crate::FacetKey;
+use crate::facet::{CodecError, CompiledSchema, Stored, hydrate_value, reconcile_json_atomic};
 use automerge::transaction::{Transactable, Transaction};
 use automerge::{ObjId, ObjType, ReadDoc, ScalarValue};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error(transparent)]
-    Codec(#[from] CodecError),
+    Codec(Box<CodecError>),
     #[error(transparent)]
     Hydrate(#[from] autosurgeon::HydrateError),
     #[error(transparent)]
@@ -25,13 +24,28 @@ pub enum StorageError {
     },
 }
 
+impl From<CodecError> for StorageError {
+    fn from(error: CodecError) -> Self {
+        Self::Codec(Box::new(error))
+    }
+}
+
 impl Dmeta {
+    /// Write this dmeta over the one stored at `object`/`prop`, preserving the identity of every
+    /// signature entry it retains.
+    ///
+    /// `replaced` names the facets whose competing signature set this write replaces outright. The
+    /// typed value only sees the winning copy of a conflicted container, but a concurrent first
+    /// write of a slot's metadata leaves two metadata maps (or two signature lists), and the losing
+    /// copy's entries are still current signatures. A replacing write retires those too; every
+    /// other facet's losing copies are left exactly as they are, since this write never saw them.
     pub fn reconcile_atomic<'a>(
         &self,
         mut tx: Transaction<'a>,
         schema: &CompiledSchema,
         object: &ObjId,
         prop: autosurgeon::Prop<'_>,
+        replaced: &BTreeSet<FacetKey>,
     ) -> Result<Transaction<'a>, StorageError> {
         let prepared = (|| -> Result<Value, StorageError> {
             let mut submitted = Stored::check(
@@ -68,6 +82,9 @@ impl Dmeta {
                 .expect("dmeta facets are a map")
             {
                 let facet = ensure_object(&mut tx, &facets, key.as_str().into(), ObjType::Map)?;
+                if replaced.iter().any(|replaced| replaced.to_string() == *key) {
+                    retire_losing_signatures(&mut tx, &facets, key, &facet)?;
+                }
                 for field in ["updatedAt", "deletedAt", "signatures"] {
                     reconcile_set(
                         &mut tx,
@@ -93,6 +110,35 @@ impl Dmeta {
     }
 }
 
+/// Empty every signature list under `key` other than the winning list of the winning metadata map.
+fn retire_losing_signatures(
+    tx: &mut Transaction<'_>,
+    facets: &ObjId,
+    key: &str,
+    winner: &ObjId,
+) -> Result<(), StorageError> {
+    let winning_list = match tx.get(winner, "signatures")? {
+        Some((automerge::Value::Object(ObjType::List), list)) => Some(list),
+        _ => None,
+    };
+    let mut losing = Vec::new();
+    for (_, metadata) in tx.get_all(facets, key)? {
+        for (value, list) in tx.get_all(&metadata, "signatures")? {
+            if value == automerge::Value::Object(ObjType::List)
+                && Some(&list) != winning_list.as_ref()
+            {
+                losing.push(list);
+            }
+        }
+    }
+    for list in losing {
+        for index in (0..tx.length(&list)).rev() {
+            tx.delete(&list, index)?;
+        }
+    }
+    Ok(())
+}
+
 fn ensure_object(
     tx: &mut Transaction<'_>,
     object: &ObjId,
@@ -115,7 +161,7 @@ fn check_bindings(
     map: &ObjId,
     submitted: &Value,
 ) -> Result<(), StorageError> {
-    for index in ["actorUuids", "facetUuids"] {
+    for index in ["actors", "branchUuids", "facetUuids"] {
         for (kind, bindings) in tx.get_all(map, index)? {
             if kind != automerge::Value::Object(ObjType::Map) {
                 return Err(StorageError::UnexpectedStorage {
@@ -133,7 +179,7 @@ fn check_bindings(
                     .get(binding.key.as_ref())
                     .ok_or_else(rebound)?;
                 for (value, id) in tx.get_all(&bindings, binding.key.as_ref())? {
-                    if index == "facetUuids" {
+                    if index != "actors" {
                         if value.to_str() != wanted.as_str() {
                             return Err(rebound());
                         }
@@ -178,7 +224,7 @@ fn reconcile_set(
     base: Option<&Value>,
 ) -> Result<(), StorageError> {
     let list = ensure_object(tx, object, field.into(), ObjType::List)?;
-    let mut wanted = BTreeMap::new();
+    let mut wanted: BTreeMap<String, (usize, Value)> = BTreeMap::new();
     let Value::Array(values) = std::mem::take(submitted) else {
         unreachable!("dmeta sets are arrays");
     };
@@ -195,9 +241,11 @@ fn reconcile_set(
                     .to_string(),
             );
         }
-        wanted
-            .entry(serde_json::to_string(&value).expect("a set value serializes"))
-            .or_insert(value);
+        let key = serde_json::to_string(&value).expect("a set value serializes");
+        let entry = wanted.entry(key).or_insert((0, value));
+        if field == "signatures" || entry.0 == 0 {
+            entry.0 += 1;
+        }
     }
     let observed = match base {
         Some(Value::Array(values)) => values.as_slice(),
@@ -213,9 +261,14 @@ fn reconcile_set(
     assert_eq!(tx.length(&list), observed.len());
     let mut retained = Vec::with_capacity(wanted.len());
     let mut removed = Vec::new();
+    let mut matched = BTreeSet::new();
     for (index, value) in observed.iter().enumerate() {
         let identity = serde_json::to_string(value).expect("an observed set value serializes");
-        if wanted.remove(&identity).is_some() {
+        if let Some((remaining, _)) = wanted.get_mut(&identity)
+            && *remaining > 0
+        {
+            *remaining -= 1;
+            matched.insert(identity);
             retained.push(value.clone());
         } else {
             removed.push(index);
@@ -224,7 +277,10 @@ fn reconcile_set(
     for index in removed.into_iter().rev() {
         tx.delete(&list, index)?;
     }
-    for value in wanted.into_values() {
+    for (identity, (remaining, value)) in wanted {
+        if remaining == 0 || matched.contains(&identity) {
+            continue;
+        }
         if field == "signatures" {
             tx.insert_object(&list, retained.len(), ObjType::Map)?;
         } else {
@@ -266,7 +322,7 @@ mod tests {
     fn fixture() -> Dmeta {
         let mut dmeta = Dmeta::new(jiff::Timestamp::from_millisecond(0).unwrap());
         let actor = Uuid7::new();
-        dmeta.actor_uuids.insert(
+        dmeta.actors.insert(
             actor,
             ActorMetadata {
                 pubkey: MultibaseKey::try_from([1; 32].as_slice()).unwrap(),
@@ -276,6 +332,9 @@ mod tests {
         );
         let key = "org.example.note/main".parse().unwrap();
         dmeta.facet_uuids.insert(Uuid7::new(), key);
+        dmeta
+            .branch_uuids
+            .insert(Uuid7::new(), crate::dmeta::DocId::new(b"doc"));
         let key = "org.example.note/main".parse().unwrap();
         dmeta.facets.insert(
             key,
@@ -297,11 +356,12 @@ mod tests {
 
     fn signature(dmeta: &Dmeta, byte: u8) -> FacetSignature {
         FacetSignature {
-            actor_uuid: *dmeta.actor_uuids.keys().next().unwrap(),
+            actor_uuid: *dmeta.actors.keys().next().unwrap(),
+            doc_uuid: *dmeta.branch_uuids.keys().next().unwrap(),
             signature: SignatureBytes::try_from([byte; 64].as_slice()).unwrap(),
             message: Some(Bytes::from(vec![byte, 0])),
             inherited: Some(InheritedWitness {
-                origin_doc: crate::dmeta::DocumentId::new(vec![byte]),
+                origin_doc: crate::dmeta::DocId::new(vec![byte]),
                 message: Bytes::from(vec![byte, 1]),
                 value: Some(Bytes::from(vec![byte, 2])),
             }),
@@ -310,7 +370,13 @@ mod tests {
 
     fn write(doc: &mut Automerge, schema: &CompiledSchema, dmeta: &Dmeta) -> usize {
         let tx = dmeta
-            .reconcile_atomic(doc.transaction(), schema, &ROOT, "dmeta".into())
+            .reconcile_atomic(
+                doc.transaction(),
+                schema,
+                &ROOT,
+                "dmeta".into(),
+                &BTreeSet::new(),
+            )
             .unwrap();
         let count = tx.pending_ops();
         tx.commit();
@@ -398,6 +464,64 @@ mod tests {
         assert_eq!(write(&mut doc, &schema, &value), 0);
     }
 
+    utils_rs::table_tests! {
+        concurrently_created_metadata,
+        replaces,
+        {
+            let schema = schema();
+            let key: crate::FacetKey = "org.example.note/main".parse().unwrap();
+            let mut initial = fixture();
+            initial.facets.clear();
+            let mut doc = Automerge::new();
+            doc.set_actor(ActorId::from([1u8; 32]));
+            write(&mut doc, &schema, &initial);
+            let mut peer = doc.fork();
+            peer.set_actor(ActorId::from([2u8; 32]));
+            for (branch, byte) in [(&mut doc, 1), (&mut peer, 2)] {
+                let mut created = initial.clone();
+                created.facets.insert(key.clone(), FacetMetadata {
+                    updated_at: Vec::new(),
+                    deleted_at: Vec::new(),
+                    signatures: vec![signature(&initial, byte)],
+                });
+                write(branch, &schema, &created);
+            }
+            doc.merge(&mut peer).unwrap();
+            let lists = |doc: &Automerge| -> Vec<usize> {
+                let root = doc.get(ROOT, "dmeta").unwrap().unwrap().1;
+                let facets = doc.get(&root, "facets").unwrap().unwrap().1;
+                let mut lengths: Vec<_> = doc
+                    .get_all(&facets, key.to_string())
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, metadata)| {
+                        let list = doc.get(&metadata, "signatures").unwrap().unwrap().1;
+                        doc.length(&list)
+                    })
+                    .collect();
+                lengths.sort();
+                lengths
+            };
+            assert_eq!(lists(&doc), [1, 1]);
+            let mut observed = read(&doc, &schema);
+            if replaces {
+                observed.facets.get_mut(&key).unwrap().signatures = vec![signature(&initial, 3)];
+            }
+            let replaced = if replaces { BTreeSet::from([key.clone()]) } else { BTreeSet::new() };
+            observed
+                .reconcile_atomic(doc.transaction(), &schema, &ROOT, "dmeta".into(), &replaced)
+                .unwrap()
+                .commit();
+            assert_eq!(lists(&doc), if replaces { [0, 1] } else { [1, 1] });
+            assert_eq!(read(&doc, &schema), observed);
+        }
+    }
+
+    concurrently_created_metadata! {
+        a_replacing_write_retires_the_losing_copy: true,
+        an_unrelated_write_leaves_the_losing_copy_alone: false,
+    }
+
     #[test]
     fn concurrent_replacements_keep_both_signatures_intact_at_supplied_heads() {
         let schema = schema();
@@ -426,7 +550,7 @@ mod tests {
         right.facets.values_mut().next().unwrap().updated_at = right.updated_at.clone();
         left.facets.values_mut().next().unwrap().deleted_at.clear();
         right.facets.values_mut().next().unwrap().deleted_at = right.updated_at.clone();
-        right.actor_uuids.insert(
+        right.actors.insert(
             Uuid7::new(),
             ActorMetadata {
                 pubkey: MultibaseKey::try_from([4; 32].as_slice()).unwrap(),
@@ -442,7 +566,7 @@ mod tests {
         let tx = doc
             .transaction_at(automerge::PatchLog::null(), &base)
             .unwrap();
-        left.reconcile_atomic(tx, &schema, &ROOT, "dmeta".into())
+        left.reconcile_atomic(tx, &schema, &ROOT, "dmeta".into(), &BTreeSet::new())
             .unwrap()
             .commit();
         peer.merge(&mut doc).unwrap();
@@ -461,7 +585,7 @@ mod tests {
             assert!(metadata.updated_at.contains(&left.updated_at[0]));
             assert!(metadata.updated_at.contains(&right.updated_at[0]));
             assert_eq!(metadata.deleted_at, right.updated_at);
-            assert_eq!(observed.actor_uuids, right.actor_uuids);
+            assert_eq!(observed.actors, right.actors);
             assert_eq!(observed.facet_uuids, right.facet_uuids);
             for index in 0..2 {
                 let entry = merged.get(&before.2[3], index).unwrap().unwrap().1;
@@ -529,19 +653,19 @@ mod tests {
     #[test]
     fn a_hidden_conflicting_binding_is_not_silently_rebound_to_the_winner() {
         let schema = schema();
-        for index in ["actorUuids", "facetUuids"] {
+        for index in ["actors", "branchUuids", "facetUuids"] {
             let initial = fixture();
             let mut doc = Automerge::new();
             doc.set_actor(ActorId::from([1u8; 32]));
             write(&mut doc, &schema, &initial);
             let root = objects(&doc).0;
             let bindings = doc.get(&root, index).unwrap().unwrap().1;
-            let uuid = if index == "actorUuids" {
-                initial.actor_uuids.keys().next().unwrap().to_string()
-            } else {
-                initial.facet_uuids.keys().next().unwrap().to_string()
+            let uuid = match index {
+                "actors" => initial.actors.keys().next().unwrap().to_string(),
+                "branchUuids" => initial.branch_uuids.keys().next().unwrap().to_string(),
+                _ => initial.facet_uuids.keys().next().unwrap().to_string(),
             };
-            let (object, prop) = if index == "actorUuids" {
+            let (object, prop) = if index == "actors" {
                 (
                     doc.get(&bindings, uuid.as_str()).unwrap().unwrap().1,
                     "pubkey".to_owned(),
@@ -552,12 +676,12 @@ mod tests {
             let mut peer = doc.fork();
             peer.set_actor(ActorId::from([2u8; 32]));
             for (branch, byte) in [(&mut doc, 2), (&mut peer, 3)] {
-                let replacement = if index == "actorUuids" {
-                    MultibaseKey::try_from([byte; 32].as_slice())
+                let replacement = match index {
+                    "actors" => MultibaseKey::try_from([byte; 32].as_slice())
                         .unwrap()
-                        .to_string()
-                } else {
-                    format!("org.example.other{byte}/main")
+                        .to_string(),
+                    "branchUuids" => crate::dmeta::DocId::new([byte]).to_string(),
+                    _ => format!("org.example.other{byte}/main"),
                 };
                 let mut tx = branch.transaction();
                 tx.put(&object, prop.as_str(), replacement).unwrap();
@@ -568,7 +692,13 @@ mod tests {
             let heads = doc.get_heads();
             assert_eq!(doc.get_all(&object, prop.as_str()).unwrap().len(), 2);
             let error = observed
-                .reconcile_atomic(doc.transaction(), &schema, &ROOT, "dmeta".into())
+                .reconcile_atomic(
+                    doc.transaction(),
+                    &schema,
+                    &ROOT,
+                    "dmeta".into(),
+                    &BTreeSet::new(),
+                )
                 .unwrap_err();
             assert!(
                 matches!(error, StorageError::ReboundBinding { index: actual, .. } if actual == index)
@@ -585,26 +715,30 @@ mod tests {
         let mut doc = Automerge::new();
         write(&mut doc, &schema, &initial);
         let heads = doc.get_heads();
-        for index in ["actorUuids", "facetUuids"] {
+        for index in ["actors", "branchUuids", "facetUuids"] {
             for remove in [false, true] {
                 let mut submitted = initial.clone();
-                if index == "actorUuids" {
-                    if remove {
-                        submitted.actor_uuids.clear();
-                    } else {
-                        submitted.actor_uuids.values_mut().next().unwrap().pubkey =
+                match (index, remove) {
+                    ("actors", true) => submitted.actors.clear(),
+                    ("actors", false) => {
+                        submitted.actors.values_mut().next().unwrap().pubkey =
                             MultibaseKey::try_from([9; 32].as_slice()).unwrap();
                     }
-                } else if remove {
-                    submitted.facet_uuids.clear();
-                } else {
-                    *submitted.facet_uuids.values_mut().next().unwrap() =
-                        "org.example.other/main".parse().unwrap();
+                    ("branchUuids", true) => submitted.branch_uuids.clear(),
+                    ("branchUuids", false) => {
+                        *submitted.branch_uuids.values_mut().next().unwrap() =
+                            crate::dmeta::DocId::new(b"other");
+                    }
+                    (_, true) => submitted.facet_uuids.clear(),
+                    (_, false) => {
+                        *submitted.facet_uuids.values_mut().next().unwrap() =
+                            "org.example.other/main".parse().unwrap();
+                    }
                 }
                 let mut tx = doc.transaction();
                 tx.put(ROOT, "pending", "must roll back").unwrap();
                 let error = submitted
-                    .reconcile_atomic(tx, &schema, &ROOT, "dmeta".into())
+                    .reconcile_atomic(tx, &schema, &ROOT, "dmeta".into(), &BTreeSet::new())
                     .unwrap_err();
                 assert!(matches!(error, StorageError::ReboundBinding { .. }));
                 assert!(doc.get(ROOT, "pending").unwrap().is_none());
@@ -617,7 +751,7 @@ mod tests {
         let mut tx = doc.transaction();
         tx.put(ROOT, "pending", true).unwrap();
         assert!(matches!(
-            invalid.reconcile_atomic(tx, &schema, &ROOT, "dmeta".into()),
+            invalid.reconcile_atomic(tx, &schema, &ROOT, "dmeta".into(), &BTreeSet::new()),
             Err(StorageError::Codec(_))
         ));
         assert!(doc.get(ROOT, "pending").unwrap().is_none());
@@ -636,7 +770,7 @@ mod tests {
         let mut tx = doc.transaction();
         tx.put(ROOT, "pending", true).unwrap();
         let error = submitted
-            .reconcile_atomic(tx, &schema, &ROOT, "dmeta".into())
+            .reconcile_atomic(tx, &schema, &ROOT, "dmeta".into(), &BTreeSet::new())
             .unwrap_err();
         assert!(matches!(error, StorageError::Codec(_)));
         assert!(doc.get(ROOT, "pending").unwrap().is_none());

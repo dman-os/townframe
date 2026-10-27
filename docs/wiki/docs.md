@@ -191,34 +191,21 @@ The following facets are used to track branch relationships in docs:
 
 ```js
 {
-  // the key-id of the facet indicates the branch id
-  "org.example.daybook.branch/main": {},
-  // the key-id on this one is just the facet convention
-  "org.example.daybook.branches/main": {
-    byPath: {
-      // under concurrent writes, we might have multiple branches for the same path
-      "/my/branch": ["zAyPkUKgPRFaLje8LNjK3CHCQEytgbhN2Xt35pLKpFHck"]
-    },
-    byId: {
-      "zAyPkUKgPRFaLje8LNjK3CHCQEytgbhN2Xt35pLKpFHck": {
-        path: "/my/branch",
-        branchedFrom: {
-          branchPath: "/main",
-          heads: ["ztXt35kUKgPLgbpFpLe8A"]
-        }
-      }
-    }
-  }
-}
-{
-  // this one branched from /main
-  // note that the facet is under key-id /main
-  // and that shouldn't be confused as the branch path
-  "org.example.daybook.branch/my/branch": {
-    // we track the origin
+  // the key-id of the facet indicates the doc id
+  "org.example.daybook.branch/zUKgPRFaLje8LhN2Xt35N3CHCQEytgbpLKpFHckjKAyPk": {
+    path: "/main"
+  },
+  // branches will have their own branch facet and won't remove their
+  // parent. a parent also carries the branch facet for it's children
+  // if it must track them. this means that both facets shown here exist
+  // on both parent and child branches
+  "org.example.daybook.branch/zAyPkUKgPRFaLje8LNjK3CHCQEytgbhN2Xt35pLKpFHck": {
+    path: "/my/branch",
+    // this pins which parent we branched from
     from: {
-      branchPath: "/main",
-      heads: ["ztXt35kUKgPLgbpFpLe8A"]
+      // self because ofc, we'll be carrying which parent we branched from
+      facetRef: "db+facet://self/org.example.daybook.branch/zUKgPRFaLje8LhN2Xt35N3CHCQEytgbpLKpFHckjKAyPk",
+      refHeads: ["ztXt35kUKgPLgbpFpLe8A"],
     }
   }
 }
@@ -308,7 +295,8 @@ Every document carries a Daybook-owned provenance facet maintained by DocumentsR
   "org.example.daybook.dmeta/main": {
     "createdAt": "2026-10-13T14:30:15Z",
     "updatedAt": ["2026-10-13T14:30:15Z"],
-    "actorUuids": {
+    // FIXME: actorUuids -> actors
+    "actors": {
       "019e5d38-0000-7000-8000-000000000001": {
         "pubkey": "zAUKgPRFak3CHCQEeLjyP8LNj35pLKpFHcKytgbhN2Xtk",
         "actorUrl": "db+actor://<nodeid>/<path>/<to>/<subsystem>",
@@ -335,7 +323,7 @@ Every document carries a Daybook-owned provenance facet maintained by DocumentsR
 }
 ```
 
-`actorUuids` shares actor bindings and certificates across claims. `facetUuids` maps UUIDv7 aliases directly to complete facet keys: concurrent creators can assign different aliases to the same slot, and all aliases remain usable. They do not select different content winners. A new claim chooses the lexicographically smallest alias visible in its writing transaction, not the smallest alias after later merges. Neither index needs a separate per-binding `createdAt` or a duplicated reverse list. The document's own ID and branch relationships are not repeated in dmeta.
+`actors` shares actor bindings and certificates across claims. `facetUuids` maps UUIDv7 aliases directly to complete facet keys: concurrent creators can assign different aliases to the same slot, and all aliases remain usable. They do not select different content winners. A new claim chooses the lexicographically smallest alias visible in its writing transaction, not the smallest alias after later merges. Neither index needs a separate per-binding `createdAt` or a duplicated reverse list. The document's own ID and branch relationships are not repeated in dmeta.
 
 `updatedAt`, `deletedAt`, and `signatures` are **current competing sets**, not logs. A write replaces entries observed at its supplied base heads; concurrent entries can survive. `deletedAt` is always initialized, empty for an authored non-tombstone. A Set clears observed deletion candidates, but a concurrent Remove can leave candidates after merge. Unsigned timestamps do not determine current tombstone status; the signed operation must match the slot's current state. Retained signature entries stay immutable and new signatures get fresh objects, preventing positional list reconciliation from mixing concurrent claims. Whole-JSON reconciliation traverses values but emits only changed operations and preserves unchanged native objects.
 
