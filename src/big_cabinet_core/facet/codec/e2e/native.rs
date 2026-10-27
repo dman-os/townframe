@@ -2,7 +2,7 @@
 //! native preservation, skipped unchanged values, checked counter deltas and omission at the base.
 
 use super::{facet, shape};
-use crate::facet::codec::{hydrate_value, reconcile_json};
+use crate::facet::codec::{hydrate_value, reconcile_json, reconcile_json_atomic};
 use crate::facet::{Bundle, Declaration, Extra, Universe};
 use automerge::transaction::Transactable;
 use automerge::{ActorId, Automerge, ObjType, ROOT, ReadDoc, ScalarValue};
@@ -498,6 +498,92 @@ fn undeclared_bytes_and_an_instant_round_trip_in_their_raw_spellings() {
     assert_eq!(projected["when"], json!("1970-01-01T00:00:00Z"));
 }
 
+/// A keyed map — `BTreeMap<Uuid7, V>` derives one — declares every value by its one value schema,
+/// so the storage forms there are written and read like anywhere else: bytes land as bytes, an
+/// authored float is normalized to its decimal string, and a key outside the pattern is refused
+/// before anything is written.
+#[test]
+fn a_keyed_map_stores_each_value_under_its_value_schema() {
+    let document = json!({
+        "type": "object",
+        "$defs": {},
+        "properties": {"entries": {
+            "type": "object",
+            "patternProperties": {"^[a-z]+$": {
+                "type": "object",
+                "properties": {
+                    "blob": {
+                        "type": "object",
+                        "x-automerge": "bytes",
+                        "properties": {"$bytes": {"type": "string", "contentEncoding": "base64"}},
+                        "required": ["$bytes"],
+                        "additionalProperties": false
+                    },
+                    "ratio": {"type": "string", "x-automerge": "float", "format": "double"}
+                },
+                "required": ["blob", "ratio"],
+                "additionalProperties": false
+            }},
+            "additionalProperties": false
+        }},
+        "required": ["entries"],
+        "additionalProperties": false
+    });
+    let mut doc = Automerge::new();
+    let mut tx = doc.transaction();
+    reconcile_json(
+        &mut tx,
+        &ROOT,
+        facet(),
+        &document,
+        json!({"entries": {"one": {"blob": {"$bytes": "AQI="}, "ratio": 1.25}}}),
+    )
+    .unwrap();
+    tx.commit();
+
+    let (_, facet_map) = doc.get(ROOT, "facet").unwrap().unwrap();
+    let (_, entries) = doc.get(&facet_map, "entries").unwrap().unwrap();
+    let (_, one) = doc.get(&entries, "one").unwrap().unwrap();
+    let (blob, _) = doc.get(&one, "blob").unwrap().unwrap();
+    assert_eq!(shape(&blob), "bytes", "{blob:?}");
+    let (ratio, _) = doc.get(&one, "ratio").unwrap().unwrap();
+    assert_eq!(shape(&ratio), "f64", "{ratio:?}");
+    assert_eq!(
+        hydrate_value(&doc, &ROOT, facet(), &super::compiled(&document)).unwrap(),
+        json!({"entries": {"one": {"blob": {"$bytes": "AQI="}, "ratio": "1.25"}}})
+    );
+
+    let mut tx = doc.transaction();
+    let refusal = reconcile_json(
+        &mut tx,
+        &ROOT,
+        facet(),
+        &document,
+        json!({"entries": {"One": {"blob": {"$bytes": "AQI="}, "ratio": "1.25"}}}),
+    )
+    .unwrap_err();
+    assert_eq!(tx.pending_ops(), 0, "{refusal}");
+}
+
+/// A `patternProperties` whose members need a pattern match to find their declaration would be
+/// stored as plain JSON, so it is refused when the schema is compiled rather than when a write
+/// happens to reach one.
+#[test]
+fn a_pattern_map_that_is_not_keyed_does_not_compile() {
+    let string = json!({"type": "string"});
+    for schema in [
+        json!({"type": "object", "patternProperties": {"^a$": string, "^b$": string}, "additionalProperties": false}),
+        json!({"type": "object", "patternProperties": {"a": string}, "additionalProperties": false}),
+        json!({"type": "object", "patternProperties": {"^a$": string}}),
+        json!({"type": "object", "properties": {"nested": {"type": "object", "patternProperties": {"^a$": string}, "properties": {"b": string}, "additionalProperties": false}}}),
+    ] {
+        let refusal = crate::facet::codec::CompiledSchema::compile(schema.clone())
+            .expect_err("refused")
+            .to_string();
+        assert!(refusal.contains("keyed map"), "{schema}: {refusal}");
+    }
+}
+
 /// The declaration a position makes is one spelling for one concept — a storage form, an ordinary
 /// kind, or genuinely nothing — and `scalar_checked` must classify by THAT, not by "no number kind
 /// was declared". A kind the schema states wins over the specialized native value underneath,
@@ -751,6 +837,297 @@ fn a_member_named_like_a_chain_position_is_not_another_position() {
             projected, expected,
             "the decisions landed where they were checked ({name})"
         );
+    }
+}
+
+#[test]
+fn nested_changes_preserve_native_identity_metadata_and_conflicts() {
+    let document = json!({
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "nested": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "changed": {"type": "string"},
+                        "stable": {
+                            "type": "object",
+                            "properties": {
+                                "blob": {"x-automerge": "bytes"},
+                                "text": {"type": "string", "x-automerge": "text"},
+                                "counter": {"type": "integer", "x-automerge": "counter"},
+                                "record": {"type": "object"}
+                            }
+                        }
+                    }
+                }
+            },
+            "metadata": {
+                "type": "object",
+                "properties": {
+                    "createdAt": {"type": "string", "format": "date-time"},
+                    "updatedAt": {
+                        "type": "array", "items": {"type": "string", "format": "date-time"}
+                    },
+                    "deletedAt": {
+                        "type": "array", "items": {"type": "string", "format": "date-time"}
+                    },
+                    "signatures": {"type": "array", "items": {"type": "object"}}
+                }
+            }
+        }
+    });
+    let declared = super::compiled(&document);
+    for schema in [declared.clone(), super::compiled(&open_document())] {
+        let mut doc = Automerge::new();
+        doc.set_actor(ActorId::from([1u8; 32]));
+        let tx = reconcile_json_atomic(
+            doc.transaction(),
+            &declared,
+            &ROOT,
+            facet(),
+            json!({
+                "title": "base",
+                "nested": [{
+                    "changed": "before",
+                    "stable": {
+                        "blob": {"$bytes": "AA=="},
+                        "text": "hello",
+                        "counter": 5,
+                        "record": {"label": "base"}
+                    }
+                }],
+                "metadata": {
+                    "createdAt": "2024-01-01T00:00:00Z",
+                    "updatedAt": ["2024-01-02T00:00:00Z"],
+                    "deletedAt": [],
+                    "signatures": [{"signer": "base", "signature": {"$bytes": "AA=="}}]
+                }
+            }),
+        )
+        .unwrap();
+        tx.commit();
+        let map = doc.get(ROOT, "facet").unwrap().unwrap().1;
+        let nested = doc.get(&map, "nested").unwrap().unwrap().1;
+        let item = doc.get(&nested, 0).unwrap().unwrap().1;
+        let stable = doc.get(&item, "stable").unwrap().unwrap().1;
+        let mut peer = doc.fork();
+        peer.set_actor(ActorId::from([2u8; 32]));
+        for (branch, byte, label) in [(&mut doc, 1, "local"), (&mut peer, 2, "peer")] {
+            let mut tx = branch.transaction();
+            tx.put(&stable, "blob", ScalarValue::Bytes(vec![byte]))
+                .unwrap();
+            let record = tx.put_object(&stable, "record", ObjType::Map).unwrap();
+            tx.put(&record, "label", label).unwrap();
+            tx.commit();
+        }
+        doc.merge(&mut peer).unwrap();
+        assert_eq!(doc.get_all(&stable, "blob").unwrap().len(), 2);
+        assert_eq!(doc.get_all(&stable, "record").unwrap().len(), 2);
+
+        let metadata = doc.get(&map, "metadata").unwrap().unwrap().1;
+        let mut positions = vec![(ROOT, automerge::Prop::from("facet"))];
+        for (obj, keys) in [
+            (&map, vec!["title", "nested", "metadata"]),
+            (&item, vec!["stable"]),
+            (&stable, vec!["blob", "text", "counter", "record"]),
+            (
+                &metadata,
+                vec!["createdAt", "updatedAt", "deletedAt", "signatures"],
+            ),
+        ] {
+            positions.extend(keys.into_iter().map(|key| (obj.clone(), key.into())));
+        }
+        positions.push((nested, 0.into()));
+        for (_, record) in doc.get_all(&stable, "record").unwrap() {
+            positions.push((record, "label".into()));
+        }
+        let updated = doc.get(&metadata, "updatedAt").unwrap().unwrap().1;
+        positions.push((updated, 0.into()));
+        let signatures = doc.get(&metadata, "signatures").unwrap().unwrap().1;
+        let signature = doc.get(&signatures, 0).unwrap().unwrap().1;
+        positions.extend([
+            (signatures, 0.into()),
+            (signature.clone(), "signer".into()),
+            (signature, "signature".into()),
+        ]);
+        let snapshot = |doc: &Automerge| {
+            positions
+                .iter()
+                .map(|(obj, prop)| {
+                    doc.get_all(obj, prop.clone())
+                        .unwrap()
+                        .into_iter()
+                        .map(|(value, id)| (value.into_owned(), id))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot(&doc);
+        let mut submitted = hydrate_value(&doc, &ROOT, facet(), &schema).unwrap();
+        submitted["nested"][0]["changed"] = json!("after");
+        let tx = reconcile_json_atomic(
+            doc.transaction(),
+            &schema,
+            &ROOT,
+            facet(),
+            submitted.clone(),
+        )
+        .unwrap();
+        assert_eq!(tx.pending_ops(), 1);
+        tx.commit();
+        assert_eq!(snapshot(&doc), before);
+        assert_eq!(
+            hydrate_value(&doc, &ROOT, facet(), &schema).unwrap(),
+            submitted
+        );
+
+        let heads = doc.get_heads();
+        let tx =
+            reconcile_json_atomic(doc.transaction(), &schema, &ROOT, facet(), submitted).unwrap();
+        assert_eq!(tx.pending_ops(), 0);
+        assert!(tx.commit().0.is_none());
+        assert_eq!(doc.get_heads(), heads);
+        assert_eq!(snapshot(&doc), before);
+    }
+}
+
+#[test]
+fn float_noop_preserves_bits_and_conflicts() {
+    let float = json!({"type": "string", "x-automerge": "float", "format": "double"});
+    let cases = [
+        (float.clone(), 1.25, json!("1.25")),
+        (float.clone(), 1.25, json!(1.25)),
+        (float.clone(), -0.0, json!("-0.0")),
+        (float.clone(), 0.0, json!("0.0")),
+        (float.clone(), f64::INFINITY, json!("Infinity")),
+        (float.clone(), f64::NEG_INFINITY, json!("-Infinity")),
+        (float.clone(), f64::NAN, json!("NaN")),
+        (
+            float.clone(),
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            json!("NaN"),
+        ),
+        (float, f64::from_bits(0xfff8_0000_0000_0002), json!("NaN")),
+        (json!({"type": "number"}), -0.0, json!(-0.0)),
+        (json!({}), 0.0, json!(0.0)),
+    ];
+    for (document, held, submitted) in cases {
+        let schema = super::compiled(&document);
+        let mut doc = Automerge::new();
+        doc.set_actor(ActorId::from([1u8; 32]));
+        let mut tx = doc.transaction();
+        tx.put(ROOT, "facet", ScalarValue::Null).unwrap();
+        tx.commit();
+        let mut peer = doc.fork();
+        peer.set_actor(ActorId::from([2u8; 32]));
+        for (branch, value) in [(&mut doc, -123.0), (&mut peer, held)] {
+            let mut tx = branch.transaction();
+            tx.put(ROOT, "facet", ScalarValue::F64(value)).unwrap();
+            tx.commit();
+        }
+        doc.merge(&mut peer).unwrap();
+        let snapshot = |doc: &Automerge| {
+            doc.get_all(ROOT, "facet")
+                .unwrap()
+                .into_iter()
+                .map(|(value, id)| (value.to_f64().unwrap().to_bits(), id))
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot(&doc);
+        assert_eq!(before.len(), 2);
+        assert_eq!(
+            doc.get(ROOT, "facet")
+                .unwrap()
+                .unwrap()
+                .0
+                .to_f64()
+                .unwrap()
+                .to_bits(),
+            held.to_bits()
+        );
+        let heads = doc.get_heads();
+        let tx = reconcile_json_atomic(
+            doc.transaction(),
+            &schema,
+            &ROOT,
+            facet(),
+            submitted.clone(),
+        )
+        .unwrap();
+        assert_eq!(tx.pending_ops(), 0, "{held:?} resubmitted as {submitted}");
+        assert!(tx.commit().0.is_none());
+        assert_eq!(doc.get_heads(), heads);
+        assert_eq!(snapshot(&doc), before);
+    }
+}
+
+#[test]
+fn positional_signature_replacements_merge_fields_not_entries() {
+    let schema = super::compiled(&json!({
+        "type": "array", "items": {"type": "object"}
+    }));
+    for (left, right, expected, conflicts) in [
+        (
+            json!({"signer": "alice", "signature": {"$bytes": "AQ=="}}),
+            json!({"signer": "bob", "signature": {"$bytes": "Ag=="}}),
+            json!({"signer": "bob", "signature": {"$bytes": "Ag=="}}),
+            2,
+        ),
+        (
+            json!({"signer": "alice", "signature": {"$bytes": "AA=="}}),
+            json!({"signer": "base", "signature": {"$bytes": "Ag=="}}),
+            json!({"signer": "alice", "signature": {"$bytes": "Ag=="}}),
+            1,
+        ),
+    ] {
+        let mut doc = Automerge::new();
+        doc.set_actor(ActorId::from([1u8; 32]));
+        let tx = reconcile_json_atomic(
+            doc.transaction(),
+            &schema,
+            &ROOT,
+            facet(),
+            json!([{"signer": "base", "signature": {"$bytes": "AA=="}}]),
+        )
+        .unwrap();
+        tx.commit();
+        let list = doc.get(ROOT, "facet").unwrap().unwrap().1;
+        let entry = doc.get(&list, 0).unwrap().unwrap().1;
+        let mut peer = doc.fork();
+        peer.set_actor(ActorId::from([2u8; 32]));
+        for (branch, replacement) in [(&mut doc, left), (&mut peer, right)] {
+            let tx = reconcile_json_atomic(
+                branch.transaction(),
+                &schema,
+                &ROOT,
+                facet(),
+                json!([replacement]),
+            )
+            .unwrap();
+            assert_eq!(tx.pending_ops(), conflicts);
+            tx.commit();
+        }
+        let mut reverse = peer.clone();
+        reverse.merge(&mut doc.clone()).unwrap();
+        doc.merge(&mut peer).unwrap();
+        for merged in [&doc, &reverse] {
+            assert_eq!(merged.get(ROOT, "facet").unwrap().unwrap().1, list);
+            assert_eq!(merged.length(&list), 1);
+            assert_eq!(merged.get(&list, 0).unwrap().unwrap().1, entry);
+            assert_eq!(merged.get_all(&list, 0).unwrap().len(), 1);
+            assert_eq!(merged.get_all(&entry, "signer").unwrap().len(), conflicts);
+            assert_eq!(
+                merged.get_all(&entry, "signature").unwrap().len(),
+                conflicts
+            );
+            assert_eq!(
+                hydrate_value(merged, &ROOT, facet(), &schema).unwrap(),
+                json!([expected])
+            );
+        }
     }
 }
 

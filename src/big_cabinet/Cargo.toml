@@ -1,0 +1,43 @@
+[package]
+name = "big_cabinet"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+# internal
+big_cabinet_core = { path = "../big_cabinet_core" }
+secrets_rs.workspace = true
+service_utils_rs.workspace = true
+sqlx_utils_rs.workspace = true
+
+# service protocol declaration: `service_protocol!` expands to irpc and tracing
+irpc.workspace = true
+tracing.workspace = true
+
+# encoding
+serde.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+
+#
+# crypto and identity
+ed25519-dalek.workspace = true
+rand.workspace = true
+zeroize = "1"
+
+#
+# errors and durable authority state
+thiserror.workspace = true
+sqlx = { workspace = true, features = ["sqlite", "runtime-tokio"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+keyring-core = { version = "1.0", default-features = false }
+tempfile.workspace = true
+url.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
