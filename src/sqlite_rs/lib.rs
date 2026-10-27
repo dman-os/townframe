@@ -574,12 +574,12 @@ impl ConnSlot {
         write: bool,
     ) -> SqlResult<Self> {
         let conn = RusConnection::open(path).map_err(SqlError::from)?;
-        for (pragma, value) in [
-            ("journal_mode", "WAL"),
-            ("foreign_keys", "ON"),
-            ("busy_timeout", "5000"),
-            ("synchronous", "NORMAL"),
-        ] {
+        // The busy timeout comes first: entering WAL may have to wait on
+        // another connection's conversion of the same file.
+        conn.pragma_update(None, "busy_timeout", 5000)
+            .map_err(SqlError::from)?;
+        Self::enter_wal(&conn)?;
+        for (pragma, value) in [("foreign_keys", "ON"), ("synchronous", "NORMAL")] {
             conn.pragma_update(None, pragma, value)
                 .map_err(SqlError::from)?;
         }
@@ -592,6 +592,32 @@ impl ConnSlot {
             conn: Arc::new(StdMutex::new(conn)),
             counter,
         })
+    }
+
+    /// Puts the file in WAL mode, which persists in the file once set.
+    ///
+    /// Converting a rollback-journal file reads its header under a shared lock
+    /// and then upgrades to a write lock to rewrite it. SQLite never runs the
+    /// busy handler for an upgrade from a held read lock, because two
+    /// upgraders waiting on each other would deadlock, so a connection that
+    /// loses the race to convert a fresh file gets `SQLITE_BUSY` at once
+    /// whatever the busy timeout. The winner converts inside a write
+    /// transaction. `BEGIN IMMEDIATE` starts from no lock, so it does run the
+    /// busy handler and returns once that transaction is over; the second
+    /// switch then finds the file already in WAL (or, if the lock holder was
+    /// not converting, converts it uncontended).
+    fn enter_wal(conn: &RusConnection) -> SqlResult<()> {
+        let set_wal = || conn.pragma_update(None, "journal_mode", "WAL");
+        match set_wal() {
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::DatabaseBusy =>
+            {
+                conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+                    .map_err(SqlError::from)?;
+                set_wal().map_err(SqlError::from)
+            }
+            other => other.map_err(SqlError::from),
+        }
     }
 }
 
@@ -1279,6 +1305,35 @@ mod tests {
             cache_size_kib: -2000,
             statement_cache_size: 64,
         })
+    }
+
+    #[test]
+    fn a_connection_that_loses_the_race_to_enter_wal_waits_for_the_winner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("race.sqlite");
+        // A write transaction on the still-rollback-mode file is what the
+        // winner of a conversion race holds: the opener's switch reads the
+        // header under it and is then refused the upgrade without a wait.
+        let winner = RusConnection::open(&path).expect("open winner");
+        winner
+            .execute_batch("BEGIN IMMEDIATE; CREATE TABLE converted (id INTEGER);")
+            .expect("winner write transaction");
+        let opener = std::thread::spawn({
+            let path = path.clone();
+            move || ConnSlot::open(&path, &RuntimeConfig::default(), Arc::default(), true).map(drop)
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        winner.execute_batch("COMMIT").expect("winner commit");
+        opener
+            .join()
+            .expect("opener panicked")
+            .expect("the loser waits for the winner instead of failing busy");
+        drop(winner);
+        let mode: String = RusConnection::open(&path)
+            .expect("reopen")
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("journal mode");
+        assert_eq!(mode, "wal");
     }
 
     #[tokio::test]
