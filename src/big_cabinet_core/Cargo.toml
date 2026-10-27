@@ -1,0 +1,44 @@
+[package]
+name = "big_cabinet_core"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "big_cabinet_core"
+path = "lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = ["manifest"]
+schemars = ["dep:schemars"]
+manifest = ["schemars"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+data-encoding.workspace = true
+# An instant is stored as milliseconds and written as RFC 3339, and jiff is what a schema in this tree
+# states one with.
+jiff = { version = "0.2", features = ["serde"] }
+# `facet::Extra` keeps the field order a peer sent; `serde_json::Map` is a `BTreeMap` here.
+indexmap = { version = "2", features = ["serde"] }
+schemars = { version = "1.2", features = ["jiff02", "indexmap2"], optional = true }
+thiserror.workspace = true
+jsonschema = { version = "0.42.0", default-features = false }
+displaydoc.workspace = true
+autosurgeon = { workspace = true, features = ["uuid"] }
+automerge = { workspace = true }
+
+[dev-dependencies]
+# The declaration macro the facet tests exercise.
+macros = { path = "../macros" }
+panproto-lens = "=0.74.4"
+panproto-mig = "=0.74.4"
+panproto-protocols = "=0.74.4"
+panproto-schema = "=0.74.4"
+panproto-vcs = "=0.74.4"
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
