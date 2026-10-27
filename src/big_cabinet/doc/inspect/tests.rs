@@ -7,7 +7,7 @@ use automerge::ObjId;
 use automerge::ObjType;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use big_cabinet_core::FacetKey;
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AttenuateCapability;
 use big_cabinet_core::authority::CapId;
@@ -18,13 +18,13 @@ use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Bytes;
 use big_cabinet_core::dmeta::ClaimOperation;
+use big_cabinet_core::dmeta::DatumClaim;
+use big_cabinet_core::dmeta::DatumSignature;
 use big_cabinet_core::dmeta::DocId;
-use big_cabinet_core::dmeta::FacetClaim;
-use big_cabinet_core::dmeta::FacetSignature;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeValue;
 use big_cabinet_core::dmeta::SignatureBytes;
-use big_cabinet_core::dmeta::SignedFacetClaim;
+use big_cabinet_core::dmeta::SignedDatumClaim;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::dmeta::cid_of;
 use big_cabinet_core::dmeta::encode_native;
@@ -50,7 +50,7 @@ use service_utils_rs::XrpcRouter;
 use service_utils_rs::xrpc;
 use std::sync::Arc;
 
-const FACET: &str = "org.example.note/main";
+const DATUM: &str = "org.example.note/main";
 const DMETA: &str = "org.example.daybook.dmeta/main";
 
 struct Fixture {
@@ -65,7 +65,7 @@ struct Fixture {
     docs_stop: Option<StopToken>,
     document: BigDocHandle,
     capability: Capability,
-    expected: UnsafeFacetInspection,
+    expected: UnsafeDatumInspection,
 }
 
 impl Fixture {
@@ -137,14 +137,14 @@ impl Fixture {
         let doc_uuid = Uuid7::new();
         let public_key = MultibaseKey::try_from(key.verifying_key().as_bytes().as_slice()).unwrap();
         let mut initial = Automerge::new();
-        let (facets, signatures, bindings) = {
+        let (datums, signatures, bindings) = {
             let mut tx = initial.transaction();
-            let facets = tx
-                .put_object(automerge::ROOT, "facets", ObjType::Map)
+            let datums = tx
+                .put_object(automerge::ROOT, "datums", ObjType::Map)
                 .unwrap();
-            let dmeta = tx.put_object(&facets, DMETA, ObjType::Map).unwrap();
-            let aliases = tx.put_object(&dmeta, "facetUuids", ObjType::Map).unwrap();
-            tx.put(&aliases, alias.to_string(), FACET).unwrap();
+            let dmeta = tx.put_object(&datums, DMETA, ObjType::Map).unwrap();
+            let aliases = tx.put_object(&dmeta, "datumUuids", ObjType::Map).unwrap();
+            tx.put(&aliases, alias.to_string(), DATUM).unwrap();
             let bindings = tx.put_object(&dmeta, "branchUuids", ObjType::Map).unwrap();
             let actors = tx.put_object(&dmeta, "actors", ObjType::Map).unwrap();
             let actor_meta = tx
@@ -152,23 +152,23 @@ impl Fixture {
                 .unwrap();
             tx.put(&actor_meta, "pubkey", public_key.to_string())
                 .unwrap();
-            let metadata = tx.put_object(&dmeta, "facets", ObjType::Map).unwrap();
-            let facet_meta = tx.put_object(&metadata, FACET, ObjType::Map).unwrap();
+            let metadata = tx.put_object(&dmeta, "datums", ObjType::Map).unwrap();
+            let datum_meta = tx.put_object(&metadata, DATUM, ObjType::Map).unwrap();
             let signatures = tx
-                .put_object(&facet_meta, "signatures", ObjType::List)
+                .put_object(&datum_meta, "signatures", ObjType::List)
                 .unwrap();
             tx.commit();
-            (facets, signatures, bindings)
+            (datums, signatures, bindings)
         };
         let document = repo.create_doc(initial).await.unwrap();
         let doc_id = document.document_id();
-        let facet_key: FacetKey = FACET.parse().unwrap();
+        let datum_key: DatumKey = DATUM.parse().unwrap();
         let native = NativeValue::Bytes(vec![0, 255, 128]);
-        let signed = SignedFacetClaim {
+        let signed = SignedDatumClaim {
             actor_public_key: public_key.clone(),
-            claim: FacetClaim {
+            claim: DatumClaim {
                 origin_document: doc_id.clone(),
-                facet_key: facet_key.clone(),
+                datum_key: datum_key.clone(),
                 chosen_uuid: alias,
                 actor_uuid: actor,
                 operation: ClaimOperation::Set,
@@ -183,7 +183,7 @@ impl Fixture {
                 .as_slice(),
         )
         .unwrap();
-        let signed = SignedFacetClaim {
+        let signed = SignedDatumClaim {
             signature,
             ..signed
         };
@@ -193,7 +193,7 @@ impl Fixture {
                 let parents = doc.get_heads();
                 let automerge_actor = Bytes::from(doc.get_actor().to_bytes().to_vec());
                 let mut tx = doc.transaction();
-                tx.put(&facets, FACET, vec![0_u8, 255, 128]).unwrap();
+                tx.put(&datums, DATUM, vec![0_u8, 255, 128]).unwrap();
                 let marker = tx.insert_object(&signatures, 0, ObjType::Map).unwrap();
                 tx.put(&marker, "actorUuid", actor.to_string()).unwrap();
                 tx.put(&marker, "docUuid", doc_uuid.to_string()).unwrap();
@@ -210,19 +210,19 @@ impl Fixture {
             .mint_inspection_handle(doc_id.clone(), issuer.capability)
             .await
             .unwrap();
-        let expected = UnsafeFacetInspection {
+        let expected = UnsafeDatumInspection {
             native_value: Some(encode_native(&native).into()),
             schema_known: false,
-            claims: FacetClaimsInspection {
+            claims: DatumClaimsInspection {
                 doc_id,
-                facet_key,
+                datum_key,
                 heads: vec![introduction_hash],
                 scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
-                evidence: vec![FacetClaimEvidence {
+                evidence: vec![DatumClaimEvidence {
                     marker: marker.to_string(),
                     result: SignatureEvidence::VerifiedSignature {
                         evidence: Box::new(VerifiedSignatureEvidence {
-                            signature: FacetSignature {
+                            signature: DatumSignature {
                                 actor_uuid: actor,
                                 doc_uuid,
                                 signature: signed.signature,
@@ -257,11 +257,11 @@ impl Fixture {
         }
     }
 
-    fn request(&self) -> UnsafeInspectFacet {
-        UnsafeInspectFacet {
+    fn request(&self) -> UnsafeInspectDatum {
+        UnsafeInspectDatum {
             capability: self.capability.capability_id,
             doc_id: self.document.document_id(),
-            facet_key: FACET.parse().unwrap(),
+            datum_key: DATUM.parse().unwrap(),
             heads: self.expected.claims.heads.clone(),
         }
     }
@@ -300,9 +300,9 @@ impl Fixture {
     async fn unsigned_value(&self, value: automerge::ScalarValue) -> Vec<ChangeHash> {
         self.document
             .with_document(|doc| {
-                let (_, facets) = doc.get(automerge::ROOT, "facets").unwrap().unwrap();
+                let (_, datums) = doc.get(automerge::ROOT, "datums").unwrap().unwrap();
                 let mut tx = doc.transaction();
-                tx.put(&facets, FACET, value).unwrap();
+                tx.put(&datums, DATUM, value).unwrap();
                 tx.commit();
                 doc.get_heads()
             })
@@ -313,10 +313,10 @@ impl Fixture {
     async fn replace_signature(&self, bytes: Option<Vec<u8>>) -> (ObjId, Vec<ChangeHash>) {
         self.document
             .with_document(|doc| {
-                let (_, facets) = doc.get(automerge::ROOT, "facets").unwrap().unwrap();
-                let (_, dmeta) = doc.get(&facets, DMETA).unwrap().unwrap();
-                let (_, metadata) = doc.get(&dmeta, "facets").unwrap().unwrap();
-                let (_, metadata) = doc.get(&metadata, FACET).unwrap().unwrap();
+                let (_, datums) = doc.get(automerge::ROOT, "datums").unwrap().unwrap();
+                let (_, dmeta) = doc.get(&datums, DMETA).unwrap().unwrap();
+                let (_, metadata) = doc.get(&dmeta, "datums").unwrap().unwrap();
+                let (_, metadata) = doc.get(&metadata, DATUM).unwrap().unwrap();
                 let (_, signatures) = doc.get(&metadata, "signatures").unwrap().unwrap();
                 let (actor_uuid, doc_uuid) = match &self.expected.claims.evidence[0].result {
                     SignatureEvidence::VerifiedSignature { evidence } => {
@@ -369,15 +369,15 @@ async fn config(
         node_issuer: authority.node_issuer.clone(),
         access,
         sql: sqlite_rs::test_support::db(&[]).unwrap().clone(),
-        facet_set: None,
-        facet_ref: None,
+        datum_set: None,
+        datum_ref: None,
     }
 }
 
 async fn inspect(
     client: &Client<DocsProtocol>,
-    request: UnsafeInspectFacet,
-) -> Result<UnsafeFacetInspection, DocsError> {
+    request: UnsafeInspectDatum,
+) -> Result<UnsafeDatumInspection, DocsError> {
     client
         .call(RequestContext::root(), request)
         .await
@@ -389,15 +389,15 @@ async fn inspect(
 
 async fn claims(
     client: &Client<DocsProtocol>,
-    request: UnsafeInspectFacet,
-) -> Result<FacetClaimsInspection, DocsError> {
+    request: UnsafeInspectDatum,
+) -> Result<DatumClaimsInspection, DocsError> {
     client
         .call(
             RequestContext::root(),
-            InspectFacetClaims {
+            InspectDatumClaims {
                 capability: request.capability,
                 doc_id: request.doc_id,
-                facet_key: request.facet_key,
+                datum_key: request.datum_key,
                 heads: request.heads,
             },
         )
@@ -433,12 +433,12 @@ async fn explicit_heads_preserve_native_bytes_and_do_not_authenticate_unsigned_e
     empty.heads.clear();
     assert_eq!(
         inspect(client, empty).await.unwrap(),
-        UnsafeFacetInspection {
+        UnsafeDatumInspection {
             native_value: None,
             schema_known: false,
-            claims: FacetClaimsInspection {
+            claims: DatumClaimsInspection {
                 doc_id: fixture.document.document_id(),
-                facet_key: FACET.parse().unwrap(),
+                datum_key: DATUM.parse().unwrap(),
                 heads: Vec::new(),
                 scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
                 evidence: Vec::new(),
@@ -509,12 +509,12 @@ async fn missing_signature_bytes_is_forgery_and_does_not_poison_descendants() {
     let (marker, heads) = fixture.replace_signature(None).await;
     let mut request = fixture.request();
     request.heads = heads.clone();
-    let expected = FacetClaimsInspection {
+    let expected = DatumClaimsInspection {
         doc_id: request.doc_id.clone(),
-        facet_key: request.facet_key.clone(),
+        datum_key: request.datum_key.clone(),
         heads,
         scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
-        evidence: vec![FacetClaimEvidence {
+        evidence: vec![DatumClaimEvidence {
             marker: marker.to_string(),
             result: SignatureEvidence::ProvenForgery {
                 reason: "malformed witness: signature bytes".into(),
@@ -532,12 +532,12 @@ async fn missing_signature_bytes_is_forgery_and_does_not_poison_descendants() {
     let (marker, heads) = fixture.replace_signature(Some(vec![0; 64])).await;
     let mut request = fixture.request();
     request.heads = heads.clone();
-    let expected = FacetClaimsInspection {
+    let expected = DatumClaimsInspection {
         doc_id: request.doc_id.clone(),
-        facet_key: request.facet_key.clone(),
+        datum_key: request.datum_key.clone(),
         heads,
         scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
-        evidence: vec![FacetClaimEvidence {
+        evidence: vec![DatumClaimEvidence {
             marker: marker.to_string(),
             result: SignatureEvidence::ProvenForgery {
                 reason: "invalid signature".into(),
@@ -561,12 +561,12 @@ async fn invalid_signature_with_available_context_is_proven_forgery() {
     let (marker, heads) = fixture.replace_signature(Some(vec![0; 64])).await;
     let mut request = fixture.request();
     request.heads = heads.clone();
-    let expected = FacetClaimsInspection {
+    let expected = DatumClaimsInspection {
         doc_id: request.doc_id.clone(),
-        facet_key: request.facet_key.clone(),
+        datum_key: request.datum_key.clone(),
         heads,
         scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
-        evidence: vec![FacetClaimEvidence {
+        evidence: vec![DatumClaimEvidence {
             marker: marker.to_string(),
             result: SignatureEvidence::ProvenForgery {
                 reason: "invalid signature".into(),
@@ -730,11 +730,11 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
         claims(&fixture.docs.client, request.clone()).await.unwrap(),
         fixture.expected.claims
     );
-    let read = ReadFacets {
+    let read = ReadDatums {
         capability: resource.capability_id,
         doc_id: document.clone(),
         at: At::Current,
-        facets: None,
+        datums: None,
         optimistic: false,
     };
     fixture
@@ -749,7 +749,7 @@ async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
             .client
             .call(
                 RequestContext::root(),
-                ReadFacets {
+                ReadDatums {
                     capability: inspection.capability_id,
                     ..read
                 }

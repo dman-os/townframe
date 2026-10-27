@@ -1,13 +1,13 @@
 //! Schema-directed authoring, normalization, and hydration behavior.
 
 use super::*;
-use crate::facet::CodecError;
+use crate::datum::CodecError;
 use autosurgeon::Hydrate as _;
 
 /// The whole point of the facility: the codec reads what the schema says, not how the field is
-/// spelled. Two facets hold a field of the same name and the same Rust type, and the schema alone
+/// spelled. Two datums hold a field of the same name and the same Rust type, and the schema alone
 /// decides that one is bytes and the other an array of numbers.
-#[macros::facet(id = "org.example.named", closed)]
+#[macros::datum(id = "org.example.named", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Named {
@@ -15,7 +15,7 @@ struct Named {
     vector: Bytes,
 }
 
-#[macros::facet(id = "org.example.unnamed", closed)]
+#[macros::datum(id = "org.example.unnamed", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Unnamed {
@@ -29,19 +29,19 @@ fn the_schema_decides_and_the_spelling_of_a_field_does_not() {
     // Both fields carry the name the old heuristics keyed on, but each uses its declared
     // canonical JSON form. The schema, not the name, selects bytes versus a list.
     let declares = |declaration: Declaration, json: Value| -> &'static str {
-        let name = declaration.facet.name.clone();
+        let name = declaration.datum.name.clone();
         let universe = Universe::collect(vec![declaration]);
         let bundle = Bundle::new(&universe, Vec::new());
         let document = serde_json::to_value(bundle.document(&name).unwrap()).unwrap();
         let mut doc = AutoCommit::new();
         let stored = Stored::check(&compiled(&document), json.clone()).unwrap();
-        reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
-        let (_, facet) = doc
-            .get(&ROOT, automerge::Prop::Map("facet".to_owned()))
+        reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
+        let (_, datum) = doc
+            .get(&ROOT, automerge::Prop::Map("datum".to_owned()))
             .unwrap()
             .unwrap();
         let (member, _) = doc
-            .get(&facet, automerge::Prop::Map("vectorBase64".to_owned()))
+            .get(&datum, automerge::Prop::Map("vectorBase64".to_owned()))
             .unwrap()
             .unwrap();
         shape(&member)
@@ -140,15 +140,15 @@ fn a_storage_form_this_build_does_not_have_is_refused() {
 #[test]
 fn an_edited_text_is_the_text_the_document_holds() {
     let mut doc = AutoCommit::new();
-    doc.put_object(ROOT, "facet", ObjType::Map).unwrap();
+    doc.put_object(ROOT, "datum", ObjType::Map).unwrap();
     let mut edited = Text::from("hello");
     edited.0.splice(5, 0, " there");
-    autosurgeon::reconcile_prop(&mut doc, ROOT, facet(), &edited).unwrap();
+    autosurgeon::reconcile_prop(&mut doc, ROOT, datum(), &edited).unwrap();
 
-    let mut document = json!({"type": "object", "properties": {"facet": {"type": "string", "x-automerge": "text"}}});
+    let mut document = json!({"type": "object", "properties": {"datum": {"type": "string", "x-automerge": "text"}}});
     document["$defs"] = json!({});
     assert_eq!(
-        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
+        hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap(),
         json!("hello there")
     );
 }
@@ -159,10 +159,10 @@ fn an_edited_text_is_the_text_the_document_holds() {
 #[test]
 fn a_specialized_native_at_a_plain_declaration_is_refused() {
     let mut doc = AutoCommit::new();
-    doc.put(ROOT, "facet", automerge::ScalarValue::Timestamp(0))
+    doc.put(ROOT, "datum", automerge::ScalarValue::Timestamp(0))
         .unwrap();
-    let document = json!({"type": "object", "properties": {"facet": {"type": "string"}}});
-    let error = hydrate_value(&doc, &ROOT, facet(), &compiled(&document))
+    let document = json!({"type": "object", "properties": {"datum": {"type": "string"}}});
+    let error = hydrate_value(&doc, &ROOT, datum(), &compiled(&document))
         .expect_err("an instant at a position declared a string is refused");
     assert!(error.to_string().contains("an instant"), "{error}");
 
@@ -170,7 +170,7 @@ fn a_specialized_native_at_a_plain_declaration_is_refused() {
     // codec's edge is the payload as Automerge renders it here, bytes. Pin that rendering, because
     // the raw fallback spellings are defined on it, not on an interpretation no build has.
     let mut doc = AutoCommit::new();
-    let obj = doc.put_object(ROOT, "facet", ObjType::Map).unwrap();
+    let obj = doc.put_object(ROOT, "datum", ObjType::Map).unwrap();
     doc.put(
         &obj,
         "future",
@@ -194,7 +194,7 @@ fn a_specialized_native_at_a_plain_declaration_is_refused() {
 /// the schema does not declare have no declaration to follow.
 #[test]
 fn a_member_the_schema_does_not_name_is_plain_json() {
-    #[macros::facet(id = "org.example.open")]
+    #[macros::datum(id = "org.example.open")]
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     struct Open {
         named: Bytes,
@@ -211,9 +211,9 @@ fn a_member_the_schema_does_not_name_is_plain_json() {
     });
     let mut doc = AutoCommit::new();
     let stored = Stored::check(&compiled(&document), json.clone()).unwrap();
-    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+    reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
     assert_eq!(
-        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
+        hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap(),
         json,
         "the member nobody declared survives the round trip whole"
     );
@@ -260,10 +260,10 @@ fn a_number_is_stored_as_the_schema_declares_it() {
         json!({"signed": 1, "unsigned": 1, "float": 1}),
     )
     .unwrap();
-    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+    reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
 
     let (_, obj) = doc
-        .get(&ROOT, automerge::Prop::Map("facet".to_owned()))
+        .get(&ROOT, automerge::Prop::Map("datum".to_owned()))
         .unwrap()
         .unwrap();
     let held = |key: &str| {
@@ -282,7 +282,7 @@ fn a_number_is_stored_as_the_schema_declares_it() {
     );
 
     // The typed read is what proves it: this is the read that used to fail with `Unexpected(Uint)`.
-    let typed = Numbers::hydrate(&doc, &ROOT, facet()).expect("a declared number reads back");
+    let typed = Numbers::hydrate(&doc, &ROOT, datum()).expect("a declared number reads back");
     assert_eq!((typed.signed, typed.unsigned, typed.float), (1, 1, 1.0));
 }
 
@@ -306,10 +306,10 @@ fn a_number_type_written_as_a_list_or_without_a_width_is_still_read() {
         json!({"maybe": 1, "bare": 1, "undeclared": 1}),
     )
     .unwrap();
-    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+    reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
 
     let (_, obj) = doc
-        .get(&ROOT, automerge::Prop::Map("facet".to_owned()))
+        .get(&ROOT, automerge::Prop::Map("datum".to_owned()))
         .unwrap()
         .unwrap();
     let held = |key: &str| {
@@ -348,10 +348,10 @@ fn a_float_union_ref_normalizes_before_owned_write() {
     let compiled = CompiledSchema::compile(schema.clone()).unwrap();
     let mut doc = Automerge::new();
     let tx = doc.transaction();
-    let tx = reconcile_json_atomic(tx, &compiled, &ROOT, "facet".into(), json!(1.25)).unwrap();
+    let tx = reconcile_json_atomic(tx, &compiled, &ROOT, "datum".into(), json!(1.25)).unwrap();
     tx.commit();
     assert_eq!(
-        hydrate_value(&doc, &ROOT, "facet".into(), &compiled).unwrap(),
+        hydrate_value(&doc, &ROOT, "datum".into(), &compiled).unwrap(),
         json!("1.25")
     );
 }
@@ -570,9 +570,9 @@ fn a_float_round_trips_at_the_precision_its_json_had() {
     let value = json!({"single": 0.1f32, "double": 0.1f64});
     let mut doc = AutoCommit::new();
     let stored = Stored::check(&compiled(&document), value.clone()).unwrap();
-    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+    reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
     assert_eq!(
-        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
+        hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap(),
         value
     );
     assert_eq!(
@@ -593,10 +593,10 @@ fn a_number_json_cannot_state_is_refused() {
     assert_eq!(serde_json::to_string(&f64::NAN).unwrap(), "null");
 
     let mut doc = AutoCommit::new();
-    doc.put(ROOT, "facet", automerge::ScalarValue::F64(f64::NAN))
+    doc.put(ROOT, "datum", automerge::ScalarValue::F64(f64::NAN))
         .unwrap();
-    let document = json!({"type": "object", "properties": {"facet": {"type": "number"}}});
-    let error = hydrate_value(&doc, &ROOT, facet(), &compiled(&document))
+    let document = json!({"type": "object", "properties": {"datum": {"type": "number"}}});
+    let error = hydrate_value(&doc, &ROOT, datum(), &compiled(&document))
         .expect_err("NaN has no JSON form");
     assert!(error.to_string().contains("NaN"), "{error}");
 }
@@ -606,24 +606,24 @@ fn a_number_json_cannot_state_is_refused() {
 #[test]
 fn a_float_position_is_carried_as_the_string_the_convention_spells() {
     let document = document();
-    let facet = &document["$defs"]["Stored0"]["properties"];
+    let datum = &document["$defs"]["Stored0"]["properties"];
 
     // The convention: the number's `type` is carried as the string a float is spelled in, under
     // the keyword, and the width's `format` stays beside it.
-    assert_eq!(facet["fraction"]["type"], "string");
-    assert_eq!(facet["fraction"]["format"], "double");
-    assert_eq!(facet["fraction"]["x-automerge"], "float");
+    assert_eq!(datum["fraction"]["type"], "string");
+    assert_eq!(datum["fraction"]["format"], "double");
+    assert_eq!(datum["fraction"]["x-automerge"], "float");
     // The `null` of an option is not a float and is not spelled one.
-    assert_eq!(facet["maybe"]["type"], json!(["string", "null"]));
-    assert_eq!(facet["maybe"]["format"], "double");
+    assert_eq!(datum["maybe"]["type"], json!(["string", "null"]));
+    assert_eq!(datum["maybe"]["format"], "double");
     // A bare `f64` is the opt-out, stated by the field's marker, and the statement survives into
     // the schema the type derives: a plain number, named as one.
-    assert_eq!(facet["plain_number"]["type"], "number");
-    assert_eq!(facet["plain_number"]["x-automerge"], "number");
+    assert_eq!(datum["plain_number"]["type"], "number");
+    assert_eq!(datum["plain_number"]["x-automerge"], "number");
     assert!(
         matches!(
             Declaration::of::<Stored0>(),
-            Err(crate::facet::ShapeError::NotLexiconAligned { .. })
+            Err(crate::datum::ShapeError::NotLexiconAligned { .. })
         ),
         "a plain number is not a lexicon type"
     );
@@ -646,20 +646,20 @@ fn a_float_travels_as_a_decimal_string_and_a_number_arrives_too() {
     let write = |json: Value| {
         let mut doc = AutoCommit::new();
         let stored = Stored::check(&compiled(&document), complete_stored(json)).unwrap();
-        reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+        reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
         doc
     };
     let doc = write(json!({"maybe": 0.1}));
-    let projected = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
+    let projected = hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap();
     assert_eq!(projected["maybe"], json!("0.1"), "spelled at the f32 width");
 
     let doc = write(json!({"maybe": "0.1"}));
-    let projected = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
+    let projected = hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap();
     assert_eq!(projected["maybe"], json!("0.1"), "kept as it was spelled");
 
     // A whole number keeps the point that says it is not an integer.
     let doc = write(json!({"maybe": 30.0}));
-    let projected = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
+    let projected = hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap();
     assert_eq!(projected["maybe"], json!("30.0"));
 }
 
@@ -704,8 +704,8 @@ fn the_non_finite_values_travel_by_their_names() {
             complete_stored(json!({"fraction": spelled})),
         )
         .unwrap();
-        reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
-        let projected = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
+        reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
+        let projected = hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap();
         assert_eq!(projected["fraction"], json!(spelled));
         let round: f64 = projected["fraction"]
             .as_str()
@@ -803,10 +803,10 @@ fn a_consumer_that_holds_the_document_hydrates_it_typed() {
     });
     let mut doc = AutoCommit::new();
     let stored = Stored::check(&compiled(&document), complete_stored(json)).unwrap();
-    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+    reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
 
     // The typed read is the document's, and a typed `f64` is not a string anywhere on it.
-    let plain: Plain = autosurgeon::hydrate_prop(&doc, &ROOT, facet()).unwrap();
+    let plain: Plain = autosurgeon::hydrate_prop(&doc, &ROOT, datum()).unwrap();
     assert_eq!(plain.fraction, 0.1);
     assert_eq!(plain.maybe, Some(30.0));
     assert_eq!(plain.listed, vec![0.1, 1.5]);
@@ -815,7 +815,7 @@ fn a_consumer_that_holds_the_document_hydrates_it_typed() {
 
     // The same two models, side by side: the projection says the strings the convention spells,
     // the typed read says the floats.
-    let projected = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
+    let projected = hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap();
     assert_eq!(projected["fraction"], json!("0.1"));
     assert_eq!(plain.fraction, 0.1);
 }
@@ -839,11 +839,11 @@ fn a_rust_type_deserializes_the_json_the_document_repo_emits() {
     let document = document();
     let mut doc = AutoCommit::new();
     let stored = Stored::check(&compiled(&document), complete_stored(json)).unwrap();
-    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+    reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
 
     // What the repo emits is what the type's Deserialize reads: the convention's strings at a
     // declared float, the plain number at a bare one, and none.
-    let emitted = hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap();
+    let emitted = hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap();
     assert_eq!(emitted["fraction"], json!("0.1"));
     assert_eq!(emitted["maybe"], Value::Null);
     assert_eq!(emitted["plain_number"], json!(2.5));
@@ -855,7 +855,7 @@ fn a_rust_type_deserializes_the_json_the_document_repo_emits() {
     assert_eq!(value.plain_number, 2.5);
 }
 
-#[macros::facet(id = "org.example.nullable", closed)]
+#[macros::datum(id = "org.example.nullable", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct NullableCodecs {
@@ -884,12 +884,12 @@ fn optional_storage_forms_stay_nullable_and_round_trip() {
     });
     let mut doc = AutoCommit::new();
     let stored = Stored::check(&compiled(&document), json.clone()).unwrap();
-    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+    reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
     assert_eq!(
-        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
+        hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap(),
         json
     );
-    let (_, map) = doc.get(ROOT, "facet").unwrap().unwrap();
+    let (_, map) = doc.get(ROOT, "datum").unwrap().unwrap();
     assert_eq!(shape(&doc.get(&map, "bytes").unwrap().unwrap().0), "bytes");
     assert_eq!(
         shape(&doc.get(&map, "counter").unwrap().unwrap().0),
@@ -900,9 +900,9 @@ fn optional_storage_forms_stay_nullable_and_round_trip() {
     let absent = json!({"bytes": null, "counter": null, "text": null});
     let mut doc = AutoCommit::new();
     let stored = Stored::check(&compiled(&document), absent.clone()).unwrap();
-    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+    reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
     assert_eq!(
-        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
+        hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap(),
         absent
     );
 }

@@ -1,9 +1,9 @@
-use crate::FacetKey;
+use crate::DatumKey;
 use crate::authority::CapId;
 use crate::dmeta::Bytes;
+use crate::dmeta::DatumClaim;
+use crate::dmeta::DatumSignature;
 use crate::dmeta::DocId;
-use crate::dmeta::FacetClaim;
-use crate::dmeta::FacetSignature;
 use crate::dmeta::MultibaseKey;
 use automerge::ChangeHash;
 use serde::Deserialize;
@@ -17,9 +17,9 @@ pub enum EvidenceScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerifiedSignatureEvidence {
-    pub signature: FacetSignature,
+    pub signature: DatumSignature,
     pub actor_public_key: MultibaseKey,
-    pub claim: FacetClaim,
+    pub claim: DatumClaim,
     pub introduction_marker: String,
     pub introduction_hash: ChangeHash,
     pub parents: Vec<ChangeHash>,
@@ -47,39 +47,39 @@ pub enum SignatureEvidence {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FacetClaimEvidence {
+pub struct DatumClaimEvidence {
     pub marker: String,
     pub result: SignatureEvidence,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FacetClaimsInspection {
+pub struct DatumClaimsInspection {
     pub doc_id: DocId,
-    pub facet_key: FacetKey,
+    pub datum_key: DatumKey,
     pub heads: Vec<ChangeHash>,
     pub scope: EvidenceScope,
-    pub evidence: Vec<FacetClaimEvidence>,
+    pub evidence: Vec<DatumClaimEvidence>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UnsafeFacetInspection {
+pub struct UnsafeDatumInspection {
     pub native_value: Option<Bytes>,
     pub schema_known: bool,
-    pub claims: FacetClaimsInspection,
+    pub claims: DatumClaimsInspection,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UnsafeInspectFacet {
+pub struct UnsafeInspectDatum {
     pub capability: CapId,
     pub doc_id: DocId,
-    pub facet_key: FacetKey,
+    pub datum_key: DatumKey,
     pub heads: Vec<ChangeHash>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InspectFacetClaims {
+pub struct InspectDatumClaims {
     pub capability: CapId,
     pub doc_id: DocId,
-    pub facet_key: FacetKey,
+    pub datum_key: DatumKey,
     pub heads: Vec<ChangeHash>,
 }

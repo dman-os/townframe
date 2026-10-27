@@ -5,20 +5,20 @@ use automerge::ObjType;
 use automerge::ReadDoc;
 use automerge::ScalarValue;
 use automerge::Value;
-use big_cabinet_core::FacetKey;
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::dmeta::Bytes;
 use big_cabinet_core::dmeta::Cid;
 use big_cabinet_core::dmeta::ClaimOperation;
+use big_cabinet_core::dmeta::DatumClaim;
+use big_cabinet_core::dmeta::DatumSignature;
 use big_cabinet_core::dmeta::DocId;
-use big_cabinet_core::dmeta::FacetClaim;
-use big_cabinet_core::dmeta::FacetSignature;
 use big_cabinet_core::dmeta::InheritedWitness;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeReadBudget;
 use big_cabinet_core::dmeta::NativeReadError;
 use big_cabinet_core::dmeta::NativeValue;
 use big_cabinet_core::dmeta::SignatureBytes;
-use big_cabinet_core::dmeta::SignedFacetClaim;
+use big_cabinet_core::dmeta::SignedDatumClaim;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::dmeta::cid_of;
 use big_cabinet_core::dmeta::encode_native;
@@ -103,12 +103,12 @@ pub struct SignatureIntroduction {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReconstructedClaim {
     pub introduction: SignatureIntroduction,
-    pub signature: FacetSignature,
+    pub signature: DatumSignature,
     pub actor_public_key: MultibaseKey,
     /// The binding's actor URL and attribution certificate as they stood at the introduction.
     pub actor_url: Option<String>,
     pub certificate: Option<Bytes>,
-    pub claim: FacetClaim,
+    pub claim: DatumClaim,
     /// The canonical native bytes read at `introduction.resulting_heads` for a non-inherited claim.
     pub(crate) native: Option<Option<Vec<u8>>>,
 }
@@ -118,20 +118,20 @@ pub struct ReconstructedClaim {
 /// reconstruction uses at an introduction's parents, so a writer and a verifier cannot disagree.
 pub fn predecessor_ids(
     doc: &Automerge,
-    facet_key: &FacetKey,
+    datum_key: &DatumKey,
     heads: &[ChangeHash],
     budget: HistoryBudget,
 ) -> Result<Vec<Cid>, ClaimHistoryError> {
-    Reconstruction::new(doc, facet_key, budget).predecessor_ids(heads)
+    Reconstruction::new(doc, datum_key, budget).predecessor_ids(heads)
 }
 
 pub fn reconstruct_claim_for_marker(
     doc: &Automerge,
-    facet_key: &FacetKey,
+    datum_key: &DatumKey,
     marker: &ObjId,
     budget: HistoryBudget,
 ) -> ClaimHistoryResult {
-    let mut state = Reconstruction::new(doc, facet_key, budget);
+    let mut state = Reconstruction::new(doc, datum_key, budget);
     let result = doc
         .hash_for_opid(marker)
         .ok_or(ClaimHistoryError::MalformedWitness(
@@ -143,11 +143,11 @@ pub fn reconstruct_claim_for_marker(
 
 pub fn reconstruct_claim(
     doc: &Automerge,
-    facet_key: &FacetKey,
+    datum_key: &DatumKey,
     introduction_hash: ChangeHash,
     budget: HistoryBudget,
 ) -> ClaimHistoryResult {
-    let mut state = Reconstruction::new(doc, facet_key, budget);
+    let mut state = Reconstruction::new(doc, datum_key, budget);
     let result = (|| {
         state.check_heads(&[introduction_hash])?;
         let entries: Vec<_> = state
@@ -167,11 +167,11 @@ pub fn reconstruct_claim(
 
 pub fn reconstruct_current_claims(
     doc: &Automerge,
-    facet_key: &FacetKey,
+    datum_key: &DatumKey,
     heads: &[ChangeHash],
     budget: HistoryBudget,
 ) -> Result<Vec<ClaimHistoryEntry>, ClaimHistoryError> {
-    let mut state = Reconstruction::new(doc, facet_key, budget);
+    let mut state = Reconstruction::new(doc, datum_key, budget);
     state.check_heads(heads)?;
     let entries = state.entries(heads)?;
     let mut results = Vec::with_capacity(entries.len());
@@ -214,7 +214,7 @@ struct SignatureEntry {
 
 struct Reconstruction<'a> {
     doc: &'a Automerge,
-    facet_key: &'a FacetKey,
+    datum_key: &'a DatumKey,
     budget: HistoryBudget,
     native_budget: NativeReadBudget,
     claims_seen: usize,
@@ -225,10 +225,10 @@ struct Reconstruction<'a> {
 }
 
 impl<'a> Reconstruction<'a> {
-    fn new(doc: &'a Automerge, facet_key: &'a FacetKey, budget: HistoryBudget) -> Self {
+    fn new(doc: &'a Automerge, datum_key: &'a DatumKey, budget: HistoryBudget) -> Self {
         Self {
             doc,
-            facet_key,
+            datum_key,
             budget,
             native_budget: NativeReadBudget {
                 nodes: budget.max_value_nodes,
@@ -245,7 +245,7 @@ impl<'a> Reconstruction<'a> {
 
     fn verdict(&self, result: Result<ReconstructedClaim, ClaimHistoryError>) -> ClaimHistoryResult {
         let result = result.and_then(|claim| {
-            SignedFacetClaim {
+            SignedDatumClaim {
                 claim: claim.claim.clone(),
                 actor_public_key: claim.actor_public_key.clone(),
                 signature: claim.signature.signature.clone(),
@@ -354,7 +354,7 @@ impl Reconstruction<'_> {
                     "multiple message carriers",
                 ));
             }
-            let claim = FacetClaim::from_signing_bytes(witness.message.as_slice())
+            let claim = DatumClaim::from_signing_bytes(witness.message.as_slice())
                 .map_err(|_| ClaimHistoryError::MalformedWitness("inherited message"))?;
             if claim.origin_document != witness.origin_doc
                 || witness.value.as_ref().is_some_and(|value| {
@@ -367,17 +367,17 @@ impl Reconstruction<'_> {
             (claim, None)
         } else {
             let encoded = self
-                .facet_value(&resulting_heads)?
+                .datum_value(&resulting_heads)?
                 .map(|value| encode_native(&value));
-            let claim = FacetClaim {
+            let claim = DatumClaim {
                 // A signature reaches other documents unchanged through branches and merges, so
                 // the document its claim names is read from the binding of its `docUuid` at the
                 // introduction, never assumed to be the document being read.
                 origin_document: self.document(signature.doc_uuid, &resulting_heads)?,
-                facet_key: self.facet_key.clone(),
+                datum_key: self.datum_key.clone(),
                 chosen_uuid: *aliases
                     .first()
-                    .ok_or(ClaimHistoryError::MalformedWitness("facet UUID alias"))?,
+                    .ok_or(ClaimHistoryError::MalformedWitness("datum UUID alias"))?,
                 actor_uuid: signature.actor_uuid,
                 operation: if encoded.is_some() {
                     ClaimOperation::Set
@@ -401,7 +401,7 @@ impl Reconstruction<'_> {
             (claim, Some(encoded))
         };
         if claim.actor_uuid != signature.actor_uuid
-            || claim.facet_key != *self.facet_key
+            || claim.datum_key != *self.datum_key
             || !aliases.contains(&claim.chosen_uuid)
         {
             return Err(ClaimHistoryError::MalformedWitness("claim binding"));
@@ -469,7 +469,7 @@ impl Reconstruction<'_> {
             return Ok(entries.clone());
         }
         let mut lists = Vec::new();
-        for meta in self.facet_metas(heads)? {
+        for meta in self.datum_metas(heads)? {
             let values = self.doc.get_all_at(&meta, "signatures", heads)?;
             self.account(heads, values.len())?;
             for (value, list) in values {
@@ -535,17 +535,17 @@ impl Reconstruction<'_> {
 
     fn dmeta_maps(&mut self, heads: &[ChangeHash]) -> Result<Vec<ObjId>, ClaimHistoryError> {
         let mut result = Vec::new();
-        for facets in self.maps(&automerge::ROOT, "facets", heads)? {
-            result.extend(self.maps(&facets, "org.example.daybook.dmeta/main", heads)?);
+        for datums in self.maps(&automerge::ROOT, "datums", heads)? {
+            result.extend(self.maps(&datums, "org.example.daybook.dmeta/main", heads)?);
         }
         Ok(result)
     }
 
-    fn facet_metas(&mut self, heads: &[ChangeHash]) -> Result<Vec<ObjId>, ClaimHistoryError> {
+    fn datum_metas(&mut self, heads: &[ChangeHash]) -> Result<Vec<ObjId>, ClaimHistoryError> {
         let mut result = Vec::new();
         for dmeta in self.dmeta_maps(heads)? {
-            for facets in self.maps(&dmeta, "facets", heads)? {
-                result.extend(self.maps(&facets, &self.facet_key.to_string(), heads)?);
+            for datums in self.maps(&dmeta, "datums", heads)? {
+                result.extend(self.maps(&datums, &self.datum_key.to_string(), heads)?);
             }
         }
         Ok(result)
@@ -623,7 +623,7 @@ impl Reconstruction<'_> {
         &mut self,
         marker: &ObjId,
         heads: &[ChangeHash],
-    ) -> Result<FacetSignature, ClaimHistoryError> {
+    ) -> Result<DatumSignature, ClaimHistoryError> {
         let actor_uuid = Self::uuid(&self.text(marker, "actorUuid", heads)?)?;
         let bytes = self
             .bytes(marker, "signature", heads)?
@@ -651,7 +651,7 @@ impl Reconstruction<'_> {
             }
         };
         let doc_uuid = Self::uuid(&self.text(marker, "docUuid", heads)?)?;
-        Ok(FacetSignature {
+        Ok(DatumSignature {
             actor_uuid,
             signature,
             doc_uuid,
@@ -723,9 +723,9 @@ impl Reconstruction<'_> {
     fn aliases(&mut self, heads: &[ChangeHash]) -> Result<Vec<Uuid7>, ClaimHistoryError> {
         let mut aliases = Vec::new();
         let doc = self.doc;
-        let target = self.facet_key.to_string();
+        let target = self.datum_key.to_string();
         for dmeta in self.dmeta_maps(heads)? {
-            for index in self.maps(&dmeta, "facetUuids", heads)? {
+            for index in self.maps(&dmeta, "datumUuids", heads)? {
                 let length = doc.length_at(&index, heads);
                 self.account(heads, length)?;
                 for item in doc.map_range_at(&index, .., heads) {
@@ -752,7 +752,7 @@ impl Reconstruction<'_> {
                         }
                     }
                     if matches && other {
-                        return Err(ClaimHistoryError::MalformedWitness("rebound facet UUID"));
+                        return Err(ClaimHistoryError::MalformedWitness("rebound datum UUID"));
                     }
                     if matches {
                         aliases.push(Self::uuid(item.key.as_ref())?);
@@ -765,20 +765,20 @@ impl Reconstruction<'_> {
         Ok(aliases)
     }
 
-    fn facet_value(
+    fn datum_value(
         &mut self,
         heads: &[ChangeHash],
     ) -> Result<Option<NativeValue>, ClaimHistoryError> {
-        let Some((value, facets)) = self.doc.get_at(automerge::ROOT, "facets", heads)? else {
-            return Err(ClaimHistoryError::MalformedWitness("facets map"));
+        let Some((value, datums)) = self.doc.get_at(automerge::ROOT, "datums", heads)? else {
+            return Err(ClaimHistoryError::MalformedWitness("datums map"));
         };
         if value != Value::Object(ObjType::Map) {
-            return Err(ClaimHistoryError::MalformedWitness("facets map"));
+            return Err(ClaimHistoryError::MalformedWitness("datums map"));
         }
         NativeValue::read_at_heads(
             self.doc,
-            &facets,
-            self.facet_key.to_string(),
+            &datums,
+            self.datum_key.to_string(),
             heads,
             &mut self.native_budget,
         )

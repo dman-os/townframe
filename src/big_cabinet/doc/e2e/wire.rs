@@ -3,7 +3,7 @@
 
 use super::NOTE;
 use super::PLACEMENT;
-use super::facet_map;
+use super::datum_map;
 use super::key;
 use super::note;
 use automerge::ChangeHash;
@@ -12,8 +12,8 @@ use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::dmeta::Bytes;
 use big_cabinet_core::dmeta::ClaimOperation;
-use big_cabinet_core::dmeta::FacetClaim;
-use big_cabinet_core::dmeta::FacetSignature;
+use big_cabinet_core::dmeta::DatumClaim;
+use big_cabinet_core::dmeta::DatumSignature;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::SignatureBytes;
 use big_cabinet_core::dmeta::Uuid7;
@@ -28,8 +28,8 @@ fn hash(byte: u8) -> ChangeHash {
     ChangeHash([byte; 32])
 }
 
-fn version(bytes: &[u8]) -> FacetVersion {
-    FacetVersion {
+fn version(bytes: &[u8]) -> DatumVersion {
+    DatumVersion {
         heads: bytes.iter().map(|byte| hash(*byte)).collect(),
         clock: 0,
     }
@@ -54,10 +54,10 @@ fn command(text: &str) -> CommandId {
     CommandId::try_from(text.to_owned()).unwrap()
 }
 
-fn claim() -> FacetClaim {
-    FacetClaim {
+fn claim() -> DatumClaim {
+    DatumClaim {
         origin_document: document(1),
-        facet_key: key("main"),
+        datum_key: key("main"),
         chosen_uuid: uuid7(1),
         actor_uuid: uuid7(2),
         operation: ClaimOperation::Set,
@@ -69,7 +69,7 @@ fn claim() -> FacetClaim {
 fn verified_evidence() -> SignatureEvidence {
     SignatureEvidence::VerifiedSignature {
         evidence: Box::new(VerifiedSignatureEvidence {
-            signature: FacetSignature {
+            signature: DatumSignature {
                 actor_uuid: uuid7(2),
                 doc_uuid: uuid7(3),
                 signature: SignatureBytes::try_from(&[7u8; 64][..]).unwrap(),
@@ -87,18 +87,18 @@ fn verified_evidence() -> SignatureEvidence {
     }
 }
 
-fn claims_inspection() -> FacetClaimsInspection {
-    FacetClaimsInspection {
+fn claims_inspection() -> DatumClaimsInspection {
+    DatumClaimsInspection {
         doc_id: document(1),
-        facet_key: key("main"),
+        datum_key: key("main"),
         heads: vec![hash(7)],
         scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
         evidence: vec![
-            FacetClaimEvidence {
+            DatumClaimEvidence {
                 marker: "marker-1".into(),
                 result: verified_evidence(),
             },
-            FacetClaimEvidence {
+            DatumClaimEvidence {
                 marker: "marker-2".into(),
                 result: SignatureEvidence::Pending {
                     reason: "verification could not complete".into(),
@@ -133,9 +133,9 @@ fn write_mode_wire() {
             },
         ),
         (
-            "write_mode_if_facets_unchanged",
-            WriteMode::IfFacetsUnchanged {
-                facets: BTreeMap::from([(key("main"), version(&[2]))]),
+            "write_mode_if_datums_unchanged",
+            WriteMode::IfDatumsUnchanged {
+                datums: BTreeMap::from([(key("main"), version(&[2]))]),
             },
         ),
         (
@@ -151,52 +151,52 @@ fn write_mode_wire() {
 }
 
 #[test]
-fn facet_read_wire() {
+fn datum_read_wire() {
     for (name, read) in [
         (
-            "facet_read_accepted",
-            FacetRead::Accepted {
+            "datum_read_accepted",
+            DatumRead::Accepted {
                 value: note("hello"),
                 version: version(&[1]),
             },
         ),
         (
-            "facet_read_absent_written",
-            FacetRead::Absent {
+            "datum_read_absent_written",
+            DatumRead::Absent {
                 version: version(&[2]),
             },
         ),
         (
-            "facet_read_absent_never_written",
-            FacetRead::Absent {
+            "datum_read_absent_never_written",
+            DatumRead::Absent {
                 version: version(&[]),
             },
         ),
         (
-            "facet_read_pending",
-            FacetRead::Pending {
+            "datum_read_pending",
+            DatumRead::Pending {
                 reason: "verification could not complete".into(),
                 version: version(&[3]),
                 value: None,
             },
         ),
         (
-            "facet_read_pending_optimistic",
-            FacetRead::Pending {
+            "datum_read_pending_optimistic",
+            DatumRead::Pending {
                 reason: "verification could not complete".into(),
                 version: version(&[3]),
                 value: Some(note("unverified")),
             },
         ),
         (
-            "facet_read_rejected",
-            FacetRead::Rejected {
+            "datum_read_rejected",
+            DatumRead::Rejected {
                 reason: "unsigned value".into(),
             },
         ),
         (
-            "facet_read_undecodable",
-            FacetRead::Undecodable {
+            "datum_read_undecodable",
+            DatumRead::Undecodable {
                 reason: "not a string".into(),
                 version: version(&[4]),
             },
@@ -207,20 +207,20 @@ fn facet_read_wire() {
 }
 
 #[test]
-fn facets_read_wire() {
-    insta::assert_json_snapshot!(FacetsRead {
+fn datums_read_wire() {
+    insta::assert_json_snapshot!(DatumsRead {
         heads: vec![hash(1)],
-        facets: BTreeMap::from([
+        datums: BTreeMap::from([
             (
                 key("main"),
-                FacetRead::Accepted {
+                DatumRead::Accepted {
                     value: note("hello"),
                     version: version(&[2]),
                 },
             ),
             (
                 key("extra"),
-                FacetRead::Absent {
+                DatumRead::Absent {
                     version: version(&[]),
                 }
             ),
@@ -229,47 +229,47 @@ fn facets_read_wire() {
 }
 
 #[test]
-fn facet_listing_wire() {
-    insta::assert_json_snapshot!(FacetListing {
+fn datum_listing_wire() {
+    insta::assert_json_snapshot!(DatumListing {
         heads: vec![hash(1)],
-        facets: BTreeMap::from([(key("main"), version(&[2, 3]))]),
+        datums: BTreeMap::from([(key("main"), version(&[2, 3]))]),
     });
 }
 
 #[test]
-fn facet_observed_wire() {
+fn datum_observed_wire() {
     for (name, observed) in [
         (
-            "facet_observed_present",
-            FacetObserved::Entry {
+            "datum_observed_present",
+            DatumObserved::Entry {
                 revision: 7,
                 doc_id: document(1),
-                facet_key: key("main"),
-                facet: ObservedFacet::Present {
+                datum_key: key("main"),
+                datum: ObservedDatum::Present {
                     doc_heads: vec![hash(1)],
                     version: version(&[2]),
                 },
             },
         ),
         (
-            "facet_observed_access_lost",
-            FacetObserved::Entry {
+            "datum_observed_access_lost",
+            DatumObserved::Entry {
                 revision: 8,
                 doc_id: document(1),
-                facet_key: key("main"),
-                facet: ObservedFacet::AccessLost,
+                datum_key: key("main"),
+                datum: ObservedDatum::AccessLost,
             },
         ),
         (
-            "facet_observed_replay_complete",
-            FacetObserved::ReplayComplete { through: 9 },
+            "datum_observed_replay_complete",
+            DatumObserved::ReplayComplete { through: 9 },
         ),
     ] {
         insta::assert_json_snapshot!(name, observed);
     }
     insta::assert_json_snapshot!(
-        "observe_facets_doc",
-        ObserveFacets {
+        "observe_datums_doc",
+        ObserveDatums {
             capability: capability(1),
             scope: ObserveScope::Doc {
                 doc_id: document(1)
@@ -348,25 +348,25 @@ fn docs_error_wire() {
         (
             "error_unknown_schema",
             DocsError::UnknownSchema {
-                facet_tag: NOTE.into(),
+                datum_tag: NOTE.into(),
             },
         ),
         (
-            "error_system_facet",
-            DocsError::SystemFacet {
-                facet_key: key("main"),
+            "error_system_datum",
+            DocsError::SystemDatum {
+                datum_key: key("main"),
             },
         ),
         (
             "error_set_and_removed",
             DocsError::SetAndRemoved {
-                facet_key: key("main"),
+                datum_key: key("main"),
             },
         ),
         (
             "error_invalid_value",
             DocsError::InvalidValue {
-                facet_key: key("main"),
+                datum_key: key("main"),
                 reason: "not a string".into(),
             },
         ),
@@ -374,13 +374,13 @@ fn docs_error_wire() {
             "error_conflict",
             DocsError::Conflict {
                 heads: vec![hash(3)],
-                facets: BTreeMap::from([(key("main"), version(&[4]))]),
+                datums: BTreeMap::from([(key("main"), version(&[4]))]),
             },
         ),
         (
             "error_base_not_accepted",
             DocsError::BaseNotAccepted {
-                facet_key: key("main"),
+                datum_key: key("main"),
                 verdict: Unaccepted::Rejected {
                     reason: "unsigned value".into(),
                 },
@@ -422,7 +422,7 @@ fn create_doc_wire() {
         capability: capability(1),
         command: command("create-note-1"),
         placement: PLACEMENT.into(),
-        facets: facet_map(&[(&key("main"), note("hello"))]),
+        datums: datum_map(&[(&key("main"), note("hello"))]),
     });
 }
 
@@ -487,24 +487,24 @@ fn merge_doc_wire() {
 }
 
 #[test]
-fn write_facets_wire() {
+fn write_datums_wire() {
     for (name, request) in [
         (
-            "write_facets_with_command",
-            WriteFacets {
+            "write_datums_with_command",
+            WriteDatums {
                 capability: capability(1),
                 command: Some(command("write-1")),
                 doc_id: document(1),
                 mode: WriteMode::IfDocUnchanged {
                     heads: vec![hash(1)],
                 },
-                set: facet_map(&[(&key("main"), note("hello"))]),
+                set: datum_map(&[(&key("main"), note("hello"))]),
                 remove: BTreeSet::from([key("extra")]),
             },
         ),
         (
-            "write_facets_bare",
-            WriteFacets {
+            "write_datums_bare",
+            WriteDatums {
                 capability: capability(1),
                 command: None,
                 doc_id: document(1),
@@ -519,25 +519,25 @@ fn write_facets_wire() {
 }
 
 #[test]
-fn read_facets_wire() {
+fn read_datums_wire() {
     for (name, request) in [
         (
-            "read_facets_all",
-            ReadFacets {
+            "read_datums_all",
+            ReadDatums {
                 capability: capability(1),
                 doc_id: document(1),
                 at: At::Current,
-                facets: None,
+                datums: None,
                 optimistic: false,
             },
         ),
         (
-            "read_facets_named_optimistic",
-            ReadFacets {
+            "read_datums_named_optimistic",
+            ReadDatums {
                 capability: capability(1),
                 doc_id: document(1),
                 at: At::Heads(vec![hash(1)]),
-                facets: Some(BTreeSet::from([key("main")])),
+                datums: Some(BTreeSet::from([key("main")])),
                 optimistic: true,
             },
         ),
@@ -547,8 +547,8 @@ fn read_facets_wire() {
 }
 
 #[test]
-fn list_facets_wire() {
-    insta::assert_json_snapshot!(ListFacets {
+fn list_datums_wire() {
+    insta::assert_json_snapshot!(ListDatums {
         capability: capability(1),
         doc_id: document(1),
         at: At::Heads(vec![hash(1)]),
@@ -556,16 +556,16 @@ fn list_facets_wire() {
 }
 
 #[test]
-fn unsafe_inspect_facet_wire() {
-    insta::assert_json_snapshot!(UnsafeInspectFacet {
+fn unsafe_inspect_datum_wire() {
+    insta::assert_json_snapshot!(UnsafeInspectDatum {
         capability: capability(1),
         doc_id: document(1),
-        facet_key: key("main"),
+        datum_key: key("main"),
         heads: vec![hash(1)],
     });
     insta::assert_json_snapshot!(
-        "unsafe_facet_inspection",
-        UnsafeFacetInspection {
+        "unsafe_datum_inspection",
+        UnsafeDatumInspection {
             native_value: Some(Bytes::from(vec![4, 5, 6])),
             schema_known: true,
             claims: claims_inspection(),
@@ -574,14 +574,14 @@ fn unsafe_inspect_facet_wire() {
 }
 
 #[test]
-fn inspect_facet_claims_wire() {
-    insta::assert_json_snapshot!(InspectFacetClaims {
+fn inspect_datum_claims_wire() {
+    insta::assert_json_snapshot!(InspectDatumClaims {
         capability: capability(1),
         doc_id: document(1),
-        facet_key: key("main"),
+        datum_key: key("main"),
         heads: vec![hash(1)],
     });
-    insta::assert_json_snapshot!("facet_claims_inspection", claims_inspection());
+    insta::assert_json_snapshot!("datum_claims_inspection", claims_inspection());
 }
 
 #[test]

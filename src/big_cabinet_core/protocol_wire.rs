@@ -16,10 +16,10 @@ use crate::doc::DocAvailability;
 use crate::doc::DocsProtocol;
 use crate::doc::GetDocAvailability;
 use crate::doc::LocalDocUsability;
+use crate::doc::ObserveDatums;
 use crate::doc::ObserveDocAvailability;
-use crate::doc::ObserveFacets;
 use crate::doc::ObserveScope;
-use crate::doc::ReadFacets;
+use crate::doc::ReadDatums;
 use crate::drawer::protocol::DrawersProtocol;
 use crate::drawer::protocol::GetDrawer;
 use serde::Serialize;
@@ -94,14 +94,14 @@ fn core_protocol_metadata_wire() {
             .unary
             .contains(&MintCapability::XRPC)
     );
-    assert!(DocsProtocol::OPERATIONS.unary.contains(&ReadFacets::XRPC));
+    assert!(DocsProtocol::OPERATIONS.unary.contains(&ReadDatums::XRPC));
     assert!(
         DocsProtocol::OPERATIONS
             .stream
-            .contains(&ObserveFacets::XRPC)
+            .contains(&ObserveDatums::XRPC)
     );
     assert!(DrawersProtocol::OPERATIONS.unary.contains(&GetDrawer::XRPC));
-    assert_eq!(ObserveFacets::XRPC.output_schema, "FacetObserved");
+    assert_eq!(ObserveDatums::XRPC.output_schema, "DatumObserved");
     assert!(
         AuthorityProtocol::OPERATIONS
             .unary
@@ -144,10 +144,10 @@ fn core_protocol_channels_wire() {
     }
     unary::<MintCapability, AuthorityProtocol>();
     unary::<ResolveAuthority, AuthorityProtocol>();
-    unary::<ReadFacets, DocsProtocol>();
+    unary::<ReadDatums, DocsProtocol>();
     unary::<GetDocAvailability, DocsProtocol>();
     unary::<GetDrawer, DrawersProtocol>();
-    stream::<ObserveFacets, DocsProtocol>();
+    stream::<ObserveDatums, DocsProtocol>();
     stream::<ObserveDocAvailability, DocsProtocol>();
 }
 
@@ -397,18 +397,18 @@ fn core_protocol_envelopes_wire() {
     let doc_id = DocId::new([2; 32]);
     let docs = DocsProtocol::from(Envelope::new(
         context.clone(),
-        ReadFacets {
+        ReadDatums {
             capability,
             doc_id: doc_id.clone(),
             at: At::Current,
-            facets: None,
+            datums: None,
             optimistic: false,
         },
     ));
     wire(
         &docs,
         expected(
-            "ReadFacets",
+            "ReadDatums",
             json!({
                 "capability": capability,
                 "docId": doc_id, "at": {"at": "current"}, "optimistic": false,
@@ -417,7 +417,7 @@ fn core_protocol_envelopes_wire() {
     );
     let observed = DocsProtocol::from(Envelope::new(
         context.clone(),
-        ObserveFacets {
+        ObserveDatums {
             capability,
             scope: ObserveScope::Doc {
                 doc_id: doc_id.clone(),
@@ -428,7 +428,7 @@ fn core_protocol_envelopes_wire() {
     wire(
         &observed,
         expected(
-            "ObserveFacets",
+            "ObserveDatums",
             json!({
                 "capability": capability,
                 "scope": {"scope": "doc", "docId": doc_id}, "after": 0,

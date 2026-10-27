@@ -1,4 +1,4 @@
-//! `ObserveFacets`: doc-scoped observation over the ungated `facet_set`
+//! `ObserveDatums`: doc-scoped observation over the ungated `datum_set`
 //! projection, filtered by the same read access as gated reads (ADR 009 §6).
 
 use super::*;
@@ -7,17 +7,17 @@ use futures::StreamExt;
 /// The next frontier entry on an observation stream, skipping the
 /// replay-complete marker.
 async fn next_entry(
-    events: &mut (impl futures::Stream<Item = Result<FacetObserved, ClientError<DocsError>>> + Unpin),
-) -> (DocId, FacetKey, ObservedFacet) {
+    events: &mut (impl futures::Stream<Item = Result<DatumObserved, ClientError<DocsError>>> + Unpin),
+) -> (DocId, DatumKey, ObservedDatum) {
     loop {
         match events.next().await.unwrap().unwrap() {
-            FacetObserved::Entry {
+            DatumObserved::Entry {
                 doc_id,
-                facet_key,
-                facet,
+                datum_key,
+                datum,
                 ..
-            } => return (doc_id, facet_key, facet),
-            FacetObserved::ReplayComplete { .. } => continue,
+            } => return (doc_id, datum_key, datum),
+            DatumObserved::ReplayComplete { .. } => continue,
         }
     }
 }
@@ -35,7 +35,7 @@ async fn doc_observation_replays_then_streams_membership_and_versions() {
         .client()
         .subscribe(
             RequestContext::root(),
-            ObserveFacets {
+            ObserveDatums {
                 capability: node
                     .capability(
                         &alice,
@@ -54,11 +54,11 @@ async fn doc_observation_replays_then_streams_membership_and_versions() {
         )
         .await
         .unwrap();
-    let (doc_id, facet_key, facet) = next_entry(&mut events).await;
+    let (doc_id, datum_key, datum) = next_entry(&mut events).await;
     assert_eq!(doc_id, document);
-    assert_eq!(facet_key, key("main"));
-    let ObservedFacet::Present { version, .. } = &facet else {
-        panic!("expected a present replay entry, got {facet:?}");
+    assert_eq!(datum_key, key("main"));
+    let ObservedDatum::Present { version, .. } = &datum else {
+        panic!("expected a present replay entry, got {datum:?}");
     };
     assert!(version.clock > 0);
     let first_clock = version.clock;
@@ -74,8 +74,8 @@ async fn doc_observation_replays_then_streams_membership_and_versions() {
     .unwrap();
     let mut clock = first_clock;
     while clock <= first_clock {
-        let (_, _, facet) = next_entry(&mut events).await;
-        if let ObservedFacet::Present { version, .. } = &facet {
+        let (_, _, datum) = next_entry(&mut events).await;
+        if let ObservedDatum::Present { version, .. } = &datum {
             clock = version.clock;
         }
     }
@@ -84,8 +84,8 @@ async fn doc_observation_replays_then_streams_membership_and_versions() {
         .await
         .unwrap();
     loop {
-        let (_, _, facet) = next_entry(&mut events).await;
-        if matches!(facet, ObservedFacet::Removed { .. }) {
+        let (_, _, datum) = next_entry(&mut events).await;
+        if matches!(datum, ObservedDatum::Removed { .. }) {
             break;
         }
     }
@@ -123,7 +123,7 @@ async fn tag_observation_hides_documents_the_observer_cannot_read() {
         .client()
         .subscribe(
             RequestContext::root(),
-            ObserveFacets {
+            ObserveDatums {
                 capability,
                 scope: ObserveScope::Doc {
                     doc_id: created.doc_id.clone(),
@@ -141,10 +141,10 @@ async fn tag_observation_hides_documents_the_observer_cannot_read() {
         .client()
         .subscribe(
             RequestContext::root(),
-            ObserveFacets {
+            ObserveDatums {
                 capability,
                 scope: ObserveScope::Tag {
-                    tag: big_cabinet_core::FacetTag::new(NOTE).unwrap(),
+                    tag: big_cabinet_core::DatumTag::new(NOTE).unwrap(),
                 },
                 after: 0,
             },
@@ -154,9 +154,9 @@ async fn tag_observation_hides_documents_the_observer_cannot_read() {
     // Alice's document was never delivered to Mallory, so it is silently
     // omitted rather than named by an `AccessLost` entry: the first entry is
     // Mallory's own document.
-    let (doc_id, _, facet) = next_entry(&mut events).await;
+    let (doc_id, _, datum) = next_entry(&mut events).await;
     assert_eq!(doc_id, own.doc_id);
-    assert!(matches!(facet, ObservedFacet::Present { .. }), "{facet:?}");
+    assert!(matches!(datum, ObservedDatum::Present { .. }), "{datum:?}");
     drop(events);
     node.stop().await;
 }

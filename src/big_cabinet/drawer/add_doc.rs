@@ -4,7 +4,7 @@ use super::ledger::Op;
 use super::*;
 use crate::doc::pipeline::digest;
 use big_cabinet_core::doc::At;
-use big_cabinet_core::doc::ReadFacets;
+use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::drawer::DrawerDocEntry;
 use big_repo::keyhive_core::principal::identifier::Identifier;
 use std::collections::BTreeSet;
@@ -42,7 +42,7 @@ impl Core {
     }
 
     /// The receipt of an operation that found the roster already saying what it was asked to
-    /// say: the drawer doc's current heads, read as this service without verifying any facet.
+    /// say: the drawer doc's current heads, read as this service without verifying any datum.
     pub(crate) async fn roster_receipt(
         &self,
         context: &RequestContext,
@@ -60,11 +60,11 @@ impl Core {
                     self.docs()
                         .call(
                             context.child(),
-                            ReadFacets {
+                            ReadDatums {
                                 capability,
                                 doc_id: drawer.clone(),
                                 at: At::Current,
-                                facets: Some(BTreeSet::new()),
+                                datums: Some(BTreeSet::new()),
                                 optimistic: false,
                             },
                         )

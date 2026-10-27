@@ -1,4 +1,4 @@
-//! ADR 020 §7: the default read and the write base reject forged facet state.
+//! ADR 020 §7: the default read and the write base reject forged datum state.
 
 use super::*;
 use automerge::ActorId;
@@ -8,9 +8,9 @@ use automerge::PatchLog;
 use automerge::ROOT;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use big_cabinet_core::authority::SignFacetClaim;
+use big_cabinet_core::authority::SignDatumClaim;
 use big_cabinet_core::dmeta::ClaimOperation;
-use big_cabinet_core::dmeta::FacetClaim;
+use big_cabinet_core::dmeta::DatumClaim;
 use big_cabinet_core::dmeta::NativeValue;
 use big_cabinet_core::dmeta::cid_of;
 use big_cabinet_core::dmeta::encode_native;
@@ -21,38 +21,38 @@ fn object(doc: &impl ReadDoc, parent: &ObjId, prop: &str) -> ObjId {
     doc.get(parent, prop).unwrap().unwrap().1
 }
 
-fn record(doc: &impl ReadDoc, facet: &FacetKey) -> ObjId {
-    let facets = object(doc, &ROOT, "facets");
-    object(doc, &facets, &facet.to_string())
+fn record(doc: &impl ReadDoc, datum: &DatumKey) -> ObjId {
+    let datums = object(doc, &ROOT, "datums");
+    object(doc, &datums, &datum.to_string())
 }
 
-fn signatures(doc: &impl ReadDoc, facet: &FacetKey) -> ObjId {
-    let facets = object(doc, &ROOT, "facets");
-    let dmeta = object(doc, &facets, DMETA);
-    let metadata = object(doc, &dmeta, "facets");
-    let metadata = object(doc, &metadata, &facet.to_string());
+fn signatures(doc: &impl ReadDoc, datum: &DatumKey) -> ObjId {
+    let datums = object(doc, &ROOT, "datums");
+    let dmeta = object(doc, &datums, DMETA);
+    let metadata = object(doc, &dmeta, "datums");
+    let metadata = object(doc, &metadata, &datum.to_string());
     object(doc, &metadata, "signatures")
 }
 
-fn rejected(read: &FacetRead) -> &str {
+fn rejected(read: &DatumRead) -> &str {
     match read {
-        FacetRead::Rejected { reason } => reason,
-        other => panic!("expected a rejected facet, got {other:?}"),
+        DatumRead::Rejected { reason } => reason,
+        other => panic!("expected a rejected datum, got {other:?}"),
     }
 }
 
-fn base_refused(error: DocsError, facet: &FacetKey) -> Unaccepted {
+fn base_refused(error: DocsError, datum: &DatumKey) -> Unaccepted {
     match error {
-        DocsError::BaseNotAccepted { facet_key, verdict } if &facet_key == facet => verdict,
-        other => panic!("expected the base of {facet} to be refused, got {other:?}"),
+        DocsError::BaseNotAccepted { datum_key, verdict } if &datum_key == datum => verdict,
+        other => panic!("expected the base of {datum} to be refused, got {other:?}"),
     }
 }
 
 /// Plant an unsigned assignment to the note's text at `heads` under a foreign Automerge actor.
-fn unsigned_text(doc: &mut Automerge, facet: &FacetKey, heads: &[ChangeHash], text: &str) {
+fn unsigned_text(doc: &mut Automerge, datum: &DatumKey, heads: &[ChangeHash], text: &str) {
     doc.set_actor(ActorId::from([1_u8; 32]));
     let mut tx = doc.transaction_at(PatchLog::null(), heads).unwrap();
-    let record = record(&tx, facet);
+    let record = record(&tx, datum);
     tx.put(&record, "value", text).unwrap();
     tx.commit();
 }
@@ -71,7 +71,7 @@ async fn seeded(node: &Node) -> (Actor, WriteReceipt) {
 }
 
 #[tokio::test]
-async fn an_unsigned_edit_rejects_the_facet_for_reads_and_for_write_bases() {
+async fn an_unsigned_edit_rejects_the_datum_for_reads_and_for_write_bases() {
     let node = Node::boot().await;
     let (alice, created) = seeded(&node).await;
     let document = &created.doc_id;
@@ -116,9 +116,9 @@ async fn an_unsigned_edit_rejects_the_facet_for_reads_and_for_write_bases() {
 }
 
 /// The §6 scenario: an unsigned assignment that loses the visible conflict still stays in the
-/// facet's state. A writer building on that state is stopped at its base check, before signing.
+/// datum's state. A writer building on that state is stopped at its base check, before signing.
 #[tokio::test]
-async fn a_hidden_unsigned_contribution_rejects_the_facet_even_when_it_loses() {
+async fn a_hidden_unsigned_contribution_rejects_the_datum_even_when_it_loses() {
     let node = Node::boot().await;
     let (alice, created) = seeded(&node).await;
     let document = &created.doc_id;
@@ -208,7 +208,7 @@ async fn an_older_verified_base_stays_usable_beside_a_newer_forgery() {
 }
 
 #[tokio::test]
-async fn a_forgery_in_another_facet_leaves_this_one_readable_and_writable() {
+async fn a_forgery_in_another_datum_leaves_this_one_readable_and_writable() {
     let node = Node::boot().await;
     let (alice, created) = seeded(&node).await;
     let document = &created.doc_id;
@@ -220,8 +220,8 @@ async fn a_forgery_in_another_facet_leaves_this_one_readable_and_writable() {
         .read(&alice, document, At::Current, false)
         .await
         .unwrap();
-    rejected(&read.facets[&key("other")]);
-    assert_eq!(accepted(&read.facets[&key("main")]).0, &note("safe"));
+    rejected(&read.datums[&key("other")]);
+    assert_eq!(accepted(&read.datums[&key("main")]).0, &note("safe"));
     node.write(
         &alice,
         document,
@@ -235,7 +235,7 @@ async fn a_forgery_in_another_facet_leaves_this_one_readable_and_writable() {
 }
 
 #[tokio::test]
-async fn a_bogus_signature_entry_rejects_only_its_own_facet() {
+async fn a_bogus_signature_entry_rejects_only_its_own_datum() {
     let node = Node::boot().await;
     let (alice, created) = seeded(&node).await;
     let document = &created.doc_id;
@@ -308,17 +308,17 @@ utils_rs::table_tests! {
         }
         node.sabotage(document, |doc| {
             let mut tx = doc.transaction();
-            let facets = object(&tx, &ROOT, "facets");
-            let dmeta = object(&tx, &facets, DMETA);
-            let metadata = object(&tx, &dmeta, "facets");
+            let datums = object(&tx, &ROOT, "datums");
+            let dmeta = object(&tx, &datums, DMETA);
+            let metadata = object(&tx, &dmeta, "datums");
             let slot = object(&tx, &metadata, &key("main").to_string());
             let (parent, property) = match target {
-                "envelope" => (ROOT, "facets".to_string()),
-                "dmeta" => (facets.clone(), DMETA.to_string()),
-                "metadata_envelope" => (dmeta, "facets".to_string()),
+                "envelope" => (ROOT, "datums".to_string()),
+                "dmeta" => (datums.clone(), DMETA.to_string()),
+                "metadata_envelope" => (dmeta, "datums".to_string()),
                 "metadata" => (metadata, key("main").to_string()),
                 "signatures" => (slot, "signatures".to_string()),
-                "content" => (facets, key("main").to_string()),
+                "content" => (datums, key("main").to_string()),
                 other => panic!("unknown target {other}"),
             };
             if replace {
@@ -334,18 +334,18 @@ utils_rs::table_tests! {
         rejected(&read);
         let explicit = op(node.client().call(
             RequestContext::root(),
-            ReadFacets {
+            ReadDatums {
                 capability: node.capability(&alice, DocScope {
                     read: BTreeSet::from([document.clone()]),
                     ..DocScope::default()
                 }).await.unwrap(),
                 doc_id: document.clone(),
                 at: At::Current,
-                facets: Some(BTreeSet::from([key("main")])),
+                datums: Some(BTreeSet::from([key("main")])),
                 optimistic: true,
             },
         ).await).unwrap();
-        assert_eq!(explicit.facets[&key("main")], read);
+        assert_eq!(explicit.datums[&key("main")], read);
         for remove in [false, true] {
             let (set, removed) = if remove {
                 (Vec::new(), vec![key("main")])
@@ -359,8 +359,8 @@ utils_rs::table_tests! {
         assert_eq!(node.read_one(&alice, document, At::Current, &key("main")).await, read);
         assert_eq!(
             node.read_one(&alice, document, At::Current, &key("never-written")).await,
-            FacetRead::Absent {
-                version: FacetVersion {
+            DatumRead::Absent {
+                version: DatumVersion {
                     heads: Vec::new(),
                     clock: 0
                 }
@@ -424,18 +424,18 @@ async fn signed_outside(
     node_actor: ActorId,
     text: &str,
 ) {
-    let facet = key("main");
-    let stage = |doc: &mut Automerge, signature: Option<Vec<u8>>| -> FacetClaim {
+    let datum = key("main");
+    let stage = |doc: &mut Automerge, signature: Option<Vec<u8>>| -> DatumClaim {
         let base = doc.get_heads();
         let predecessors =
-            crate::doc::predecessor_ids(doc, &facet, &base, crate::doc::HistoryBudget::default())
+            crate::doc::predecessor_ids(doc, &datum, &base, crate::doc::HistoryBudget::default())
                 .unwrap();
         doc.set_actor(node_actor.clone());
         let mut tx = doc.transaction();
-        let record = record(&tx, &facet);
+        let record = record(&tx, &datum);
         tx.put(&record, "value", text).unwrap();
-        let facets = object(&tx, &ROOT, "facets");
-        let dmeta = object(&tx, &facets, DMETA);
+        let datums = object(&tx, &ROOT, "datums");
+        let dmeta = object(&tx, &datums, DMETA);
         let actors = object(&tx, &dmeta, "actors");
         let binding = tx
             .put_object(&actors, signer.actor_id.to_string(), ObjType::Map)
@@ -449,8 +449,8 @@ async fn signed_outside(
             signer.certificate.as_slice().to_vec(),
         )
         .unwrap();
-        let aliases = object(&tx, &dmeta, "facetUuids");
-        let target = facet.to_string();
+        let aliases = object(&tx, &dmeta, "datumUuids");
+        let target = datum.to_string();
         let chosen = tx
             .keys(&aliases)
             .filter(|alias| {
@@ -464,10 +464,10 @@ async fn signed_outside(
             .map(|alias| alias.parse::<uuid::Uuid>().unwrap())
             .min()
             .unwrap();
-        let native = NativeValue::read_at(&tx, &facets, facet.to_string())
+        let native = NativeValue::read_at(&tx, &datums, datum.to_string())
             .unwrap()
             .unwrap();
-        let list = signatures(&tx, &facet);
+        let list = signatures(&tx, &datum);
         tx.delete(&list, 0).unwrap();
         let entry = tx.insert_object(&list, 0, ObjType::Map).unwrap();
         tx.put(&entry, "actorUuid", signer.actor_id.to_string())
@@ -491,9 +491,9 @@ async fn signed_outside(
             signature.clone().unwrap_or(vec![0; 64]),
         )
         .unwrap();
-        let claim = FacetClaim {
+        let claim = DatumClaim {
             origin_document: document.clone(),
-            facet_key: facet.clone(),
+            datum_key: datum.clone(),
             chosen_uuid: chosen.try_into().unwrap(),
             actor_uuid: signer.actor_id,
             operation: ClaimOperation::Set,
@@ -548,7 +548,7 @@ async fn signed_outside(
         .client
         .call(
             RequestContext::root(),
-            SignFacetClaim {
+            SignDatumClaim {
                 actor: signer.capability,
                 claim: claim.unwrap(),
             },
@@ -597,10 +597,10 @@ utils_rs::table_tests! {
         let bob = node.writer("bob").await;
         signed_outside(&node, document, &bob, damage, node_actor(&node, document), "unattributed").await;
         let before = node.read(&alice, document, At::Current, false).await.unwrap();
-        assert!(rejected(&before.facets[&key("main")]).contains(reason), "{damage:?}: {before:?}");
+        assert!(rejected(&before.datums[&key("main")]).contains(reason), "{damage:?}: {before:?}");
         let optimistic = node.read(&alice, document, At::Current, true).await.unwrap();
         assert_eq!(optimistic, before, "optimistic reads never expose rejected values");
-        assert_eq!(accepted(&before.facets[&key("other")]).0, &note("other"));
+        assert_eq!(accepted(&before.datums[&key("other")]).0, &note("other"));
         for remove in [false, true] {
             let (set, removed) = if remove {
                 (Vec::new(), vec![key("main")])
@@ -623,7 +623,7 @@ malformed_evidence! {
     absent_certificate: (Damage::MissingCertificate, "attribution certificate"),
     absent_actor_url: (Damage::MissingUrl, "attribution certificate or URL"),
     absent_actor_binding: (Damage::MissingActor, "unbound actor"),
-    absent_facet_alias: (Damage::MissingAlias, "facet UUID alias"),
+    absent_datum_alias: (Damage::MissingAlias, "datum UUID alias"),
     absent_actor_uuid: (Damage::MissingActorUuid, "metadata text"),
     unbound_doc_uuid: (Damage::UnboundDocUuid, "unbound document UUID"),
     absent_signature: (Damage::MissingSignature, "signature bytes"),
@@ -653,21 +653,21 @@ async fn unverifiable_encoding_has_no_value_unless_optimistic_and_cannot_be_writ
         .read(&alice, document, At::Current, false)
         .await
         .unwrap();
-    let facet_heads = match &read.facets[&key("main")] {
-        FacetRead::Pending {
+    let datum_heads = match &read.datums[&key("main")] {
+        DatumRead::Pending {
             value: None,
             version,
             reason,
         } if reason.contains("unsupported") => version.heads.clone(),
         other => panic!("expected incomplete verification, got {other:?}"),
     };
-    assert_eq!(facet_heads.len(), 1);
+    assert_eq!(datum_heads.len(), 1);
     let optimistic = node
         .read(&alice, document, At::Current, true)
         .await
         .unwrap();
     assert!(
-        matches!(&optimistic.facets[&key("main")], FacetRead::Pending { value: Some(value), version: actual, .. } if value == &note("unverified") && actual.heads == facet_heads)
+        matches!(&optimistic.datums[&key("main")], DatumRead::Pending { value: Some(value), version: actual, .. } if value == &note("unverified") && actual.heads == datum_heads)
     );
     let refused = node
         .write(

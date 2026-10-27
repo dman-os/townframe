@@ -9,21 +9,21 @@ use super::super::commands::State;
 use super::*;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
-use big_cabinet_core::dmeta::BRANCH_FACET_TAG;
+use big_cabinet_core::dmeta::BRANCH_DATUM_TAG;
 
 fn command(text: &str) -> CommandId {
     CommandId::try_from(text.to_owned()).unwrap()
 }
 
-fn branch_key(branch: &DocId) -> FacetKey {
-    format!("{BRANCH_FACET_TAG}/{branch}").parse().unwrap()
+fn branch_key(branch: &DocId) -> DatumKey {
+    format!("{BRANCH_DATUM_TAG}/{branch}").parse().unwrap()
 }
 
 fn branch_value(path: &str, origin: &WriteReceipt) -> Value {
     json!({
         "path": path,
         "from": {
-            "facetRef": format!("db+facet:/{}/{}", origin.doc_id, branch_key(&origin.doc_id)),
+            "datumRef": format!("db+datum:/{}/{}", origin.doc_id, branch_key(&origin.doc_id)),
             "refHeads": origin.heads,
         },
     })
@@ -102,8 +102,8 @@ impl Node {
     pub(super) async fn claims(
         &self,
         document: &DocId,
-        facet: &FacetKey,
-    ) -> Vec<FacetClaimEvidence> {
+        datum: &DatumKey,
+    ) -> Vec<DatumClaimEvidence> {
         let docs = self.docs.as_ref().unwrap();
         let capability = docs
             .mint_inspection_handle(document.clone(), self.docs_actor.capability)
@@ -119,10 +119,10 @@ impl Node {
             .client()
             .call(
                 RequestContext::root(),
-                InspectFacetClaims {
+                InspectDatumClaims {
                     capability: capability.capability_id,
                     doc_id: document.clone(),
-                    facet_key: facet.clone(),
+                    datum_key: datum.clone(),
                     heads,
                 },
             )
@@ -132,7 +132,7 @@ impl Node {
     }
 }
 
-fn origins(evidence: &[FacetClaimEvidence]) -> BTreeSet<DocId> {
+fn origins(evidence: &[DatumClaimEvidence]) -> BTreeSet<DocId> {
     evidence
         .iter()
         .map(|entry| match &entry.result {
@@ -166,12 +166,12 @@ async fn a_branch_carries_its_origin_history_and_both_sides_name_it() {
         .await
         .unwrap();
     assert_eq!(
-        read.facets[&key("main")],
-        before.facets[&key("main")],
-        "the branch holds the origin's own change, so its facet heads are the origin's"
+        read.datums[&key("main")],
+        before.datums[&key("main")],
+        "the branch holds the origin's own change, so its datum heads are the origin's"
     );
     assert_eq!(
-        accepted(&read.facets[&branch_key(&branch.doc_id)]).0,
+        accepted(&read.datums[&branch_key(&branch.doc_id)]).0,
         &branch_value("/draft", &origin),
     );
     assert_eq!(
@@ -213,11 +213,11 @@ async fn a_branch_carries_its_origin_history_and_both_sides_name_it() {
         .await
         .unwrap();
     assert_eq!(
-        accepted(&read.facets[&branch_key(&branch.doc_id)]).0,
+        accepted(&read.datums[&branch_key(&branch.doc_id)]).0,
         &branch_value("/draft", &origin)
     );
     assert_eq!(
-        accepted(&read.facets[&branch_key(&second.doc_id)]).0,
+        accepted(&read.datums[&branch_key(&second.doc_id)]).0,
         &branch_value(
             "/draft",
             &WriteReceipt {
@@ -302,17 +302,17 @@ async fn a_historical_branch_pins_its_concrete_parent_and_preserves_inherited_br
         .await
         .unwrap();
     assert_eq!(
-        accepted(&read.facets[&branch_key(&branch.doc_id)]).0,
+        accepted(&read.datums[&branch_key(&branch.doc_id)]).0,
         &expected
     );
     assert_eq!(
-        accepted(&read.facets[&branch_key(&nested.doc_id)]).0,
+        accepted(&read.datums[&branch_key(&nested.doc_id)]).0,
         &branch_value("/nested", &branch)
     );
     let typed: big_cabinet_core::dmeta::BranchPath = serde_json::from_value(expected).unwrap();
     assert_eq!(
-        typed.from.unwrap().facet_ref.to_uri_string().unwrap(),
-        format!("db+facet:/{}/{}", origin.doc_id, branch_key(&origin.doc_id))
+        typed.from.unwrap().datum_ref.to_uri_string().unwrap(),
+        format!("db+datum:/{}/{}", origin.doc_id, branch_key(&origin.doc_id))
     );
     node.stop().await;
 }
@@ -348,7 +348,7 @@ async fn announcing_a_branch_needs_write_on_the_origin_and_stealth_needs_only_re
         origin_now.heads, origin.heads,
         "a stealth branch leaves the origin untouched"
     );
-    assert!(!origin_now.facets.contains_key(&branch_key(&branch.doc_id)));
+    assert!(!origin_now.datums.contains_key(&branch_key(&branch.doc_id)));
     assert_eq!(
         accepted(
             &node
@@ -422,7 +422,7 @@ async fn a_branch_merges_back_with_the_provenance_of_each_side() {
         )
         .0,
         &branch_value("/draft", &origin),
-        "merging a nested branch does not overwrite the branch's own path facet"
+        "merging a nested branch does not overwrite the branch's own path datum"
     );
     let on_origin = node
         .write(
@@ -445,15 +445,15 @@ async fn a_branch_merges_back_with_the_provenance_of_each_side() {
         .unwrap();
     assert_eq!(read.heads, merged.heads);
     assert_eq!(
-        accepted(&read.facets[&key("main")]),
+        accepted(&read.datums[&key("main")]),
         (&note("from the branch"), on_branch.heads.as_slice()),
     );
     assert_eq!(
-        accepted(&read.facets[&key("other")]),
+        accepted(&read.datums[&key("other")]),
         (&note("from the origin"), on_origin.heads.as_slice()),
     );
     assert_eq!(
-        accepted(&read.facets[&key("third")]),
+        accepted(&read.datums[&key("third")]),
         (&note("from the nested branch"), on_nested.heads.as_slice()),
     );
     assert_eq!(
@@ -468,8 +468,8 @@ async fn a_branch_merges_back_with_the_provenance_of_each_side() {
         origins(&node.claims(&origin.doc_id, &key("third")).await),
         BTreeSet::from([nested.doc_id.clone()]),
     );
-    accepted(&read.facets[&branch_key(&branch.doc_id)]);
-    accepted(&read.facets[&branch_key(&nested.doc_id)]);
+    accepted(&read.datums[&branch_key(&branch.doc_id)]);
+    accepted(&read.datums[&branch_key(&nested.doc_id)]);
     // Writing on the origin after the merge reuses the origin's own document UUID.
     node.write(
         &alice,
@@ -524,16 +524,16 @@ async fn merges_refuse_unrelated_documents_unaccepted_sources_and_missing_access
         "a merge writes its target"
     );
     node.sabotage(&branch.doc_id, |doc| {
-        let facets = doc.get(automerge::ROOT, "facets").unwrap().unwrap().1;
+        let datums = doc.get(automerge::ROOT, "datums").unwrap().unwrap().1;
         let mut tx = doc.transaction();
-        tx.delete(&facets, key("main").to_string()).unwrap();
+        tx.delete(&datums, key("main").to_string()).unwrap();
         tx.commit();
     })
     .await;
     assert!(matches!(
         node.merge(&alice, &branch.doc_id, &first.doc_id)
             .await,
-        Err(DocsError::BaseNotAccepted { facet_key, .. }) if facet_key == key("main")
+        Err(DocsError::BaseNotAccepted { datum_key, .. }) if datum_key == key("main")
     ));
     for (document, heads) in [(&first, &first.heads), (&second, &second.heads)] {
         assert_eq!(

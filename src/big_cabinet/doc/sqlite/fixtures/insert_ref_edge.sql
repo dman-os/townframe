@@ -1,16 +1,16 @@
-INSERT INTO big_cabinet_facet_ref_edges
+INSERT INTO big_cabinet_datum_ref_edges
      ( origin_doc
-     , origin_facet
+     , origin_datum
      , origin_path
      , target_doc
-     , target_facet
+     , target_datum
      , ref_heads
      )
 VALUES ( :origin_doc
-       , :facet
+       , :datum
        , '/link'
        , :target_doc
-       , :facet
+       , :datum
        , :ref_heads
        )
 ON CONFLICT DO NOTHING;

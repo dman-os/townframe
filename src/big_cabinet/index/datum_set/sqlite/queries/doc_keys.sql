@@ -1,6 +1,6 @@
 -- name: doc_keys :many
 -- param: doc_id String
--- returns: facet_key String
-SELECT facet_key
-  FROM big_cabinet_facet_set_entries
+-- returns: datum_key String
+SELECT datum_key
+  FROM big_cabinet_datum_set_entries
  WHERE doc_id = :doc_id;

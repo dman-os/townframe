@@ -39,18 +39,18 @@ async fn mint(
         .unwrap()
 }
 
-async fn next_facet(
-    events: &mut (impl futures::Stream<Item = Result<FacetObserved, ClientError<DocsError>>> + Unpin),
-) -> (DocId, FacetKey, ObservedFacet) {
+async fn next_datum(
+    events: &mut (impl futures::Stream<Item = Result<DatumObserved, ClientError<DocsError>>> + Unpin),
+) -> (DocId, DatumKey, ObservedDatum) {
     loop {
         match events.next().await.unwrap().unwrap() {
-            FacetObserved::Entry {
+            DatumObserved::Entry {
                 doc_id,
-                facet_key,
-                facet,
+                datum_key,
+                datum,
                 ..
-            } => return (doc_id, facet_key, facet),
-            FacetObserved::ReplayComplete { .. } => {}
+            } => return (doc_id, datum_key, datum),
+            DatumObserved::ReplayComplete { .. } => {}
         }
     }
 }
@@ -128,7 +128,7 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
         node.client()
             .call(
                 RequestContext::root(),
-                WriteFacets {
+                WriteDatums {
                     capability,
                     command: None,
                     doc_id: created.doc_id.clone(),
@@ -143,18 +143,18 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
             .client()
             .call(
                 RequestContext::root(),
-                ReadFacets {
+                ReadDatums {
                     capability,
                     doc_id: created.doc_id.clone(),
                     at: At::Current,
-                    facets: Some(BTreeSet::from([key("main")])),
+                    datums: Some(BTreeSet::from([key("main")])),
                     optimistic: false,
                 },
             )
             .await
             .unwrap();
         assert_eq!(
-            accepted(&read.facets[&key("main")]).0,
+            accepted(&read.datums[&key("main")]).0,
             &note(&format!("write {index}"))
         );
         let evidence = node.claims(&created.doc_id, &key("main")).await;
@@ -183,11 +183,11 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
             .client()
             .call(
                 RequestContext::root(),
-                ReadFacets {
+                ReadDatums {
                     capability: bound.capability_id,
                     doc_id: other.doc_id.clone(),
                     at: At::Current,
-                    facets: None,
+                    datums: None,
                     optimistic: false,
                 }
             )
@@ -234,7 +234,7 @@ async fn bound_signer_survives_attenuation_and_only_domain_mint_rebinds() {
             .client()
             .call(
                 RequestContext::root(),
-                WriteFacets {
+                WriteDatums {
                     capability: narrowed.capability_id,
                     command: None,
                     doc_id: created.doc_id,
@@ -349,11 +349,11 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                 .client()
                 .call(
                     RequestContext::root(),
-                    ReadFacets {
+                    ReadDatums {
                         capability,
                         doc_id: created.doc_id.clone(),
                         at: At::Current,
-                        facets: None,
+                        datums: None,
                         optimistic: false,
                     }
                 )
@@ -365,7 +365,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                 .client()
                 .call(
                     RequestContext::root(),
-                    ListFacets {
+                    ListDatums {
                         capability,
                         doc_id: created.doc_id.clone(),
                         at: At::Current,
@@ -379,7 +379,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                 .client()
                 .call(
                     RequestContext::root(),
-                    WriteFacets {
+                    WriteDatums {
                         capability,
                         command: None,
                         doc_id: created.doc_id.clone(),
@@ -400,7 +400,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                         capability,
                         command: "denied-create".to_owned().try_into().unwrap(),
                         placement: PLACEMENT.into(),
-                        facets: BTreeMap::new(),
+                        datums: BTreeMap::new(),
                     }
                 )
                 .await),
@@ -445,10 +445,10 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                 .client()
                 .call(
                     RequestContext::root(),
-                    QueryFacets {
+                    QueryDatums {
                         capability,
                         drawer_id: None,
-                        selector: FacetSelector::Doc {
+                        selector: DatumSelector::Doc {
                             doc_id: created.doc_id.clone()
                         },
                     }
@@ -462,12 +462,12 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
                     .client()
                     .call(
                         RequestContext::root(),
-                        QueryFacetRefs {
+                        QueryDatumRefs {
                             capability,
                             drawer_id,
-                            selector: FacetRefSelector::Origin {
+                            selector: DatumRefSelector::Origin {
                                 doc_id: created.doc_id.clone(),
-                                facet_key: None,
+                                datum_key: None,
                             },
                         },
                     )
@@ -479,7 +479,7 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
             node.client()
                 .subscribe(
                     RequestContext::root(),
-                    ObserveFacets {
+                    ObserveDatums {
                         capability,
                         scope: ObserveScope::Doc {
                             doc_id: created.doc_id.clone()
@@ -619,7 +619,7 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
         capability: attenuated.capability_id,
         command: "bound-create".to_owned().try_into().unwrap(),
         placement: PLACEMENT.into(),
-        facets: BTreeMap::from([(key("main"), note("content"))]),
+        datums: BTreeMap::from([(key("main"), note("content"))]),
     };
     let branch_scope = DocScope {
         write: BTreeSet::from([origin.doc_id.clone()]),
@@ -808,7 +808,7 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
     .unwrap();
     for receipt in &receipts {
         assert!(
-            matches!(node.read_one(&owner, &receipt.doc_id, At::Current, &key("main")).await, FacetRead::Accepted { value, .. } if value == note("content"))
+            matches!(node.read_one(&owner, &receipt.doc_id, At::Current, &key("main")).await, DatumRead::Accepted { value, .. } if value == note("content"))
         );
     }
     assert_doc_access(
@@ -821,8 +821,8 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
 }
 
 #[tokio::test]
-async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched() {
-    use crate::index::FacetRefStore;
+async fn datum_ref_selector_is_authorized_before_lookup_and_origins_are_batched() {
+    use crate::index::DatumRefStore;
     use big_cabinet_core::drawer::DrawerAccess;
     use sqlite_rs::IntoValue;
     use std::sync::Mutex;
@@ -924,7 +924,7 @@ async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
     let [selector, first_origin, second_origin, denied, drawer] =
         [81_u8, 82, 83, 84, 85].map(|value| DocId::new([value; 32]));
     let index_sql = sqlite_rs::test_support::db(&[]).unwrap().clone();
-    let facet_ref = Arc::new(FacetRefStore::new(index_sql.clone()).await.unwrap());
+    let datum_ref = Arc::new(DatumRefStore::new(index_sql.clone()).await.unwrap());
     let policy = Arc::new(Policy {
         sql: index_sql.clone(),
         drawers: BTreeMap::from([(drawer.clone(), DrawerAccess::Read)]),
@@ -934,7 +934,7 @@ async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
         calls: Mutex::new(Vec::new()),
     });
     node.crash_docs().await;
-    node.start_with(Arc::<Policy>::clone(&policy), Some(facet_ref))
+    node.start_with(Arc::<Policy>::clone(&policy), Some(datum_ref))
         .await
         .unwrap();
     let capability = node
@@ -954,22 +954,22 @@ async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
                 .client()
                 .call(
                     RequestContext::root(),
-                    QueryFacetRefs {
+                    QueryDatumRefs {
                         capability,
                         drawer_id,
-                        selector: FacetRefSelector::Target {
+                        selector: DatumRefSelector::Target {
                             doc_id: selector.clone(),
-                            facet_key: None,
+                            datum_key: None,
                         },
                     },
                 )
                 .await),
-            Ok(vec![QueriedFacetRef {
+            Ok(vec![QueriedDatumRef {
                 origin_doc_id: first_origin.clone(),
-                origin_facet_key: key("main"),
+                origin_datum_key: key("main"),
                 path: "/link".to_owned(),
                 target_doc_id: selector.clone(),
-                target_facet_key: key("main"),
+                target_datum_key: key("main"),
                 ref_heads: Vec::new(),
             }]),
         );
@@ -982,21 +982,21 @@ async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
         .unwrap();
     for drawer_id in [None, Some(drawer)] {
         for selector in [
-            FacetRefSelector::Origin {
+            DatumRefSelector::Origin {
                 doc_id: denied.clone(),
-                facet_key: None,
+                datum_key: None,
             },
-            FacetRefSelector::Origin {
+            DatumRefSelector::Origin {
                 doc_id: denied.clone(),
-                facet_key: Some(key("main")),
+                datum_key: Some(key("main")),
             },
-            FacetRefSelector::Target {
+            DatumRefSelector::Target {
                 doc_id: denied.clone(),
-                facet_key: None,
+                datum_key: None,
             },
-            FacetRefSelector::Target {
+            DatumRefSelector::Target {
                 doc_id: denied.clone(),
-                facet_key: Some(key("main")),
+                datum_key: Some(key("main")),
             },
         ] {
             let expected = if drawer_id.is_some() {
@@ -1009,7 +1009,7 @@ async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
                     .client()
                     .call(
                         RequestContext::root(),
-                        QueryFacetRefs {
+                        QueryDatumRefs {
                             capability,
                             drawer_id: drawer_id.clone(),
                             selector
@@ -1158,11 +1158,11 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
                     .client()
                     .call(
                         context.child(),
-                        ReadFacets {
+                        ReadDatums {
                             capability,
                             doc_id: write_doc.clone(),
                             at: At::Current,
-                            facets: None,
+                            datums: None,
                             optimistic: false,
                         },
                     )
@@ -1265,11 +1265,11 @@ async fn mint_requires_narrow_bounded_rights_and_current_source_entitlements() {
             .client()
             .call(
                 RequestContext::root(),
-                ReadFacets {
+                ReadDatums {
                     capability: old_capability,
                     doc_id: created.doc_id.clone(),
                     at: At::Current,
-                    facets: None,
+                    datums: None,
                     optimistic: false,
                 },
             )
@@ -1279,11 +1279,11 @@ async fn mint_requires_narrow_bounded_rights_and_current_source_entitlements() {
     node.client()
         .call(
             RequestContext::root(),
-            ReadFacets {
+            ReadDatums {
                 capability,
                 doc_id: created.doc_id,
                 at: At::Current,
-                facets: None,
+                datums: None,
                 optimistic: false,
             },
         )
@@ -1357,17 +1357,17 @@ async fn shutdown_drains_before_retiring_the_namespace_and_restart_refreshes_gra
                 .unwrap(),
         );
     }
-    let read = |capability| ReadFacets {
+    let read = |capability| ReadDatums {
         capability,
         doc_id: created.doc_id.clone(),
         at: At::Current,
-        facets: None,
+        datums: None,
         optimistic: false,
     };
-    let inspect = |capability| InspectFacetClaims {
+    let inspect = |capability| InspectDatumClaims {
         capability,
         doc_id: created.doc_id.clone(),
-        facet_key: key("main"),
+        datum_key: key("main"),
         heads: created.heads.clone(),
     };
     let expected_read = node
@@ -1636,7 +1636,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
             .client()
             .subscribe(
                 RequestContext::root(),
-                ObserveFacets {
+                ObserveDatums {
                     capability: attenuated.capability_id,
                     scope: ObserveScope::Doc {
                         doc_id: created.doc_id,
@@ -1647,8 +1647,8 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
             .await
             .unwrap();
         assert!(matches!(
-            next_facet(&mut events).await.2,
-            ObservedFacet::Present { .. }
+            next_datum(&mut events).await.2,
+            ObservedDatum::Present { .. }
         ));
         let retracted = match target {
             Target::Authority => Some(capability.capability_id),
@@ -1680,7 +1680,7 @@ async fn quiet_support_retraction_terminates_narrowed_and_attenuated_observation
         }
         loop {
             match events.next().await {
-                Some(Ok(FacetObserved::ReplayComplete { .. })) => {}
+                Some(Ok(DatumObserved::ReplayComplete { .. })) => {}
                 terminal => {
                     assert_eq!(
                         terminal,
@@ -1717,10 +1717,10 @@ async fn authorized_absent_document_observation_acquires_interest_but_tag_observ
         .client()
         .subscribe(
             RequestContext::root(),
-            ObserveFacets {
+            ObserveDatums {
                 capability,
                 scope: ObserveScope::Tag {
-                    tag: big_cabinet_core::FacetTag::new(NOTE).unwrap(),
+                    tag: big_cabinet_core::DatumTag::new(NOTE).unwrap(),
                 },
                 after: 0,
             },
@@ -1729,14 +1729,14 @@ async fn authorized_absent_document_observation_acquires_interest_but_tag_observ
         .unwrap();
     assert!(matches!(
         tags.next().await,
-        Some(Ok(FacetObserved::ReplayComplete { .. }))
+        Some(Ok(DatumObserved::ReplayComplete { .. }))
     ));
     assert!(!node.repo.sync_demand().documents().contains(&absent));
     let mut document = node
         .client()
         .subscribe(
             RequestContext::root(),
-            ObserveFacets {
+            ObserveDatums {
                 capability,
                 scope: ObserveScope::Doc {
                     doc_id: absent.clone(),
@@ -1748,7 +1748,7 @@ async fn authorized_absent_document_observation_acquires_interest_but_tag_observ
         .unwrap();
     assert!(matches!(
         document.next().await,
-        Some(Ok(FacetObserved::ReplayComplete { .. }))
+        Some(Ok(DatumObserved::ReplayComplete { .. }))
     ));
     assert!(node.repo.sync_demand().documents().contains(&absent));
     drop(document);

@@ -13,16 +13,16 @@ pub(super) struct Plan<'a> {
     /// The `docUuid` bound to the document if it has none yet; see [`Dmeta::doc_uuid`].
     pub(super) doc_uuid: Uuid7,
     pub(super) actor: &'a Actor,
-    pub(super) set: BTreeMap<FacetKey, (SchemaHandle, Json)>,
-    pub(super) remove: BTreeSet<FacetKey>,
+    pub(super) set: BTreeMap<DatumKey, (SchemaHandle, Json)>,
+    pub(super) remove: BTreeSet<DatumKey>,
     pub(super) now: jiff::Timestamp,
-    pub(super) predecessors: BTreeMap<FacetKey, Vec<Cid>>,
+    pub(super) predecessors: BTreeMap<DatumKey, Vec<Cid>>,
     /// Aliases minted for slots that had none when the plan was first staged.
-    pub(super) aliases: BTreeMap<FacetKey, Uuid7>,
+    pub(super) aliases: BTreeMap<DatumKey, Uuid7>,
 }
 
 impl Plan<'_> {
-    pub(super) fn keys(&self) -> impl Iterator<Item = &FacetKey> {
+    pub(super) fn keys(&self) -> impl Iterator<Item = &DatumKey> {
         self.set.keys().chain(self.remove.iter())
     }
 }
@@ -82,18 +82,18 @@ impl DocsService {
 
     pub(super) fn schemas(
         &self,
-        set: BTreeMap<FacetKey, Json>,
-        remove: &BTreeSet<FacetKey>,
-    ) -> Result<BTreeMap<FacetKey, (SchemaHandle, Json)>, DocsError> {
+        set: BTreeMap<DatumKey, Json>,
+        remove: &BTreeSet<DatumKey>,
+    ) -> Result<BTreeMap<DatumKey, (SchemaHandle, Json)>, DocsError> {
         for key in set.keys().chain(remove.iter()) {
             if is_system(key) {
-                return Err(DocsError::SystemFacet {
-                    facet_key: key.clone(),
+                return Err(DocsError::SystemDatum {
+                    datum_key: key.clone(),
                 });
             }
             if set.contains_key(key) && remove.contains(key) {
                 return Err(DocsError::SetAndRemoved {
-                    facet_key: key.clone(),
+                    datum_key: key.clone(),
                 });
             }
         }
@@ -103,14 +103,14 @@ impl DocsService {
                     .schema_repo
                     .require_for_write(key.tag().as_str())
                     .map_err(|_| DocsError::UnknownSchema {
-                        facet_tag: key.tag().to_string(),
+                        datum_tag: key.tag().to_string(),
                     })?;
                 Ok((key, (schema, value)))
             })
             .collect()
     }
 
-    /// Apply a plan to a transaction and derive the claim each touched facet's signature covers.
+    /// Apply a plan to a transaction and derive the claim each touched datum's signature covers.
     ///
     /// The value a claim covers is read back from the transaction after the content mutation, not
     /// taken from the caller's JSON, and the alias it names is the smallest one visible in the
@@ -120,42 +120,42 @@ impl DocsService {
         &self,
         mut tx: Transaction<'t>,
         plan: &mut Plan<'_>,
-        signatures: Option<&BTreeMap<FacetKey, SignatureBytes>>,
-    ) -> Result<(Transaction<'t>, BTreeMap<FacetKey, FacetClaim>), DocsError> {
-        let facets = match tx.get(automerge::ROOT, "facets").map_err(repository)? {
-            Some((Value::Object(ObjType::Map), facets)) => facets,
+        signatures: Option<&BTreeMap<DatumKey, SignatureBytes>>,
+    ) -> Result<(Transaction<'t>, BTreeMap<DatumKey, DatumClaim>), DocsError> {
+        let datums = match tx.get(automerge::ROOT, "datums").map_err(repository)? {
+            Some((Value::Object(ObjType::Map), datums)) => datums,
             Some(_) => {
-                return Err(DocsError::Repository("facets is not a map".into()));
+                return Err(DocsError::Repository("datums is not a map".into()));
             }
             None => tx
-                .put_object(automerge::ROOT, "facets", ObjType::Map)
+                .put_object(automerge::ROOT, "datums", ObjType::Map)
                 .map_err(repository)?,
         };
-        let values: Vec<(&FacetKey, &CompiledSchema, Json)> = plan
+        let values: Vec<(&DatumKey, &CompiledSchema, Json)> = plan
             .set
             .iter()
             .map(|(key, (schema, value))| (key, schema.compiled(), value.clone()))
             .collect();
         for (key, schema, value) in values {
-            tx = reconcile_json_atomic(tx, schema, &facets, key.to_string().as_str().into(), value)
+            tx = reconcile_json_atomic(tx, schema, &datums, key.to_string().as_str().into(), value)
                 .map_err(|error| DocsError::InvalidValue {
-                    facet_key: key.clone(),
+                    datum_key: key.clone(),
                     reason: error.to_string(),
                 })?;
         }
         for key in &plan.remove {
             if tx
-                .get(&facets, key.to_string())
+                .get(&datums, key.to_string())
                 .map_err(repository)?
                 .is_some()
             {
-                tx.delete(&facets, key.to_string()).map_err(repository)?;
+                tx.delete(&datums, key.to_string()).map_err(repository)?;
             }
         }
-        let mut dmeta = match tx.get(&facets, DMETA_KEY).map_err(repository)? {
+        let mut dmeta = match tx.get(&datums, DMETA_KEY).map_err(repository)? {
             None => Dmeta::new(plan.now),
             Some(_) => {
-                let json = hydrate_value(&tx, &facets, DMETA_KEY.into(), self.dmeta.compiled())
+                let json = hydrate_value(&tx, &datums, DMETA_KEY.into(), self.dmeta.compiled())
                     .map_err(repository)?;
                 serde_json::from_value::<Dmeta>(json).map_err(repository)?
             }
@@ -164,10 +164,10 @@ impl DocsService {
             .doc_uuid(plan.document, plan.doc_uuid)
             .expect("a freshly minted document UUID is unbound");
         let mut claims = BTreeMap::new();
-        let keys: Vec<FacetKey> = plan.keys().cloned().collect();
+        let keys: Vec<DatumKey> = plan.keys().cloned().collect();
         for key in keys {
             let visible = dmeta
-                .facet_uuids
+                .datum_uuids
                 .iter()
                 .filter(|(_, alias)| **alias == key)
                 .map(|(uuid, _)| *uuid)
@@ -177,23 +177,23 @@ impl DocsService {
                 None => {
                     let alias = *plan.aliases.entry(key.clone()).or_default();
                     dmeta
-                        .record_facet_alias(alias, key.clone())
+                        .record_datum_alias(alias, key.clone())
                         .expect("a freshly minted alias is unbound");
                     alias
                 }
             };
-            let native = NativeValue::read_at(&tx, &facets, key.to_string()).map_err(|error| {
+            let native = NativeValue::read_at(&tx, &datums, key.to_string()).map_err(|error| {
                 DocsError::InvalidValue {
-                    facet_key: key.clone(),
+                    datum_key: key.clone(),
                     reason: format!("{error:?}"),
                 }
             })?;
             let removed = native.is_none();
             claims.insert(
                 key.clone(),
-                FacetClaim {
+                DatumClaim {
                     origin_document: plan.document.clone(),
-                    facet_key: key.clone(),
+                    datum_key: key.clone(),
                     chosen_uuid: chosen,
                     actor_uuid: plan.actor.actor_id,
                     operation: if removed {
@@ -210,12 +210,12 @@ impl DocsService {
                 None => SignatureBytes::try_from([0_u8; 64].as_slice())
                     .expect("64 bytes are a signature"),
             };
-            dmeta.facets.insert(
+            dmeta.datums.insert(
                 key,
-                FacetMetadata {
+                DatumMetadata {
                     updated_at: vec![plan.now],
                     deleted_at: if removed { vec![plan.now] } else { Vec::new() },
-                    signatures: vec![FacetSignature {
+                    signatures: vec![DatumSignature {
                         actor_uuid: plan.actor.actor_id,
                         signature,
                         doc_uuid,
@@ -238,7 +238,7 @@ impl DocsService {
             .reconcile_atomic(
                 tx,
                 self.dmeta.compiled(),
-                &facets,
+                &datums,
                 DMETA_KEY.into(),
                 &plan.keys().cloned().collect(),
             )
@@ -250,15 +250,15 @@ impl DocsService {
         &self,
         context: &RequestContext,
         capability: CapId,
-        claims: &BTreeMap<FacetKey, FacetClaim>,
-    ) -> Result<BTreeMap<FacetKey, SignatureBytes>, DocsError> {
+        claims: &BTreeMap<DatumKey, DatumClaim>,
+    ) -> Result<BTreeMap<DatumKey, SignatureBytes>, DocsError> {
         let mut signatures = BTreeMap::new();
         for (key, claim) in claims {
             let signed = self
                 .authority
                 .call(
                     context.child(),
-                    SignFacetClaim {
+                    SignDatumClaim {
                         actor: capability,
                         claim: claim.clone(),
                     },
@@ -274,18 +274,18 @@ impl DocsService {
         Ok(signatures)
     }
 
-    /// The facet heads of every named facet at `heads`, verified: a facet that does not verify
+    /// The datum heads of every named datum at `heads`, verified: a datum that does not verify
     /// cannot match a condition taken from an earlier read.
-    pub(super) fn facet_heads(
+    pub(super) fn datum_heads(
         doc: &Automerge,
         heads: &[ChangeHash],
-        keys: impl Iterator<Item = FacetKey>,
-    ) -> BTreeMap<FacetKey, Vec<ChangeHash>> {
+        keys: impl Iterator<Item = DatumKey>,
+    ) -> BTreeMap<DatumKey, Vec<ChangeHash>> {
         let gate = Gate::new(doc, heads);
         keys.map(|key| {
             let heads = match gate.verify(&key) {
-                Verdict::Accepted { facet_heads, .. } | Verdict::Pending { facet_heads, .. } => {
-                    facet_heads
+                Verdict::Accepted { datum_heads, .. } | Verdict::Pending { datum_heads, .. } => {
+                    datum_heads
                 }
                 Verdict::Rejected { .. } => Vec::new(),
             };
@@ -308,23 +308,23 @@ impl DocsService {
                 if sorted(heads.clone()) != current {
                     return Err(DocsError::Conflict {
                         heads: current,
-                        facets: BTreeMap::new(),
+                        datums: BTreeMap::new(),
                     });
                 }
                 Ok(current)
             }
-            WriteMode::IfFacetsUnchanged { facets } => {
-                let actual = Self::facet_heads(doc, &current, facets.keys().cloned());
-                let expected: BTreeMap<_, _> = facets
+            WriteMode::IfDatumsUnchanged { datums } => {
+                let actual = Self::datum_heads(doc, &current, datums.keys().cloned());
+                let expected: BTreeMap<_, _> = datums
                     .iter()
                     .map(|(key, version)| (key.clone(), sorted(version.heads.clone())))
                     .collect();
                 if actual != expected {
                     return Err(DocsError::Conflict {
                         heads: current,
-                        facets: actual
+                        datums: actual
                             .into_iter()
-                            .map(|(key, heads)| (key, facet_version(doc, heads)))
+                            .map(|(key, heads)| (key, datum_version(doc, heads)))
                             .collect(),
                     });
                 }

@@ -1,14 +1,14 @@
-pub mod facet_ref;
-pub mod facet_set;
+pub mod datum_ref;
+pub mod datum_set;
 
-pub use facet_ref::FacetRefEdge;
-pub use facet_ref::FacetRefQuery;
-pub use facet_ref::FacetRefStore;
-pub use facet_set::FacetMembership;
-pub use facet_set::FacetRecord;
-pub use facet_set::FacetRoute;
-pub use facet_set::FacetSetQuery;
-pub use facet_set::FacetSetStore;
+pub use datum_ref::DatumRefEdge;
+pub use datum_ref::DatumRefQuery;
+pub use datum_ref::DatumRefStore;
+pub use datum_set::DatumMembership;
+pub use datum_set::DatumRecord;
+pub use datum_set::DatumRoute;
+pub use datum_set::DatumSetQuery;
+pub use datum_set::DatumSetStore;
 
 use crate::schema::SchemaRepo;
 use big_repo::SharedBigRepo;
@@ -22,8 +22,8 @@ use std::sync::Arc;
 use utils_rs::prelude::Res;
 
 pub struct Indexes {
-    pub facet_set: Arc<FacetSetStore>,
-    pub facet_ref: Arc<FacetRefStore>,
+    pub datum_set: Arc<DatumSetStore>,
+    pub datum_ref: Arc<DatumRefStore>,
     set_tasks: Spawner,
     ref_tasks: Spawner,
 }
@@ -35,11 +35,11 @@ impl Indexes {
         sql: Database,
         concurrency: NonZeroUsize,
     ) -> Res<(Arc<Self>, StopToken)> {
-        let facet_set = Arc::new(FacetSetStore::new(sql.clone()).await?);
-        let facet_ref = Arc::new(FacetRefStore::new(sql).await?);
+        let datum_set = Arc::new(DatumSetStore::new(sql.clone()).await?);
+        let datum_ref = Arc::new(DatumRefStore::new(sql).await?);
         let (set_stop, set_tasks) = ComponentStopToken::new();
         let (ready, started) = tokio::sync::oneshot::channel();
-        let store = Arc::clone(&facet_set);
+        let store = Arc::clone(&datum_set);
         let set_repo = Arc::clone(&repo);
         let owner = set_tasks.clone();
         set_tasks
@@ -65,8 +65,8 @@ impl Indexes {
 
         let (ref_stop, ref_tasks) = ComponentStopToken::new();
         let (ready, started) = tokio::sync::oneshot::channel();
-        let store = Arc::clone(&facet_ref);
-        let set = (*facet_set).clone();
+        let store = Arc::clone(&datum_ref);
+        let set = (*datum_set).clone();
         let owner = ref_tasks.clone();
         ref_tasks
             .spawn(async move {
@@ -91,8 +91,8 @@ impl Indexes {
         }
         Ok((
             Arc::new(Self {
-                facet_set,
-                facet_ref,
+                datum_set,
+                datum_ref,
                 set_tasks,
                 ref_tasks,
             }),
@@ -114,8 +114,8 @@ pub struct StopToken {
 impl StopToken {
     pub async fn stop(self) {
         let reference = AssertUnwindSafe(self.ref_stop.stop()).catch_unwind().await;
-        let facets = AssertUnwindSafe(self.set_stop.stop()).catch_unwind().await;
-        for result in [reference, facets] {
+        let datums = AssertUnwindSafe(self.set_stop.stop()).catch_unwind().await;
+        for result in [reference, datums] {
             if let Err(panic) = result {
                 std::panic::resume_unwind(panic);
             }

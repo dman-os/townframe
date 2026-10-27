@@ -1,4 +1,4 @@
-//! Structural storage traversal and hydration for a compiled facet schema.
+//! Structural storage traversal and hydration for a compiled datum schema.
 
 use super::Codec;
 use super::CodecError;
@@ -486,7 +486,7 @@ impl<'a> Position<'a> {
     }
 
     /// One definition of this document. Every definition is carried in the same flat place, which is
-    /// what lets two facets reach one definition once.
+    /// what lets two datums reach one definition once.
     fn definition(&self, name: &str) -> Result<&'a Value, CodecError> {
         self.document
             .get("$defs")
@@ -553,7 +553,7 @@ impl<'a> Position<'a> {
     /// Refuse a value the declarations here cannot hold. Nothing is written afterwards, so this is
     /// where a declaration turns into an assertion.
     pub(super) fn check<'p>(&self, value: &'p Value, path: &'p Path<'p>) -> Result<(), CodecError> {
-        let lexicon = self.document.get(crate::facet::input::DATA) == Some(&Value::Bool(true));
+        let lexicon = self.document.get(crate::datum::input::DATA) == Some(&Value::Bool(true));
         if !lexicon
             && let Value::Number(number) = value
             && (number
@@ -572,7 +572,7 @@ impl<'a> Position<'a> {
         }
         if let Value::Object(members) = value {
             for key in members.keys().filter(|key| key.starts_with("$")) {
-                if self.document.get(crate::facet::input::DATA) != Some(&Value::Bool(true))
+                if self.document.get(crate::datum::input::DATA) != Some(&Value::Bool(true))
                     && !protocol_key(key)
                 {
                     return Err(at(
@@ -635,7 +635,7 @@ impl<'a> Position<'a> {
                 for (key, member) in members {
                     let child = Path::key(path, key);
                     let declared = properties.and_then(|properties| properties.get(key));
-                    if self.document.get(crate::facet::input::DATA) != Some(&Value::Bool(true))
+                    if self.document.get(crate::datum::input::DATA) != Some(&Value::Bool(true))
                         && declared.is_none()
                         && key.starts_with("$")
                     {
@@ -839,7 +839,7 @@ impl<'a> Position<'a> {
                     &scalar,
                     path,
                     raw,
-                    self.document.get(crate::facet::input::DATA) == Some(&Value::Bool(true)),
+                    self.document.get(crate::datum::input::DATA) == Some(&Value::Bool(true)),
                 )
             }
             automerge::Value::Object(ObjType::Map | ObjType::Table) => {

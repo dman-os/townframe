@@ -1,18 +1,18 @@
 //! End to end: a declaration, the wire form it produces, and the schema it publishes.
 
 use super::*;
-use crate::facet::Bundle;
-use crate::facet::Declaration;
-use crate::facet::FacetDecl;
-use crate::facet::Universe;
-use crate::facet::UniverseError;
+use crate::datum::Bundle;
+use crate::datum::DatumDecl;
+use crate::datum::Declaration;
+use crate::datum::Universe;
+use crate::datum::UniverseError;
 use schemars::JsonSchema;
 use schemars::schema_for;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 
-#[macros::facet(id_prefix = "org.example.daybook.")]
+#[macros::datum(id_prefix = "org.example.daybook.")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Note {
     content: String,
@@ -20,7 +20,7 @@ struct Note {
     extra: Extra,
 }
 
-#[macros::facet(closed, id_prefix = "org.example.daybook.")]
+#[macros::datum(closed, id_prefix = "org.example.daybook.")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Photo {
@@ -28,16 +28,16 @@ struct Photo {
 }
 
 /// The macro writes all three impls, so the derive list holds nothing it owns.
-#[macros::facet]
+#[macros::datum]
 #[derive(Debug, Clone, PartialEq)]
 enum OpenAttachment {
     Note(Note),
     Photo(Photo),
-    #[facet(other)]
+    #[datum(other)]
     Other(UnknownMember),
 }
 
-#[macros::facet(closed)]
+#[macros::datum(closed)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ClosedAttachment {
     #[serde(rename = "org.example.daybook.note")]
@@ -48,12 +48,12 @@ enum ClosedAttachment {
 
 /// A vocabulary rather than a set of named types: the values are strings a peer may extend, so the
 /// spelling is stated on the variant and an unknown one is kept.
-#[macros::facet(open_string)]
+#[macros::datum(open_string)]
 #[derive(Debug, Clone, PartialEq)]
 enum OpenColor {
     Red,
     Blue,
-    #[facet(other)]
+    #[datum(other)]
     Unknown(String),
 }
 
@@ -101,8 +101,8 @@ fn the_macro_reports_what_it_saw() {
 }
 
 /// `id_prefix` plus the type name, lowerCamel: the same string `define_enum_and_tag!` builds, so a
-/// persisted facet key does not change when a type moves onto this declaration. That the string
-/// resolves back to a `WellKnownFacetTag` is a property of `FacetTag` and is asserted where it
+/// persisted datum key does not change when a type moves onto this declaration. That the string
+/// resolves back to a `WellKnownDatumTag` is a property of `DatumTag` and is asserted where it
 /// lives.
 #[test]
 fn an_id_prefix_derives_the_key_from_the_type_name() {
@@ -296,9 +296,9 @@ fn a_string_vocabulary_whose_values_disagree_is_refused() {
     );
 }
 
-/// A facet whose schema names another type: the nested one is written at a position, so it is not a
-/// facet, but a peer still has to be able to resolve it.
-#[macros::facet(id_prefix = "org.example.daybook.")]
+/// A datum whose schema names another type: the nested one is written at a position, so it is not a
+/// datum, but a peer still has to be able to resolve it.
+#[macros::datum(id_prefix = "org.example.daybook.")]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct Nested {
     inner: Photo,
@@ -306,7 +306,7 @@ struct Nested {
     extra: Extra,
 }
 
-#[macros::facet(id_prefix = "org.example.daybook.")]
+#[macros::datum(id_prefix = "org.example.daybook.")]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct AlsoNested {
     photo: Photo,
@@ -314,14 +314,14 @@ struct AlsoNested {
     extra: Extra,
 }
 
-/// A facet's own schema is its definition, and every definition it reached travels beside it rather
-/// than inside it — which is what lets two facets share one.
+/// A datum's own schema is its definition, and every definition it reached travels beside it rather
+/// than inside it — which is what lets two datums share one.
 #[test]
 fn a_declaration_hoists_the_definitions_it_reaches() {
     let declaration = Declaration::of::<Nested>().unwrap();
-    assert_eq!(declaration.facet.id, "org.example.daybook.nested");
+    assert_eq!(declaration.datum.id, "org.example.daybook.nested");
 
-    let document = serde_json::to_value(&declaration.facet.schema).unwrap();
+    let document = serde_json::to_value(&declaration.datum.schema).unwrap();
     assert!(
         document.get("$defs").is_none(),
         "nothing is inlined beside the definition: {document}"
@@ -341,25 +341,25 @@ fn a_declaration_hoists_the_definitions_it_reaches() {
 }
 
 #[test]
-fn a_definition_two_facets_both_reach_is_carried_once() {
+fn a_definition_two_datums_both_reach_is_carried_once() {
     let universe = Universe::collect(vec![
         Declaration::of::<Nested>().unwrap(),
         Declaration::of::<AlsoNested>().unwrap(),
     ]);
-    assert_eq!(universe.facets.len(), 2);
+    assert_eq!(universe.datums.len(), 2);
     let names: Vec<&str> = universe
         .types
         .iter()
         .map(|decl| decl.name.as_str())
         .collect();
-    assert_eq!(names, vec!["Photo"], "carried once, not once per facet");
+    assert_eq!(names, vec!["Photo"], "carried once, not once per datum");
 }
 
 /// A closed object is a decision with a cost, so it comes back as a flag rather than a refusal.
 #[test]
 fn a_declaration_carries_the_flags_of_its_shape() {
     let declaration = Declaration::of::<Photo>().unwrap();
-    assert_eq!(declaration.facet.flags, vec![ShapeFlag::ClosedObject]);
+    assert_eq!(declaration.datum.flags, vec![ShapeFlag::ClosedObject]);
     let universe = Universe::collect(vec![declaration]);
     assert_eq!(
         Bundle::new(&universe, Vec::new()).validate().unwrap(),
@@ -378,10 +378,10 @@ fn the_bundle_resolves_the_definitions_the_plug_carries() {
 }
 
 #[test]
-fn two_facets_claiming_one_tag_are_refused() {
+fn two_datums_claiming_one_tag_are_refused() {
     let first = Declaration::of::<Note>().unwrap();
     let mut second = Declaration::of::<Note>().unwrap();
-    second.facet.name = "ADifferentName".into();
+    second.datum.name = "ADifferentName".into();
     let universe = Universe::collect(vec![first, second]);
     let bundle = Bundle::new(&universe, Vec::new());
     assert!(
@@ -396,7 +396,7 @@ fn two_facets_claiming_one_tag_are_refused() {
 #[test]
 fn two_declarations_disagreeing_about_a_name_are_refused() {
     let mut universe = Universe::collect(vec![Declaration::of::<Note>().unwrap()]);
-    universe.types.push(crate::facet::TypeDecl {
+    universe.types.push(crate::datum::TypeDecl {
         name: "Note".into(),
         schema: schemars::json_schema!({"type": "string"}),
     });
@@ -412,7 +412,7 @@ fn two_declarations_disagreeing_about_a_name_are_refused() {
 #[test]
 fn a_reference_is_resolved_against_the_plug_and_its_dependencies() {
     let ours = Universe::collect(vec![Declaration {
-        facet: FacetDecl {
+        datum: DatumDecl {
             id: "org.example.daybook.referencing".into(),
             name: "Referencing".into(),
             schema: schemars::json_schema!({
@@ -439,7 +439,7 @@ fn a_reference_is_resolved_against_the_plug_and_its_dependencies() {
 fn the_bundle_document_validates_a_value_with_a_stock_validator() {
     let universe = Universe::collect(vec![Declaration::of::<Nested>().unwrap()]);
     let bundle = Bundle::new(&universe, Vec::new());
-    let document = bundle.document("Nested").expect("the facet resolves");
+    let document = bundle.document("Nested").expect("the datum resolves");
     let document = serde_json::to_value(&document).unwrap();
     let validator = jsonschema::validator_for(&document).unwrap();
 
@@ -450,20 +450,20 @@ fn the_bundle_document_validates_a_value_with_a_stock_validator() {
     );
     assert!(
         validator.is_valid(&json!({"inner": {"url": "https://example.com"}, "unknown": 1})),
-        "and the facet is open, so a member it does not name is still valid"
+        "and the datum is open, so a member it does not name is still valid"
     );
 }
 
 /// A value's spelling is derived, never written — and the one override is a statement rather than a
 /// rule, so `rename_all` in the case that agrees with the rule is read and then consumed.
-#[macros::facet(open_string)]
+#[macros::datum(open_string)]
 #[derive(Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 enum Derived {
     #[serde(rename = "org.example.custom")]
     Explicit,
     MyValue,
-    #[facet(other)]
+    #[datum(other)]
     Unknown(String),
 }
 
@@ -486,9 +486,9 @@ fn a_spelling_is_derived_or_stated_and_never_rewritten() {
     );
 }
 
-/// A facet that carries a deliberate plain number: the codec reads it fine, so it assembles, and
+/// A datum that carries a deliberate plain number: the codec reads it fine, so it assembles, and
 /// only the publish refuses it.
-#[macros::facet(id = "org.example.loose")]
+#[macros::datum(id = "org.example.loose")]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct Loose {
     #[schemars(extend("x-automerge" = "number"))]
@@ -499,7 +499,7 @@ struct Loose {
 
 /// An adjacent union is representable in the sidecar and is not a Lexicon union, so it assembles
 /// and is refused at both gates rather than published in a layout a peer cannot read.
-#[macros::facet(
+#[macros::datum(
     closed,
     tagging = "adjacent",
     id = "org.example.daybook.wrappedAttachment"
@@ -514,7 +514,7 @@ enum WrappedAttachment {
 }
 
 /// The Lexicon is projected from what the whole bundle carries, not stored on the declaration: a
-/// reference a facet makes resolves against the plug and its dependencies, the same way
+/// reference a datum makes resolves against the plug and its dependencies, the same way
 /// [`Bundle::document`] resolves it.
 #[test]
 fn an_aligned_declaration_publishes_a_lexicon_file() {
@@ -549,7 +549,7 @@ fn an_assembled_codec_document_is_refused_at_the_publish() {
             if id == "org.example.loose" && reason.contains("plain `number`")),
         "{err}"
     );
-    // The same facet assembles for the codec, which is the point of the split.
+    // The same datum assembles for the codec, which is the point of the split.
     assert!(Declaration::assemble::<Loose>().is_ok());
     // And a declaration meant for publishing is refused at authoring time, not at the publish.
     let err = Declaration::of::<Loose>().unwrap_err();
@@ -574,7 +574,7 @@ fn a_non_internal_union_is_refused_by_both_gates() {
     let declaration = Declaration::assemble::<WrappedAttachment>().unwrap();
     assert!(
         declaration
-            .facet
+            .datum
             .flags
             .contains(&ShapeFlag::NonInternalTagging)
     );

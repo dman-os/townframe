@@ -1,6 +1,6 @@
 ---
 source: src/big_cabinet/document/e2e/wire.rs
-expression: "UnsafeFacetInspection\n{\n    native_value: Some(Bytes::from(vec![4, 5, 6])), schema_known: true,\n    claims: claims_inspection(),\n}"
+expression: "UnsafeDatumInspection\n{\n    native_value: Some(Bytes::from(vec![4, 5, 6])), schema_known: true,\n    claims: claims_inspection(),\n}"
 ---
 {
   "nativeValue": {
@@ -9,7 +9,7 @@ expression: "UnsafeFacetInspection\n{\n    native_value: Some(Bytes::from(vec![4
   "schemaKnown": true,
   "claims": {
     "docId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
-    "facetKey": "org.example.note/main",
+    "datumKey": "org.example.note/main",
     "heads": [
       "0707070707070707070707070707070707070707070707070707070707070707"
     ],
@@ -30,7 +30,7 @@ expression: "UnsafeFacetInspection\n{\n    native_value: Some(Bytes::from(vec![4
             "actorPublicKey": "zYMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
             "claim": {
               "originDocument": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
-              "facetKey": "org.example.note/main",
+              "datumKey": "org.example.note/main",
               "chosenUuid": "01010101-0101-7101-8101-010101010101",
               "actorUuid": "02020202-0202-7202-8202-020202020202",
               "operation": "Set",

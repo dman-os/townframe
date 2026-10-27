@@ -39,10 +39,10 @@ impl Bundle<'_> {
         carried: &[&Value],
     ) -> Result<CompiledSchema> {
         self.validate()?;
-        if !self.definitions().is_empty() && !self.plug.facets.iter().any(|facet| facet.id == tag) {
+        if !self.definitions().is_empty() && !self.plug.datums.iter().any(|datum| datum.id == tag) {
             return Err(invalid(
                 "supplement",
-                format!("bundle does not declare facet `{tag}`"),
+                format!("bundle does not declare datum `{tag}`"),
             ));
         }
         let mut compiler = Compiler {
@@ -146,20 +146,20 @@ impl Bundle<'_> {
         let root = compiler
             .names
             .get(&(tag.to_owned(), "main".to_owned()))
-            .ok_or_else(|| invalid("defs.main", "the facet requires a main definition"))?
+            .ok_or_else(|| invalid("defs.main", "the datum requires a main definition"))?
             .clone();
         let main = &primary["defs"]["main"];
         if !matches!(main["type"].as_str(), Some("record" | "object")) {
             return Err(invalid(
                 "defs.main.type",
-                "a facet must have record or object main",
+                "a datum must have record or object main",
             ));
         }
         let mut document = json!({"$ref": format!("#/$defs/{root}"), DATA: true});
-        if let Some(facet) = self.plug.facets.iter().find(|facet| facet.id == tag) {
+        if let Some(datum) = self.plug.datums.iter().find(|datum| datum.id == tag) {
             let supplement = serde_json::to_value(
-                self.document(&facet.name)
-                    .expect("validated facet definition"),
+                self.document(&datum.name)
+                    .expect("validated datum definition"),
             )
             .expect("schema serializes");
             bound(&supplement)?;
@@ -582,8 +582,8 @@ fn names<'a>(object: &'a Map<String, Value>, key: &str, path: &str) -> Result<BT
 }
 
 /// The keywords a sidecar position may state. Beyond the JSON Schema structure the overlay reads,
-/// this is exactly what `schemars` emits for the facet macros' declarations: `default` is the
-/// `#[serde(default)]` spelling (an annotation, never validation), `x-lexicon-id` is the facet
+/// this is exactly what `schemars` emits for the datum macros' declarations: `default` is the
+/// `#[serde(default)]` spelling (an annotation, never validation), `x-lexicon-id` is the datum
 /// macro's record of the published id on its own definition, and `pattern` is the `Uuid7` key
 /// spelling — admitted only on the `format: "uuid"` string that carries it, never as a general
 /// constraint keyword.
@@ -963,7 +963,7 @@ impl Overlay<'_> {
     /// A union's supplement is its member branches: one `oneOf` arm per member, matched to the
     /// primary's branch by its discriminant `const`, with each member overlaid in place so the
     /// compiled union keeps its tag order and openness. This is how a declared union member's
-    /// facet-level constraints (its storage markers, its closed object) reach the compiled
+    /// datum-level constraints (its storage markers, its closed object) reach the compiled
     /// document the codec validates against.
     fn apply_union(
         &mut self,

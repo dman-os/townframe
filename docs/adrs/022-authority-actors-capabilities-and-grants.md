@@ -136,9 +136,9 @@ standing grants. There is no identity fallback after a scoped cap is refused.
 Binding an actor UUID is not permission to expose the actor's signing proof. The
 signing path must verify the domain's authority to use that binding after the
 domain authorizes the operation. A guest holding a document cap must not acquire
-an unrestricted `SignFacetClaim` oracle or an actor proof it can exchange for
+an unrestricted `SignDatumClaim` oracle or an actor proof it can exchange for
 broader authority. Identity signing remains an explicitly held actor-domain
-capability. Signatures on facet claims and attribution certificates remain
+capability. Signatures on datum claims and attribution certificates remain
 cryptographic even though capability handles need no signatures.
 
 A bound signer records whose delegated signing authority is used; it does not
@@ -198,7 +198,7 @@ operations must cover every resource they affect.
 | Issuer-authorized domain grant rows | Durable |
 | Capability handles, namespace handles, issuance associations, signer bindings | Authority-instance local |
 | Delegations dependent on a temporary object cap | At most that cap's lifetime |
-| Facet-set and facet-reference indexes and their progress cursors | Durable |
+| Datum-set and datum-reference indexes and their progress cursors | Durable |
 
 Restart creates fresh handles and reacquires subsystem authority. Old handles
 must fail even when the same durable actor or namespace exists. Running another
@@ -206,7 +206,7 @@ authority instance on the same durable actor store must not clear or adopt the
 first instance's handle table. Durable command ledgers store stable actors and
 operation intent, never a capability required for replay.
 
-Facet indexes are not rebuilt at boot: their workers resume from durable frontier
+Datum indexes are not rebuilt at boot: their workers resume from durable frontier
 cursors and idempotent settlement. Worker ownership and reverse-order shutdown are
 lifecycle concerns, not reasons to discard those indexes.
 

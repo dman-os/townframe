@@ -1,1 +1,1 @@
-DROP TABLE big_cabinet_facet_ref_edges;
+DROP TABLE big_cabinet_datum_ref_edges;

@@ -29,7 +29,7 @@ impl DocsService {
             actor.actor_id,
             owner_id,
             &params.placement,
-            &params.facets,
+            &params.datums,
         ));
         if let Some(receipt) = self
             .replay(&params.command, request_digest, actor.actor_id)
@@ -37,7 +37,7 @@ impl DocsService {
         {
             return Ok(receipt);
         }
-        let set = self.schemas(params.facets, &BTreeSet::new())?;
+        let set = self.schemas(params.datums, &BTreeSet::new())?;
         self.commands
             .begin(
                 &params.command,

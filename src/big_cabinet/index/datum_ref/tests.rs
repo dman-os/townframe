@@ -1,17 +1,17 @@
 use super::*;
 use automerge::transaction::Transactable;
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
-use big_cabinet_core::FacetKey;
 
-fn route(doc: u8, name: &str) -> FacetRoute {
-    FacetRoute {
+fn route(doc: u8, name: &str) -> DatumRoute {
+    DatumRoute {
         doc_id: DocId::new([doc; 32]),
-        facet_key: FacetKey::from_text("org.example.note", name).unwrap(),
+        datum_key: DatumKey::from_text("org.example.note", name).unwrap(),
     }
 }
 
-fn edge(origin: &FacetRoute, path: &str, target: &FacetRoute, heads: &[u8]) -> FacetRefEdge {
-    FacetRefEdge {
+fn edge(origin: &DatumRoute, path: &str, target: &DatumRoute, heads: &[u8]) -> DatumRefEdge {
+    DatumRefEdge {
         origin: origin.clone(),
         path: path.to_owned(),
         target: target.clone(),
@@ -20,7 +20,7 @@ fn edge(origin: &FacetRoute, path: &str, target: &FacetRoute, heads: &[u8]) -> F
 }
 
 #[cfg(test)]
-async fn progress(store: &FacetRefStore, tag: &str) -> Option<u64> {
+async fn progress(store: &DatumRefStore, tag: &str) -> Option<u64> {
     store.cursors().await.unwrap().get(tag).copied()
 }
 
@@ -29,7 +29,7 @@ async fn settlement_replaces_edges_serves_both_directions_and_never_regresses() 
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = FacetRefStore::new(sql.clone()).await.unwrap();
+    let store = DatumRefStore::new(sql.clone()).await.unwrap();
     let mut parked = BTreeMap::new();
     let origin = route(1, "main");
     let first = route(2, "first");
@@ -50,7 +50,7 @@ async fn settlement_replaces_edges_serves_both_directions_and_never_regresses() 
     assert_eq!(progress(&store, "org.example.note").await, Some(1));
     assert_eq!(
         store
-            .query(FacetRefQuery::Origin(origin.clone()))
+            .query(DatumRefQuery::Origin(origin.clone()))
             .await
             .unwrap(),
         vec![
@@ -60,14 +60,14 @@ async fn settlement_replaces_edges_serves_both_directions_and_never_regresses() 
     );
     assert_eq!(
         store
-            .query(FacetRefQuery::Target(first.clone()))
+            .query(DatumRefQuery::Target(first.clone()))
             .await
             .unwrap(),
         vec![edge(&origin, "/link", &first, &[7; 2])]
     );
     assert_eq!(
         store
-            .query(FacetRefQuery::OriginDoc(origin.doc_id.clone()))
+            .query(DatumRefQuery::OriginDoc(origin.doc_id.clone()))
             .await
             .unwrap(),
         vec![
@@ -77,7 +77,7 @@ async fn settlement_replaces_edges_serves_both_directions_and_never_regresses() 
     );
     assert_eq!(
         store
-            .query(FacetRefQuery::TargetDoc(first.doc_id.clone()))
+            .query(DatumRefQuery::TargetDoc(first.doc_id.clone()))
             .await
             .unwrap(),
         vec![edge(&origin, "/link", &first, &[7; 2])]
@@ -93,14 +93,14 @@ async fn settlement_replaces_edges_serves_both_directions_and_never_regresses() 
         .unwrap();
     assert_eq!(
         store
-            .query(FacetRefQuery::Origin(origin.clone()))
+            .query(DatumRefQuery::Origin(origin.clone()))
             .await
             .unwrap(),
         vec![edge(&origin, "/link", &third, &[])]
     );
     assert!(
         store
-            .query(FacetRefQuery::Target(first.clone()))
+            .query(DatumRefQuery::Target(first.clone()))
             .await
             .unwrap()
             .is_empty()
@@ -109,13 +109,13 @@ async fn settlement_replaces_edges_serves_both_directions_and_never_regresses() 
     store.settle(&origin, &[], 1, &mut parked).await.unwrap();
     assert!(
         store
-            .query(FacetRefQuery::Origin(origin.clone()))
+            .query(DatumRefQuery::Origin(origin.clone()))
             .await
             .unwrap()
             .is_empty()
     );
     assert_eq!(progress(&store, "org.example.note").await, Some(2));
-    let reopened = FacetRefStore::new(sql).await.unwrap();
+    let reopened = DatumRefStore::new(sql).await.unwrap();
     assert_eq!(progress(&reopened, "org.example.note").await, Some(2));
 }
 
@@ -124,7 +124,7 @@ async fn failed_settlement_preserves_edges_cursor_and_parked_replay_without_noti
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = FacetRefStore::new(sql.clone()).await.unwrap();
+    let store = DatumRefStore::new(sql.clone()).await.unwrap();
     let origin = route(1, "main");
     let original = vec![edge(&origin, "/link", &route(2, "first"), &[7])];
     let replacement = vec![edge(&origin, "/link", &route(3, "second"), &[])];
@@ -144,7 +144,7 @@ async fn failed_settlement_preserves_edges_cursor_and_parked_replay_without_noti
         .unwrap();
     let expected_parked = parked.clone();
     let mut settled = store.subscribe_settled();
-    sql.execute_batch("CREATE TRIGGER reject_facet_ref BEFORE INSERT ON big_cabinet_facet_ref_progress BEGIN SELECT RAISE(ABORT, 'injected'); END")
+    sql.execute_batch("CREATE TRIGGER reject_datum_ref BEFORE INSERT ON big_cabinet_datum_ref_progress BEGIN SELECT RAISE(ABORT, 'injected'); END")
         .await.unwrap();
     assert!(
         store
@@ -154,7 +154,7 @@ async fn failed_settlement_preserves_edges_cursor_and_parked_replay_without_noti
     );
     assert_eq!(
         store
-            .query(FacetRefQuery::Origin(origin.clone()))
+            .query(DatumRefQuery::Origin(origin.clone()))
             .await
             .unwrap(),
         original
@@ -166,7 +166,7 @@ async fn failed_settlement_preserves_edges_cursor_and_parked_replay_without_noti
     assert_eq!(store.parked().await.unwrap(), expected_parked);
     assert_eq!(parked, expected_parked);
     assert!(!settled.has_changed().unwrap());
-    sql.execute_batch("DROP TRIGGER reject_facet_ref")
+    sql.execute_batch("DROP TRIGGER reject_datum_ref")
         .await
         .unwrap();
     store
@@ -175,7 +175,7 @@ async fn failed_settlement_preserves_edges_cursor_and_parked_replay_without_noti
         .unwrap();
     settled.changed().await.unwrap();
     assert_eq!(
-        store.query(FacetRefQuery::Origin(origin)).await.unwrap(),
+        store.query(DatumRefQuery::Origin(origin)).await.unwrap(),
         replacement
     );
     assert_eq!(
@@ -186,28 +186,28 @@ async fn failed_settlement_preserves_edges_cursor_and_parked_replay_without_noti
     assert!(parked.is_empty());
 }
 
-/// A document carrying one unsigned branch facet: a reference-declaring tag whose value the
+/// A document carrying one unsigned branch datum: a reference-declaring tag whose value the
 /// gate refuses, so it settles with no edges and exercises the route plumbing alone.
-fn branch_document() -> (Automerge, FacetKey) {
-    let facet_key = FacetKey::from_text(big_cabinet_core::dmeta::BRANCH_FACET_TAG, "main").unwrap();
+fn branch_document() -> (Automerge, DatumKey) {
+    let datum_key = DatumKey::from_text(big_cabinet_core::dmeta::BRANCH_DATUM_TAG, "main").unwrap();
     let mut document = Automerge::new();
     let mut tx = document.transaction();
-    let facets = tx
-        .put_object(automerge::ROOT, "facets", ObjType::Map)
+    let datums = tx
+        .put_object(automerge::ROOT, "datums", ObjType::Map)
         .unwrap();
-    let facet = tx
-        .put_object(&facets, facet_key.to_string(), ObjType::Map)
+    let datum = tx
+        .put_object(&datums, datum_key.to_string(), ObjType::Map)
         .unwrap();
-    tx.put(&facet, "from", "db+facet:/self/org.example.note/main")
+    tx.put(&datum, "from", "db+datum:/self/org.example.note/main")
         .unwrap();
     tx.commit();
-    (document, facet_key)
+    (document, datum_key)
 }
 
-fn present(heads: Vec<ChangeHash>) -> FacetMembership {
-    FacetMembership::Present {
+fn present(heads: Vec<ChangeHash>) -> DatumMembership {
+    DatumMembership::Present {
         doc_heads: heads,
-        facet_heads: Vec::new(),
+        datum_heads: Vec::new(),
         clock: 0,
     }
 }
@@ -221,17 +221,17 @@ async fn close(repo: SharedBigRepo, stop: big_repo::BigRepoStopToken, sql: Datab
 #[tokio::test]
 async fn a_newer_revision_releases_or_outranks_a_parked_route_and_parking_survives_reopen() {
     let schemas = SchemaRepo::open(Vec::new()).unwrap();
-    let (document, facet_key) = branch_document();
+    let (document, datum_key) = branch_document();
     let (_directory, repo, stop, doc_id) =
         crate::index::test_support::reopen_document(document).await;
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = FacetRefStore::new(sql.clone()).await.unwrap();
+    let store = DatumRefStore::new(sql.clone()).await.unwrap();
     let target = route(2, "other");
-    let route = FacetRoute { doc_id, facet_key };
+    let route = DatumRoute { doc_id, datum_key };
     let unknown = present(vec![ChangeHash([9; 32])]);
-    let tag = big_cabinet_core::dmeta::BRANCH_FACET_TAG;
+    let tag = big_cabinet_core::dmeta::BRANCH_DATUM_TAG;
     let mut parked = BTreeMap::new();
 
     // Revision 1 parks (the heads are not local); revision 2 settles the route and releases
@@ -280,9 +280,9 @@ async fn a_newer_revision_releases_or_outranks_a_parked_route_and_parking_surviv
             &repo,
             &schemas,
             route.clone(),
-            Some(FacetMembership::Removed {
+            Some(DatumMembership::Removed {
                 doc_heads: None,
-                facet_heads: Vec::new(),
+                datum_heads: Vec::new(),
                 clock: 0,
             }),
             2,
@@ -302,7 +302,7 @@ async fn a_newer_revision_releases_or_outranks_a_parked_route_and_parking_surviv
     );
     assert_eq!(
         store
-            .query(FacetRefQuery::Origin(route.clone()))
+            .query(DatumRefQuery::Origin(route.clone()))
             .await
             .unwrap(),
         vec![edge(&route, "/link", &target, &[])]
@@ -317,7 +317,7 @@ async fn a_newer_revision_releases_or_outranks_a_parked_route_and_parking_surviv
     assert!(parked.is_empty());
     assert!(
         store
-            .query(FacetRefQuery::Origin(route.clone()))
+            .query(DatumRefQuery::Origin(route.clone()))
             .await
             .unwrap()
             .is_empty()
@@ -337,7 +337,7 @@ async fn a_newer_revision_releases_or_outranks_a_parked_route_and_parking_surviv
         .await
         .unwrap();
     drop(store);
-    let reopened = FacetRefStore::new(sql.clone()).await.unwrap();
+    let reopened = DatumRefStore::new(sql.clone()).await.unwrap();
     let mut reloaded = reopened.parked().await.unwrap();
     assert_eq!(reloaded, parked);
     for (
@@ -369,7 +369,7 @@ async fn a_newer_revision_releases_or_outranks_a_parked_route_and_parking_surviv
 #[tokio::test]
 async fn reference_lookup_does_not_acquire_sync_demand() {
     let schemas = SchemaRepo::open(Vec::new()).unwrap();
-    let (document, facet_key) = branch_document();
+    let (document, datum_key) = branch_document();
     let heads = document.get_heads();
     let (_directory, repo, stop, doc_id) =
         crate::index::test_support::reopen_document(document).await;
@@ -377,10 +377,10 @@ async fn reference_lookup_does_not_acquire_sync_demand() {
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = FacetRefStore::new(sql.clone()).await.unwrap();
-    let route = FacetRoute {
+    let store = DatumRefStore::new(sql.clone()).await.unwrap();
+    let route = DatumRoute {
         doc_id: doc_id.clone(),
-        facet_key,
+        datum_key,
     };
     let mut parked = BTreeMap::new();
     store
@@ -388,9 +388,9 @@ async fn reference_lookup_does_not_acquire_sync_demand() {
             &repo,
             &schemas,
             route.clone(),
-            Some(FacetMembership::Present {
+            Some(DatumMembership::Present {
                 doc_heads: heads,
-                facet_heads: Vec::new(),
+                datum_heads: Vec::new(),
                 clock: 0,
             }),
             1,
@@ -400,20 +400,20 @@ async fn reference_lookup_does_not_acquire_sync_demand() {
         .unwrap();
     assert!(parked.is_empty());
     assert_eq!(
-        progress(&store, big_cabinet_core::dmeta::BRANCH_FACET_TAG).await,
+        progress(&store, big_cabinet_core::dmeta::BRANCH_DATUM_TAG).await,
         Some(1)
     );
     assert!(
         store
-            .query(FacetRefQuery::Origin(route.clone()))
+            .query(DatumRefQuery::Origin(route.clone()))
             .await
             .unwrap()
             .is_empty()
     );
     assert!(demand.documents().is_empty());
-    let pending = FacetMembership::Present {
+    let pending = DatumMembership::Present {
         doc_heads: vec![ChangeHash([9; 32])],
-        facet_heads: Vec::new(),
+        datum_heads: Vec::new(),
         clock: 0,
     };
     store
@@ -458,13 +458,13 @@ fn an_unsigned_value_publishes_no_edges() {
     .unwrap();
     let mut doc = Automerge::new();
     let mut tx = doc.transaction();
-    let facets = tx
-        .put_object(automerge::ROOT, "facets", ObjType::Map)
+    let datums = tx
+        .put_object(automerge::ROOT, "datums", ObjType::Map)
         .unwrap();
-    let facet = tx
-        .put_object(&facets, "org.example.note/main", ObjType::Map)
+    let datum = tx
+        .put_object(&datums, "org.example.note/main", ObjType::Map)
         .unwrap();
-    tx.put(&facet, "link", "db+facet:/self/org.example.note/other")
+    tx.put(&datum, "link", "db+datum:/self/org.example.note/other")
         .unwrap();
     tx.commit();
     let heads = doc.get_heads();

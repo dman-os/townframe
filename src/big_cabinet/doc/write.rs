@@ -1,4 +1,4 @@
-//! WriteFacets: set and remove whole facet values under an explicit write condition.
+//! WriteDatums: set and remove whole datum values under an explicit write condition.
 
 use super::commands::Kind;
 use super::commands::State;
@@ -11,7 +11,7 @@ impl DocsService {
     async fn write(
         &self,
         context: &RequestContext,
-        params: WriteFacets,
+        params: WriteDatums,
     ) -> Result<WriteReceipt, DocsError> {
         let caller = self.invocation(context, params.capability).await?;
         let actor = &caller.signer;
@@ -102,7 +102,7 @@ impl DocsService {
                 let gate = Gate::new(doc, &base);
                 for key in plan.keys() {
                     unaccepted(gate.verify(key)).map_err(|verdict| DocsError::BaseNotAccepted {
-                        facet_key: key.clone(),
+                        datum_key: key.clone(),
                         verdict,
                     })?;
                 }
@@ -110,7 +110,7 @@ impl DocsService {
                 for key in plan.keys() {
                     let ids = predecessor_ids(doc, key, &base, HistoryBudget::default()).map_err(
                         |error| DocsError::BaseNotAccepted {
-                            facet_key: key.clone(),
+                            datum_key: key.clone(),
                             verdict: Unaccepted::Pending {
                                 reason: format!("predecessors: {error:?}"),
                             },
@@ -152,10 +152,10 @@ impl DocsService {
     }
 }
 
-impl Handler<WriteFacets> for DocsService {
+impl Handler<WriteDatums> for DocsService {
     async fn call(
         &self,
-        request: Envelope<WriteFacets>,
+        request: Envelope<WriteDatums>,
     ) -> Result<ResponseEnvelope<WriteReceipt>, DocsError> {
         Ok(self.write(&request.context, request.params).await?.into())
     }

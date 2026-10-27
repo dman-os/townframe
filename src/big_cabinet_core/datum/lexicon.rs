@@ -1,4 +1,4 @@
-//! The Lexicon a facet publishes, projected from its sidecar JSON Schema.
+//! The Lexicon a datum publishes, projected from its sidecar JSON Schema.
 //!
 //! Lexicon is the primary artifact: it states the canonical JSON a peer reads. The sidecar is what
 //! Lexicon cannot say — the `x-automerge` storage annotations, and refinements that *narrow* a
@@ -9,7 +9,7 @@
 //!
 //! What the sidecar may never do is admit a value outside the canonical data model. So a plain
 //! `number` is refused rather than projected: the convention carries a float as a decimal string,
-//! and a facet that opts out of it is a codec document, not a publishable declaration.
+//! and a datum that opts out of it is a codec document, not a publishable declaration.
 //!
 //! The projection errs rather than widening. A position whose sidecar cannot be said in Lexicon is
 //! an error naming the position; it is never quietly turned into an `unknown` that admits more than
@@ -29,14 +29,14 @@ const PROTOCOL_KEYS: [&str; 3] = ["$type", "$bytes", "$link"];
 /// The union discriminant. Internal tagging is the only layout a Lexicon union has.
 const TAG: &str = "$type";
 
-/// Project one facet's sidecar document — its definition plus the `$defs` it carries — into the
+/// Project one datum's sidecar document — its definition plus the `$defs` it carries — into the
 /// Lexicon file it publishes.
 ///
-/// Named definitions the facet reaches are carried into this file and referenced locally, which is
-/// what lets a plug be read on its own: there is no registry, and a definition two facets both
+/// Named definitions the datum reaches are carried into this file and referenced locally, which is
+/// what lets a plug be read on its own: there is no registry, and a definition two datums both
 /// reach is carried by both. A union member is referenced by the id its `$type` const states,
 /// because that id is data a peer reads and not a structure this file owns.
-pub fn project_facet(id: &str, document: &Value) -> Result<Value, String> {
+pub fn project_datum(id: &str, document: &Value) -> Result<Value, String> {
     let definitions = document
         .get("$defs")
         .and_then(Value::as_object)
@@ -46,7 +46,7 @@ pub fn project_facet(id: &str, document: &Value) -> Result<Value, String> {
     let main = position(document, &definitions, &mut carried, "$")?;
     if main.get("type").and_then(Value::as_str) != Some("object") {
         return Err(
-            "$: a facet's Lexicon `main` is an object, and a union, an array or a scalar is a \
+            "$: a datum's Lexicon `main` is an object, and a union, an array or a scalar is a \
              position inside one"
                 .to_owned(),
         );
@@ -63,7 +63,7 @@ pub fn project_facet(id: &str, document: &Value) -> Result<Value, String> {
 
 /// Project one schema position, carrying the definitions it reaches.
 ///
-/// [`project_facet`] refuses anything but an object, because a facet's `main` is one. A compatibility
+/// [`project_datum`] refuses anything but an object, because a datum's `main` is one. A compatibility
 /// check is asked about arbitrary positions — a string, an array, a union — so it projects the
 /// position on its own and compares the results. The rules are the same; only the object requirement
 /// is absent.
@@ -267,10 +267,10 @@ fn marked(
             Ok(None)
         }
         // A plain number is the float opt-out. It is a legitimate codec position and it is not
-        // canonical JSON, so the facet that holds one is not publishable.
+        // canonical JSON, so the datum that holds one is not publishable.
         "number" => Err(here(
             path,
-            "a plain `number` is the float opt-out: Lexicon has no float, and a facet that carries \
+            "a plain `number` is the float opt-out: Lexicon has no float, and a datum that carries \
              one is a codec document rather than a publishable declaration",
         )),
         _ => Err(here(
@@ -314,7 +314,7 @@ fn typed(
         "number" => Err(here(
             path,
             "a plain `number` has no Lexicon type: a float is carried as the decimal string \
-             `facet::Float64` declares, and a whole number is an `integer`",
+             `datum::Float64` declares, and a whole number is an `integer`",
         )),
         "null" => Err(here(
             path,
@@ -460,7 +460,7 @@ fn array(
 ///
 /// A dynamic map is the one place the two layers deliberately disagree. Lexicon has no map type, so
 /// the map projects as `unknown` — any data object — and the sidecar states the value type it
-/// narrows to. A Lexicon-only peer therefore accepts more than this facet does, which is what the
+/// narrows to. A Lexicon-only peer therefore accepts more than this datum does, which is what the
 /// sidecar is for; what it may not do is admit a value outside the canonical data model, so the
 /// value type is projected for its alignment and then dropped rather than trusted unchecked.
 ///
@@ -895,7 +895,7 @@ fn schema(value: &Value, defs: &Map<String, Value>, path: &str) -> Result<(), St
         }
         "integer" | "boolean" | "bytes" | "cid-link" | "blob" | "unknown" | "token" => Ok(()),
         _ => Err(format!(
-            "{path}: `{kind}` is a primary type, which a facet value is not"
+            "{path}: `{kind}` is a primary type, which a datum value is not"
         )),
     }
 }

@@ -1,21 +1,21 @@
-//! Document metadata and signed facet-claim primitives.
+//! Document metadata and signed datum-claim primitives.
 //!
 //! This module deliberately does not know about Automerge or authority storage. A repository
 //! reconstructs an ordinary claim from the state at the change that introduced its signature; this
 //! module owns the stable bytes that are signed, the compact metadata carried by dmeta, and the
 //! distinction between missing evidence and proven forgery.
 //!
-//! Dmeta is an ordinary facet — `org.example.daybook.dmeta/main` — and the document repository is
+//! Dmeta is an ordinary datum — `org.example.daybook.dmeta/main` — and the document repository is
 //! the only writer of it. Its shape is the one in `docs/wiki/docs.md`: aliases live in one forward
 //! index, identities are multibase text, and branch relationships are not duplicated here. A branch
-//! is a weak link recorded by the branch facets (ADR 007); dmeta signs those facets, it does not
+//! is a weak link recorded by the branch datums (ADR 007); dmeta signs those datums, it does not
 //! restate them.
 //!
 //! A claim authenticates the value in its **native storage form**, not its canonical JSON. The
 //! JSON spelling of a stored value is a function of the installed declaration — a float leaves as a
 //! decimal string, a counter as a whole number, bytes as `{ "$bytes": "…" }` — so a signature over
-//! JSON could not be checked on a node that has not installed the facet's schema. The native value
-//! is self-describing, so verification needs no schema at all: an absent schema leaves the facet
+//! JSON could not be checked on a node that has not installed the datum's schema. The native value
+//! is self-describing, so verification needs no schema at all: an absent schema leaves the datum
 //! uninterpreted, never unverifiable. [`encode_native`] is that encoding. The claim type only ever
 //! holds the resulting CID; the repository is what reads the value back out of the transaction and
 //! passes those bytes here.
@@ -45,20 +45,20 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use uuid::Uuid;
+pub use verification::DatumValue;
 pub use verification::Evidence;
-pub use verification::FacetValue;
 pub use verification::SignatureChecks;
-pub use verification::SignedFacetClaim;
+pub use verification::SignedDatumClaim;
 pub use verification::VerificationState;
-pub use verification::facet_verification;
+pub use verification::datum_verification;
 pub use verification::fold_checks;
 pub use verification::signature_id;
 
-use crate::reference::FacetKey;
+use crate::reference::DatumKey;
 
-pub const DMETA_FACET_TAG: &str = "org.example.daybook.dmeta";
-const CLAIM_DOMAIN: &[u8] = b"daybook.facet-claim.v2\0";
-const CLAIM_ID_DOMAIN: &[u8] = b"daybook.facet-claim-id.v2\0";
+pub const DMETA_DATUM_TAG: &str = "org.example.daybook.dmeta";
+const CLAIM_DOMAIN: &[u8] = b"daybook.datum-claim.v2\0";
+const CLAIM_ID_DOMAIN: &[u8] = b"daybook.datum-claim-id.v2\0";
 const CID_VERSION_RAW_BLAKE3: [u8; 4] = [0x01, 0x55, 0x1e, 0x20];
 const CID_LENGTH: usize = 36;
 
@@ -68,7 +68,7 @@ pub use big_sync_core::ObjKey as DocId;
 /// Identity allocated before initial content is persisted and publication begins.
 ///
 /// The document's own id is not a field of [`Dmeta`]: the enclosing document already knows it, and
-/// a field inside the facet would be copied verbatim onto a branch, where it would name the origin
+/// a field inside the datum would be copied verbatim onto a branch, where it would name the origin
 /// rather than the branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocIdentity {
@@ -157,13 +157,13 @@ pub struct ActorMetadata {
     pub delegation: Option<Bytes>,
 }
 
-/// The compact provenance facet. Maps are ordered so snapshots and derived evidence are stable.
+/// The compact provenance datum. Maps are ordered so snapshots and derived evidence are stable.
 ///
-/// There is one index of aliases, `facet_uuids`, keyed by the alias. A per-facet reverse list would
+/// There is one index of aliases, `datum_uuids`, keyed by the alias. A per-datum reverse list would
 /// be a second copy of the same facts, and the two copies are exactly what a merge can pull apart.
 /// The chosen alias for a signature — the lexicographically smallest one visible in the writing
 /// transaction — is derived from this index by the repository, which holds the reverse lookup.
-#[cfg_attr(feature = "schemars", macros::facet(id = "org.example.daybook.dmeta"))]
+#[cfg_attr(feature = "schemars", macros::datum(id = "org.example.daybook.dmeta"))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,13 +181,13 @@ pub struct Dmeta {
     #[cfg_attr(feature = "schemars", schemars(with = "BTreeMap<Uuid7, String>"))]
     pub branch_uuids: BTreeMap<Uuid7, DocId>,
     #[serde(default)]
-    pub facet_uuids: BTreeMap<Uuid7, FacetKey>,
+    pub datum_uuids: BTreeMap<Uuid7, DatumKey>,
     #[serde(default)]
-    pub facets: BTreeMap<FacetKey, FacetMetadata>,
-    /// Members a newer dmeta wrote that this declaration does not name. An open facet keeps them,
+    pub datums: BTreeMap<DatumKey, DatumMetadata>,
+    /// Members a newer dmeta wrote that this declaration does not name. An open datum keeps them,
     /// so a reader that has not been taught a new field does not delete it on the way back.
     #[serde(flatten)]
-    pub extra: crate::facet::Extra,
+    pub extra: crate::datum::Extra,
 }
 
 impl Dmeta {
@@ -197,9 +197,9 @@ impl Dmeta {
             updated_at: Vec::new(),
             actors: BTreeMap::new(),
             branch_uuids: BTreeMap::new(),
-            facet_uuids: BTreeMap::new(),
-            facets: BTreeMap::new(),
-            extra: crate::facet::Extra::new(),
+            datum_uuids: BTreeMap::new(),
+            datums: BTreeMap::new(),
+            extra: crate::datum::Extra::new(),
         }
     }
 
@@ -208,7 +208,7 @@ impl Dmeta {
     ///
     /// A normal branch *is* its origin's changes under a new [`DocId`], so it arrives with the
     /// origin's bindings and none of its own. Its first write — the branch's own
-    /// `org.example.daybook.branch/<docid>` facet — binds a fresh UUID to it, so every later
+    /// `org.example.daybook.branch/<docid>` datum — binds a fresh UUID to it, so every later
     /// write on the branch finds one. Choosing the smallest visible binding keeps two stagings of
     /// the same write, and two concurrent writers that both see it, on the same UUID.
     pub fn doc_uuid(&mut self, document: &DocId, minted: Uuid7) -> Result<Uuid7, DmetaError> {
@@ -230,8 +230,8 @@ impl Dmeta {
 
     /// Record an alias without selecting content. Multiple aliases for one key are durable evidence
     /// of concurrent creation even after the conflict that produced them is no longer visible.
-    pub fn record_facet_alias(&mut self, uuid: Uuid7, key: FacetKey) -> Result<(), DmetaError> {
-        match self.facet_uuids.entry(uuid) {
+    pub fn record_datum_alias(&mut self, uuid: Uuid7, key: DatumKey) -> Result<(), DmetaError> {
+        match self.datum_uuids.entry(uuid) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(key);
                 Ok(())
@@ -242,8 +242,8 @@ impl Dmeta {
     }
 
     /// Whether more than one creator independently opened this slot.
-    pub fn has_concurrent_creation(&self, key: &FacetKey) -> bool {
-        self.facet_uuids
+    pub fn has_concurrent_creation(&self, key: &DatumKey) -> bool {
+        self.datum_uuids
             .values()
             .filter(|alias| *alias == key)
             .count()
@@ -251,7 +251,7 @@ impl Dmeta {
     }
 }
 
-/// What dmeta records about one facet slot.
+/// What dmeta records about one datum slot.
 ///
 /// `signatures` is a **current competing set**, not an append-only audit index: a write replaces
 /// the entries it observed at its base heads with its own, and concurrent writers can leave several.
@@ -263,12 +263,12 @@ impl Dmeta {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct FacetMetadata {
+pub struct DatumMetadata {
     #[serde(default)]
     pub updated_at: Vec<Timestamp>,
     pub deleted_at: Vec<Timestamp>,
     #[serde(default)]
-    pub signatures: Vec<FacetSignature>,
+    pub signatures: Vec<DatumSignature>,
 }
 
 /// A signature a compaction retained from history it dropped, where that history is no longer
@@ -304,15 +304,15 @@ pub struct InheritedWitness {
     pub value: Option<Bytes>,
 }
 
-pub const BRANCH_FACET_TAG: &str = "org.example.daybook.branch";
+pub const BRANCH_DATUM_TAG: &str = "org.example.daybook.branch";
 
 /// The branch side of a branch: `org.example.daybook.branch/<docid>` on the branch document,
 /// naming that document's branch path.
 ///
-/// The facet id carries the document id, not the value, because a branch merged back brings this
-/// facet along: the origin then holds the branch's entry under the branch's id, and still finds
+/// The datum id carries the document id, not the value, because a branch merged back brings this
+/// datum along: the origin then holds the branch's entry under the branch's id, and still finds
 /// its own path (if it is itself a branch) under its own id. Only Branch writes it.
-#[cfg_attr(feature = "schemars", macros::facet(id = "org.example.daybook.branch"))]
+#[cfg_attr(feature = "schemars", macros::datum(id = "org.example.daybook.branch"))]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -321,11 +321,11 @@ pub struct BranchPath {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<BranchOrigin>,
     #[serde(flatten)]
-    pub extra: crate::facet::Extra,
+    pub extra: crate::datum::Extra,
 }
 
 // FIXME: this isn't an open struct and yet i'm seeing
-// no requirements by the facet macro to declare it closed
+// no requirements by the datum macro to declare it closed
 // this is an issue. first of all, this should be open
 // and second of all, for it to be closed, there should have been
 // an explicit closed marker on here
@@ -335,12 +335,12 @@ pub struct BranchPath {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchOrigin {
-    pub facet_ref: crate::FacetReference,
+    pub datum_ref: crate::DatumReference,
     #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub ref_heads: Vec<automerge::ChangeHash>,
 }
 
-/// One entry in a facet's competing set of signatures.
+/// One entry in a datum's competing set of signatures.
 ///
 /// `inherited` is set only for a signature carried over a compaction, where the history its
 /// message would be reconstructed from is gone. Every other signature, including one that arrived
@@ -348,7 +348,7 @@ pub struct BranchOrigin {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct FacetSignature {
+pub struct DatumSignature {
     pub actor_uuid: Uuid7,
     pub signature: SignatureBytes,
     // The document this entry was introduced on, through the `branchUuids` binding visible at its
@@ -373,7 +373,7 @@ pub enum ClaimOperation {
     Remove,
 }
 
-/// The logical fields authenticated by a facet signature.
+/// The logical fields authenticated by a datum signature.
 ///
 /// `value_cid` is a CIDv1 (`raw` codec, BLAKE3-256) over the canonical encoding of the value in its
 /// **native storage form**, read back from the transaction after the content mutation. It is absent
@@ -381,12 +381,12 @@ pub enum ClaimOperation {
 /// resulting CID, so it cannot drift from the bytes that were stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FacetClaim {
+pub struct DatumClaim {
     /// The document the claim was made on. A branch or a merge later moves the signature to other
     /// documents unchanged, so this is not necessarily the document that now holds it; the entry
     /// names this document through its `docUuid` and the `branchUuids` binding.
     pub origin_document: DocId,
-    pub facet_key: FacetKey,
+    pub datum_key: DatumKey,
     pub chosen_uuid: Uuid7,
     pub actor_uuid: Uuid7,
     pub operation: ClaimOperation,
@@ -587,7 +587,7 @@ impl schemars::JsonSchema for SignatureBytes {
 /// Opaque bytes carried inside dmeta: a delegation, or the message and value a branch inherited.
 ///
 /// These are not identities, so they are not multibase text. They are the protocol bytes object,
-/// which is what makes the facet publishable: an array of numbers is not a Lexicon type.
+/// which is what makes the datum publishable: an array of numbers is not a Lexicon type.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Bytes(Vec<u8>);
 
@@ -646,8 +646,8 @@ impl schemars::JsonSchema for Bytes {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        crate::facet::codec_schema(
-            crate::facet::Codec::Bytes,
+        crate::datum::codec_schema(
+            crate::datum::Codec::Bytes,
             schemars::json_schema!({
                 "type": "object",
                 "properties": {
@@ -662,9 +662,9 @@ impl schemars::JsonSchema for Bytes {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DmetaError {
-    #[error("an actor or facet alias must be an RFC 9562 UUIDv7")]
+    #[error("an actor or datum alias must be an RFC 9562 UUIDv7")]
     InvalidUuidVersion,
-    #[error("a facet UUID alias cannot be rebound to another key")]
+    #[error("a datum UUID alias cannot be rebound to another key")]
     ReboundAlias,
     #[error("signed message evidence is unavailable")]
     MissingMessage,
@@ -672,7 +672,7 @@ pub enum DmetaError {
     WrongContext,
     #[error("claim operation and value CID disagree")]
     InvalidClaim,
-    #[error("malformed facet claim: {0}")]
+    #[error("malformed datum claim: {0}")]
     MalformedClaim(&'static str),
     #[error("invalid Ed25519 public key")]
     InvalidPublicKey,
@@ -680,7 +680,7 @@ pub enum DmetaError {
     InvalidSignature,
 }
 
-impl FacetClaim {
+impl DatumClaim {
     /// Deterministic RFC 8949 array encoding from ADR 020 §4.
     pub fn cbor_fields(&self) -> Result<Vec<u8>, DmetaError> {
         if matches!(self.operation, ClaimOperation::Set) != self.value_cid.is_some() {
@@ -689,7 +689,7 @@ impl FacetClaim {
         let mut out = Vec::new();
         cbor_array(&mut out, 7);
         cbor_text(&mut out, &self.origin_document.to_string());
-        cbor_text(&mut out, &self.facet_key.to_string());
+        cbor_text(&mut out, &self.datum_key.to_string());
         cbor_bytes(&mut out, self.chosen_uuid.as_uuid().as_bytes());
         cbor_bytes(&mut out, self.actor_uuid.as_uuid().as_bytes());
         cbor_uint(
@@ -733,9 +733,9 @@ impl FacetClaim {
         let origin_text = read_cbor_text_strict(bytes, &mut cursor)?;
         let origin_document = DocId::from_str(&origin_text)
             .map_err(|_| DmetaError::MalformedClaim("invalid origin document ID"))?;
-        let facet_key_text = read_cbor_text_strict(bytes, &mut cursor)?;
-        let facet_key = FacetKey::from_str(&facet_key_text)
-            .map_err(|_| DmetaError::MalformedClaim("invalid facet key"))?;
+        let datum_key_text = read_cbor_text_strict(bytes, &mut cursor)?;
+        let datum_key = DatumKey::from_str(&datum_key_text)
+            .map_err(|_| DmetaError::MalformedClaim("invalid datum key"))?;
         let uuid_bytes = read_cbor_bytes_strict(bytes, &mut cursor)?;
         let chosen_uuid = Uuid7::try_from(
             Uuid::from_slice(&uuid_bytes)
@@ -797,7 +797,7 @@ impl FacetClaim {
         }
         let claim = Self {
             origin_document,
-            facet_key,
+            datum_key,
             chosen_uuid,
             actor_uuid,
             operation,
@@ -822,7 +822,7 @@ impl FacetClaim {
 /// The CIDv1 (`raw` codec, BLAKE3-256) of an arbitrary byte string.
 ///
 /// This is the one hashing primitive the claim wire needs. The bytes it is given for a value CID are
-/// the canonical native encoding of the facet value, which the repository produces; the bytes for a
+/// the canonical native encoding of the datum value, which the repository produces; the bytes for a
 /// signature id are the domain-separated claim material below.
 pub fn cid_of(bytes: &[u8]) -> Cid {
     Cid::from_digest(*blake3::hash(bytes).as_bytes())

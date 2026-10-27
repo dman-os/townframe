@@ -2,39 +2,39 @@
 
 use super::*;
 
-#[macros::facet(id = "org.example.bytesMember", closed)]
+#[macros::datum(id = "org.example.bytesMember", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct BytesMember {
     data: Bytes,
 }
 
-#[macros::facet(id = "org.example.textMember", closed)]
+#[macros::datum(id = "org.example.textMember", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TextMember {
     data: Text,
 }
 
-#[macros::facet]
+#[macros::datum]
 #[derive(Debug)]
 enum StorageUnion {
     Bytes(BytesMember),
     Text(TextMember),
-    #[facet(other)]
-    Unknown(crate::facet::UnknownMember),
+    #[datum(other)]
+    Unknown(crate::datum::UnknownMember),
 }
 
-#[macros::facet]
+#[macros::datum]
 #[derive(Debug)]
 enum ReversedStorageUnion {
     Text(TextMember),
     Bytes(BytesMember),
-    #[facet(other)]
-    Unknown(crate::facet::UnknownMember),
+    #[datum(other)]
+    Unknown(crate::datum::UnknownMember),
 }
 
-#[macros::facet(closed)]
+#[macros::datum(closed)]
 #[derive(Debug, Serialize, Deserialize)]
 enum ClosedStorageUnion {
     #[serde(rename = "org.example.bytesMember")]
@@ -75,12 +75,12 @@ fn tagged_union_codecs_follow_the_discriminant_not_branch_order() {
             let mut doc = AutoCommit::new();
             assert!(validator.is_valid(&json), "{json}");
             let checked = Stored::check(&compiled(&document), json.clone()).unwrap();
-            reconcile_json(&mut doc, &ROOT, facet(), &document, checked.into_value()).unwrap();
+            reconcile_json(&mut doc, &ROOT, datum(), &document, checked.into_value()).unwrap();
             assert_eq!(
-                hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
+                hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap(),
                 json
             );
-            let (_, member) = doc.get(ROOT, "facet").unwrap().unwrap();
+            let (_, member) = doc.get(ROOT, "datum").unwrap().unwrap();
             let (native, _) = doc.get(member, "data").unwrap().unwrap();
             assert_eq!(shape(&native), expected);
         }
@@ -103,9 +103,9 @@ fn tagged_union_unknown_members_and_optional_null_keep_their_json() {
             let mut doc = AutoCommit::new();
             let checked = Stored::check(&compiled(&document), json.clone())
                 .unwrap_or_else(|err| panic!("{err}; value={json}; schema={document}"));
-            reconcile_json(&mut doc, &ROOT, facet(), &document, checked.into_value()).unwrap();
+            reconcile_json(&mut doc, &ROOT, datum(), &document, checked.into_value()).unwrap();
             assert_eq!(
-                hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
+                hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap(),
                 json
             );
         }
@@ -169,12 +169,12 @@ fn schema_less_canonical_bytes_are_stored_as_bytes() {
     let json = json!({"blob": {"$bytes": "AQID"}});
     let mut doc = AutoCommit::new();
     let checked = Stored::check(&compiled(&document), json.clone()).unwrap();
-    reconcile_json(&mut doc, &ROOT, facet(), &document, checked.into_value()).unwrap();
-    let (_, map) = doc.get(ROOT, "facet").unwrap().unwrap();
+    reconcile_json(&mut doc, &ROOT, datum(), &document, checked.into_value()).unwrap();
+    let (_, map) = doc.get(ROOT, "datum").unwrap().unwrap();
     let (native, _) = doc.get(map, "blob").unwrap().unwrap();
     assert_eq!(shape(&native), "bytes");
     assert_eq!(
-        hydrate_value(&doc, &ROOT, facet(), &compiled(&document)).unwrap(),
+        hydrate_value(&doc, &ROOT, datum(), &compiled(&document)).unwrap(),
         json
     );
 }
@@ -214,7 +214,7 @@ fn undeclared_positions_follow_the_canonical_rules_recursively() {
 /// A union branch is published whole: the `$type` const and `required` are added to the payload's
 /// own schema, so a constraint the payload states — here the object it has to be — survives into
 /// the branch rather than being replaced by it. The branch itself is built by
-/// [`crate::facet::wire`]'s own tests; this is the codec honouring what it built.
+/// [`crate::datum::wire`]'s own tests; this is the codec honouring what it built.
 #[test]
 fn a_union_branch_keeps_its_payloads_own_constraints() {
     let document = json!({

@@ -1,4 +1,4 @@
-//! The field-level checks the `facet` macro runs: what a field may state, and the bare number that
+//! The field-level checks the `datum` macro runs: what a field may state, and the bare number that
 //! must state itself.
 
 use syn::Token;
@@ -8,11 +8,11 @@ use syn::Type;
 /// owns it: a field's marker is read at expansion time, where the core is not in scope.
 const STORAGE_KEYWORD: &str = "x-automerge";
 
-/// A facet's bare `f32`/`f64` or byte-array field must state its spelling. A field marker covers
+/// A datum's bare `f32`/`f64` or byte-array field must state its spelling. A field marker covers
 /// only that field, or the same type under `Option`/`Box`. A bare number or byte array nested in a
 /// map, a tuple, or another container — `Vec<Vec<u8>>` included — is refused: the marker on the
 /// outer field does not reach it.
-pub fn check_field_facets(fields: &syn::Fields) -> syn::Result<()> {
+pub fn check_field_datums(fields: &syn::Fields) -> syn::Result<()> {
     for field in fields.iter() {
         let Some((kind, coverable)) = classify(&field.ty, 0, true) else {
             continue;
@@ -23,13 +23,13 @@ pub fn check_field_facets(fields: &syn::Fields) -> syn::Result<()> {
         let message = if coverable {
             match kind {
                 Bare::Float => {
-                    "a bare number field must state its spelling: use `facet::Float64` or \
-                     `facet::Float32` for the convention's decimal string, or mark this field \
+                    "a bare number field must state its spelling: use `datum::Float64` or \
+                     `datum::Float32` for the convention's decimal string, or mark this field \
                      `#[schemars(extend(\"x-automerge\" = \"number\"))]` if it is deliberately a \
                      plain json number that a consumer reads as one"
                 }
                 Bare::Bytes => {
-                    "a byte-array field must state its spelling: use `facet::Bytes` for the blob, \
+                    "a byte-array field must state its spelling: use `datum::Bytes` for the blob, \
                      `#[serde(with = \"…\" )]` for your own base64, or `#[schemars(extend(\"x-automerge\" \
                      = \"list\"))]` if it is deliberately an array of numbers, not bytes"
                 }
@@ -37,7 +37,7 @@ pub fn check_field_facets(fields: &syn::Fields) -> syn::Result<()> {
         } else {
             "a bare number or byte array nested in a map, a tuple, or another container is not \
              reached by a marker on the outer field, which describes one position and not the ones \
-             inside it: use `facet::Float64`/`facet::Bytes` at the nested position, or state the \
+             inside it: use `datum::Float64`/`datum::Bytes` at the nested position, or state the \
              spelling on the type that holds it"
         };
         return Err(syn::Error::new_spanned(field, message));
@@ -187,13 +187,13 @@ fn states(attr: &syn::Attribute, names: &[&str]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::check_field_facets;
+    use super::check_field_datums;
 
     /// One field, scanned the way the item macro scans a struct's.
     fn check(declaration: &str) -> Result<(), String> {
         let item: syn::ItemStruct =
             syn::parse_str(&format!("struct Test {{ {declaration} }}")).expect("parses");
-        check_field_facets(&item.fields).map_err(|error| error.to_string())
+        check_field_datums(&item.fields).map_err(|error| error.to_string())
     }
 
     fn refused(declaration: &str, expected: &str) {

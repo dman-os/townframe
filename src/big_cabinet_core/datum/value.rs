@@ -1,4 +1,4 @@
-//! The value a facet holds that its own schema does not describe.
+//! The value a datum holds that its own schema does not describe.
 
 use indexmap::IndexMap;
 use serde_json::Value;

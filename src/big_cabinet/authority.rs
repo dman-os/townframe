@@ -39,11 +39,11 @@ use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::authority::ResolvedAuthority;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
-use big_cabinet_core::authority::SignFacetClaim;
+use big_cabinet_core::authority::SignDatumClaim;
 use big_cabinet_core::dmeta::AttributionError;
 use big_cabinet_core::dmeta::DmetaError;
 use big_cabinet_core::dmeta::MultibaseKey;
-use big_cabinet_core::dmeta::SignedFacetClaim;
+use big_cabinet_core::dmeta::SignedDatumClaim;
 use big_cabinet_core::dmeta::Uuid7;
 use ed25519_dalek::SigningKey;
 use secrets_rs::SecretStore;
@@ -99,7 +99,7 @@ pub enum AuthorityError {
     Storage(#[from] sqlite_rs::SqlError),
     #[error("secret store failed: {0}")]
     Secrets(#[from] SecretsError),
-    #[error("facet claim is invalid: {0}")]
+    #[error("datum claim is invalid: {0}")]
     Claim(#[from] DmetaError),
     #[error("attribution certificate is invalid: {0}")]
     Attribution(#[from] AttributionError),
@@ -347,7 +347,7 @@ service_utils_rs::bind_service_protocol! {
             AttenuateCapability(AttenuateCapability),
             InspectCapability(InspectCapability),
             RetractCapability(RetractCapability),
-            SignFacetClaim(SignFacetClaim)
+            SignDatumClaim(SignDatumClaim)
         }
         stream { ObserveCapability(ObserveCapability) }
     }

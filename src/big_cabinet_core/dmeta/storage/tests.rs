@@ -1,14 +1,14 @@
 use super::*;
+use crate::datum::Bundle;
+use crate::datum::Declaration;
+use crate::datum::Universe;
 use crate::dmeta::ActorMetadata;
-use crate::dmeta::FacetMetadata;
-use crate::dmeta::FacetSignature;
+use crate::dmeta::DatumMetadata;
+use crate::dmeta::DatumSignature;
 use crate::dmeta::InheritedWitness;
 use crate::dmeta::MultibaseKey;
 use crate::dmeta::SignatureBytes;
 use crate::dmeta::Uuid7;
-use crate::facet::Bundle;
-use crate::facet::Declaration;
-use crate::facet::Universe;
 use automerge::ActorId;
 use automerge::Automerge;
 use automerge::ROOT;
@@ -33,14 +33,14 @@ fn fixture() -> Dmeta {
         },
     );
     let key = "org.example.note/main".parse().unwrap();
-    dmeta.facet_uuids.insert(Uuid7::new(), key);
+    dmeta.datum_uuids.insert(Uuid7::new(), key);
     dmeta
         .branch_uuids
         .insert(Uuid7::new(), crate::dmeta::DocId::new(b"doc"));
     let key = "org.example.note/main".parse().unwrap();
-    dmeta.facets.insert(
+    dmeta.datums.insert(
         key,
-        FacetMetadata {
+        DatumMetadata {
             updated_at: Vec::new(),
             deleted_at: Vec::new(),
             signatures: Vec::new(),
@@ -56,8 +56,8 @@ fn fixture() -> Dmeta {
     dmeta
 }
 
-fn signature(dmeta: &Dmeta, byte: u8) -> FacetSignature {
-    FacetSignature {
+fn signature(dmeta: &Dmeta, byte: u8) -> DatumSignature {
+    DatumSignature {
         actor_uuid: *dmeta.actors.keys().next().unwrap(),
         doc_uuid: *dmeta.branch_uuids.keys().next().unwrap(),
         signature: SignatureBytes::try_from([byte; 64].as_slice()).unwrap(),
@@ -91,19 +91,19 @@ fn read(doc: &Automerge, schema: &CompiledSchema) -> Dmeta {
 
 fn objects(doc: &Automerge) -> (ObjId, ObjId, [ObjId; 4]) {
     let root = doc.get(ROOT, "dmeta").unwrap().unwrap().1;
-    let facets = doc.get(&root, "facets").unwrap().unwrap().1;
-    let facet = doc
-        .get(&facets, "org.example.note/main")
+    let datums = doc.get(&root, "datums").unwrap().unwrap().1;
+    let datum = doc
+        .get(&datums, "org.example.note/main")
         .unwrap()
         .unwrap()
         .1;
     let lists = [
         doc.get(&root, "updatedAt").unwrap().unwrap().1,
-        doc.get(&facet, "updatedAt").unwrap().unwrap().1,
-        doc.get(&facet, "deletedAt").unwrap().unwrap().1,
-        doc.get(&facet, "signatures").unwrap().unwrap().1,
+        doc.get(&datum, "updatedAt").unwrap().unwrap().1,
+        doc.get(&datum, "deletedAt").unwrap().unwrap().1,
+        doc.get(&datum, "signatures").unwrap().unwrap().1,
     ];
-    (root, facet, lists)
+    (root, datum, lists)
 }
 
 #[test]
@@ -150,15 +150,15 @@ fn timestamps_replace_instead_of_growing_and_resurrection_clears_observed_deleti
     let first = jiff::Timestamp::from_millisecond(1000).unwrap();
     let second = jiff::Timestamp::from_millisecond(2000).unwrap();
     value.updated_at = vec![first];
-    value.facets.values_mut().next().unwrap().updated_at = vec![first];
+    value.datums.values_mut().next().unwrap().updated_at = vec![first];
     assert_eq!(write(&mut doc, &schema, &value), 2);
     value.updated_at = vec![second];
-    value.facets.values_mut().next().unwrap().updated_at = vec![second];
+    value.datums.values_mut().next().unwrap().updated_at = vec![second];
     assert_eq!(write(&mut doc, &schema, &value), 4);
     assert_eq!(read(&doc, &schema), value);
-    value.facets.values_mut().next().unwrap().deleted_at = vec![second];
+    value.datums.values_mut().next().unwrap().deleted_at = vec![second];
     assert_eq!(write(&mut doc, &schema, &value), 1);
-    value.facets.values_mut().next().unwrap().deleted_at.clear();
+    value.datums.values_mut().next().unwrap().deleted_at.clear();
     assert_eq!(write(&mut doc, &schema, &value), 1);
     assert_eq!(read(&doc, &schema), value);
     assert_eq!(objects(&doc), before);
@@ -171,9 +171,9 @@ utils_rs::table_tests! {
     replaces,
     {
         let schema = schema();
-        let key: crate::FacetKey = "org.example.note/main".parse().unwrap();
+        let key: crate::DatumKey = "org.example.note/main".parse().unwrap();
         let mut initial = fixture();
-        initial.facets.clear();
+        initial.datums.clear();
         let mut doc = Automerge::new();
         doc.set_actor(ActorId::from([1u8; 32]));
         write(&mut doc, &schema, &initial);
@@ -181,7 +181,7 @@ utils_rs::table_tests! {
         peer.set_actor(ActorId::from([2u8; 32]));
         for (branch, byte) in [(&mut doc, 1), (&mut peer, 2)] {
             let mut created = initial.clone();
-            created.facets.insert(key.clone(), FacetMetadata {
+            created.datums.insert(key.clone(), DatumMetadata {
                 updated_at: Vec::new(),
                 deleted_at: Vec::new(),
                 signatures: vec![signature(&initial, byte)],
@@ -191,9 +191,9 @@ utils_rs::table_tests! {
         doc.merge(&mut peer).unwrap();
         let lists = |doc: &Automerge| -> Vec<usize> {
             let root = doc.get(ROOT, "dmeta").unwrap().unwrap().1;
-            let facets = doc.get(&root, "facets").unwrap().unwrap().1;
+            let datums = doc.get(&root, "datums").unwrap().unwrap().1;
             let mut lengths: Vec<_> = doc
-                .get_all(&facets, key.to_string())
+                .get_all(&datums, key.to_string())
                 .unwrap()
                 .into_iter()
                 .map(|(_, metadata)| {
@@ -207,7 +207,7 @@ utils_rs::table_tests! {
         assert_eq!(lists(&doc), [1, 1]);
         let mut observed = read(&doc, &schema);
         if replaces {
-            observed.facets.get_mut(&key).unwrap().signatures = vec![signature(&initial, 3)];
+            observed.datums.get_mut(&key).unwrap().signatures = vec![signature(&initial, 3)];
         }
         let replaced = if replaces { BTreeSet::from([key.clone()]) } else { BTreeSet::new() };
         observed
@@ -230,7 +230,7 @@ fn concurrent_replacements_keep_both_signatures_intact_at_supplied_heads() {
     let mut initial = fixture();
     let first = signature(&initial, 1);
     initial.updated_at = vec![initial.created_at];
-    let metadata = initial.facets.values_mut().next().unwrap();
+    let metadata = initial.datums.values_mut().next().unwrap();
     metadata.signatures = vec![first];
     metadata.updated_at = vec![initial.created_at];
     metadata.deleted_at = vec![initial.created_at];
@@ -246,12 +246,12 @@ fn concurrent_replacements_keep_both_signatures_intact_at_supplied_heads() {
     let mut right = initial.clone();
     left.updated_at = vec![jiff::Timestamp::from_millisecond(1000).unwrap()];
     right.updated_at = vec![jiff::Timestamp::from_millisecond(2000).unwrap()];
-    left.facets.values_mut().next().unwrap().signatures = vec![signature(&initial, 2)];
-    right.facets.values_mut().next().unwrap().signatures = vec![signature(&initial, 3)];
-    left.facets.values_mut().next().unwrap().updated_at = left.updated_at.clone();
-    right.facets.values_mut().next().unwrap().updated_at = right.updated_at.clone();
-    left.facets.values_mut().next().unwrap().deleted_at.clear();
-    right.facets.values_mut().next().unwrap().deleted_at = right.updated_at.clone();
+    left.datums.values_mut().next().unwrap().signatures = vec![signature(&initial, 2)];
+    right.datums.values_mut().next().unwrap().signatures = vec![signature(&initial, 3)];
+    left.datums.values_mut().next().unwrap().updated_at = left.updated_at.clone();
+    right.datums.values_mut().next().unwrap().updated_at = right.updated_at.clone();
+    left.datums.values_mut().next().unwrap().deleted_at.clear();
+    right.datums.values_mut().next().unwrap().deleted_at = right.updated_at.clone();
     right.actors.insert(
         Uuid7::new(),
         ActorMetadata {
@@ -261,7 +261,7 @@ fn concurrent_replacements_keep_both_signatures_intact_at_supplied_heads() {
         },
     );
     right
-        .facet_uuids
+        .datum_uuids
         .insert(Uuid7::new(), "org.example.note/main".parse().unwrap());
     write(&mut peer, &schema, &right);
     doc.merge(&mut peer).unwrap();
@@ -275,20 +275,20 @@ fn concurrent_replacements_keep_both_signatures_intact_at_supplied_heads() {
     for merged in [&doc, &peer] {
         assert_eq!(objects(merged), before);
         let observed = read(merged, &schema);
-        let signatures = &observed.facets.values().next().unwrap().signatures;
+        let signatures = &observed.datums.values().next().unwrap().signatures;
         assert_eq!(signatures.len(), 2);
         assert!(signatures.contains(&signature(&initial, 2)));
         assert!(signatures.contains(&signature(&initial, 3)));
         assert_eq!(observed.updated_at.len(), 2);
         assert!(observed.updated_at.contains(&left.updated_at[0]));
         assert!(observed.updated_at.contains(&right.updated_at[0]));
-        let metadata = observed.facets.values().next().unwrap();
+        let metadata = observed.datums.values().next().unwrap();
         assert_eq!(metadata.updated_at.len(), 2);
         assert!(metadata.updated_at.contains(&left.updated_at[0]));
         assert!(metadata.updated_at.contains(&right.updated_at[0]));
         assert_eq!(metadata.deleted_at, right.updated_at);
         assert_eq!(observed.actors, right.actors);
-        assert_eq!(observed.facet_uuids, right.facet_uuids);
+        assert_eq!(observed.datum_uuids, right.datum_uuids);
         for index in 0..2 {
             let entry = merged.get(&before.2[3], index).unwrap().unwrap().1;
             assert_ne!(entry, old_entry);
@@ -319,7 +319,7 @@ fn set_order_duplicates_and_timestamp_precision_do_not_rewrite_equal_entries() {
     let mut value = fixture();
     let first = signature(&value, 1);
     let second = signature(&value, 2);
-    value.facets.values_mut().next().unwrap().signatures =
+    value.datums.values_mut().next().unwrap().signatures =
         vec![first.clone(), second.clone(), first.clone()];
     let fractional: jiff::Timestamp = "2024-01-01T00:00:00.123456Z".parse().unwrap();
     value.updated_at = vec![fractional, fractional];
@@ -331,7 +331,7 @@ fn set_order_duplicates_and_timestamp_precision_do_not_rewrite_equal_entries() {
     let entries = (0..2)
         .map(|index| doc.get(&lists[3], index).unwrap().unwrap().1)
         .collect::<Vec<_>>();
-    value.facets.values_mut().next().unwrap().signatures = vec![second, first];
+    value.datums.values_mut().next().unwrap().signatures = vec![second, first];
     assert_eq!(write(&mut doc, &schema, &value), 0);
     assert_eq!(
         (0..2)
@@ -355,7 +355,7 @@ fn set_order_duplicates_and_timestamp_precision_do_not_rewrite_equal_entries() {
 #[test]
 fn a_hidden_conflicting_binding_is_not_silently_rebound_to_the_winner() {
     let schema = schema();
-    for index in ["actors", "branchUuids", "facetUuids"] {
+    for index in ["actors", "branchUuids", "datumUuids"] {
         let initial = fixture();
         let mut doc = Automerge::new();
         doc.set_actor(ActorId::from([1u8; 32]));
@@ -365,7 +365,7 @@ fn a_hidden_conflicting_binding_is_not_silently_rebound_to_the_winner() {
         let uuid = match index {
             "actors" => initial.actors.keys().next().unwrap().to_string(),
             "branchUuids" => initial.branch_uuids.keys().next().unwrap().to_string(),
-            _ => initial.facet_uuids.keys().next().unwrap().to_string(),
+            _ => initial.datum_uuids.keys().next().unwrap().to_string(),
         };
         let (object, prop) = if index == "actors" {
             (
@@ -417,7 +417,7 @@ fn rejected_bindings_and_late_codec_errors_roll_back_the_owned_transaction() {
     let mut doc = Automerge::new();
     write(&mut doc, &schema, &initial);
     let heads = doc.get_heads();
-    for index in ["actors", "branchUuids", "facetUuids"] {
+    for index in ["actors", "branchUuids", "datumUuids"] {
         for remove in [false, true] {
             let mut submitted = initial.clone();
             match (index, remove) {
@@ -431,9 +431,9 @@ fn rejected_bindings_and_late_codec_errors_roll_back_the_owned_transaction() {
                     *submitted.branch_uuids.values_mut().next().unwrap() =
                         crate::dmeta::DocId::new(b"other");
                 }
-                (_, true) => submitted.facet_uuids.clear(),
+                (_, true) => submitted.datum_uuids.clear(),
                 (_, false) => {
-                    *submitted.facet_uuids.values_mut().next().unwrap() =
+                    *submitted.datum_uuids.values_mut().next().unwrap() =
                         "org.example.other/main".parse().unwrap();
                 }
             }

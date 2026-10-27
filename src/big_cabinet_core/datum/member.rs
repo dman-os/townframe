@@ -2,12 +2,12 @@
 
 /// A type that can be a union member.
 ///
-/// The id is the `$type` value on the wire and the tag a facet key carries, in reverse domain
-/// notation: `org.example.daybook.note`. `FacetTag::from` resolves the same string to the
+/// The id is the `$type` value on the wire and the tag a datum key carries, in reverse domain
+/// notation: `org.example.daybook.note`. `DatumTag::from` resolves the same string to the
 /// well-known tag it names, so one id serves both and a tag is never written twice.
 ///
-/// Emitted by `#[facet(id = "…")]` or `#[facet(id_prefix = "…")]`; not written by hand.
-pub trait FacetMember {
+/// Emitted by `#[datum(id = "…")]` or `#[datum(id_prefix = "…")]`; not written by hand.
+pub trait DatumMember {
     const ID: &'static str;
 }
 

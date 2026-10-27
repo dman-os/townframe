@@ -33,7 +33,7 @@ pub enum Tagging {
     Externally,
 }
 
-/// What a facet declaration is, on the Rust side.
+/// What a datum declaration is, on the Rust side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
     Object {
@@ -51,8 +51,8 @@ pub enum Shape {
     },
 }
 
-/// Emitted by the `facet` macro for a declared type; not written by hand.
-pub trait FacetShape {
+/// Emitted by the `datum` macro for a declared type; not written by hand.
+pub trait DatumShape {
     const SHAPE: Shape;
 }
 
@@ -106,7 +106,7 @@ pub enum ShapeError {
     },
 }
 
-/// Checks the schema a facet type emits against the shape its declaration claims.
+/// Checks the schema a datum type emits against the shape its declaration claims.
 ///
 /// Called with the schema that is about to be published; `name` only makes the error readable. A
 /// flag is a decision with a real cost, an error is the declaration and the schema disagreeing.

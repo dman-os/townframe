@@ -1,5 +1,5 @@
 -- name: cursors :many
--- returns: facet_tag String, revision i64
-SELECT facet_tag
+-- returns: datum_tag String, revision i64
+SELECT datum_tag
      , revision
-  FROM big_cabinet_facet_ref_progress;
+  FROM big_cabinet_datum_ref_progress;

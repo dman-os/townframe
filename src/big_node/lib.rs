@@ -91,7 +91,7 @@ impl BigNode {
                 drawers_actor.capability,
                 drawers_namespace,
                 config.sql.clone(),
-                Arc::clone(&indexes.facet_set),
+                Arc::clone(&indexes.datum_set),
             )
             .await?;
             stop.stages.push(Stage::Service(policy_stop));
@@ -104,8 +104,8 @@ impl BigNode {
                 node_issuer: authority.node_issuer.clone(),
                 access: Arc::clone(&drawer_access) as Arc<dyn DocAccess>,
                 sql: config.sql,
-                facet_set: Some(Arc::clone(&indexes.facet_set)),
-                facet_ref: Some(Arc::clone(&indexes.facet_ref)),
+                datum_set: Some(Arc::clone(&indexes.datum_set)),
+                datum_ref: Some(Arc::clone(&indexes.datum_ref)),
             })
             .await?;
             stop.stages.push(Stage::Service(docs_stop));

@@ -1,6 +1,6 @@
 ---
 source: src/big_cabinet/document/e2e/wire.rs
-expression: "ListFacets\n{\n    capability: capability(1), doc_id: document(1), at:\n    At::Heads(vec![hash(1)]),\n}"
+expression: "ListDatums\n{\n    capability: capability(1), doc_id: document(1), at:\n    At::Heads(vec![hash(1)]),\n}"
 ---
 {
   "capability": "01010101-0101-0101-0101-010101010101",

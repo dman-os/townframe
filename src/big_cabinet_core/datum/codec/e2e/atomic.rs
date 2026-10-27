@@ -13,7 +13,7 @@ fn atomic_reconcile_returns_the_only_commit_capability() {
         tx,
         &compiled_schema,
         &ROOT,
-        facet(),
+        datum(),
         complete_stored(json!({
             "bytes": {"$bytes": "AQID"},
             "instant": "1970-01-01T00:00:00Z",
@@ -29,7 +29,7 @@ fn atomic_reconcile_returns_the_only_commit_capability() {
     .unwrap();
     tx.commit();
     assert_eq!(
-        hydrate_value(&doc, &ROOT, facet(), &compiled(&schema)).unwrap()["text"],
+        hydrate_value(&doc, &ROOT, datum(), &compiled(&schema)).unwrap()["text"],
         "atomic"
     );
 }
@@ -45,7 +45,7 @@ fn atomic_reconcile_discards_pending_transaction_on_preflight_error() {
         tx,
         &compiled_schema,
         &ROOT,
-        facet(),
+        datum(),
         complete_stored(json!({
             "bytes": "plain-base64-is-not-canonical",
             "instant": "1970-01-01T00:00:00Z",
@@ -90,10 +90,10 @@ fn atomic_integer_write_commits_signed_and_unsigned_native_kinds() {
         let compiled = CompiledSchema::compile(schema).unwrap();
         let mut doc = Automerge::new();
         let tx = doc.transaction();
-        let tx = reconcile_json_atomic(tx, &compiled, &ROOT, "facet".into(), value).unwrap();
+        let tx = reconcile_json_atomic(tx, &compiled, &ROOT, "datum".into(), value).unwrap();
         tx.commit();
         let (stored, _) = doc
-            .get(ROOT, "facet")
+            .get(ROOT, "datum")
             .unwrap()
             .expect("integer was committed");
         assert!(matches!(stored, automerge::Value::Scalar(actual) if actual.as_ref() == &expected));
@@ -123,7 +123,7 @@ fn atomic_integer_fractional_tokens_refuse_without_panicking_or_mutating() {
             let mut tx = doc.transaction();
             tx.put(&ROOT, "pending", true).unwrap();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                reconcile_json_atomic(tx, &compiled, &ROOT, "facet".into(), value)
+                reconcile_json_atomic(tx, &compiled, &ROOT, "datum".into(), value)
             }));
             assert!(result.is_ok(), "integer refusal must not panic");
             let error = result
@@ -131,7 +131,7 @@ fn atomic_integer_fractional_tokens_refuse_without_panicking_or_mutating() {
                 .expect_err("non-integral token must be refused");
             assert!(error.to_string().contains("without losing"), "{error}");
             assert!(doc.get(&ROOT, "pending").unwrap().is_none());
-            assert!(doc.get(&ROOT, "facet").unwrap().is_none());
+            assert!(doc.get(&ROOT, "datum").unwrap().is_none());
         }
     }
 }
@@ -145,7 +145,7 @@ fn canonical_projection_is_idempotent_at_the_target_aware_boundary() {
     let document = document();
     let mut second = first.clone();
     second.commit();
-    reconcile_json(&mut second, &ROOT, facet(), &document, canonical.clone())
+    reconcile_json(&mut second, &ROOT, datum(), &document, canonical.clone())
         .expect("canonical projection is accepted again");
     assert_eq!(
         second.pending_ops(),
@@ -160,14 +160,14 @@ fn a_declared_position_is_stored_by_its_declaration() {
     let (_value, json) = value();
     let doc = stored(&json);
 
-    let facet = doc
-        .get(&ROOT, automerge::Prop::Map("facet".to_owned()))
+    let datum = doc
+        .get(&ROOT, automerge::Prop::Map("datum".to_owned()))
         .unwrap()
         .unwrap()
         .1;
     let at = |key: &str| {
         let (stored, id) = doc
-            .get(&facet, automerge::Prop::Map(key.to_owned()))
+            .get(&datum, automerge::Prop::Map(key.to_owned()))
             .unwrap()
             .expect("the member is there");
         (stored, id)

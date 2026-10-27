@@ -33,7 +33,7 @@ async fn a_doc_created_in_a_drawer_belongs_to_it_and_to_the_local_drawers() {
         );
     }
     // The roster doc agrees with the projection, and the docs group holds the grant.
-    let roster = node.roster_facets(&drawer).await;
+    let roster = node.roster_datums(&drawer).await;
     assert_eq!(roster[&doc_entry_key(&doc)], json!({"access": "Admin"}));
     let (_, docs_group) = groups_of(&view);
     assert_eq!(
@@ -120,7 +120,7 @@ async fn an_entry_is_added_grant_first_and_removed_entry_first() {
         .unwrap();
     assert_eq!(receipt.doc_id, shared);
     assert_eq!(
-        node.roster_facets(&shared).await[&doc_entry_key(&doc)],
+        node.roster_datums(&shared).await[&doc_entry_key(&doc)],
         json!({"access": "Read"})
     );
     assert_eq!(
@@ -171,7 +171,7 @@ async fn an_entry_is_added_grant_first_and_removed_entry_first() {
         Some(KeyhiveAccess::Relay)
     );
     assert_eq!(
-        node.roster_facets(&shared).await[&doc_entry_key(&doc)],
+        node.roster_datums(&shared).await[&doc_entry_key(&doc)],
         json!({"access": "Relay"})
     );
 
@@ -202,7 +202,7 @@ async fn an_entry_is_added_grant_first_and_removed_entry_first() {
         .unwrap();
     assert!(
         !node
-            .roster_facets(&shared)
+            .roster_datums(&shared)
             .await
             .contains_key(&doc_entry_key(&doc))
     );
@@ -293,7 +293,7 @@ async fn a_child_drawer_confers_access_through_its_parent() {
         .await
         .unwrap();
     assert_eq!(
-        node.roster_facets(&parent).await[&child_entry_key(&child)],
+        node.roster_datums(&parent).await[&child_entry_key(&child)],
         json!({"access": "Read"})
     );
     assert_eq!(
@@ -344,7 +344,7 @@ async fn a_child_drawer_confers_access_through_its_parent() {
         .unwrap();
     assert!(
         !node
-            .roster_facets(&parent)
+            .roster_datums(&parent)
             .await
             .contains_key(&child_entry_key(&child))
     );
@@ -414,7 +414,7 @@ async fn a_self_doc_drawer_is_the_doc_itself() {
         .unwrap();
     assert_eq!(created.drawer_id, doc);
     assert_eq!(
-        node.roster_facets(&doc).await[&drawer_key()],
+        node.roster_datums(&doc).await[&drawer_key()],
         serde_json::to_value(Drawer::self_doc()).unwrap()
     );
     let err = node
@@ -482,7 +482,7 @@ async fn a_self_doc_drawer_is_the_doc_itself() {
     node.docs()
         .call(
             RequestContext::root(),
-            WriteFacets {
+            WriteDatums {
                 capability: node
                     .mint_doc(
                         &alice,
@@ -502,7 +502,7 @@ async fn a_self_doc_drawer_is_the_doc_itself() {
         )
         .await
         .unwrap();
-    assert_eq!(node.roster_facets(&doc).await[&drawer_key()], value);
+    assert_eq!(node.roster_datums(&doc).await[&drawer_key()], value);
     node.core()
         .state
         .put_drawer(&doc, &cached_descriptor)
@@ -750,7 +750,7 @@ async fn an_entry_with_an_unknown_access_level_is_carried_without_granting_or_br
     node.docs()
         .call(
             RequestContext::root(),
-            WriteFacets {
+            WriteDatums {
                 capability: node
                     .mint_doc(
                         &alice,
@@ -800,7 +800,7 @@ async fn an_entry_with_an_unknown_access_level_is_carried_without_granting_or_br
         DrawersError::Denied
     );
     assert_eq!(
-        node.roster_facets(&shared).await[&doc_entry_key(&foreign_doc)],
+        node.roster_datums(&shared).await[&doc_entry_key(&foreign_doc)],
         json!({"access": "Pull", "future": 1})
     );
     node.stop().await;

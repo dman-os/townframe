@@ -1,9 +1,9 @@
 use super::*;
-use crate::facet::FacetDecl;
-use crate::facet::Stored;
-use crate::facet::Universe;
-use crate::facet::hydrate_value;
-use crate::facet::reconcile_json_atomic;
+use crate::datum::DatumDecl;
+use crate::datum::Stored;
+use crate::datum::Universe;
+use crate::datum::hydrate_value;
+use crate::datum::reconcile_json_atomic;
 use automerge::Automerge;
 use automerge::ROOT;
 use automerge::ReadDoc;
@@ -29,7 +29,7 @@ fn accepts(schema: &CompiledSchema, mut value: Value) -> bool {
 
 fn supplement(properties: Value) -> Universe {
     Universe {
-        facets: vec![FacetDecl {
+        datums: vec![DatumDecl {
             id: TAG.to_owned(),
             name: "Authored".to_owned(),
             schema: schemars::Schema::try_from(json!({"type": "object", "properties": properties}))
@@ -143,7 +143,7 @@ fn recursive_primary_refs_and_carried_storage_supplements_round_trip() {
         "children": {"type": "array", "items": {"type": "ref", "ref": "#node"}}
     }});
     let mut universe = supplement(json!({"tree": {"$ref": "#/$defs/Node"}}));
-    universe.types.push(crate::facet::TypeDecl {
+    universe.types.push(crate::datum::TypeDecl {
         name: "Node".to_owned(),
         schema: schemars::Schema::try_from(json!({"type": "object", "properties": {
             "label": {"type": "string", "x-automerge": "text"},
@@ -157,19 +157,19 @@ fn recursive_primary_refs_and_carried_storage_supplements_round_trip() {
     let value = json!({"$type": TAG, "tree": {"label": "root", "children": [{"label": "leaf", "future": true}]}});
     let mut doc = Automerge::new();
     let transaction = doc.transaction();
-    reconcile_json_atomic(transaction, &compiled, &ROOT, "facet".into(), value.clone())
+    reconcile_json_atomic(transaction, &compiled, &ROOT, "datum".into(), value.clone())
         .unwrap()
         .commit();
     assert_eq!(
-        hydrate_value(&doc, &ROOT, "facet".into(), &compiled).unwrap(),
+        hydrate_value(&doc, &ROOT, "datum".into(), &compiled).unwrap(),
         value
     );
     assert!(!accepts(
         &compiled,
         json!({"tree": {"label": "root", "children": [{"label": "too long"}]}})
     ));
-    let (_, facet) = doc.get(ROOT, "facet").unwrap().unwrap();
-    let (_, tree) = doc.get(facet, "tree").unwrap().unwrap();
+    let (_, datum) = doc.get(ROOT, "datum").unwrap().unwrap();
+    let (_, tree) = doc.get(datum, "tree").unwrap().unwrap();
     assert!(matches!(
         doc.get(tree, "label").unwrap().unwrap().0,
         automerge::Value::Object(automerge::ObjType::Text)
@@ -193,11 +193,11 @@ fn nullable_primary_unions_round_trip_known_and_future_payloads() {
     ] {
         let value = json!({"$type": TAG, "member": member});
         let transaction = doc.transaction();
-        reconcile_json_atomic(transaction, &compiled, &ROOT, "facet".into(), value.clone())
+        reconcile_json_atomic(transaction, &compiled, &ROOT, "datum".into(), value.clone())
             .unwrap()
             .commit();
         assert_eq!(
-            hydrate_value(&doc, &ROOT, "facet".into(), &compiled).unwrap(),
+            hydrate_value(&doc, &ROOT, "datum".into(), &compiled).unwrap(),
             value
         );
     }
@@ -286,36 +286,36 @@ fn native_supplements_round_trip_through_transactions_without_datetime_precision
     let mut doc = Automerge::new();
     let mut value = json!({"$type": TAG, "uint": u64::MAX, "float": 1.25, "counter": i64::MAX, "text": "text", "instant": "1985-04-12T23:20:50.12345678912345Z", "bytes": {"$bytes": "AQ=="}, "wide": i64::MAX});
     let transaction = doc.transaction();
-    reconcile_json_atomic(transaction, &compiled, &ROOT, "facet".into(), value.clone())
+    reconcile_json_atomic(transaction, &compiled, &ROOT, "datum".into(), value.clone())
         .unwrap()
         .commit();
     value["uint"] = json!(u64::MAX.to_string());
     value["float"] = json!("1.25");
     assert_eq!(
-        hydrate_value(&doc, &ROOT, "facet".into(), &compiled).unwrap(),
+        hydrate_value(&doc, &ROOT, "datum".into(), &compiled).unwrap(),
         value
     );
-    let (_, facet) = doc.get(ROOT, "facet").unwrap().unwrap();
+    let (_, datum) = doc.get(ROOT, "datum").unwrap().unwrap();
     assert!(
-        matches!(doc.get(&facet, "uint").unwrap().unwrap().0, automerge::Value::Scalar(value) if matches!(value.as_ref(), automerge::ScalarValue::Uint(u64::MAX)))
+        matches!(doc.get(&datum, "uint").unwrap().unwrap().0, automerge::Value::Scalar(value) if matches!(value.as_ref(), automerge::ScalarValue::Uint(u64::MAX)))
     );
     let before = doc.get_heads();
     let transaction = doc.transaction();
-    reconcile_json_atomic(transaction, &compiled, &ROOT, "facet".into(), value.clone())
+    reconcile_json_atomic(transaction, &compiled, &ROOT, "datum".into(), value.clone())
         .unwrap()
         .commit();
     assert_eq!(doc.get_heads(), before);
     value["instant"] = json!("2024-01-02T03:04:05Z");
     let transaction = doc.transaction();
-    reconcile_json_atomic(transaction, &compiled, &ROOT, "facet".into(), value.clone())
+    reconcile_json_atomic(transaction, &compiled, &ROOT, "datum".into(), value.clone())
         .unwrap()
         .commit();
     assert_eq!(
-        hydrate_value(&doc, &ROOT, "facet".into(), &compiled).unwrap(),
+        hydrate_value(&doc, &ROOT, "datum".into(), &compiled).unwrap(),
         value
     );
     assert!(
-        matches!(doc.get(&facet, "instant").unwrap().unwrap().0, automerge::Value::Scalar(value) if matches!(value.as_ref(), automerge::ScalarValue::Timestamp(_)))
+        matches!(doc.get(&datum, "instant").unwrap().unwrap().0, automerge::Value::Scalar(value) if matches!(value.as_ref(), automerge::ScalarValue::Timestamp(_)))
     );
     for invalid in [
         json!({"uint": "18446744073709551616"}),
@@ -536,7 +536,7 @@ fn unused_supplement_definitions_and_bundle_identity_are_checked_at_admission() 
         json!({"type": "string", "maxLength": 2}),
     ] {
         let mut universe = supplement(json!({}));
-        universe.types.push(crate::facet::TypeDecl {
+        universe.types.push(crate::datum::TypeDecl {
             name: "Unused".to_owned(),
             schema: schemars::Schema::try_from(schema).unwrap(),
         });
@@ -547,7 +547,7 @@ fn unused_supplement_definitions_and_bundle_identity_are_checked_at_admission() 
         );
     }
     let mut universe = supplement(json!({}));
-    universe.facets[0].id = "org.example.other".to_owned();
+    universe.datums[0].id = "org.example.other".to_owned();
     assert!(matches!(
         Bundle::new(&universe, Vec::new()).validate_lexicon(TAG, &primary, &[]),
         Err(LexiconAdmissionError::Invalid { .. })
@@ -587,16 +587,16 @@ fn nested_typed_map_array_leaves_preserve_full_width_native_counters() {
     let value = json!({"$type": TAG, "map": {"entry": value}});
     let mut doc = Automerge::new();
     let transaction = doc.transaction();
-    reconcile_json_atomic(transaction, &compiled, &ROOT, "facet".into(), value.clone())
+    reconcile_json_atomic(transaction, &compiled, &ROOT, "datum".into(), value.clone())
         .unwrap()
         .commit();
     assert_eq!(
-        hydrate_value(&doc, &ROOT, "facet".into(), &compiled).unwrap(),
+        hydrate_value(&doc, &ROOT, "datum".into(), &compiled).unwrap(),
         value
     );
     let heads = doc.get_heads();
     let transaction = doc.transaction();
-    reconcile_json_atomic(transaction, &compiled, &ROOT, "facet".into(), value)
+    reconcile_json_atomic(transaction, &compiled, &ROOT, "datum".into(), value)
         .unwrap()
         .commit();
     assert_eq!(doc.get_heads(), heads);
@@ -638,7 +638,7 @@ fn carried_unused_storage_declarations_are_not_ignored() {
         json!({"anyOf": [{"type": "string"}], "x-automerge": "text"}),
     ] {
         let mut universe = supplement(json!({}));
-        universe.types.push(crate::facet::TypeDecl {
+        universe.types.push(crate::datum::TypeDecl {
             name: "Unused".to_owned(),
             schema: schemars::Schema::try_from(annotation).unwrap(),
         });
@@ -673,22 +673,22 @@ fn typed_maps_can_select_native_bytes_and_lossless_datetime_leaves() {
     ] {
         let value = json!({"$type": TAG, "bytes": {"one": {"$bytes": "AQ=="}}, "instants": {"one": instant}});
         let transaction = doc.transaction();
-        reconcile_json_atomic(transaction, &compiled, &ROOT, "facet".into(), value.clone())
+        reconcile_json_atomic(transaction, &compiled, &ROOT, "datum".into(), value.clone())
             .unwrap()
             .commit();
         assert_eq!(
-            hydrate_value(&doc, &ROOT, "facet".into(), &compiled).unwrap(),
+            hydrate_value(&doc, &ROOT, "datum".into(), &compiled).unwrap(),
             value
         );
         let heads = doc.get_heads();
         let transaction = doc.transaction();
-        reconcile_json_atomic(transaction, &compiled, &ROOT, "facet".into(), value)
+        reconcile_json_atomic(transaction, &compiled, &ROOT, "datum".into(), value)
             .unwrap()
             .commit();
         assert_eq!(doc.get_heads(), heads);
     }
-    let (_, facet) = doc.get(ROOT, "facet").unwrap().unwrap();
-    let (_, bytes) = doc.get(&facet, "bytes").unwrap().unwrap();
+    let (_, datum) = doc.get(ROOT, "datum").unwrap().unwrap();
+    let (_, bytes) = doc.get(&datum, "bytes").unwrap().unwrap();
     assert!(
         matches!(doc.get(bytes, "one").unwrap().unwrap().0, automerge::Value::Scalar(value) if matches!(value.as_ref(), automerge::ScalarValue::Bytes(bytes) if bytes == &[1]))
     );

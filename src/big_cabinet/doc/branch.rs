@@ -86,7 +86,7 @@ impl DocsService {
         let branch_value = serde_json::json!({
             "path": params.path,
             "from": {
-                "facetRef": format!("db+facet:/{}/{}", params.doc_id, branch_key(&params.doc_id)),
+                "datumRef": format!("db+datum:/{}/{}", params.doc_id, branch_key(&params.doc_id)),
                 "refHeads": sorted(fork.get_heads()),
             },
         });
@@ -173,20 +173,20 @@ impl DocsService {
                 .await
                 .is_none()
             {
-                let branch_facet = branch_key(branch);
+                let branch_datum = branch_key(branch);
                 let value = self
                     .handle(branch)
                     .await?
                     .with_document_read(|doc| -> Result<Json, DocsError> {
                         let view = doc.fork_at(&row.heads).map_err(repository)?;
-                        let (_, facets) = view
-                            .get(automerge::ROOT, "facets")
+                        let (_, datums) = view
+                            .get(automerge::ROOT, "datums")
                             .map_err(repository)?
-                            .expect("a committed branch has facets");
+                            .expect("a committed branch has datums");
                         hydrate_value(
                             &view,
-                            &facets,
-                            branch_facet.to_string().as_str().into(),
+                            &datums,
+                            branch_datum.to_string().as_str().into(),
                             self.branch.compiled(),
                         )
                         .map_err(repository)
@@ -196,7 +196,7 @@ impl DocsService {
                     document: origin,
                     doc_uuid: Uuid7::new(),
                     actor: &self.system_actor,
-                    set: BTreeMap::from([(branch_facet, (self.branch.clone(), value))]),
+                    set: BTreeMap::from([(branch_datum, (self.branch.clone(), value))]),
                     remove: BTreeSet::new(),
                     now: jiff::Timestamp::now(),
                     predecessors: BTreeMap::new(),

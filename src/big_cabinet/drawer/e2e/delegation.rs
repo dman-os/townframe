@@ -63,11 +63,11 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
             .await
             .unwrap();
     }
-    let read = |capability| ReadFacets {
+    let read = |capability| ReadDatums {
         capability,
         doc_id: doc.clone(),
         at: At::Current,
-        facets: None,
+        datums: None,
         optimistic: false,
     };
     for capability in &doc_caps {
@@ -80,10 +80,10 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
         .docs()
         .subscribe(
             RequestContext::root(),
-            ObserveFacets {
+            ObserveDatums {
                 capability: doc_caps[1],
                 scope: ObserveScope::Tag {
-                    tag: big_cabinet_core::FacetTag::new(NOTE).unwrap(),
+                    tag: big_cabinet_core::DatumTag::new(NOTE).unwrap(),
                 },
                 after: 0,
             },
@@ -94,15 +94,15 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
     let mut replay_complete = false;
     while !present || !replay_complete {
         match events.next().await.unwrap().unwrap() {
-            FacetObserved::Entry {
+            DatumObserved::Entry {
                 doc_id,
-                facet: ObservedFacet::Present { .. },
+                datum: ObservedDatum::Present { .. },
                 ..
             } => {
                 assert_eq!(doc_id, doc);
                 present = true;
             }
-            FacetObserved::ReplayComplete { .. } => replay_complete = true,
+            DatumObserved::ReplayComplete { .. } => replay_complete = true,
             other => panic!("expected the note or replay completion, got {other:?}"),
         }
     }
@@ -768,11 +768,11 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     let read = |capability| {
         node.docs().call(
             context.child(),
-            ReadFacets {
+            ReadDatums {
                 capability,
                 doc_id: doc.clone(),
                 at: At::Current,
-                facets: Some([note_key.clone()].into()),
+                datums: Some([note_key.clone()].into()),
                 optimistic: false,
             },
         )
@@ -785,8 +785,8 @@ async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support()
     );
     let expected_read = read(doc_cap).await.unwrap();
     assert!(matches!(
-        expected_read.facets.get(&note_key),
-        Some(FacetRead::Accepted { value, .. }) if *value == note_value
+        expected_read.datums.get(&note_key),
+        Some(DatumRead::Accepted { value, .. }) if *value == note_value
     ));
 
     let admin = node
@@ -1106,7 +1106,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
                     node.docs()
                         .call(
                             context.child(),
-                            WriteFacets {
+                            WriteDatums {
                                 capability,
                                 command: Some(self_doc_command.clone()),
                                 doc_id: doc.clone(),
@@ -1127,7 +1127,7 @@ async fn interrupted_delegated_creation_recovers_owner_and_bound_signer_for_both
         .await
         .unwrap();
     assert_eq!(
-        node.roster_facets(&doc).await,
+        node.roster_datums(&doc).await,
         [(
             drawer_key(),
             serde_json::to_value(Drawer::self_doc()).unwrap()

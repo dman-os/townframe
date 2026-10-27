@@ -30,7 +30,7 @@ impl From<ClaimHistoryError> for DocsError {
     }
 }
 
-impl From<ClaimHistoryEntry> for FacetClaimEvidence {
+impl From<ClaimHistoryEntry> for DatumClaimEvidence {
     fn from(entry: ClaimHistoryEntry) -> Self {
         let result = match entry.result {
             ClaimHistoryResult::Accepted(claim) => SignatureEvidence::VerifiedSignature {
@@ -103,17 +103,17 @@ impl DocsService {
     fn claims(
         doc: &Automerge,
         doc_id: DocId,
-        facet_key: FacetKey,
+        datum_key: DatumKey,
         heads: Vec<ChangeHash>,
-    ) -> Result<FacetClaimsInspection, DocsError> {
+    ) -> Result<DatumClaimsInspection, DocsError> {
         let evidence =
-            reconstruct_current_claims(doc, &facet_key, &heads, HistoryBudget::default())?
+            reconstruct_current_claims(doc, &datum_key, &heads, HistoryBudget::default())?
                 .into_iter()
-                .map(FacetClaimEvidence::from)
+                .map(DatumClaimEvidence::from)
                 .collect();
-        Ok(FacetClaimsInspection {
+        Ok(DatumClaimsInspection {
             doc_id,
-            facet_key,
+            datum_key,
             heads,
             scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
             evidence,
@@ -121,11 +121,11 @@ impl DocsService {
     }
 }
 
-impl Handler<UnsafeInspectFacet> for DocsService {
+impl Handler<UnsafeInspectDatum> for DocsService {
     async fn call(
         &self,
-        request: Envelope<UnsafeInspectFacet>,
-    ) -> Result<ResponseEnvelope<UnsafeFacetInspection>, DocsError> {
+        request: Envelope<UnsafeInspectDatum>,
+    ) -> Result<ResponseEnvelope<UnsafeDatumInspection>, DocsError> {
         let params = request.params;
         let document = self
             .inspected(
@@ -137,21 +137,21 @@ impl Handler<UnsafeInspectFacet> for DocsService {
             .await?;
         let schema_known = self
             .schema_repo
-            .resolve_for_read(params.facet_key.tag().as_str())
+            .resolve_for_read(params.datum_key.tag().as_str())
             .is_some();
         let output = document
             .with_document_read(|doc| {
                 request.context.validate()?;
                 check_heads(doc, &params.heads)?;
                 let native_value = match doc
-                    .get_at(automerge::ROOT, "facets", &params.heads)
+                    .get_at(automerge::ROOT, "datums", &params.heads)
                     .map_err(ClaimHistoryError::from)?
                 {
                     None => None,
-                    Some((Value::Object(ObjType::Map), facets)) => NativeValue::read_at_heads(
+                    Some((Value::Object(ObjType::Map), datums)) => NativeValue::read_at_heads(
                         doc,
-                        &facets,
-                        params.facet_key.to_string(),
+                        &datums,
+                        params.datum_key.to_string(),
                         &params.heads,
                         &mut NativeReadBudget::default(),
                     )
@@ -159,12 +159,12 @@ impl Handler<UnsafeInspectFacet> for DocsService {
                     .map(|value| encode_native(&value).into()),
                     Some(_) => {
                         return Err(DocsError::MalformedEvidence {
-                            reason: "facets is not a map".into(),
+                            reason: "datums is not a map".into(),
                         });
                     }
                 };
-                let claims = Self::claims(doc, params.doc_id, params.facet_key, params.heads)?;
-                Ok::<_, DocsError>(UnsafeFacetInspection {
+                let claims = Self::claims(doc, params.doc_id, params.datum_key, params.heads)?;
+                Ok::<_, DocsError>(UnsafeDatumInspection {
                     native_value,
                     schema_known,
                     claims,
@@ -175,11 +175,11 @@ impl Handler<UnsafeInspectFacet> for DocsService {
     }
 }
 
-impl Handler<InspectFacetClaims> for DocsService {
+impl Handler<InspectDatumClaims> for DocsService {
     async fn call(
         &self,
-        request: Envelope<InspectFacetClaims>,
-    ) -> Result<ResponseEnvelope<FacetClaimsInspection>, DocsError> {
+        request: Envelope<InspectDatumClaims>,
+    ) -> Result<ResponseEnvelope<DatumClaimsInspection>, DocsError> {
         let params = request.params;
         let document = self
             .inspected(
@@ -193,7 +193,7 @@ impl Handler<InspectFacetClaims> for DocsService {
             .with_document_read(|doc| {
                 request.context.validate()?;
                 check_heads(doc, &params.heads)?;
-                Self::claims(doc, params.doc_id, params.facet_key, params.heads)
+                Self::claims(doc, params.doc_id, params.datum_key, params.heads)
             })
             .await?;
         Ok(output.into())

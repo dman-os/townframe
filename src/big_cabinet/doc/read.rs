@@ -1,20 +1,20 @@
-//! ReadFacets: gated reads at explicit heads.
+//! ReadDatums: gated reads at explicit heads.
 
 use super::*;
 
 impl DocsService {
-    fn json<D: ReadDoc>(&self, doc: &D, facets: &ObjId, key: &FacetKey) -> Result<Json, String> {
+    fn json<D: ReadDoc>(&self, doc: &D, datums: &ObjId, key: &DatumKey) -> Result<Json, String> {
         let handle = self.schema_repo.resolve_for_read(key.tag().as_str());
         let schema = handle.as_ref().map_or(&self.raw, SchemaHandle::compiled);
-        hydrate_value(doc, facets, key.to_string().as_str().into(), schema)
+        hydrate_value(doc, datums, key.to_string().as_str().into(), schema)
             .map_err(|error| error.to_string())
     }
 
     async fn read(
         &self,
         context: &RequestContext,
-        params: ReadFacets,
-    ) -> Result<FacetsRead, DocsError> {
+        params: ReadDatums,
+    ) -> Result<DatumsRead, DocsError> {
         let caller = self.invocation(context, params.capability).await?;
         self.authorize(
             context,
@@ -23,21 +23,21 @@ impl DocsService {
         )
         .await?;
         if let Some(key) = params
-            .facets
+            .datums
             .iter()
             .flatten()
-            .find(|key| key.tag().as_str() == DMETA_FACET_TAG)
+            .find(|key| key.tag().as_str() == DMETA_DATUM_TAG)
         {
-            return Err(DocsError::SystemFacet {
-                facet_key: key.clone(),
+            return Err(DocsError::SystemDatum {
+                datum_key: key.clone(),
             });
         }
         let document = self.handle(&params.doc_id).await?;
         document
-            .with_document(|doc| -> Result<FacetsRead, DocsError> {
+            .with_document(|doc| -> Result<DatumsRead, DocsError> {
                 context.validate()?;
                 let heads = resolve(doc, &params.at)?;
-                let keys = match &params.facets {
+                let keys = match &params.datums {
                     Some(keys) => keys.clone(),
                     None => present_keys(doc, &heads)?,
                 };
@@ -51,17 +51,17 @@ impl DocsService {
                         .collect()
                 };
                 // Versions are computed before opening the read transaction: the
-                // transaction borrows the document mutably, while `facet_version`
+                // transaction borrows the document mutably, while `datum_version`
                 // reads its changes.
                 let verdicts: Vec<_> = verdicts
                     .into_iter()
                     .map(|(key, verdict)| {
                         let version = match &verdict {
-                            Verdict::Accepted { facet_heads, .. }
-                            | Verdict::Pending { facet_heads, .. } => {
-                                facet_version(doc, facet_heads.clone())
+                            Verdict::Accepted { datum_heads, .. }
+                            | Verdict::Pending { datum_heads, .. } => {
+                                datum_version(doc, datum_heads.clone())
                             }
-                            Verdict::Rejected { .. } => FacetVersion {
+                            Verdict::Rejected { .. } => DatumVersion {
                                 heads: Vec::new(),
                                 clock: 0,
                             },
@@ -72,51 +72,51 @@ impl DocsService {
                 let tx = doc
                     .transaction_at(PatchLog::null(), &heads)
                     .expect("a null patch log matches any document");
-                let facets_obj = match tx.get(automerge::ROOT, "facets").map_err(repository)? {
-                    Some((Value::Object(ObjType::Map), facets)) => Some(facets),
+                let datums_obj = match tx.get(automerge::ROOT, "datums").map_err(repository)? {
+                    Some((Value::Object(ObjType::Map), datums)) => Some(datums),
                     _ => None,
                 };
-                let present = |key: &FacetKey| {
-                    facets_obj.as_ref().filter(|facets| {
-                        tx.get(*facets, key.to_string())
+                let present = |key: &DatumKey| {
+                    datums_obj.as_ref().filter(|datums| {
+                        tx.get(*datums, key.to_string())
                             .is_ok_and(|value| value.is_some())
                     })
                 };
-                let mut facets = BTreeMap::new();
+                let mut datums = BTreeMap::new();
                 for (key, verdict, version) in verdicts {
                     let read = match verdict {
-                        Verdict::Accepted { native: None, .. } => FacetRead::Absent { version },
+                        Verdict::Accepted { native: None, .. } => DatumRead::Absent { version },
                         Verdict::Accepted { .. } => {
-                            let facets = present(&key).expect("an accepted value is present");
-                            match self.json(&tx, facets, &key) {
-                                Ok(value) => FacetRead::Accepted { value, version },
-                                Err(reason) => FacetRead::Undecodable { reason, version },
+                            let datums = present(&key).expect("an accepted value is present");
+                            match self.json(&tx, datums, &key) {
+                                Ok(value) => DatumRead::Accepted { value, version },
+                                Err(reason) => DatumRead::Undecodable { reason, version },
                             }
                         }
-                        Verdict::Pending { reason, .. } => FacetRead::Pending {
+                        Verdict::Pending { reason, .. } => DatumRead::Pending {
                             value: present(&key)
                                 .filter(|_| params.optimistic)
-                                .and_then(|facets| self.json(&tx, facets, &key).ok()),
+                                .and_then(|datums| self.json(&tx, datums, &key).ok()),
                             reason,
                             version,
                         },
-                        Verdict::Rejected { reason } => FacetRead::Rejected { reason },
+                        Verdict::Rejected { reason } => DatumRead::Rejected { reason },
                     };
-                    facets.insert(key, read);
+                    datums.insert(key, read);
                 }
                 tx.rollback();
-                Ok(FacetsRead { heads, facets })
+                Ok(DatumsRead { heads, datums })
             })
             .await
             .map_err(repository)?
     }
 }
 
-impl Handler<ReadFacets> for DocsService {
+impl Handler<ReadDatums> for DocsService {
     async fn call(
         &self,
-        request: Envelope<ReadFacets>,
-    ) -> Result<ResponseEnvelope<FacetsRead>, DocsError> {
+        request: Envelope<ReadDatums>,
+    ) -> Result<ResponseEnvelope<DatumsRead>, DocsError> {
         Ok(self.read(&request.context, request.params).await?.into())
     }
 }

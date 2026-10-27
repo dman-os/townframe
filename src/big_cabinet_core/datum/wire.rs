@@ -10,8 +10,8 @@
 //! enum encoding is not the contract. An open union has a fallback that keeps a member this build
 //! does not know about, and no serde attribute expresses that.
 
-use crate::facet::Extra;
-use crate::facet::FacetMember;
+use crate::datum::DatumMember;
+use crate::datum::Extra;
 #[cfg(feature = "schemars")]
 use schemars::JsonSchema;
 #[cfg(feature = "schemars")]
@@ -53,7 +53,7 @@ pub fn serialize_member<S, P>(
 ) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
-    P: Serialize + FacetMember,
+    P: Serialize + DatumMember,
 {
     match *layout {
         UnionLayout::Adjacent { tag, content } => {

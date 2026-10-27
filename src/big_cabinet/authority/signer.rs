@@ -8,14 +8,14 @@
 use super::AuthorityError;
 use super::actor;
 use super::store::ActorRow;
-use big_cabinet_core::dmeta::FacetClaim;
-use big_cabinet_core::dmeta::SignedFacetClaim;
+use big_cabinet_core::dmeta::DatumClaim;
+use big_cabinet_core::dmeta::SignedDatumClaim;
 
 pub(super) fn sign_claim(
     wrapping: &[u8; 32],
     row: &ActorRow,
-    claim: FacetClaim,
-) -> Result<SignedFacetClaim, AuthorityError> {
+    claim: DatumClaim,
+) -> Result<SignedDatumClaim, AuthorityError> {
     if claim.actor_uuid != row.actor_id {
         return Err(AuthorityError::Unauthorized);
     }
@@ -29,7 +29,7 @@ pub(super) fn sign_claim(
         &row.public_key,
     )?;
     let signature = actor::signature(&key, &message);
-    Ok(SignedFacetClaim::from_signature(
+    Ok(SignedDatumClaim::from_signature(
         claim,
         actor::key_text(&row.public_key)?,
         signature,

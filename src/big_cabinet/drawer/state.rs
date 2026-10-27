@@ -1,7 +1,7 @@
 //! The local drawer projection: which drawers this node knows, what their rosters list, and the
 //! two local drawers. SQLite, owned by DrawerService.
 //!
-//! It is a projection, not authority: the roster facets on the drawer docs are authoritative, and
+//! It is a projection, not authority: the roster datums on the drawer docs are authoritative, and
 //! these rows are what this service wrote plus what it read back from them. They exist so that
 //! "which drawers hold doc X" — the question every DocsRepo access check asks — is one indexed
 //! query rather than a scan of every drawer doc on the node.
@@ -88,7 +88,7 @@ fn drawer_record(drawer_id: &str, descriptor_json: &str) -> DrawerRecord {
 
 impl State {
     pub(crate) async fn open(sql: Database) -> Result<Self, DrawersError> {
-        // The descriptor is stored verbatim, not decomposed: it is an open facet, and a
+        // The descriptor is stored verbatim, not decomposed: it is an open datum, and a
         // column per field (or a CHECK on the layout tag) would reject exactly the future
         // members carrying exists to survive. Interpretation happens at read time.
         sql.apply_migrations(sqlite::MIGRATION_TABLE, sqlite::MIGRATIONS)
@@ -272,7 +272,7 @@ impl State {
     }
 
     /// Drawer ids not yet projected into `big_cabinet_drawers`: those named by child links, plus
-    /// the `announced` ids the caller found elsewhere (the docs carrying the drawer facet).
+    /// the `announced` ids the caller found elsewhere (the docs carrying the drawer datum).
     pub(crate) async fn unprojected(
         &self,
         announced: &BTreeSet<DrawerId>,

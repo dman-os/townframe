@@ -1,4 +1,4 @@
-//! Facet declaration: what a declaration states, the conventions on top of the schema, and how a
+//! Datum declaration: what a declaration states, the conventions on top of the schema, and how a
 //! value is stored in a document.
 //!
 //! Schemas are JSON Schema 2020-12, derived by `schemars` from a Rust type. Three things JSON Schema
@@ -6,7 +6,7 @@
 //! discriminant sits, and how a value is stored — and each is a sidecar keyword, which the
 //! specification reads as an annotation and a conforming validator ignores.
 //!
-//! The `facet` macro in the `macros` crate does the refusing, because refusing means reading the
+//! The `datum` macro in the `macros` crate does the refusing, because refusing means reading the
 //! item's attributes and a derive cannot do that.
 
 mod member;
@@ -29,9 +29,9 @@ mod wire;
 #[cfg(all(test, feature = "schemars"))]
 mod e2e;
 
-pub use member::FacetMember;
+pub use member::DatumMember;
 pub use member::str_eq;
-pub use shape::FacetShape;
+pub use shape::DatumShape;
 pub use shape::Openness;
 pub use shape::Shape;
 pub use shape::Tagging;
@@ -83,9 +83,9 @@ pub use shape::check_shape;
 #[cfg(feature = "schemars")]
 pub use universe::Bundle;
 #[cfg(feature = "schemars")]
-pub use universe::Declaration;
+pub use universe::DatumDecl;
 #[cfg(feature = "schemars")]
-pub use universe::FacetDecl;
+pub use universe::Declaration;
 #[cfg(feature = "schemars")]
 pub use universe::Lexicon;
 #[cfg(feature = "schemars")]

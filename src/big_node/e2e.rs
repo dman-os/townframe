@@ -1,22 +1,22 @@
 use super::*;
 use big_cabinet::SchemaRegistration;
 use big_cabinet::SchemaRegistrationGroup;
-use big_cabinet::index::FacetMembership;
-use big_cabinet::index::FacetRoute;
-use big_cabinet::index::FacetSetQuery;
-use big_cabinet::index::FacetSetStore;
+use big_cabinet::index::DatumMembership;
+use big_cabinet::index::DatumRoute;
+use big_cabinet::index::DatumSetQuery;
+use big_cabinet::index::DatumSetStore;
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::DocId;
-use big_cabinet_core::FacetKey;
 use big_cabinet_core::authority::Authorization;
 use big_cabinet_core::authority::CapId;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::DatumRead;
+use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::DocScope;
-use big_cabinet_core::doc::FacetRead;
-use big_cabinet_core::doc::FacetsRead;
 use big_cabinet_core::doc::MintDocCapability;
-use big_cabinet_core::doc::ReadFacets;
+use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::WriteReceipt;
 use big_repo::StorageConfig;
 use big_sync_core::revisioned_store::RevisionRead;
@@ -30,7 +30,7 @@ use std::collections::BTreeSet;
 
 const NOTE: &str = "org.example.note";
 
-fn key() -> FacetKey {
+fn key() -> DatumKey {
     format!("{NOTE}/main").parse().unwrap()
 }
 
@@ -119,14 +119,14 @@ async fn create(node: &BigNode, command: &str, value: Value) -> WriteReceipt {
                 capability,
                 command: CommandId::try_from(command.to_owned()).unwrap(),
                 placement,
-                facets: BTreeMap::from([(key(), value)]),
+                datums: BTreeMap::from([(key(), value)]),
             },
         )
         .await
         .unwrap()
 }
 
-async fn read(node: &BigNode, document: &DocId) -> FacetsRead {
+async fn read(node: &BigNode, document: &DocId) -> DatumsRead {
     let capability = capability(
         node,
         DocScope {
@@ -139,11 +139,11 @@ async fn read(node: &BigNode, document: &DocId) -> FacetsRead {
         .client
         .call(
             RequestContext::root(),
-            ReadFacets {
+            ReadDatums {
                 capability,
                 doc_id: document.clone(),
                 at: At::Current,
-                facets: Some(BTreeSet::from([key()])),
+                datums: Some(BTreeSet::from([key()])),
                 optimistic: false,
             },
         )
@@ -152,14 +152,14 @@ async fn read(node: &BigNode, document: &DocId) -> FacetsRead {
 }
 
 async fn indexed(node: &BigNode, receipt: &WriteReceipt) {
-    let route = FacetRoute {
+    let route = DatumRoute {
         doc_id: receipt.doc_id.clone(),
-        facet_key: key(),
+        datum_key: key(),
     };
     let mut reader = node
         .indexes
-        .facet_set
-        .open(route.facet_key.tag().clone(), 0)
+        .datum_set
+        .open(route.datum_key.tag().clone(), 0)
         .await
         .unwrap();
     loop {
@@ -172,7 +172,7 @@ async fn indexed(node: &BigNode, receipt: &WriteReceipt) {
             entry.key == route
                 && matches!(
                     entry.value,
-                    Some(FacetMembership::Present { doc_heads, .. }) if doc_heads == receipt.heads
+                    Some(DatumMembership::Present { doc_heads, .. }) if doc_heads == receipt.heads
                 )
         }) {
             break;
@@ -180,8 +180,8 @@ async fn indexed(node: &BigNode, receipt: &WriteReceipt) {
     }
     let records = node
         .indexes
-        .facet_set
-        .query(FacetSetQuery::Route(route))
+        .datum_set
+        .query(DatumSetQuery::Route(route))
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
@@ -226,7 +226,7 @@ async fn memory_boot_owns_and_joins_every_component() {
     let receipt = create(&node, "memory-note", value.clone()).await;
     let read = read(&node, &receipt.doc_id).await;
     assert!(
-        matches!(&read.facets[&key()], FacetRead::Accepted { value: accepted, .. } if *accepted == value)
+        matches!(&read.datums[&key()], DatumRead::Accepted { value: accepted, .. } if *accepted == value)
     );
     indexed(&node, &receipt).await;
     shutdown(node, stop).await;
@@ -266,17 +266,17 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
     let receipt = create(&node, "persistent-note", value.clone()).await;
     let before = read(&node, &receipt.doc_id).await;
     assert!(
-        matches!(&before.facets[&key()], FacetRead::Accepted { value: accepted, .. } if *accepted == value)
+        matches!(&before.datums[&key()], DatumRead::Accepted { value: accepted, .. } if *accepted == value)
     );
     indexed(&node, &receipt).await;
-    let index = Arc::clone(&node.indexes.facet_set);
+    let index = Arc::clone(&node.indexes.datum_set);
     shutdown(node, stop).await;
     let cursor = index.source_revision().await.unwrap();
     let output_revision = index.latest_revision().await.unwrap();
     assert!(cursor > 0);
     assert!(output_revision > 0);
     let records = index
-        .query(FacetSetQuery::Doc(receipt.doc_id.clone()))
+        .query(DatumSetQuery::Doc(receipt.doc_id.clone()))
         .await
         .unwrap();
     assert!(!records.is_empty());
@@ -286,12 +286,12 @@ async fn disk_reopen_recovers_identity_drawers_documents_commands_and_index_curs
 
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.database(&sql_path, &[], "_sqlite_rs_migrations");
-    let persisted = FacetSetStore::new(sql.clone()).await.unwrap();
+    let persisted = DatumSetStore::new(sql.clone()).await.unwrap();
     assert_eq!(persisted.source_revision().await.unwrap(), cursor);
     assert_eq!(persisted.latest_revision().await.unwrap(), output_revision);
     assert_eq!(
         persisted
-            .query(FacetSetQuery::Doc(receipt.doc_id.clone()))
+            .query(DatumSetQuery::Doc(receipt.doc_id.clone()))
             .await
             .unwrap(),
         records
@@ -379,14 +379,14 @@ async fn failed_docs_recovery_unwinds_the_partial_node() {
 }
 
 #[tokio::test]
-async fn failed_reference_initialization_joins_the_started_facet_worker() {
+async fn failed_reference_initialization_joins_the_started_datum_worker() {
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let sql = runtime.ephemeral(&[]).unwrap();
-    big_cabinet::index::FacetRefStore::new(sql.clone())
+    big_cabinet::index::DatumRefStore::new(sql.clone())
         .await
         .unwrap();
     sql.execute(
-        "INSERT INTO big_cabinet_facet_ref_progress VALUES (?, -1)",
+        "INSERT INTO big_cabinet_datum_ref_progress VALUES (?, -1)",
         (NOTE,),
     )
     .await
@@ -410,7 +410,7 @@ async fn failed_reference_initialization_joins_the_started_facet_worker() {
         Err(error) => assert!(
             error
                 .to_string()
-                .contains("facet-ref revision is out of range")
+                .contains("datum-ref revision is out of range")
         ),
         Ok(_) => panic!("a negative reference cursor must reject index startup"),
     }
@@ -428,11 +428,11 @@ async fn failed_reference_initialization_unwinds_disk_node_and_allows_reopen() {
     let runtime = Arc::new(SqliteRuntime::new(Default::default()));
     let secrets = secrets().await;
     let sql = runtime.database(&sql_path, &[], "_sqlite_rs_migrations");
-    big_cabinet::index::FacetRefStore::new(sql.clone())
+    big_cabinet::index::DatumRefStore::new(sql.clone())
         .await
         .unwrap();
     sql.execute(
-        "INSERT INTO big_cabinet_facet_ref_progress (facet_tag, revision) VALUES (?, -1)",
+        "INSERT INTO big_cabinet_datum_ref_progress (datum_tag, revision) VALUES (?, -1)",
         (NOTE,),
     )
     .await
@@ -447,7 +447,7 @@ async fn failed_reference_initialization_unwinds_disk_node_and_allows_reopen() {
     ))
     .await
     {
-        Err(error) => assert_eq!(error.to_string(), "facet-ref revision is out of range"),
+        Err(error) => assert_eq!(error.to_string(), "datum-ref revision is out of range"),
         Ok((node, stop)) => {
             shutdown(node, stop).await;
             panic!("a negative reference cursor must reject node startup");
@@ -455,7 +455,7 @@ async fn failed_reference_initialization_unwinds_disk_node_and_allows_reopen() {
     }
     let repaired = sql
         .execute(
-            "UPDATE big_cabinet_facet_ref_progress SET revision = 0 WHERE facet_tag = ?",
+            "UPDATE big_cabinet_datum_ref_progress SET revision = 0 WHERE datum_tag = ?",
             (NOTE,),
         )
         .await
@@ -468,7 +468,7 @@ async fn failed_reference_initialization_unwinds_disk_node_and_allows_reopen() {
     let sql = runtime.database(&sql_path, &[], "_sqlite_rs_migrations");
     let revision: i64 = sql
         .query(
-            "SELECT revision FROM big_cabinet_facet_ref_progress WHERE facet_tag = ?",
+            "SELECT revision FROM big_cabinet_datum_ref_progress WHERE datum_tag = ?",
             (NOTE,),
         )
         .await

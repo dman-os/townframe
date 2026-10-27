@@ -2,26 +2,26 @@
 use crate::sqlite_rs_alias::Migration;
 use crate::sqlite_rs_alias::SqlResult;
 
-pub const MIGRATION_TABLE: &str = "_big_cabinet_index_facet_ref_migrations";
+pub const MIGRATION_TABLE: &str = "_big_cabinet_index_datum_ref_migrations";
 
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_init.sql", sql: include_str!("migrations/001_init.sql") },
 ];
 
 pub const ADVANCE_CURSOR_SQL: &str = include_str!("queries/advance_cursor.sql");
-pub async fn advance_cursor(db: &impl crate::sqlite_rs_alias::Executor, facet_tag: String, revision: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(ADVANCE_CURSOR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(facet_tag), crate::sqlite_rs_alias::IntoValue::into_value(revision)]).await
+pub async fn advance_cursor(db: &impl crate::sqlite_rs_alias::Executor, datum_tag: String, revision: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(ADVANCE_CURSOR_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(datum_tag), crate::sqlite_rs_alias::IntoValue::into_value(revision)]).await
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CursorsRow {
-    pub facet_tag: String,
+    pub datum_tag: String,
     pub revision: i64,
 }
 impl crate::sqlite_rs_alias::FromRow for CursorsRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
         row.require_width(2)?;
-        Ok(CursorsRow { facet_tag: row.get::<String>("facet_tag")?, revision: row.get::<i64>("revision")? })
+        Ok(CursorsRow { datum_tag: row.get::<String>("datum_tag")?, revision: row.get::<i64>("revision")? })
     }
 }
 
@@ -32,36 +32,36 @@ pub async fn cursors(db: &impl crate::sqlite_rs_alias::QueryExecutor) -> SqlResu
 }
 
 pub const DELETE_EDGES_SQL: &str = include_str!("queries/delete_edges.sql");
-pub async fn delete_edges(db: &impl crate::sqlite_rs_alias::Executor, origin_doc: String, origin_facet: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(DELETE_EDGES_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc), crate::sqlite_rs_alias::IntoValue::into_value(origin_facet)]).await
+pub async fn delete_edges(db: &impl crate::sqlite_rs_alias::Executor, origin_doc: String, origin_datum: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_EDGES_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc), crate::sqlite_rs_alias::IntoValue::into_value(origin_datum)]).await
 }
 
 pub const DELETE_PARKED_SQL: &str = include_str!("queries/delete_parked.sql");
-pub async fn delete_parked(db: &impl crate::sqlite_rs_alias::Executor, origin_doc: String, origin_facet: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(DELETE_PARKED_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc), crate::sqlite_rs_alias::IntoValue::into_value(origin_facet)]).await
+pub async fn delete_parked(db: &impl crate::sqlite_rs_alias::Executor, origin_doc: String, origin_datum: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_PARKED_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc), crate::sqlite_rs_alias::IntoValue::into_value(origin_datum)]).await
 }
 
 pub const INSERT_EDGE_SQL: &str = include_str!("queries/insert_edge.sql");
-pub async fn insert_edge(db: &impl crate::sqlite_rs_alias::Executor, origin_doc: String, origin_facet: String, origin_path: String, target_doc: String, target_facet: String, ref_heads: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(INSERT_EDGE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc), crate::sqlite_rs_alias::IntoValue::into_value(origin_facet), crate::sqlite_rs_alias::IntoValue::into_value(origin_path), crate::sqlite_rs_alias::IntoValue::into_value(target_doc), crate::sqlite_rs_alias::IntoValue::into_value(target_facet), crate::sqlite_rs_alias::IntoValue::into_value(ref_heads)]).await
+pub async fn insert_edge(db: &impl crate::sqlite_rs_alias::Executor, origin_doc: String, origin_datum: String, origin_path: String, target_doc: String, target_datum: String, ref_heads: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(INSERT_EDGE_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc), crate::sqlite_rs_alias::IntoValue::into_value(origin_datum), crate::sqlite_rs_alias::IntoValue::into_value(origin_path), crate::sqlite_rs_alias::IntoValue::into_value(target_doc), crate::sqlite_rs_alias::IntoValue::into_value(target_datum), crate::sqlite_rs_alias::IntoValue::into_value(ref_heads)]).await
 }
 
 pub const PARK_SQL: &str = include_str!("queries/park.sql");
-pub async fn park(db: &impl crate::sqlite_rs_alias::Executor, origin_doc: String, origin_facet: String, revision: i64, membership: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(PARK_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc), crate::sqlite_rs_alias::IntoValue::into_value(origin_facet), crate::sqlite_rs_alias::IntoValue::into_value(revision), crate::sqlite_rs_alias::IntoValue::into_value(membership)]).await
+pub async fn park(db: &impl crate::sqlite_rs_alias::Executor, origin_doc: String, origin_datum: String, revision: i64, membership: Vec<u8>) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(PARK_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(origin_doc), crate::sqlite_rs_alias::IntoValue::into_value(origin_datum), crate::sqlite_rs_alias::IntoValue::into_value(revision), crate::sqlite_rs_alias::IntoValue::into_value(membership)]).await
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParkedRow {
     pub origin_doc: String,
-    pub origin_facet: String,
+    pub origin_datum: String,
     pub revision: i64,
     pub membership: Vec<u8>,
 }
 impl crate::sqlite_rs_alias::FromRow for ParkedRow {
     fn from_row(row: &crate::sqlite_rs_alias::Row) -> SqlResult<Self> {
         row.require_width(4)?;
-        Ok(ParkedRow { origin_doc: row.get::<String>("origin_doc")?, origin_facet: row.get::<String>("origin_facet")?, revision: row.get::<i64>("revision")?, membership: row.get::<Vec<u8>>("membership")? })
+        Ok(ParkedRow { origin_doc: row.get::<String>("origin_doc")?, origin_datum: row.get::<String>("origin_datum")?, revision: row.get::<i64>("revision")?, membership: row.get::<Vec<u8>>("membership")? })
     }
 }
 

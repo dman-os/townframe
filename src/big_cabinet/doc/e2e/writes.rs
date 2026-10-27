@@ -1,9 +1,9 @@
-//! The ordinary write surface: whole-facet values, explicit bases, and the four write modes.
+//! The ordinary write surface: whole-datum values, explicit bases, and the four write modes.
 
 use super::*;
 
 #[tokio::test]
-async fn a_created_document_reads_back_its_facets_at_the_creation_heads() {
+async fn a_created_document_reads_back_its_datums_at_the_creation_heads() {
     let node = Node::boot().await;
     let alice = node.writer("alice").await;
     let receipt = node
@@ -15,15 +15,15 @@ async fn a_created_document_reads_back_its_facets_at_the_creation_heads() {
         .await
         .unwrap();
     assert_eq!(read.heads, receipt.heads);
-    let (value, facet_heads) = accepted(&read.facets[&key("main")]);
+    let (value, datum_heads) = accepted(&read.datums[&key("main")]);
     assert_eq!(value, &note("hello"));
-    assert_eq!(facet_heads, receipt.heads.as_slice());
-    assert_eq!(read.facets.len(), 1, "dmeta is not a readable facet");
+    assert_eq!(datum_heads, receipt.heads.as_slice());
+    assert_eq!(read.datums.len(), 1, "dmeta is not a readable datum");
     node.stop().await;
 }
 
 #[tokio::test]
-async fn unmentioned_facets_keep_their_value_and_facet_heads() {
+async fn unmentioned_datums_keep_their_value_and_datum_heads() {
     let node = Node::boot().await;
     let alice = node.writer("alice").await;
     let created = node
@@ -53,18 +53,18 @@ async fn unmentioned_facets_keep_their_value_and_facet_heads() {
         .unwrap();
     assert_eq!(read.heads, written.heads);
     assert_eq!(
-        accepted(&read.facets[&key("a")]),
+        accepted(&read.datums[&key("a")]),
         (&note("a1"), written.heads.as_slice())
     );
     assert_eq!(
-        accepted(&read.facets[&key("b")]),
+        accepted(&read.datums[&key("b")]),
         (&note("b0"), created.heads.as_slice())
     );
     let historical = node
         .read(&alice, document, At::Heads(created.heads.clone()), false)
         .await
         .unwrap();
-    assert_eq!(accepted(&historical.facets[&key("a")]).0, &note("a0"));
+    assert_eq!(accepted(&historical.datums[&key("a")]).0, &note("a0"));
     node.stop().await;
 }
 
@@ -84,7 +84,7 @@ async fn removal_is_a_verified_absence_and_a_later_set_resurrects_the_slot() {
     assert!(
         matches!(
             node.read_one(&alice, document, At::Current, &key("main")).await,
-            FacetRead::Absent { version } if version.heads == removed.heads && version.clock > 0
+            DatumRead::Absent { version } if version.heads == removed.heads && version.clock > 0
         ),
         "a removal is an absence at the removal's version"
     );
@@ -92,7 +92,7 @@ async fn removal_is_a_verified_absence_and_a_later_set_resurrects_the_slot() {
         .client()
         .call(
             RequestContext::root(),
-            ListFacets {
+            ListDatums {
                 capability: node
                     .capability(
                         &alice,
@@ -109,15 +109,15 @@ async fn removal_is_a_verified_absence_and_a_later_set_resurrects_the_slot() {
         )
         .await)
     .unwrap();
-    assert!(listing.facets.is_empty(), "a removed slot is not listed");
+    assert!(listing.datums.is_empty(), "a removed slot is not listed");
     let back = node
         .write(
             &alice,
             document,
-            WriteMode::IfFacetsUnchanged {
-                facets: BTreeMap::from([(
+            WriteMode::IfDatumsUnchanged {
+                datums: BTreeMap::from([(
                     key("main"),
-                    FacetVersion {
+                    DatumVersion {
                         heads: removed.heads.clone(),
                         clock: 0,
                     },
@@ -148,43 +148,43 @@ async fn refused_writes_commit_nothing() {
         .await
         .unwrap();
     let document = &created.doc_id;
-    let unknown: FacetKey = "org.example.unknown/main".parse().unwrap();
-    let dmeta: FacetKey = "org.example.daybook.dmeta/main".parse().unwrap();
-    let branch: FacetKey = "org.example.daybook.branch/main".parse().unwrap();
+    let unknown: DatumKey = "org.example.unknown/main".parse().unwrap();
+    let dmeta: DatumKey = "org.example.daybook.dmeta/main".parse().unwrap();
+    let branch: DatumKey = "org.example.daybook.branch/main".parse().unwrap();
     let cases = [
         (
             vec![(unknown.clone(), json!({}))],
             vec![],
             DocsError::UnknownSchema {
-                facet_tag: "org.example.unknown".into(),
+                datum_tag: "org.example.unknown".into(),
             },
         ),
         (
             vec![(dmeta.clone(), json!({}))],
             vec![],
-            DocsError::SystemFacet {
-                facet_key: dmeta.clone(),
+            DocsError::SystemDatum {
+                datum_key: dmeta.clone(),
             },
         ),
         (
             vec![(branch.clone(), json!({"path": "/x"}))],
             vec![],
-            DocsError::SystemFacet {
-                facet_key: branch.clone(),
+            DocsError::SystemDatum {
+                datum_key: branch.clone(),
             },
         ),
         (
             vec![],
             vec![branch.clone()],
-            DocsError::SystemFacet {
-                facet_key: branch.clone(),
+            DocsError::SystemDatum {
+                datum_key: branch.clone(),
             },
         ),
         (
             vec![(key("main"), note("y"))],
             vec![key("main")],
             DocsError::SetAndRemoved {
-                facet_key: key("main"),
+                datum_key: key("main"),
             },
         ),
     ];
@@ -255,17 +255,17 @@ async fn conditional_modes_compare_under_the_commit_and_report_what_changed() {
         .unwrap_err(),
         DocsError::Conflict {
             heads: moved.heads.clone(),
-            facets: BTreeMap::new(),
+            datums: BTreeMap::new(),
         }
     );
-    // Another facet moving does not break a facet-scoped condition.
+    // Another datum moving does not break a datum-scoped condition.
     node.write(
         &alice,
         document,
-        WriteMode::IfFacetsUnchanged {
-            facets: BTreeMap::from([(
+        WriteMode::IfDatumsUnchanged {
+            datums: BTreeMap::from([(
                 key("a"),
-                FacetVersion {
+                DatumVersion {
                     heads: created.heads.clone(),
                     clock: 0,
                 },
@@ -280,10 +280,10 @@ async fn conditional_modes_compare_under_the_commit_and_report_what_changed() {
         .write(
             &alice,
             document,
-            WriteMode::IfFacetsUnchanged {
-                facets: BTreeMap::from([(
+            WriteMode::IfDatumsUnchanged {
+                datums: BTreeMap::from([(
                     key("b"),
-                    FacetVersion {
+                    DatumVersion {
                         heads: created.heads.clone(),
                         clock: 0,
                     },
@@ -295,14 +295,14 @@ async fn conditional_modes_compare_under_the_commit_and_report_what_changed() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&stale, DocsError::Conflict { facets, .. } if facets[&key("b")].heads == moved.heads),
+        matches!(&stale, DocsError::Conflict { datums, .. } if datums[&key("b")].heads == moved.heads),
         "{stale:?}"
     );
     node.stop().await;
 }
 
 #[tokio::test]
-async fn writes_at_the_same_historical_heads_leave_a_set_of_facet_heads() {
+async fn writes_at_the_same_historical_heads_leave_a_set_of_datum_heads() {
     let node = Node::boot().await;
     let alice = node.writer("alice").await;
     let created = node
@@ -335,17 +335,17 @@ async fn writes_at_the_same_historical_heads_leave_a_set_of_facet_heads() {
     let read = node
         .read_one(&alice, document, At::Current, &key("main"))
         .await;
-    let (value, facet_heads) = accepted(&read);
-    assert_eq!(facet_heads, introductions.as_slice());
+    let (value, datum_heads) = accepted(&read);
+    assert_eq!(datum_heads, introductions.as_slice());
     assert!(value == &note("left") || value == &note("right"));
     // The merged view is readable, and a writer that saw it can sign over it.
     node.write(
         &alice,
         document,
-        WriteMode::IfFacetsUnchanged {
-            facets: BTreeMap::from([(
+        WriteMode::IfDatumsUnchanged {
+            datums: BTreeMap::from([(
                 key("main"),
-                FacetVersion {
+                DatumVersion {
                     heads: introductions.clone(),
                     clock: 0,
                 },

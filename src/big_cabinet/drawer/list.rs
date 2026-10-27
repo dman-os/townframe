@@ -36,18 +36,18 @@ impl DrawerService {
                         .docs()
                         .call(
                             context.child(),
-                            big_cabinet_core::doc::ReadFacets {
+                            big_cabinet_core::doc::ReadDatums {
                                 capability,
                                 doc_id: record.drawer_id.clone(),
                                 at: big_cabinet_core::doc::At::Current,
-                                facets: Some(std::collections::BTreeSet::from([drawer_key()])),
+                                datums: Some(std::collections::BTreeSet::from([drawer_key()])),
                                 optimistic: false,
                             },
                         )
                         .await
                         .map_err(docs_error)?;
-                    let value = match read.facets.into_iter().next() {
-                        Some((_, big_cabinet_core::doc::FacetRead::Accepted { value, .. })) => {
+                    let value = match read.datums.into_iter().next() {
+                        Some((_, big_cabinet_core::doc::DatumRead::Accepted { value, .. })) => {
                             value
                         }
                         _ => {

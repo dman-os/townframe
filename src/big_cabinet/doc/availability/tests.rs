@@ -129,8 +129,8 @@ impl Node {
             node_issuer: authority.node_issuer.clone(),
             access: Arc::<ScopeAccess>::clone(&access),
             sql: sqlite_rs::test_support::db(&[]).unwrap().clone(),
-            facet_set: None,
-            facet_ref: None,
+            datum_set: None,
+            datum_ref: None,
         })
         .await
         .unwrap();
@@ -199,7 +199,7 @@ impl Node {
         let mut raw = Automerge::new();
         let mut transaction = raw.transaction();
         transaction
-            .put(automerge::ROOT, "unvalidated", "no facets or schema")
+            .put(automerge::ROOT, "unvalidated", "no datums or schema")
             .unwrap();
         transaction.commit();
         raw

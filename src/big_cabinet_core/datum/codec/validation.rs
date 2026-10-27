@@ -55,7 +55,7 @@ impl CompiledSchema {
     /// Compile one carried Bundle schema for reuse by checks and target writes.
     pub fn compile(document: Value) -> Result<Self, CodecError> {
         Self::check_storage_declarations(&document)?;
-        let validator = crate::facet::input::options()
+        let validator = crate::datum::input::options()
             .with_retriever(CarriedSchemaRetriever)
             .build(&document)
             .map_err(|error| CodecError::InvalidSchema {
@@ -172,7 +172,7 @@ fn compile_branch_validators(document: &Value) -> Result<BranchValidators, Codec
                         }
                     }
                 }
-                let validator = crate::facet::input::options()
+                let validator = crate::datum::input::options()
                     .with_retriever(CarriedSchemaRetriever)
                     .build(&branch_document)
                     .map_err(|error| CodecError::InvalidSchema {
@@ -187,7 +187,7 @@ fn compile_branch_validators(document: &Value) -> Result<BranchValidators, Codec
 }
 
 impl CompiledSchema {
-    pub(in crate::facet) fn check_storage_declarations(document: &Value) -> Result<(), CodecError> {
+    pub(in crate::datum) fn check_storage_declarations(document: &Value) -> Result<(), CodecError> {
         for schema in schema_positions(document) {
             let Some(object) = schema.as_object() else {
                 continue;

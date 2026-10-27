@@ -7,17 +7,17 @@
 //!   two local drawers — in SQLite, fed by this service's own writes and by boot rescans.
 //! - `ledger`: the durable op ledger a roster-and-Keyhive operation steps through, so a crash
 //!   between the two halves resumes rather than leaving a grant without an entry or vice versa.
-//! - `keys`: the facet keys of a drawer doc's descriptor, roster and entries, and the group keys
+//! - `keys`: the datum keys of a drawer doc's descriptor, roster and entries, and the group keys
 //!   a descriptor names its Keyhive groups by.
 //!
 //! A `DrawerId` is the `DocId` of the doc carrying `org.example.daybook.drawer/main`. The roster
-//! (facets on that doc, written through DocsRepo) is what makes inclusion official; the Keyhive
+//! (datums on that doc, written through DocsRepo) is what makes inclusion official; the Keyhive
 //! groups the descriptor names are what make it effective. The two are deliberately not atomic:
 //! adding a doc grants the docs group first and publishes the entry second, removing deletes the
 //! entry first and revokes second, so an interrupted operation is visible as "listed but not yet
 //! available" or "available but no longer listed" and is finished by the ledger replay at boot.
 //!
-//! The drawer facets are ordinary signed facets, so an actor holding Write on a drawer doc could
+//! The drawer datums are ordinary signed datums, so an actor holding Write on a drawer doc could
 //! publish an entry directly through DocsRepo. That is not a bypass: an entry grants nothing by
 //! itself (the Keyhive grant is what the node enforces), it is exactly the "official but
 //! unavailable" state ADR 019 names, and the roster's authority is the drawer doc's write
@@ -69,7 +69,7 @@ use crate::capability::DomainCapabilities;
 use crate::capability::Invocation;
 use crate::grants::GrantError;
 use crate::grants::Grants;
-use big_cabinet_core::FacetKey;
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AuthorityServiceError;
 use big_cabinet_core::authority::Authorization;
@@ -86,10 +86,10 @@ use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::MintDocCapability;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::doc::WriteReceipt;
-use big_cabinet_core::drawer::DRAWER_CHILD_ENTRY_FACET_TAG;
-use big_cabinet_core::drawer::DRAWER_DOC_ENTRY_FACET_TAG;
-use big_cabinet_core::drawer::DRAWER_FACET_TAG;
-use big_cabinet_core::drawer::DRAWER_KNOWN_ENTRY_FACET_TAG;
+use big_cabinet_core::drawer::DRAWER_CHILD_ENTRY_DATUM_TAG;
+use big_cabinet_core::drawer::DRAWER_DATUM_TAG;
+use big_cabinet_core::drawer::DRAWER_DOC_ENTRY_DATUM_TAG;
+use big_cabinet_core::drawer::DRAWER_KNOWN_ENTRY_DATUM_TAG;
 use big_cabinet_core::drawer::DrawerAccess as Access;
 use big_cabinet_core::drawer::DrawerGroups;
 use big_cabinet_core::drawer::GroupKey;
@@ -159,7 +159,7 @@ pub(crate) struct Projection {
     pub(crate) grants: Arc<Grants>,
     pub(crate) actor: Actor,
     pub(crate) state: State,
-    pub(crate) facet_set: Arc<crate::index::FacetSetStore>,
+    pub(crate) datum_set: Arc<crate::index::DatumSetStore>,
     pub(crate) ledger: Ledger,
     pub(crate) commands: tokio::sync::mpsc::Sender<access::PolicyCommand>,
 }
@@ -638,7 +638,7 @@ impl Core {
         Ok(())
     }
 
-    /// Write facets on a drawer doc as this service, at current heads. Roster writes are
+    /// Write datums on a drawer doc as this service, at current heads. Roster writes are
     /// last-writer-wins by construction: two nodes publishing the same entry converge on one
     /// value, and the entry's presence is what matters.
     pub(crate) async fn write_roster(
@@ -646,8 +646,8 @@ impl Core {
         context: &RequestContext,
         drawer: &DrawerId,
         command: Option<CommandId>,
-        set: BTreeMap<FacetKey, serde_json::Value>,
-        remove: std::collections::BTreeSet<FacetKey>,
+        set: BTreeMap<DatumKey, serde_json::Value>,
+        remove: std::collections::BTreeSet<DatumKey>,
     ) -> Result<WriteReceipt, DrawersError> {
         self.as_signer(
             context,
@@ -660,7 +660,7 @@ impl Core {
                 self.docs()
                     .call(
                         context.child(),
-                        big_cabinet_core::doc::WriteFacets {
+                        big_cabinet_core::doc::WriteDatums {
                             capability,
                             command,
                             doc_id: drawer.clone(),
@@ -676,7 +676,7 @@ impl Core {
         .await
     }
 
-    /// Bring the projection of `drawer` back in line with its doc: the roster facets, read as
+    /// Bring the projection of `drawer` back in line with its doc: the roster datums, read as
     /// this service, replace the rows. A self-doc drawer has no roster and nothing to rescan.
     /// This is how a change another node made to a shared roster becomes visible here; the
     /// service's own writes update the rows directly.
@@ -697,11 +697,11 @@ impl Core {
                     self.docs()
                         .call(
                             context.child(),
-                            big_cabinet_core::doc::ReadFacets {
+                            big_cabinet_core::doc::ReadDatums {
                                 capability,
                                 doc_id: record.drawer_id.clone(),
                                 at: big_cabinet_core::doc::At::Current,
-                                facets: None,
+                                datums: None,
                                 optimistic: false,
                             },
                         )
@@ -712,10 +712,10 @@ impl Core {
             .await?;
         // The descriptor is re-read with the entries: a layout edited on another node — into
         // another known layout, or into one this build does not know — replaces the stored rows
-        // with what the facet now states.
-        let descriptor_value = match read.facets.get(&drawer_key()) {
-            Some(big_cabinet_core::doc::FacetRead::Accepted { value, .. }) => value.clone(),
-            Some(big_cabinet_core::doc::FacetRead::Absent { .. }) => {
+        // with what the datum now states.
+        let descriptor_value = match read.datums.get(&drawer_key()) {
+            Some(big_cabinet_core::doc::DatumRead::Accepted { value, .. }) => value.clone(),
+            Some(big_cabinet_core::doc::DatumRead::Absent { .. }) => {
                 return Err(DrawersError::RosterUnreadable(format!(
                     "{} carries no drawer descriptor",
                     record.drawer_id
@@ -741,14 +741,14 @@ impl Core {
         let record = crate::drawer::create::record_of(&record.drawer_id, &descriptor);
         let mut docs = BTreeMap::new();
         let mut children = BTreeMap::new();
-        for (key, facet) in read.facets {
+        for (key, datum) in read.datums {
             let tag = key.tag().as_str();
-            if tag != DRAWER_DOC_ENTRY_FACET_TAG && tag != DRAWER_CHILD_ENTRY_FACET_TAG {
+            if tag != DRAWER_DOC_ENTRY_DATUM_TAG && tag != DRAWER_CHILD_ENTRY_DATUM_TAG {
                 continue;
             }
-            let value = match facet {
-                big_cabinet_core::doc::FacetRead::Accepted { value, .. } => value,
-                big_cabinet_core::doc::FacetRead::Absent { .. } => continue,
+            let value = match datum {
+                big_cabinet_core::doc::DatumRead::Accepted { value, .. } => value,
+                big_cabinet_core::doc::DatumRead::Absent { .. } => continue,
                 other => {
                     return Err(DrawersError::RosterUnreadable(format!(
                         "{key} on {}: {other:?}",
@@ -765,7 +765,7 @@ impl Core {
             let unreadable = |error: serde_json::Error| {
                 DrawersError::RosterUnreadable(format!("{key} on {}: {error}", record.drawer_id))
             };
-            if tag == DRAWER_DOC_ENTRY_FACET_TAG {
+            if tag == DRAWER_DOC_ENTRY_DATUM_TAG {
                 let entry: big_cabinet_core::drawer::DrawerDocEntry =
                     serde_json::from_value(value).map_err(unreadable)?;
                 if let Some(access) = entry.access.known() {
@@ -803,7 +803,7 @@ impl Core {
     }
 
     /// Look up `drawer_id` in the local projection, or if it is not yet projected but its doc is
-    /// locally available with an accepted `org.example.daybook.drawer/main` facet, project its
+    /// locally available with an accepted `org.example.daybook.drawer/main` datum, project its
     /// descriptor and roster now.
     pub(crate) async fn ensure_drawer(
         &self,
@@ -840,11 +840,11 @@ impl Core {
                                 .docs()
                                 .call(
                                     context.child(),
-                                    big_cabinet_core::doc::ReadFacets {
+                                    big_cabinet_core::doc::ReadDatums {
                                         capability,
                                         doc_id: drawer_id.clone(),
                                         at: big_cabinet_core::doc::At::Current,
-                                        facets: Some(std::collections::BTreeSet::from([
+                                        datums: Some(std::collections::BTreeSet::from([
                                             drawer_key(),
                                         ])),
                                         optimistic: false,
@@ -865,8 +865,8 @@ impl Core {
             let Some(read) = read else {
                 continue;
             };
-            let Some(big_cabinet_core::doc::FacetRead::Accepted { value, .. }) =
-                read.facets.get(&drawer_key())
+            let Some(big_cabinet_core::doc::DatumRead::Accepted { value, .. }) =
+                read.datums.get(&drawer_key())
             else {
                 continue;
             };
@@ -890,17 +890,17 @@ impl Core {
         Ok(root_record)
     }
 
-    /// Project any drawer docs that arrived via sync (referenced by child entries or `facet_set`)
+    /// Project any drawer docs that arrived via sync (referenced by child entries or `datum_set`)
     /// into the local drawer projection without modifying the registry.
     pub(crate) async fn sync_discovered(
         &self,
         context: &RequestContext,
     ) -> Result<(), DrawersError> {
         let announced = self
-            .facet_set
-            .query(crate::index::FacetSetQuery::Tag(
-                big_cabinet_core::FacetTag::new(DRAWER_FACET_TAG)
-                    .expect("the drawer facet tag is a valid tag"),
+            .datum_set
+            .query(crate::index::DatumSetQuery::Tag(
+                big_cabinet_core::DatumTag::new(DRAWER_DATUM_TAG)
+                    .expect("the drawer datum tag is a valid tag"),
             ))
             .await
             .map_err(|error| DrawersError::Storage(error.to_string()))?

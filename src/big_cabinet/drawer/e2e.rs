@@ -5,34 +5,34 @@ use super::*;
 use crate::authority::Authority;
 use crate::doc::DocsConfig;
 use crate::doc::DocsRepo;
-use crate::index::FacetMembership;
-use crate::index::FacetRefQuery;
-use crate::index::FacetRefStore;
-use crate::index::FacetRoute;
-use crate::index::FacetSetStore;
+use crate::index::DatumMembership;
+use crate::index::DatumRefQuery;
+use crate::index::DatumRefStore;
+use crate::index::DatumRoute;
+use crate::index::DatumSetStore;
 use crate::schema::SchemaRepo;
 use automerge::ChangeHash;
-use big_cabinet_core::FacetTag;
+use big_cabinet_core::DatumTag;
 use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::datum::Bundle;
+use big_cabinet_core::datum::DatumDecl;
+use big_cabinet_core::datum::Universe;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CreateDoc;
-use big_cabinet_core::doc::FacetObserved;
-use big_cabinet_core::doc::FacetRead;
-use big_cabinet_core::doc::FacetRefSelector;
-use big_cabinet_core::doc::FacetSelector;
-use big_cabinet_core::doc::ObserveFacets;
+use big_cabinet_core::doc::DatumObserved;
+use big_cabinet_core::doc::DatumRead;
+use big_cabinet_core::doc::DatumRefSelector;
+use big_cabinet_core::doc::DatumSelector;
+use big_cabinet_core::doc::ObserveDatums;
 use big_cabinet_core::doc::ObserveScope;
-use big_cabinet_core::doc::ObservedFacet;
-use big_cabinet_core::doc::QueriedFacetRef;
-use big_cabinet_core::doc::QueryFacetRefs;
-use big_cabinet_core::doc::QueryFacets;
-use big_cabinet_core::doc::ReadFacets;
-use big_cabinet_core::doc::WriteFacets;
+use big_cabinet_core::doc::ObservedDatum;
+use big_cabinet_core::doc::QueriedDatumRef;
+use big_cabinet_core::doc::QueryDatumRefs;
+use big_cabinet_core::doc::QueryDatums;
+use big_cabinet_core::doc::ReadDatums;
+use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::LayoutKind;
-use big_cabinet_core::facet::Bundle;
-use big_cabinet_core::facet::FacetDecl;
-use big_cabinet_core::facet::Universe;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
 use big_repo::Config;
@@ -53,20 +53,20 @@ use std::num::NonZeroUsize;
 
 const NOTE: &str = "org.example.note";
 
-fn note(text: &str) -> (FacetKey, Value) {
+fn note(text: &str) -> (DatumKey, Value) {
     (
         format!("{NOTE}/main").parse().unwrap(),
         json!({"$type": NOTE, "value": text}),
     )
 }
 
-fn note_linking(text: &str, target_doc: &DocId) -> (FacetKey, Value) {
+fn note_linking(text: &str, target_doc: &DocId) -> (DatumKey, Value) {
     (
         format!("{NOTE}/main").parse().unwrap(),
         json!({
             "$type": NOTE,
             "value": text,
-            "link": format!("db+facet:/{target_doc}/{NOTE}/main"),
+            "link": format!("db+datum:/{target_doc}/{NOTE}/main"),
         }),
     )
 }
@@ -92,7 +92,7 @@ fn schemas() -> Arc<SchemaRepo> {
         }
     });
     let universe = Universe {
-        facets: vec![FacetDecl {
+        datums: vec![DatumDecl {
             id: NOTE.to_owned(),
             name: "Note".to_owned(),
             schema: schemars::Schema::try_from(supplement).unwrap(),
@@ -125,10 +125,10 @@ struct Node {
     repo: SharedBigRepo,
     repo_stop: Option<BigRepoStopToken>,
     sql: Database,
-    facet_set: Arc<FacetSetStore>,
-    facet_set_task: Option<tokio::task::JoinHandle<()>>,
-    facet_ref: Arc<FacetRefStore>,
-    facet_ref_task: Option<tokio::task::JoinHandle<()>>,
+    datum_set: Arc<DatumSetStore>,
+    datum_set_task: Option<tokio::task::JoinHandle<()>>,
+    datum_ref: Arc<DatumRefStore>,
+    datum_ref_task: Option<tokio::task::JoinHandle<()>>,
     docs: Option<DocsRepo>,
     docs_stop: Option<StopToken>,
     drawers: Option<Drawers>,
@@ -189,9 +189,9 @@ impl Node {
         .await
         .unwrap();
         let sql = runtime.ephemeral(&[]).unwrap();
-        let facet_set = Arc::new(FacetSetStore::new(sql.clone()).await.unwrap());
-        let facet_set_task = {
-            let store = (*facet_set).clone();
+        let datum_set = Arc::new(DatumSetStore::new(sql.clone()).await.unwrap());
+        let datum_set_task = {
+            let store = (*datum_set).clone();
             let repo = Arc::clone(&repo);
             tokio::spawn(async move {
                 store
@@ -200,14 +200,14 @@ impl Node {
                     .unwrap();
             })
         };
-        let facet_ref = Arc::new(FacetRefStore::new(sql.clone()).await.unwrap());
-        let facet_ref_task = {
-            let store = (*facet_ref).clone();
+        let datum_ref = Arc::new(DatumRefStore::new(sql.clone()).await.unwrap());
+        let datum_ref_task = {
+            let store = (*datum_ref).clone();
             let repo = Arc::clone(&repo);
             let schemas = schemas();
-            let facet_set = (*facet_set).clone();
+            let datum_set = (*datum_set).clone();
             tokio::spawn(async move {
-                store.run(repo, schemas, facet_set).await.unwrap();
+                store.run(repo, schemas, datum_set).await.unwrap();
             })
         };
         let mut node = Self {
@@ -220,10 +220,10 @@ impl Node {
             repo,
             repo_stop: Some(repo_stop),
             sql,
-            facet_set,
-            facet_set_task: Some(facet_set_task),
-            facet_ref,
-            facet_ref_task: Some(facet_ref_task),
+            datum_set,
+            datum_set_task: Some(datum_set_task),
+            datum_ref,
+            datum_ref_task: Some(datum_ref_task),
             docs: None,
             docs_stop: None,
             drawers: None,
@@ -244,7 +244,7 @@ impl Node {
             self.drawers_actor.capability,
             self.drawers_namespace,
             self.sql.clone(),
-            Arc::clone(&self.facet_set),
+            Arc::clone(&self.datum_set),
         )
         .await?;
         self.drawer_policy_stop = Some(policy_stop);
@@ -257,8 +257,8 @@ impl Node {
             node_issuer: self.authority.node_issuer.clone(),
             access: Arc::clone(&access) as Arc<dyn crate::doc::DocAccess>,
             sql: self.sql.clone(),
-            facet_set: Some(Arc::clone(&self.facet_set)),
-            facet_ref: Some(Arc::clone(&self.facet_ref)),
+            datum_set: Some(Arc::clone(&self.datum_set)),
+            datum_ref: Some(Arc::clone(&self.datum_ref)),
         })
         .await;
         let (docs, docs_stop) = match prepared {
@@ -472,7 +472,7 @@ impl Node {
                         .await?,
                     command: command(name),
                     placement: drawer_placement(drawer),
-                    facets: BTreeMap::from([(key, value)]),
+                    datums: BTreeMap::from([(key, value)]),
                 },
             )
             .await
@@ -486,7 +486,7 @@ impl Node {
             .docs()
             .call(
                 RequestContext::root(),
-                ReadFacets {
+                ReadDatums {
                     capability: self
                         .mint_doc(
                             actor,
@@ -498,28 +498,28 @@ impl Node {
                         .await?,
                     doc_id: doc.clone(),
                     at: At::Current,
-                    facets: Some(BTreeSet::from([key.clone()])),
+                    datums: Some(BTreeSet::from([key.clone()])),
                     optimistic: false,
                 },
             )
             .await
             .map_err(docs_op)?;
-        match read.facets.get(&key).unwrap() {
-            FacetRead::Accepted { value, .. } => Ok(value.clone()),
+        match read.datums.get(&key).unwrap() {
+            DatumRead::Accepted { value, .. } => Ok(value.clone()),
             other => panic!("expected an accepted note, got {other:?}"),
         }
     }
 
-    /// Follow this node's `facet_set` frontier for `tag`, replay first and then live, until an
+    /// Follow this node's `datum_set` frontier for `tag`, replay first and then live, until an
     /// entry satisfies `indexed`.
     async fn wait_indexed(
         &self,
         tag: &str,
-        indexed: impl Fn(&FacetRoute, &FacetMembership) -> bool,
+        indexed: impl Fn(&DatumRoute, &DatumMembership) -> bool,
     ) {
         let mut reader = self
-            .facet_set
-            .open_tags([(FacetTag::new(tag).unwrap(), 0)])
+            .datum_set
+            .open_tags([(DatumTag::new(tag).unwrap(), 0)])
             .await
             .unwrap();
         loop {
@@ -541,7 +541,7 @@ impl Node {
         self.docs()
             .call(
                 RequestContext::root(),
-                WriteFacets {
+                WriteDatums {
                     capability: self
                         .mint_doc(
                             actor,
@@ -565,12 +565,12 @@ impl Node {
 
     /// The roster of `drawer` as its doc states it, read as the service: the authoritative view
     /// the projection must agree with.
-    async fn roster_facets(&self, drawer: &DrawerId) -> BTreeMap<FacetKey, Value> {
+    async fn roster_datums(&self, drawer: &DrawerId) -> BTreeMap<DatumKey, Value> {
         let read = self
             .docs()
             .call(
                 RequestContext::root(),
-                ReadFacets {
+                ReadDatums {
                     capability: self
                         .mint_doc(
                             &self.drawers_actor,
@@ -583,18 +583,18 @@ impl Node {
                         .unwrap(),
                     doc_id: drawer.clone(),
                     at: At::Current,
-                    facets: None,
+                    datums: None,
                     optimistic: false,
                 },
             )
             .await
             .unwrap();
-        read.facets
+        read.datums
             .into_iter()
-            .filter(|(key, _)| key.tag().as_str().starts_with(DRAWER_FACET_TAG))
+            .filter(|(key, _)| key.tag().as_str().starts_with(DRAWER_DATUM_TAG))
             .map(|(key, read)| match read {
-                FacetRead::Accepted { value, .. } => (key, value),
-                other => panic!("drawer facet {key} is not accepted: {other:?}"),
+                DatumRead::Accepted { value, .. } => (key, value),
+                other => panic!("drawer datum {key} is not accepted: {other:?}"),
             })
             .collect()
     }
@@ -823,11 +823,11 @@ impl Node {
 
     async fn stop(mut self) {
         self.stop_services().await;
-        if let Some(task) = self.facet_ref_task.take() {
+        if let Some(task) = self.datum_ref_task.take() {
             task.abort();
             drop(task.await);
         }
-        if let Some(task) = self.facet_set_task.take() {
+        if let Some(task) = self.datum_set_task.take() {
             task.abort();
             drop(task.await);
         }

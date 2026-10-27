@@ -13,7 +13,7 @@
 //! sidecar marks that object with `x-automerge`. The other three forms are `x-automerge` as well,
 //! because JSON Schema cannot describe a CRDT object, cannot say that a number is a *float*, and
 //! cannot state the non-finite values at all — so a float's declaration is its value's own type
-//! (`facet::Float64`/`Float32`, spelled as the decimal string it is), and a bare `f64` derives a
+//! (`datum::Float64`/`Float32`, spelled as the decimal string it is), and a bare `f64` derives a
 //! plain number, which is the opt-out the Rust type itself states. Nothing opts in: a type declares
 //! its storage by what its `JsonSchema` says, so a foreign type whose schema states a storage form
 //! — `jiff::Timestamp` today, `chrono`'s tomorrow — is stored correctly as soon as it does.
@@ -153,7 +153,7 @@ pub(super) fn keyed_map(object: &Map<String, Value>) -> Result<Option<&Value>, &
 }
 
 /// A shape whose storage in a document is not its JSON form — with one exception: a reference is
-/// a string on both sides, and its marker declares what the string *is* (a `db+facet:` address)
+/// a string on both sides, and its marker declares what the string *is* (a `db+datum:` address)
 /// so that a malformed one is refused on write and the reference index can find every declared
 /// position from the schema alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,9 +171,9 @@ pub enum Codec {
     Text,
     Uint,
     Datetime,
-    /// A facet reference: a string in the document and in JSON, which must parse as a
-    /// [`crate::FacetReference`]. An optional `refHeads` sibling of the marked member pins the
-    /// referenced facet's frontier (ADR 021).
+    /// A datum reference: a string in the document and in JSON, which must parse as a
+    /// [`crate::DatumReference`]. An optional `refHeads` sibling of the marked member pins the
+    /// referenced datum's frontier (ADR 021).
     Reference,
 }
 
@@ -329,7 +329,7 @@ impl Codec {
             },
             (Codec::Counter, automerge::Value::Scalar(stated)) => match stated.as_ref() {
                 ScalarValue::Counter(value)
-                    if schema.get(crate::facet::input::KEYWORD).is_some()
+                    if schema.get(crate::datum::input::KEYWORD).is_some()
                         || i64::from(value).unsigned_abs() <= JS_SAFE_INTEGER_MAX as u64 =>
                 {
                     Ok(Value::Number(i64::from(value).into()))
@@ -368,7 +368,7 @@ impl Codec {
             },
             Codec::Datetime => value
                 .as_str()
-                .filter(|value| crate::facet::input::datetime(value))
+                .filter(|value| crate::datum::input::datetime(value))
                 .map(|_| ())
                 .ok_or_else(|| CodecError::NotAnInstant {
                     stated: found.to_owned(),
@@ -388,16 +388,16 @@ impl Codec {
                 }),
             Codec::Reference => match value.as_str() {
                 Some(stated) => {
-                    crate::FacetReference::parse(stated)
+                    crate::DatumReference::parse(stated)
                         .map(|_| ())
-                        .map_err(|reason| CodecError::NotAFacetReference {
+                        .map_err(|reason| CodecError::NotADatumReference {
                             stated: stated.to_owned(),
                             reason: reason.to_string(),
                         })
                 }
-                None => Err(CodecError::NotAFacetReference {
+                None => Err(CodecError::NotADatumReference {
                     stated: kind(value).to_owned(),
-                    reason: "a facet reference is a `db+facet:` address string".to_owned(),
+                    reason: "a datum reference is a `db+datum:` address string".to_owned(),
                 }),
             },
             Codec::Counter => value
@@ -579,9 +579,9 @@ pub enum CodecError {
     #[error("this position is stored as text, so it is a string, not {found}")]
     NotAText { found: &'static str },
 
-    /// the position is declared a facet reference, and the value is not a `db+facet:` address
-    #[error("this position is declared a facet reference, and {stated} is not one: {reason}")]
-    NotAFacetReference { stated: String, reason: String },
+    /// the position is declared a datum reference, and the value is not a `db+datum:` address
+    #[error("this position is declared a datum reference, and {stated} is not one: {reason}")]
+    NotADatumReference { stated: String, reason: String },
 
     /// the position is declared as a float, and the value does not spell a number
     #[error(
@@ -797,7 +797,7 @@ pub struct Counter(i64);
 
 impl Counter {
     /// Construct a canonical counter. An unsafe integer is a programming error because it cannot
-    /// be represented by the facet JSON contract or read back by a canonical consumer.
+    /// be represented by the datum JSON contract or read back by a canonical consumer.
     pub fn new(value: i64) -> Self {
         assert!(
             value.unsigned_abs() <= JS_SAFE_INTEGER_MAX as u64,

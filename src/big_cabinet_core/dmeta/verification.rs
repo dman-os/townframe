@@ -5,17 +5,17 @@ use super::Bytes;
 use super::CLAIM_ID_DOMAIN;
 use super::Cid;
 use super::ClaimOperation;
+use super::DatumClaim;
+use super::DatumSignature;
 use super::Dmeta;
 use super::DmetaError;
-use super::FacetClaim;
-use super::FacetSignature;
 use super::MultibaseKey;
 use super::NativeValue;
 use super::SignatureBytes;
 use super::Uuid7;
 use super::cid_of;
 use super::encode_native;
-use crate::FacetKey;
+use crate::DatumKey;
 use ed25519_dalek::Signature;
 use ed25519_dalek::VerifyingKey;
 use serde::Deserialize;
@@ -24,15 +24,15 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SignedFacetClaim {
+pub struct SignedDatumClaim {
     pub actor_public_key: MultibaseKey,
     pub signature: SignatureBytes,
-    pub claim: FacetClaim,
+    pub claim: DatumClaim,
 }
 
-impl SignedFacetClaim {
+impl SignedDatumClaim {
     pub fn from_signature(
-        claim: FacetClaim,
+        claim: DatumClaim,
         actor_public_key: MultibaseKey,
         signature: SignatureBytes,
     ) -> Result<Self, DmetaError> {
@@ -68,12 +68,12 @@ pub fn signature_id(actor_public_key: &MultibaseKey, signature: &SignatureBytes)
     Cid::from_digest(*hasher.finalize().as_bytes())
 }
 
-impl SignedFacetClaim {
-    pub fn value_evidence(&self, current: FacetValue<'_>) -> Evidence {
+impl SignedDatumClaim {
+    pub fn value_evidence(&self, current: DatumValue<'_>) -> Evidence {
         match (&self.claim.operation, &self.claim.value_cid, current) {
-            (_, _, FacetValue::Missing) => Evidence::Missing,
-            (ClaimOperation::Remove, None, FacetValue::Removed) => Evidence::Present,
-            (ClaimOperation::Set, Some(cid), FacetValue::Present(value))
+            (_, _, DatumValue::Missing) => Evidence::Missing,
+            (ClaimOperation::Remove, None, DatumValue::Removed) => Evidence::Present,
+            (ClaimOperation::Set, Some(cid), DatumValue::Present(value))
                 if cid_of(&encode_native(value)) == *cid =>
             {
                 Evidence::Present
@@ -84,17 +84,17 @@ impl SignedFacetClaim {
 }
 
 impl Dmeta {
-    pub fn verify_facet(
+    pub fn verify_datum(
         &self,
-        key: &FacetKey,
-        current: FacetValue<'_>,
-        reconstructed: &BTreeMap<SignatureBytes, FacetClaim>,
+        key: &DatumKey,
+        current: DatumValue<'_>,
+        reconstructed: &BTreeMap<SignatureBytes, DatumClaim>,
         issuers: &BTreeMap<Uuid7, MultibaseKey>,
     ) -> VerificationState {
-        let Some(metadata) = self.facets.get(key) else {
+        let Some(metadata) = self.datums.get(key) else {
             return VerificationState::Uncovered;
         };
-        facet_verification(metadata.signatures.iter().map(|entry| {
+        datum_verification(metadata.signatures.iter().map(|entry| {
             let Some(actor) = self.actors.get(&entry.actor_uuid) else {
                 return VerificationState::Rejected;
             };
@@ -108,8 +108,8 @@ impl Dmeta {
             };
             // A compaction witness names its origin itself; every other entry names it through the
             // binding of its `docUuid`.
-            if signed.claim.facet_key != *key
-                || self.facet_uuids.get(&signed.claim.chosen_uuid) != Some(key)
+            if signed.claim.datum_key != *key
+                || self.datum_uuids.get(&signed.claim.chosen_uuid) != Some(key)
                 || (entry.inherited.is_none()
                     && self.branch_uuids.get(&entry.doc_uuid)
                         != Some(&signed.claim.origin_document))
@@ -137,12 +137,12 @@ impl Dmeta {
     }
 }
 
-impl FacetSignature {
+impl DatumSignature {
     pub fn authenticate(
         &self,
         actor: &ActorMetadata,
-        reconstructed: Option<&FacetClaim>,
-    ) -> Result<SignedFacetClaim, DmetaError> {
+        reconstructed: Option<&DatumClaim>,
+    ) -> Result<SignedDatumClaim, DmetaError> {
         if self.message.is_some() && self.inherited.is_some() {
             return Err(DmetaError::WrongContext);
         }
@@ -151,7 +151,7 @@ impl FacetSignature {
             .as_ref()
             .or_else(|| self.inherited.as_ref().map(|witness| &witness.message));
         let claim = match (carried, reconstructed) {
-            (Some(bytes), _) => FacetClaim::from_signing_bytes(bytes.as_slice())?,
+            (Some(bytes), _) => DatumClaim::from_signing_bytes(bytes.as_slice())?,
             (None, Some(claim)) => claim.clone(),
             (None, None) => return Err(DmetaError::MissingMessage),
         };
@@ -174,10 +174,10 @@ impl FacetSignature {
                 return Err(DmetaError::WrongContext);
             }
         }
-        SignedFacetClaim::from_signature(claim, actor.pubkey.clone(), self.signature.clone())
+        SignedDatumClaim::from_signature(claim, actor.pubkey.clone(), self.signature.clone())
     }
 
-    pub fn carry_message(&mut self, claim: &FacetClaim) -> Result<(), DmetaError> {
+    pub fn carry_message(&mut self, claim: &DatumClaim) -> Result<(), DmetaError> {
         if self.actor_uuid != claim.actor_uuid || self.inherited.is_some() {
             return Err(DmetaError::WrongContext);
         }
@@ -187,7 +187,7 @@ impl FacetSignature {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum FacetValue<'a> {
+pub enum DatumValue<'a> {
     Missing,
     Removed,
     Present(&'a NativeValue),
@@ -229,7 +229,7 @@ pub fn fold_checks(checks: SignatureChecks) -> VerificationState {
     }
 }
 
-pub fn facet_verification(
+pub fn datum_verification(
     states: impl IntoIterator<Item = VerificationState>,
 ) -> VerificationState {
     let mut pending = false;

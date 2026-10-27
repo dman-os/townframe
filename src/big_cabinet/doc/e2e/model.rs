@@ -5,13 +5,13 @@ use std::sync::atomic::AtomicUsize;
 
 const SLOTS: [&str; 3] = ["a", "b", "c"];
 
-/// One facet slot as the model sees it.
+/// One datum slot as the model sees it.
 ///
 /// `values` holds every value a read may return: one entry when the slot is determined, several
 /// when concurrent signed writes to it merged. Which of those Automerge shows is its own tie-break
 /// and not the model's to decide, so an ambiguous slot asserts membership rather than equality.
 /// `heads` is always exact — the introductions of every signature covering the slot — which is what
-/// keeps an ambiguous slot a precise version for `IfFacetsUnchanged`.
+/// keeps an ambiguous slot a precise version for `IfDatumsUnchanged`.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Slot {
     values: Vec<Option<Value>>,
@@ -21,8 +21,8 @@ struct Slot {
 impl Slot {
     /// The model tracks introductions exactly but not Automerge op counts, so its
     /// versions carry `clock: 0` and actual clocks are zeroed before comparison.
-    fn version(&self) -> FacetVersion {
-        FacetVersion {
+    fn version(&self) -> DatumVersion {
+        DatumVersion {
             heads: self.heads.clone(),
             clock: 0,
         }
@@ -44,17 +44,17 @@ impl Slot {
     }
 
     /// The read state this slot stands for: exact when determined, the first candidate otherwise.
-    fn read(&self) -> FacetRead {
+    fn read(&self) -> DatumRead {
         match self
             .values
             .first()
             .expect("a slot always has at least one candidate")
         {
-            Some(value) => FacetRead::Accepted {
+            Some(value) => DatumRead::Accepted {
                 value: value.clone(),
                 version: self.version(),
             },
-            None => FacetRead::Absent {
+            None => DatumRead::Absent {
                 version: self.version(),
             },
         }
@@ -62,23 +62,23 @@ impl Slot {
 
     /// Rewrite an actual read to the candidate it matched, so a whole-response equality still says
     /// something when a slot is ambiguous. A read that matches no candidate is a real mismatch.
-    fn normalize(&self, actual: FacetRead, context: &str) -> FacetRead {
+    fn normalize(&self, actual: DatumRead, context: &str) -> DatumRead {
         let mut actual = actual;
         match &mut actual {
-            FacetRead::Accepted { version, .. }
-            | FacetRead::Absent { version }
-            | FacetRead::Pending { version, .. }
-            | FacetRead::Undecodable { version, .. } => version.clock = 0,
-            FacetRead::Rejected { .. } => {}
+            DatumRead::Accepted { version, .. }
+            | DatumRead::Absent { version }
+            | DatumRead::Pending { version, .. }
+            | DatumRead::Undecodable { version, .. } => version.clock = 0,
+            DatumRead::Rejected { .. } => {}
         }
         if !self.ambiguous() {
             return actual;
         }
         let covered = match &actual {
-            FacetRead::Accepted { value, version } => {
+            DatumRead::Accepted { value, version } => {
                 version.heads == self.heads && self.values.contains(&Some(value.clone()))
             }
-            FacetRead::Absent { version } => {
+            DatumRead::Absent { version } => {
                 version.heads == self.heads && self.values.contains(&None)
             }
             other => panic!("{context}: {other:?} is not a read of a merged slot"),
@@ -92,12 +92,12 @@ impl Slot {
     }
 }
 
-/// The slot a facet key names.
-fn slot_of(facet: &FacetKey) -> usize {
+/// The slot a datum key names.
+fn slot_of(datum: &DatumKey) -> usize {
     SLOTS
         .iter()
-        .position(|name| key(name) == *facet)
-        .expect("every returned facet is a modelled slot")
+        .position(|name| key(name) == *datum)
+        .expect("every returned datum is a modelled slot")
 }
 
 #[derive(Clone, Debug)]
@@ -114,7 +114,7 @@ struct Model {
 }
 
 impl Model {
-    fn new(receipt: &WriteReceipt, initial: &BTreeMap<FacetKey, Value>) -> Self {
+    fn new(receipt: &WriteReceipt, initial: &BTreeMap<DatumKey, Value>) -> Self {
         assert_eq!(receipt.heads.len(), 1);
         let snapshot = Snapshot {
             heads: receipt.heads.clone(),
@@ -220,46 +220,46 @@ impl Model {
             )
             .await
             .unwrap();
-        // Rewrite every facet of a response to the candidate its slot matched, so the comparisons
+        // Rewrite every datum of a response to the candidate its slot matched, so the comparisons
         // below stay whole-object equalities.
-        let normalize = |read: FacetsRead| FacetsRead {
+        let normalize = |read: DatumsRead| DatumsRead {
             heads: read.heads,
-            facets: read
-                .facets
+            datums: read
+                .datums
                 .into_iter()
-                .map(|(facet, actual)| {
-                    let actual = snapshot.slots[slot_of(&facet)].normalize(actual, context);
-                    (facet, actual)
+                .map(|(datum, actual)| {
+                    let actual = snapshot.slots[slot_of(&datum)].normalize(actual, context);
+                    (datum, actual)
                 })
                 .collect(),
         };
         // Drop the slots whose presence a concurrent merge left undetermined. The selected read
         // below still pins their exact state, including the removal candidate.
-        let determined = |facet: &FacetKey| !snapshot.slots[slot_of(facet)].ambiguous();
-        let keep_reads = |read: FacetsRead| FacetsRead {
+        let determined = |datum: &DatumKey| !snapshot.slots[slot_of(datum)].ambiguous();
+        let keep_reads = |read: DatumsRead| DatumsRead {
             heads: read.heads,
-            facets: read
-                .facets
+            datums: read
+                .datums
                 .into_iter()
-                .filter(|(facet, _)| determined(facet))
+                .filter(|(datum, _)| determined(datum))
                 .collect(),
         };
-        let keep_listed = |listing: FacetListing| FacetListing {
+        let keep_listed = |listing: DatumListing| DatumListing {
             heads: listing.heads,
-            facets: listing
-                .facets
+            datums: listing
+                .datums
                 .into_iter()
-                .filter(|(facet, _)| determined(facet))
-                .map(|(facet, mut version)| {
+                .filter(|(datum, _)| determined(datum))
+                .map(|(datum, mut version)| {
                     version.clock = 0;
-                    (facet, version)
+                    (datum, version)
                 })
                 .collect(),
         };
 
-        let selected = FacetsRead {
+        let selected = DatumsRead {
             heads: snapshot.heads.clone(),
-            facets: SLOTS
+            datums: SLOTS
                 .iter()
                 .enumerate()
                 .map(|(slot, name)| (key(name), snapshot.slots[slot].read()))
@@ -270,11 +270,11 @@ impl Model {
                 .client()
                 .call(
                     RequestContext::root(),
-                    ReadFacets {
+                    ReadDatums {
                         capability,
                         doc_id: self.document.clone(),
                         at: at.clone(),
-                        facets: Some(SLOTS.map(key).into_iter().collect()),
+                        datums: Some(SLOTS.map(key).into_iter().collect()),
                         optimistic,
                     },
                 )
@@ -298,17 +298,17 @@ impl Model {
             .unwrap_or_else(|error| panic!("{context}: {error:?}"));
         assert_eq!(
             keep_reads(normalize(actual)),
-            keep_reads(FacetsRead {
+            keep_reads(DatumsRead {
                 heads: snapshot.heads.clone(),
-                facets: present,
+                datums: present,
             }),
-            "{context}: all present facets"
+            "{context}: all present datums"
         );
         let listing = op(node
             .client()
             .call(
                 RequestContext::root(),
-                ListFacets {
+                ListDatums {
                     capability,
                     doc_id: self.document.clone(),
                     at,
@@ -318,9 +318,9 @@ impl Model {
         .unwrap_or_else(|error| panic!("{context}: {error:?}"));
         assert_eq!(
             keep_listed(listing),
-            keep_listed(FacetListing {
+            keep_listed(DatumListing {
                 heads: snapshot.heads.clone(),
-                facets: SLOTS
+                datums: SLOTS
                     .iter()
                     .enumerate()
                     .filter(|(slot, _)| snapshot.slots[*slot].present())
@@ -365,7 +365,7 @@ enum Mode {
     Current,
     Heads(usize),
     Document(usize),
-    Facets(usize, u8),
+    Datums(usize, u8),
 }
 
 impl Mode {
@@ -379,7 +379,7 @@ impl Mode {
             Self::Current => Self::Current,
             Self::Heads(index) => Self::Heads(at(index)),
             Self::Document(index) => Self::Document(at(index)),
-            Self::Facets(index, mask) => Self::Facets(at(index), mask),
+            Self::Datums(index, mask) => Self::Datums(at(index), mask),
         }
     }
 
@@ -392,8 +392,8 @@ impl Mode {
             Self::Document(at) => WriteMode::IfDocUnchanged {
                 heads: model.checkpoints[at].heads.clone(),
             },
-            Self::Facets(at, mask) => WriteMode::IfFacetsUnchanged {
-                facets: SLOTS
+            Self::Datums(at, mask) => WriteMode::IfDatumsUnchanged {
+                datums: SLOTS
                     .iter()
                     .enumerate()
                     .filter(|(slot, _)| mask & (1 << slot) != 0)
@@ -410,10 +410,10 @@ impl Mode {
             Self::Document(at) => {
                 (current.heads != model.checkpoints[at].heads).then(|| DocsError::Conflict {
                     heads: current.heads.clone(),
-                    facets: BTreeMap::new(),
+                    datums: BTreeMap::new(),
                 })
             }
-            Self::Facets(at, mask) => {
+            Self::Datums(at, mask) => {
                 let slots: Vec<_> = (0..SLOTS.len())
                     .filter(|slot| mask & (1 << slot) != 0)
                     .collect();
@@ -424,7 +424,7 @@ impl Mode {
                     })
                     .then(|| DocsError::Conflict {
                         heads: current.heads.clone(),
-                        facets: slots
+                        datums: slots
                             .into_iter()
                             .map(|slot| (key(SLOTS[slot]), current.slots[slot].version()))
                             .collect(),
@@ -454,7 +454,7 @@ enum Op {
 #[derive(Clone)]
 enum Request {
     Create(Actor, CreateDoc),
-    Write(Actor, WriteFacets),
+    Write(Actor, WriteDatums),
 }
 
 impl Request {
@@ -523,7 +523,7 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
                 .unwrap(),
             command: format!("{case}/create").try_into().unwrap(),
             placement: PLACEMENT.into(),
-            facets: initial.clone(),
+            datums: initial.clone(),
         },
     );
     let created = create.call(node).await.unwrap();
@@ -556,7 +556,7 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
                 };
                 let request = Request::Write(
                     actor.clone(),
-                    WriteFacets {
+                    WriteDatums {
                         capability: node.capability(actor, scope).await.unwrap(),
                         command: Some(format!("{case}/{step}").try_into().unwrap()),
                         doc_id: model.document.clone(),
@@ -581,8 +581,8 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
                     assert_eq!(actual, Err(DocsError::Denied), "{context}");
                 } else if let Some(conflict) = mode.conflict(&model) {
                     let actual = actual.map_err(|mut error| {
-                        if let DocsError::Conflict { facets, .. } = &mut error {
-                            for version in facets.values_mut() {
+                        if let DocsError::Conflict { datums, .. } = &mut error {
+                            for version in datums.values_mut() {
                                 version.clock = 0;
                             }
                         }
@@ -593,7 +593,7 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
                     let receipt = actual.unwrap_or_else(|error| panic!("{context}: {error:?}"));
                     let base = match mode.resolved(&model) {
                         Mode::Heads(at) => &model.checkpoints[at],
-                        Mode::Current | Mode::Document(_) | Mode::Facets(_, _) => model.current(),
+                        Mode::Current | Mode::Document(_) | Mode::Datums(_, _) => model.current(),
                     }
                     .clone();
                     model.commit(&base, &changes, &receipt, &context);
@@ -641,7 +641,7 @@ async fn run(node: &mut Node, actors: &[Actor; 2], case: &str, initial_mask: u8,
                     Mode::Current,
                     Mode::Heads(0),
                     Mode::Document(0),
-                    Mode::Facets(0, 7),
+                    Mode::Datums(0, 7),
                 ] {
                     assert_eq!(
                         node.write(
@@ -735,7 +735,7 @@ fn exhaustive(mode: Mode) -> Vec<Vec<Op>> {
             edits.into_iter().map(move |second| {
                 let second_mode = match mode {
                     Mode::Heads(_) => Mode::Heads(1),
-                    Mode::Facets(_, _) => Mode::Facets(0, second.mask()),
+                    Mode::Datums(_, _) => Mode::Datums(0, second.mask()),
                     Mode::Current | Mode::Document(_) => mode,
                 };
                 vec![
@@ -768,7 +768,7 @@ conformance! {
     exhaustive_current_empty_long_test: ("current", 0, exhaustive(Mode::Current)),
     exhaustive_explicit_heads_long_test: ("heads", 3, exhaustive(Mode::Heads(0))),
     exhaustive_document_conditions_long_test: ("document", 1, exhaustive(Mode::Document(0))),
-    exhaustive_facet_conditions_long_test: ("facets", 1, exhaustive(Mode::Facets(0, 7))),
+    exhaustive_datum_conditions_long_test: ("datums", 1, exhaustive(Mode::Datums(0, 7))),
     historical_disjoint_branches: ("branches", 1, vec![vec![
         Op::Write(Edit::Set(0), Mode::Current, Author::Owner),
         Op::Write(Edit::Set(1), Mode::Heads(0), Author::Owner),
@@ -783,13 +783,13 @@ conformance! {
         Op::Replay(3),
     ]]),
     tombstone_conditions_and_resurrection: ("tombstones", 0, vec![vec![
-        Op::Write(Edit::Remove(0), Mode::Facets(0, 1), Author::Owner),
-        Op::Write(Edit::SetAndRemove(0, 1), Mode::Facets(0, 3), Author::Owner),
-        Op::Write(Edit::Set(0), Mode::Facets(1, 1), Author::Owner),
+        Op::Write(Edit::Remove(0), Mode::Datums(0, 1), Author::Owner),
+        Op::Write(Edit::SetAndRemove(0, 1), Mode::Datums(0, 3), Author::Owner),
+        Op::Write(Edit::Set(0), Mode::Datums(1, 1), Author::Owner),
         Op::Write(Edit::Remove(0), Mode::Document(2), Author::Owner),
-        Op::Write(Edit::Remove(0), Mode::Facets(3, 1), Author::Owner),
-        Op::Write(Edit::Set(0), Mode::Facets(3, 1), Author::Owner),
-        Op::Write(Edit::SetAndRemove(0, 1), Mode::Facets(4, 3), Author::Owner),
+        Op::Write(Edit::Remove(0), Mode::Datums(3, 1), Author::Owner),
+        Op::Write(Edit::Set(0), Mode::Datums(3, 1), Author::Owner),
+        Op::Write(Edit::SetAndRemove(0, 1), Mode::Datums(4, 3), Author::Owner),
         Op::Read(1),
         Op::Restart,
         Op::Replay(1),
@@ -797,12 +797,12 @@ conformance! {
     ]]),
     equal_values_still_advance_versions: ("equal-values", 1, vec![vec![
         Op::Write(Edit::SetInitial(0), Mode::Current, Author::Owner),
-        Op::Write(Edit::Set(1), Mode::Facets(0, 1), Author::Owner),
-        Op::Write(Edit::SetInitial(0), Mode::Facets(1, 1), Author::Owner),
+        Op::Write(Edit::Set(1), Mode::Datums(0, 1), Author::Owner),
+        Op::Write(Edit::SetInitial(0), Mode::Datums(1, 1), Author::Owner),
         Op::Write(Edit::SetAndRemove(1, 0), Mode::Document(1), Author::Owner),
         Op::Write(Edit::Set(0), Mode::Current, Author::Owner),
         Op::Write(Edit::SetInitial(0), Mode::Current, Author::Owner),
-        Op::Write(Edit::Remove(0), Mode::Facets(2, 1), Author::Owner),
+        Op::Write(Edit::Remove(0), Mode::Datums(2, 1), Author::Owner),
         Op::Read(0),
         Op::Replay(1),
     ]]),
@@ -812,9 +812,9 @@ conformance! {
         Op::OtherDenied,
         Op::ShareRead,
         Op::ShareWrite,
-        Op::Write(Edit::SetAndRemove(1, 2), Mode::Facets(0, 6), Author::Other),
+        Op::Write(Edit::SetAndRemove(1, 2), Mode::Datums(0, 6), Author::Other),
         Op::Write(Edit::Remove(0), Mode::Document(2), Author::Owner),
-        Op::Write(Edit::Set(0), Mode::Facets(3, 1), Author::Other),
+        Op::Write(Edit::Set(0), Mode::Datums(3, 1), Author::Other),
         Op::Read(0),
         Op::Restart,
         Op::Replay(2),
@@ -832,7 +832,7 @@ conformance! {
         Op::Replay(1),
     ]]),
     // Two writes to one slot from different bases merge under both signatures: which value
-    // Automerge shows is its tie-break, the facet heads are both introductions, and a later write
+    // Automerge shows is its tie-break, the datum heads are both introductions, and a later write
     // recovers an exactly determined slot.
     concurrent_writes_to_one_slot_merge_under_both_signatures: ("overlap", 1, vec![vec![
         Op::Write(Edit::Set(0), Mode::Current, Author::Owner),
@@ -846,7 +846,7 @@ conformance! {
     ]]),
     // Found by the generated scripts: two first writes of a slot from bases where it had no
     // metadata each create the slot's metadata map, and the losing map's signature is still
-    // current. A later write replaces both, so neither may survive it as a facet head.
+    // current. A later write replaces both, so neither may survive it as a datum head.
     concurrent_first_writes_leave_two_metadata_maps: ("first-writes", 0, vec![vec![
         Op::Write(Edit::Set(1), Mode::Current, Author::Owner),
         Op::Write(Edit::Set(1), Mode::Heads(0), Author::Owner),
@@ -880,7 +880,7 @@ fn any_edit() -> impl Strategy<Value = Edit> {
         0 => Edit::Set(slot),
         1 => Edit::SetInitial(slot),
         2 => Edit::Remove(slot),
-        // A facet cannot be both set and removed, so the second slot is always a different one.
+        // A datum cannot be both set and removed, so the second slot is always a different one.
         _ => Edit::SetAndRemove(slot, (slot + 1 + offset) % SLOTS.len()),
     })
 }
@@ -890,7 +890,7 @@ fn any_mode() -> impl Strategy<Value = Mode> {
         Just(Mode::Current),
         any::<usize>().prop_map(Mode::Heads),
         any::<usize>().prop_map(Mode::Document),
-        (any::<usize>(), 1..=7u8).prop_map(|(at, mask)| Mode::Facets(at, mask)),
+        (any::<usize>(), 1..=7u8).prop_map(|(at, mask)| Mode::Datums(at, mask)),
     ]
 }
 

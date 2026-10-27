@@ -1,11 +1,11 @@
 use super::Bytes;
 use super::Dmeta;
-use crate::FacetKey;
-use crate::facet::CodecError;
-use crate::facet::CompiledSchema;
-use crate::facet::Stored;
-use crate::facet::hydrate_value;
-use crate::facet::reconcile_json_atomic;
+use crate::DatumKey;
+use crate::datum::CodecError;
+use crate::datum::CompiledSchema;
+use crate::datum::Stored;
+use crate::datum::hydrate_value;
+use crate::datum::reconcile_json_atomic;
 use automerge::ObjId;
 use automerge::ObjType;
 use automerge::ReadDoc;
@@ -44,18 +44,18 @@ impl Dmeta {
     /// Write this dmeta over the one stored at `object`/`prop`, preserving the identity of every
     /// signature entry it retains.
     ///
-    /// `replaced` names the facets whose competing signature set this write replaces outright. The
+    /// `replaced` names the datums whose competing signature set this write replaces outright. The
     /// typed value only sees the winning copy of a conflicted container, but a concurrent first
     /// write of a slot's metadata leaves two metadata maps (or two signature lists), and the losing
     /// copy's entries are still current signatures. A replacing write retires those too; every
-    /// other facet's losing copies are left exactly as they are, since this write never saw them.
+    /// other datum's losing copies are left exactly as they are, since this write never saw them.
     pub fn reconcile_atomic<'a>(
         &self,
         mut tx: Transaction<'a>,
         schema: &CompiledSchema,
         object: &ObjId,
         prop: autosurgeon::Prop<'_>,
-        replaced: &BTreeSet<FacetKey>,
+        replaced: &BTreeSet<DatumKey>,
     ) -> Result<Transaction<'a>, StorageError> {
         let prepared = (|| -> Result<Value, StorageError> {
             let mut submitted = Stored::check(
@@ -86,23 +86,23 @@ impl Dmeta {
                 &mut submitted["updatedAt"],
                 base.get("updatedAt"),
             )?;
-            let facets = ensure_object(&mut tx, &map, "facets".into(), ObjType::Map)?;
-            for (key, metadata) in submitted["facets"]
+            let datums = ensure_object(&mut tx, &map, "datums".into(), ObjType::Map)?;
+            for (key, metadata) in submitted["datums"]
                 .as_object_mut()
-                .expect("dmeta facets are a map")
+                .expect("dmeta datums are a map")
             {
-                let facet = ensure_object(&mut tx, &facets, key.as_str().into(), ObjType::Map)?;
+                let datum = ensure_object(&mut tx, &datums, key.as_str().into(), ObjType::Map)?;
                 if replaced.iter().any(|replaced| replaced.to_string() == *key) {
-                    retire_losing_signatures(&mut tx, &facets, key, &facet)?;
+                    retire_losing_signatures(&mut tx, &datums, key, &datum)?;
                 }
                 for field in ["updatedAt", "deletedAt", "signatures"] {
                     reconcile_set(
                         &mut tx,
-                        &facet,
+                        &datum,
                         field,
                         &mut metadata[field],
-                        base.get("facets")
-                            .and_then(|facets| facets.get(key))
+                        base.get("datums")
+                            .and_then(|datums| datums.get(key))
                             .and_then(|metadata| metadata.get(field)),
                     )?;
                 }
@@ -123,7 +123,7 @@ impl Dmeta {
 /// Empty every signature list under `key` other than the winning list of the winning metadata map.
 fn retire_losing_signatures(
     tx: &mut Transaction<'_>,
-    facets: &ObjId,
+    datums: &ObjId,
     key: &str,
     winner: &ObjId,
 ) -> Result<(), StorageError> {
@@ -132,7 +132,7 @@ fn retire_losing_signatures(
         _ => None,
     };
     let mut losing = Vec::new();
-    for (_, metadata) in tx.get_all(facets, key)? {
+    for (_, metadata) in tx.get_all(datums, key)? {
         for (value, list) in tx.get_all(&metadata, "signatures")? {
             if value == automerge::Value::Object(ObjType::List)
                 && Some(&list) != winning_list.as_ref()
@@ -171,7 +171,7 @@ fn check_bindings(
     map: &ObjId,
     submitted: &Value,
 ) -> Result<(), StorageError> {
-    for index in ["actors", "branchUuids", "facetUuids"] {
+    for index in ["actors", "branchUuids", "datumUuids"] {
         for (kind, bindings) in tx.get_all(map, index)? {
             if kind != automerge::Value::Object(ObjType::Map) {
                 return Err(StorageError::UnexpectedStorage {

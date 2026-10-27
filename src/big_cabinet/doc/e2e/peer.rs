@@ -93,7 +93,7 @@ async fn observation_fetches_remote_document_without_manual_document_sync() {
         .client()
         .subscribe(
             RequestContext::root(),
-            ObserveFacets {
+            ObserveDatums {
                 capability,
                 scope: ObserveScope::Doc {
                     doc_id: created.doc_id.clone(),
@@ -105,13 +105,13 @@ async fn observation_fetches_remote_document_without_manual_document_sync() {
         .unwrap();
     loop {
         match observations.next().await.unwrap().unwrap() {
-            FacetObserved::Entry {
+            DatumObserved::Entry {
                 doc_id,
-                facet_key,
-                facet: ObservedFacet::Present { .. },
+                datum_key,
+                datum: ObservedDatum::Present { .. },
                 ..
-            } if doc_id == created.doc_id && facet_key == key("main") => break,
-            FacetObserved::Entry { .. } | FacetObserved::ReplayComplete { .. } => {}
+            } if doc_id == created.doc_id && datum_key == key("main") => break,
+            DatumObserved::Entry { .. } | DatumObserved::ReplayComplete { .. } => {}
         }
     }
     let expected = owner

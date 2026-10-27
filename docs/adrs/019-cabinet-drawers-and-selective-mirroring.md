@@ -7,12 +7,12 @@ for the self-doc and single-group layouts; the deferred list at the end is uncha
 
 [The drawer FDR](../fdrs/001-drawers-as-document-collections.md) defines the
 user-visible collection model. This ADR is the contract for the drawer model
-Cabinet implements: the drawer facets, roster, child entries, and required
+Cabinet implements: the drawer datums, roster, child entries, and required
 local drawers below are `DrawerService`'s contract. Namespace capabilities, actor identities,
 domain-owned grants, signing, and their implementation migration are specified in
 [ADR 022](022-authority-actors-capabilities-and-grants.md) and the
 [authority guide](../big-cabinet-authority.md). Subset drawers, managed-participant
-layouts, roster sharding, provider/home facets, and Panproto integration are
+layouts, roster sharding, provider/home datums, and Panproto integration are
 later work.
 
 A doc can be entered in several drawers. Official inclusion, Keyhive access, and local
@@ -79,7 +79,7 @@ retryable rather than falsely complete.
 
 ## Child entries
 
-A child drawer is a typed roster entry, not a separate `DrawerRelation` facet:
+A child drawer is a typed roster entry, not a separate `DrawerRelation` datum:
 
 ```jsonc
 {
@@ -113,7 +113,7 @@ Child traversal computes recursive set union, terminates on already visited draw
 and uses the strongest effective access when a doc is reachable by several independent
 paths. Keyhive reachability alone never creates an official entry.
 
-## Facets
+## Datums
 
 The first-version vocabulary is:
 
@@ -124,8 +124,8 @@ org.example.daybook.drawer.docEntry
 org.example.daybook.drawer.childEntry
 ```
 
-Facet tags are grouped by dotted names. Drawer values carry no ad-hoc version integer;
-compatible evolution occurs under the facet identity, while incompatible meanings need a
+Datum tags are grouped by dotted names. Drawer values carry no ad-hoc version integer;
+compatible evolution occurs under the datum identity, while incompatible meanings need a
 new identity.
 
 The layout is an open union, internally tagged as every published union is (ADR 021 §5):
@@ -134,7 +134,7 @@ node that does not know a layout still reads, stores and lists the drawer untouc
 an operation that must interpret the layout refuses. A Lexicon object states at least one
 property, so a member with nothing to say carries `empty: true` — the convention for an
 empty member, excluded from the wire by `skip_serializing_if` until a later field lands
-beside it. Adding a layout is a new member under the same facet id, not a new facet tag.
+beside it. Adding a layout is a new member under the same datum id, not a new datum tag.
 
 A self-doc drawer is:
 
@@ -182,9 +182,9 @@ A single-group drawer is:
 }
 ```
 
-The `drawer.roster/main` facet marks the canonical roster and states where its entries
+The `drawer.roster/main` datum marks the canonical roster and states where its entries
 live. A Lexicon object states at least one property, so the marker is not `{}`: it
-carries `empty: true`, the empty-member convention. Today every entry is a facet on the
+carries `empty: true`, the empty-member convention. Today every entry is a datum on the
 drawer doc itself, so the marker has nothing further to say; the fields an external
 roster layout needs (roster docs, ranges, shard routing) land beside `empty` as optional
 fields when the sharding design below is implemented.
@@ -241,10 +241,10 @@ boot and records locally:
 - docs originated by this node.
 
 Plus one registry drawer: the known-drawers list, a self-doc drawer holding
-`org.example.daybook.drawer.knownEntry/<drawerId>` facets (`{ mirror?: true }`). It is an
+`org.example.daybook.drawer.knownEntry/<drawerId>` datums (`{ mirror?: true }`). It is an
 explicitly managed list, not a collection and not a tag scan: remembering a drawer grants
 no access to it, mirroring intent certifies no fetched or retained bytes, forgetting edits
-nothing but the local registry, and child relationships or observed facets never write it.
+nothing but the local registry, and child relationships or observed datums never write it.
 DrawerService's `rememberDrawer` / `forgetDrawer` / `listKnownDrawers` / `setDrawerPolicy`
 are the only writers. The registry doc is the durable home — the list survives a restart
 by being read back from the doc — and its id anchors in the same local record as the other
@@ -268,7 +268,7 @@ Cabinet owns drawer semantics, roster writes, actor checks, and the projections 
 query them. BigRepo owns node-level Keyhive enforcement and physical content. An embedder
 chooses peers, transport, sync, byte retention, and public/provider APIs.
 
-`facet_set` and `facet_ref` move from daybook_core into Cabinet as generic projections;
+`datum_set` and `datum_ref` move from daybook_core into Cabinet as generic projections;
 blob-specific behavior is removed. SQLite tables and transitive-index strategies are
 implementation details, not authoritative drawer state.
 
@@ -278,7 +278,7 @@ implementation details, not authoritative drawer state.
 - managed-participant and self-group layouts;
 - external roster docs and sharding (design below — deferred means unimplemented, not
   undesigned);
-- provider/home facets and node URL design;
+- provider/home datums and node URL design;
 - public indices and XRPC;
 - sensitivity labels;
 - recovery principals;
@@ -295,12 +295,12 @@ design; it is recorded here again so the later PR starts from it, not from scrat
 
 Cabinet uses a drawer-writer-controlled Automerge roster for official membership. A
 drawer has a roster registry document; it identifies the active roster-shard documents.
-Each shard holds one membership facet per admitted logical document ID (including an
-explicitly admitted branch ID), not one facet containing a giant set. The registry has
-one registration facet per shard. Only authorized edits to registered roster shards count
+Each shard holds one membership datum per admitted logical document ID (including an
+explicitly admitted branch ID), not one datum containing a giant set. The registry has
+one registration datum per shard. Only authorized edits to registered roster shards count
 as official entries; a Keyhive grant to the metadata group cannot register an arbitrary
 document as a shard. DocumentsRepo defines and enforces the write gate, including how an
-Automerge change's actor maps to an authorized writer. A group grant or unverified facet
+Automerge change's actor maps to an authorized writer. A group grant or unverified datum
 author is not curator approval.
 
 Every descriptor, roster registry, and registered roster shard grants Read to the
@@ -315,7 +315,7 @@ have a valid registry entry. A registered shard may be visible through M before 
 registry entry or vice versa; neither order authorizes an unregistered shard, and Cabinet
 retries discovery after the missing half arrives.
 
-A self-drawer can keep its initial registry and member facet on the descriptor itself;
+A self-drawer can keep its initial registry and member datum on the descriptor itself;
 there is no requirement to allocate multiple documents just to share one document.
 
 *Reconciliation with the settled self-doc rule:* the paragraph above is the pre-redesign
@@ -346,11 +346,11 @@ concurrent remove/re-add have the same final value. Migration must preserve the 
 causal distinction, not turn a concurrent removal into a later sequential delete. The
 target is Automerge-style conflict semantics, but the cross-shard algorithm,
 claim-lineage transfer, and duplicate physical shard creation rule remain open.
-Deterministic routing alone does not solve these. One membership facet per document also
+Deterministic routing alone does not solve these. One membership datum per document also
 provides authenticated who-added-what provenance; it is not merely a workaround for
 rewriting a large map.
 
-In today's facets this design is what `drawer.roster/main`'s `layout` vocabulary is for:
+In today's datums this design is what `drawer.roster/main`'s `layout` vocabulary is for:
 `inline` is the one spelling implemented (the registry and the shard are the drawer doc
 itself); external registry/shard spellings arrive with this design. The vocabulary stays
 closed — a node that cannot read a drawer's roster layout cannot enumerate the drawer, so

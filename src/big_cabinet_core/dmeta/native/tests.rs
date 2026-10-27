@@ -12,7 +12,7 @@ fn historical_reads_use_one_shared_budget_and_preserve_native_kinds() {
     let mut doc = Automerge::new();
     let mut tx = doc.transaction();
     let map = tx
-        .put_object(automerge::ROOT, "facet", ObjType::Map)
+        .put_object(automerge::ROOT, "datum", ObjType::Map)
         .unwrap();
     tx.put(&map, "counter", ScalarValue::Counter(3.into()))
         .unwrap();
@@ -20,18 +20,18 @@ fn historical_reads_use_one_shared_budget_and_preserve_native_kinds() {
     tx.splice_text(&text, 0, 0, "old").unwrap();
     tx.commit();
     let heads = doc.get_heads();
-    let expected = NativeValue::read_at(&doc, &automerge::ROOT, "facet").unwrap();
+    let expected = NativeValue::read_at(&doc, &automerge::ROOT, "datum").unwrap();
     let mut tx = doc.transaction();
     tx.increment(&map, "counter", 2).unwrap();
     tx.splice_text(&text, 0, 3, "new").unwrap();
     tx.commit();
     let mut budget = NativeReadBudget::default();
     assert_eq!(
-        NativeValue::read_at_heads(&doc, &automerge::ROOT, "facet", &heads, &mut budget).unwrap(),
+        NativeValue::read_at_heads(&doc, &automerge::ROOT, "datum", &heads, &mut budget).unwrap(),
         expected
     );
     assert_ne!(
-        NativeValue::read_at(&doc, &automerge::ROOT, "facet").unwrap(),
+        NativeValue::read_at(&doc, &automerge::ROOT, "datum").unwrap(),
         expected
     );
     let mut budget = NativeReadBudget {
@@ -440,10 +440,10 @@ fn read_at_preserves_transaction_values_across_save_load_and_fork_snapshots() {
     ];
     let mut doc = Automerge::new();
     let mut tx = doc.transaction();
-    let facet = tx
-        .put_object(automerge::ROOT, "facet", ObjType::Map)
+    let datum = tx
+        .put_object(automerge::ROOT, "datum", ObjType::Map)
         .unwrap();
-    let list = tx.put_object(&facet, "aa", ObjType::List).unwrap();
+    let list = tx.put_object(&datum, "aa", ObjType::List).unwrap();
     for (index, (scalar, expected)) in scalars.iter().enumerate() {
         tx.insert(&list, index, scalar.clone()).unwrap();
         if matches!(expected, NativeValue::Counter(_)) {
@@ -454,7 +454,7 @@ fn read_at_preserves_transaction_values_across_save_load_and_fork_snapshots() {
             Some(expected.clone())
         );
     }
-    let text = tx.put_object(&facet, "z", ObjType::Text).unwrap();
+    let text = tx.put_object(&datum, "z", ObjType::Text).unwrap();
     tx.splice_text(&text, 0, 0, "é𐐀").unwrap();
     tx.splice_text(&text, 0, 0, "a").unwrap();
     let expected = NativeValue::Map(BTreeMap::from([
@@ -464,7 +464,7 @@ fn read_at_preserves_transaction_values_across_save_load_and_fork_snapshots() {
         ),
         ("z".to_owned(), NativeValue::Text("aé𐐀".to_owned())),
     ]));
-    let before_commit = NativeValue::read_at(&tx, &automerge::ROOT, "facet")
+    let before_commit = NativeValue::read_at(&tx, &automerge::ROOT, "datum")
         .unwrap()
         .unwrap();
     assert_eq!(before_commit, expected);
@@ -478,14 +478,14 @@ fn read_at_preserves_transaction_values_across_save_load_and_fork_snapshots() {
     tx.commit();
     let snapshot = doc.fork_at(&heads).unwrap();
     for reconstructed in [&loaded, &snapshot] {
-        let native = NativeValue::read_at(reconstructed, &automerge::ROOT, "facet")
+        let native = NativeValue::read_at(reconstructed, &automerge::ROOT, "datum")
             .unwrap()
             .unwrap();
         assert_eq!(native, expected);
         assert_eq!(encode_native(&native), encoded);
     }
     assert_ne!(
-        NativeValue::read_at(&doc, &automerge::ROOT, "facet").unwrap(),
+        NativeValue::read_at(&doc, &automerge::ROOT, "datum").unwrap(),
         Some(expected)
     );
 }
@@ -498,19 +498,19 @@ fn read_at_map_fixture_is_independent_of_insertion_history() {
     ];
     for keys in [["aa", "z"], ["z", "aa"]] {
         let mut doc = AutoCommit::new();
-        let facet = doc
-            .put_object(automerge::ROOT, "facet", ObjType::Map)
+        let datum = doc
+            .put_object(automerge::ROOT, "datum", ObjType::Map)
             .unwrap();
         for key in keys {
-            doc.put(&facet, key, ScalarValue::Null).unwrap();
+            doc.put(&datum, key, ScalarValue::Null).unwrap();
             let value = if key == "aa" {
                 ScalarValue::Str("later".into())
             } else {
                 ScalarValue::Int(1)
             };
-            doc.put(&facet, key, value).unwrap();
+            doc.put(&datum, key, value).unwrap();
         }
-        let value = NativeValue::read_at(&doc, &automerge::ROOT, "facet")
+        let value = NativeValue::read_at(&doc, &automerge::ROOT, "datum")
             .unwrap()
             .unwrap();
         assert_eq!(encode_native(&value), expected);
@@ -548,18 +548,18 @@ fn read_at_distinguishes_absence_null_and_automerge_errors() {
 #[test]
 fn read_at_uses_one_materialized_winner_per_conflicted_map_key() {
     let mut doc = AutoCommit::new();
-    let facet = doc
-        .put_object(automerge::ROOT, "facet", ObjType::Map)
+    let datum = doc
+        .put_object(automerge::ROOT, "datum", ObjType::Map)
         .unwrap();
-    doc.put(&facet, "key", "base").unwrap();
+    doc.put(&datum, "key", "base").unwrap();
     let mut other = doc.fork();
-    doc.put(&facet, "key", "left").unwrap();
-    other.put(&facet, "key", "right").unwrap();
+    doc.put(&datum, "key", "left").unwrap();
+    other.put(&datum, "key", "right").unwrap();
     doc.merge(&mut other).unwrap();
-    assert_eq!(doc.get_all(&facet, "key").unwrap().len(), 2);
-    let winner = NativeValue::read_at(&doc, &facet, "key").unwrap().unwrap();
+    assert_eq!(doc.get_all(&datum, "key").unwrap().len(), 2);
+    let winner = NativeValue::read_at(&doc, &datum, "key").unwrap().unwrap();
     assert_eq!(
-        NativeValue::read_at(&doc, &automerge::ROOT, "facet").unwrap(),
+        NativeValue::read_at(&doc, &automerge::ROOT, "datum").unwrap(),
         Some(NativeValue::Map(BTreeMap::from([(
             "key".to_owned(),
             winner
@@ -650,15 +650,15 @@ fn read_at_rejects_text_marks_blocks_and_non_string_elements_before_commit() {
 fn read_at_depth_limit_has_an_exact_boundary() {
     let mut doc = AutoCommit::new();
     let mut nested = doc
-        .put_object(automerge::ROOT, "facet", ObjType::Map)
+        .put_object(automerge::ROOT, "datum", ObjType::Map)
         .unwrap();
     for _ in 1..NativeReadBudget::MAX_DEPTH {
         nested = doc.put_object(&nested, "child", ObjType::Map).unwrap();
     }
-    assert!(NativeValue::read_at(&doc, &automerge::ROOT, "facet").is_ok());
+    assert!(NativeValue::read_at(&doc, &automerge::ROOT, "datum").is_ok());
     doc.put(&nested, "child", ScalarValue::Null).unwrap();
     assert!(matches!(
-        NativeValue::read_at(&doc, &automerge::ROOT, "facet"),
+        NativeValue::read_at(&doc, &automerge::ROOT, "datum"),
         Err(NativeReadError::ResourceLimit("depth"))
     ));
     assert_eq!(
@@ -670,11 +670,11 @@ fn read_at_depth_limit_has_an_exact_boundary() {
 #[test]
 fn read_at_node_budget_is_shared_across_siblings() {
     let mut doc = AutoCommit::new();
-    let facet = doc
-        .put_object(automerge::ROOT, "facet", ObjType::Map)
+    let datum = doc
+        .put_object(automerge::ROOT, "datum", ObjType::Map)
         .unwrap();
-    let left = doc.put_object(&facet, "left", ObjType::List).unwrap();
-    let right = doc.put_object(&facet, "right", ObjType::List).unwrap();
+    let left = doc.put_object(&datum, "left", ObjType::List).unwrap();
+    let right = doc.put_object(&datum, "right", ObjType::List).unwrap();
     let leaves = NativeReadBudget::MAX_NODES - 3;
     doc.splice(
         &left,
@@ -690,10 +690,10 @@ fn read_at_node_budget_is_shared_across_siblings() {
         std::iter::repeat_n(ScalarValue::Null, leaves - leaves / 2),
     )
     .unwrap();
-    assert!(NativeValue::read_at(&doc, &automerge::ROOT, "facet").is_ok());
+    assert!(NativeValue::read_at(&doc, &automerge::ROOT, "datum").is_ok());
     doc.insert(&left, 0, ScalarValue::Null).unwrap();
     assert!(matches!(
-        NativeValue::read_at(&doc, &automerge::ROOT, "facet"),
+        NativeValue::read_at(&doc, &automerge::ROOT, "datum"),
         Err(NativeReadError::ResourceLimit("nodes"))
     ));
 }
@@ -720,19 +720,19 @@ fn read_at_text_elements_share_the_node_budget() {
 #[test]
 fn read_at_byte_budget_counts_keys_and_payloads_across_siblings() {
     let mut doc = AutoCommit::new();
-    let facet = doc
-        .put_object(automerge::ROOT, "facet", ObjType::Map)
+    let datum = doc
+        .put_object(automerge::ROOT, "datum", ObjType::Map)
         .unwrap();
     let half = NativeReadBudget::MAX_BYTES / 2 - 1;
-    doc.put(&facet, "a", ScalarValue::Bytes(vec![0; half]))
+    doc.put(&datum, "a", ScalarValue::Bytes(vec![0; half]))
         .unwrap();
-    doc.put(&facet, "b", ScalarValue::Str("x".repeat(half).into()))
+    doc.put(&datum, "b", ScalarValue::Str("x".repeat(half).into()))
         .unwrap();
-    assert!(NativeValue::read_at(&doc, &automerge::ROOT, "facet").is_ok());
-    doc.put(&facet, "b", ScalarValue::Str("x".repeat(half + 1).into()))
+    assert!(NativeValue::read_at(&doc, &automerge::ROOT, "datum").is_ok());
+    doc.put(&datum, "b", ScalarValue::Str("x".repeat(half + 1).into()))
         .unwrap();
     assert!(matches!(
-        NativeValue::read_at(&doc, &automerge::ROOT, "facet"),
+        NativeValue::read_at(&doc, &automerge::ROOT, "datum"),
         Err(NativeReadError::ResourceLimit("bytes"))
     ));
 }

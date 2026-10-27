@@ -1,18 +1,24 @@
-//! Known facet-schema configuration for one Cabinet embedding.
+//! Known datum-schema configuration for one Cabinet embedding.
 //!
 //! A schema repository owns the embedder-provided Lexicon document and the
 //! validated carried sidecar bundle together. It does not discover, publish,
-//! fetch, or compare schemas. Unknown facets remain readable as best-effort
-//! raw data, but writes require an explicitly configured known facet.
+//! fetch, or compare schemas. Unknown datums remain readable as best-effort
+//! raw data, but writes require an explicitly configured known datum.
 //!
-//! The facets Cabinet itself maintains — dmeta, branch, drawer — are always registered, before any embedder group,
+//! The datums Cabinet itself maintains — dmeta, branch, drawer — are always registered, before any embedder group,
 //! so an embedder cannot shadow them with its own definition. They are declared in Rust, so their
-//! sidecar is the codec's authority by construction, and the Lexicon published for a core facet is
-//! the projection of that same declaration. Core facets go through the same Lexicon admission path
+//! sidecar is the codec's authority by construction, and the Lexicon published for a core datum is
+//! the projection of that same declaration. Core datums go through the same Lexicon admission path
 //! as an embedder-registered pair — the projected Lexicon is checked against the sidecar and the
 //! compiled schema is the overlay admission produces — so there is exactly one compilation path a
 //! stored value is ever read against.
 
+use big_cabinet_core::datum::Bundle;
+use big_cabinet_core::datum::CompiledSchema;
+use big_cabinet_core::datum::Declaration;
+use big_cabinet_core::datum::LexiconAdmissionError;
+use big_cabinet_core::datum::Universe;
+use big_cabinet_core::datum::UniverseError;
 use big_cabinet_core::dmeta::BranchPath;
 use big_cabinet_core::dmeta::Dmeta;
 use big_cabinet_core::drawer::Drawer;
@@ -22,12 +28,6 @@ use big_cabinet_core::drawer::DrawerRoster;
 use big_cabinet_core::drawer::KnownDrawerEntry;
 use big_cabinet_core::drawer::SelfDocLayout;
 use big_cabinet_core::drawer::SingleGroupLayout;
-use big_cabinet_core::facet::Bundle;
-use big_cabinet_core::facet::CompiledSchema;
-use big_cabinet_core::facet::Declaration;
-use big_cabinet_core::facet::LexiconAdmissionError;
-use big_cabinet_core::facet::Universe;
-use big_cabinet_core::facet::UniverseError;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -36,9 +36,9 @@ use thiserror::Error;
 
 static CORE: LazyLock<Universe> = LazyLock::new(|| {
     Universe::collect([
-        Declaration::of::<Dmeta>().expect("dmeta is a well-formed facet declaration"),
-        Declaration::of::<BranchPath>().expect("branch is a well-formed facet declaration"),
-        Declaration::of::<Drawer>().expect("drawer is a well-formed facet declaration"),
+        Declaration::of::<Dmeta>().expect("dmeta is a well-formed datum declaration"),
+        Declaration::of::<BranchPath>().expect("branch is a well-formed datum declaration"),
+        Declaration::of::<Drawer>().expect("drawer is a well-formed datum declaration"),
         // A published union's members are carried as their own lexicons at admission, whether or
         // not the union is open.
         Declaration::of::<SelfDocLayout>()
@@ -46,26 +46,26 @@ static CORE: LazyLock<Universe> = LazyLock::new(|| {
         Declaration::of::<SingleGroupLayout>()
             .expect("single-group layout is a well-formed member declaration"),
         Declaration::of::<DrawerRoster>()
-            .expect("drawer roster is a well-formed facet declaration"),
+            .expect("drawer roster is a well-formed datum declaration"),
         Declaration::of::<DrawerDocEntry>()
-            .expect("drawer doc entry is a well-formed facet declaration"),
+            .expect("drawer doc entry is a well-formed datum declaration"),
         Declaration::of::<DrawerChildEntry>()
-            .expect("drawer child entry is a well-formed facet declaration"),
+            .expect("drawer child entry is a well-formed datum declaration"),
         Declaration::of::<KnownDrawerEntry>()
-            .expect("known drawer entry is a well-formed facet declaration"),
+            .expect("known drawer entry is a well-formed datum declaration"),
     ])
 });
 
 fn core_schemas() -> impl Iterator<Item = SchemaHandle> {
     let bundle = Bundle::new(&CORE, Vec::new());
     let sidecar = Arc::new(
-        OwnedSidecar::from_bundle(&bundle).expect("core facet declarations form a valid bundle"),
+        OwnedSidecar::from_bundle(&bundle).expect("core datum declarations form a valid bundle"),
     );
-    let lexicons = bundle.lexicons().expect("core facets publish lexicons");
+    let lexicons = bundle.lexicons().expect("core datums publish lexicons");
     (0..lexicons.len()).map(move |index| {
-        let facet = &CORE.facets[index];
+        let datum = &CORE.datums[index];
         let lexicon = &lexicons[index];
-        assert_eq!(facet.id, lexicon.id, "a bundle projects facets in order");
+        assert_eq!(datum.id, lexicon.id, "a bundle projects datums in order");
         let carried: Vec<&Value> = lexicons
             .iter()
             .enumerate()
@@ -73,11 +73,11 @@ fn core_schemas() -> impl Iterator<Item = SchemaHandle> {
             .map(|(_, other)| &other.file)
             .collect();
         let compiled = bundle
-            .validate_lexicon(&facet.id, &lexicon.file, &carried)
-            .expect("a core facet's declaration admits its own published lexicon");
+            .validate_lexicon(&datum.id, &lexicon.file, &carried)
+            .expect("a core datum's declaration admits its own published lexicon");
         SchemaHandle {
             inner: Arc::new(KnownSchema {
-                facet_tag: facet.id.clone(),
+                datum_tag: datum.id.clone(),
                 lexicon: lexicon.file.clone(),
                 sidecar: Some(Arc::clone(&sidecar)),
                 compiled,
@@ -87,14 +87,14 @@ fn core_schemas() -> impl Iterator<Item = SchemaHandle> {
 }
 
 pub struct SchemaRegistration {
-    pub facet_tag: String,
+    pub datum_tag: String,
     pub lexicon: Value,
 }
 
 impl SchemaRegistration {
-    pub fn new(facet_tag: impl Into<String>, lexicon: Value) -> Self {
+    pub fn new(datum_tag: impl Into<String>, lexicon: Value) -> Self {
         Self {
-            facet_tag: facet_tag.into(),
+            datum_tag: datum_tag.into(),
             lexicon,
         }
     }
@@ -122,23 +122,23 @@ impl<'a> SchemaRegistrationGroup<'a> {
 
 #[derive(Debug, Error)]
 pub enum SchemaRepoError {
-    #[error("known facet schema tag is empty")]
-    EmptyFacetTag,
-    #[error("known facet schema tag `{0}` is configured more than once")]
-    DuplicateFacetTag(String),
+    #[error("known datum schema tag is empty")]
+    EmptyDatumTag,
+    #[error("known datum schema tag `{0}` is configured more than once")]
+    DuplicateDatumTag(String),
     #[error("sidecar bundle is invalid: {source}")]
     SidecarInvalid {
         #[source]
         source: UniverseError,
     },
-    #[error("schema pair for facet `{tag}` is invalid: {source}")]
+    #[error("schema pair for datum `{tag}` is invalid: {source}")]
     Admission {
         tag: String,
         #[source]
         source: Box<LexiconAdmissionError>,
     },
-    #[error("facet `{tag}` is not known to this SchemaRepo")]
-    UnknownFacet { tag: String },
+    #[error("datum `{tag}` is not known to this SchemaRepo")]
+    UnknownDatum { tag: String },
 }
 
 #[derive(Debug, Clone)]
@@ -169,7 +169,7 @@ impl OwnedSidecar {
 
 #[derive(Debug)]
 struct KnownSchema {
-    facet_tag: String,
+    datum_tag: String,
     lexicon: Value,
     sidecar: Option<Arc<OwnedSidecar>>,
     compiled: CompiledSchema,
@@ -181,8 +181,8 @@ pub struct SchemaHandle {
 }
 
 impl SchemaHandle {
-    pub fn facet_tag(&self) -> &str {
-        &self.inner.facet_tag
+    pub fn datum_tag(&self) -> &str {
+        &self.inner.datum_tag
     }
     pub fn lexicon(&self) -> &Value {
         &self.inner.lexicon
@@ -208,17 +208,17 @@ impl SchemaRepo {
         groups: impl IntoIterator<Item = SchemaRegistrationGroup<'a>>,
     ) -> Result<Self, SchemaRepoError> {
         let mut known: BTreeMap<String, SchemaHandle> = core_schemas()
-            .map(|handle| (handle.facet_tag().to_owned(), handle))
+            .map(|handle| (handle.datum_tag().to_owned(), handle))
             .collect();
         let empty = Universe::default();
         for group in groups {
             let mut tags = std::collections::BTreeSet::new();
             for registration in &group.registrations {
-                if !tags.insert(&registration.facet_tag)
-                    || known.contains_key(&registration.facet_tag)
+                if !tags.insert(&registration.datum_tag)
+                    || known.contains_key(&registration.datum_tag)
                 {
-                    return Err(SchemaRepoError::DuplicateFacetTag(
-                        registration.facet_tag.clone(),
+                    return Err(SchemaRepoError::DuplicateDatumTag(
+                        registration.datum_tag.clone(),
                     ));
                 }
             }
@@ -233,12 +233,12 @@ impl SchemaRepo {
                 |sidecar| sidecar.borrowed(),
             );
             for registration in &group.registrations {
-                let tag = &registration.facet_tag;
+                let tag = &registration.datum_tag;
                 if tag.is_empty() {
-                    return Err(SchemaRepoError::EmptyFacetTag);
+                    return Err(SchemaRepoError::EmptyDatumTag);
                 }
                 if known.contains_key(tag) {
-                    return Err(SchemaRepoError::DuplicateFacetTag(tag.clone()));
+                    return Err(SchemaRepoError::DuplicateDatumTag(tag.clone()));
                 }
                 let carried: Vec<_> = group
                     .carried_lexicons
@@ -261,7 +261,7 @@ impl SchemaRepo {
                     tag.clone(),
                     SchemaHandle {
                         inner: Arc::new(KnownSchema {
-                            facet_tag: tag.clone(),
+                            datum_tag: tag.clone(),
                             lexicon: registration.lexicon.clone(),
                             sidecar: sidecar.clone(),
                             compiled,
@@ -273,25 +273,25 @@ impl SchemaRepo {
         Ok(Self { known })
     }
 
-    pub fn resolve_for_read(&self, facet_tag: &str) -> Option<SchemaHandle> {
-        self.known.get(facet_tag).cloned()
+    pub fn resolve_for_read(&self, datum_tag: &str) -> Option<SchemaHandle> {
+        self.known.get(datum_tag).cloned()
     }
 
-    /// The tags of the known facets whose schema declares at least one `reference` position: the
+    /// The tags of the known datums whose schema declares at least one `reference` position: the
     /// selector a reference index consumes, derived once from the compiled schemas rather than
     /// re-derived per document.
     pub fn reference_tags(&self) -> Vec<String> {
         self.known
             .values()
             .filter(|handle| handle.compiled().declares_references())
-            .map(|handle| handle.facet_tag().to_owned())
+            .map(|handle| handle.datum_tag().to_owned())
             .collect()
     }
 
-    pub fn require_for_write(&self, facet_tag: &str) -> Result<SchemaHandle, SchemaRepoError> {
-        self.resolve_for_read(facet_tag)
-            .ok_or_else(|| SchemaRepoError::UnknownFacet {
-                tag: facet_tag.to_owned(),
+    pub fn require_for_write(&self, datum_tag: &str) -> Result<SchemaHandle, SchemaRepoError> {
+        self.resolve_for_read(datum_tag)
+            .ok_or_else(|| SchemaRepoError::UnknownDatum {
+                tag: datum_tag.to_owned(),
             })
     }
 }

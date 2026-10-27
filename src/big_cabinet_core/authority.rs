@@ -1,7 +1,7 @@
 use crate::dmeta::Bytes;
-use crate::dmeta::FacetClaim;
+use crate::dmeta::DatumClaim;
 use crate::dmeta::MultibaseKey;
-use crate::dmeta::SignedFacetClaim;
+use crate::dmeta::SignedDatumClaim;
 use crate::dmeta::Uuid7;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -285,9 +285,9 @@ pub struct RetractCapability {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SignFacetClaim {
+pub struct SignDatumClaim {
     pub actor: CapId,
-    pub claim: FacetClaim,
+    pub claim: DatumClaim,
 }
 
 macro_rules! operation {
@@ -308,7 +308,7 @@ operation!(MintCapability => Capability, procedure, "mintCapability");
 operation!(AttenuateCapability => Capability, procedure, "attenuateCapability");
 operation!(InspectCapability => Capability, query, "inspectCapability");
 operation!(RetractCapability => (), procedure, "retractCapability");
-operation!(SignFacetClaim => SignedFacetClaim, procedure, "signFacetClaim");
+operation!(SignDatumClaim => SignedDatumClaim, procedure, "signDatumClaim");
 
 service_core_rs::service_operation!(ObserveCapability => stream CapabilityStatus, AuthorityServiceError, "org.example.daybook.authority.observeCapability");
 
@@ -322,7 +322,7 @@ declare_service_protocol! {
             AttenuateCapability(AttenuateCapability),
             InspectCapability(InspectCapability),
             RetractCapability(RetractCapability),
-            SignFacetClaim(SignFacetClaim)
+            SignDatumClaim(SignDatumClaim)
         }
         stream { ObserveCapability(ObserveCapability) }
     }

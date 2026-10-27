@@ -2,15 +2,15 @@
 use crate::sqlite_rs_alias::Migration;
 use crate::sqlite_rs_alias::SqlResult;
 
-pub const MIGRATION_TABLE: &str = "_big_cabinet_index_facet_set_migrations";
+pub const MIGRATION_TABLE: &str = "_big_cabinet_index_datum_set_migrations";
 
 pub const MIGRATIONS: &[Migration<'static>] = &[
     Migration { version: 1, name: "001_init.sql", sql: include_str!("migrations/001_init.sql") },
 ];
 
 pub const DELETE_ENTRY_SQL: &str = include_str!("queries/delete_entry.sql");
-pub async fn delete_entry(db: &impl crate::sqlite_rs_alias::Executor, doc_id: String, facet_key: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(DELETE_ENTRY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id), crate::sqlite_rs_alias::IntoValue::into_value(facet_key)]).await
+pub async fn delete_entry(db: &impl crate::sqlite_rs_alias::Executor, doc_id: String, datum_key: String) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(DELETE_ENTRY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id), crate::sqlite_rs_alias::IntoValue::into_value(datum_key)]).await
 }
 
 pub const DOC_KEYS_SQL: &str = include_str!("queries/doc_keys.sql");
@@ -31,6 +31,6 @@ pub async fn put_doc(db: &impl crate::sqlite_rs_alias::Executor, doc_id: String,
 }
 
 pub const PUT_ENTRY_SQL: &str = include_str!("queries/put_entry.sql");
-pub async fn put_entry(db: &impl crate::sqlite_rs_alias::Executor, doc_id: String, facet_key: String, facet_tag: String, doc_heads: Vec<u8>, facet_heads: Vec<u8>, clock: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
-    db.execute(PUT_ENTRY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id), crate::sqlite_rs_alias::IntoValue::into_value(facet_key), crate::sqlite_rs_alias::IntoValue::into_value(facet_tag), crate::sqlite_rs_alias::IntoValue::into_value(doc_heads), crate::sqlite_rs_alias::IntoValue::into_value(facet_heads), crate::sqlite_rs_alias::IntoValue::into_value(clock)]).await
+pub async fn put_entry(db: &impl crate::sqlite_rs_alias::Executor, doc_id: String, datum_key: String, datum_tag: String, doc_heads: Vec<u8>, datum_heads: Vec<u8>, clock: i64) -> SqlResult<crate::sqlite_rs_alias::ExecuteResult> {
+    db.execute(PUT_ENTRY_SQL, &[crate::sqlite_rs_alias::IntoValue::into_value(doc_id), crate::sqlite_rs_alias::IntoValue::into_value(datum_key), crate::sqlite_rs_alias::IntoValue::into_value(datum_tag), crate::sqlite_rs_alias::IntoValue::into_value(doc_heads), crate::sqlite_rs_alias::IntoValue::into_value(datum_heads), crate::sqlite_rs_alias::IntoValue::into_value(clock)]).await
 }

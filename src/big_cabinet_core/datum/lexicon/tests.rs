@@ -1,8 +1,8 @@
 use super::*;
 
-/// One position of a facet, projected: the shape every case here is about.
+/// One position of a datum, projected: the shape every case here is about.
 fn project(property: Value) -> Result<Value, String> {
-    project_facet(
+    project_datum(
         "org.example.test",
         &json!({ "type": "object", "properties": { "value": property } }),
     )
@@ -51,12 +51,12 @@ fn a_dynamic_map_still_may_not_admit_a_non_canonical_value() {
     }
 }
 
-/// A named type travels beside the facet that reaches it and is referenced locally, which is
+/// A named type travels beside the datum that reaches it and is referenced locally, which is
 /// what lets a plug be read on its own. Inlining it would lose the name a peer points at, and
 /// leaving the reference alone would publish a file that does not resolve.
 #[test]
 fn a_named_definition_is_carried_and_referenced_locally() {
-    let file = project_facet(
+    let file = project_datum(
         "org.example.parent",
         &json!({
             "type": "object",
@@ -107,7 +107,7 @@ fn a_reference_nothing_carries_is_refused_rather_than_emitted() {
 /// recursion is what makes a recursive type project instead of exhausting the stack.
 #[test]
 fn a_recursive_definition_is_a_reference_to_itself() {
-    let file = project_facet(
+    let file = project_datum(
         "org.example.tree",
         &json!({
             "type": "object",
@@ -162,7 +162,7 @@ fn constraints_lexicon_states_travel_and_the_ones_it_counts_differently_do_not()
 
 /// Nullability is a list of names on the object holding the position, so a property has one and
 /// a position inside a container does not. Projecting the latter as the non-nullable type it is
-/// not would publish a Lexicon that rejects a value the facet accepts.
+/// not would publish a Lexicon that rejects a value the datum accepts.
 #[test]
 fn null_is_expressible_only_as_an_object_property() {
     assert_eq!(
@@ -238,7 +238,7 @@ fn each_storage_form_projects_to_the_type_its_json_has() {
     );
 }
 
-/// The float opt-out is a legitimate codec position and is not canonical JSON, so the facet
+/// The float opt-out is a legitimate codec position and is not canonical JSON, so the datum
 /// holding one is a codec document rather than a publishable declaration.
 #[test]
 fn a_plain_number_is_not_a_lexicon_type() {
@@ -365,11 +365,11 @@ fn the_projection_is_checked_against_the_lexicon_grammar() {
     }
 }
 
-/// A facet is an object a peer reads; the shapes that are not one are positions inside it.
+/// A datum is an object a peer reads; the shapes that are not one are positions inside it.
 #[test]
-fn a_facet_main_is_an_object() {
+fn a_datum_main_is_an_object() {
     let reason =
-        project_facet("org.example.test", &json!({"type": "string"})).expect_err("refused");
+        project_datum("org.example.test", &json!({"type": "string"})).expect_err("refused");
     assert!(reason.contains("`main` is an object"), "{reason}");
 }
 

@@ -1,6 +1,6 @@
 //! Attribute macros for the workspace.
 
-mod facet_fields;
+mod datum_fields;
 
 use proc_macro::TokenStream;
 use quote::ToTokens;
@@ -16,43 +16,43 @@ use syn::Token;
 use syn::punctuated::Punctuated;
 
 /// The module every emitted item resolves through, so moving it is one edit.
-fn facet_path() -> Path {
-    syn::parse_quote!(::big_cabinet_core::facet)
+fn datum_path() -> Path {
+    syn::parse_quote!(::big_cabinet_core::datum)
 }
 
-/// Declares a facet type.
+/// Declares a datum type.
 ///
-/// Emits `FacetShape`, and `FacetMember` when the type states an id. It does not generate the
+/// Emits `DatumShape`, and `DatumMember` when the type states an id. It does not generate the
 /// schema: `schemars` derives that from the same item, and the two are checked against each other
 /// where the type is published.
 ///
 /// A struct is **open** when it has exactly one `#[serde(flatten)]` overflow field of type `Extra`,
 /// which is what preserves the members the type does not know about, and **closed** when it says
-/// `#[facet(closed)]` together with `#[serde(deny_unknown_fields)]`. Anything else is refused:
+/// `#[datum(closed)]` together with `#[serde(deny_unknown_fields)]`. Anything else is refused:
 /// `serde` drops a member it has nowhere to put, so the type and the schema would disagree.
 ///
 /// A union is **internally tagged** by default — the member object carries `$type`, which is what a
-/// Lexicon union is. Adjacent tagging is explicit, `#[facet(tagging = "adjacent")]` with
+/// Lexicon union is. Adjacent tagging is explicit, `#[datum(tagging = "adjacent")]` with
 /// `#[serde(tag = "$type", content = "value")]`, and external tagging is
-/// `#[facet(tagging = "external")]`, which is recorded and flagged. It is **open** when exactly one
-/// variant is marked `#[facet(other)]`, and then the macro writes the wire form and the schema,
+/// `#[datum(tagging = "external")]`, which is recorded and flagged. It is **open** when exactly one
+/// variant is marked `#[datum(other)]`, and then the macro writes the wire form and the schema,
 /// because a fallback that carries a payload is not expressible in serde attributes. A union that
-/// says `#[facet(closed)]` has no fallback and keeps its serde derives; the macro still emits
+/// says `#[datum(closed)]` has no fallback and keeps its serde derives; the macro still emits
 /// `JsonSchema`, because the enum encoding is not the contract.
 ///
 /// A vocabulary of *strings* rather than of named types is a different shape, so it is declared
-/// differently: `#[facet(open_string)]`, with `#[facet(other)]` on the one variant that carries a
+/// differently: `#[datum(open_string)]`, with `#[datum(other)]` on the one variant that carries a
 /// `String`. Each known value's spelling is its variant's name in lowerCamel — `MyValue` is
 /// `"myValue"` — or an explicit `#[serde(rename = "…")]`. The macro writes the wire form and the
 /// schema, and a string nobody declared survives as it was written. A *closed* vocabulary of strings
 /// needs none of this — derive serde and `schemars` and drop the macro.
 ///
 /// A union member is a declared type whose id is its tag, so a variant names a payload and nothing
-/// else. `#[facet(id = "…")]` states an id exactly; `#[facet(id_prefix = "org.example.daybook.")]`
+/// else. `#[datum(id = "…")]` states an id exactly; `#[datum(id_prefix = "org.example.daybook.")]`
 /// derives it from the type name, producing the same string `define_enum_and_tag!` builds.
 ///
 /// ```ignore
-/// #[facet(id_prefix = "org.example.daybook.")]
+/// #[datum(id_prefix = "org.example.daybook.")]
 /// #[derive(Serialize, Deserialize, JsonSchema)]
 /// pub struct Note {
 ///     pub content: String,
@@ -61,7 +61,7 @@ fn facet_path() -> Path {
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn facet(args: TokenStream, item: TokenStream) -> TokenStream {
+pub fn datum(args: TokenStream, item: TokenStream) -> TokenStream {
     match expand(args.into(), item.into()) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
@@ -125,7 +125,7 @@ impl Args {
             } else {
                 return Err(syn::Error::new_spanned(
                     &meta,
-                    "unknown facet argument: expected `closed`, `open_string`, `tagging = \
+                    "unknown datum argument: expected `closed`, `open_string`, `tagging = \
                      \"…\"`, `id = \"…\"` or `id_prefix = \"…\"`",
                 ));
             }
@@ -234,7 +234,7 @@ fn no_generics(name: &syn::Ident, generics: &syn::Generics) -> syn::Result<()> {
     }
     Err(syn::Error::new_spanned(
         name,
-        "a generic facet type is not supported: the macro emits a plain `FacetShape` impl, and the \
+        "a generic datum type is not supported: the macro emits a plain `DatumShape` impl, and the \
          schema a generic type emits depends on its instantiation",
     ))
 }
@@ -270,12 +270,12 @@ fn lexicon_attr(id: &str) -> syn::Attribute {
 }
 
 fn member_impl(name: &syn::Ident, args: &Args) -> proc_macro2::TokenStream {
-    let facet = facet_path();
+    let datum = datum_path();
     let Some(id) = member_id(name, args) else {
         return proc_macro2::TokenStream::new();
     };
     quote! {
-        impl #facet::FacetMember for #name {
+        impl #datum::DatumMember for #name {
             const ID: &'static str = #id;
         }
     }
@@ -287,17 +287,17 @@ fn expand(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let args = Args::parse(args)?;
     let mut item: Item = syn::parse2(item)?;
-    let facet = facet_path();
+    let datum = datum_path();
     let (name, shape) = match &mut item {
-        Item::Struct(item) => struct_shape(item, &args, &facet)?,
-        Item::Enum(item) if args.open_string => string_enum_shape(item, &args, &facet)?,
-        Item::Enum(item) => enum_shape(item, &args, &facet)?,
+        Item::Struct(item) => struct_shape(item, &args, &datum)?,
+        Item::Enum(item) if args.open_string => string_enum_shape(item, &args, &datum)?,
+        Item::Enum(item) => enum_shape(item, &args, &datum)?,
         other => {
             let what = if args.open_string {
-                "#[facet(open_string)] applies to an enum, and its variants are unit variants plus \
-                 one `#[facet(other)]` carrying the unrecognized string"
+                "#[datum(open_string)] applies to an enum, and its variants are unit variants plus \
+                 one `#[datum(other)]` carrying the unrecognized string"
             } else {
-                "#[facet] applies to a struct or an enum"
+                "#[datum] applies to a struct or an enum"
             };
             return Err(syn::Error::new_spanned(other.to_token_stream(), what));
         }
@@ -313,7 +313,7 @@ fn expand(
 fn struct_shape(
     item: &mut syn::ItemStruct,
     args: &Args,
-    facet: &Path,
+    datum: &Path,
 ) -> syn::Result<(syn::Ident, proc_macro2::TokenStream)> {
     let name = item.ident.clone();
     no_generics(&name, &item.generics)?;
@@ -323,7 +323,7 @@ fn struct_shape(
             item.attrs.push(lexicon_attr(&id));
         }
     }
-    facet_fields::check_field_facets(&item.fields)?;
+    datum_fields::check_field_datums(&item.fields)?;
     let serde = scan_serde(&item.attrs)?;
     let mut extras = 0usize;
     for field in item.fields.iter() {
@@ -354,13 +354,13 @@ fn struct_shape(
                  additionalProperties: false",
             ));
         }
-        quote!(#facet::Openness::Closed)
+        quote!(#datum::Openness::Closed)
     } else {
         if extras == 0 {
             return Err(syn::Error::new_spanned(
                 &name,
                 "state the openness of this object: add a `#[serde(flatten)] extra: Extra` field to \
-                 preserve the members it does not know about, or declare `#[facet(closed)]` \
+                 preserve the members it does not know about, or declare `#[datum(closed)]` \
                  together with `#[serde(deny_unknown_fields)]`",
             ));
         }
@@ -379,13 +379,13 @@ fn struct_shape(
                  preserve",
             ));
         }
-        quote!(#facet::Openness::Open)
+        quote!(#datum::Openness::Open)
     };
     Ok((
         name.clone(),
         quote! {
-            impl #facet::FacetShape for #name {
-                const SHAPE: #facet::Shape = #facet::Shape::Object { openness: #openness };
+            impl #datum::DatumShape for #name {
+                const SHAPE: #datum::Shape = #datum::Shape::Object { openness: #openness };
             }
         },
     ))
@@ -410,9 +410,9 @@ fn payload_type(variant: &syn::Variant) -> syn::Result<syn::Type> {
     Ok(field.ty.clone())
 }
 
-/// Strips the variant's `#[facet(...)]` attributes and reports whether one of them is
-/// `#[facet(other)]`, the marker of the fallback variant. `not_a_list` is the error for a bare
-/// `#[facet]`, `not_other` the error for any other facet attribute.
+/// Strips the variant's `#[datum(...)]` attributes and reports whether one of them is
+/// `#[datum(other)]`, the marker of the fallback variant. `not_a_list` is the error for a bare
+/// `#[datum]`, `not_other` the error for any other datum attribute.
 fn fallback_marker(
     variant: &mut syn::Variant,
     not_a_list: &str,
@@ -420,7 +420,7 @@ fn fallback_marker(
 ) -> syn::Result<bool> {
     let mut is_fallback = false;
     for attr in &variant.attrs {
-        if !attr.path().is_ident("facet") {
+        if !attr.path().is_ident("datum") {
             continue;
         }
         let Meta::List(list) = &attr.meta else {
@@ -432,7 +432,7 @@ fn fallback_marker(
             return Err(syn::Error::new_spanned(attr, not_other));
         }
     }
-    variant.attrs.retain(|attr| !attr.path().is_ident("facet"));
+    variant.attrs.retain(|attr| !attr.path().is_ident("datum"));
     Ok(is_fallback)
 }
 
@@ -442,12 +442,12 @@ struct Union {
     layout: Layout,
     open: bool,
     members: Vec<MemberVariant>,
-    /// The `#[facet(other)]` variant and its payload; present exactly when the union is open.
+    /// The `#[datum(other)]` variant and its payload; present exactly when the union is open.
     fallback: Option<(syn::Ident, syn::Type)>,
 }
 
 impl Union {
-    /// Reads every variant as a member or the fallback, stripping the `#[facet(other)]` marker, and
+    /// Reads every variant as a member or the fallback, stripping the `#[datum(other)]` marker, and
     /// refuses a declaration whose openness, tagging and fallback disagree.
     fn parse(item: &mut syn::ItemEnum, layout: Layout, open: bool) -> syn::Result<Self> {
         let name = item.ident.clone();
@@ -456,11 +456,11 @@ impl Union {
         for variant in item.variants.iter_mut() {
             let is_fallback = fallback_marker(
                 variant,
-                "expected `#[facet(other)]`",
-                "the only facet attribute a union variant takes is `#[facet(other)]`, marking the \
+                "expected `#[datum(other)]`",
+                "the only datum attribute a union variant takes is `#[datum(other)]`, marking the \
                  fallback variant that keeps an unrecognized member",
             )?;
-            facet_fields::check_field_facets(&variant.fields)?;
+            datum_fields::check_field_datums(&variant.fields)?;
             let payload = payload_type(variant)?;
             let variant_serde = scan_serde(&variant.attrs)?;
             if is_fallback {
@@ -492,14 +492,14 @@ impl Union {
         if open && fallback.is_none() {
             return Err(syn::Error::new_spanned(
                 &name,
-                "an open union needs exactly one fallback variant marked `#[facet(other)]`, or \
-                 `#[facet(closed)]` to declare that an unrecognized member is an error",
+                "an open union needs exactly one fallback variant marked `#[datum(other)]`, or \
+                 `#[datum(closed)]` to declare that an unrecognized member is an error",
             ));
         }
         if !open && fallback.is_some() {
             return Err(syn::Error::new_spanned(
                 &name,
-                "a variant is marked #[facet(other)] but the union is declared closed: a closed \
+                "a variant is marked #[datum(other)] but the union is declared closed: a closed \
                  union has no fallback",
             ));
         }
@@ -520,21 +520,21 @@ impl Union {
         })
     }
 
-    fn openness(&self, facet: &Path) -> proc_macro2::TokenStream {
+    fn openness(&self, datum: &Path) -> proc_macro2::TokenStream {
         if self.open {
-            quote!(#facet::Openness::Open)
+            quote!(#datum::Openness::Open)
         } else {
-            quote!(#facet::Openness::Closed)
+            quote!(#datum::Openness::Closed)
         }
     }
 
-    fn shape_impl(&self, facet: &Path) -> proc_macro2::TokenStream {
+    fn shape_impl(&self, datum: &Path) -> proc_macro2::TokenStream {
         let name = &self.name;
-        let openness = self.openness(facet);
-        let tagging = self.layout.tagging(facet);
+        let openness = self.openness(datum);
+        let tagging = self.layout.tagging(datum);
         quote! {
-            impl #facet::FacetShape for #name {
-                const SHAPE: #facet::Shape = #facet::Shape::Union {
+            impl #datum::DatumShape for #name {
+                const SHAPE: #datum::Shape = #datum::Shape::Union {
                     openness: #openness,
                     tagging: #tagging,
                 };
@@ -542,15 +542,15 @@ impl Union {
         }
     }
 
-    fn schema_impl(&self, facet: &Path) -> proc_macro2::TokenStream {
+    fn schema_impl(&self, datum: &Path) -> proc_macro2::TokenStream {
         let name = &self.name;
         let open = self.open;
-        let layout_tokens = self.layout.tokens(facet);
+        let layout_tokens = self.layout.tokens(datum);
         let schema_members = self.members.iter().map(|member| {
             let payload = &member.payload;
             quote! {
-                #facet::MemberSchema {
-                    id: <#payload as #facet::FacetMember>::ID,
+                #datum::MemberSchema {
+                    id: <#payload as #datum::DatumMember>::ID,
                     schema: generator.subschema_for::<#payload>(),
                 },
             }
@@ -573,7 +573,7 @@ impl Union {
 
                 fn json_schema(generator: &mut ::schemars::SchemaGenerator) -> ::schemars::Schema {
                     let members = ::std::vec![#(#schema_members)*];
-                    #facet::union_schema(&#layout_tokens, #open, members, generator.definitions())
+                    #datum::union_schema(&#layout_tokens, #open, members, generator.definitions())
                 }
             }
         }
@@ -584,7 +584,7 @@ impl Union {
     fn closed_tag_asserts(
         &self,
         item: &syn::ItemEnum,
-        facet: &Path,
+        datum: &Path,
     ) -> syn::Result<proc_macro2::TokenStream> {
         let name = &self.name;
         let derived = derived_traits(&item.attrs)?;
@@ -617,7 +617,7 @@ impl Union {
             };
             asserts.push(quote! {
                 const _: () = ::core::assert!(
-                    #facet::str_eq(#rename, <#payload as #facet::FacetMember>::ID),
+                    #datum::str_eq(#rename, <#payload as #datum::DatumMember>::ID),
                     "this tag and the payload's member id disagree",
                 );
             });
@@ -630,7 +630,7 @@ impl Union {
     fn open_codec(
         &self,
         item: &mut syn::ItemEnum,
-        facet: &Path,
+        datum: &Path,
     ) -> syn::Result<proc_macro2::TokenStream> {
         let name = &self.name;
         let derived = derived_traits(&item.attrs)?;
@@ -651,18 +651,18 @@ impl Union {
         // `schemars` registers `serde` on whatever it derives elsewhere.
         item.attrs.retain(|attr| !attr.path().is_ident("serde"));
 
-        let layout_tokens = self.layout.tokens(facet);
+        let layout_tokens = self.layout.tokens(datum);
         let serialize_arms = self.members.iter().map(|member| {
             let ident = &member.ident;
             quote! {
-                Self::#ident(payload) => #facet::serialize_member(serializer, &#layout_tokens, payload),
+                Self::#ident(payload) => #datum::serialize_member(serializer, &#layout_tokens, payload),
             }
         });
         let deserialize_members = self.members.iter().map(|member| {
             let (ident, payload) = (&member.ident, &member.payload);
             quote! {
-                #facet::Member {
-                    id: <#payload as #facet::FacetMember>::ID,
+                #datum::Member {
+                    id: <#payload as #datum::DatumMember>::ID,
                     read: |member| ::serde_json::from_value::<#payload>(member).map(Self::#ident),
                 },
             }
@@ -685,7 +685,7 @@ impl Union {
                 where
                     D: ::serde::Deserializer<'de>,
                 {
-                    #facet::deserialize_union(
+                    #datum::deserialize_union(
                         deserializer,
                         &#layout_tokens,
                         &[#(#deserialize_members)*],
@@ -703,7 +703,7 @@ impl Union {
 fn enum_shape(
     item: &mut syn::ItemEnum,
     args: &Args,
-    facet: &Path,
+    datum: &Path,
 ) -> syn::Result<(syn::Ident, proc_macro2::TokenStream)> {
     let name = item.ident.clone();
     no_generics(&name, &item.generics)?;
@@ -715,13 +715,13 @@ fn enum_shape(
         item.attrs.push(syn::parse_quote!(#[serde(tag = "$type")]));
     }
 
-    let shape = union.shape_impl(facet);
-    let schema_impl = union.schema_impl(facet);
+    let shape = union.shape_impl(datum);
+    let schema_impl = union.schema_impl(datum);
     if !union.open {
-        let asserts = union.closed_tag_asserts(item, facet)?;
+        let asserts = union.closed_tag_asserts(item, datum)?;
         return Ok((name, quote! { #shape #schema_impl #asserts }));
     }
-    let codec = union.open_codec(item, facet)?;
+    let codec = union.open_codec(item, datum)?;
     Ok((
         name,
         quote! {
@@ -741,25 +741,25 @@ enum Layout {
 }
 
 impl Layout {
-    /// The `Tagging` the union's `FacetShape` states.
-    fn tagging(&self, facet: &Path) -> proc_macro2::TokenStream {
+    /// The `Tagging` the union's `DatumShape` states.
+    fn tagging(&self, datum: &Path) -> proc_macro2::TokenStream {
         match self {
-            Layout::Internal => quote!(#facet::Tagging::Internally { tag: "$type" }),
+            Layout::Internal => quote!(#datum::Tagging::Internally { tag: "$type" }),
             Layout::Adjacent => {
-                quote!(#facet::Tagging::Adjacently { tag: "$type", content: "value" })
+                quote!(#datum::Tagging::Adjacently { tag: "$type", content: "value" })
             }
-            Layout::External => quote!(#facet::Tagging::Externally),
+            Layout::External => quote!(#datum::Tagging::Externally),
         }
     }
 
     /// The `UnionLayout` the emitted codec and schema dispatch on.
-    fn tokens(&self, facet: &Path) -> proc_macro2::TokenStream {
+    fn tokens(&self, datum: &Path) -> proc_macro2::TokenStream {
         match self {
-            Layout::Internal => quote!(#facet::UnionLayout::Internal { tag: "$type" }),
+            Layout::Internal => quote!(#datum::UnionLayout::Internal { tag: "$type" }),
             Layout::Adjacent => {
-                quote!(#facet::UnionLayout::Adjacent { tag: "$type", content: "value" })
+                quote!(#datum::UnionLayout::Adjacent { tag: "$type", content: "value" })
             }
-            Layout::External => quote!(#facet::UnionLayout::External),
+            Layout::External => quote!(#datum::UnionLayout::External),
         }
     }
 }
@@ -788,7 +788,7 @@ fn union_layout(name: &syn::Ident, args: &Args, serde: &Serde) -> syn::Result<La
             if serde.content.is_some() {
                 return Err(syn::Error::new_spanned(
                     name,
-                    "a content key is adjacent tagging: name it with `#[facet(tagging = \
+                    "a content key is adjacent tagging: name it with `#[datum(tagging = \
                      \"adjacent\")]` and pin the content key to \"value\"",
                 ));
             }
@@ -809,7 +809,7 @@ struct KnownVariant {
     spelling: String,
 }
 
-/// Reads every variant as a known spelling or the fallback, stripping the `facet` and `serde`
+/// Reads every variant as a known spelling or the fallback, stripping the `datum` and `serde`
 /// attributes it consumed: nothing derives serde on a vocabulary, so a leftover is a compile error.
 fn vocabulary_variants(item: &mut syn::ItemEnum) -> syn::Result<(Vec<KnownVariant>, syn::Ident)> {
     let mut known: Vec<KnownVariant> = Vec::new();
@@ -817,7 +817,7 @@ fn vocabulary_variants(item: &mut syn::ItemEnum) -> syn::Result<(Vec<KnownVarian
     for variant in item.variants.iter_mut() {
         let is_fallback = fallback_marker(
             variant,
-            "expected `#[facet(other)]` on the variant that keeps an unrecognized string",
+            "expected `#[datum(other)]` on the variant that keeps an unrecognized string",
             "a value's spelling is its variant's name in lowerCamel, so there is nothing to state \
              here: name the variant `MyValue` for \"myValue\", or state it explicitly with \
              `#[serde(rename = \"…\")]`",
@@ -883,7 +883,7 @@ fn vocabulary_variants(item: &mut syn::ItemEnum) -> syn::Result<(Vec<KnownVarian
     let Some(fallback) = fallback else {
         return Err(syn::Error::new_spanned(
             &item.ident,
-            "a vocabulary of strings needs exactly one fallback variant marked `#[facet(other)]`, \
+            "a vocabulary of strings needs exactly one fallback variant marked `#[datum(other)]`, \
              carrying a `String`: without one, a string nobody knows is an error",
         ));
     };
@@ -901,14 +901,14 @@ fn vocabulary_variants(item: &mut syn::ItemEnum) -> syn::Result<(Vec<KnownVarian
 fn string_enum_shape(
     item: &mut syn::ItemEnum,
     args: &Args,
-    facet: &Path,
+    datum: &Path,
 ) -> syn::Result<(syn::Ident, proc_macro2::TokenStream)> {
     let name = item.ident.clone();
     no_generics(&name, &item.generics)?;
     if args.closed {
         return Err(syn::Error::new_spanned(
             &name,
-            "a closed vocabulary needs nothing from the macro: drop `#[facet(open_string)]` and \
+            "a closed vocabulary needs nothing from the macro: drop `#[datum(open_string)]` and \
              derive `Serialize`, `Deserialize` and `JsonSchema` on the enum instead",
         ));
     }
@@ -936,8 +936,8 @@ fn string_enum_shape(
     Ok((
         name.clone(),
         quote! {
-            impl #facet::FacetShape for #name {
-                const SHAPE: #facet::Shape = #facet::Shape::Str { known: &[#(#spellings),*] };
+            impl #datum::DatumShape for #name {
+                const SHAPE: #datum::Shape = #datum::Shape::Str { known: &[#(#spellings),*] };
             }
 
             impl ::serde::Serialize for #name {
@@ -957,7 +957,7 @@ fn string_enum_shape(
                 where
                     D: ::serde::Deserializer<'de>,
                 {
-                    #facet::deserialize_known_str(
+                    #datum::deserialize_known_str(
                         deserializer,
                         &[#( (#spellings, || Self::#known_idents), )*],
                         Self::#fallback,
@@ -983,7 +983,7 @@ fn string_enum_shape(
                 fn json_schema(
                     _generator: &mut ::schemars::SchemaGenerator,
                 ) -> ::schemars::Schema {
-                    #facet::open_string_schema(&[#(#spellings),*])
+                    #datum::open_string_schema(&[#(#spellings),*])
                 }
             }
         },

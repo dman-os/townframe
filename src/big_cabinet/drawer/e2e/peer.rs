@@ -84,9 +84,9 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
     mirror.wait_until_ready().await.unwrap();
     reader
         .wait_indexed(
-            big_cabinet_core::drawer::DRAWER_FACET_TAG,
+            big_cabinet_core::drawer::DRAWER_DATUM_TAG,
             |route, membership| {
-                route.doc_id == drawer && matches!(membership, FacetMembership::Present { .. })
+                route.doc_id == drawer && matches!(membership, DatumMembership::Present { .. })
             },
         )
         .await;
@@ -129,7 +129,7 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
         .docs()
         .subscribe(
             RequestContext::root(),
-            ObserveFacets {
+            ObserveDatums {
                 capability,
                 scope: ObserveScope::Doc {
                     doc_id: doc.clone(),
@@ -142,13 +142,13 @@ async fn a_drawer_shared_by_another_node_authorizes_reads_on_this_node() {
     let (key, _) = note("");
     loop {
         match observations.next().await.unwrap().unwrap() {
-            FacetObserved::Entry {
+            DatumObserved::Entry {
                 doc_id,
-                facet_key,
-                facet: ObservedFacet::Present { .. },
+                datum_key,
+                datum: ObservedDatum::Present { .. },
                 ..
-            } if doc_id == doc && facet_key == key => break,
-            FacetObserved::Entry { .. } | FacetObserved::ReplayComplete { .. } => {}
+            } if doc_id == doc && datum_key == key => break,
+            DatumObserved::Entry { .. } | DatumObserved::ReplayComplete { .. } => {}
         }
     }
     let expected = json!({"$type": NOTE, "value": "shared-note"});

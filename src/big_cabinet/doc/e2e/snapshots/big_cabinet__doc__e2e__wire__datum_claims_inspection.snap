@@ -4,7 +4,7 @@ expression: claims_inspection()
 ---
 {
   "docId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
-  "facetKey": "org.example.note/main",
+  "datumKey": "org.example.note/main",
   "heads": [
     "0707070707070707070707070707070707070707070707070707070707070707"
   ],
@@ -25,7 +25,7 @@ expression: claims_inspection()
           "actorPublicKey": "zYMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
           "claim": {
             "originDocument": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
-            "facetKey": "org.example.note/main",
+            "datumKey": "org.example.note/main",
             "chosenUuid": "01010101-0101-7101-8101-010101010101",
             "actorUuid": "02020202-0202-7202-8202-020202020202",
             "operation": "Set",

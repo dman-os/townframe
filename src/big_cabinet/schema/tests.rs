@@ -1,7 +1,7 @@
 use super::*;
-use big_cabinet_core::facet::FacetDecl;
-use big_cabinet_core::facet::Stored;
-use big_cabinet_core::facet::TypeDecl;
+use big_cabinet_core::datum::DatumDecl;
+use big_cabinet_core::datum::Stored;
+use big_cabinet_core::datum::TypeDecl;
 use serde_json::json;
 
 fn record(tag: &str, value: Value) -> Value {
@@ -14,7 +14,7 @@ fn registration(tag: &str, value: Value) -> SchemaRegistration {
 
 fn universe(tag: &str, value: Value) -> Universe {
     Universe {
-        facets: vec![FacetDecl {
+        datums: vec![DatumDecl {
             id: tag.to_owned(),
             name: "Main".to_owned(),
             schema: schemars::Schema::try_from(
@@ -69,7 +69,7 @@ fn dependency_storage_annotations_are_owned_without_becoming_validation_authorit
     let repo = {
         let plug = universe(tag, json!({"$ref": "#/$defs/Carried"}));
         let dependency = Universe {
-            facets: Vec::new(),
+            datums: Vec::new(),
             types: vec![TypeDecl {
                 name: "Carried".to_owned(),
                 schema: schemars::Schema::try_from(
@@ -231,7 +231,7 @@ fn duplicates_identity_and_malformed_documents_fail_atomically() {
             [make(), make()],
             Vec::new()
         )]),
-        Err(SchemaRepoError::DuplicateFacetTag(_))
+        Err(SchemaRepoError::DuplicateDatumTag(_))
     ));
     for document in [
         Value::Null,
@@ -252,7 +252,7 @@ fn duplicates_identity_and_malformed_documents_fail_atomically() {
 }
 
 #[test]
-fn core_facets_are_admitted_like_registered_ones_and_keep_their_narrowing() {
+fn core_datums_are_admitted_like_registered_ones_and_keep_their_narrowing() {
     let tag = "org.example.daybook.dmeta";
     let repo = SchemaRepo::open(Vec::new()).unwrap();
     let handle = repo.require_for_write(tag).unwrap();
@@ -262,7 +262,7 @@ fn core_facets_are_admitted_like_registered_ones_and_keep_their_narrowing() {
     for invalid in [
         json!({"$type": tag, "createdAt": "not an instant"}),
         json!({"$type": tag, "createdAt": "2024-01-02T03:04:05Z", "actors": {"not-a-uuid": {"pubkey": "z", "actorUrl": "https://example.test"}}}),
-        json!({"$type": tag, "createdAt": "2024-01-02T03:04:05Z", "facets": {"org.example.note/main": {"deletedAt": [], "signatures": [{"actorUuid": "not-a-uuid", "signature": {"$bytes": "AQ=="}}]}}}),
+        json!({"$type": tag, "createdAt": "2024-01-02T03:04:05Z", "datums": {"org.example.note/main": {"deletedAt": [], "signatures": [{"actorUuid": "not-a-uuid", "signature": {"$bytes": "AQ=="}}]}}}),
         json!({"$type": tag, "createdAt": "2024-01-02T03:04:05Z", "actors": {"01a15688-2519-7ea0-a1ea-421237f5c0cc": {"pubkey": "z", "actorUrl": "https://example.test", "delegation": "not bytes"}}}),
     ] {
         assert!(
@@ -273,7 +273,7 @@ fn core_facets_are_admitted_like_registered_ones_and_keep_their_narrowing() {
 }
 
 #[test]
-fn reference_tags_select_the_facets_that_declare_references() {
+fn reference_tags_select_the_datums_that_declare_references() {
     let referencing = "org.example.schema.referencing";
     let plain = "org.example.schema.plain";
     let repo = SchemaRepo::open([
@@ -296,8 +296,8 @@ fn reference_tags_select_the_facets_that_declare_references() {
     ])
     .unwrap();
     let tags = repo.reference_tags();
-    // The core branch facet carries a `FacetReference`, so it is selected alongside the
-    // registered referencing facet; the plain one and dmeta are not.
+    // The core branch datum carries a `DatumReference`, so it is selected alongside the
+    // registered referencing datum; the plain one and dmeta are not.
     assert_eq!(
         tags,
         vec![
@@ -313,6 +313,6 @@ fn unknown_reads_are_best_effort_but_unknown_writes_are_refused() {
     assert!(repo.resolve_for_read("org.example.unknown").is_none());
     assert!(matches!(
         repo.require_for_write("org.example.unknown"),
-        Err(SchemaRepoError::UnknownFacet { .. })
+        Err(SchemaRepoError::UnknownDatum { .. })
     ));
 }

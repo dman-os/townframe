@@ -4,13 +4,13 @@
 use super::*;
 use crate::doc::pipeline::digest;
 use big_cabinet_core::doc::CreateDoc;
-use big_cabinet_core::doc::WriteFacets;
+use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::DrawerRoster;
 use ledger::Op;
 
-fn facet_value(facet: &impl Serialize) -> serde_json::Value {
-    serde_json::to_value(facet).expect("a drawer facet serializes")
+fn datum_value(datum: &impl Serialize) -> serde_json::Value {
+    serde_json::to_value(datum).expect("a drawer datum serializes")
 }
 
 /// The record a descriptor states. Carrying, not operating: a foreign layout is stored as it
@@ -24,7 +24,7 @@ pub(crate) fn record_of(drawer_id: &DrawerId, descriptor: &Drawer) -> DrawerReco
 
 impl Core {
     /// Declare `doc` a self-doc drawer by writing the descriptor on it with the caller's own
-    /// capability: DocsRepo enforces Write, signs the facet as the caller, and its command ledger
+    /// capability: DocsRepo enforces Write, signs the datum as the caller, and its command ledger
     /// makes the command idempotent. The drawer ledger row ensures that if a crash falls after the
     /// descriptor write and before the projection record or the creator's Admin grant, boot
     /// finishes both from the committed descriptor even if the caller never retries; if the crash
@@ -70,14 +70,14 @@ impl Core {
                                     self.docs()
                                         .call(
                                             context.child(),
-                                            WriteFacets {
+                                            WriteDatums {
                                                 capability,
                                                 command: Some(command.clone()),
                                                 doc_id: doc_id.clone(),
                                                 mode: WriteMode::AtCurrent,
                                                 set: BTreeMap::from([(
                                                     drawer_key(),
-                                                    facet_value(&Drawer::self_doc()),
+                                                    datum_value(&Drawer::self_doc()),
                                                 )]),
                                                 remove: Default::default(),
                                             },
@@ -130,11 +130,11 @@ impl Core {
                     self.docs()
                         .call(
                             context.child(),
-                            big_cabinet_core::doc::ReadFacets {
+                            big_cabinet_core::doc::ReadDatums {
                                 capability,
                                 doc_id: doc_id.clone(),
                                 at: big_cabinet_core::doc::At::Current,
-                                facets: Some(std::collections::BTreeSet::from([drawer_key()])),
+                                datums: Some(std::collections::BTreeSet::from([drawer_key()])),
                                 optimistic: false,
                             },
                         )
@@ -143,8 +143,8 @@ impl Core {
                 },
             )
             .await?;
-        match read.facets.get(&drawer_key()) {
-            Some(big_cabinet_core::doc::FacetRead::Accepted { value, .. }) => {
+        match read.datums.get(&drawer_key()) {
+            Some(big_cabinet_core::doc::DatumRead::Accepted { value, .. }) => {
                 let descriptor: Drawer =
                     serde_json::from_value(value.clone()).map_err(|error| {
                         DrawersError::RosterUnreadable(format!("{doc_id} descriptor: {error}"))
@@ -268,9 +268,9 @@ impl Core {
                                     capability,
                                     command: command.clone(),
                                     placement: METADATA_PLACEMENT.into(),
-                                    facets: BTreeMap::from([
-                                        (drawer_key(), facet_value(descriptor)),
-                                        (roster_key(), facet_value(&DrawerRoster::inline())),
+                                    datums: BTreeMap::from([
+                                        (drawer_key(), datum_value(descriptor)),
+                                        (roster_key(), datum_value(&DrawerRoster::inline())),
                                     ]),
                                 },
                             )
@@ -361,7 +361,7 @@ impl DrawerService {
             );
         }
         // The registry is a fresh self-doc drawer: a metadata doc that is its own drawer, its
-        // known entries are bookkeeping facets on it, and a foreign layout arriving from a
+        // known entries are bookkeeping datums on it, and a foreign layout arriving from a
         // peer is carried rather than operated, as anywhere else.
         let command = CommandId::try_from("local drawer registry".to_owned())
             .expect("the registry command is within bounds");
@@ -385,9 +385,9 @@ impl DrawerService {
                                     capability,
                                     command: command.clone(),
                                     placement: METADATA_PLACEMENT.into(),
-                                    facets: BTreeMap::from([(
+                                    datums: BTreeMap::from([(
                                         drawer_key(),
-                                        facet_value(&Drawer::self_doc()),
+                                        datum_value(&Drawer::self_doc()),
                                     )]),
                                 },
                             )

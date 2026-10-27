@@ -1,5 +1,5 @@
-use crate::FacetKey;
-use crate::FacetTag;
+use crate::DatumKey;
+use crate::DatumTag;
 use crate::authority::AuthorityServiceError;
 use crate::authority::Authorization;
 use crate::authority::CapId;
@@ -25,13 +25,13 @@ pub use availability::DocAvailability;
 pub use availability::GetDocAvailability;
 pub use availability::LocalDocUsability;
 pub use availability::ObserveDocAvailability;
+pub use inspection::DatumClaimEvidence;
+pub use inspection::DatumClaimsInspection;
 pub use inspection::EvidenceScope;
-pub use inspection::FacetClaimEvidence;
-pub use inspection::FacetClaimsInspection;
-pub use inspection::InspectFacetClaims;
+pub use inspection::InspectDatumClaims;
 pub use inspection::SignatureEvidence;
-pub use inspection::UnsafeFacetInspection;
-pub use inspection::UnsafeInspectFacet;
+pub use inspection::UnsafeDatumInspection;
+pub use inspection::UnsafeInspectDatum;
 pub use inspection::VerifiedSignatureEvidence;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -79,8 +79,8 @@ pub enum WriteMode {
     IfDocUnchanged {
         heads: Vec<ChangeHash>,
     },
-    IfFacetsUnchanged {
-        facets: BTreeMap<FacetKey, FacetVersion>,
+    IfDatumsUnchanged {
+        datums: BTreeMap<DatumKey, DatumVersion>,
     },
     AtHeads {
         heads: Vec<ChangeHash>,
@@ -90,24 +90,24 @@ pub enum WriteMode {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FacetVersion {
+pub struct DatumVersion {
     pub heads: Vec<ChangeHash>,
     pub clock: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
-pub enum FacetRead {
+pub enum DatumRead {
     Accepted {
         value: Json,
-        version: FacetVersion,
+        version: DatumVersion,
     },
     Absent {
-        version: FacetVersion,
+        version: DatumVersion,
     },
     Pending {
         reason: String,
-        version: FacetVersion,
+        version: DatumVersion,
         value: Option<Json>,
     },
     Rejected {
@@ -115,21 +115,21 @@ pub enum FacetRead {
     },
     Undecodable {
         reason: String,
-        version: FacetVersion,
+        version: DatumVersion,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FacetsRead {
+pub struct DatumsRead {
     pub heads: Vec<ChangeHash>,
-    pub facets: BTreeMap<FacetKey, FacetRead>,
+    pub datums: BTreeMap<DatumKey, DatumRead>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FacetListing {
+pub struct DatumListing {
     pub heads: Vec<ChangeHash>,
-    pub facets: BTreeMap<FacetKey, FacetVersion>,
+    pub datums: BTreeMap<DatumKey, DatumVersion>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -168,22 +168,22 @@ pub enum DocsError {
     CommandInFlight { command: CommandId },
     #[error("command {command} was already used for a different request")]
     CommandReused { command: CommandId },
-    #[error("no schema is registered for facet tag {facet_tag}")]
-    UnknownSchema { facet_tag: String },
-    #[error("facet {facet_key} is managed by the repository and cannot be written directly")]
-    SystemFacet { facet_key: FacetKey },
-    #[error("facet {facet_key} is both set and removed")]
-    SetAndRemoved { facet_key: FacetKey },
-    #[error("facet {facet_key} value is invalid: {reason}")]
-    InvalidValue { facet_key: FacetKey, reason: String },
+    #[error("no schema is registered for datum tag {datum_tag}")]
+    UnknownSchema { datum_tag: String },
+    #[error("datum {datum_key} is managed by the repository and cannot be written directly")]
+    SystemDatum { datum_key: DatumKey },
+    #[error("datum {datum_key} is both set and removed")]
+    SetAndRemoved { datum_key: DatumKey },
+    #[error("datum {datum_key} value is invalid: {reason}")]
+    InvalidValue { datum_key: DatumKey, reason: String },
     #[error("the write condition no longer holds at {heads:?}")]
     Conflict {
         heads: Vec<ChangeHash>,
-        facets: BTreeMap<FacetKey, FacetVersion>,
+        datums: BTreeMap<DatumKey, DatumVersion>,
     },
-    #[error("facet {facet_key} at the write's base is not accepted: {verdict:?}")]
+    #[error("datum {datum_key} at the write's base is not accepted: {verdict:?}")]
     BaseNotAccepted {
-        facet_key: FacetKey,
+        datum_key: DatumKey,
         verdict: Unaccepted,
     },
     #[error("inspection evidence is pending: {reason}")]
@@ -221,20 +221,20 @@ pub struct CreateDoc {
     pub capability: CapId,
     pub command: CommandId,
     pub placement: String,
-    pub facets: BTreeMap<FacetKey, Json>,
+    pub datums: BTreeMap<DatumKey, Json>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WriteFacets {
+pub struct WriteDatums {
     pub capability: CapId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<CommandId>,
     pub doc_id: DocId,
     pub mode: WriteMode,
     #[serde(default)]
-    pub set: BTreeMap<FacetKey, Json>,
+    pub set: BTreeMap<DatumKey, Json>,
     #[serde(default)]
-    pub remove: BTreeSet<FacetKey>,
+    pub remove: BTreeSet<DatumKey>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -260,18 +260,18 @@ pub struct MergeDoc {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReadFacets {
+pub struct ReadDatums {
     pub capability: CapId,
     pub doc_id: DocId,
     pub at: At,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub facets: Option<BTreeSet<FacetKey>>,
+    pub datums: Option<BTreeSet<DatumKey>>,
     #[serde(default)]
     pub optimistic: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListFacets {
+pub struct ListDatums {
     pub capability: CapId,
     pub doc_id: DocId,
     pub at: At,
@@ -279,59 +279,59 @@ pub struct ListFacets {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum FacetSelector {
+pub enum DatumSelector {
     All,
     Doc { doc_id: DocId },
-    Tag { tag: FacetTag },
-    Route { doc_id: DocId, facet_key: FacetKey },
-    Key { facet_key: FacetKey },
+    Tag { tag: DatumTag },
+    Route { doc_id: DocId, datum_key: DatumKey },
+    Key { datum_key: DatumKey },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct QueryFacets {
+pub struct QueryDatums {
     pub capability: CapId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drawer_id: Option<DocId>,
-    pub selector: FacetSelector,
+    pub selector: DatumSelector,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct QueriedFacet {
+pub struct QueriedDatum {
     pub doc_id: DocId,
-    pub facet_key: FacetKey,
+    pub datum_key: DatumKey,
     pub doc_heads: Vec<ChangeHash>,
-    pub version: FacetVersion,
+    pub version: DatumVersion,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum FacetRefSelector {
+pub enum DatumRefSelector {
     Origin {
         doc_id: DocId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        facet_key: Option<FacetKey>,
+        datum_key: Option<DatumKey>,
     },
     Target {
         doc_id: DocId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        facet_key: Option<FacetKey>,
+        datum_key: Option<DatumKey>,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct QueryFacetRefs {
+pub struct QueryDatumRefs {
     pub capability: CapId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drawer_id: Option<DocId>,
-    pub selector: FacetRefSelector,
+    pub selector: DatumRefSelector,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct QueriedFacetRef {
+pub struct QueriedDatumRef {
     pub origin_doc_id: DocId,
-    pub origin_facet_key: FacetKey,
+    pub origin_datum_key: DatumKey,
     pub path: String,
     pub target_doc_id: DocId,
-    pub target_facet_key: FacetKey,
+    pub target_datum_key: DatumKey,
     pub ref_heads: Vec<ChangeHash>,
 }
 
@@ -346,12 +346,12 @@ pub enum ObserveScope {
         doc_id: DocId,
     },
     Tag {
-        tag: FacetTag,
+        tag: DatumTag,
     },
     Drawer {
         drawer_id: DocId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        tag: Option<FacetTag>,
+        tag: Option<DatumTag>,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,14 +360,14 @@ pub enum ObserveScope {
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-pub enum ObservedFacet {
+pub enum ObservedDatum {
     Present {
         doc_heads: Vec<ChangeHash>,
-        version: FacetVersion,
+        version: DatumVersion,
     },
     Removed {
         doc_heads: Option<Vec<ChangeHash>>,
-        version: FacetVersion,
+        version: DatumVersion,
     },
     AccessLost,
 }
@@ -377,12 +377,12 @@ pub enum ObservedFacet {
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-pub enum FacetObserved {
+pub enum DatumObserved {
     Entry {
         revision: u64,
         doc_id: DocId,
-        facet_key: FacetKey,
-        facet: ObservedFacet,
+        datum_key: DatumKey,
+        datum: ObservedDatum,
     },
     ReplayComplete {
         through: u64,
@@ -390,13 +390,13 @@ pub enum FacetObserved {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ObserveFacets {
+pub struct ObserveDatums {
     pub capability: CapId,
     pub scope: ObserveScope,
     #[serde(default)]
     pub after: u64,
 }
-service_core_rs::service_operation!(ObserveFacets => stream FacetObserved, DocsError, "org.example.daybook.docs.observeFacets");
+service_core_rs::service_operation!(ObserveDatums => stream DatumObserved, DocsError, "org.example.daybook.docs.observeDatums");
 
 macro_rules! operations {
     ($($request:ident => $output:ty, $kind:ident, $nsid:literal;)*) => {$(
@@ -412,15 +412,15 @@ macro_rules! operations {
 operations! {
     MintDocCapability => Capability, procedure, "mintDocCapability";
     CreateDoc => WriteReceipt, procedure, "createDoc";
-    WriteFacets => WriteReceipt, procedure, "writeFacets";
+    WriteDatums => WriteReceipt, procedure, "writeDatums";
     BranchDoc => WriteReceipt, procedure, "branchDoc";
     MergeDoc => WriteReceipt, procedure, "mergeDoc";
-    ReadFacets => FacetsRead, procedure, "readFacets";
-    ListFacets => FacetListing, procedure, "listFacets";
-    QueryFacets => Vec<QueriedFacet>, procedure, "queryFacets";
-    QueryFacetRefs => Vec<QueriedFacetRef>, procedure, "queryFacetRefs";
-    UnsafeInspectFacet => UnsafeFacetInspection, procedure, "unsafeInspectFacet";
-    InspectFacetClaims => FacetClaimsInspection, procedure, "inspectFacetClaims";
+    ReadDatums => DatumsRead, procedure, "readDatums";
+    ListDatums => DatumListing, procedure, "listDatums";
+    QueryDatums => Vec<QueriedDatum>, procedure, "queryDatums";
+    QueryDatumRefs => Vec<QueriedDatumRef>, procedure, "queryDatumRefs";
+    UnsafeInspectDatum => UnsafeDatumInspection, procedure, "unsafeInspectDatum";
+    InspectDatumClaims => DatumClaimsInspection, procedure, "inspectDatumClaims";
     GetDocAvailability => DocAvailability, query, "getDocAvailability";
 }
 
@@ -429,19 +429,19 @@ declare_service_protocol! {
         unary {
             MintDocCapability(MintDocCapability),
             CreateDoc(CreateDoc),
-            WriteFacets(WriteFacets),
+            WriteDatums(WriteDatums),
             BranchDoc(BranchDoc),
             MergeDoc(MergeDoc),
-            ReadFacets(ReadFacets),
-            ListFacets(ListFacets),
-            QueryFacets(QueryFacets),
-            QueryFacetRefs(QueryFacetRefs),
-            UnsafeInspectFacet(UnsafeInspectFacet),
-            InspectFacetClaims(InspectFacetClaims),
+            ReadDatums(ReadDatums),
+            ListDatums(ListDatums),
+            QueryDatums(QueryDatums),
+            QueryDatumRefs(QueryDatumRefs),
+            UnsafeInspectDatum(UnsafeInspectDatum),
+            InspectDatumClaims(InspectDatumClaims),
             GetDocAvailability(GetDocAvailability)
         }
         stream {
-            ObserveFacets(ObserveFacets),
+            ObserveDatums(ObserveDatums),
             ObserveDocAvailability(ObserveDocAvailability)
         }
     }

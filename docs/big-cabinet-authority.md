@@ -116,7 +116,7 @@ permissions from the signer. Resource operations require a domain cap and have
 no identity fallback.
 
 The resulting cap has an immutable signer binding. Its holder does not learn the
-actor's proof or private key and cannot use the cap to sign arbitrary facet
+actor's proof or private key and cannot use the cap to sign arbitrary datum
 claims directly. The domain checks the operation's scope before the signing
 service uses the binding. Rebinding requires proof of the intended signer at a
 new authorized mint. Ordinary attenuation never changes attribution.
@@ -147,11 +147,11 @@ Actor seeds remain sealed with ChaCha20-Poly1305 under the OS-keyring wrapping k
 and bound to their registry row. Losing the wrapping key is a boot error rather
 than a request to create replacement identities.
 
-Facet claims and node-signed attribution certificates remain signed artifacts.
+Datum claims and node-signed attribution certificates remain signed artifacts.
 An old valid signature does not become invalid when a live cap is retracted.
 Neither attribution nor a local cap proves historical Keyhive write authority.
 
-Facet-set and facet-reference indexes resume from their durable frontier cursors;
+Datum-set and datum-reference indexes resume from their durable frontier cursors;
 restarting capability state does not rebuild those indexes. Durable command
 recovery uses stable actor IDs and operation intent, not expired bearer handles.
 

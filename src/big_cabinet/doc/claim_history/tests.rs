@@ -7,21 +7,21 @@ use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 use std::collections::BTreeMap;
 
-const FACET: &str = "org.example.note/main";
+const DATUM: &str = "org.example.note/main";
 const DMETA: &str = "org.example.daybook.dmeta/main";
 
 struct Fixture {
     doc: Automerge,
     document: DocId,
     doc_uuid: Uuid7,
-    facet: FacetKey,
+    datum: DatumKey,
     alias: Uuid7,
     actor: Uuid7,
     key: SigningKey,
 }
 
 struct Paths {
-    facets: ObjId,
+    datums: ObjId,
     dmeta: ObjId,
     metadata: ObjId,
     signatures: ObjId,
@@ -34,21 +34,21 @@ impl Fixture {
             doc: Automerge::new(),
             document: DocId::new([7; 32]),
             doc_uuid: Reconstruction::uuid("01940000-0000-7000-8000-000000000003").unwrap(),
-            facet: FacetKey::from_text("org.example.note", "main").unwrap(),
+            datum: DatumKey::from_text("org.example.note", "main").unwrap(),
             alias: Reconstruction::uuid("01940000-0000-7000-8000-000000000001").unwrap(),
             actor: Reconstruction::uuid("01940000-0000-7000-8000-000000000002").unwrap(),
             key: SigningKey::from_bytes(&[9; 32]),
         };
         let mut tx = fixture.doc.transaction();
-        let facets = tx
-            .put_object(automerge::ROOT, "facets", ObjType::Map)
+        let datums = tx
+            .put_object(automerge::ROOT, "datums", ObjType::Map)
             .unwrap();
-        let dmeta = tx.put_object(&facets, DMETA, ObjType::Map).unwrap();
+        let dmeta = tx.put_object(&datums, DMETA, ObjType::Map).unwrap();
         tx.put(&dmeta, "createdAt", ScalarValue::Timestamp(0))
             .unwrap();
         tx.put_object(&dmeta, "updatedAt", ObjType::List).unwrap();
-        let aliases = tx.put_object(&dmeta, "facetUuids", ObjType::Map).unwrap();
-        tx.put(&aliases, fixture.alias.to_string(), FACET).unwrap();
+        let aliases = tx.put_object(&dmeta, "datumUuids", ObjType::Map).unwrap();
+        tx.put(&aliases, fixture.alias.to_string(), DATUM).unwrap();
         let documents = tx.put_object(&dmeta, "branchUuids", ObjType::Map).unwrap();
         tx.put(
             &documents,
@@ -64,28 +64,28 @@ impl Fixture {
             MultibaseKey::try_from(fixture.key.verifying_key().as_bytes().as_slice()).unwrap();
         tx.put(&actor, "pubkey", public_key.to_string()).unwrap();
         tx.put(&actor, "actorUrl", "db+actor://node/test").unwrap();
-        let metadata = tx.put_object(&dmeta, "facets", ObjType::Map).unwrap();
-        let metadata = tx.put_object(&metadata, FACET, ObjType::Map).unwrap();
+        let metadata = tx.put_object(&dmeta, "datums", ObjType::Map).unwrap();
+        let metadata = tx.put_object(&metadata, DATUM, ObjType::Map).unwrap();
         tx.put_object(&metadata, "updatedAt", ObjType::List)
             .unwrap();
         tx.put_object(&metadata, "deletedAt", ObjType::List)
             .unwrap();
         tx.put_object(&metadata, "signatures", ObjType::List)
             .unwrap();
-        tx.put(&facets, FACET, "seed").unwrap();
+        tx.put(&datums, DATUM, "seed").unwrap();
         tx.commit();
         fixture
     }
 
     fn paths(&self) -> Paths {
-        let (_, facets) = self.doc.get(automerge::ROOT, "facets").unwrap().unwrap();
-        let (_, dmeta) = self.doc.get(&facets, DMETA).unwrap().unwrap();
-        let (_, aliases) = self.doc.get(&dmeta, "facetUuids").unwrap().unwrap();
-        let (_, metadata) = self.doc.get(&dmeta, "facets").unwrap().unwrap();
-        let (_, metadata) = self.doc.get(&metadata, FACET).unwrap().unwrap();
+        let (_, datums) = self.doc.get(automerge::ROOT, "datums").unwrap().unwrap();
+        let (_, dmeta) = self.doc.get(&datums, DMETA).unwrap().unwrap();
+        let (_, aliases) = self.doc.get(&dmeta, "datumUuids").unwrap().unwrap();
+        let (_, metadata) = self.doc.get(&dmeta, "datums").unwrap().unwrap();
+        let (_, metadata) = self.doc.get(&metadata, DATUM).unwrap().unwrap();
         let (_, signatures) = self.doc.get(&metadata, "signatures").unwrap().unwrap();
         Paths {
-            facets,
+            datums,
             dmeta,
             metadata,
             signatures,
@@ -93,11 +93,11 @@ impl Fixture {
         }
     }
 
-    fn signed(&self, value: Option<&NativeValue>) -> SignedFacetClaim {
-        let mut state = Reconstruction::new(&self.doc, &self.facet, HistoryBudget::default());
-        let claim = FacetClaim {
+    fn signed(&self, value: Option<&NativeValue>) -> SignedDatumClaim {
+        let mut state = Reconstruction::new(&self.doc, &self.datum, HistoryBudget::default());
+        let claim = DatumClaim {
             origin_document: self.document.clone(),
-            facet_key: self.facet.clone(),
+            datum_key: self.datum.clone(),
             chosen_uuid: self.alias,
             actor_uuid: self.actor,
             operation: if value.is_some() {
@@ -108,7 +108,7 @@ impl Fixture {
             value_cid: value.map(|value| cid_of(&encode_native(value))),
             predecessors: state.predecessor_ids(&self.doc.get_heads()).unwrap(),
         };
-        SignedFacetClaim {
+        SignedDatumClaim {
             signature: SignatureBytes::try_from(
                 self.key
                     .sign(&claim.signing_bytes().unwrap())
@@ -127,11 +127,11 @@ impl Fixture {
     fn install(
         &mut self,
         value: Option<&NativeValue>,
-        signed: &SignedFacetClaim,
+        signed: &SignedDatumClaim,
     ) -> (ObjId, ChangeHash) {
         self.install_entry(
             value,
-            &FacetSignature {
+            &DatumSignature {
                 actor_uuid: signed.claim.actor_uuid,
                 doc_uuid: self.doc_uuid,
                 signature: signed.signature.clone(),
@@ -144,13 +144,13 @@ impl Fixture {
     fn install_entry(
         &mut self,
         value: Option<&NativeValue>,
-        entry: &FacetSignature,
+        entry: &DatumSignature,
     ) -> (ObjId, ChangeHash) {
         let paths = self.paths();
         let mut tx = self.doc.transaction();
         match value {
-            Some(value) => put_native(&mut tx, &paths.facets, FACET.into(), value),
-            None => tx.delete(&paths.facets, FACET).unwrap(),
+            Some(value) => put_native(&mut tx, &paths.datums, DATUM.into(), value),
+            None => tx.delete(&paths.datums, DATUM).unwrap(),
         }
         for index in (0..tx.length(&paths.signatures)).rev() {
             tx.delete(&paths.signatures, index).unwrap();
@@ -183,14 +183,14 @@ impl Fixture {
         (marker, hash)
     }
 
-    fn write(&mut self, value: Option<&NativeValue>) -> (ObjId, ChangeHash, SignedFacetClaim) {
+    fn write(&mut self, value: Option<&NativeValue>) -> (ObjId, ChangeHash, SignedDatumClaim) {
         let signed = self.signed(value);
         let (marker, hash) = self.install(value, &signed);
         (marker, hash, signed)
     }
 
     fn reconstruct(&self, marker: &ObjId) -> ClaimHistoryResult {
-        reconstruct_claim_for_marker(&self.doc, &self.facet, marker, HistoryBudget::default())
+        reconstruct_claim_for_marker(&self.doc, &self.datum, marker, HistoryBudget::default())
     }
 }
 
@@ -243,11 +243,11 @@ fn introduction_uses_historical_value_alias_and_actor_binding() {
     let (marker, hash, signed) = fixture.write(Some(&NativeValue::Str("first".into())));
     let paths = fixture.paths();
     let mut tx = fixture.doc.transaction();
-    tx.put(&paths.facets, FACET, "later").unwrap();
+    tx.put(&paths.datums, DATUM, "later").unwrap();
     tx.put(
         &paths.aliases,
         "01930000-0000-7000-8000-000000000001",
-        FACET,
+        DATUM,
     )
     .unwrap();
     let (_, actors) = tx.get(&paths.dmeta, "actors").unwrap().unwrap();
@@ -262,7 +262,7 @@ fn introduction_uses_historical_value_alias_and_actor_binding() {
     assert_eq!(
         accepted(reconstruct_claim(
             &fixture.doc,
-            &fixture.facet,
+            &fixture.datum,
             hash,
             HistoryBudget::default()
         )),
@@ -353,7 +353,7 @@ fn competing_bad_and_incomplete_entries_do_not_erase_accepted_evidence() {
     tx.commit();
     let claims = reconstruct_current_claims(
         &fixture.doc,
-        &fixture.facet,
+        &fixture.datum,
         &fixture.doc.get_heads(),
         HistoryBudget::default(),
     )
@@ -395,13 +395,13 @@ fn mutated_signature_is_not_backdated_by_frontier_cache() {
     let (marker, _, signed) = fixture.write(Some(&NativeValue::Str("first".into())));
     let paths = fixture.paths();
     let mut tx = fixture.doc.transaction();
-    tx.put(&paths.facets, FACET, "later").unwrap();
+    tx.put(&paths.datums, DATUM, "later").unwrap();
     tx.put(&marker, "signature", vec![0_u8; 64]).unwrap();
     tx.commit();
     assert_eq!(accepted(fixture.reconstruct(&marker)).claim, signed.claim);
     let entries = reconstruct_current_claims(
         &fixture.doc,
-        &fixture.facet,
+        &fixture.datum,
         &fixture.doc.get_heads(),
         HistoryBudget::default(),
     )
@@ -418,7 +418,7 @@ fn mutated_signature_is_not_backdated_by_frontier_cache() {
 }
 
 #[test]
-fn unrelated_marker_is_not_a_signature_for_this_facet() {
+fn unrelated_marker_is_not_a_signature_for_this_datum() {
     let mut fixture = Fixture::new();
     let mut tx = fixture.doc.transaction();
     let list = tx
@@ -441,7 +441,7 @@ fn distinct_markers_in_one_change_have_independent_verdicts() {
     let signed = fixture.signed(Some(&value));
     let paths = fixture.paths();
     let mut tx = fixture.doc.transaction();
-    tx.put(&paths.facets, FACET, "same").unwrap();
+    tx.put(&paths.datums, DATUM, "same").unwrap();
     for index in 0..2 {
         let marker = tx
             .insert_object(&paths.signatures, index, ObjType::Map)
@@ -456,7 +456,7 @@ fn distinct_markers_in_one_change_have_independent_verdicts() {
     let hash = tx.commit().0.unwrap();
     let claims = reconstruct_current_claims(
         &fixture.doc,
-        &fixture.facet,
+        &fixture.datum,
         &[hash],
         HistoryBudget::default(),
     )
@@ -467,7 +467,7 @@ fn distinct_markers_in_one_change_have_independent_verdicts() {
         assert_eq!(accepted(entry.result).claim, signed.claim);
     }
     assert_eq!(
-        reconstruct_claim(&fixture.doc, &fixture.facet, hash, HistoryBudget::default()),
+        reconstruct_claim(&fixture.doc, &fixture.datum, hash, HistoryBudget::default()),
         ClaimHistoryResult::ProvenForgery(ClaimHistoryError::MalformedWitness(
             "one signature marker at introduction"
         ))
@@ -481,7 +481,7 @@ fn concurrent_writers_reconstruct_their_own_transaction_views() {
         doc: left.doc.fork(),
         document: left.document.clone(),
         doc_uuid: left.doc_uuid,
-        facet: left.facet.clone(),
+        datum: left.datum.clone(),
         alias: left.alias,
         actor: left.actor,
         key: left.key.clone(),
@@ -491,7 +491,7 @@ fn concurrent_writers_reconstruct_their_own_transaction_views() {
     left.doc.merge(&mut right.doc).unwrap();
     let claims = reconstruct_current_claims(
         &left.doc,
-        &left.facet,
+        &left.datum,
         &left.doc.get_heads(),
         HistoryBudget::default(),
     )
@@ -511,7 +511,7 @@ fn carried_message_must_agree_with_reconstructible_context() {
     let mut fixture = Fixture::new();
     let value = NativeValue::Str("value".into());
     let signed = fixture.signed(Some(&value));
-    let mut entry = FacetSignature {
+    let mut entry = DatumSignature {
         actor_uuid: fixture.actor,
         doc_uuid: fixture.doc_uuid,
         signature: signed.signature.clone(),
@@ -563,7 +563,7 @@ utils_rs::table_tests! {
             other => panic!("unknown case: {other}"),
         };
         let signed = fixture.signed(Some(&value));
-        let entry = FacetSignature {
+        let entry = DatumSignature {
             actor_uuid: fixture.actor,
             doc_uuid,
             signature: signed.signature.clone(),
@@ -606,7 +606,7 @@ fn inherited_message_keeps_origin_authorship_distinct_from_the_compacted_value()
     let signed = origin.signed(Some(&value));
     let mut branch = Fixture::new();
     branch.document = DocId::new([8; 32]);
-    let entry = FacetSignature {
+    let entry = DatumSignature {
         actor_uuid: origin.actor,
         doc_uuid: branch.doc_uuid,
         signature: signed.signature.clone(),
@@ -644,7 +644,7 @@ fn reconstruction_does_not_recurse_into_ancestor_claims() {
     let marker = last_marker.unwrap();
     accepted(reconstruct_claim_for_marker(
         &fixture.doc,
-        &fixture.facet,
+        &fixture.datum,
         &marker,
         HistoryBudget {
             max_claims: 1,
@@ -673,7 +673,7 @@ utils_rs::table_tests! {
             receiver = Automerge::load(&receiver.save()).unwrap();
             let entries = reconstruct_current_claims(
                 &receiver,
-                &fixture.facet,
+                &fixture.datum,
                 &receiver.get_heads(),
                 HistoryBudget::default(),
             ).unwrap();
@@ -729,14 +729,14 @@ fn resource_refusals_remain_pending_and_unknown_heads_are_malformed() {
         },
     ] {
         assert!(matches!(
-            reconstruct_claim_for_marker(&fixture.doc, &fixture.facet, &marker, budget),
+            reconstruct_claim_for_marker(&fixture.doc, &fixture.datum, &marker, budget),
             ClaimHistoryResult::Pending(ClaimHistoryError::ResourceRefused(_))
         ));
     }
     assert_eq!(
         reconstruct_current_claims(
             &fixture.doc,
-            &fixture.facet,
+            &fixture.datum,
             &[ChangeHash([255; 32])],
             HistoryBudget::default()
         ),

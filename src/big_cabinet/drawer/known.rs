@@ -1,7 +1,7 @@
 //! RememberDrawer, ForgetDrawer, ListKnownDrawers, SetDrawerPolicy: the known-drawers
 //! registry.
 //!
-//! The registry is an explicitly managed list, kept as `knownEntry/<drawerId>` facets on the
+//! The registry is an explicitly managed list, kept as `knownEntry/<drawerId>` datums on the
 //! local registry drawer — a self-doc drawer whose own doc is the durable home, so the list
 //! survives like every other drawer fact and a peer that syncs the doc sees what this node
 //! remembered. It is bookkeeping, not membership: remembering grants no access to the drawer,
@@ -13,7 +13,7 @@ use big_cabinet_core::doc::At;
 use big_cabinet_core::drawer::KnownDrawerEntry;
 
 impl Core {
-    /// The registry's `knownEntry` facets, read as this service at current heads.
+    /// The registry's `knownEntry` datums, read as this service at current heads.
     pub(crate) async fn known_entries(
         &self,
         context: &RequestContext,
@@ -31,11 +31,11 @@ impl Core {
                     self.docs()
                         .call(
                             context.child(),
-                            big_cabinet_core::doc::ReadFacets {
+                            big_cabinet_core::doc::ReadDatums {
                                 capability,
                                 doc_id: registry,
                                 at: At::Current,
-                                facets: None,
+                                datums: None,
                                 optimistic: false,
                             },
                         )
@@ -45,13 +45,13 @@ impl Core {
             )
             .await?;
         let mut known = BTreeMap::new();
-        for (key, facet) in read.facets {
-            if key.tag().as_str() != DRAWER_KNOWN_ENTRY_FACET_TAG {
+        for (key, datum) in read.datums {
+            if key.tag().as_str() != DRAWER_KNOWN_ENTRY_DATUM_TAG {
                 continue;
             }
-            let value = match facet {
-                big_cabinet_core::doc::FacetRead::Accepted { value, .. } => value,
-                big_cabinet_core::doc::FacetRead::Absent { .. } => continue,
+            let value = match datum {
+                big_cabinet_core::doc::DatumRead::Accepted { value, .. } => value,
+                big_cabinet_core::doc::DatumRead::Absent { .. } => continue,
                 other => {
                     return Err(DrawersError::RosterUnreadable(format!(
                         "{key} on the registry: {other:?}"

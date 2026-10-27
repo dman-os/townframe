@@ -1,10 +1,10 @@
-//! ObserveFacets: doc-scoped observation over the ungated `facet_set` projection,
+//! ObserveDatums: doc-scoped observation over the ungated `datum_set` projection,
 //! filtered by the same read access as gated reads (ADR 009 §6).
 
 use super::*;
-use crate::index::facet_set::FacetMembership;
-use crate::index::facet_set::FacetRoute;
-use big_cabinet_core::FacetTag;
+use crate::index::datum_set::DatumMembership;
+use crate::index::datum_set::DatumRoute;
+use big_cabinet_core::DatumTag;
 use big_cabinet_core::authority::CapabilityStatus;
 use big_cabinet_core::authority::ObserveCapability;
 use big_sync_core::keyed_frontier::FrontierEntry;
@@ -15,11 +15,11 @@ use big_sync_core::revisioned_store::RevisionedStore;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
 use futures::StreamExt;
 
-impl Handler<ObserveFacets> for DocsService {
+impl Handler<ObserveDatums> for DocsService {
     async fn call(
         &self,
-        request: Envelope<ObserveFacets>,
-    ) -> Result<ResponseEnvelope<EventStream<FacetObserved, DocsError>>, DocsError> {
+        request: Envelope<ObserveDatums>,
+    ) -> Result<ResponseEnvelope<EventStream<DatumObserved, DocsError>>, DocsError> {
         let params = request.params;
         let authority_changes = self
             .authority
@@ -55,9 +55,9 @@ impl Handler<ObserveFacets> for DocsService {
                 Some(readable)
             }
         };
-        let Some(store) = self.facet_set.clone() else {
+        let Some(store) = self.datum_set.clone() else {
             return Err(DocsError::Repository(
-                "facet observation is not configured on this repository".into(),
+                "datum observation is not configured on this repository".into(),
             ));
         };
         let interest = match &params.scope {
@@ -70,7 +70,7 @@ impl Handler<ObserveFacets> for DocsService {
             ObserveScope::Tag { .. } | ObserveScope::Drawer { .. } => None,
         };
         let (sender, receiver) = tokio::sync::mpsc::channel(64);
-        let pump = FacetPump {
+        let pump = DatumPump {
             delivered: Delivered::new(&params.scope),
             params,
             repo: Arc::clone(&self.big_repo),
@@ -90,7 +90,7 @@ impl Handler<ObserveFacets> for DocsService {
                 "documents service is shutting down".into(),
             ));
         };
-        let stream: EventStream<FacetObserved, DocsError> = Box::pin(futures::stream::unfold(
+        let stream: EventStream<DatumObserved, DocsError> = Box::pin(futures::stream::unfold(
             receiver,
             |mut receiver| async move { receiver.recv().await.map(|item| (item, receiver)) },
         ));
@@ -98,7 +98,7 @@ impl Handler<ObserveFacets> for DocsService {
     }
 }
 
-/// Why a [`FacetPump`] stops.
+/// Why a [`DatumPump`] stops.
 enum Halt {
     /// The stream ends with this error as its last item.
     Fail(DocsError),
@@ -112,16 +112,16 @@ impl From<DocsError> for Halt {
     }
 }
 
-/// What one `ObserveFacets` stream has handed its consumer, so access changes are reported only
+/// What one `ObserveDatums` stream has handed its consumer, so access changes are reported only
 /// about documents the consumer already knows of, and a re-published state is not repeated.
 struct Delivered {
     /// Documents this stream has delivered an entry for. `AccessLost` is only meaningful — and
     /// only non-leaking — for those: naming a document the observer never saw would disclose
     /// its existence. A `Doc` scope names its document itself, so it starts delivered.
     docs: BTreeSet<DocId>,
-    /// The first facet key delivered per document, which [`Self::access_lost`] reports under.
-    first_keys: BTreeMap<DocId, FacetKey>,
-    last_present: BTreeMap<(DocId, FacetKey), (Vec<ChangeHash>, FacetVersion)>,
+    /// The first datum key delivered per document, which [`Self::access_lost`] reports under.
+    first_keys: BTreeMap<DocId, DatumKey>,
+    last_present: BTreeMap<(DocId, DatumKey), (Vec<ChangeHash>, DatumVersion)>,
     /// Delivered documents whose loss of access has been reported and not yet restored.
     lost: BTreeSet<DocId>,
 }
@@ -140,7 +140,7 @@ impl Delivered {
         }
     }
 
-    /// Forgets the present facets of a document the caller can no longer read, and reports
+    /// Forgets the present datums of a document the caller can no longer read, and reports
     /// whether the stream owes it an `AccessLost`: only for a delivered document, once per loss.
     fn lose(&mut self, doc_id: &DocId) -> bool {
         self.last_present.retain(|(doc, _), _| doc != doc_id);
@@ -148,53 +148,53 @@ impl Delivered {
     }
 
     /// The `AccessLost` an access change, rather than a frontier entry, owes `doc_id`: reported
-    /// under the first facet key the stream delivered for it.
-    fn access_lost(&mut self, revision: u64, doc_id: DocId) -> Option<FacetObserved> {
+    /// under the first datum key the stream delivered for it.
+    fn access_lost(&mut self, revision: u64, doc_id: DocId) -> Option<DatumObserved> {
         if self.lose(&doc_id)
-            && let Some(facet_key) = self.first_keys.get(&doc_id).cloned()
+            && let Some(datum_key) = self.first_keys.get(&doc_id).cloned()
         {
-            return Some(FacetObserved::Entry {
+            return Some(DatumObserved::Entry {
                 revision,
                 doc_id,
-                facet_key,
-                facet: ObservedFacet::AccessLost,
+                datum_key,
+                datum: ObservedDatum::AccessLost,
             });
         }
         None
     }
 
-    /// Records a readable facet's membership and returns what to deliver for it, or `None` when
-    /// it repeats the facet's last delivered present state.
-    fn admit(&mut self, route: &FacetRoute, membership: FacetMembership) -> Option<ObservedFacet> {
-        let facet = match membership {
-            FacetMembership::Present {
+    /// Records a readable datum's membership and returns what to deliver for it, or `None` when
+    /// it repeats the datum's last delivered present state.
+    fn admit(&mut self, route: &DatumRoute, membership: DatumMembership) -> Option<ObservedDatum> {
+        let datum = match membership {
+            DatumMembership::Present {
                 doc_heads,
-                facet_heads,
+                datum_heads,
                 clock,
             } => {
-                let version = FacetVersion {
-                    heads: facet_heads,
+                let version = DatumVersion {
+                    heads: datum_heads,
                     clock,
                 };
-                let pair = (route.doc_id.clone(), route.facet_key.clone());
+                let pair = (route.doc_id.clone(), route.datum_key.clone());
                 let state = (doc_heads.clone(), version.clone());
                 if self.last_present.get(&pair) == Some(&state) {
                     return None;
                 }
                 self.last_present.insert(pair, state);
-                ObservedFacet::Present { doc_heads, version }
+                ObservedDatum::Present { doc_heads, version }
             }
-            FacetMembership::Removed {
+            DatumMembership::Removed {
                 doc_heads,
-                facet_heads,
+                datum_heads,
                 clock,
             } => {
                 self.last_present
-                    .remove(&(route.doc_id.clone(), route.facet_key.clone()));
-                ObservedFacet::Removed {
+                    .remove(&(route.doc_id.clone(), route.datum_key.clone()));
+                ObservedDatum::Removed {
                     doc_heads,
-                    version: FacetVersion {
-                        heads: facet_heads,
+                    version: DatumVersion {
+                        heads: datum_heads,
                         clock,
                     },
                 }
@@ -203,21 +203,21 @@ impl Delivered {
         self.docs.insert(route.doc_id.clone());
         self.first_keys
             .entry(route.doc_id.clone())
-            .or_insert_with(|| route.facet_key.clone());
+            .or_insert_with(|| route.datum_key.clone());
         self.lost.remove(&route.doc_id);
-        Some(facet)
+        Some(datum)
     }
 }
 
-/// The task behind one `ObserveFacets` stream: it replays and then follows the facet-set
+/// The task behind one `ObserveDatums` stream: it replays and then follows the datum-set
 /// frontier, and re-evaluates read access whenever the capability or the access policy changes.
-struct FacetPump {
-    params: ObserveFacets,
+struct DatumPump {
+    params: ObserveDatums,
     repo: SharedBigRepo,
     access: Arc<dyn DocAccess>,
     capabilities: DomainCapabilities,
     context: RequestContext,
-    sender: tokio::sync::mpsc::Sender<Result<FacetObserved, DocsError>>,
+    sender: tokio::sync::mpsc::Sender<Result<DatumObserved, DocsError>>,
     /// The readable documents of a `Drawer` scope, kept current across access changes; `None`
     /// for the other scopes, which check each batch of entries instead.
     drawer_readable: Option<BTreeSet<DocId>>,
@@ -226,10 +226,10 @@ struct FacetPump {
     delivered: Delivered,
 }
 
-impl FacetPump {
+impl DatumPump {
     async fn run(
         mut self,
-        store: Arc<FacetSetStore>,
+        store: Arc<DatumSetStore>,
         tasks: Spawner,
         authority_changes: service_utils_rs::ClientStream<ObserveCapability>,
         changes: Option<tokio::sync::watch::Receiver<u64>>,
@@ -242,7 +242,7 @@ impl FacetPump {
 
     async fn pump(
         &mut self,
-        store: &FacetSetStore,
+        store: &DatumSetStore,
         tasks: &Spawner,
         mut authority_changes: service_utils_rs::ClientStream<ObserveCapability>,
         mut changes: Option<tokio::sync::watch::Receiver<u64>>,
@@ -250,7 +250,7 @@ impl FacetPump {
         enum Wake {
             Frontier(
                 Result<
-                    RevisionRead<u64, FrontierEntry<FacetRoute, FacetMembership>>,
+                    RevisionRead<u64, FrontierEntry<DatumRoute, DatumMembership>>,
                     KeyedFrontierError,
                 >,
             ),
@@ -301,7 +301,7 @@ impl FacetPump {
                 Wake::Frontier(Ok(RevisionRead::Entries { entries, .. })) => entries,
                 Wake::Frontier(Ok(RevisionRead::ReplayComplete { through })) => {
                     replay_complete = true;
-                    self.emit(FacetObserved::ReplayComplete { through }).await?;
+                    self.emit(DatumObserved::ReplayComplete { through }).await?;
                     continue;
                 }
                 Wake::Frontier(Err(error)) => return Err(repository(error).into()),
@@ -310,18 +310,18 @@ impl FacetPump {
         }
     }
 
-    async fn emit(&self, event: FacetObserved) -> Result<(), Halt> {
+    async fn emit(&self, event: DatumObserved) -> Result<(), Halt> {
         self.sender.send(Ok(event)).await.map_err(|_| Halt::Stop)
     }
 
     /// Re-checks read access to every delivered document of a `Doc` or `Tag` scope after an
-    /// access change. Lost documents get their `AccessLost`; the current facets of documents
+    /// access change. Lost documents get their `AccessLost`; the current datums of documents
     /// readable again are returned for delivery.
     async fn recheck_delivered(
         &mut self,
-        store: &FacetSetStore,
+        store: &DatumSetStore,
         authority: &DomainAuthority<DocScope>,
-    ) -> Result<Vec<FrontierEntry<FacetRoute, FacetMembership>>, Halt> {
+    ) -> Result<Vec<FrontierEntry<DatumRoute, DatumMembership>>, Halt> {
         let revision = store.latest_revision().await.map_err(repository)?;
         let readable = DocsService::allowed_docs(
             self.access.as_ref(),
@@ -364,13 +364,13 @@ impl FacetPump {
     }
 
     /// Re-reads a `Drawer` scope's readable documents after an access change. Documents that
-    /// left it get their `AccessLost`; the current facets of documents that joined are returned
+    /// left it get their `AccessLost`; the current datums of documents that joined are returned
     /// for delivery.
     async fn recheck_drawer(
         &mut self,
-        store: &FacetSetStore,
+        store: &DatumSetStore,
         authority: &DomainAuthority<DocScope>,
-    ) -> Result<Vec<FrontierEntry<FacetRoute, FacetMembership>>, Halt> {
+    ) -> Result<Vec<FrontierEntry<DatumRoute, DatumMembership>>, Halt> {
         let ObserveScope::Drawer { drawer_id, tag } = &self.params.scope else {
             return Ok(Vec::new());
         };
@@ -408,13 +408,13 @@ impl FacetPump {
         Self::present_entries(store, &added_docs, tag.as_ref(), revision).await
     }
 
-    /// The current facets of `docs`, as frontier entries stamped with `revision`.
+    /// The current datums of `docs`, as frontier entries stamped with `revision`.
     async fn present_entries(
-        store: &FacetSetStore,
+        store: &DatumSetStore,
         docs: &BTreeSet<DocId>,
-        tag: Option<&FacetTag>,
+        tag: Option<&DatumTag>,
         revision: u64,
-    ) -> Result<Vec<FrontierEntry<FacetRoute, FacetMembership>>, Halt> {
+    ) -> Result<Vec<FrontierEntry<DatumRoute, DatumMembership>>, Halt> {
         let records = store
             .query_docs(docs, tag, None)
             .await
@@ -424,9 +424,9 @@ impl FacetPump {
             .map(|record| FrontierEntry {
                 revision,
                 key: record.route,
-                value: Some(FacetMembership::Present {
+                value: Some(DatumMembership::Present {
                     doc_heads: record.doc_heads,
-                    facet_heads: record.facet_heads,
+                    datum_heads: record.datum_heads,
                     clock: record.clock,
                 }),
             })
@@ -438,17 +438,17 @@ impl FacetPump {
     /// is dropped silently.
     async fn deliver(
         &mut self,
-        entries: Vec<FrontierEntry<FacetRoute, FacetMembership>>,
+        entries: Vec<FrontierEntry<DatumRoute, DatumMembership>>,
         authority: &DomainAuthority<DocScope>,
     ) -> Result<(), Halt> {
         let entries: Vec<_> = entries
             .into_iter()
             .filter(|entry| match &self.params.scope {
                 ObserveScope::Doc { doc_id } => &entry.key.doc_id == doc_id,
-                ObserveScope::Tag { tag } => entry.key.facet_key.tag() == tag,
+                ObserveScope::Tag { tag } => entry.key.datum_key.tag() == tag,
                 ObserveScope::Drawer { tag, .. } => tag
                     .as_ref()
-                    .is_none_or(|tag| entry.key.facet_key.tag() == tag),
+                    .is_none_or(|tag| entry.key.datum_key.tag() == tag),
             })
             .collect();
         let batch_readable;
@@ -477,11 +477,11 @@ impl FacetPump {
             } = entry;
             if !readable.contains(&route.doc_id) {
                 if self.delivered.lose(&route.doc_id) {
-                    self.emit(FacetObserved::Entry {
+                    self.emit(DatumObserved::Entry {
                         revision,
                         doc_id: route.doc_id,
-                        facet_key: route.facet_key,
-                        facet: ObservedFacet::AccessLost,
+                        datum_key: route.datum_key,
+                        datum: ObservedDatum::AccessLost,
                     })
                     .await?;
                 }
@@ -492,17 +492,17 @@ impl FacetPump {
             // removal.
             let Some(membership) = value else {
                 return Err(
-                    repository("facet-set frontier published an entry without membership").into(),
+                    repository("datum-set frontier published an entry without membership").into(),
                 );
             };
-            let Some(facet) = self.delivered.admit(&route, membership) else {
+            let Some(datum) = self.delivered.admit(&route, membership) else {
                 continue;
             };
-            self.emit(FacetObserved::Entry {
+            self.emit(DatumObserved::Entry {
                 revision,
                 doc_id: route.doc_id,
-                facet_key: route.facet_key,
-                facet,
+                datum_key: route.datum_key,
+                datum,
             })
             .await?;
         }

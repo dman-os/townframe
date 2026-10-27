@@ -1,11 +1,11 @@
 -- name: advance_cursor :exec
--- param: facet_tag String
+-- param: datum_tag String
 -- param: revision i64
-INSERT INTO big_cabinet_facet_ref_progress (
-    facet_tag
+INSERT INTO big_cabinet_datum_ref_progress (
+    datum_tag
     , revision
 ) VALUES (
-    :facet_tag
+    :datum_tag
     , :revision
 )
-ON CONFLICT (facet_tag) DO UPDATE SET revision = MAX(revision, excluded.revision);
+ON CONFLICT (datum_tag) DO UPDATE SET revision = MAX(revision, excluded.revision);

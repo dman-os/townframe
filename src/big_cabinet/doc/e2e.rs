@@ -16,13 +16,13 @@ mod writes;
 
 use super::*;
 use crate::authority::Authority;
-use crate::index::FacetSetStore;
+use crate::index::DatumSetStore;
 use crate::schema::SchemaRegistration;
 use crate::schema::SchemaRegistrationGroup;
 use crate::schema::SchemaRepo;
 use automerge::Automerge;
 use automerge::ChangeHash;
-use big_cabinet_core::FacetKey;
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::OpenActor;
 use big_cabinet_core::authority::Rights;
@@ -50,7 +50,7 @@ fn note(text: &str) -> Value {
     json!({"$type": NOTE, "value": text})
 }
 
-fn key(id: &str) -> FacetKey {
+fn key(id: &str) -> DatumKey {
     format!("{NOTE}/{id}").parse().unwrap()
 }
 
@@ -85,8 +85,8 @@ struct Node {
     sql: Database,
     docs: Option<DocsRepo>,
     docs_stop: Option<StopToken>,
-    facet_set: Arc<FacetSetStore>,
-    facet_stop: Option<StopToken>,
+    datum_set: Arc<DatumSetStore>,
+    datum_stop: Option<StopToken>,
 }
 
 impl Node {
@@ -139,17 +139,17 @@ impl Node {
         )
         .await
         .unwrap();
-        let facet_set = Arc::new(
-            FacetSetStore::new(sqlite_rs::test_support::db(&[]).unwrap().clone())
+        let datum_set = Arc::new(
+            DatumSetStore::new(sqlite_rs::test_support::db(&[]).unwrap().clone())
                 .await
                 .unwrap(),
         );
-        let (facet_stop, facet_tasks) = StopToken::new();
+        let (datum_stop, datum_tasks) = StopToken::new();
         {
-            let store = Arc::clone(&facet_set);
+            let store = Arc::clone(&datum_set);
             let repo = Arc::clone(&repo);
-            let owner = facet_tasks.clone();
-            facet_tasks
+            let owner = datum_tasks.clone();
+            datum_tasks
                 .spawn(async move {
                     store
                         .run_until(
@@ -174,8 +174,8 @@ impl Node {
             sql,
             docs: None,
             docs_stop: None,
-            facet_set,
-            facet_stop: Some(facet_stop),
+            datum_set,
+            datum_stop: Some(datum_stop),
         };
         node.start().await.unwrap();
         node
@@ -191,7 +191,7 @@ impl Node {
     async fn start_with(
         &mut self,
         access: Arc<dyn DocAccess>,
-        facet_ref: Option<Arc<crate::index::FacetRefStore>>,
+        datum_ref: Option<Arc<crate::index::DatumRefStore>>,
     ) -> Result<(), DocsError> {
         let (docs, stop) = boot(DocsConfig {
             big_repo: Arc::clone(&self.repo),
@@ -202,8 +202,8 @@ impl Node {
             node_issuer: self.authority.node_issuer.clone(),
             access,
             sql: self.sql.clone(),
-            facet_set: Some(Arc::clone(&self.facet_set)),
-            facet_ref,
+            datum_set: Some(Arc::clone(&self.datum_set)),
+            datum_ref,
         })
         .await?;
         self.docs = Some(docs);
@@ -304,7 +304,7 @@ impl Node {
         &self,
         actor: &Actor,
         command: &str,
-        facets: impl IntoIterator<Item = (FacetKey, Value)>,
+        datums: impl IntoIterator<Item = (DatumKey, Value)>,
     ) -> Result<WriteReceipt, DocsError> {
         op(self
             .client()
@@ -322,7 +322,7 @@ impl Node {
                         .await?,
                     command: CommandId::try_from(command.to_owned()).unwrap(),
                     placement: PLACEMENT.into(),
-                    facets: facets.into_iter().collect(),
+                    datums: datums.into_iter().collect(),
                 },
             )
             .await)
@@ -333,14 +333,14 @@ impl Node {
         actor: &Actor,
         document: &DocId,
         mode: WriteMode,
-        set: impl IntoIterator<Item = (FacetKey, Value)>,
-        remove: impl IntoIterator<Item = FacetKey>,
+        set: impl IntoIterator<Item = (DatumKey, Value)>,
+        remove: impl IntoIterator<Item = DatumKey>,
     ) -> Result<WriteReceipt, DocsError> {
         op(self
             .client()
             .call(
                 RequestContext::root(),
-                WriteFacets {
+                WriteDatums {
                     capability: self
                         .capability(
                             actor,
@@ -366,12 +366,12 @@ impl Node {
         document: &DocId,
         at: At,
         optimistic: bool,
-    ) -> Result<FacetsRead, DocsError> {
+    ) -> Result<DatumsRead, DocsError> {
         op(self
             .client()
             .call(
                 RequestContext::root(),
-                ReadFacets {
+                ReadDatums {
                     capability: self
                         .capability(
                             actor,
@@ -383,7 +383,7 @@ impl Node {
                         .await?,
                     doc_id: document.clone(),
                     at,
-                    facets: None,
+                    datums: None,
                     optimistic,
                 },
             )
@@ -395,11 +395,11 @@ impl Node {
         actor: &Actor,
         document: &DocId,
         at: At,
-        facet: &FacetKey,
-    ) -> FacetRead {
+        datum: &DatumKey,
+    ) -> DatumRead {
         let read = self.client().call(
             RequestContext::root(),
-            ReadFacets {
+            ReadDatums {
                 capability: self
                     .capability(
                         actor,
@@ -412,12 +412,12 @@ impl Node {
                     .unwrap(),
                 doc_id: document.clone(),
                 at,
-                facets: Some(BTreeSet::from([facet.clone()])),
+                datums: Some(BTreeSet::from([datum.clone()])),
                 optimistic: false,
             },
         );
         let mut read = op(read.await).unwrap();
-        read.facets.remove(facet).unwrap()
+        read.datums.remove(datum).unwrap()
     }
 
     /// Apply a raw Automerge edit, bypassing the repository, and return the heads after it.
@@ -446,7 +446,7 @@ impl Node {
         if let Some(stop) = self.docs_stop.take() {
             stop.stop().await;
         }
-        if let Some(stop) = self.facet_stop.take() {
+        if let Some(stop) = self.datum_stop.take() {
             stop.stop().await;
         }
         if let Some(stop) = self.repo_stop.take() {
@@ -463,14 +463,14 @@ fn op<T>(result: Result<T, ClientError<DocsError>>) -> Result<T, DocsError> {
     })
 }
 
-fn accepted(read: &FacetRead) -> (&Value, &[ChangeHash]) {
+fn accepted(read: &DatumRead) -> (&Value, &[ChangeHash]) {
     match read {
-        FacetRead::Accepted { value, version } => (value, version.heads.as_slice()),
-        other => panic!("expected an accepted facet, got {other:?}"),
+        DatumRead::Accepted { value, version } => (value, version.heads.as_slice()),
+        other => panic!("expected an accepted datum, got {other:?}"),
     }
 }
 
-fn facet_map(entries: &[(&FacetKey, Value)]) -> BTreeMap<FacetKey, Value> {
+fn datum_map(entries: &[(&DatumKey, Value)]) -> BTreeMap<DatumKey, Value> {
     entries
         .iter()
         .map(|(key, value)| ((*key).clone(), value.clone()))

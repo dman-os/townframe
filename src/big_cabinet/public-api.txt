@@ -8,22 +8,22 @@ impl DocAccess for big_cabinet::drawer::access::DrawerAccess
 impl Drop for big_cabinet::drawer::access::DrawerWorker
 impl From < AuthorityError > for big_cabinet::authority::AuthorityServiceError
 impl Handler < MintDrawerCapability > for big_cabinet::drawer::DrawerService
-impl RevisionedStore for big_cabinet::index::facet_set::FacetSetStore
-impl SqliteFrontierCodec for big_cabinet::index::facet_set::FacetSetCodec
+impl RevisionedStore for big_cabinet::index::datum_set::DatumSetStore
+impl SqliteFrontierCodec for big_cabinet::index::datum_set::DatumSetCodec
 impl service_utils_rs :: Handler < MintDocCapability > for big_cabinet::doc::access::DocsService
 impl std :: ops :: Deref for big_cabinet::drawer::Core
 pub big_cabinet::authority::async fn boot (secrets : & SecretStore , sql : Database ,) -> Result < (Authority , StopToken) , AuthorityError >
 pub big_cabinet::doc::async fn boot (config : DocsConfig) -> Result < (DocsRepo , StopToken) , DocsError >
 pub big_cabinet::doc::async fn prepare (config : DocsConfig) -> Result < (DocsRepo , StopToken) , DocsError >
 pub big_cabinet::drawer::async fn boot (config : DrawerConfig < '_ >) -> Result < (Drawers , StopToken) , DrawersError >
-pub enum big_cabinet::authority::AuthorityError { # [error ("capability is unknown, retracted, or descends from a retracted capability")] InvalidCapability, # [error ("capability lacks the right this operation needs")] Unauthorized, # [error ("the request asks for more than the presented capability holds")] Escalation, # [error ("AuthorityActors did not associate this capability with an actor")] UnrecognizedActor, # [error ("actor path is not its parent's path plus one segment")] InvalidActorPath, # [error ("actor is not registered")] ActorNotFound, # [error ("persisted authority state is corrupt: {0}")] StateCorrupt (String), # [error ("authority storage failed: {0}")] Storage (# [from] sqlite_rs :: SqlError), # [error ("secret store failed: {0}")] Secrets (# [from] SecretsError), # [error ("facet claim is invalid: {0}")] Claim (# [from] DmetaError), # [error ("attribution certificate is invalid: {0}")] Attribution (# [from] AttributionError) }
+pub enum big_cabinet::authority::AuthorityError { # [error ("capability is unknown, retracted, or descends from a retracted capability")] InvalidCapability, # [error ("capability lacks the right this operation needs")] Unauthorized, # [error ("the request asks for more than the presented capability holds")] Escalation, # [error ("AuthorityActors did not associate this capability with an actor")] UnrecognizedActor, # [error ("actor path is not its parent's path plus one segment")] InvalidActorPath, # [error ("actor is not registered")] ActorNotFound, # [error ("persisted authority state is corrupt: {0}")] StateCorrupt (String), # [error ("authority storage failed: {0}")] Storage (# [from] sqlite_rs :: SqlError), # [error ("secret store failed: {0}")] Secrets (# [from] SecretsError), # [error ("datum claim is invalid: {0}")] Claim (# [from] DmetaError), # [error ("attribution certificate is invalid: {0}")] Attribution (# [from] AttributionError) }
 pub enum big_cabinet::doc::access::AccessError { # [error ("access policy is unavailable: {0}")] Unavailable (String), # [error ("access policy refused: {0}")] Refused (String) }
 pub enum big_cabinet::doc::access::AccessRequest< 'a > { Read (& 'a DocId), Write (& 'a DocId), Create { placement : & 'a str } }
 pub enum big_cabinet::grants::GrantError { # [error ("grant storage failed: {0}")] Storage (# [from] SqlError), # [error ("grant capability failed: {0}")] Authority (# [from] ClientError < AuthorityServiceError >) }
-pub enum big_cabinet::index::facet_ref::FacetRefQuery { # [doc = " Every edge out of one facet route."] Origin (FacetRoute), # [doc = " Every edge out of any facet in one document."] OriginDoc (big_cabinet_core :: DocId), # [doc = " Every edge pointing at one facet route."] Target (FacetRoute), # [doc = " Every edge pointing at any facet in one document."] TargetDoc (big_cabinet_core :: DocId) }
-pub enum big_cabinet::index::facet_set::FacetMembership { Present { doc_heads : Vec < ChangeHash > , facet_heads : Vec < ChangeHash > , # [doc = " Lamport clock of `facet_heads`: the greatest `max_op` among the"] # [doc = " introducing changes. See `FacetVersion` in the DocsRepo protocol."] clock : u64 , }, Removed { doc_heads : Option < Vec < ChangeHash > > , facet_heads : Vec < ChangeHash > , clock : u64 , } }
-pub enum big_cabinet::index::facet_set::FacetSetQuery { Doc (DocId), Tag (FacetTag), Route (FacetRoute), # [doc = " Every live route with exactly this facet key, across documents."] Key (FacetKey) }
-pub enum big_cabinet::schema::SchemaRepoError { # [error ("known facet schema tag is empty")] EmptyFacetTag, # [error ("known facet schema tag `{0}` is configured more than once")] DuplicateFacetTag (String), # [error ("sidecar bundle is invalid: {source}")] SidecarInvalid { # [source] source : UniverseError , }, # [error ("schema pair for facet `{tag}` is invalid: {source}")] Admission { tag : String , # [source] source : Box < LexiconAdmissionError > , }, # [error ("facet `{tag}` is not known to this SchemaRepo")] UnknownFacet { tag : String } }
+pub enum big_cabinet::index::datum_ref::DatumRefQuery { # [doc = " Every edge out of one datum route."] Origin (DatumRoute), # [doc = " Every edge out of any datum in one document."] OriginDoc (big_cabinet_core :: DocId), # [doc = " Every edge pointing at one datum route."] Target (DatumRoute), # [doc = " Every edge pointing at any datum in one document."] TargetDoc (big_cabinet_core :: DocId) }
+pub enum big_cabinet::index::datum_set::DatumMembership { Present { doc_heads : Vec < ChangeHash > , datum_heads : Vec < ChangeHash > , # [doc = " Lamport clock of `datum_heads`: the greatest `max_op` among the"] # [doc = " introducing changes. See `DatumVersion` in the DocsRepo protocol."] clock : u64 , }, Removed { doc_heads : Option < Vec < ChangeHash > > , datum_heads : Vec < ChangeHash > , clock : u64 , } }
+pub enum big_cabinet::index::datum_set::DatumSetQuery { Doc (DocId), Tag (DatumTag), Route (DatumRoute), # [doc = " Every live route with exactly this datum key, across documents."] Key (DatumKey) }
+pub enum big_cabinet::schema::SchemaRepoError { # [error ("known datum schema tag is empty")] EmptyDatumTag, # [error ("known datum schema tag `{0}` is configured more than once")] DuplicateDatumTag (String), # [error ("sidecar bundle is invalid: {source}")] SidecarInvalid { # [source] source : UniverseError , }, # [error ("schema pair for datum `{tag}` is invalid: {source}")] Admission { tag : String , # [source] source : Box < LexiconAdmissionError > , }, # [error ("datum `{tag}` is not known to this SchemaRepo")] UnknownDatum { tag : String } }
 pub impl big_cabinet::authority::AuthorityService::async fn boot (secrets : & SecretStore , sql : Database ,) -> Result < (Arc < Self > , StopToken) , AuthorityError >
 pub impl big_cabinet::authority::AuthorityService::async fn open_namespace (& self , namespace_id : Uuid7) -> Result < Namespace , AuthorityError >
 pub impl big_cabinet::authority::AuthorityService::fn node_issuer (& self) -> MultibaseKey
@@ -35,7 +35,7 @@ pub impl big_cabinet::doc::access::LedgerAccess::async fn open (sql : Database ,
 pub impl big_cabinet::doc::access::LedgerAccess::fn object (request : AccessRequest < '_ >) -> String
 pub impl big_cabinet::drawer::Drawers::async fn mint_drawer_capability (& self , context : & RequestContext , authorization : Authorization , drawer_id : & DrawerId , access : Access , rights : Rights ,) -> Result < Capability , DrawersError >
 pub impl big_cabinet::drawer::Drawers::fn local (& self) -> LocalDrawers
-pub impl big_cabinet::drawer::access::DrawerAccess::async fn open (big_repo : SharedBigRepo , authority : Client < AuthorityProtocol > , issuer : CapId , namespace : Namespace , sql : Database , facet_set : Arc < crate :: index :: FacetSetStore > ,) -> Result < (Arc < Self > , DrawerProvider , StopToken) , DrawersError >
+pub impl big_cabinet::drawer::access::DrawerAccess::async fn open (big_repo : SharedBigRepo , authority : Client < AuthorityProtocol > , issuer : CapId , namespace : Namespace , sql : Database , datum_set : Arc < crate :: index :: DatumSetStore > ,) -> Result < (Arc < Self > , DrawerProvider , StopToken) , DrawersError >
 pub impl big_cabinet::drawer::access::DrawerAccess::fn grants (& self) -> & Arc < crate :: grants :: Grants >
 pub impl big_cabinet::drawer::access::DrawerAccess::fn object (access : Access , drawer : & DrawerId) -> String
 pub impl big_cabinet::drawer::access::DrawerProvider::fn start (self , docs : Client < DocsProtocol >) -> (DrawerWorker , StopToken)
@@ -46,26 +46,26 @@ pub impl big_cabinet::grants::Grants::async fn revoke (& self , context : & Requ
 pub impl big_cabinet::index::Indexes::async fn boot (repo : SharedBigRepo , schemas : Arc < SchemaRepo > , sql : Database , concurrency : NonZeroUsize ,) -> Res < (Arc < Self > , StopToken) >
 pub impl big_cabinet::index::Indexes::fn live_tasks (& self) -> usize
 pub impl big_cabinet::index::StopToken::async fn stop (self)
-pub impl big_cabinet::index::facet_ref::FacetRefStore::async fn new (sql : Database) -> Res < Self >
-pub impl big_cabinet::index::facet_ref::FacetRefStore::async fn query (& self , selector : FacetRefQuery) -> Res < Vec < FacetRefEdge > >
-pub impl big_cabinet::index::facet_ref::FacetRefStore::async fn run (& self , repo : SharedBigRepo , schemas : Arc < SchemaRepo > , facet_set : FacetSetStore ,) -> Res < () >
-pub impl big_cabinet::index::facet_set::FacetSetStore::async fn new (sql : Database) -> Res < Self >
-pub impl big_cabinet::index::facet_set::FacetSetStore::async fn open_all (& self , after : u64 ,) -> Result < KeyedFrontierRevisionReader < '_ , FacetRoute , FacetMembership > , KeyedFrontierError >
-pub impl big_cabinet::index::facet_set::FacetSetStore::async fn open_tags (& self , tags : impl IntoIterator < Item = (FacetTag , u64) > ,) -> Result < KeyedFrontierRevisionReader < '_ , FacetRoute , FacetMembership > , KeyedFrontierError >
-pub impl big_cabinet::index::facet_set::FacetSetStore::async fn query (& self , selector : FacetSetQuery) -> Res < Vec < FacetRecord > >
-pub impl big_cabinet::index::facet_set::FacetSetStore::async fn query_docs (& self , docs : & BTreeSet < DocId > , tag : Option < & FacetTag > , key : Option < & FacetKey > ,) -> Res < Vec < FacetRecord > >
-pub impl big_cabinet::index::facet_set::FacetSetStore::async fn run (& self , repo : SharedBigRepo , concurrency : NonZeroUsize) -> Res < () >
-pub impl big_cabinet::index::facet_set::FacetSetStore::async fn source_revision (& self) -> Res < u64 >
+pub impl big_cabinet::index::datum_ref::DatumRefStore::async fn new (sql : Database) -> Res < Self >
+pub impl big_cabinet::index::datum_ref::DatumRefStore::async fn query (& self , selector : DatumRefQuery) -> Res < Vec < DatumRefEdge > >
+pub impl big_cabinet::index::datum_ref::DatumRefStore::async fn run (& self , repo : SharedBigRepo , schemas : Arc < SchemaRepo > , datum_set : DatumSetStore ,) -> Res < () >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn new (sql : Database) -> Res < Self >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn open_all (& self , after : u64 ,) -> Result < KeyedFrontierRevisionReader < '_ , DatumRoute , DatumMembership > , KeyedFrontierError >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn open_tags (& self , tags : impl IntoIterator < Item = (DatumTag , u64) > ,) -> Result < KeyedFrontierRevisionReader < '_ , DatumRoute , DatumMembership > , KeyedFrontierError >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn query (& self , selector : DatumSetQuery) -> Res < Vec < DatumRecord > >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn query_docs (& self , docs : & BTreeSet < DocId > , tag : Option < & DatumTag > , key : Option < & DatumKey > ,) -> Res < Vec < DatumRecord > >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn run (& self , repo : SharedBigRepo , concurrency : NonZeroUsize) -> Res < () >
+pub impl big_cabinet::index::datum_set::DatumSetStore::async fn source_revision (& self) -> Res < u64 >
 pub impl big_cabinet::schema::SchemaHandle::fn compiled (& self) -> & CompiledSchema
-pub impl big_cabinet::schema::SchemaHandle::fn facet_tag (& self) -> & str
+pub impl big_cabinet::schema::SchemaHandle::fn datum_tag (& self) -> & str
 pub impl big_cabinet::schema::SchemaHandle::fn lexicon (& self) -> & Value
 pub impl big_cabinet::schema::SchemaHandle::fn sidecar (& self) -> Option < Bundle < '_ > >
-pub impl big_cabinet::schema::SchemaRegistration::fn new (facet_tag : impl Into < String > , lexicon : Value) -> Self
+pub impl big_cabinet::schema::SchemaRegistration::fn new (datum_tag : impl Into < String > , lexicon : Value) -> Self
 pub impl big_cabinet::schema::SchemaRegistrationGroup < 'a >::fn new (sidecar : Option < Bundle < 'a > > , registrations : impl IntoIterator < Item = SchemaRegistration > , carried_lexicons : Vec < Value > ,) -> Self
 pub impl big_cabinet::schema::SchemaRepo::fn open < 'a > (groups : impl IntoIterator < Item = SchemaRegistrationGroup < 'a > > ,) -> Result < Self , SchemaRepoError >
 pub impl big_cabinet::schema::SchemaRepo::fn reference_tags (& self) -> Vec < String >
-pub impl big_cabinet::schema::SchemaRepo::fn require_for_write (& self , facet_tag : & str) -> Result < SchemaHandle , SchemaRepoError >
-pub impl big_cabinet::schema::SchemaRepo::fn resolve_for_read (& self , facet_tag : & str) -> Option < SchemaHandle >
+pub impl big_cabinet::schema::SchemaRepo::fn require_for_write (& self , datum_tag : & str) -> Result < SchemaHandle , SchemaRepoError >
+pub impl big_cabinet::schema::SchemaRepo::fn resolve_for_read (& self , datum_tag : & str) -> Option < SchemaHandle >
 pub mod big_cabinet::authority
 pub mod big_cabinet::doc
 pub mod big_cabinet::doc::access
@@ -73,12 +73,12 @@ pub mod big_cabinet::drawer
 pub mod big_cabinet::drawer::access
 pub mod big_cabinet::grants
 pub mod big_cabinet::index
-pub mod big_cabinet::index::facet_ref
-pub mod big_cabinet::index::facet_set
+pub mod big_cabinet::index::datum_ref
+pub mod big_cabinet::index::datum_set
 pub mod big_cabinet::schema
 pub struct big_cabinet::authority::Authority  { service: Arc < AuthorityService >, host: Arc < Host < AuthorityHandler > >, client: Client < AuthorityProtocol >, root: CapId, node_issuer: MultibaseKey }
 pub struct big_cabinet::authority::AuthorityService  {  }
-pub struct big_cabinet::doc::DocsConfig  { big_repo: SharedBigRepo, schema_repo: Arc < SchemaRepo >, authority: Client < AuthorityProtocol >, issuer: CapId, namespace: Namespace, node_issuer: MultibaseKey, access: Arc < dyn DocAccess >, sql: Database, facet_set: Option < Arc < FacetSetStore > >, facet_ref: Option < Arc < FacetRefStore > > }
+pub struct big_cabinet::doc::DocsConfig  { big_repo: SharedBigRepo, schema_repo: Arc < SchemaRepo >, authority: Client < AuthorityProtocol >, issuer: CapId, namespace: Namespace, node_issuer: MultibaseKey, access: Arc < dyn DocAccess >, sql: Database, datum_set: Option < Arc < DatumSetStore > >, datum_ref: Option < Arc < DatumRefStore > > }
 pub struct big_cabinet::doc::DocsRepo  { host: Arc < Host < DocsHandler > >, client: Client < DocsProtocol > }
 pub struct big_cabinet::doc::DocsService  {  }
 pub struct big_cabinet::doc::access::LedgerAccess  { grants: Arc < Grants > }
@@ -90,15 +90,15 @@ pub struct big_cabinet::drawer::access::DrawerProvider  {  }
 pub struct big_cabinet::drawer::access::DrawerWorker  {  }
 pub struct big_cabinet::grants::GrantProof  { rights: Rights, dependencies: Vec < CapId > }
 pub struct big_cabinet::grants::Grants  {  }
-pub struct big_cabinet::index::Indexes  { facet_set: Arc < FacetSetStore >, facet_ref: Arc < FacetRefStore > }
+pub struct big_cabinet::index::Indexes  { datum_set: Arc < DatumSetStore >, datum_ref: Arc < DatumRefStore > }
 pub struct big_cabinet::index::StopToken  {  }
-pub struct big_cabinet::index::facet_ref::FacetRefEdge  { origin: FacetRoute, path: String, target: FacetRoute, ref_heads: Vec < ChangeHash > }
-pub struct big_cabinet::index::facet_ref::FacetRefStore  {  }
-pub struct big_cabinet::index::facet_set::FacetRecord  { route: FacetRoute, doc_heads: Vec < ChangeHash >, facet_heads: Vec < ChangeHash >, clock: u64 }
-pub struct big_cabinet::index::facet_set::FacetRoute  { doc_id: DocId, facet_key: FacetKey }
-pub struct big_cabinet::index::facet_set::FacetSetStore  {  }
+pub struct big_cabinet::index::datum_ref::DatumRefEdge  { origin: DatumRoute, path: String, target: DatumRoute, ref_heads: Vec < ChangeHash > }
+pub struct big_cabinet::index::datum_ref::DatumRefStore  {  }
+pub struct big_cabinet::index::datum_set::DatumRecord  { route: DatumRoute, doc_heads: Vec < ChangeHash >, datum_heads: Vec < ChangeHash >, clock: u64 }
+pub struct big_cabinet::index::datum_set::DatumRoute  { doc_id: DocId, datum_key: DatumKey }
+pub struct big_cabinet::index::datum_set::DatumSetStore  {  }
 pub struct big_cabinet::schema::SchemaHandle  {  }
-pub struct big_cabinet::schema::SchemaRegistration  { facet_tag: String, lexicon: Value }
+pub struct big_cabinet::schema::SchemaRegistration  { datum_tag: String, lexicon: Value }
 pub struct big_cabinet::schema::SchemaRegistrationGroup< 'a >  { sidecar: Option < Bundle < 'a > >, registrations: Vec < SchemaRegistration >, carried_lexicons: Vec < Value > }
 pub struct big_cabinet::schema::SchemaRepo  {  }
 pub trait big_cabinet::doc::access::DocAccess { fn prove < 'a > (& 'a self , context : & 'a RequestContext , actor : Uuid7 , scope : & 'a DocScope ,) -> AccessFuture < 'a , Vec < CapId > >; fn check < 'a > (& 'a self , context : & 'a RequestContext , actor : Uuid7 , request : AccessRequest < 'a > ,) -> AccessFuture < 'a , bool >; fn place < 'a > (& 'a self , context : & 'a RequestContext , actor : Option < Uuid7 > , document : & 'a DocId , placement : & 'a str ,) -> AccessFuture < 'a , () >; fn readable_in_drawer < 'a > (& 'a self , _context : & 'a RequestContext , _actor : Uuid7 , _drawer_id : & 'a DocId ,) -> AccessFuture < 'a , Option < BTreeSet < DocId > > >; fn scoped_docs < 'a > (& 'a self , _context : & 'a RequestContext , _drawers : & 'a BTreeMap < DocId , big_cabinet_core :: drawer :: DrawerAccess > , _documents : Option < & 'a BTreeSet < DocId > > ,) -> AccessFuture < 'a , BTreeMap < DocId , big_cabinet_core :: drawer :: DrawerAccess > >; fn subscribe_changes (& self) -> Option < tokio :: sync :: watch :: Receiver < u64 > > }
@@ -146,16 +146,16 @@ pub use big_cabinet::drawer::big_cabinet_core :: drawer :: LayoutKind
 pub use big_cabinet::drawer::self :: access :: DrawerAccess
 pub use big_cabinet::drawer::self :: access :: DrawerProvider
 pub use big_cabinet::drawer::self :: access :: DrawerWorker
-pub use big_cabinet::index :: facet_ref :: FacetRefStore
-pub use big_cabinet::index :: facet_set :: FacetSetStore
-pub use big_cabinet::index::facet_ref :: FacetRefEdge
-pub use big_cabinet::index::facet_ref :: FacetRefQuery
-pub use big_cabinet::index::facet_ref :: FacetRefStore
-pub use big_cabinet::index::facet_set :: FacetMembership
-pub use big_cabinet::index::facet_set :: FacetRecord
-pub use big_cabinet::index::facet_set :: FacetRoute
-pub use big_cabinet::index::facet_set :: FacetSetQuery
-pub use big_cabinet::index::facet_set :: FacetSetStore
+pub use big_cabinet::index :: datum_ref :: DatumRefStore
+pub use big_cabinet::index :: datum_set :: DatumSetStore
+pub use big_cabinet::index::datum_ref :: DatumRefEdge
+pub use big_cabinet::index::datum_ref :: DatumRefQuery
+pub use big_cabinet::index::datum_ref :: DatumRefStore
+pub use big_cabinet::index::datum_set :: DatumMembership
+pub use big_cabinet::index::datum_set :: DatumRecord
+pub use big_cabinet::index::datum_set :: DatumRoute
+pub use big_cabinet::index::datum_set :: DatumSetQuery
+pub use big_cabinet::index::datum_set :: DatumSetStore
 pub use big_cabinet::schema :: SchemaHandle
 pub use big_cabinet::schema :: SchemaRegistration
 pub use big_cabinet::schema :: SchemaRegistrationGroup

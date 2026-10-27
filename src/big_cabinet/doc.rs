@@ -1,4 +1,4 @@
-//! DocsRepo: documents as maps of signed facets, read and written as whole JSON values at
+//! DocsRepo: documents as maps of signed datums, read and written as whole JSON values at
 //! explicit heads.
 //!
 //! - `<op>.rs`: one file per operation — its wire types, its implementation, and its tests.
@@ -8,16 +8,16 @@
 //! - `claim_history`: reconstruction of a signed claim from the change that introduced it.
 //! - `pipeline`: the two-phase write machinery and boot recovery shared by create, write, and branch.
 //!
-//! A document is addressed by its `DocId`; its content is a map of facets, each read and
+//! A document is addressed by its `DocId`; its content is a map of datums, each read and
 //! written as one complete canonical JSON value. Every read names the document heads it is taken
 //! at and every write names the heads it is based on — current heads are an explicit choice
 //! ([`At::Current`], [`WriteMode::AtCurrent`]), never a silent default.
 //!
-//! Provenance stays inside the repository. What leaves it is a [`FacetVersion`]: the change hashes
-//! that introduced each signature currently covering the facet, plus a Lamport clock. There is one
-//! per signature, so a concurrently written facet has several. They are ordinary change hashes, so
-//! a caller can seek a facet's history with them exactly the way it seeks a document's history
-//! with document heads, and can hand them back to [`WriteMode::IfFacetsUnchanged`].
+//! Provenance stays inside the repository. What leaves it is a [`DatumVersion`]: the change hashes
+//! that introduced each signature currently covering the datum, plus a Lamport clock. There is one
+//! per signature, so a concurrently written datum has several. They are ordinary change hashes, so
+//! a caller can seek a datum's history with them exactly the way it seeks a document's history
+//! with document heads, and can hand them back to [`WriteMode::IfDatumsUnchanged`].
 //!
 //! TODO(big-repo-delete): DocsRepo exposes no Delete operation, and a partially created
 //! branch cannot be rolled back, because BigRepo has no physical document-deletion primitive —
@@ -75,14 +75,14 @@ use self::commands::Commands;
 use self::gate::DMETA_KEY;
 use self::gate::Gate;
 use self::gate::Verdict;
+use self::gate::datum_version;
 use self::gate::doc_actor;
-use self::gate::facet_version;
 use self::gate::signature_heads;
 use crate::authority::DomainAuthority;
 use crate::capability::DomainCapabilities;
 use crate::capability::Invocation;
-use crate::index::facet_ref::FacetRefStore;
-use crate::index::facet_set::FacetSetStore;
+use crate::index::datum_ref::DatumRefStore;
+use crate::index::datum_set::DatumSetStore;
 use crate::schema::SchemaHandle;
 use crate::schema::SchemaRepo;
 use automerge::Automerge;
@@ -95,7 +95,7 @@ use automerge::Value;
 use automerge::transaction::CommitOptions;
 use automerge::transaction::Transactable;
 use automerge::transaction::Transaction;
-use big_cabinet_core::FacetKey;
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AuthorityProtocol;
 use big_cabinet_core::authority::AuthorityServiceError;
@@ -105,17 +105,20 @@ use big_cabinet_core::authority::Capability;
 use big_cabinet_core::authority::Namespace;
 use big_cabinet_core::authority::ResolveActor;
 use big_cabinet_core::authority::Rights;
-use big_cabinet_core::authority::SignFacetClaim;
+use big_cabinet_core::authority::SignDatumClaim;
+use big_cabinet_core::datum::CompiledSchema;
+use big_cabinet_core::datum::hydrate_value;
+use big_cabinet_core::datum::reconcile_json_atomic;
 use big_cabinet_core::dmeta::ActorMetadata;
-use big_cabinet_core::dmeta::BRANCH_FACET_TAG;
+use big_cabinet_core::dmeta::BRANCH_DATUM_TAG;
 use big_cabinet_core::dmeta::Cid;
 use big_cabinet_core::dmeta::ClaimOperation;
-use big_cabinet_core::dmeta::DMETA_FACET_TAG;
+use big_cabinet_core::dmeta::DMETA_DATUM_TAG;
+use big_cabinet_core::dmeta::DatumClaim;
+use big_cabinet_core::dmeta::DatumMetadata;
+use big_cabinet_core::dmeta::DatumSignature;
 use big_cabinet_core::dmeta::Dmeta;
 use big_cabinet_core::dmeta::DocId;
-use big_cabinet_core::dmeta::FacetClaim;
-use big_cabinet_core::dmeta::FacetMetadata;
-use big_cabinet_core::dmeta::FacetSignature;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeReadBudget;
 use big_cabinet_core::dmeta::NativeValue;
@@ -127,47 +130,44 @@ use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::BranchDoc;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::DatumClaimEvidence;
+use big_cabinet_core::doc::DatumClaimsInspection;
+use big_cabinet_core::doc::DatumListing;
+use big_cabinet_core::doc::DatumObserved;
+use big_cabinet_core::doc::DatumRead;
+use big_cabinet_core::doc::DatumRefSelector;
+use big_cabinet_core::doc::DatumSelector;
+use big_cabinet_core::doc::DatumVersion;
+use big_cabinet_core::doc::DatumsRead;
 use big_cabinet_core::doc::DocAvailability;
 use big_cabinet_core::doc::DocScope;
 use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::doc::DocsMessage;
 use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::doc::EvidenceScope;
-use big_cabinet_core::doc::FacetClaimEvidence;
-use big_cabinet_core::doc::FacetClaimsInspection;
-use big_cabinet_core::doc::FacetListing;
-use big_cabinet_core::doc::FacetObserved;
-use big_cabinet_core::doc::FacetRead;
-use big_cabinet_core::doc::FacetRefSelector;
-use big_cabinet_core::doc::FacetSelector;
-use big_cabinet_core::doc::FacetVersion;
-use big_cabinet_core::doc::FacetsRead;
 use big_cabinet_core::doc::GetDocAvailability;
-use big_cabinet_core::doc::InspectFacetClaims;
-use big_cabinet_core::doc::ListFacets;
+use big_cabinet_core::doc::InspectDatumClaims;
+use big_cabinet_core::doc::ListDatums;
 use big_cabinet_core::doc::LocalDocUsability;
 use big_cabinet_core::doc::MergeDoc;
 use big_cabinet_core::doc::MintDocCapability;
+use big_cabinet_core::doc::ObserveDatums;
 use big_cabinet_core::doc::ObserveDocAvailability;
-use big_cabinet_core::doc::ObserveFacets;
 use big_cabinet_core::doc::ObserveScope;
-use big_cabinet_core::doc::ObservedFacet;
-use big_cabinet_core::doc::QueriedFacet;
-use big_cabinet_core::doc::QueriedFacetRef;
-use big_cabinet_core::doc::QueryFacetRefs;
-use big_cabinet_core::doc::QueryFacets;
-use big_cabinet_core::doc::ReadFacets;
+use big_cabinet_core::doc::ObservedDatum;
+use big_cabinet_core::doc::QueriedDatum;
+use big_cabinet_core::doc::QueriedDatumRef;
+use big_cabinet_core::doc::QueryDatumRefs;
+use big_cabinet_core::doc::QueryDatums;
+use big_cabinet_core::doc::ReadDatums;
 use big_cabinet_core::doc::SignatureEvidence;
 use big_cabinet_core::doc::Unaccepted;
-use big_cabinet_core::doc::UnsafeFacetInspection;
-use big_cabinet_core::doc::UnsafeInspectFacet;
+use big_cabinet_core::doc::UnsafeDatumInspection;
+use big_cabinet_core::doc::UnsafeInspectDatum;
 use big_cabinet_core::doc::VerifiedSignatureEvidence;
-use big_cabinet_core::doc::WriteFacets;
+use big_cabinet_core::doc::WriteDatums;
 use big_cabinet_core::doc::WriteMode;
 use big_cabinet_core::doc::WriteReceipt;
-use big_cabinet_core::facet::CompiledSchema;
-use big_cabinet_core::facet::hydrate_value;
-use big_cabinet_core::facet::reconcile_json_atomic;
 use big_repo::BigDocHandle;
 use big_repo::DocLookup;
 use big_repo::SharedBigRepo;
@@ -201,14 +201,14 @@ pub struct DocsConfig {
     pub node_issuer: MultibaseKey,
     pub access: Arc<dyn DocAccess>,
     pub sql: Database,
-    /// The facet-set projection backing `ObserveFacets` and `QueryFacets`, if
-    /// the embedder runs one. The embedder owns `FacetSetStore::run`; DocsRepo
-    /// only reads the committed projection. Without it, `ObserveFacets` and
-    /// `QueryFacets` are refused.
-    pub facet_set: Option<Arc<FacetSetStore>>,
-    /// The declared-reference index backing `QueryFacetRefs`, if the embedder
+    /// The datum-set projection backing `ObserveDatums` and `QueryDatums`, if
+    /// the embedder runs one. The embedder owns `DatumSetStore::run`; DocsRepo
+    /// only reads the committed projection. Without it, `ObserveDatums` and
+    /// `QueryDatums` are refused.
+    pub datum_set: Option<Arc<DatumSetStore>>,
+    /// The declared-reference index backing `QueryDatumRefs`, if the embedder
     /// runs one.
-    pub facet_ref: Option<Arc<FacetRefStore>>,
+    pub datum_ref: Option<Arc<DatumRefStore>>,
 }
 
 pub struct DocsService {
@@ -220,7 +220,7 @@ pub struct DocsService {
     capabilities: DomainCapabilities,
     inspection_capabilities: DomainCapabilities,
     /// DocsRepo's own actor, which signs `org.example.daybook.branch/<id>` on the branch and,
-    /// unless stealth, the same facet on the origin. Access is checked before either is written;
+    /// unless stealth, the same datum on the origin. Access is checked before either is written;
     /// signing them as the
     /// repository is what lets crash recovery finish a branch without the caller's capability.
     system_actor: Actor,
@@ -229,18 +229,18 @@ pub struct DocsService {
     dmeta: SchemaHandle,
     branch: SchemaHandle,
     commands: Commands,
-    facet_set: Option<Arc<FacetSetStore>>,
-    facet_ref: Option<Arc<FacetRefStore>>,
+    datum_set: Option<Arc<DatumSetStore>>,
+    datum_ref: Option<Arc<DatumRefStore>>,
     /// Spawns the service's long-lived per-subscription tasks (the
-    /// `ObserveFacets` pumps). Stopped after the host and the mint spawner,
+    /// `ObserveDatums` pumps). Stopped after the host and the mint spawner,
     /// in reverse construction order.
     tasks: Spawner,
 }
 
-fn branch_key(branch: &DocId) -> FacetKey {
-    format!("{BRANCH_FACET_TAG}/{branch}")
+fn branch_key(branch: &DocId) -> DatumKey {
+    format!("{BRANCH_DATUM_TAG}/{branch}")
         .parse()
-        .expect("a branch facet key is well formed")
+        .expect("a branch datum key is well formed")
 }
 
 /// The change on `doc` whose commit message is `command`: how a write is found after a crash.
@@ -304,15 +304,15 @@ fn resolve(doc: &Automerge, at: &At) -> Result<Vec<ChangeHash>, DocsError> {
     }
 }
 
-/// Facets only the repository writes. The branch facets are readable like any other facet; dmeta
-/// is not a signed facet and is never read through the gate.
-fn is_system(key: &FacetKey) -> bool {
-    [DMETA_FACET_TAG, BRANCH_FACET_TAG].contains(&key.tag().as_str())
+/// Datums only the repository writes. The branch datums are readable like any other datum; dmeta
+/// is not a signed datum and is never read through the gate.
+fn is_system(key: &DatumKey) -> bool {
+    [DMETA_DATUM_TAG, BRANCH_DATUM_TAG].contains(&key.tag().as_str())
 }
 
 fn unaccepted(verdict: Verdict) -> Result<Vec<ChangeHash>, Unaccepted> {
     match verdict {
-        Verdict::Accepted { facet_heads, .. } => Ok(facet_heads),
+        Verdict::Accepted { datum_heads, .. } => Ok(datum_heads),
         Verdict::Pending { reason, .. } => Err(Unaccepted::Pending { reason }),
         Verdict::Rejected { reason } => Err(Unaccepted::Rejected { reason }),
     }
@@ -438,15 +438,15 @@ impl DocsService {
     }
 }
 
-fn present_keys(doc: &Automerge, heads: &[ChangeHash]) -> Result<BTreeSet<FacetKey>, DocsError> {
-    let Some((Value::Object(ObjType::Map), facets)) = doc
-        .get_at(automerge::ROOT, "facets", heads)
+fn present_keys(doc: &Automerge, heads: &[ChangeHash]) -> Result<BTreeSet<DatumKey>, DocsError> {
+    let Some((Value::Object(ObjType::Map), datums)) = doc
+        .get_at(automerge::ROOT, "datums", heads)
         .map_err(repository)?
     else {
         return Ok(BTreeSet::new());
     };
     Ok(doc
-        .map_range_at(&facets, .., heads)
+        .map_range_at(&datums, .., heads)
         .filter(|item| item.key != DMETA_KEY)
         .filter_map(|item| item.key.parse().ok())
         .collect())
@@ -457,19 +457,19 @@ service_utils_rs::bind_service_protocol! {
         unary {
             MintDocCapability(MintDocCapability),
             CreateDoc(CreateDoc),
-            WriteFacets(WriteFacets),
+            WriteDatums(WriteDatums),
             BranchDoc(BranchDoc),
             MergeDoc(MergeDoc),
-            ReadFacets(ReadFacets),
-            ListFacets(ListFacets),
-            QueryFacets(QueryFacets),
-            QueryFacetRefs(QueryFacetRefs),
-            UnsafeInspectFacet(UnsafeInspectFacet),
-            InspectFacetClaims(InspectFacetClaims),
+            ReadDatums(ReadDatums),
+            ListDatums(ListDatums),
+            QueryDatums(QueryDatums),
+            QueryDatumRefs(QueryDatumRefs),
+            UnsafeInspectDatum(UnsafeInspectDatum),
+            InspectDatumClaims(InspectDatumClaims),
             GetDocAvailability(GetDocAvailability)
         }
         stream {
-            ObserveFacets(ObserveFacets),
+            ObserveDatums(ObserveDatums),
             ObserveDocAvailability(ObserveDocAvailability)
         }
     }
@@ -557,9 +557,9 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
         config
             .schema_repo
             .resolve_for_read(tag)
-            .expect("SchemaRepo always registers the core facets")
+            .expect("SchemaRepo always registers the core datums")
     };
-    let (dmeta, branch) = (core(DMETA_FACET_TAG), core(BRANCH_FACET_TAG));
+    let (dmeta, branch) = (core(DMETA_DATUM_TAG), core(BRANCH_DATUM_TAG));
     let (service_stop, service_spawner) = StopToken::new();
     let service = Arc::new(DocsService {
         big_repo: config.big_repo,
@@ -583,8 +583,8 @@ pub async fn prepare(config: DocsConfig) -> Result<(DocsRepo, StopToken), DocsEr
         dmeta,
         branch,
         commands: Commands::open(config.sql).await?,
-        facet_set: config.facet_set,
-        facet_ref: config.facet_ref,
+        datum_set: config.datum_set,
+        datum_ref: config.datum_ref,
         tasks: service_spawner,
     });
     let (mint_stop, mint_spawner) = StopToken::new();
@@ -705,9 +705,9 @@ mod tests {
             WriteMode::IfDocUnchanged { heads: vec![ChangeHash([2; 32])] },
             serde_json::json!({"mode": "ifDocUnchanged", "heads": [ChangeHash([2; 32])]})
         ),
-        if_facets_unchanged: (
-            WriteMode::IfFacetsUnchanged { facets: BTreeMap::from([(FacetKey::from_text("note", "a").expect("facet key"), FacetVersion { heads: vec![ChangeHash([3; 32])], clock: 7 })]) },
-            serde_json::json!({"mode": "ifFacetsUnchanged", "facets": {"note/a": {"heads": [ChangeHash([3; 32])], "clock": 7}}})
+        if_datums_unchanged: (
+            WriteMode::IfDatumsUnchanged { datums: BTreeMap::from([(DatumKey::from_text("note", "a").expect("datum key"), DatumVersion { heads: vec![ChangeHash([3; 32])], clock: 7 })]) },
+            serde_json::json!({"mode": "ifDatumsUnchanged", "datums": {"note/a": {"heads": [ChangeHash([3; 32])], "clock": 7}}})
         ),
         at_heads: (
             WriteMode::AtHeads { heads: vec![ChangeHash([4; 32])] },

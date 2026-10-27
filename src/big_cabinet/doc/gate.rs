@@ -1,21 +1,21 @@
-//! The read and write gate: is facet X at heads H exactly what valid signatures say it is?
+//! The read and write gate: is datum X at heads H exactly what valid signatures say it is?
 //!
-//! Every change that modifies a facet's content also introduces a signature on that facet, and the
-//! signature covers the facet's value as that change left it. The facet's **facet heads** are the
+//! Every change that modifies a datum's content also introduces a signature on that datum, and the
+//! signature covers the datum's value as that change left it. The datum's **datum heads** are the
 //! introductions of the signatures currently covering it. X at H is accepted when:
 //!
 //! 1. **The current signatures verify.** Each claim, reconstructed at its introduction, matches the
 //!    signed bytes, and the actor's attribution certificate verifies against the node that made
-//!    the change. A proven-invalid current entry rejects that facet.
+//!    the change. A proven-invalid current entry rejects that datum.
 //! 2. **Nothing touched X outside them.** Every change in H's history that touched X and is not
-//!    already beneath the facet heads must itself introduce a valid signature on X. A change that
+//!    already beneath the datum heads must itself introduce a valid signature on X. A change that
 //!    touched X without signing it — even one whose value lost an Automerge conflict and is not
-//!    visible at H — is a forgery and rejects the facet.
-//! 3. **The value is what they signed.** The value at H equals the value at the facet heads, i.e.
+//!    visible at H — is a forgery and rejects the datum.
+//! 3. **The value is what they signed.** The value at H equals the value at the datum heads, i.e.
 //!    the signed values merged by Automerge's own rules. This stops signature entries from being
 //!    deleted out from under a value.
 //!
-//! Changes beneath the facet heads are not re-examined: whoever signed on top of them passed this
+//! Changes beneath the datum heads are not re-examined: whoever signed on top of them passed this
 //! same gate for their base first. That is why a hidden unsigned contribution cannot be laundered.
 //! An honest writer's base check sees it (it is not beneath the signatures that existed then) and
 //! refuses to sign; only a writer bypassing the gate could sign over it, and their signature is
@@ -24,7 +24,7 @@
 //!
 //! Pending means verification could not complete; it never means part of an applied change may
 //! arrive later. Missing document metadata or attribution certificates are malformed, not pending.
-//! Checks are facet-local: a forgery in another facet changes nothing here.
+//! Checks are datum-local: a forgery in another datum changes nothing here.
 
 use super::claim_history::ClaimHistoryError;
 use super::claim_history::ClaimHistoryResult;
@@ -42,19 +42,19 @@ use automerge::legacy::Key;
 use automerge::legacy::ObjectId;
 use automerge::legacy::OpId;
 use automerge::legacy::OpType;
-use big_cabinet_core::FacetKey;
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::dmeta::ActorMetadata;
 use big_cabinet_core::dmeta::Attribution;
 use big_cabinet_core::dmeta::AttributionError;
 use big_cabinet_core::dmeta::ClaimOperation;
-use big_cabinet_core::dmeta::DMETA_FACET_TAG;
+use big_cabinet_core::dmeta::DMETA_DATUM_TAG;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::MultibaseKey;
 use big_cabinet_core::dmeta::NativeReadBudget;
 use big_cabinet_core::dmeta::NativeValue;
 use big_cabinet_core::dmeta::cid_of;
 use big_cabinet_core::dmeta::encode_native;
-use big_cabinet_core::doc::FacetVersion;
+use big_cabinet_core::doc::DatumVersion;
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -65,12 +65,12 @@ pub(super) const DMETA_KEY: &str = "org.example.daybook.dmeta/main";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Verdict {
     Accepted {
-        facet_heads: Vec<ChangeHash>,
+        datum_heads: Vec<ChangeHash>,
         native: Option<Vec<u8>>,
     },
     Pending {
         reason: String,
-        facet_heads: Vec<ChangeHash>,
+        datum_heads: Vec<ChangeHash>,
     },
     Rejected {
         reason: String,
@@ -99,11 +99,11 @@ pub(crate) struct Gate<'a> {
 }
 
 enum Role {
-    Facets,
+    Datums,
     Slot(String),
     Dmeta,
-    DmetaFacets,
-    FacetMeta(String),
+    DmetaDatums,
+    DatumMeta(String),
     Signatures(String),
 }
 
@@ -117,8 +117,8 @@ impl<'a> Gate<'a> {
         }
     }
 
-    /// One pass over H's history records, per facet key, which changes touched the facet's
-    /// content and which introduced a signature on it. Computed lazily: a facet whose signature
+    /// One pass over H's history records, per datum key, which changes touched the datum's
+    /// content and which introduced a signature on it. Computed lazily: a datum whose signature
     /// heads already cover `self.heads` has no uncovered history to inspect.
     fn footprints(&self) -> &Footprints {
         self.footprints.get_or_init(|| {
@@ -156,10 +156,10 @@ impl<'a> Gate<'a> {
                         Key::Seq(_) => None,
                     };
                     let shared = match (&op.obj, key) {
-                        (ObjectId::Root, Some("facets")) => true,
+                        (ObjectId::Root, Some("datums")) => true,
                         (ObjectId::Id(parent), Some(key)) => matches!(
                             (roles.get(parent), key),
-                            (Some(Role::Facets), DMETA_KEY) | (Some(Role::Dmeta), "facets")
+                            (Some(Role::Datums), DMETA_KEY) | (Some(Role::Dmeta), "datums")
                         ),
                         _ => false,
                     };
@@ -168,12 +168,12 @@ impl<'a> Gate<'a> {
                     }
                     let role = match &op.obj {
                         ObjectId::Root => match (key, &op.action) {
-                            (Some("facets"), OpType::Make(ObjType::Map)) => Some(Role::Facets),
+                            (Some("datums"), OpType::Make(ObjType::Map)) => Some(Role::Datums),
                             _ => None,
                         },
                         ObjectId::Id(parent) => match roles.get(parent) {
                             None => None,
-                            Some(Role::Facets) => match key {
+                            Some(Role::Datums) => match key {
                                 Some(DMETA_KEY) => matches!(op.action, OpType::Make(ObjType::Map))
                                     .then_some(Role::Dmeta),
                                 Some(slot) => {
@@ -187,18 +187,18 @@ impl<'a> Gate<'a> {
                                 touch(&mut by_slot, &slot, change_idx);
                                 made.then_some(Role::Slot(slot))
                             }
-                            Some(Role::Dmeta) => (key == Some("facets")
+                            Some(Role::Dmeta) => (key == Some("datums")
                                 && matches!(op.action, OpType::Make(ObjType::Map)))
-                            .then_some(Role::DmetaFacets),
-                            Some(Role::DmetaFacets) => match key {
+                            .then_some(Role::DmetaDatums),
+                            Some(Role::DmetaDatums) => match key {
                                 Some(slot) => {
                                     touch(&mut by_slot, slot, change_idx);
                                     matches!(op.action, OpType::Make(ObjType::Map))
-                                        .then(|| Role::FacetMeta(slot.to_owned()))
+                                        .then(|| Role::DatumMeta(slot.to_owned()))
                                 }
                                 None => None,
                             },
-                            Some(Role::FacetMeta(slot)) => {
+                            Some(Role::DatumMeta(slot)) => {
                                 if key == Some("signatures") {
                                     touch(&mut by_slot, slot, change_idx);
                                     matches!(op.action, OpType::Make(ObjType::List))
@@ -235,26 +235,26 @@ impl<'a> Gate<'a> {
         })
     }
 
-    /// Every facet key touched in `heads`'s history, including slots later deleted.
-    pub(super) fn keys(&self) -> impl Iterator<Item = FacetKey> + '_ {
+    /// Every datum key touched in `heads`'s history, including slots later deleted.
+    pub(super) fn keys(&self) -> impl Iterator<Item = DatumKey> + '_ {
         self.footprints()
             .by_slot
             .keys()
             .filter_map(|key| key.parse().ok())
     }
 
-    pub(crate) fn verify(&self, key: &FacetKey) -> Verdict {
+    pub(crate) fn verify(&self, key: &DatumKey) -> Verdict {
         assert_ne!(
             key.tag().as_str(),
-            DMETA_FACET_TAG,
-            "dmeta is not a signed facet"
+            DMETA_DATUM_TAG,
+            "dmeta is not a signed datum"
         );
         let mut pending: Option<String> = None;
         let entries = match reconstruct_current_claims(self.doc, key, self.heads, self.budget) {
             Ok(entries) => entries,
             Err(error) => return unreadable(error),
         };
-        let mut facet_heads = BTreeSet::new();
+        let mut datum_heads = BTreeSet::new();
         let mut single_claim_native: Option<(ChangeHash, Option<Vec<u8>>)> = None;
         let entries_len = entries.len();
         for entry in entries {
@@ -270,21 +270,21 @@ impl<'a> Gate<'a> {
             }
             match self.claim_status(entry.result) {
                 Status::Valid => {
-                    facet_heads.insert(introduction);
+                    datum_heads.insert(introduction);
                 }
                 Status::Pending(reason) => {
-                    facet_heads.insert(introduction);
+                    datum_heads.insert(introduction);
                     pending.get_or_insert(reason);
                 }
                 Status::Invalid(reason) => return Verdict::Rejected { reason },
             }
         }
-        let heads_all_covered = self.heads.iter().all(|head| facet_heads.contains(head));
+        let heads_all_covered = self.heads.iter().all(|head| datum_heads.contains(head));
         if !heads_all_covered {
             let footprints = self.footprints();
             if let Some(footprint) = footprints.by_slot.get(&key.to_string()) {
                 let mut covered = vec![false; footprints.hashes.len()];
-                let mut stack: Vec<usize> = facet_heads
+                let mut stack: Vec<usize> = datum_heads
                     .iter()
                     .filter_map(|head| footprints.index_of.get(head).copied())
                     .collect();
@@ -304,7 +304,7 @@ impl<'a> Gate<'a> {
                     if !footprint.signed.contains(&change_idx) {
                         return Verdict::Rejected {
                             reason: format!(
-                                "change {change} modified the facet without signing it"
+                                "change {change} modified the datum without signing it"
                             ),
                         };
                     }
@@ -324,20 +324,20 @@ impl<'a> Gate<'a> {
                 }
             }
         }
-        let facet_heads: Vec<_> = facet_heads.into_iter().collect();
-        let signed = if facet_heads.is_empty() {
+        let datum_heads: Vec<_> = datum_heads.into_iter().collect();
+        let signed = if datum_heads.is_empty() {
             None
         } else if let Some((intro, native)) = single_claim_native
-            && facet_heads.as_slice() == [intro]
+            && datum_heads.as_slice() == [intro]
         {
             native
         } else {
-            match self.native(key, &facet_heads) {
+            match self.native(key, &datum_heads) {
                 Ok(native) => native,
                 Err(error) => return unreadable(error),
             }
         };
-        let current = if self.heads == facet_heads.as_slice() {
+        let current = if self.heads == datum_heads.as_slice() {
             signed.clone()
         } else {
             match self.native(key, self.heads) {
@@ -353,10 +353,10 @@ impl<'a> Gate<'a> {
         match pending {
             Some(reason) => Verdict::Pending {
                 reason,
-                facet_heads,
+                datum_heads,
             },
             None => Verdict::Accepted {
-                facet_heads,
+                datum_heads,
                 native: current,
             },
         }
@@ -364,14 +364,14 @@ impl<'a> Gate<'a> {
 
     fn native(
         &self,
-        key: &FacetKey,
+        key: &DatumKey,
         heads: &[ChangeHash],
     ) -> Result<Option<Vec<u8>>, ClaimHistoryError> {
-        let Some((value, facets)) = self.doc.get_at(automerge::ROOT, "facets", heads)? else {
+        let Some((value, datums)) = self.doc.get_at(automerge::ROOT, "datums", heads)? else {
             return Ok(None);
         };
         if value != Value::Object(ObjType::Map) {
-            return Err(ClaimHistoryError::MalformedWitness("facets map"));
+            return Err(ClaimHistoryError::MalformedWitness("datums map"));
         }
         let mut budget = NativeReadBudget {
             nodes: self.budget.max_value_nodes,
@@ -379,7 +379,7 @@ impl<'a> Gate<'a> {
             max_depth: self.budget.max_depth,
         };
         Ok(
-            NativeValue::read_at_heads(self.doc, &facets, key.to_string(), heads, &mut budget)?
+            NativeValue::read_at_heads(self.doc, &datums, key.to_string(), heads, &mut budget)?
                 .map(|native| encode_native(&native)),
         )
     }
@@ -389,7 +389,7 @@ impl<'a> Gate<'a> {
             ClaimHistoryResult::Accepted(claim) => {
                 if claim.signature.inherited.is_some() {
                     let native = match self
-                        .native(&claim.claim.facet_key, &claim.introduction.resulting_heads)
+                        .native(&claim.claim.datum_key, &claim.introduction.resulting_heads)
                     {
                         Ok(native) => native,
                         Err(error) => {
@@ -536,22 +536,22 @@ fn unreadable(error: ClaimHistoryError) -> Verdict {
         ClaimHistoryError::ResourceRefused(_) | ClaimHistoryError::Unsupported(_) => {
             Verdict::Pending {
                 reason: describe(&error),
-                facet_heads: Vec::new(),
+                datum_heads: Vec::new(),
             }
         }
     }
 }
 
-/// The version a set of facet heads names: those heads plus their Lamport
+/// The version a set of datum heads names: those heads plus their Lamport
 /// clock (the greatest `max_op` among the introducing changes).
-pub(super) fn facet_version(doc: &Automerge, heads: Vec<ChangeHash>) -> FacetVersion {
+pub(super) fn datum_version(doc: &Automerge, heads: Vec<ChangeHash>) -> DatumVersion {
     let clock = heads
         .iter()
         .filter_map(|head| doc.get_change_by_hash(head))
         .map(|change| change.max_op())
         .max()
         .unwrap_or(0);
-    FacetVersion { heads, clock }
+    DatumVersion { heads, clock }
 }
 
 /// The introductions of the signature entries on `key` visible at `heads`, without verifying any of
@@ -561,7 +561,7 @@ pub(super) fn facet_version(doc: &Automerge, heads: Vec<ChangeHash>) -> FacetVer
 /// unreadable container is reported as an absent slot rather than turned into a verification error.
 pub(super) fn signature_heads(
     doc: &Automerge,
-    key: &FacetKey,
+    key: &DatumKey,
     heads: &[ChangeHash],
 ) -> Vec<ChangeHash> {
     let maps = |object: &automerge::ObjId, prop: &str| -> Vec<automerge::ObjId> {
@@ -574,12 +574,12 @@ pub(super) fn signature_heads(
     };
     let key = key.to_string();
     let mut found = BTreeSet::new();
-    for facets in maps(&automerge::ROOT, "facets") {
-        for dmeta in maps(&facets, DMETA_KEY) {
-            for metadata in maps(&dmeta, "facets") {
-                for facet in maps(&metadata, &key) {
+    for datums in maps(&automerge::ROOT, "datums") {
+        for dmeta in maps(&datums, DMETA_KEY) {
+            for metadata in maps(&dmeta, "datums") {
+                for datum in maps(&metadata, &key) {
                     for (value, list) in doc
-                        .get_all_at(&facet, "signatures", heads)
+                        .get_all_at(&datum, "signatures", heads)
                         .unwrap_or_default()
                     {
                         if value != Value::Object(ObjType::List) {

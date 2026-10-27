@@ -1,15 +1,15 @@
 use super::*;
 #[cfg(feature = "schemars")]
-use crate::facet::FacetShape;
+use crate::datum::DatumShape;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
 
-use crate::FacetReference;
+use crate::DatumReference;
 use crate::ReferenceDocId;
 use crate::ReferenceError;
 
-fn facet_key(value: &str) -> FacetKey {
-    FacetKey::from_str(value).unwrap()
+fn datum_key(value: &str) -> DatumKey {
+    DatumKey::from_str(value).unwrap()
 }
 
 const PORTABLE_PROOF: &str = r#"{
@@ -25,18 +25,18 @@ const PORTABLE_PROOF: &str = r#"{
         "branchUuids": {
             "01890f3e-1234-7000-8000-000000000009": "zajdk"
         },
-        "facetUuids": {
+        "datumUuids": {
             "01890f3e-1234-7000-8000-000000000001": "org.example.note/main"
         },
-        "facets": {
+        "datums": {
             "org.example.note/main": {
                 "updatedAt": [],
                 "deletedAt": [],
                 "signatures": [{
                     "actorUuid": "01890f3e-1234-7000-8000-000000000002",
                     "docUuid": "01890f3e-1234-7000-8000-000000000009",
-                    "signature": {"$bytes": "7OJ5Fpuon7QCm9iAUz+gJ7ePC9pXGDQYBu8GxSthtkEzcmogHSGTzh8Pr+G1AvIdOK2QqQ+qr2+58orrETzcBQ=="},
-                    "message": {"$bytes": "ZGF5Ym9vay5mYWNldC1jbGFpbS52MgCHZXphamRrdW9yZy5leGFtcGxlLm5vdGUvbWFpblABiQ8+EjRwAIAAAAAAAAABUAGJDz4SNHAAgAAAAAAAAAIAWCQBVR4gLWvLu8YEORo43f1WfOLngEcapPP3vFmdHGSY17U+tsaA"}
+                    "signature": {"$bytes": "0OfFbepD8pkizr9CzZzifZowUUEIgKyjSsnE/TrBs+sjFi+2cozVHjaf6O/w/6mPoZ4+phKLY+MzNbo6/vv6AQ=="},
+                    "message": {"$bytes": "ZGF5Ym9vay5kYXR1bS1jbGFpbS52MgCHZXphamRrdW9yZy5leGFtcGxlLm5vdGUvbWFpblABiQ8+EjRwAIAAAAAAAAABUAGJDz4SNHAAgAAAAAAAAAIAWCQBVR4gLWvLu8YEORo43f1WfOLngEcapPP3vFmdHGSY17U+tsaA"}
                 }]
             }
         }
@@ -56,10 +56,10 @@ fn native_value() -> NativeValue {
     ]))
 }
 
-fn claim_for(value: &NativeValue) -> FacetClaim {
-    FacetClaim {
+fn claim_for(value: &NativeValue) -> DatumClaim {
+    DatumClaim {
         origin_document: DocId::new(b"doc"),
-        facet_key: facet_key("org.example.note/main"),
+        datum_key: datum_key("org.example.note/main"),
         chosen_uuid: uuid7(1),
         actor_uuid: uuid7(2),
         operation: ClaimOperation::Set,
@@ -68,7 +68,7 @@ fn claim_for(value: &NativeValue) -> FacetClaim {
     }
 }
 
-fn signed_entry(claim: &FacetClaim) -> (ActorMetadata, FacetSignature) {
+fn signed_entry(claim: &DatumClaim) -> (ActorMetadata, DatumSignature) {
     let key = SigningKey::from_bytes(&[7; 32]);
     (
         ActorMetadata {
@@ -76,7 +76,7 @@ fn signed_entry(claim: &FacetClaim) -> (ActorMetadata, FacetSignature) {
             actor_url: "did:key:test".into(),
             delegation: None,
         },
-        FacetSignature {
+        DatumSignature {
             actor_uuid: claim.actor_uuid,
             doc_uuid: uuid7(9),
             signature: SignatureBytes::try_from(
@@ -98,15 +98,15 @@ fn cid_with(byte: u8) -> Cid {
 #[test]
 fn aliases_retain_concurrency_without_a_reverse_index() {
     let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
-    let key = facet_key("org.example.note/main");
-    dmeta.record_facet_alias(uuid7(2), key.clone()).unwrap();
+    let key = datum_key("org.example.note/main");
+    dmeta.record_datum_alias(uuid7(2), key.clone()).unwrap();
     assert!(!dmeta.has_concurrent_creation(&key));
-    dmeta.record_facet_alias(uuid7(1), key.clone()).unwrap();
+    dmeta.record_datum_alias(uuid7(1), key.clone()).unwrap();
     assert!(dmeta.has_concurrent_creation(&key));
-    assert!(!dmeta.has_concurrent_creation(&facet_key("org.example.note/other")));
+    assert!(!dmeta.has_concurrent_creation(&datum_key("org.example.note/other")));
     // The chosen alias is the smallest one visible, and it falls out of the index order.
     let chosen = dmeta
-        .facet_uuids
+        .datum_uuids
         .iter()
         .filter(|(_, alias)| **alias == key)
         .map(|(uuid, _)| *uuid)
@@ -120,15 +120,15 @@ fn aliases_retain_concurrency_without_a_reverse_index() {
 }
 
 #[test]
-fn a_facet_alias_can_be_repeated_but_never_rebound() {
+fn a_datum_alias_can_be_repeated_but_never_rebound() {
     let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
-    let key = facet_key("org.example.note/main");
-    dmeta.record_facet_alias(uuid7(1), key.clone()).unwrap();
+    let key = datum_key("org.example.note/main");
+    dmeta.record_datum_alias(uuid7(1), key.clone()).unwrap();
     let original = dmeta.clone();
-    dmeta.record_facet_alias(uuid7(1), key).unwrap();
+    dmeta.record_datum_alias(uuid7(1), key).unwrap();
     assert_eq!(dmeta, original);
     assert!(matches!(
-        dmeta.record_facet_alias(uuid7(1), facet_key("org.example.note/other")),
+        dmeta.record_datum_alias(uuid7(1), datum_key("org.example.note/other")),
         Err(DmetaError::ReboundAlias)
     ));
     assert_eq!(dmeta, original);
@@ -160,7 +160,7 @@ fn uuid7_is_validated_in_values_and_metadata_map_keys() {
             Err(DmetaError::InvalidUuidVersion)
         ));
         assert!(serde_json::from_value::<Uuid7>(serde_json::json!(invalid)).is_err());
-        for member in ["actors", "facetUuids"] {
+        for member in ["actors", "datumUuids"] {
             let mut malformed = fixture.clone();
             let map = malformed[member].as_object_mut().unwrap();
             let valid_key = map.keys().next().unwrap().clone();
@@ -168,15 +168,15 @@ fn uuid7_is_validated_in_values_and_metadata_map_keys() {
             assert!(map.insert(invalid.into(), value).is_none());
             assert!(serde_json::from_value::<Dmeta>(malformed).is_err());
         }
-        let mut malformed = fixture["facets"]["org.example.note/main"]["signatures"][0].clone();
+        let mut malformed = fixture["datums"]["org.example.note/main"]["signatures"][0].clone();
         malformed["actorUuid"] = serde_json::json!(invalid);
-        assert!(serde_json::from_value::<FacetSignature>(malformed).is_err());
+        assert!(serde_json::from_value::<DatumSignature>(malformed).is_err());
     }
 }
 
 #[test]
 fn deleted_at_is_a_required_list_even_when_empty() {
-    let metadata = FacetMetadata {
+    let metadata = DatumMetadata {
         updated_at: Vec::new(),
         deleted_at: Vec::new(),
         signatures: Vec::new(),
@@ -184,11 +184,11 @@ fn deleted_at_is_a_required_list_even_when_empty() {
     let json = serde_json::json!({"updatedAt": [], "deletedAt": [], "signatures": []});
     assert_eq!(serde_json::to_value(&metadata).unwrap(), json);
     assert_eq!(
-        serde_json::from_value::<FacetMetadata>(json).unwrap(),
+        serde_json::from_value::<DatumMetadata>(json).unwrap(),
         metadata
     );
     assert_eq!(
-        serde_json::from_value::<FacetMetadata>(serde_json::json!({"deletedAt": []})).unwrap(),
+        serde_json::from_value::<DatumMetadata>(serde_json::json!({"deletedAt": []})).unwrap(),
         metadata
     );
     for malformed in [
@@ -197,27 +197,27 @@ fn deleted_at_is_a_required_list_even_when_empty() {
         serde_json::json!({"deletedAt": null}),
         serde_json::json!({"deletedAt": "1970-01-01T00:00:00Z"}),
     ] {
-        assert!(serde_json::from_value::<FacetMetadata>(malformed).is_err());
+        assert!(serde_json::from_value::<DatumMetadata>(malformed).is_err());
     }
 }
 
 #[cfg(feature = "schemars")]
 #[test]
-fn dmeta_publishes_as_an_ordinary_facet() {
-    let declaration = crate::facet::Declaration::of::<Dmeta>().expect("dmeta is lexicon-aligned");
-    assert_eq!(declaration.facet.id, DMETA_FACET_TAG);
+fn dmeta_publishes_as_an_ordinary_datum() {
+    let declaration = crate::datum::Declaration::of::<Dmeta>().expect("dmeta is lexicon-aligned");
+    assert_eq!(declaration.datum.id, DMETA_DATUM_TAG);
     assert_eq!(
         Dmeta::SHAPE,
-        crate::facet::Shape::Object {
-            openness: crate::facet::Openness::Open
+        crate::datum::Shape::Object {
+            openness: crate::datum::Openness::Open
         }
     );
-    let universe = crate::facet::Universe::collect(vec![declaration]);
-    let published = crate::facet::Bundle::new(&universe, Vec::new())
+    let universe = crate::datum::Universe::collect(vec![declaration]);
+    let published = crate::datum::Bundle::new(&universe, Vec::new())
         .lexicons()
         .expect("an aligned declaration publishes");
     assert_eq!(published.len(), 1);
-    assert_eq!(published[0].file["id"], DMETA_FACET_TAG);
+    assert_eq!(published[0].file["id"], DMETA_DATUM_TAG);
     assert_eq!(published[0].file["defs"]["main"]["type"], "object");
 }
 
@@ -237,7 +237,7 @@ fn actor_keys_are_multibase_but_signatures_are_fixed_length_bytes() {
     assert!(format!("{text}1").parse::<MultibaseKey>().is_err());
 
     let fixture: serde_json::Value = serde_json::from_str(PORTABLE_PROOF).unwrap();
-    let json = fixture["facets"]["org.example.note/main"]["signatures"][0]["signature"].clone();
+    let json = fixture["datums"]["org.example.note/main"]["signatures"][0]["signature"].clone();
     let signature: SignatureBytes = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(signature.as_bytes().len(), 64);
     assert_eq!(serde_json::to_value(&signature).unwrap(), json);
@@ -304,7 +304,7 @@ fn claim_cbor_and_openssl_ed25519_vectors_are_stable() {
         )
         .unwrap();
     assert_eq!(claim.cbor_fields().unwrap(), expected_cbor);
-    assert_eq!(FacetClaim::from_cbor_fields(&expected_cbor).unwrap(), claim);
+    assert_eq!(DatumClaim::from_cbor_fields(&expected_cbor).unwrap(), claim);
     let independently_decoded: Cbor = ciborium::from_reader(&expected_cbor[..]).unwrap();
     assert_eq!(
         independently_decoded,
@@ -319,7 +319,7 @@ fn claim_cbor_and_openssl_ed25519_vectors_are_stable() {
         ])
     );
     let fixture: Dmeta = serde_json::from_str(PORTABLE_PROOF).unwrap();
-    let entry = &fixture.facets[&claim.facet_key].signatures[0];
+    let entry = &fixture.datums[&claim.datum_key].signatures[0];
     assert_eq!(
         claim.signing_bytes().unwrap(),
         entry.message.as_ref().unwrap().as_slice()
@@ -339,7 +339,7 @@ fn real_ed25519_vector_rejects_tampering_with_every_signed_field() {
     wrong.origin_document = DocId::new(b"another-document");
     altered.push(wrong);
     let mut wrong = claim.clone();
-    wrong.facet_key = facet_key("org.example.note/mainx");
+    wrong.datum_key = datum_key("org.example.note/mainx");
     altered.push(wrong);
     let mut wrong = claim.clone();
     wrong.chosen_uuid = uuid7(3);
@@ -358,13 +358,13 @@ fn real_ed25519_vector_rejects_tampering_with_every_signed_field() {
     wrong.predecessors.push(cid_with(1));
     altered.push(wrong);
     for wrong in altered {
-        let forged = SignedFacetClaim {
+        let forged = SignedDatumClaim {
             claim: wrong.clone(),
             ..signed.clone()
         };
         assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
         assert!(matches!(
-            SignedFacetClaim::from_signature(wrong, actor.pubkey.clone(), entry.signature.clone()),
+            SignedDatumClaim::from_signature(wrong, actor.pubkey.clone(), entry.signature.clone()),
             Err(DmetaError::InvalidSignature)
         ));
     }
@@ -405,20 +405,20 @@ fn an_inherited_historical_witness_does_not_cover_changed_current_content() {
     entry.inherited = Some(witness);
     let signed = entry.authenticate(&actor, None).unwrap();
     assert_eq!(
-        signed.value_evidence(FacetValue::Present(&value)),
+        signed.value_evidence(DatumValue::Present(&value)),
         Evidence::Present
     );
     entry.inherited.as_mut().unwrap().value = Some(Bytes::from(encode_native(&value)));
     assert_eq!(entry.authenticate(&actor, Some(&claim)).unwrap(), signed);
     assert_eq!(
-        signed.value_evidence(FacetValue::Present(&changed)),
+        signed.value_evidence(DatumValue::Present(&changed)),
         Evidence::Invalid
     );
     assert_eq!(
         fold_checks(SignatureChecks {
             message: Evidence::Present,
             attribution: Evidence::Present,
-            value: signed.value_evidence(FacetValue::Present(&changed)),
+            value: signed.value_evidence(DatumValue::Present(&changed)),
         }),
         VerificationState::Uncovered
     );
@@ -426,12 +426,12 @@ fn an_inherited_historical_witness_does_not_cover_changed_current_content() {
         fold_checks(SignatureChecks {
             message: Evidence::Present,
             attribution: Evidence::Missing,
-            value: signed.value_evidence(FacetValue::Present(&value)),
+            value: signed.value_evidence(DatumValue::Present(&value)),
         }),
         VerificationState::Pending
     );
     assert_eq!(
-        signed.value_evidence(FacetValue::Missing),
+        signed.value_evidence(DatumValue::Missing),
         Evidence::Missing
     );
     let mut forged = entry.clone();
@@ -440,7 +440,7 @@ fn an_inherited_historical_witness_does_not_cover_changed_current_content() {
         forged.authenticate(&actor, None),
         Err(DmetaError::WrongContext)
     ));
-    let remove = FacetClaim {
+    let remove = DatumClaim {
         operation: ClaimOperation::Remove,
         value_cid: None,
         ..claim.clone()
@@ -458,15 +458,15 @@ fn an_inherited_historical_witness_does_not_cover_changed_current_content() {
     remove_entry.inherited.as_mut().unwrap().value = None;
     let signed_remove = remove_entry.authenticate(&actor, None).unwrap();
     assert_eq!(
-        signed_remove.value_evidence(FacetValue::Removed),
+        signed_remove.value_evidence(DatumValue::Removed),
         Evidence::Present
     );
     assert_eq!(
-        signed_remove.value_evidence(FacetValue::Present(&value)),
+        signed_remove.value_evidence(DatumValue::Present(&value)),
         Evidence::Invalid
     );
     assert_eq!(
-        signed_remove.value_evidence(FacetValue::Missing),
+        signed_remove.value_evidence(DatumValue::Missing),
         Evidence::Missing
     );
     entry.inherited = None;
@@ -522,12 +522,12 @@ fn a_valid_replacement_can_name_rejected_ancestry_without_accepting_it() {
     let rejected = fold_checks(SignatureChecks {
         message: Evidence::Invalid,
         attribution: Evidence::Present,
-        value: forged.value_evidence(FacetValue::Present(&old_value)),
+        value: forged.value_evidence(DatumValue::Present(&old_value)),
     });
     assert_eq!(rejected, VerificationState::Rejected);
     let forged_id = forged.signature_id().unwrap();
     let new_value = NativeValue::Bytes(vec![0, 255, 42]);
-    let replacement = FacetClaim {
+    let replacement = DatumClaim {
         predecessors: vec![forged_id.clone()],
         ..claim_for(&new_value)
     };
@@ -538,15 +538,15 @@ fn a_valid_replacement_can_name_rejected_ancestry_without_accepting_it() {
     let accepted = fold_checks(SignatureChecks {
         message: Evidence::Present,
         attribution: Evidence::Present,
-        value: signed.value_evidence(FacetValue::Present(&new_value)),
+        value: signed.value_evidence(DatumValue::Present(&new_value)),
     });
     assert_eq!(accepted, VerificationState::Accepted);
     assert_eq!(
-        facet_verification([rejected, accepted]),
+        datum_verification([rejected, accepted]),
         VerificationState::Accepted
     );
     assert_eq!(
-        facet_verification([accepted, rejected]),
+        datum_verification([accepted, rejected]),
         VerificationState::Accepted
     );
     assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
@@ -564,15 +564,15 @@ fn a_static_openssl_proof_round_trips_and_verifies_without_document_history() {
     assert_eq!(restored, fixture);
     let value = native_value();
     let claim = claim_for(&value);
-    assert_eq!(restored.facet_uuids[&claim.chosen_uuid], claim.facet_key);
-    let entry = &restored.facets[&claim.facet_key].signatures[0];
+    assert_eq!(restored.datum_uuids[&claim.chosen_uuid], claim.datum_key);
+    let entry = &restored.datums[&claim.datum_key].signatures[0];
     let actor = &restored.actors[&entry.actor_uuid];
     assert_eq!(actor.delegation, Some(Bytes::from(vec![1, 2, 3, 255])));
     let signed = entry.authenticate(actor, None).unwrap();
     assert_eq!(signed.claim, claim);
     signed.verify().unwrap();
     let expected_id = data_encoding::HEXLOWER
-        .decode(b"01551e20776f47997358fee3b289570cf1a2ef3104a2bbc4c623875c1324bf1fad6b828c")
+        .decode(b"01551e20a6f76489de0820e0e659c1249d704303090a83a6375c272eccac2eeb1bda4bfa")
         .unwrap();
     assert_eq!(
         signed.signature_id().unwrap().as_bytes().as_slice(),
@@ -582,7 +582,7 @@ fn a_static_openssl_proof_round_trips_and_verifies_without_document_history() {
         fold_checks(SignatureChecks {
             message: Evidence::Present,
             attribution: Evidence::Present,
-            value: signed.value_evidence(FacetValue::Present(&value)),
+            value: signed.value_evidence(DatumValue::Present(&value)),
         }),
         VerificationState::Accepted
     );
@@ -601,22 +601,22 @@ fn a_stale_signature_authenticates_but_does_not_cover_the_current_native_value()
     ]));
     for (current, evidence, state) in [
         (
-            FacetValue::Present(&value),
+            DatumValue::Present(&value),
             Evidence::Present,
             VerificationState::Accepted,
         ),
         (
-            FacetValue::Present(&changed),
+            DatumValue::Present(&changed),
             Evidence::Invalid,
             VerificationState::Uncovered,
         ),
         (
-            FacetValue::Removed,
+            DatumValue::Removed,
             Evidence::Invalid,
             VerificationState::Uncovered,
         ),
         (
-            FacetValue::Missing,
+            DatumValue::Missing,
             Evidence::Missing,
             VerificationState::Pending,
         ),
@@ -654,12 +654,12 @@ utils_rs::table_tests! {
         actor.delegation = Some(attribution.certificate(signature).unwrap());
         let mut issuers = BTreeMap::from([(claim.actor_uuid, issuer)]);
         if !carried_message {
-            dmeta.facets.get_mut(&claim.facet_key).unwrap().signatures[0].message = None;
+            dmeta.datums.get_mut(&claim.datum_key).unwrap().signatures[0].message = None;
         }
         match missing {
             "none" => {}
             "actor" => { dmeta.actors.remove(&claim.actor_uuid).unwrap(); }
-            "alias" => { dmeta.facet_uuids.remove(&claim.chosen_uuid).unwrap(); }
+            "alias" => { dmeta.datum_uuids.remove(&claim.chosen_uuid).unwrap(); }
             "document" => { dmeta.branch_uuids.remove(&uuid7(9)).unwrap(); }
             "rebound document" => { dmeta.branch_uuids.insert(uuid7(9), DocId::new(b"other")).unwrap(); }
             "certificate" => dmeta.actors.get_mut(&claim.actor_uuid).unwrap().delegation = None,
@@ -667,8 +667,8 @@ utils_rs::table_tests! {
             other => panic!("unknown case: {other}"),
         }
         assert_eq!(
-            dmeta.verify_facet(
-                &claim.facet_key, FacetValue::Present(&value),
+            dmeta.verify_datum(
+                &claim.datum_key, DatumValue::Present(&value),
                 &BTreeMap::new(), &issuers,
             ),
             expected,
@@ -695,30 +695,30 @@ fn empty_signature_sets_are_uncovered_and_competitors_do_not_poison_acceptance()
     use VerificationState::Rejected;
     use VerificationState::Uncovered;
 
-    assert_eq!(facet_verification([]), Uncovered);
-    assert_eq!(facet_verification([Uncovered]), Uncovered);
-    assert_eq!(facet_verification([Rejected, Uncovered]), Rejected);
-    assert_eq!(facet_verification([Pending, Rejected]), Pending);
-    assert_eq!(facet_verification([Rejected, Pending]), Pending);
-    assert_eq!(facet_verification([Uncovered, Pending]), Pending);
+    assert_eq!(datum_verification([]), Uncovered);
+    assert_eq!(datum_verification([Uncovered]), Uncovered);
+    assert_eq!(datum_verification([Rejected, Uncovered]), Rejected);
+    assert_eq!(datum_verification([Pending, Rejected]), Pending);
+    assert_eq!(datum_verification([Rejected, Pending]), Pending);
+    assert_eq!(datum_verification([Uncovered, Pending]), Pending);
     assert_eq!(
-        facet_verification([Accepted, Pending, Rejected, Uncovered]),
+        datum_verification([Accepted, Pending, Rejected, Uncovered]),
         Accepted
     );
     assert_eq!(
-        facet_verification([Uncovered, Rejected, Pending, Accepted]),
+        datum_verification([Uncovered, Rejected, Pending, Accepted]),
         Accepted
     );
 }
 
 #[test]
-fn a_corrupted_other_facet_does_not_poison_a_valid_facet() {
+fn a_corrupted_other_datum_does_not_poison_a_valid_datum() {
     let value = native_value();
     let claim = claim_for(&value);
     let (actor, mut valid) = signed_entry(&claim);
     valid.carry_message(&claim).unwrap();
-    let other_claim = FacetClaim {
-        facet_key: facet_key("org.example.note/other"),
+    let other_claim = DatumClaim {
+        datum_key: datum_key("org.example.note/other"),
         chosen_uuid: uuid7(3),
         ..claim.clone()
     };
@@ -729,16 +729,16 @@ fn a_corrupted_other_facet_does_not_poison_a_valid_facet() {
     corrupt.signature = SignatureBytes::try_from(bytes.as_slice()).unwrap();
     let mut dmeta = Dmeta::new(Timestamp::from_second(0).unwrap());
     assert!(dmeta.actors.insert(claim.actor_uuid, actor).is_none());
-    for (facet_claim, entry) in [(&claim, valid), (&other_claim, corrupt)] {
+    for (datum_claim, entry) in [(&claim, valid), (&other_claim, corrupt)] {
         dmeta
-            .record_facet_alias(facet_claim.chosen_uuid, facet_claim.facet_key.clone())
+            .record_datum_alias(datum_claim.chosen_uuid, datum_claim.datum_key.clone())
             .unwrap();
         assert!(
             dmeta
-                .facets
+                .datums
                 .insert(
-                    facet_claim.facet_key.clone(),
-                    FacetMetadata {
+                    datum_claim.datum_key.clone(),
+                    DatumMetadata {
                         updated_at: Vec::new(),
                         deleted_at: Vec::new(),
                         signatures: vec![entry],
@@ -748,16 +748,16 @@ fn a_corrupted_other_facet_does_not_poison_a_valid_facet() {
         );
     }
     let states: BTreeMap<_, _> = dmeta
-        .facets
+        .datums
         .iter()
         .map(|(key, metadata)| {
-            let state = facet_verification(metadata.signatures.iter().map(|entry| {
+            let state = datum_verification(metadata.signatures.iter().map(|entry| {
                 let actor = &dmeta.actors[&entry.actor_uuid];
                 match entry.authenticate(actor, None) {
                     Ok(signed) => fold_checks(SignatureChecks {
                         message: Evidence::Present,
                         attribution: Evidence::Present,
-                        value: signed.value_evidence(FacetValue::Present(&value)),
+                        value: signed.value_evidence(DatumValue::Present(&value)),
                     }),
                     Err(DmetaError::InvalidSignature) => VerificationState::Rejected,
                     Err(error) => panic!("unexpected authentication failure: {error}"),
@@ -769,15 +769,15 @@ fn a_corrupted_other_facet_does_not_poison_a_valid_facet() {
     assert_eq!(
         states,
         BTreeMap::from([
-            (claim.facet_key, VerificationState::Accepted),
-            (other_claim.facet_key, VerificationState::Rejected),
+            (claim.datum_key, VerificationState::Accepted),
+            (other_claim.datum_key, VerificationState::Rejected),
         ])
     );
 }
 
 #[test]
 fn a_hostile_predecessor_count_is_refused_before_allocation() {
-    let claim = FacetClaim {
+    let claim = DatumClaim {
         operation: ClaimOperation::Remove,
         value_cid: None,
         ..claim_for(&NativeValue::Null)
@@ -786,7 +786,7 @@ fn a_hostile_predecessor_count_is_refused_before_allocation() {
     assert_eq!(fields.pop(), Some(0x80));
     fields.extend([0x9a, 0xff, 0xff, 0xff, 0xff]);
     assert!(matches!(
-        FacetClaim::from_cbor_fields(&fields),
+        DatumClaim::from_cbor_fields(&fields),
         Err(DmetaError::MalformedClaim(
             "predecessor count exceeds input budget"
         ))
@@ -794,7 +794,7 @@ fn a_hostile_predecessor_count_is_refused_before_allocation() {
     let mut u64_count = claim.cbor_fields().unwrap();
     assert_eq!(u64_count.pop(), Some(0x80));
     u64_count.extend([0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
-    assert!(FacetClaim::from_cbor_fields(&u64_count).is_err());
+    assert!(DatumClaim::from_cbor_fields(&u64_count).is_err());
 }
 
 #[test]
@@ -803,32 +803,32 @@ fn the_decoder_rejects_malformed_noncanonical_and_trailing_bytes() {
 
     let claim = claim_for(&native_value());
     let fields = claim.cbor_fields().unwrap();
-    assert_eq!(FacetClaim::from_cbor_fields(&fields).unwrap(), claim);
+    assert_eq!(DatumClaim::from_cbor_fields(&fields).unwrap(), claim);
     let signing = claim.signing_bytes().unwrap();
-    assert_eq!(FacetClaim::from_signing_bytes(&signing).unwrap(), claim);
+    assert_eq!(DatumClaim::from_signing_bytes(&signing).unwrap(), claim);
     assert!(matches!(
-        FacetKey::from_str("org.example.note/"),
-        Err(ReferenceError::MissingFacetKey)
+        DatumKey::from_str("org.example.note/"),
+        Err(ReferenceError::MissingDatumKey)
     ));
     for length in 0..fields.len() {
-        assert!(FacetClaim::from_cbor_fields(&fields[..length]).is_err());
+        assert!(DatumClaim::from_cbor_fields(&fields[..length]).is_err());
     }
     let mut trailing = fields.clone();
     trailing.push(0);
-    assert!(FacetClaim::from_cbor_fields(&trailing).is_err());
+    assert!(DatumClaim::from_cbor_fields(&trailing).is_err());
     let mut noncanonical = fields.clone();
     noncanonical.splice(0..1, [0x98, 7]);
-    assert!(FacetClaim::from_cbor_fields(&noncanonical).is_err());
+    assert!(DatumClaim::from_cbor_fields(&noncanonical).is_err());
     let mut wrong_arity = fields.clone();
     wrong_arity[0] = 0x86;
-    assert!(FacetClaim::from_cbor_fields(&wrong_arity).is_err());
+    assert!(DatumClaim::from_cbor_fields(&wrong_arity).is_err());
     let mut invalid_utf8 = fields.clone();
     invalid_utf8[2] = 0xff;
-    assert!(FacetClaim::from_cbor_fields(&invalid_utf8).is_err());
-    let mut old_domain = b"daybook.facet-claim.v1\0".to_vec();
+    assert!(DatumClaim::from_cbor_fields(&invalid_utf8).is_err());
+    let mut old_domain = b"daybook.datum-claim.v1\0".to_vec();
     old_domain.extend(&fields);
-    assert!(FacetClaim::from_signing_bytes(&old_domain).is_err());
-    assert!(FacetClaim::from_signing_bytes(&fields).is_err());
+    assert!(DatumClaim::from_signing_bytes(&old_domain).is_err());
+    assert!(DatumClaim::from_signing_bytes(&fields).is_err());
     let Cbor::Array(decoded) = ciborium::from_reader(&fields[..]).unwrap() else {
         panic!("claim fixture is not an array");
     };
@@ -837,7 +837,7 @@ fn the_decoder_rejects_malformed_noncanonical_and_trailing_bytes() {
         malformed[index] = value;
         let mut bytes = Vec::new();
         ciborium::into_writer(&Cbor::Array(malformed), &mut bytes).unwrap();
-        assert!(FacetClaim::from_cbor_fields(&bytes).is_err());
+        assert!(DatumClaim::from_cbor_fields(&bytes).is_err());
     };
     for index in [2, 3] {
         for invalid in [
@@ -884,7 +884,7 @@ fn an_inherited_claim_binds_the_source_context_not_the_branch() {
     let predecessor_a = cid_with(1);
     let predecessor_b = cid_with(2);
     let value = native_value();
-    let source_claim = FacetClaim {
+    let source_claim = DatumClaim {
         origin_document: DocId::new(b"origin-a"),
         predecessors: vec![
             predecessor_b.clone(),
@@ -912,8 +912,8 @@ fn an_inherited_claim_binds_the_source_context_not_the_branch() {
     );
     let mut wrong_frontier = normalized.clone();
     wrong_frontier.predecessors = vec![predecessor_a];
-    let mut wrong_facet = source_claim.clone();
-    wrong_facet.facet_key = facet_key("org.example.note/wrong");
+    let mut wrong_datum = source_claim.clone();
+    wrong_datum.datum_key = datum_key("org.example.note/wrong");
     let mut wrong_uuid = source_claim.clone();
     wrong_uuid.chosen_uuid = uuid7(10);
     let mut wrong_actor = source_claim.clone();
@@ -922,7 +922,7 @@ fn an_inherited_claim_binds_the_source_context_not_the_branch() {
     wrong_origin.origin_document = DocId::new(b"branch-b");
     for wrong in [
         wrong_frontier,
-        wrong_facet,
+        wrong_datum,
         wrong_uuid,
         wrong_actor,
         wrong_origin,
@@ -977,7 +977,7 @@ fn portable_messages_bind_actor_and_expected_context() {
         reconstructed
     );
     let mut wrong_context = claim.clone();
-    wrong_context.facet_key = facet_key("org.example.note/other");
+    wrong_context.datum_key = datum_key("org.example.note/other");
     assert!(matches!(
         entry.authenticate(&actor, Some(&wrong_context)),
         Err(DmetaError::WrongContext)
@@ -1005,11 +1005,11 @@ fn portable_messages_bind_actor_and_expected_context() {
 }
 
 #[test]
-fn a_facet_key_with_slashes_and_non_utf8_survives_the_claim_and_the_uri() {
-    let key = FacetKey::new("org.example.note", b"main/bytes/\x80".to_vec()).unwrap();
-    let claim = FacetClaim {
+fn a_datum_key_with_slashes_and_non_utf8_survives_the_claim_and_the_uri() {
+    let key = DatumKey::new("org.example.note", b"main/bytes/\x80".to_vec()).unwrap();
+    let claim = DatumClaim {
         origin_document: DocId::new(b"doc"),
-        facet_key: key.clone(),
+        datum_key: key.clone(),
         chosen_uuid: uuid7(12),
         actor_uuid: uuid7(2),
         operation: ClaimOperation::Remove,
@@ -1017,14 +1017,14 @@ fn a_facet_key_with_slashes_and_non_utf8_survives_the_claim_and_the_uri() {
         predecessors: vec![],
     };
     let encoded = claim.cbor_fields().unwrap();
-    assert_eq!(FacetClaim::from_cbor_fields(&encoded).unwrap(), claim);
-    assert_eq!(FacetKey::from_str(&key.to_string()).unwrap(), key);
+    assert_eq!(DatumClaim::from_cbor_fields(&encoded).unwrap(), claim);
+    assert_eq!(DatumKey::from_str(&key.to_string()).unwrap(), key);
     assert!(key.to_string().contains("\\x80"));
 
-    let reference = FacetReference::new(ReferenceDocId::SelfDoc, key.clone()).unwrap();
+    let reference = DatumReference::new(ReferenceDocId::SelfDoc, key.clone()).unwrap();
     let uri = reference.to_uri_string().unwrap();
     assert!(uri.contains("%5Cx80"));
-    assert_eq!(FacetReference::parse(&uri).unwrap().key(), &key);
+    assert_eq!(DatumReference::parse(&uri).unwrap().key(), &key);
     assert_eq!(reference.key(), &key);
 }
 
@@ -1035,18 +1035,18 @@ fn predecessors_are_sorted_and_deduplicated_before_signing() {
     let mut predecessors = [cid_with(1), cid_with(2)];
     predecessors.sort();
     let [first, second] = predecessors;
-    let claim = FacetClaim {
+    let claim = DatumClaim {
         operation: ClaimOperation::Remove,
         value_cid: None,
         predecessors: vec![second.clone(), first.clone(), second.clone()],
         ..claim_for(&NativeValue::Null)
     };
     let bytes = claim.cbor_fields().unwrap();
-    let normalized = FacetClaim {
+    let normalized = DatumClaim {
         predecessors: vec![first.clone(), second.clone()],
         ..claim.clone()
     };
-    assert_eq!(FacetClaim::from_cbor_fields(&bytes).unwrap(), normalized);
+    assert_eq!(DatumClaim::from_cbor_fields(&bytes).unwrap(), normalized);
     assert_eq!(
         claim.signing_bytes().unwrap(),
         normalized.signing_bytes().unwrap()
@@ -1072,7 +1072,7 @@ fn predecessors_are_sorted_and_deduplicated_before_signing() {
         let mut encoded = Vec::new();
         ciborium::into_writer(&Cbor::Array(malformed), &mut encoded).unwrap();
         assert!(matches!(
-            FacetClaim::from_cbor_fields(&encoded),
+            DatumClaim::from_cbor_fields(&encoded),
             Err(DmetaError::MalformedClaim(
                 "predecessors must be sorted and unique"
             ))

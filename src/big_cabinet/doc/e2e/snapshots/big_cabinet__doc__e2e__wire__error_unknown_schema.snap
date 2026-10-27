@@ -4,6 +4,6 @@ expression: error
 ---
 {
   "UnknownSchema": {
-    "facet_tag": "org.example.note"
+    "datum_tag": "org.example.note"
   }
 }

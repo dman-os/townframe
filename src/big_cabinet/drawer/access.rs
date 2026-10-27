@@ -301,8 +301,8 @@ fn access_error(error: DrawersError) -> AccessError {
 
 impl DrawerAccess {
     /// `issuer` is DrawerService's own actor capability, carrying `use` and `delegate`. `sql` is
-    /// the projection and ledger store; DocsRepo may share the same `Database`. `facet_set` is
-    /// where drawer docs that arrived by sync are discovered: a doc carrying the drawer facet is
+    /// the projection and ledger store; DocsRepo may share the same `Database`. `datum_set` is
+    /// where drawer docs that arrived by sync are discovered: a doc carrying the drawer datum is
     /// a drawer this node can project without anyone having remembered it.
     pub async fn open(
         big_repo: SharedBigRepo,
@@ -310,7 +310,7 @@ impl DrawerAccess {
         issuer: CapId,
         namespace: Namespace,
         sql: Database,
-        facet_set: Arc<crate::index::FacetSetStore>,
+        datum_set: Arc<crate::index::DatumSetStore>,
     ) -> Result<(Arc<Self>, DrawerProvider, StopToken), DrawersError> {
         let actor = authority
             .call(RequestContext::root(), ResolveActor { capability: issuer })
@@ -336,7 +336,7 @@ impl DrawerAccess {
             namespace,
             actor,
             state,
-            facet_set,
+            datum_set,
             ledger,
             commands,
         });

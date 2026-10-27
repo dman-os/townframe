@@ -1,8 +1,8 @@
-//! Extracting the references a schema declares out of a facet value.
+//! Extracting the references a schema declares out of a datum value.
 //!
 //! A reference is a string the schema marks with the `reference` storage form, so extraction is a
 //! co-walk of value and schema like the codec's own: only a declared position produces an edge,
-//! and a string that happens to spell a `db+facet:` address where nothing declares a reference is
+//! and a string that happens to spell a `db+datum:` address where nothing declares a reference is
 //! data, not a reference. The value was checked on the way in; what a peer wrote may not have
 //! been, so a position whose schema does not resolve for the value, and a string that does not
 //! parse, are skipped rather than refusing the rest of the walk.
@@ -13,7 +13,7 @@ use super::validation::CompiledSchema;
 use super::walk::Kind;
 use super::walk::Position;
 use super::walk::discriminant_matches;
-use crate::FacetReference;
+use crate::DatumReference;
 use automerge::ChangeHash;
 use serde_json::Value;
 
@@ -27,10 +27,10 @@ const DEPTH: usize = 1024;
 /// One reference found at the position its schema declares it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclaredReference {
-    /// Where the reference sits in the facet value, as a JSON pointer (`""` is the root).
+    /// Where the reference sits in the datum value, as a JSON pointer (`""` is the root).
     pub path: String,
     /// The address the string holds.
-    pub reference: FacetReference,
+    pub reference: DatumReference,
     /// The frontier the sibling `refHeads` pins. Empty means unpinned: the reference follows the
     /// target's current frontier. An entry that does not parse is dropped, so a malformed sibling
     /// degrades the pin rather than the reference.
@@ -81,7 +81,7 @@ fn references<'a>(
     if let Ok(Some(codec)) = Codec::of(schema) {
         if codec == Codec::Reference
             && let Some(stated) = value.as_str()
-            && let Ok(reference) = FacetReference::parse(stated)
+            && let Ok(reference) = DatumReference::parse(stated)
         {
             found.push(DeclaredReference {
                 path: pointer(path),
@@ -176,39 +176,39 @@ mod tests {
     use std::collections::BTreeMap;
     use std::str::FromStr;
 
-    #[macros::facet(id = "org.example.reffed", closed)]
+    #[macros::datum(id = "org.example.reffed", closed)]
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct Reffed {
-        link: FacetReference,
+        link: DatumReference,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ref_heads: Option<Vec<String>>,
         nested: Nested,
         #[serde(default)]
-        listed: Vec<FacetReference>,
+        listed: Vec<DatumReference>,
         #[serde(default)]
-        mapped: BTreeMap<String, FacetReference>,
+        mapped: BTreeMap<String, DatumReference>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        maybe: Option<FacetReference>,
+        maybe: Option<DatumReference>,
     }
 
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     struct Nested {
-        inner: FacetReference,
+        inner: DatumReference,
     }
 
     fn compiled() -> CompiledSchema {
-        let universe = crate::facet::Universe::collect(vec![
-            crate::facet::Declaration::assemble::<Reffed>().unwrap(),
+        let universe = crate::datum::Universe::collect(vec![
+            crate::datum::Declaration::assemble::<Reffed>().unwrap(),
         ]);
-        let bundle = crate::facet::Bundle::new(&universe, Vec::new());
+        let bundle = crate::datum::Bundle::new(&universe, Vec::new());
         let document = serde_json::to_value(bundle.document("Reffed").unwrap()).unwrap();
         CompiledSchema::compile(document).unwrap()
     }
 
     fn reference(suffix: &str) -> String {
-        format!("db+facet:/self/org.example.note/{suffix}")
+        format!("db+datum:/self/org.example.note/{suffix}")
     }
 
     #[test]
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(found.len(), 5, "{by_path:?}");
         assert_eq!(
             by_path["/link"].reference,
-            FacetReference::parse(&reference("main")).unwrap()
+            DatumReference::parse(&reference("main")).unwrap()
         );
         assert_eq!(
             by_path["/link"].heads,
@@ -263,11 +263,11 @@ mod tests {
         let schema = compiled();
         let mut doc = automerge::Automerge::new();
         let tx = doc.transaction();
-        let tx = crate::facet::reconcile_json_atomic(
+        let tx = crate::datum::reconcile_json_atomic(
             tx,
             &schema,
             &automerge::ROOT,
-            "facet".into(),
+            "datum".into(),
             json!({
                 "link": reference("main"),
                 "refHeads": ["a".repeat(64)],
@@ -280,7 +280,7 @@ mod tests {
         .unwrap();
         tx.commit();
         let hydrated =
-            crate::facet::hydrate_value(&doc, &automerge::ROOT, "facet".into(), &schema).unwrap();
+            crate::datum::hydrate_value(&doc, &automerge::ROOT, "datum".into(), &schema).unwrap();
         let found = declared_references(&schema, &hydrated);
         assert_eq!(found.len(), 2, "{found:?}");
         assert_eq!(found[0].path, "/link");

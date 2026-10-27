@@ -2,18 +2,18 @@ use super::ActorMetadata;
 use super::Attribution;
 use super::Cid;
 use super::ClaimOperation;
+use super::DatumClaim;
+use super::DatumMetadata;
+use super::DatumSignature;
+use super::DatumValue;
 use super::Dmeta;
 use super::DmetaError;
 use super::DocId;
 use super::Evidence;
-use super::FacetClaim;
-use super::FacetMetadata;
-use super::FacetSignature;
-use super::FacetValue;
 use super::MultibaseKey;
 use super::NativeValue;
 use super::SignatureBytes;
-use super::SignedFacetClaim;
+use super::SignedDatumClaim;
 use super::Uuid7;
 use super::VerificationState;
 use super::cid_of;
@@ -30,7 +30,7 @@ use ed25519_dalek::SigningKey;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-const FACET: &str = "org.example.note/main";
+const DATUM: &str = "org.example.note/main";
 
 fn uuid7(index: u128) -> Uuid7 {
     Uuid7::try_from(Uuid::from_u128(
@@ -40,14 +40,14 @@ fn uuid7(index: u128) -> Uuid7 {
 }
 
 fn current_value(doc: &impl ReadDoc) -> NativeValue {
-    NativeValue::read_at(doc, &ROOT, FACET).unwrap().unwrap()
+    NativeValue::read_at(doc, &ROOT, DATUM).unwrap().unwrap()
 }
 
-fn signed_claim(doc: &impl ReadDoc, actor: u8, predecessors: Vec<Cid>) -> SignedFacetClaim {
+fn signed_claim(doc: &impl ReadDoc, actor: u8, predecessors: Vec<Cid>) -> SignedDatumClaim {
     let value = current_value(doc);
-    let claim = FacetClaim {
-        origin_document: DocId::new(b"facet-verification-e2e"),
-        facet_key: FACET.parse().unwrap(),
+    let claim = DatumClaim {
+        origin_document: DocId::new(b"datum-verification-e2e"),
+        datum_key: DATUM.parse().unwrap(),
         chosen_uuid: uuid7(1),
         actor_uuid: uuid7(100 + u128::from(actor)),
         operation: ClaimOperation::Set,
@@ -61,7 +61,7 @@ fn signed_claim(doc: &impl ReadDoc, actor: u8, predecessors: Vec<Cid>) -> Signed
             .as_slice(),
     )
     .unwrap();
-    let signed = SignedFacetClaim::from_signature(
+    let signed = SignedDatumClaim::from_signature(
         claim,
         MultibaseKey::try_from(key.verifying_key().as_bytes().as_slice()).unwrap(),
         signature,
@@ -69,26 +69,26 @@ fn signed_claim(doc: &impl ReadDoc, actor: u8, predecessors: Vec<Cid>) -> Signed
     .unwrap();
     signed.verify().unwrap();
     assert_eq!(
-        signed.value_evidence(FacetValue::Present(&value)),
+        signed.value_evidence(DatumValue::Present(&value)),
         Evidence::Present
     );
     signed
 }
 
-fn fixture() -> (Automerge, ObjId, SignedFacetClaim) {
+fn fixture() -> (Automerge, ObjId, SignedDatumClaim) {
     let mut doc = Automerge::new().with_actor(ActorId::from([0]));
     let mut transaction = doc.transaction();
-    let facet = transaction.put_object(ROOT, FACET, ObjType::Map).unwrap();
-    transaction.put(&facet, "n", 0_i64).unwrap();
+    let datum = transaction.put_object(ROOT, DATUM, ObjType::Map).unwrap();
+    transaction.put(&datum, "n", 0_i64).unwrap();
     let signed = signed_claim(&transaction, 0, Vec::new());
     transaction.commit();
-    (doc, facet, signed)
+    (doc, datum, signed)
 }
 
-fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> VerificationState {
+fn verify_current(doc: &Automerge, claims: &[&SignedDatumClaim]) -> VerificationState {
     let mut dmeta = Dmeta::new(jiff::Timestamp::from_second(0).unwrap());
     let doc_uuid = dmeta
-        .doc_uuid(&DocId::new(b"facet-verification-e2e"), uuid7(9))
+        .doc_uuid(&DocId::new(b"datum-verification-e2e"), uuid7(9))
         .unwrap();
     let mut issuers = BTreeMap::new();
     let mut signatures = Vec::new();
@@ -97,9 +97,9 @@ fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> Verification
     for signed in claims {
         assert_eq!(
             signed.claim.origin_document,
-            DocId::new(b"facet-verification-e2e")
+            DocId::new(b"datum-verification-e2e")
         );
-        assert_eq!(signed.claim.facet_key, FACET.parse().unwrap());
+        assert_eq!(signed.claim.datum_key, DATUM.parse().unwrap());
         let attribution = Attribution {
             issuer: issuer.clone(),
             actor_uuid: signed.claim.actor_uuid,
@@ -143,9 +143,9 @@ fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> Verification
                 .is_none()
         );
         dmeta
-            .record_facet_alias(signed.claim.chosen_uuid, signed.claim.facet_key.clone())
+            .record_datum_alias(signed.claim.chosen_uuid, signed.claim.datum_key.clone())
             .unwrap();
-        let mut entry = FacetSignature {
+        let mut entry = DatumSignature {
             actor_uuid: signed.claim.actor_uuid,
             doc_uuid,
             signature: signed.signature.clone(),
@@ -157,10 +157,10 @@ fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> Verification
     }
     assert!(
         dmeta
-            .facets
+            .datums
             .insert(
-                FACET.parse().unwrap(),
-                FacetMetadata {
+                DATUM.parse().unwrap(),
+                DatumMetadata {
                     updated_at: Vec::new(),
                     deleted_at: Vec::new(),
                     signatures,
@@ -169,9 +169,9 @@ fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> Verification
             .is_none()
     );
     let value = current_value(doc);
-    dmeta.verify_facet(
-        &FACET.parse().unwrap(),
-        FacetValue::Present(&value),
+    dmeta.verify_datum(
+        &DATUM.parse().unwrap(),
+        DatumValue::Present(&value),
         &BTreeMap::new(),
         &issuers,
     )
@@ -179,41 +179,41 @@ fn verify_current(doc: &Automerge, claims: &[&SignedFacetClaim]) -> Verification
 
 #[test]
 fn historical_value_only_merge_can_resurrect_a_losing_unsigned_assignment() {
-    let (base, facet, genesis) = fixture();
+    let (base, datum, genesis) = fixture();
     let mut safe = base.fork().with_actor(ActorId::from([2]));
     let mut transaction = safe.transaction();
-    transaction.put(&facet, "x", "safe").unwrap();
+    transaction.put(&datum, "x", "safe").unwrap();
     let common = signed_claim(&transaction, 2, vec![genesis.signature_id().unwrap()]);
     transaction.commit();
     let common_id = common.signature_id().unwrap();
 
     let mut unsigned = base.fork().with_actor(ActorId::from([1]));
     let mut transaction = unsigned.transaction();
-    transaction.put(&facet, "x", "evil").unwrap();
+    transaction.put(&datum, "x", "evil").unwrap();
     transaction.commit();
-    let unsigned_assignment = unsigned.get(&facet, "x").unwrap().unwrap().1;
+    let unsigned_assignment = unsigned.get(&datum, "x").unwrap().unwrap().1;
     let unsigned_change = unsigned.get_heads();
 
     let mut left = safe.fork().with_actor(ActorId::from([3]));
     left.merge(&mut unsigned).unwrap();
-    assert_eq!(left.get_all(&facet, "x").unwrap().len(), 2);
+    assert_eq!(left.get_all(&datum, "x").unwrap().len(), 2);
     assert_eq!(
-        NativeValue::read_at(&left, &facet, "x").unwrap(),
+        NativeValue::read_at(&left, &datum, "x").unwrap(),
         Some(NativeValue::Str("safe".into()))
     );
     let mut transaction = left.transaction();
-    transaction.put(&facet, "n", 1_i64).unwrap();
+    transaction.put(&datum, "n", 1_i64).unwrap();
     let left_claim = signed_claim(&transaction, 3, vec![common_id.clone()]);
     transaction.commit();
     let left_heads = left.get_heads();
 
     let mut right = safe.fork().with_actor(ActorId::from([4]));
     let mut transaction = right.transaction();
-    transaction.delete(&facet, "x").unwrap();
+    transaction.delete(&datum, "x").unwrap();
     let right_claim = signed_claim(&transaction, 4, vec![common_id.clone()]);
     transaction.commit();
     let right_heads = right.get_heads();
-    assert_eq!(right.get(&facet, "x").unwrap(), None);
+    assert_eq!(right.get(&datum, "x").unwrap(), None);
     assert_eq!(left_claim.claim.predecessors, vec![common_id.clone()]);
     assert_eq!(right_claim.claim.predecessors, vec![common_id]);
     assert_eq!(
@@ -236,7 +236,7 @@ fn historical_value_only_merge_can_resurrect_a_losing_unsigned_assignment() {
         ]))
     );
     assert_eq!(
-        current.get(&facet, "x").unwrap().unwrap().1,
+        current.get(&datum, "x").unwrap().unwrap().1,
         unsigned_assignment
     );
     assert_eq!(
@@ -246,14 +246,14 @@ fn historical_value_only_merge_can_resurrect_a_losing_unsigned_assignment() {
 
     let mut reconstructed_left = current.fork_at(&left_heads).unwrap();
     let mut reconstructed_right = current.fork_at(&right_heads).unwrap();
-    assert_eq!(reconstructed_left.get_all(&facet, "x").unwrap().len(), 2);
+    assert_eq!(reconstructed_left.get_all(&datum, "x").unwrap().len(), 2);
     for (claim, historical) in [
         (&left_claim, &reconstructed_left),
         (&right_claim, &reconstructed_right),
     ] {
         claim.verify().unwrap();
         assert_eq!(
-            claim.value_evidence(FacetValue::Present(&current_value(historical))),
+            claim.value_evidence(DatumValue::Present(&current_value(historical))),
             Evidence::Present
         );
     }
@@ -262,7 +262,7 @@ fn historical_value_only_merge_can_resurrect_a_losing_unsigned_assignment() {
     for claim in [&genesis, &common, &left_claim, &right_claim] {
         claim.verify().unwrap();
         assert_eq!(
-            claim.value_evidence(FacetValue::Present(&merged_value)),
+            claim.value_evidence(DatumValue::Present(&merged_value)),
             Evidence::Invalid
         );
     }
@@ -274,17 +274,17 @@ fn historical_value_only_merge_can_resurrect_a_losing_unsigned_assignment() {
 
 #[test]
 fn valid_concurrent_disjoint_writes_merge_to_a_value_neither_actor_signed() {
-    let (base, facet, common) = fixture();
+    let (base, datum, common) = fixture();
     let common_id = common.signature_id().unwrap();
     let mut left = base.fork().with_actor(ActorId::from([1]));
     let mut transaction = left.transaction();
-    transaction.put(&facet, "x", "left").unwrap();
+    transaction.put(&datum, "x", "left").unwrap();
     let left_claim = signed_claim(&transaction, 1, vec![common_id.clone()]);
     transaction.commit();
     let left_heads = left.get_heads();
     let mut right = base.fork().with_actor(ActorId::from([2]));
     let mut transaction = right.transaction();
-    transaction.put(&facet, "y", "right").unwrap();
+    transaction.put(&datum, "y", "right").unwrap();
     let right_claim = signed_claim(&transaction, 2, vec![common_id.clone()]);
     transaction.commit();
     let right_heads = right.get_heads();
@@ -313,11 +313,11 @@ fn valid_concurrent_disjoint_writes_merge_to_a_value_neither_actor_signed() {
         claim.verify().unwrap();
         let historical = left.fork_at(&heads).unwrap();
         assert_eq!(
-            claim.value_evidence(FacetValue::Present(&current_value(&historical))),
+            claim.value_evidence(DatumValue::Present(&current_value(&historical))),
             Evidence::Present
         );
         assert_eq!(
-            claim.value_evidence(FacetValue::Present(&merged_value)),
+            claim.value_evidence(DatumValue::Present(&merged_value)),
             Evidence::Invalid
         );
     }
@@ -329,10 +329,10 @@ fn valid_concurrent_disjoint_writes_merge_to_a_value_neither_actor_signed() {
 
 #[test]
 fn exact_replacement_of_forged_content_recovers_without_trusting_its_parent() {
-    let (mut doc, old_facet, common) = fixture();
+    let (mut doc, old_datum, common) = fixture();
     let mut transaction = doc.transaction();
-    transaction.put(&old_facet, "n", 9_i64).unwrap();
-    transaction.put(&old_facet, "x", "forged").unwrap();
+    transaction.put(&old_datum, "n", 9_i64).unwrap();
+    transaction.put(&old_datum, "x", "forged").unwrap();
     let mut forged = signed_claim(&transaction, 1, vec![common.signature_id().unwrap()]);
     transaction.commit();
     let forged_heads = doc.get_heads();
@@ -342,7 +342,7 @@ fn exact_replacement_of_forged_content_recovers_without_trusting_its_parent() {
     forged.signature = SignatureBytes::try_from(signature.as_slice()).unwrap();
     assert!(matches!(forged.verify(), Err(DmetaError::InvalidSignature)));
     assert_eq!(
-        forged.value_evidence(FacetValue::Present(&forged_value)),
+        forged.value_evidence(DatumValue::Present(&forged_value)),
         Evidence::Present
     );
     assert_eq!(
@@ -352,12 +352,12 @@ fn exact_replacement_of_forged_content_recovers_without_trusting_its_parent() {
     let forged_id = forged.signature_id().unwrap();
 
     let mut transaction = doc.transaction();
-    let replacement = transaction.put_object(ROOT, FACET, ObjType::Map).unwrap();
+    let replacement = transaction.put_object(ROOT, DATUM, ObjType::Map).unwrap();
     transaction.put(&replacement, "n", 2_i64).unwrap();
     let repaired = signed_claim(&transaction, 2, vec![forged_id.clone()]);
     transaction.commit();
-    assert_ne!(replacement, old_facet);
-    assert_eq!(doc.get_all(ROOT, FACET).unwrap().len(), 1);
+    assert_ne!(replacement, old_datum);
+    assert_eq!(doc.get_all(ROOT, DATUM).unwrap().len(), 1);
     let repaired_value = current_value(&doc);
     assert_eq!(
         repaired_value,
@@ -366,7 +366,7 @@ fn exact_replacement_of_forged_content_recovers_without_trusting_its_parent() {
     repaired.verify().unwrap();
     assert_eq!(repaired.claim.predecessors, vec![forged_id]);
     assert_eq!(
-        repaired.value_evidence(FacetValue::Present(&repaired_value)),
+        repaired.value_evidence(DatumValue::Present(&repaired_value)),
         Evidence::Present
     );
     assert_eq!(
@@ -392,7 +392,7 @@ fn exact_replacement_of_forged_content_recovers_without_trusting_its_parent() {
 
 #[test]
 fn unsigned_post_signature_mutation_is_uncovered_not_a_forged_signature() {
-    let (mut doc, facet, signed) = fixture();
+    let (mut doc, datum, signed) = fixture();
     let signed_heads = doc.get_heads();
     let signed_value = current_value(&doc);
     assert_eq!(
@@ -400,13 +400,13 @@ fn unsigned_post_signature_mutation_is_uncovered_not_a_forged_signature() {
         VerificationState::Accepted
     );
     let mut transaction = doc.transaction();
-    transaction.put(&facet, "n", 1_i64).unwrap();
+    transaction.put(&datum, "n", 1_i64).unwrap();
     transaction.commit();
     let mutated_value = current_value(&doc);
     assert_ne!(mutated_value, signed_value);
     signed.verify().unwrap();
     assert_eq!(
-        signed.value_evidence(FacetValue::Present(&mutated_value)),
+        signed.value_evidence(DatumValue::Present(&mutated_value)),
         Evidence::Invalid
     );
     assert_eq!(

@@ -4,7 +4,7 @@ use big_sync_core::revisioned_store::RevisionRead;
 use big_sync_core::revisioned_store::RevisionReadLimits;
 use big_sync_core::revisioned_store::RevisionedStoreReader;
 
-fn key(name: &str) -> FacetKey {
+fn key(name: &str) -> DatumKey {
     format!("org.example.note/{name}").parse().unwrap()
 }
 
@@ -30,21 +30,21 @@ fn state(doc: &Automerge, cursor: u64) -> DocState {
 fn fixture() -> (Automerge, ObjId, ObjId, ObjId) {
     let mut doc = Automerge::new();
     let mut tx = doc.transaction();
-    let facets = tx.put_object(ROOT, "facets", ObjType::Map).unwrap();
+    let datums = tx.put_object(ROOT, "datums", ObjType::Map).unwrap();
     let first = tx
-        .put_object(&facets, key("a").to_string(), ObjType::Map)
+        .put_object(&datums, key("a").to_string(), ObjType::Map)
         .unwrap();
     tx.put(&first, "value", "a").unwrap();
-    tx.put(&facets, key("b").to_string(), "b").unwrap();
-    let dmeta = tx.put_object(&facets, DMETA_KEY, ObjType::Map).unwrap();
-    let metadata = tx.put_object(&dmeta, "facets", ObjType::Map).unwrap();
+    tx.put(&datums, key("b").to_string(), "b").unwrap();
+    let dmeta = tx.put_object(&datums, DMETA_KEY, ObjType::Map).unwrap();
+    let metadata = tx.put_object(&dmeta, "datums", ObjType::Map).unwrap();
     let entry = tx
         .put_object(&metadata, key("a").to_string(), ObjType::Map)
         .unwrap();
     let signatures = tx.put_object(&entry, "signatures", ObjType::List).unwrap();
     tx.insert_object(&signatures, 0, ObjType::Map).unwrap();
     tx.commit();
-    (doc, facets, first, metadata)
+    (doc, datums, first, metadata)
 }
 
 fn project(doc: &Automerge, previous: Option<&DocState>, cursor: u64) -> Prepared {
@@ -66,7 +66,7 @@ fn project(doc: &Automerge, previous: Option<&DocState>, cursor: u64) -> Prepare
 
 #[test]
 fn raw_initial_and_historical_views_do_not_verify_or_hydrate() {
-    let (mut doc, facets, _, _) = fixture();
+    let (mut doc, datums, _, _) = fixture();
     let initial = state(&doc, 1);
     let first = project(&doc, None, 1);
     assert!(first.replace_all);
@@ -75,24 +75,24 @@ fn raw_initial_and_historical_views_do_not_verify_or_hydrate() {
         BTreeMap::from([
             (
                 key("a"),
-                FacetMembership::Present {
+                DatumMembership::Present {
                     doc_heads: initial.heads.clone().unwrap(),
                     clock: heads_clock(&doc, initial.heads.as_ref().unwrap()),
-                    facet_heads: initial.heads.clone().unwrap()
+                    datum_heads: initial.heads.clone().unwrap()
                 }
             ),
             (
                 key("b"),
-                FacetMembership::Present {
+                DatumMembership::Present {
                     doc_heads: initial.heads.clone().unwrap(),
-                    facet_heads: Vec::new(),
+                    datum_heads: Vec::new(),
                     clock: 0
                 }
             ),
         ])
     );
     let mut tx = doc.transaction();
-    tx.delete(&facets, key("a").to_string()).unwrap();
+    tx.delete(&datums, key("a").to_string()).unwrap();
     tx.commit();
     let view = DocView::new(&doc, initial.heads.as_ref().unwrap()).unwrap();
     assert!(!view.current);
@@ -102,10 +102,10 @@ fn raw_initial_and_historical_views_do_not_verify_or_hydrate() {
         next.slots,
         BTreeMap::from([(
             key("a"),
-            FacetMembership::Removed {
+            DatumMembership::Removed {
                 doc_heads: Some(doc.get_heads()),
                 clock: heads_clock(&doc, initial.heads.as_ref().unwrap()),
-                facet_heads: initial.heads.unwrap(),
+                datum_heads: initial.heads.unwrap(),
             }
         )])
     );
@@ -124,18 +124,18 @@ fn nested_unsigned_edits_emit_only_the_touched_slot_with_unchanged_signature_hea
         next.slots,
         BTreeMap::from([(
             key("a"),
-            FacetMembership::Present {
+            DatumMembership::Present {
                 doc_heads: doc.get_heads(),
                 clock: heads_clock(&doc, initial.heads.as_ref().unwrap()),
-                facet_heads: initial.heads.unwrap(),
+                datum_heads: initial.heads.unwrap(),
             }
         )])
     );
 }
 
 #[test]
-fn hidden_and_deleted_object_operations_still_touch_their_facet() {
-    let (mut doc, facets, first, _) = fixture();
+fn hidden_and_deleted_object_operations_still_touch_their_datum() {
+    let (mut doc, datums, first, _) = fixture();
     let base = state(&doc, 1);
     let mut peer = doc.fork();
     let mut tx = doc.transaction();
@@ -155,7 +155,7 @@ fn hidden_and_deleted_object_operations_still_touch_their_facet() {
         [key("a")]
     );
     let mut tx = doc.transaction();
-    tx.delete(&facets, key("a").to_string()).unwrap();
+    tx.delete(&datums, key("a").to_string()).unwrap();
     tx.commit();
     let before = state(&doc, 4);
     let mut peer = doc.fork_at(base.heads.as_ref().unwrap()).unwrap();
@@ -196,20 +196,20 @@ fn concurrent_metadata_maps_contribute_all_signature_introductions() {
         next.slots,
         BTreeMap::from([(
             key("b"),
-            FacetMembership::Present {
+            DatumMembership::Present {
                 doc_heads: introductions.clone(),
                 clock: heads_clock(&doc, &introductions),
-                facet_heads: introductions,
+                datum_heads: introductions,
             }
         )])
     );
 }
 
 #[test]
-fn dmeta_fields_other_than_facets_do_not_touch_slots() {
-    let (mut doc, facets, _, _) = fixture();
+fn dmeta_fields_other_than_datums_do_not_touch_slots() {
+    let (mut doc, datums, _, _) = fixture();
     let before = state(&doc, 1);
-    let (_, dmeta) = doc.get(&facets, DMETA_KEY).unwrap().unwrap();
+    let (_, dmeta) = doc.get(&datums, DMETA_KEY).unwrap().unwrap();
     let mut tx = doc.transaction();
     tx.put(&dmeta, "aliases", "renamed").unwrap();
     tx.commit();
@@ -241,9 +241,9 @@ fn projection_across_a_tombstoned_signature_uses_historical_paths() {
         next.slots,
         BTreeMap::from([(
             key("a"),
-            FacetMembership::Present {
+            DatumMembership::Present {
                 doc_heads: doc.get_heads(),
-                facet_heads: Vec::new(),
+                datum_heads: Vec::new(),
                 clock: 0,
             }
         )])
@@ -255,11 +255,11 @@ async fn key_query_returns_records_with_signature_clocks() {
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = FacetSetStore::new(sql).await.unwrap();
+    let store = DatumSetStore::new(sql).await.unwrap();
     let (mut doc, _, first, _) = fixture();
     let initial = state(&doc, 1);
     store.settle(project(&doc, None, 1)).await.unwrap();
-    let records = store.query(FacetSetQuery::Key(key("a"))).await.unwrap();
+    let records = store.query(DatumSetQuery::Key(key("a"))).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].route.doc_id, DocId::new([1; 32]));
     assert_eq!(
@@ -271,17 +271,17 @@ async fn key_query_returns_records_with_signature_clocks() {
     let mut tx = doc.transaction();
     tx.put(&first, "value", "changed").unwrap();
     tx.commit();
-    // An unsigned value edit does not move the facet version: its clock is
+    // An unsigned value edit does not move the datum version: its clock is
     // over the signature introductions, which are unchanged.
     store
         .settle(project(&doc, Some(&initial), 2))
         .await
         .unwrap();
-    let records = store.query(FacetSetQuery::Key(key("a"))).await.unwrap();
+    let records = store.query(DatumSetQuery::Key(key("a"))).await.unwrap();
     assert_eq!(records[0].clock, first_clock);
     assert!(
         store
-            .query(FacetSetQuery::Key(key("missing")))
+            .query(DatumSetQuery::Key(key("missing")))
             .await
             .unwrap()
             .is_empty()
@@ -293,9 +293,9 @@ async fn selectors_and_document_batches_preserve_routes_and_filter_intersections
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = FacetSetStore::new(sql).await.unwrap();
+    let store = DatumSetStore::new(sql).await.unwrap();
     let (doc, _, _, _) = fixture();
-    let tag = FacetTag::new("org.example.note").unwrap();
+    let tag = DatumTag::new("org.example.note").unwrap();
     let first_id = DocId::new([1; 32]);
     let second_id = DocId::new([2; 32]);
     store.settle(project(&doc, None, 1)).await.unwrap();
@@ -307,22 +307,22 @@ async fn selectors_and_document_batches_preserve_routes_and_filter_intersections
         .into_iter()
         .flat_map(|doc_id| {
             [
-                FacetRecord {
-                    route: FacetRoute {
+                DatumRecord {
+                    route: DatumRoute {
                         doc_id: doc_id.clone(),
-                        facet_key: key("a"),
+                        datum_key: key("a"),
                     },
                     doc_heads: heads.clone(),
-                    facet_heads: heads.clone(),
+                    datum_heads: heads.clone(),
                     clock: heads_clock(&doc, &heads),
                 },
-                FacetRecord {
-                    route: FacetRoute {
+                DatumRecord {
+                    route: DatumRoute {
                         doc_id,
-                        facet_key: key("b"),
+                        datum_key: key("b"),
                     },
                     doc_heads: heads.clone(),
-                    facet_heads: Vec::new(),
+                    datum_heads: Vec::new(),
                     clock: 0,
                 },
             ]
@@ -331,13 +331,13 @@ async fn selectors_and_document_batches_preserve_routes_and_filter_intersections
     let mut expected = expected;
     expected.sort_by(|left, right| left.route.cmp(&right.route));
     assert_eq!(
-        store.query(FacetSetQuery::Tag(tag.clone())).await.unwrap(),
+        store.query(DatumSetQuery::Tag(tag.clone())).await.unwrap(),
         expected
     );
     for record in &expected {
         assert_eq!(
             store
-                .query(FacetSetQuery::Route(record.route.clone()))
+                .query(DatumSetQuery::Route(record.route.clone()))
                 .await
                 .unwrap(),
             vec![record.clone()]
@@ -351,10 +351,10 @@ async fn selectors_and_document_batches_preserve_routes_and_filter_intersections
     );
     let selected: Vec<_> = expected
         .into_iter()
-        .filter(|record| record.route.facet_key == key("a"))
+        .filter(|record| record.route.datum_key == key("a"))
         .collect();
     assert_eq!(
-        store.query(FacetSetQuery::Key(key("a"))).await.unwrap(),
+        store.query(DatumSetQuery::Key(key("a"))).await.unwrap(),
         selected
     );
     assert_eq!(
@@ -375,7 +375,7 @@ async fn selectors_and_document_batches_preserve_routes_and_filter_intersections
         store
             .query_docs(
                 &docs,
-                Some(&FacetTag::new("org.example.other").unwrap()),
+                Some(&DatumTag::new("org.example.other").unwrap()),
                 Some(&key("a"))
             )
             .await
@@ -396,15 +396,15 @@ fn envelope_replacement_rescans_and_ignores_later_materialized_changes() {
     let (mut doc, _, _, _) = fixture();
     let before = state(&doc, 1);
     let mut tx = doc.transaction();
-    let facets = tx.put_object(ROOT, "facets", ObjType::Map).unwrap();
-    tx.put(&facets, key("c").to_string(), "c").unwrap();
+    let datums = tx.put_object(ROOT, "datums", ObjType::Map).unwrap();
+    tx.put(&datums, key("c").to_string(), "c").unwrap();
     tx.commit();
     let replacement = state(&doc, 2);
     let next = project(&doc, Some(&before), 2);
     assert!(next.replace_all);
     assert_eq!(next.slots.keys().cloned().collect::<Vec<_>>(), [key("c")]);
     let mut tx = doc.transaction();
-    tx.put(&facets, key("later").to_string(), "later").unwrap();
+    tx.put(&datums, key("later").to_string(), "later").unwrap();
     tx.commit();
     let historic = DocView::new(&doc, replacement.heads.as_ref().unwrap())
         .unwrap()
@@ -414,12 +414,12 @@ fn envelope_replacement_rescans_and_ignores_later_materialized_changes() {
 }
 
 async fn next_entries(
-    store: &FacetSetStore,
+    store: &DatumSetStore,
     tag: &str,
     after: u64,
-) -> (u64, Vec<FrontierEntry<FacetRoute, FacetMembership>>) {
+) -> (u64, Vec<FrontierEntry<DatumRoute, DatumMembership>>) {
     let mut reader = store
-        .open(FacetTag::new(tag).unwrap(), after)
+        .open(DatumTag::new(tag).unwrap(), after)
         .await
         .unwrap();
     loop {
@@ -437,24 +437,24 @@ async fn settlements_are_atomic_idempotent_and_removals_preserve_tombstone_heads
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = FacetSetStore::new(sql.clone()).await.unwrap();
-    let (mut doc, facets, _, _) = fixture();
+    let store = DatumSetStore::new(sql.clone()).await.unwrap();
+    let (mut doc, datums, _, _) = fixture();
     let initial = state(&doc, 1);
-    sql.execute_batch("CREATE TRIGGER reject_facet_set BEFORE INSERT ON big_cabinet_facet_set_docs BEGIN SELECT RAISE(ABORT, 'injected'); END")
+    sql.execute_batch("CREATE TRIGGER reject_datum_set BEFORE INSERT ON big_cabinet_datum_set_docs BEGIN SELECT RAISE(ABORT, 'injected'); END")
         .await.unwrap();
     assert!(store.settle(project(&doc, None, 1)).await.is_err());
     assert_eq!(store.latest_revision().await.unwrap(), 0);
     assert_eq!(store.doc_state(&DocId::new([1; 32])).await.unwrap(), None);
     assert!(
         store
-            .query(FacetSetQuery::Tag(
-                FacetTag::new("org.example.note").unwrap()
+            .query(DatumSetQuery::Tag(
+                DatumTag::new("org.example.note").unwrap()
             ))
             .await
             .unwrap()
             .is_empty()
     );
-    sql.execute_batch("DROP TRIGGER reject_facet_set")
+    sql.execute_batch("DROP TRIGGER reject_datum_set")
         .await
         .unwrap();
     store.settle(project(&doc, None, 1)).await.unwrap();
@@ -463,7 +463,7 @@ async fn settlements_are_atomic_idempotent_and_removals_preserve_tombstone_heads
     store.settle(project(&doc, None, 1)).await.unwrap();
     assert_eq!(store.latest_revision().await.unwrap(), 1);
     let mut tx = doc.transaction();
-    tx.delete(&facets, key("a").to_string()).unwrap();
+    tx.delete(&datums, key("a").to_string()).unwrap();
     tx.commit();
     store
         .settle(project(&doc, Some(&initial), 2))
@@ -474,25 +474,25 @@ async fn settlements_are_atomic_idempotent_and_removals_preserve_tombstone_heads
         entries,
         vec![FrontierEntry {
             revision,
-            key: FacetRoute {
+            key: DatumRoute {
                 doc_id: DocId::new([1; 32]),
-                facet_key: key("a")
+                datum_key: key("a")
             },
-            value: Some(FacetMembership::Removed {
+            value: Some(DatumMembership::Removed {
                 doc_heads: Some(doc.get_heads()),
                 clock: heads_clock(&doc, initial.heads.as_ref().unwrap()),
-                facet_heads: initial.heads.unwrap()
+                datum_heads: initial.heads.unwrap()
             })
         }]
     );
-    let reopened = FacetSetStore::new(sql).await.unwrap();
+    let reopened = DatumSetStore::new(sql).await.unwrap();
     assert_eq!(
         reopened
-            .query(FacetSetQuery::Doc(DocId::new([1; 32])))
+            .query(DatumSetQuery::Doc(DocId::new([1; 32])))
             .await
             .unwrap()
             .into_iter()
-            .map(|record| record.route.facet_key)
+            .map(|record| record.route.datum_key)
             .collect::<Vec<_>>(),
         [key("b")]
     );
@@ -501,7 +501,7 @@ async fn settlements_are_atomic_idempotent_and_removals_preserve_tombstone_heads
 
 #[tokio::test]
 async fn replacement_and_physical_removal_remove_all_old_routes_without_regressing_state() {
-    let store = FacetSetStore::new(
+    let store = DatumSetStore::new(
         sqlite_rs::SqliteRuntime::new(Default::default())
             .ephemeral(&[])
             .unwrap(),
@@ -513,7 +513,7 @@ async fn replacement_and_physical_removal_remove_all_old_routes_without_regressi
     store.settle(project(&doc, None, 1)).await.unwrap();
     let stale = project(&doc, Some(&initial), 2);
     let mut tx = doc.transaction();
-    tx.put_object(ROOT, "facets", ObjType::Map).unwrap();
+    tx.put_object(ROOT, "datums", ObjType::Map).unwrap();
     tx.commit();
     store
         .settle(project(&doc, Some(&initial), 3))
@@ -526,7 +526,7 @@ async fn replacement_and_physical_removal_remove_all_old_routes_without_regressi
     );
     assert!(
         store
-            .query(FacetSetQuery::Doc(DocId::new([1; 32])))
+            .query(DatumSetQuery::Doc(DocId::new([1; 32])))
             .await
             .unwrap()
             .is_empty()
@@ -544,7 +544,7 @@ async fn projection_does_not_acquire_sync_demand() {
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = FacetSetStore::new(sql.clone()).await.unwrap();
+    let store = DatumSetStore::new(sql.clone()).await.unwrap();
     let prepared = store
         .prepare(
             &repo,
@@ -565,11 +565,11 @@ async fn projection_does_not_acquire_sync_demand() {
     assert!(store.latest_revision().await.unwrap() > 0);
     assert_eq!(
         store
-            .query(FacetSetQuery::Doc(doc_id.clone()))
+            .query(DatumSetQuery::Doc(doc_id.clone()))
             .await
             .unwrap()
             .into_iter()
-            .map(|record| (record.route.facet_key, record.doc_heads))
+            .map(|record| (record.route.datum_key, record.doc_heads))
             .collect::<Vec<_>>(),
         [(key("a"), heads.clone()), (key("b"), heads)]
     );
@@ -673,7 +673,7 @@ async fn boot_repo() -> (SharedBigRepo, big_repo::BigRepoStopToken) {
         big_repo::Config {
             node_identity_seed: [31; 32],
             storage: big_repo::StorageConfig::Memory,
-            scope_key: "facet-set-test".into(),
+            scope_key: "datum-set-test".into(),
             hidden_parts: Default::default(),
             automerge_frontier_group_scope: Default::default(),
             causal_checkpoint_group_scope: Default::default(),
@@ -685,7 +685,7 @@ async fn boot_repo() -> (SharedBigRepo, big_repo::BigRepoStopToken) {
 }
 
 async fn start_script(
-    store: FacetSetStore,
+    store: DatumSetStore,
     repo: SharedBigRepo,
     source: ScriptSource,
 ) -> (service_utils_rs::StopToken, service_utils_rs::Spawner) {
@@ -714,7 +714,7 @@ async fn start_script(
 #[tokio::test]
 async fn a_parked_doc_does_not_block_other_docs_and_newer_work_supersedes_it() {
     let (repo, stop) = boot_repo().await;
-    let store = FacetSetStore::new(
+    let store = DatumSetStore::new(
         sqlite_rs::SqliteRuntime::new(Default::default())
             .ephemeral(&[])
             .unwrap(),
@@ -756,7 +756,7 @@ async fn a_parked_doc_does_not_block_other_docs_and_newer_work_supersedes_it() {
         if entries.iter().any(|entry| {
             entry.key.doc_id == delayed_id
                 && matches!(&entry.value,
-            Some(FacetMembership::Present { doc_heads, .. }) if *doc_heads == latest_heads)
+            Some(DatumMembership::Present { doc_heads, .. }) if *doc_heads == latest_heads)
         }) {
             break;
         }
@@ -780,21 +780,21 @@ async fn a_parked_doc_does_not_block_other_docs_and_newer_work_supersedes_it() {
     assert!(entries.iter().all(|entry| entry.key.doc_id == delayed_id
         && matches!(
             entry.value,
-            Some(FacetMembership::Removed {
+            Some(DatumMembership::Removed {
                 doc_heads: None,
                 ..
             })
         )));
     assert!(
         store
-            .query(FacetSetQuery::Doc(delayed_id))
+            .query(DatumSetQuery::Doc(delayed_id))
             .await
             .unwrap()
             .is_empty()
     );
     assert_eq!(
         store
-            .query(FacetSetQuery::Doc(other_id))
+            .query(DatumSetQuery::Doc(other_id))
             .await
             .unwrap()
             .len(),
@@ -814,7 +814,7 @@ async fn cooperative_stop_preserves_parked_work_and_replays_without_duplicate_ou
     let sql = sqlite_rs::SqliteRuntime::new(Default::default())
         .ephemeral(&[])
         .unwrap();
-    let store = FacetSetStore::new(sql.clone()).await.unwrap();
+    let store = DatumSetStore::new(sql.clone()).await.unwrap();
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     let (worker_stop, worker_tasks) = start_script(
         store.clone(),
@@ -846,7 +846,7 @@ async fn cooperative_stop_preserves_parked_work_and_replays_without_duplicate_ou
     drop(sender);
     drop(store);
 
-    let store = FacetSetStore::new(sql).await.unwrap();
+    let store = DatumSetStore::new(sql).await.unwrap();
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
     sender.send(changed(&delayed_id, &delayed, 1)).unwrap();
     let delayed = repo
@@ -910,7 +910,7 @@ async fn cooperative_stop_drains_an_inflight_preparation_before_acknowledging_it
     let sql = sqlite_rs::SqliteRuntime::new(config)
         .ephemeral(&[])
         .unwrap();
-    let store = FacetSetStore::new(sql.clone()).await.unwrap();
+    let store = DatumSetStore::new(sql.clone()).await.unwrap();
     let doc_id = repo.allocate_id().await.unwrap();
     let (doc, _, _, _) = fixture();
     let event = changed(&doc_id, &doc, 1);
@@ -950,7 +950,7 @@ async fn cooperative_stop_drains_an_inflight_preparation_before_acknowledging_it
     assert_eq!(store.doc_state(&doc_id).await.unwrap().unwrap().cursor, 1);
     assert_eq!(store.source_revision().await.unwrap(), 1);
     assert_eq!(
-        store.query(FacetSetQuery::Doc(doc_id)).await.unwrap().len(),
+        store.query(DatumSetQuery::Doc(doc_id)).await.unwrap().len(),
         2
     );
     drop(handle);
@@ -961,7 +961,7 @@ async fn cooperative_stop_drains_an_inflight_preparation_before_acknowledging_it
 #[tokio::test]
 async fn live_afw_projection_needs_no_docs_service_and_replays_without_duplicate_output() {
     let (repo, stop) = boot_repo().await;
-    let store = FacetSetStore::new(
+    let store = DatumSetStore::new(
         sqlite_rs::SqliteRuntime::new(Default::default())
             .ephemeral(&[])
             .unwrap(),
@@ -1017,8 +1017,8 @@ async fn live_afw_projection_needs_no_docs_service_and_replays_without_duplicate
     let (worker_stop, worker_tasks) = start_worker().await;
     handle
         .with_document(|doc| {
-            let facets = doc.get(ROOT, "facets").unwrap().unwrap().1;
-            let first = doc.get(&facets, key("a").to_string()).unwrap().unwrap().1;
+            let datums = doc.get(ROOT, "datums").unwrap().unwrap().1;
+            let first = doc.get(&datums, key("a").to_string()).unwrap().unwrap().1;
             let mut tx = doc.transaction();
             tx.put(&first, "value", "remote-like raw edit").unwrap();
             tx.commit();
@@ -1027,11 +1027,11 @@ async fn live_afw_projection_needs_no_docs_service_and_replays_without_duplicate
         .unwrap();
     let (_, entries) = next_entries(&store, "org.example.note", revision).await;
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].key.facet_key, key("a"));
-    let FacetMembership::Present { facet_heads, .. } = entries[0].value.as_ref().unwrap() else {
-        panic!("live facet")
+    assert_eq!(entries[0].key.datum_key, key("a"));
+    let DatumMembership::Present { datum_heads, .. } = entries[0].value.as_ref().unwrap() else {
+        panic!("live datum")
     };
-    assert_eq!(Some(facet_heads.clone()), before.heads);
+    assert_eq!(Some(datum_heads.clone()), before.heads);
     worker_stop.stop().await;
     assert_eq!(worker_tasks.live_tasks(), 0);
     drop(handle);

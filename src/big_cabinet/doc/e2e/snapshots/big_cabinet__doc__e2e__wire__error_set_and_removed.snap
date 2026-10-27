@@ -4,6 +4,6 @@ expression: error
 ---
 {
   "SetAndRemoved": {
-    "facet_key": "org.example.note/main"
+    "datum_key": "org.example.note/main"
   }
 }

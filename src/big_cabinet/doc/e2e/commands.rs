@@ -36,12 +36,12 @@ async fn a_replayed_command_returns_its_receipt_without_acting_again() {
         )
         .await
         .unwrap();
-    let write = || WriteFacets {
+    let write = || WriteDatums {
         capability,
         command: Some(command("write")),
         doc_id: created.doc_id.clone(),
         mode: WriteMode::AtCurrent,
-        set: facet_map(&[(&key("main"), note("y"))]),
+        set: datum_map(&[(&key("main"), note("y"))]),
         remove: BTreeSet::new(),
     };
     let first = op(node.client().call(RequestContext::root(), write()).await).unwrap();
@@ -91,12 +91,12 @@ async fn a_refused_write_releases_its_command() {
         )
         .await
         .unwrap();
-    let write = |heads: Vec<ChangeHash>| WriteFacets {
+    let write = |heads: Vec<ChangeHash>| WriteDatums {
         capability,
         command: Some(command("write")),
         doc_id: created.doc_id.clone(),
         mode: WriteMode::IfDocUnchanged { heads },
-        set: facet_map(&[(&key("main"), note("y"))]),
+        set: datum_map(&[(&key("main"), note("y"))]),
         remove: BTreeSet::new(),
     };
     let stale = vec![ChangeHash([3; 32])];
@@ -222,7 +222,7 @@ async fn the_boot_pass_places_a_committed_create_and_abandons_an_uncommitted_one
     }
     let mut initial = Automerge::new();
     let mut tx = initial.transaction();
-    tx.put_object(automerge::ROOT, "facets", automerge::ObjType::Map)
+    tx.put_object(automerge::ROOT, "datums", automerge::ObjType::Map)
         .unwrap();
     tx.commit();
     node.repo

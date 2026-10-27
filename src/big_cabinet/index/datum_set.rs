@@ -6,9 +6,9 @@ use automerge::Prop;
 use automerge::ROOT;
 use automerge::ReadDoc;
 use automerge::Value;
+use big_cabinet_core::DatumKey;
+use big_cabinet_core::DatumTag;
 use big_cabinet_core::DocId;
-use big_cabinet_core::FacetKey;
-use big_cabinet_core::FacetTag;
 use big_repo::AutomergeFrontierEvent;
 use big_repo::AutomergeFrontierRevisionStore;
 use big_repo::AutomergeFrontierSelector;
@@ -47,73 +47,73 @@ use utils_rs::prelude::async_trait;
 use utils_rs::prelude::ferr;
 
 mod queries {
-    include!("facet_set/sqlite/gen.rs");
+    include!("datum_set/sqlite/gen.rs");
 }
 
-const FACET_SET_ID: &str = "big-cabinet-facet-set-v2";
+const DATUM_SET_ID: &str = "big-cabinet-datum-set-v2";
 const DMETA_KEY: &str = "org.example.daybook.dmeta/main";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct FacetRoute {
+pub struct DatumRoute {
     pub doc_id: DocId,
-    pub facet_key: FacetKey,
+    pub datum_key: DatumKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FacetMembership {
+pub enum DatumMembership {
     Present {
         doc_heads: Vec<ChangeHash>,
-        facet_heads: Vec<ChangeHash>,
-        /// Lamport clock of `facet_heads`: the greatest `max_op` among the
-        /// introducing changes. See `FacetVersion` in the DocsRepo protocol.
+        datum_heads: Vec<ChangeHash>,
+        /// Lamport clock of `datum_heads`: the greatest `max_op` among the
+        /// introducing changes. See `DatumVersion` in the DocsRepo protocol.
         clock: u64,
     },
     Removed {
         doc_heads: Option<Vec<ChangeHash>>,
-        facet_heads: Vec<ChangeHash>,
+        datum_heads: Vec<ChangeHash>,
         clock: u64,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FacetRecord {
-    pub route: FacetRoute,
+pub struct DatumRecord {
+    pub route: DatumRoute,
     pub doc_heads: Vec<ChangeHash>,
-    pub facet_heads: Vec<ChangeHash>,
+    pub datum_heads: Vec<ChangeHash>,
     pub clock: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FacetSetQuery {
+pub enum DatumSetQuery {
     Doc(DocId),
-    Tag(FacetTag),
-    Route(FacetRoute),
-    /// Every live route with exactly this facet key, across documents.
-    Key(FacetKey),
+    Tag(DatumTag),
+    Route(DatumRoute),
+    /// Every live route with exactly this datum key, across documents.
+    Key(DatumKey),
 }
 
-fn facet_record(row: Row) -> Res<FacetRecord> {
-    Ok(FacetRecord {
-        route: FacetRoute {
+fn datum_record(row: Row) -> Res<DatumRecord> {
+    Ok(DatumRecord {
+        route: DatumRoute {
             doc_id: row.get::<String>("doc_id")?.parse()?,
-            facet_key: row.get::<String>("facet_key")?.parse()?,
+            datum_key: row.get::<String>("datum_key")?.parse()?,
         },
         doc_heads: serde_json::from_slice(&row.get::<Vec<u8>>("doc_heads")?)?,
-        facet_heads: serde_json::from_slice(&row.get::<Vec<u8>>("facet_heads")?)?,
+        datum_heads: serde_json::from_slice(&row.get::<Vec<u8>>("datum_heads")?)?,
         clock: u64::try_from(row.get::<i64>("clock")?)
-            .map_err(|_| utils_rs::prelude::ferr!("facet-set clock is out of range"))?,
+            .map_err(|_| utils_rs::prelude::ferr!("datum-set clock is out of range"))?,
     })
 }
 
 #[derive(Clone)]
-struct FacetSetCodec;
+struct DatumSetCodec;
 
-impl SqliteFrontierCodec for FacetSetCodec {
-    type Key = FacetRoute;
-    type Value = FacetMembership;
+impl SqliteFrontierCodec for DatumSetCodec {
+    type Key = DatumRoute;
+    type Value = DatumMembership;
 
     fn encode_key(&self, key: &Self::Key) -> Vec<u8> {
-        serde_json::to_vec(key).expect("facet routes serialize")
+        serde_json::to_vec(key).expect("datum routes serialize")
     }
 
     fn decode_key(
@@ -124,7 +124,7 @@ impl SqliteFrontierCodec for FacetSetCodec {
     }
 
     fn encode_value(&self, value: &Self::Value) -> Vec<u8> {
-        serde_json::to_vec(value).expect("facet membership serializes")
+        serde_json::to_vec(value).expect("datum membership serializes")
     }
 
     fn decode_value(
@@ -135,7 +135,7 @@ impl SqliteFrontierCodec for FacetSetCodec {
     }
 
     fn namespace(&self, key: &Self::Key) -> Option<Vec<u8>> {
-        Some(key.facet_key.tag().as_str().as_bytes().to_vec())
+        Some(key.datum_key.tag().as_str().as_bytes().to_vec())
     }
 }
 
@@ -155,30 +155,30 @@ struct Work {
 struct Prepared {
     work: Work,
     previous: Option<DocState>,
-    slots: BTreeMap<FacetKey, FacetMembership>,
+    slots: BTreeMap<DatumKey, DatumMembership>,
     replace_all: bool,
 }
 
 #[derive(Clone)]
-pub struct FacetSetStore {
+pub struct DatumSetStore {
     sql: Database,
-    frontier: SqliteKeyedFrontier<FacetSetCodec>,
+    frontier: SqliteKeyedFrontier<DatumSetCodec>,
     input_state: SqliteDeltaWalkerStateRepo,
 }
 
-impl FacetSetStore {
+impl DatumSetStore {
     pub async fn new(sql: Database) -> Res<Self> {
         sql.apply_migrations(queries::MIGRATION_TABLE, queries::MIGRATIONS)
             .await?;
         let frontier = SqliteKeyedFrontier::new(
             sql.clone(),
-            FACET_SET_ID,
-            FacetSetCodec,
+            DATUM_SET_ID,
+            DatumSetCodec,
             Arc::new(Notify::new()),
         )
         .await?;
         let input_state =
-            SqliteDeltaWalkerStateRepo::new(sql.clone(), FACET_SET_ID, "automerge-frontier")
+            SqliteDeltaWalkerStateRepo::new(sql.clone(), DATUM_SET_ID, "automerge-frontier")
                 .await?;
         Ok(Self {
             sql,
@@ -192,7 +192,7 @@ impl FacetSetStore {
     pub async fn open_all(
         &self,
         after: u64,
-    ) -> Result<KeyedFrontierRevisionReader<'_, FacetRoute, FacetMembership>, KeyedFrontierError>
+    ) -> Result<KeyedFrontierRevisionReader<'_, DatumRoute, DatumMembership>, KeyedFrontierError>
     {
         Ok(KeyedFrontierRevisionReader::new(
             self.frontier
@@ -204,8 +204,8 @@ impl FacetSetStore {
     /// Open the frontier across several tag namespaces at once, each at its own cursor.
     pub async fn open_tags(
         &self,
-        tags: impl IntoIterator<Item = (FacetTag, u64)>,
-    ) -> Result<KeyedFrontierRevisionReader<'_, FacetRoute, FacetMembership>, KeyedFrontierError>
+        tags: impl IntoIterator<Item = (DatumTag, u64)>,
+    ) -> Result<KeyedFrontierRevisionReader<'_, DatumRoute, DatumMembership>, KeyedFrontierError>
     {
         Ok(KeyedFrontierRevisionReader::new(
             self.frontier
@@ -229,41 +229,41 @@ impl FacetSetStore {
             .transpose()
     }
 
-    pub async fn query(&self, selector: FacetSetQuery) -> Res<Vec<FacetRecord>> {
+    pub async fn query(&self, selector: DatumSetQuery) -> Res<Vec<DatumRecord>> {
         let mut query = Sql::new(
             r#"SELECT doc_id
-                 , facet_key
+                 , datum_key
                  , doc_heads
-                 , facet_heads
+                 , datum_heads
                  , clock
-              FROM big_cabinet_facet_set_entries
+              FROM big_cabinet_datum_set_entries
              WHERE "#,
         );
         match selector {
-            FacetSetQuery::Doc(doc) => {
+            DatumSetQuery::Doc(doc) => {
                 query.push("doc_id = ").bind(doc.to_string());
             }
-            FacetSetQuery::Tag(tag) => {
-                query.push("facet_tag = ").bind(tag.to_string());
+            DatumSetQuery::Tag(tag) => {
+                query.push("datum_tag = ").bind(tag.to_string());
             }
-            FacetSetQuery::Route(route) => {
+            DatumSetQuery::Route(route) => {
                 query
                     .push("doc_id = ")
                     .bind(route.doc_id.to_string())
-                    .push(" AND facet_key = ")
-                    .bind(route.facet_key.to_string());
+                    .push(" AND datum_key = ")
+                    .bind(route.datum_key.to_string());
             }
-            FacetSetQuery::Key(key) => {
-                query.push("facet_key = ").bind(key.to_string());
+            DatumSetQuery::Key(key) => {
+                query.push("datum_key = ").bind(key.to_string());
             }
         }
-        query.push(" ORDER BY doc_id, facet_key");
+        query.push(" ORDER BY doc_id, datum_key");
         query
             .query(&self.sql)
             .await?
             .rows
             .into_iter()
-            .map(facet_record)
+            .map(datum_record)
             .collect()
     }
 
@@ -271,37 +271,37 @@ impl FacetSetStore {
     pub async fn query_docs(
         &self,
         docs: &BTreeSet<DocId>,
-        tag: Option<&FacetTag>,
-        key: Option<&FacetKey>,
-    ) -> Res<Vec<FacetRecord>> {
+        tag: Option<&DatumTag>,
+        key: Option<&DatumKey>,
+    ) -> Res<Vec<DatumRecord>> {
         if docs.is_empty() {
             return Ok(Vec::new());
         }
         let mut query = Sql::new(
             r#"SELECT doc_id
-                 , facet_key
+                 , datum_key
                  , doc_heads
-                 , facet_heads
+                 , datum_heads
                  , clock
-              FROM big_cabinet_facet_set_entries
+              FROM big_cabinet_datum_set_entries
               WHERE doc_id IN (SELECT value FROM json_each("#,
         );
         query.bind(serde_json::to_string(docs)?).push("))");
         if let Some(tag) = tag {
             query
-                .push(" AND facet_tag = ")
+                .push(" AND datum_tag = ")
                 .bind(tag.as_str().to_owned());
         }
         if let Some(key) = key {
-            query.push(" AND facet_key = ").bind(key.to_string());
+            query.push(" AND datum_key = ").bind(key.to_string());
         }
-        query.push(" ORDER BY doc_id, facet_key");
+        query.push(" ORDER BY doc_id, datum_key");
         query
             .query(&self.sql)
             .await?
             .rows
             .into_iter()
-            .map(facet_record)
+            .map(datum_record)
             .collect()
     }
 
@@ -321,7 +321,7 @@ impl FacetSetStore {
         }
         if stored != prepared.previous {
             return Err(ferr!(
-                "facet-set document changed during preparation: {doc_id}"
+                "datum-set document changed during preparation: {doc_id}"
             ));
         }
         let mut slots = prepared.slots;
@@ -330,18 +330,18 @@ impl FacetSetStore {
             for key in old {
                 slots
                     .entry(key.parse()?)
-                    .or_insert_with(|| FacetMembership::Removed {
+                    .or_insert_with(|| DatumMembership::Removed {
                         doc_heads: prepared.work.state.heads.clone(),
-                        facet_heads: Vec::new(),
+                        datum_heads: Vec::new(),
                         clock: 0,
                     });
             }
         }
         let mutations = slots.iter().map(|(key, value)| {
             (
-                FacetRoute {
+                DatumRoute {
                     doc_id: prepared.work.doc_id.clone(),
-                    facet_key: key.clone(),
+                    datum_key: key.clone(),
                 },
                 Some(value.clone()),
             )
@@ -353,9 +353,9 @@ impl FacetSetStore {
         }
         for (key, value) in slots {
             match value {
-                FacetMembership::Present {
+                DatumMembership::Present {
                     doc_heads,
-                    facet_heads,
+                    datum_heads,
                     clock,
                 } => {
                     queries::put_entry(
@@ -364,14 +364,14 @@ impl FacetSetStore {
                         key.to_string(),
                         key.tag().to_string(),
                         serde_json::to_vec(&doc_heads)?,
-                        serde_json::to_vec(&facet_heads)?,
+                        serde_json::to_vec(&datum_heads)?,
                         i64::try_from(clock).map_err(|_| {
-                            utils_rs::prelude::ferr!("facet-set clock is out of range")
+                            utils_rs::prelude::ferr!("datum-set clock is out of range")
                         })?,
                     )
                     .await?;
                 }
-                FacetMembership::Removed { .. } => {
+                DatumMembership::Removed { .. } => {
                     queries::delete_entry(&transaction, doc_id.clone(), key.to_string()).await?;
                 }
             }
@@ -392,7 +392,7 @@ struct DocView<'a> {
     doc: &'a Automerge,
     heads: &'a [ChangeHash],
     current: bool,
-    facets: Vec<ObjId>,
+    datums: Vec<ObjId>,
     metadata: Vec<ObjId>,
 }
 
@@ -404,13 +404,13 @@ impl<'a> DocView<'a> {
             doc,
             heads,
             current: current_heads == heads,
-            facets: Vec::new(),
+            datums: Vec::new(),
             metadata: Vec::new(),
         };
-        view.facets = view.maps(&ROOT, "facets")?;
-        for facets in &view.facets {
-            for dmeta in view.maps(facets, DMETA_KEY)? {
-                view.metadata.extend(view.maps(&dmeta, "facets")?);
+        view.datums = view.maps(&ROOT, "datums")?;
+        for datums in &view.datums {
+            for dmeta in view.maps(datums, DMETA_KEY)? {
+                view.metadata.extend(view.maps(&dmeta, "datums")?);
             }
         }
         Ok(view)
@@ -432,8 +432,8 @@ impl<'a> DocView<'a> {
             .collect())
     }
 
-    fn keys(&self) -> BTreeSet<FacetKey> {
-        self.facets
+    fn keys(&self) -> BTreeSet<DatumKey> {
+        self.datums
             .iter()
             .chain(&self.metadata)
             .flat_map(|object| {
@@ -443,22 +443,22 @@ impl<'a> DocView<'a> {
                     self.doc.map_range_at(object, .., self.heads)
                 };
                 range
-                    .filter_map(|item| item.key.parse::<FacetKey>().ok())
+                    .filter_map(|item| item.key.parse::<DatumKey>().ok())
                     .filter(|key| key.to_string() != DMETA_KEY)
             })
             .collect()
     }
 
-    fn slot(&self, key: &FacetKey) -> Res<FacetMembership> {
+    fn slot(&self, key: &DatumKey) -> Res<DatumMembership> {
         let text = key.to_string();
         let mut present = false;
-        for facets in &self.facets {
-            present |= !self.all(facets, text.as_str())?.is_empty();
+        for datums in &self.datums {
+            present |= !self.all(datums, text.as_str())?.is_empty();
         }
         let mut heads = BTreeSet::new();
         for metadata in &self.metadata {
-            for facet in self.maps(metadata, &text)? {
-                for (value, list) in self.all(&facet, "signatures")? {
+            for datum in self.maps(metadata, &text)? {
+                for (value, list) in self.all(&datum, "signatures")? {
                     if value != Value::Object(ObjType::List) {
                         continue;
                     }
@@ -493,17 +493,17 @@ impl<'a> DocView<'a> {
             .map(|change| change.max_op())
             .max()
             .unwrap_or(0);
-        let facet_heads = heads.into_iter().collect();
+        let datum_heads = heads.into_iter().collect();
         Ok(if present {
-            FacetMembership::Present {
+            DatumMembership::Present {
                 doc_heads: self.heads.to_vec(),
-                facet_heads,
+                datum_heads,
                 clock,
             }
         } else {
-            FacetMembership::Removed {
+            DatumMembership::Removed {
                 doc_heads: Some(self.heads.to_vec()),
-                facet_heads,
+                datum_heads,
                 clock,
             }
         })
@@ -512,7 +512,7 @@ impl<'a> DocView<'a> {
     fn project(
         &self,
         previous: Option<&DocState>,
-    ) -> Res<(BTreeMap<FacetKey, FacetMembership>, bool)> {
+    ) -> Res<(BTreeMap<DatumKey, DatumMembership>, bool)> {
         let old_heads = previous.and_then(|state| state.heads.as_deref());
         let excluded: BTreeSet<_> = self
             .doc
@@ -535,7 +535,7 @@ impl<'a> DocView<'a> {
                 }
                 for op in change.decode().operations {
                     // Resolve the object's path as of the change containing
-                    // the op, not the current heads: a facet write followed
+                    // the op, not the current heads: a datum write followed
                     // by a removal inside the same projection window leaves
                     // the op's object tombstoned at the current heads, and
                     // automerge's clock-less parent walk cannot seek an
@@ -567,7 +567,7 @@ impl<'a> DocView<'a> {
                         },
                         Some(Prop::Seq(_)) | None => None,
                     };
-                    if name(0) != Some("facets") {
+                    if name(0) != Some("datums") {
                         continue;
                     }
                     let key = match (name(1), name(2), name(3)) {
@@ -575,9 +575,9 @@ impl<'a> DocView<'a> {
                             full = true;
                             None
                         }
-                        (Some(DMETA_KEY), Some("facets"), Some(key)) => Some(key),
+                        (Some(DMETA_KEY), Some("datums"), Some(key)) => Some(key),
                         // Aliases, actors and timestamps do not change membership
-                        // or signature heads; only the `facets` subtree does.
+                        // or signature heads; only the `datums` subtree does.
                         (Some(DMETA_KEY), Some(_), _) => None,
                         (Some(DMETA_KEY), _, _) => {
                             full = true;
@@ -585,7 +585,7 @@ impl<'a> DocView<'a> {
                         }
                         (Some(key), _, _) => Some(key),
                     };
-                    if let Some(key) = key.and_then(|key| key.parse::<FacetKey>().ok()) {
+                    if let Some(key) = key.and_then(|key| key.parse::<DatumKey>().ok()) {
                         touched.insert(key);
                     }
                 }
@@ -602,7 +602,7 @@ impl<'a> DocView<'a> {
     }
 }
 
-impl FacetSetStore {
+impl DatumSetStore {
     async fn prepare(&self, repo: &SharedBigRepo, work: Work) -> Res<Option<Prepared>> {
         let previous = self.doc_state(&work.doc_id).await?;
         if previous
@@ -795,7 +795,7 @@ impl FacetSetStore {
                     }
                 }
                 notifications = wakes.recv(), if !stopping => {
-                    for notification in notifications.ok_or_else(|| ferr!("facet-set materialization listener closed"))? {
+                    for notification in notifications.ok_or_else(|| ferr!("datum-set materialization listener closed"))? {
                         let doc_id = match notification {
                             BigRepoLocalNotification::DocCreated { doc_id, .. } | BigRepoLocalNotification::DocImported { doc_id, .. }
                             | BigRepoLocalNotification::DocHeadsUpdated { doc_id, .. } | BigRepoLocalNotification::DocMaterializationReady { doc_id, .. } => doc_id,
@@ -814,12 +814,12 @@ impl FacetSetStore {
 }
 
 #[async_trait]
-impl RevisionedStore for FacetSetStore {
+impl RevisionedStore for DatumSetStore {
     type Revision = u64;
-    type Entry = FrontierEntry<FacetRoute, FacetMembership>;
-    type Selector = FacetTag;
+    type Entry = FrontierEntry<DatumRoute, DatumMembership>;
+    type Selector = DatumTag;
     type Error = KeyedFrontierError;
-    type Reader<'a> = KeyedFrontierRevisionReader<'a, FacetRoute, FacetMembership>;
+    type Reader<'a> = KeyedFrontierRevisionReader<'a, DatumRoute, DatumMembership>;
 
     async fn latest_revision(&self) -> Result<u64, Self::Error> {
         self.frontier.latest_revision().await
@@ -827,7 +827,7 @@ impl RevisionedStore for FacetSetStore {
 
     async fn open<'a>(
         &'a self,
-        tag: FacetTag,
+        tag: DatumTag,
         after: u64,
     ) -> Result<Self::Reader<'a>, Self::Error> {
         Ok(KeyedFrontierRevisionReader::new(

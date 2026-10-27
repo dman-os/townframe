@@ -1,79 +1,79 @@
-//! What one plug declares: the definitions it carries, which of them are facets, and the context
+//! What one plug declares: the definitions it carries, which of them are datums, and the context
 //! they are read in.
 //!
-//! A definition is not standalone. A facet's schema refers to the types it names by `#/$defs/<name>`,
+//! A definition is not standalone. A datum's schema refers to the types it names by `#/$defs/<name>`,
 //! so it is read in a context — the way an OpenAPI document resolves against its own components and
 //! the documents it includes, and the way an AT Proto record resolves against every NSID in the
 //! world. Ours is narrower and explicit: **the plug, plus the plugs it references**.
 //!
 //! # The definitions are carried, not looked up
 //!
-//! There is no registry. A plug carries the schema of every type its facets reach, *including* one
+//! There is no registry. A plug carries the schema of every type its datums reach, *including* one
 //! that belongs to another plug, so a plug can be read on its own and a definition can disappear
 //! from the world without taking its consumers with it. [`Declaration::of`] hoists those definitions
-//! out of a facet's schema into the manifest, so a type two facets both name is carried once, and a
-//! facet's own schema is its definition with nothing extra inlined.
+//! out of a datum's schema into the manifest, so a type two datums both name is carried once, and a
+//! datum's own schema is its definition with nothing extra inlined.
 //!
 //! # Some checks are only possible here
 //!
 //! `check_shape` runs per declaration, inside [`Declaration::of`], because only the compiler knows
-//! the shape a type *claims*. Everything plural is checked in [`Bundle::validate`]: two facets
+//! the shape a type *claims*. Everything plural is checked in [`Bundle::validate`]: two datums
 //! claiming one tag, two definitions disagreeing about a name they both declare, and a reference
 //! that resolves in neither this plug nor a dependency.
 
-use crate::facet::FacetMember;
-use crate::facet::FacetShape;
-use crate::facet::Shape;
-use crate::facet::ShapeFlag;
-use crate::facet::Tagging;
-use crate::facet::check_shape;
-use crate::facet::lexicon::project_facet;
+use crate::datum::DatumMember;
+use crate::datum::DatumShape;
+use crate::datum::Shape;
+use crate::datum::ShapeFlag;
+use crate::datum::Tagging;
+use crate::datum::check_shape;
+use crate::datum::lexicon::project_datum;
 use schemars::JsonSchema;
 use schemars::Schema;
 use serde_json::Map;
 use serde_json::Value;
 use std::collections::HashSet;
 
-/// A facet a plug declares: the tag a facet key carries, the name a definition refers to it by, its
+/// A datum a plug declares: the tag a datum key carries, the name a definition refers to it by, its
 /// definition, and the decisions that declaration makes at a cost.
 ///
 /// The Lexicon it publishes is not a field: it is projected from the definitions the whole bundle
-/// carries ([`Bundle::lexicons`]), because a reference a facet makes resolves against the plug and
+/// carries ([`Bundle::lexicons`]), because a reference a datum makes resolves against the plug and
 /// its dependencies and not against the declaration alone.
 #[derive(Debug, Clone)]
-pub struct FacetDecl {
+pub struct DatumDecl {
     pub id: String,
     pub name: String,
     pub schema: Schema,
     pub flags: Vec<ShapeFlag>,
 }
 
-/// A named type a declaration reaches, which is not a facet: it is written at its positions, nothing
-/// keys a facet on it, and it has no display or reference behaviour of its own.
+/// A named type a declaration reaches, which is not a datum: it is written at its positions, nothing
+/// keys a datum on it, and it has no display or reference behaviour of its own.
 #[derive(Debug, Clone)]
 pub struct TypeDecl {
     pub name: String,
     pub schema: Schema,
 }
 
-/// One facet and the definitions its schema brought with it, before the plug has collected them.
+/// One datum and the definitions its schema brought with it, before the plug has collected them.
 #[derive(Debug, Clone)]
 pub struct Declaration {
-    pub facet: FacetDecl,
+    pub datum: DatumDecl,
     pub types: Vec<TypeDecl>,
 }
 
 impl Declaration {
-    /// Declares one facet type, refusing a schema that is not lexicon-aligned.
+    /// Declares one datum type, refusing a schema that is not lexicon-aligned.
     ///
     /// The id comes from the type, the definition is the schema `schemars` derived for it, and every
     /// other definition that schema reached is hoisted out to travel beside it. The shape the type
     /// claims is checked against its definition here, which is the one place both are in hand, and so
     /// is the Lexicon the definition has to project to — refused here, at authoring time, rather than
     /// at the publish that would carry it.
-    pub fn of<T>() -> Result<Self, crate::facet::ShapeError>
+    pub fn of<T>() -> Result<Self, crate::datum::ShapeError>
     where
-        T: FacetMember + FacetShape + JsonSchema,
+        T: DatumMember + DatumShape + JsonSchema,
     {
         Self::declared::<T>(Publish::Yes)
     }
@@ -83,16 +83,16 @@ impl Declaration {
     /// The codec's document is a `$ref` bundle a walk can store under. A type such as one with a
     /// deliberate plain number is a legitimate codec position and is not canonical JSON, so it
     /// assembles here and is refused by [`Bundle::lexicons`] rather than silently published.
-    pub fn assemble<T>() -> Result<Self, crate::facet::ShapeError>
+    pub fn assemble<T>() -> Result<Self, crate::datum::ShapeError>
     where
-        T: FacetMember + FacetShape + JsonSchema,
+        T: DatumMember + DatumShape + JsonSchema,
     {
         Self::declared::<T>(Publish::No)
     }
 
-    fn declared<T>(publish: Publish) -> Result<Self, crate::facet::ShapeError>
+    fn declared<T>(publish: Publish) -> Result<Self, crate::datum::ShapeError>
     where
-        T: FacetMember + FacetShape + JsonSchema,
+        T: DatumMember + DatumShape + JsonSchema,
     {
         let derived = schemars::schema_for!(T);
         let document = serde_json::to_value(&derived).expect("a schema serializes");
@@ -102,7 +102,7 @@ impl Declaration {
             check_aligned(T::ID, T::SHAPE, &document)?;
         }
         Ok(Self {
-            facet: FacetDecl {
+            datum: DatumDecl {
                 id: T::ID.to_owned(),
                 name: T::schema_name().into_owned(),
                 schema,
@@ -123,18 +123,18 @@ enum Publish {
 ///
 /// Adjacent and external unions are explicit departures from the internally tagged member a Lexicon
 /// union is, so they are refused here and stay representable in the sidecar only.
-fn check_aligned(id: &str, shape: Shape, document: &Value) -> Result<(), crate::facet::ShapeError> {
+fn check_aligned(id: &str, shape: Shape, document: &Value) -> Result<(), crate::datum::ShapeError> {
     if let Shape::Union {
         tagging: Tagging::Adjacently { .. } | Tagging::Externally,
         ..
     } = shape
     {
-        return Err(crate::facet::ShapeError::NotLexiconAligned {
+        return Err(crate::datum::ShapeError::NotLexiconAligned {
             name: id.to_owned(),
             reason: "only an internally tagged union is a lexicon union".to_owned(),
         });
     }
-    project_facet(id, document).map_err(|reason| crate::facet::ShapeError::NotLexiconAligned {
+    project_datum(id, document).map_err(|reason| crate::datum::ShapeError::NotLexiconAligned {
         name: id.to_owned(),
         reason,
     })?;
@@ -144,7 +144,7 @@ fn check_aligned(id: &str, shape: Shape, document: &Value) -> Result<(), crate::
 /// Everything one plug declares.
 #[derive(Debug, Clone, Default)]
 pub struct Universe {
-    pub facets: Vec<FacetDecl>,
+    pub datums: Vec<DatumDecl>,
     pub types: Vec<TypeDecl>,
 }
 
@@ -152,26 +152,26 @@ pub struct Universe {
 type Declared<'a> = (&'a str, &'a Schema, &'a str);
 
 impl Universe {
-    /// Collects the facets and the definitions they brought with them.
+    /// Collects the datums and the definitions they brought with them.
     ///
-    /// A definition two facets both brought is carried once. A name two of them disagree about is
+    /// A definition two datums both brought is carried once. A name two of them disagree about is
     /// carried twice, deliberately, so that [`Bundle::validate`] reports it rather than one of them
     /// quietly winning.
     pub fn collect(declarations: impl IntoIterator<Item = Declaration>) -> Self {
         let declarations: Vec<Declaration> = declarations.into_iter().collect();
-        let mut facets: Vec<FacetDecl> = Vec::new();
+        let mut datums: Vec<DatumDecl> = Vec::new();
         let mut types: Vec<TypeDecl> = Vec::new();
-        // Two passes: a union member's own declaration and the definition a member-using facet's
+        // Two passes: a union member's own declaration and the definition a member-using datum's
         // schema hoists for it name the same type, and the hoisted copy is a `$ref` target without
-        // the facet's document frame (`$schema`, `title`). Declaration order is arbitrary, so the
-        // facets are all known before the types are screened against them.
+        // the datum's document frame (`$schema`, `title`). Declaration order is arbitrary, so the
+        // datums are all known before the types are screened against them.
         for declaration in &declarations {
-            facets.push(declaration.facet.clone());
+            datums.push(declaration.datum.clone());
         }
         for declaration in declarations {
             for decl in declaration.types {
-                let facet_agrees = facets.iter().any(|facet| {
-                    facet.name == decl.name && same_schema(&facet.schema, &decl.schema)
+                let datum_agrees = datums.iter().any(|datum| {
+                    datum.name == decl.name && same_schema(&datum.schema, &decl.schema)
                 });
                 let schema_frame = |document: Value| {
                     let mut document = document;
@@ -181,12 +181,12 @@ impl Universe {
                     }
                     document
                 };
-                let framed_agrees = facets.iter().any(|facet| {
-                    facet.name == decl.name
-                        && schema_frame(serde_json::to_value(&facet.schema).expect("a schema"))
+                let framed_agrees = datums.iter().any(|datum| {
+                    datum.name == decl.name
+                        && schema_frame(serde_json::to_value(&datum.schema).expect("a schema"))
                             == serde_json::to_value(&decl.schema).expect("a schema")
                 });
-                if facet_agrees || framed_agrees || declaration.facet.name == decl.name {
+                if datum_agrees || framed_agrees || declaration.datum.name == decl.name {
                     continue;
                 }
                 if types
@@ -198,7 +198,7 @@ impl Universe {
                 types.push(decl);
             }
         }
-        Self { facets, types }
+        Self { datums, types }
     }
 }
 
@@ -221,9 +221,9 @@ impl<'a> Bundle<'a> {
             .chain(self.dependencies.iter().copied())
             .flat_map(|universe| {
                 universe
-                    .facets
+                    .datums
                     .iter()
-                    .map(|facet| (facet.name.as_str(), &facet.schema, facet.id.as_str()))
+                    .map(|datum| (datum.name.as_str(), &datum.schema, datum.id.as_str()))
                     .chain(
                         universe
                             .types
@@ -250,13 +250,13 @@ impl<'a> Bundle<'a> {
 
         let mut seen_ids: HashSet<&str> = HashSet::new();
         let mut flags: Vec<ShapeFlag> = Vec::new();
-        for facet in &self.plug.facets {
-            if !seen_ids.insert(&facet.id) {
+        for datum in &self.plug.datums {
+            if !seen_ids.insert(&datum.id) {
                 return Err(UniverseError::DuplicateId {
-                    id: facet.id.clone(),
+                    id: datum.id.clone(),
                 });
             }
-            flags.extend(facet.flags.iter().copied());
+            flags.extend(datum.flags.iter().copied());
         }
 
         let mut by_name: Vec<Declared<'a>> = Vec::new();
@@ -292,10 +292,10 @@ impl<'a> Bundle<'a> {
     }
 
     /// The single document a peer validates a value against: every definition in scope, and the
-    /// named facet's definition as the root.
+    /// named datum's definition as the root.
     ///
     /// This is what makes the context cost a consumer nothing. The manifest carries definitions
-    /// flat, because that is what lets two facets share one; a reader that just wants to check a
+    /// flat, because that is what lets two datums share one; a reader that just wants to check a
     /// value takes this instead of assembling `$defs` itself.
     /// A union member's definition as the member declares it. The overlay of a union position
     /// matches a supplement branch by its discriminant and applies the branch — which is this
@@ -305,9 +305,9 @@ impl<'a> Bundle<'a> {
         self.resolve(name)
     }
 
-    pub fn document(&self, facet_name: &str) -> Option<Schema> {
+    pub fn document(&self, datum_name: &str) -> Option<Schema> {
         let defs = self.defs_in_scope();
-        if !defs.contains_key(facet_name) {
+        if !defs.contains_key(datum_name) {
             return None;
         }
         let mut root = Map::new();
@@ -317,48 +317,48 @@ impl<'a> Bundle<'a> {
         );
         root.insert(
             "$ref".to_owned(),
-            Value::from(format!("#/$defs/{facet_name}")),
+            Value::from(format!("#/$defs/{datum_name}")),
         );
         root.insert("$defs".to_owned(), Value::Object(defs));
         Schema::try_from(Value::Object(root)).ok()
     }
 
-    /// Every Lexicon file this bundle publishes, one per facet, in the order the plug declares them.
+    /// Every Lexicon file this bundle publishes, one per datum, in the order the plug declares them.
     ///
     /// Projected against the whole bundle rather than against one declaration, so a definition a
-    /// facet reaches resolves here the same way it does in [`Bundle::document`] — including one
+    /// datum reaches resolves here the same way it does in [`Bundle::document`] — including one
     /// carried by a dependency plug. This is the publish step, and it is where a declaration that
     /// was [`assemble`d](Declaration::assemble) without the alignment gate is refused instead of
     /// being handed to a peer that cannot read it.
     pub fn lexicons(&self) -> Result<Vec<Lexicon>, LexiconError> {
         let defs = Value::Object(self.defs_in_scope());
         self.plug
-            .facets
+            .datums
             .iter()
-            .map(|facet| {
+            .map(|datum| {
                 // A declaration is checked against its own schema at authoring time, but the union
                 // tagging it settled on is only a decision recorded in `flags`: refuse to publish a
-                // facet whose union a consumer cannot read as an internal `$type` union.
-                if facet.flags.contains(&ShapeFlag::NonInternalTagging) {
+                // datum whose union a consumer cannot read as an internal `$type` union.
+                if datum.flags.contains(&ShapeFlag::NonInternalTagging) {
                     return Err(LexiconError::NotAligned {
-                        id: facet.id.clone(),
+                        id: datum.id.clone(),
                         reason: "only an internally tagged union is a lexicon union".to_owned(),
                     });
                 }
                 let mut document =
-                    serde_json::to_value(&facet.schema).expect("a schema is a JSON value");
+                    serde_json::to_value(&datum.schema).expect("a schema is a JSON value");
                 document
                     .as_object_mut()
                     .expect("a schema is an object")
                     .insert("$defs".to_owned(), defs.clone());
-                let file = project_facet(&facet.id, &document).map_err(|reason| {
+                let file = project_datum(&datum.id, &document).map_err(|reason| {
                     LexiconError::NotAligned {
-                        id: facet.id.clone(),
+                        id: datum.id.clone(),
                         reason,
                     }
                 })?;
                 Ok(Lexicon {
-                    id: facet.id.clone(),
+                    id: datum.id.clone(),
                     file,
                 })
             })
@@ -376,14 +376,14 @@ impl<'a> Bundle<'a> {
     }
 }
 
-/// One facet's published Lexicon: the NSID it is published under, and the file itself.
+/// One datum's published Lexicon: the NSID it is published under, and the file itself.
 #[derive(Debug, Clone)]
 pub struct Lexicon {
     pub id: String,
     pub file: Value,
 }
 
-/// A facet this bundle cannot publish a Lexicon for.
+/// A datum this bundle cannot publish a Lexicon for.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum LexiconError {
     /// {id} is not lexicon-aligned: {reason}
@@ -393,7 +393,7 @@ pub enum LexiconError {
 /// The declaration and the manifest do not agree, or the manifest does not stand on its own.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
 pub enum UniverseError {
-    /// two facets of one plug claim the tag {id}
+    /// two datums of one plug claim the tag {id}
     DuplicateId { id: String },
     /// {name} is declared twice, as {first} and as {second}, and the two disagree
     Conflict {
@@ -502,7 +502,7 @@ mod tests {
 
     fn universe_with_schema(schema: Value, types: Vec<TypeDecl>) -> Universe {
         Universe {
-            facets: vec![FacetDecl {
+            datums: vec![DatumDecl {
                 id: "org.example.schema.test".to_owned(),
                 name: "Main".to_owned(),
                 schema: Schema::try_from(schema).expect("test schema"),

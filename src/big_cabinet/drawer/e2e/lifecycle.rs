@@ -27,7 +27,7 @@ async fn placement_reply_waits_for_committed_rosters() {
                 capability,
                 command: command("placed-note"),
                 placement,
-                facets: BTreeMap::from([note("placed-note")]),
+                datums: BTreeMap::from([note("placed-note")]),
             },
         )
         .await
@@ -47,7 +47,7 @@ async fn placement_reply_waits_for_committed_rosters() {
         );
         assert!(
             !node
-                .roster_facets(target)
+                .roster_datums(target)
                 .await
                 .contains_key(&doc_entry_key(&document))
         );
@@ -65,7 +65,7 @@ async fn placement_reply_waits_for_committed_rosters() {
             Some(Access::Admin)
         );
         assert!(
-            node.roster_facets(target)
+            node.roster_datums(target)
                 .await
                 .contains_key(&doc_entry_key(&document))
         );
@@ -146,7 +146,7 @@ async fn drawer_drop_and_stop_reclaim_state_and_recover_interrupted_placement() 
                     capability,
                     command: command("interrupted-note"),
                     placement,
-                    facets: BTreeMap::from([note("interrupted-note")]),
+                    datums: BTreeMap::from([note("interrupted-note")]),
                 },
             )
             .await
@@ -207,7 +207,7 @@ async fn drawer_drop_and_stop_reclaim_state_and_recover_interrupted_placement() 
                 Some(Access::Admin)
             );
             assert!(
-                node.roster_facets(target)
+                node.roster_datums(target)
                     .await
                     .contains_key(&doc_entry_key(&document))
             );
@@ -244,7 +244,7 @@ async fn boot_creates_the_local_drawers_once() {
     assert_eq!(view.access, Access::Admin);
     assert_eq!(view.layout.known(), Some(LayoutKind::SingleGroup));
     assert!(view.docs.is_empty(), "{view:?}");
-    let roster = node.roster_facets(&local.present_id).await;
+    let roster = node.roster_datums(&local.present_id).await;
     assert!(roster.contains_key(&drawer_key()), "{roster:?}");
     assert!(roster.contains_key(&roster_key()), "{roster:?}");
 
@@ -279,7 +279,7 @@ async fn an_add_interrupted_at_either_boundary_is_finished_by_a_retry_or_at_boot
     );
     assert!(
         !node
-            .roster_facets(&shared)
+            .roster_datums(&shared)
             .await
             .contains_key(&doc_entry_key(&doc))
     );
@@ -292,7 +292,7 @@ async fn an_add_interrupted_at_either_boundary_is_finished_by_a_retry_or_at_boot
         .unwrap();
     assert_eq!(receipt.doc_id, shared);
     assert_eq!(
-        node.roster_facets(&shared).await[&doc_entry_key(&doc)],
+        node.roster_datums(&shared).await[&doc_entry_key(&doc)],
         json!({"access": "Write"})
     );
     assert_eq!(
@@ -316,7 +316,7 @@ async fn an_add_interrupted_at_either_boundary_is_finished_by_a_retry_or_at_boot
         .await
         .unwrap_err();
     assert_eq!(
-        node.roster_facets(&shared).await[&doc_entry_key(&other)],
+        node.roster_datums(&shared).await[&doc_entry_key(&other)],
         json!({"access": "Read"})
     );
     // ListDocs answers from the projection alone (GetDrawer rescans the roster first).
@@ -374,7 +374,7 @@ async fn a_removal_interrupted_after_its_roster_write_is_finished_at_boot() {
         .unwrap_err();
     assert!(
         !node
-            .roster_facets(&shared)
+            .roster_datums(&shared)
             .await
             .contains_key(&doc_entry_key(&doc))
     );
@@ -413,7 +413,7 @@ async fn the_known_drawers_registry_is_explicit_and_survives_restart() {
 
     // The registry is a self-doc drawer, readable only through a grant — here the service
     // actor's, as the embedder's own handle — and remembering grants nobody anything.
-    let registry_descriptor = node.roster_facets(&registry).await[&drawer_key()].clone();
+    let registry_descriptor = node.roster_datums(&registry).await[&drawer_key()].clone();
     let registry_layout = serde_json::from_value::<Drawer>(registry_descriptor).unwrap();
     assert_eq!(registry_layout.layout.known(), Some(LayoutKind::SelfDoc));
     assert_eq!(
@@ -444,7 +444,7 @@ async fn the_known_drawers_registry_is_explicit_and_survives_restart() {
         std::collections::BTreeMap::from([(home.clone(), true), (shared.clone(), false)])
     );
     assert_eq!(
-        node.roster_facets(&registry).await[&known_entry_key(&home)],
+        node.roster_datums(&registry).await[&known_entry_key(&home)],
         json!({"mirror": true})
     );
 

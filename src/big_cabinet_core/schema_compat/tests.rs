@@ -296,9 +296,9 @@ fn supported_shapes_are_reflexive() {
 }
 
 #[test]
-fn actual_facet_union_schema_is_compatible_when_a_member_is_added() {
-    fn member(id: &'static str) -> crate::facet::MemberSchema {
-        crate::facet::MemberSchema {
+fn actual_datum_union_schema_is_compatible_when_a_member_is_added() {
+    fn member(id: &'static str) -> crate::datum::MemberSchema {
+        crate::datum::MemberSchema {
             id,
             schema: schemars::Schema::try_from(
                 json!({"type":"object","additionalProperties":true}),
@@ -306,8 +306,8 @@ fn actual_facet_union_schema_is_compatible_when_a_member_is_added() {
             .unwrap(),
         }
     }
-    let old = serde_json::to_value(crate::facet::union_schema(
-        &crate::facet::UnionLayout::Adjacent {
+    let old = serde_json::to_value(crate::datum::union_schema(
+        &crate::datum::UnionLayout::Adjacent {
             tag: "$type",
             content: "value",
         },
@@ -316,8 +316,8 @@ fn actual_facet_union_schema_is_compatible_when_a_member_is_added() {
         &serde_json::Map::new(),
     ))
     .unwrap();
-    let new = serde_json::to_value(crate::facet::union_schema(
-        &crate::facet::UnionLayout::Adjacent {
+    let new = serde_json::to_value(crate::datum::union_schema(
+        &crate::datum::UnionLayout::Adjacent {
             tag: "$type",
             content: "value",
         },
@@ -650,10 +650,10 @@ fn conflicting_definition_constructor_does_not_last_win() {
 }
 
 #[test]
-fn facet_bundle_adapter_reports_all_three_dimensions_for_a_real_change() {
+fn datum_bundle_adapter_reports_all_three_dimensions_for_a_real_change() {
     let schema = |value| schemars::Schema::try_from(value).unwrap();
-    let old_universe = crate::facet::Universe {
-        facets: vec![crate::facet::FacetDecl {
+    let old_universe = crate::datum::Universe {
+        datums: vec![crate::datum::DatumDecl {
             id: "org.example.root".to_owned(),
             name: "Root".to_owned(),
             schema: schema(
@@ -663,8 +663,8 @@ fn facet_bundle_adapter_reports_all_three_dimensions_for_a_real_change() {
         }],
         types: Vec::new(),
     };
-    let new_universe = crate::facet::Universe {
-        facets: vec![crate::facet::FacetDecl {
+    let new_universe = crate::datum::Universe {
+        datums: vec![crate::datum::DatumDecl {
             id: "org.example.root".to_owned(),
             name: "Root".to_owned(),
             schema: schema(
@@ -674,9 +674,9 @@ fn facet_bundle_adapter_reports_all_three_dimensions_for_a_real_change() {
         }],
         types: Vec::new(),
     };
-    let old_bundle = crate::facet::Bundle::new(&old_universe, Vec::new());
-    let new_bundle = crate::facet::Bundle::new(&new_universe, Vec::new());
-    let report = compare_facet_bundles(&old_bundle, "Root", &new_bundle, "Root").unwrap();
+    let old_bundle = crate::datum::Bundle::new(&old_universe, Vec::new());
+    let new_bundle = crate::datum::Bundle::new(&new_universe, Vec::new());
+    let report = compare_datum_bundles(&old_bundle, "Root", &new_bundle, "Root").unwrap();
     assert_eq!(report.json.result, Compatibility::Incompatible);
     assert_eq!(report.native_storage.result, Compatibility::Incompatible);
     assert_eq!(report.lexicon.result, Compatibility::Incompatible);

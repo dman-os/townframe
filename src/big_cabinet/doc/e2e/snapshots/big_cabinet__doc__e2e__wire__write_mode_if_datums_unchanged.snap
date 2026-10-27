@@ -3,8 +3,8 @@ source: src/big_cabinet/doc/e2e/wire.rs
 expression: mode
 ---
 {
-  "mode": "ifFacetsUnchanged",
-  "facets": {
+  "mode": "ifDatumsUnchanged",
+  "datums": {
     "org.example.note/main": {
       "heads": [
         "0202020202020202020202020202020202020202020202020202020202020202"

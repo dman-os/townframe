@@ -5,7 +5,7 @@ use super::Authority;
 use super::AuthorityBinding;
 use super::AuthorityError;
 use super::boot;
-use big_cabinet_core::FacetKey;
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::authority::Actor;
 use big_cabinet_core::authority::AttenuateCapability;
 use big_cabinet_core::authority::AuthorityMessage;
@@ -23,13 +23,13 @@ use big_cabinet_core::authority::ResolveAuthority;
 use big_cabinet_core::authority::ResolvedAuthority;
 use big_cabinet_core::authority::RetractCapability;
 use big_cabinet_core::authority::Rights;
-use big_cabinet_core::authority::SignFacetClaim;
+use big_cabinet_core::authority::SignDatumClaim;
 use big_cabinet_core::dmeta::ActorMetadata;
 use big_cabinet_core::dmeta::Attribution;
 use big_cabinet_core::dmeta::Cid;
 use big_cabinet_core::dmeta::ClaimOperation;
+use big_cabinet_core::dmeta::DatumClaim;
 use big_cabinet_core::dmeta::DocId;
-use big_cabinet_core::dmeta::FacetClaim;
 use big_cabinet_core::dmeta::Uuid7;
 use irpc::Channels;
 use irpc::WithChannels;
@@ -167,9 +167,9 @@ impl TestAuthority {
         self.call(RetractCapability { via, capability }).await
     }
 
-    async fn sign(&self, actor: CapId, claim: FacetClaim) -> Result<(), AuthorityServiceError> {
+    async fn sign(&self, actor: CapId, claim: DatumClaim) -> Result<(), AuthorityServiceError> {
         let signed = self
-            .call(SignFacetClaim {
+            .call(SignDatumClaim {
                 actor,
                 claim: claim.clone(),
             })
@@ -181,12 +181,12 @@ impl TestAuthority {
     }
 }
 
-fn facet_claim(actor: Uuid7, seed: u8) -> FacetClaim {
+fn datum_claim(actor: Uuid7, seed: u8) -> DatumClaim {
     let mut digest = vec![0x01, 0x55, 0x1e, 0x20];
     digest.extend([seed; 32]);
-    FacetClaim {
+    DatumClaim {
         origin_document: DocId::new(b"mutation-document"),
-        facet_key: FacetKey::from_text("org.example.note", "main").expect("facet key"),
+        datum_key: DatumKey::from_text("org.example.note", "main").expect("datum key"),
         chosen_uuid: Uuid7::new(),
         actor_uuid: actor,
         operation: ClaimOperation::Set,
@@ -397,7 +397,7 @@ async fn only_an_actors_own_capability_acts_as_it() {
     assert_eq!(edit.issuer_id, docs.actor_id);
 
     assert_refused!(
-        test.sign(edit.capability_id, facet_claim(docs.actor_id, 1))
+        test.sign(edit.capability_id, datum_claim(docs.actor_id, 1))
             .await,
         AuthorityServiceError::UnrecognizedActor
     );
@@ -424,7 +424,7 @@ async fn only_an_actors_own_capability_acts_as_it() {
         .await
         .unwrap();
     assert_refused!(
-        test.sign(opener.capability, facet_claim(docs.actor_id, 2))
+        test.sign(opener.capability, datum_claim(docs.actor_id, 2))
             .await,
         AuthorityServiceError::Unauthorized
     );
@@ -501,7 +501,7 @@ async fn capabilities_only_attenuate_and_labels_cannot_forge_issuance() {
             AuthorityServiceError::UnrecognizedActor
         );
         assert_refused!(
-            test.sign(counterfeit.capability_id, facet_claim(docs.actor_id, 4))
+            test.sign(counterfeit.capability_id, datum_claim(docs.actor_id, 4))
                 .await,
             AuthorityServiceError::UnrecognizedActor
         );
@@ -870,13 +870,13 @@ async fn resolution_only_recognizes_exact_registered_identity_issuances() {
 async fn signing_binds_the_claim_to_the_presenting_actor() {
     let test = boot_authority().await;
     let docs = test.subsystem("docs").await;
-    test.sign(docs.capability, facet_claim(docs.actor_id, 7))
+    test.sign(docs.capability, datum_claim(docs.actor_id, 7))
         .await
         .expect("signature");
     let signed = test
-        .call(SignFacetClaim {
+        .call(SignDatumClaim {
             actor: docs.capability,
-            claim: facet_claim(docs.actor_id, 8),
+            claim: datum_claim(docs.actor_id, 8),
         })
         .await
         .unwrap();
@@ -885,7 +885,7 @@ async fn signing_binds_the_claim_to_the_presenting_actor() {
     // A claim naming another actor is refused, including the actor's parent.
     for actor in [Uuid7::new(), test.authority.service.operator_uuid()] {
         assert_refused!(
-            test.sign(docs.capability, facet_claim(actor, 7)).await,
+            test.sign(docs.capability, datum_claim(actor, 7)).await,
             AuthorityServiceError::Unauthorized
         );
     }
@@ -906,7 +906,7 @@ async fn unknown_capability_ids_are_refused() {
         AuthorityServiceError::InvalidCapability
     );
     assert_refused!(
-        test.sign(forged, facet_claim(docs.actor_id, 1)).await,
+        test.sign(forged, datum_claim(docs.actor_id, 1)).await,
         AuthorityServiceError::InvalidCapability
     );
     test.stop.stop().await;
@@ -932,9 +932,9 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
         .attenuate(docs.capability, Rights::all())
         .await
         .unwrap();
-    let claim = facet_claim(docs.actor_id, 9);
+    let claim = datum_claim(docs.actor_id, 9);
     let signature = first
-        .call(SignFacetClaim {
+        .call(SignDatumClaim {
             actor: docs.capability,
             claim: claim.clone(),
         })
@@ -988,7 +988,7 @@ async fn reboot_loses_handles_but_preserves_actors_and_keys() {
         .await
         .unwrap();
     let reopened_signature = reopened
-        .call(SignFacetClaim {
+        .call(SignDatumClaim {
             actor: reopened_docs.capability,
             claim,
         })
@@ -1652,7 +1652,7 @@ async fn simultaneous_service_instances_share_identities_not_handles() {
         held
     );
     first
-        .sign(subject.capability, facet_claim(subject.actor_id, 3))
+        .sign(subject.capability, datum_claim(subject.actor_id, 3))
         .await
         .unwrap();
     third_stop.stop().await;
@@ -1762,7 +1762,7 @@ async fn obsolete_schemas_are_refused_without_destroying_durable_data() {
         );
         assert_eq!(snapshot().await, before);
         first
-            .sign(subject.capability, facet_claim(subject.actor_id, 4))
+            .sign(subject.capability, datum_claim(subject.actor_id, 4))
             .await
             .unwrap();
         assert_eq!(first.subsystem("subject").await, subject);
@@ -1793,7 +1793,7 @@ async fn unversioned_identities_gain_migration_history_without_replacing_keys() 
         .await
         .unwrap()
         .unwrap();
-    let claim = facet_claim(node.operator, 11);
+    let claim = datum_claim(node.operator, 11);
     let signed = super::signer::sign_claim(&wrapping, &operator, claim.clone()).unwrap();
     let before = sql.query("SELECT * FROM authority_node", ()).await.unwrap();
     let (authority, stop) = boot(&secrets, sql.clone()).await.unwrap();
@@ -1804,7 +1804,7 @@ async fn unversioned_identities_gain_migration_history_without_replacing_keys() 
         node.actors_issuer
     );
     assert_eq!(
-        test.call(SignFacetClaim {
+        test.call(SignDatumClaim {
             actor: test.root(),
             claim,
         })
@@ -1985,9 +1985,9 @@ async fn the_protocol_answers_alike_over_every_transport() {
         );
         let signed = call(
             client,
-            SignFacetClaim {
+            SignDatumClaim {
                 actor: actor.capability,
-                claim: facet_claim(actor.actor_id, 3),
+                claim: datum_claim(actor.actor_id, 3),
             },
         )
         .await
@@ -1995,9 +1995,9 @@ async fn the_protocol_answers_alike_over_every_transport() {
         signed.verify().expect("core verification");
         let refusal = call(
             client,
-            SignFacetClaim {
+            SignDatumClaim {
                 actor: edit.capability_id,
-                claim: facet_claim(actor.actor_id, 3),
+                claim: datum_claim(actor.actor_id, 3),
             },
         )
         .await;

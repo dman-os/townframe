@@ -1,8 +1,8 @@
-//! Drawer-scoped facet queries, reference queries, observation, and discovery of synced-in drawers.
+//! Drawer-scoped datum queries, reference queries, observation, and discovery of synced-in drawers.
 
 use super::*;
 
-/// The document's current heads, read as `actor` without verifying any facet.
+/// The document's current heads, read as `actor` without verifying any datum.
 async fn heads(node: &Node, actor: &Actor, doc_id: &DocId) -> Vec<ChangeHash> {
     let capability = node
         .mint_doc(
@@ -17,11 +17,11 @@ async fn heads(node: &Node, actor: &Actor, doc_id: &DocId) -> Vec<ChangeHash> {
     node.docs()
         .call(
             RequestContext::root(),
-            ReadFacets {
+            ReadDatums {
                 capability,
                 doc_id: doc_id.clone(),
                 at: At::Current,
-                facets: Some(BTreeSet::new()),
+                datums: Some(BTreeSet::new()),
                 optimistic: false,
             },
         )
@@ -30,41 +30,41 @@ async fn heads(node: &Node, actor: &Actor, doc_id: &DocId) -> Vec<ChangeHash> {
         .heads
 }
 
-/// Wait until the `facet_set` index carries the note of `doc_id` at the document's current
+/// Wait until the `datum_set` index carries the note of `doc_id` at the document's current
 /// heads: not merely some row for the document, but the row for the state the test wrote.
-async fn wait_for_facet_set(node: &Node, actor: &Actor, doc_id: &DocId) {
+async fn wait_for_datum_set(node: &Node, actor: &Actor, doc_id: &DocId) {
     let heads = heads(node, actor, doc_id).await;
     let note_key = note("").0;
     node.wait_indexed(NOTE, |route, membership| {
         route.doc_id == *doc_id
-            && route.facet_key == note_key
-            && matches!(membership, FacetMembership::Present { doc_heads, .. } if *doc_heads == heads)
+            && route.datum_key == note_key
+            && matches!(membership, DatumMembership::Present { doc_heads, .. } if *doc_heads == heads)
     })
     .await;
 }
 
-/// Wait until the `facet_ref` index records exactly `targets` out of the note of `doc_id`,
+/// Wait until the `datum_ref` index records exactly `targets` out of the note of `doc_id`,
 /// each at the `/link` position: a stale edge set, or one still being rewritten, does not
 /// match. Every settle the index commits wakes the check.
-async fn wait_for_facet_ref(node: &Node, doc_id: &DocId, targets: &[&DocId]) {
+async fn wait_for_datum_ref(node: &Node, doc_id: &DocId, targets: &[&DocId]) {
     let note_key = note("").0;
-    let expected: BTreeSet<(String, FacetRoute)> = targets
+    let expected: BTreeSet<(String, DatumRoute)> = targets
         .iter()
         .map(|target| {
             (
                 "/link".to_owned(),
-                FacetRoute {
+                DatumRoute {
                     doc_id: (*target).clone(),
-                    facet_key: note_key.clone(),
+                    datum_key: note_key.clone(),
                 },
             )
         })
         .collect();
-    let mut settled = node.facet_ref.subscribe_settled();
+    let mut settled = node.datum_ref.subscribe_settled();
     loop {
-        let edges: BTreeSet<(String, FacetRoute)> = node
-            .facet_ref
-            .query(FacetRefQuery::OriginDoc(doc_id.clone()))
+        let edges: BTreeSet<(String, DatumRoute)> = node
+            .datum_ref
+            .query(DatumRefQuery::OriginDoc(doc_id.clone()))
             .await
             .unwrap()
             .into_iter()
@@ -94,8 +94,8 @@ struct Containment {
     doc_relay_entry: DocId,
     doc_in_child_read: DocId,
     doc_outside: DocId,
-    note_key: FacetKey,
-    note_tag: FacetTag,
+    note_key: DatumKey,
+    note_tag: DatumTag,
 }
 
 impl Containment {
@@ -126,14 +126,14 @@ impl Containment {
             .unwrap();
         let doc_outside = node.create_doc(&alice, &other, "outside").await.unwrap();
 
-        // Link `doc_direct -> doc_in_child_read` and `doc_outside -> doc_direct` so `facet_ref`
+        // Link `doc_direct -> doc_in_child_read` and `doc_outside -> doc_direct` so `datum_ref`
         // records both an in-drawer edge and an incoming edge from outside `parent`.
         let link = async |origin: &DocId, text: &str, target: &DocId| {
             let (note_key, linking) = note_linking(text, target);
             node.docs()
                 .call(
                     RequestContext::root(),
-                    WriteFacets {
+                    WriteDatums {
                         capability: node
                             .mint_doc(
                                 &alice,
@@ -164,10 +164,10 @@ impl Containment {
             &doc_in_child_relay,
             &doc_outside,
         ] {
-            wait_for_facet_set(&node, &alice, doc).await;
+            wait_for_datum_set(&node, &alice, doc).await;
         }
-        wait_for_facet_ref(&node, &doc_direct, &[&doc_in_child_read]).await;
-        wait_for_facet_ref(&node, &doc_outside, &[&doc_direct]).await;
+        wait_for_datum_ref(&node, &doc_direct, &[&doc_in_child_read]).await;
+        wait_for_datum_ref(&node, &doc_outside, &[&doc_direct]).await;
 
         node.add_doc(
             &alice,
@@ -216,7 +216,7 @@ impl Containment {
             doc_in_child_read,
             doc_outside,
             note_key: note("").0,
-            note_tag: FacetTag::new(NOTE).unwrap(),
+            note_tag: DatumTag::new(NOTE).unwrap(),
         }
     }
 
@@ -253,31 +253,31 @@ impl Containment {
     }
 
     /// The `/link` edge from the note of `origin` to the note of `target`.
-    fn note_edge(&self, origin: &DocId, target: &DocId) -> QueriedFacetRef {
-        QueriedFacetRef {
+    fn note_edge(&self, origin: &DocId, target: &DocId) -> QueriedDatumRef {
+        QueriedDatumRef {
             origin_doc_id: origin.clone(),
-            origin_facet_key: self.note_key.clone(),
+            origin_datum_key: self.note_key.clone(),
             path: "/link".to_owned(),
             target_doc_id: target.clone(),
-            target_facet_key: self.note_key.clone(),
+            target_datum_key: self.note_key.clone(),
             ref_heads: Vec::new(),
         }
     }
 
-    fn backlinks_to(&self, doc_id: &DocId) -> FacetRefSelector {
-        FacetRefSelector::Target {
+    fn backlinks_to(&self, doc_id: &DocId) -> DatumRefSelector {
+        DatumRefSelector::Target {
             doc_id: doc_id.clone(),
-            facet_key: None,
+            datum_key: None,
         }
     }
 }
 
 #[tokio::test]
-async fn relay_holder_lists_drawer_docs_but_is_denied_drawer_scoped_facet_queries() {
+async fn relay_holder_lists_drawer_docs_but_is_denied_drawer_scoped_datum_queries() {
     let fx = Containment::boot().await;
 
-    // Carol holds only `Relay` on `parent`: she can `ListDocs`, but `QueryFacets` and
-    // `QueryFacetRefs` on `parent` are refused (`Denied`).
+    // Carol holds only `Relay` on `parent`: she can `ListDocs`, but `QueryDatums` and
+    // `QueryDatumRefs` on `parent` are refused (`Denied`).
     assert_eq!(
         fx.node
             .list_docs(&fx.carol, &fx.parent, 0, None)
@@ -291,10 +291,10 @@ async fn relay_holder_lists_drawer_docs_but_is_denied_drawer_scoped_facet_querie
         .docs()
         .call(
             RequestContext::root(),
-            QueryFacets {
+            QueryDatums {
                 capability: fx.parent_capability(&fx.carol, Access::Relay).await,
                 drawer_id: Some(fx.parent.clone()),
-                selector: FacetSelector::Tag {
+                selector: DatumSelector::Tag {
                     tag: fx.note_tag.clone(),
                 },
             },
@@ -309,10 +309,10 @@ async fn relay_holder_lists_drawer_docs_but_is_denied_drawer_scoped_facet_querie
 }
 
 #[tokio::test]
-async fn drawer_scoped_facet_queries_obey_containment_and_attenuation() {
+async fn drawer_scoped_datum_queries_obey_containment_and_attenuation() {
     let fx = Containment::boot().await;
 
-    // Bob's drawer-scoped `QueryFacets` on `parent` returns ONLY `doc_direct` and
+    // Bob's drawer-scoped `QueryDatums` on `parent` returns ONLY `doc_direct` and
     // `doc_in_child_read`: `doc_relay_entry` and `doc_in_child_relay` are attenuated to `Relay` in
     // `parent`, and `doc_outside` is not in `parent` even though Bob can read it via `other`.
     let bob_in_parent: BTreeSet<DocId> = fx
@@ -320,10 +320,10 @@ async fn drawer_scoped_facet_queries_obey_containment_and_attenuation() {
         .docs()
         .call(
             RequestContext::root(),
-            QueryFacets {
+            QueryDatums {
                 capability: fx.parent_capability(&fx.bob, Access::Read).await,
                 drawer_id: Some(fx.parent.clone()),
-                selector: FacetSelector::Tag {
+                selector: DatumSelector::Tag {
                     tag: fx.note_tag.clone(),
                 },
             },
@@ -338,17 +338,17 @@ async fn drawer_scoped_facet_queries_obey_containment_and_attenuation() {
         BTreeSet::from([fx.doc_direct.clone(), fx.doc_in_child_read.clone()])
     );
 
-    // Unscoped `QueryFacets` by tag for Bob includes `doc_outside` and `doc_relay_entry` too,
+    // Unscoped `QueryDatums` by tag for Bob includes `doc_outside` and `doc_relay_entry` too,
     // because Bob reaches them via `other`, while still hiding `doc_in_child_relay`.
     let bob_unscoped: BTreeSet<DocId> = fx
         .node
         .docs()
         .call(
             RequestContext::root(),
-            QueryFacets {
+            QueryDatums {
                 capability: fx.bob_both_drawers().await,
                 drawer_id: None,
-                selector: FacetSelector::Tag {
+                selector: DatumSelector::Tag {
                     tag: fx.note_tag.clone(),
                 },
             },
@@ -388,7 +388,7 @@ async fn drawer_scoped_facet_queries_obey_containment_and_attenuation() {
         .docs()
         .subscribe(
             RequestContext::root(),
-            ObserveFacets {
+            ObserveDatums {
                 capability: observation_capability,
                 scope: ObserveScope::Tag {
                     tag: fx.note_tag.clone(),
@@ -399,8 +399,8 @@ async fn drawer_scoped_facet_queries_obey_containment_and_attenuation() {
         .await
         .unwrap();
     let mut observed = BTreeSet::new();
-    while let FacetObserved::Entry { doc_id, facet, .. } = events.next().await.unwrap().unwrap() {
-        assert!(matches!(facet, ObservedFacet::Present { .. }));
+    while let DatumObserved::Entry { doc_id, datum, .. } = events.next().await.unwrap().unwrap() {
+        assert!(matches!(datum, ObservedDatum::Present { .. }));
         observed.insert(doc_id);
     }
     assert_eq!(observed, bob_unscoped);
@@ -421,11 +421,11 @@ async fn unscoped_queries_are_narrowed_to_the_capability_scope() {
         .docs()
         .call(
             RequestContext::root(),
-            QueryFacets {
+            QueryDatums {
                 capability: parent_only,
                 drawer_id: None,
-                selector: FacetSelector::Key {
-                    facet_key: fx.note_key.clone(),
+                selector: DatumSelector::Key {
+                    datum_key: fx.note_key.clone(),
                 },
             },
         )
@@ -445,7 +445,7 @@ async fn unscoped_queries_are_narrowed_to_the_capability_scope() {
             .docs()
             .call(
                 RequestContext::root(),
-                QueryFacetRefs {
+                QueryDatumRefs {
                     capability: parent_only,
                     drawer_id: None,
                     selector: fx.backlinks_to(&fx.doc_direct),
@@ -472,12 +472,12 @@ async fn unscoped_queries_are_narrowed_to_the_capability_scope() {
             .docs()
             .call(
                 RequestContext::root(),
-                QueryFacetRefs {
+                QueryDatumRefs {
                     capability: origin_only,
                     drawer_id: None,
-                    selector: FacetRefSelector::Origin {
+                    selector: DatumRefSelector::Origin {
                         doc_id: fx.doc_outside.clone(),
-                        facet_key: None,
+                        datum_key: None,
                     },
                 },
             )
@@ -490,7 +490,7 @@ async fn unscoped_queries_are_narrowed_to_the_capability_scope() {
             .docs()
             .call(
                 RequestContext::root(),
-                QueryFacetRefs {
+                QueryDatumRefs {
                     capability: origin_only,
                     drawer_id: None,
                     selector: fx.backlinks_to(&fx.doc_direct),
@@ -508,9 +508,9 @@ async fn unscoped_queries_are_narrowed_to_the_capability_scope() {
 async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
     let fx = Containment::boot().await;
 
-    // Drawer-scoped `QueryFacetRefs` on `parent` for incoming edges to `doc_direct` omits the edge
+    // Drawer-scoped `QueryDatumRefs` on `parent` for incoming edges to `doc_direct` omits the edge
     // from `doc_outside` (because `doc_outside` is not in `parent`), while unscoped
-    // `QueryFacetRefs` for Bob includes it (because Bob can read `doc_outside`), and unscoped for
+    // `QueryDatumRefs` for Bob includes it (because Bob can read `doc_outside`), and unscoped for
     // an actor who cannot read `other` omits it (no backlink leak from unreadable origin docs).
     let dave = fx.node.actor("dave").await;
     fx.node
@@ -522,7 +522,7 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         .docs()
         .call(
             RequestContext::root(),
-            QueryFacetRefs {
+            QueryDatumRefs {
                 capability: fx.parent_capability(&fx.bob, Access::Read).await,
                 drawer_id: Some(fx.parent.clone()),
                 selector: fx.backlinks_to(&fx.doc_direct),
@@ -537,7 +537,7 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         .docs()
         .call(
             RequestContext::root(),
-            QueryFacetRefs {
+            QueryDatumRefs {
                 capability: fx.parent_capability(&dave, Access::Read).await,
                 drawer_id: None,
                 selector: fx.backlinks_to(&fx.doc_direct),
@@ -552,7 +552,7 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         .docs()
         .call(
             RequestContext::root(),
-            QueryFacetRefs {
+            QueryDatumRefs {
                 capability: fx.bob_both_drawers().await,
                 drawer_id: None,
                 selector: fx.backlinks_to(&fx.doc_direct),
@@ -572,12 +572,12 @@ async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
         .docs()
         .call(
             RequestContext::root(),
-            QueryFacetRefs {
+            QueryDatumRefs {
                 capability: fx.parent_capability(&dave, Access::Read).await,
                 drawer_id: Some(fx.parent.clone()),
-                selector: FacetRefSelector::Origin {
+                selector: DatumRefSelector::Origin {
                     doc_id: fx.doc_direct.clone(),
-                    facet_key: Some(fx.note_key.clone()),
+                    datum_key: Some(fx.note_key.clone()),
                 },
             },
         )
@@ -608,7 +608,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         .unwrap();
     let doc_in_child = node.create_doc(&alice, &child, "in-child").await.unwrap();
     for doc in [&doc_initial, &doc_added_later, &doc_in_child] {
-        wait_for_facet_set(&node, &alice, doc).await;
+        wait_for_datum_set(&node, &alice, doc).await;
     }
 
     node.grant(&alice, &drawer, &bob, Access::Read).await;
@@ -616,11 +616,11 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         drawers: [(drawer.clone(), Access::Read)].into(),
         ..Default::default()
     };
-    let observation = ObserveFacets {
+    let observation = ObserveDatums {
         capability: node.mint_doc(&bob, doc_scope.clone()).await.unwrap(),
         scope: ObserveScope::Drawer {
             drawer_id: drawer.clone(),
-            tag: Some(big_cabinet_core::FacetTag::new(NOTE).unwrap()),
+            tag: Some(big_cabinet_core::DatumTag::new(NOTE).unwrap()),
         },
         after: 0,
     };
@@ -632,9 +632,9 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
 
     // 1. Opening replay delivers `doc_initial` and then `ReplayComplete`.
     let first = events.next().await.unwrap().unwrap();
-    let FacetObserved::Entry {
+    let DatumObserved::Entry {
         doc_id,
-        facet: ObservedFacet::Present { .. },
+        datum: ObservedDatum::Present { .. },
         ..
     } = first
     else {
@@ -643,7 +643,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     assert_eq!(doc_id, doc_initial);
     let replay_done = events.next().await.unwrap().unwrap();
     assert!(
-        matches!(replay_done, FacetObserved::ReplayComplete { .. }),
+        matches!(replay_done, DatumObserved::ReplayComplete { .. }),
         "expected ReplayComplete, got {replay_done:?}"
     );
 
@@ -653,9 +653,9 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         .await
         .unwrap();
     let added = events.next().await.unwrap().unwrap();
-    let FacetObserved::Entry {
+    let DatumObserved::Entry {
         doc_id,
-        facet: ObservedFacet::Present { .. },
+        datum: ObservedDatum::Present { .. },
         ..
     } = added
     else {
@@ -677,9 +677,9 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     assert!(
         matches!(
             narrowed,
-            FacetObserved::Entry {
+            DatumObserved::Entry {
                 ref doc_id,
-                facet: ObservedFacet::AccessLost,
+                datum: ObservedDatum::AccessLost,
                 ..
             } if *doc_id == doc_added_later
         ),
@@ -700,9 +700,9 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     assert!(
         matches!(
             widened,
-            FacetObserved::Entry {
+            DatumObserved::Entry {
                 ref doc_id,
-                facet: ObservedFacet::Present { .. },
+                datum: ObservedDatum::Present { .. },
                 ..
             } if *doc_id == doc_added_later
         ),
@@ -717,9 +717,9 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     assert!(
         matches!(
             removed,
-            FacetObserved::Entry {
+            DatumObserved::Entry {
                 ref doc_id,
-                facet: ObservedFacet::AccessLost,
+                datum: ObservedDatum::AccessLost,
                 ..
             } if *doc_id == doc_added_later
         ),
@@ -748,9 +748,9 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     assert!(
         matches!(
             child_added,
-            FacetObserved::Entry {
+            DatumObserved::Entry {
                 ref doc_id,
-                facet: ObservedFacet::Present { .. },
+                datum: ObservedDatum::Present { .. },
                 ..
             } if *doc_id == doc_in_child
         ),
@@ -772,9 +772,9 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     assert!(
         matches!(
             child_removed,
-            FacetObserved::Entry {
+            DatumObserved::Entry {
                 ref doc_id,
-                facet: ObservedFacet::AccessLost,
+                datum: ObservedDatum::AccessLost,
                 ..
             } if *doc_id == doc_in_child
         ),
@@ -815,7 +815,7 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
         .docs()
         .subscribe(
             RequestContext::root(),
-            ObserveFacets {
+            ObserveDatums {
                 capability: node.mint_doc(&bob, doc_scope).await.unwrap(),
                 ..observation
             },
@@ -826,9 +826,9 @@ async fn drawer_scoped_observation_replays_and_emits_live_membership_and_grant_c
     assert!(
         matches!(
             regranted,
-            FacetObserved::Entry {
+            DatumObserved::Entry {
                 ref doc_id,
-                facet: ObservedFacet::Present { .. },
+                datum: ObservedDatum::Present { .. },
                 ..
             } if *doc_id == doc_initial
         ),

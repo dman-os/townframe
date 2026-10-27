@@ -16,10 +16,10 @@ mod atomic;
 mod authoring;
 mod native;
 mod wire;
-use crate::facet::Bundle;
-use crate::facet::Declaration;
-use crate::facet::Extra;
-use crate::facet::Universe;
+use crate::datum::Bundle;
+use crate::datum::Declaration;
+use crate::datum::Extra;
+use crate::datum::Universe;
 use automerge::AutoCommit;
 use automerge::Automerge;
 use automerge::ObjType;
@@ -35,7 +35,7 @@ use serde_json::json;
 use std::borrow::Cow;
 
 /// Every storage form in one object, reached through a reference so the walk has to resolve one.
-#[macros::facet(id = "org.example.stored", closed)]
+#[macros::datum(id = "org.example.stored", closed)]
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Stored0 {
@@ -66,7 +66,7 @@ fn compiled(document: &Value) -> CompiledSchema {
 }
 
 /// Supply the required members for focused tests that intentionally vary one member. The public
-/// write boundary validates complete whole-facet values, so test fixtures must not accidentally use
+/// write boundary validates complete whole-datum values, so test fixtures must not accidentally use
 /// omission as a shortcut when they are testing a nested refusal.
 fn complete_stored(value: Value) -> Value {
     let mut complete = json!({
@@ -129,7 +129,7 @@ fn shape(stored: &automerge::Value) -> &'static str {
     }
 }
 
-/// Replace what one member of the facet is declared by. A document carries the facet's definition in
+/// Replace what one member of the datum is declared by. A document carries the datum's definition in
 /// `$defs` and its root is a reference to it, so that is where a member is declared.
 fn redeclare(document: &mut Value, member: &str, declared: Value) {
     let root = document["$ref"].as_str().expect("the root is a reference");
@@ -140,10 +140,10 @@ fn redeclare(document: &mut Value, member: &str, declared: Value) {
     document["$defs"][name]["properties"][member] = declared;
 }
 
-/// The key both directions address the value by: a document holds it under `facet`, and the walk
+/// The key both directions address the value by: a document holds it under `datum`, and the walk
 /// takes a key the way `autosurgeon` hands it one.
-fn facet() -> autosurgeon::Prop<'static> {
-    autosurgeon::Prop::Key(Cow::Borrowed("facet"))
+fn datum() -> autosurgeon::Prop<'static> {
+    autosurgeon::Prop::Key(Cow::Borrowed("datum"))
 }
 
 /// The JSON a value writes to a document.
@@ -152,11 +152,11 @@ fn stored(json: &Value) -> AutoCommit {
     let document = document();
     let stored = Stored::check(&compiled(&document), complete_stored(json.clone()))
         .expect("the value is what it declares");
-    reconcile_json(&mut doc, &ROOT, facet(), &document, stored.into_value()).unwrap();
+    reconcile_json(&mut doc, &ROOT, datum(), &document, stored.into_value()).unwrap();
     doc
 }
 
 fn read(doc: &AutoCommit) -> Value {
-    hydrate_value(doc, &ROOT, facet(), &compiled(&document()))
+    hydrate_value(doc, &ROOT, datum(), &compiled(&document()))
         .expect("what a declaration wrote, a declaration reads")
 }

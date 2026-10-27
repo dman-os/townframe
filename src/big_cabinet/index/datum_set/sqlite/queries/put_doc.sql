@@ -1,7 +1,7 @@
 -- name: put_doc :exec
 -- param: doc_id String
 -- param: state Vec<u8>
-INSERT INTO big_cabinet_facet_set_docs (
+INSERT INTO big_cabinet_datum_set_docs (
     doc_id
     , state
 ) VALUES (

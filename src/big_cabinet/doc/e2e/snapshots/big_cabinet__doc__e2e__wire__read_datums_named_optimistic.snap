@@ -11,7 +11,7 @@ expression: request
       "0101010101010101010101010101010101010101010101010101010101010101"
     ]
   },
-  "facets": [
+  "datums": [
     "org.example.note/main"
   ],
   "optimistic": true

@@ -16,7 +16,7 @@ index. `DrawerId` is the `DocumentId` of the doc carrying the drawer descriptor.
 
 ## Vocabulary
 
-- **Doc:** a Daybook doc with a stable ID, facets, and history. A branch is another doc
+- **Doc:** a Daybook doc with a stable ID, datums, and history. A branch is another doc
   with its own ID and CRDT history.
 - **Drawer:** a doc carrying drawer metadata. Its doc ID is its drawer ID.
 - **Roster:** the authoritative set of docs and child drawers officially included by a
@@ -193,7 +193,7 @@ The following are future PRs rather than alternative meanings of this model:
 - subset drawers and selective intersection sync;
 - managed-participant and self-group layouts;
 - external roster docs, sharding, ranges, and split migration;
-- provider/home facets and public/provider indices;
+- provider/home datums and public/provider indices;
 - XRPC and node/provider URL design;
 - sensitivity labels and information-flow policy;
 - recovery principals;

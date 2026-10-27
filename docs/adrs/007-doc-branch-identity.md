@@ -1,6 +1,6 @@
 # ADR 007: Doc and Branch Identity
 
-**Status:** Partially implemented — `DocumentId` unification, `db+facet` references, `BranchDoc`/`MergeDoc`, the `org.example.daybook.branch` core facet with concrete parent references and pinned fork heads, and `dmeta.branchUuids` provenance across branches and merges are implemented in `big_cabinet_core` and `big_cabinet`. Explicit branch-link removal and physical document deletion remain deferred.
+**Status:** Partially implemented — `DocumentId` unification, `db+datum` references, `BranchDoc`/`MergeDoc`, the `org.example.daybook.branch` core datum with concrete parent references and pinned fork heads, and `dmeta.branchUuids` provenance across branches and merges are implemented in `big_cabinet_core` and `big_cabinet`. Explicit branch-link removal and physical document deletion remain deferred.
 
 ## Context
 
@@ -37,12 +37,12 @@ logical-document wrapper whose identity differs from the physical doc.
 A normal branch is a new `DocumentId` whose initial Automerge state is forked (`fork_at`)
 from the origin document at the requested heads, and a merge (`MergeDoc`) merges one
 history-sharing document's Automerge changes into another (`doc.merge`). Because the
-Automerge changes themselves travel between origin and branch, facets are not copied by
+Automerge changes themselves travel between origin and branch, datums are not copied by
 value and signatures authored on either document reconstruct at their introducing changes
 wherever those changes land (ADR 020 §5). History-truncating compaction is not a branch:
 documents that do not share genesis changes cannot be merged (`UnrelatedHistory`).
 
-Creating branch B from doc A at path `/draft` writes B's identity facet on B and, unless
+Creating branch B from doc A at path `/draft` writes B's identity datum on B and, unless
 the branch is stealth, announces B on A:
 
 On B, and on A when non-stealth, `org.example.daybook.branch/<B>` holds:
@@ -51,25 +51,25 @@ On B, and on A when non-stealth, `org.example.daybook.branch/<B>` holds:
 {
   "path": "/draft",
   "from": {
-    "facetRef": "db+facet:/<A>/org.example.daybook.branch/<A>",
+    "datumRef": "db+datum:/<A>/org.example.daybook.branch/<A>",
     "heads": ["<fork-head>"]
   }
 }
 ```
 
 The reference names the concrete parent document, not `self`: the target must remain A
-when this facet travels between documents. The pinned heads are the selected fork frontier,
+when this datum travels between documents. The pinned heads are the selected fork frontier,
 not A's current frontier when the announcement is written. The initial branch change is the
 durable source of this value during crash recovery. `from` is optional for root metadata;
-like every facet reference it is a weak address and does not assert the parent facet exists.
+like every datum reference it is a weak address and does not assert the parent datum exists.
 
-Keying B's facet by `<B>` (`org.example.daybook.branch/<B>`) rather than `/main` keeps the
-facet merge-safe: when B is merged back into A, or a nested branch C is merged into B, the
-target acquires the source's `branch/<source-id>` facet without overwriting its own
+Keying B's datum by `<B>` (`org.example.daybook.branch/<B>`) rather than `/main` keeps the
+datum merge-safe: when B is merged back into A, or a nested branch C is merged into B, the
+target acquires the source's `branch/<source-id>` datum without overwriting its own
 `branch/<self-id>`. Any document resolves its own branch path by reading
 `org.example.daybook.branch/<self-id>`. There is no `branches/main`, `byId`, or `byPath`
-map. Per-branch keys preserve concurrent branches with the same label; generic facet-reference
-backlinks can discover children through their `from.facetRef`.
+map. Per-branch keys preserve concurrent branches with the same label; generic datum-reference
+backlinks can discover children through their `from.datumRef`.
 
 Announcing a branch on A (`stealth: false`) mutates A and therefore requires `Write`
 access on A (in addition to `Read` on A and `Create` for B's placement); a caller with
@@ -82,13 +82,13 @@ present, readable, or still available. A branch created from B records the new
 relationship in B and the new branch; branch information is not propagated through every
 ancestor or sibling.
 
-`BranchDoc` owns `org.example.daybook.branch/*` and signs these facets with `DocsRepo`'s
+`BranchDoc` owns `org.example.daybook.branch/*` and signs these datums with `DocsRepo`'s
 system actor after
-checking the caller's access. Ordinary `CreateDoc` and `WriteFacets` calls cannot
-set or remove them (`SystemFacet`), while `ReadFacets` and `ListFacets` read them like any
-other facet.
+checking the caller's access. Ordinary `CreateDoc` and `WriteDatums` calls cannot
+set or remove them (`SystemDatum`), while `ReadDatums` and `ListDatums` read them like any
+other datum.
 
-Merging B's Automerge changes into A does not delete B or remove either facet. A merge
+Merging B's Automerge changes into A does not delete B or remove either datum. A merge
 is not branch destruction: B remains an ordinary doc with its own ID and history. Any
 later lifecycle operation that removes a branch link is explicit and is not implied by a
 merge.
@@ -100,7 +100,7 @@ explicitly add the new branch doc to a drawer as a separate operation. The origi
 an authority parent of its branches, and direct grants over the origin do not propagate
 through branch metadata.
 
-Consequently branch facets contain neither `BranchPublication` nor `AuthorityScope`.
+Consequently branch datums contain neither `BranchPublication` nor `AuthorityScope`.
 Publication, retention, and access are drawer and Keyhive concerns.
 
 ### Initial identity precedes publication
@@ -135,41 +135,41 @@ does not require first loading an origin-wide directory.
 A branch link grants no access, retention, publication, or provider discovery. Missing or
 unauthorized linked docs remain unresolved weak references.
 
-### Facet addresses have no URI authority
+### Datum addresses have no URI authority
 
-A facet address uses an absolute path under the `db+facet` scheme:
+A datum address uses an absolute path under the `db+datum` scheme:
 
 ```text
-db+facet:/<doc-id>/<facet-tag>/<facet-key-id...>
+db+datum:/<doc-id>/<datum-tag>/<datum-key-slot...>
 ```
 
 There is no URI authority component. Drawers are access/collection contexts and nodes are
-providers; neither identifies the facet. The doc ID is the first path component.
+providers; neither identifies the datum. The doc ID is the first path component.
 
 `self` is reserved in the doc position for a reference relative to the doc containing the
-facet:
+datum:
 
 ```text
-db+facet:/self/org.example.daybook.blob/main
+db+datum:/self/org.example.daybook.blob/main
 ```
 
-This lets a facet copied into a branch retain internal references unchanged. `self` is
+This lets a datum copied into a branch retain internal references unchanged. `self` is
 not a concrete `DocumentId`.
 
-The facet key ID is the entire path remainder after the facet tag, including `/`. For
-example, a dpath key ID beginning with `/photos` intentionally produces:
+The datum key slot is the entire path remainder after the datum tag, including `/`. For
+example, a dpath key slot beginning with `/photos` intentionally produces:
 
 ```text
-db+facet:/zDoc/org.example.daybook.dpath//photos/beach.jpg
+db+datum:/zDoc/org.example.daybook.dpath//photos/beach.jpg
 ```
 
-A facet address is only an address. It grants no access, implies no retention, and does
+A datum address is only an address. It grants no access, implies no retention, and does
 not establish that the target exists or is reachable. Node/provider locators are a later,
 separate URL design.
 
 ## Consequences
 
-- Branches use the same doc APIs, authority substrate, and facet machinery as other docs.
+- Branches use the same doc APIs, authority substrate, and datum machinery as other docs.
 - Branch creation and drawer admission remain separately observable operations.
 - Branch links tolerate partial replication and asymmetric access.
 - Merge does not silently destroy branch identity or metadata.

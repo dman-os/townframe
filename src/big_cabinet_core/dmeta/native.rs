@@ -1,4 +1,4 @@
-//! Canonical encoding of a facet value in its native storage form.
+//! Canonical encoding of a datum value in its native storage form.
 //!
 //! ADR 020 §4: deterministic CBOR of the materialized subtree, one application-private tag per
 //! storage kind, map keys sorted by their encoded bytes, and no object, actor, or operation ids.

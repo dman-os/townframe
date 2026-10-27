@@ -20,7 +20,7 @@
 //!
 //! Unsupported applicators are reported as `not established`; they are never treated as compatible
 //! merely because two arbitrary JSON documents happen to compare equal. The Lexicon dimension
-//! compares the files [`crate::facet::Bundle::lexicons`] actually publishes, so a bundle that fails
+//! compares the files [`crate::datum::Bundle::lexicons`] actually publishes, so a bundle that fails
 //! that gate has no Lexicon to evolve.
 
 mod accessors;
@@ -145,35 +145,35 @@ pub fn compare(old: &SchemaBundle, new: &SchemaBundle) -> CompatibilityReport {
     }
 }
 
-/// Compare named facet documents from two Cabinet bundles without requiring callers to flatten
+/// Compare named datum documents from two Cabinet bundles without requiring callers to flatten
 /// `$defs` themselves.  Definition resolution remains limited to each bundle's carried context.
 #[cfg(feature = "schemars")]
-pub fn compare_facet_bundles(
-    old: &crate::facet::Bundle<'_>,
-    old_facet: &str,
-    new: &crate::facet::Bundle<'_>,
-    new_facet: &str,
+pub fn compare_datum_bundles(
+    old: &crate::datum::Bundle<'_>,
+    old_datum: &str,
+    new: &crate::datum::Bundle<'_>,
+    new_datum: &str,
 ) -> Option<CompatibilityReport> {
     // The document a bundle exposes is a `$ref` into its definitions, which is not itself a
-    // position. The facet's own definition is, and that is what evolves.
-    let old_schema = serde_json::to_value(old.resolve(old_facet)?).expect("a schema is JSON");
-    let new_schema = serde_json::to_value(new.resolve(new_facet)?).expect("a schema is JSON");
+    // position. The datum's own definition is, and that is what evolves.
+    let old_schema = serde_json::to_value(old.resolve(old_datum)?).expect("a schema is JSON");
+    let new_schema = serde_json::to_value(new.resolve(new_datum)?).expect("a schema is JSON");
     let mut report = compare_schemas(&old_schema, &new_schema);
     // The Lexicon dimension compares published files, not a projection of the sidecar. A bundle
     // that fails the publish gate is a codec document: it has no Lexicon, so the dimension is not
     // established rather than guessed.
     let old_id = old
         .plug
-        .facets
+        .datums
         .iter()
-        .find(|facet| facet.name == old_facet)
-        .map(|facet| facet.id.as_str());
+        .find(|datum| datum.name == old_datum)
+        .map(|datum| datum.id.as_str());
     let new_id = new
         .plug
-        .facets
+        .datums
         .iter()
-        .find(|facet| facet.name == new_facet)
-        .map(|facet| facet.id.as_str());
+        .find(|datum| datum.name == new_datum)
+        .map(|datum| datum.id.as_str());
     report.lexicon = match (old_id, new_id, old.lexicons(), new.lexicons()) {
         (Some(old_id), Some(new_id), Ok(old_lexicons), Ok(new_lexicons)) => {
             let old_file = old_lexicons
@@ -189,14 +189,14 @@ pub fn compare_facet_bundles(
                 (Some(_), Some(_)) => incompatible_outcome("/", "lexicon id changed"),
                 _ => not_established_outcome(
                     "/",
-                    "facet has no published Lexicon: it is a codec document".to_owned(),
+                    "datum has no published Lexicon: it is a codec document".to_owned(),
                 ),
             }
         }
         (_, _, Err(error), _) | (_, _, _, Err(error)) => {
-            not_established_outcome("/", format!("facet bundle is not lexicon-aligned: {error}"))
+            not_established_outcome("/", format!("datum bundle is not lexicon-aligned: {error}"))
         }
-        _ => not_established_outcome("/", "facet is not declared by the bundle".to_owned()),
+        _ => not_established_outcome("/", "datum is not declared by the bundle".to_owned()),
     };
     Some(report)
 }
@@ -381,15 +381,15 @@ fn compare_json(old: &SchemaBundle, new: &SchemaBundle) -> CompatibilityOutcome 
 }
 
 /// Project the supported canonical representation through the same projector a bundle publishes
-/// with, so this dimension cannot disagree with [`crate::facet::lexicon::project_facet`] about a
+/// with, so this dimension cannot disagree with [`crate::datum::lexicon::project_datum`] about a
 /// schema the crate itself authored. A schema that projector refuses is not a Lexicon, and the
 /// answer is `not established` rather than a guess. Two projections that differ are judged by the
 /// bidirectional evolution rules, not by byte equality.
 #[cfg(feature = "schemars")]
 fn compare_lexicon(old: &SchemaBundle, new: &SchemaBundle) -> CompatibilityOutcome {
     match (
-        crate::facet::lexicon::project_position(&old.root, &defs_of(&old.definitions)),
-        crate::facet::lexicon::project_position(&new.root, &defs_of(&new.definitions)),
+        crate::datum::lexicon::project_position(&old.root, &defs_of(&old.definitions)),
+        crate::datum::lexicon::project_position(&new.root, &defs_of(&new.definitions)),
     ) {
         (Ok(old_position), Ok(new_position)) => {
             lexicon::evolve_projected(&old_position, &new_position)

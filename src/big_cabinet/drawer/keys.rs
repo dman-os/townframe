@@ -1,46 +1,46 @@
-//! How drawer state is named in the docs that carry it: the facet keys of a drawer doc's
+//! How drawer state is named in the docs that carry it: the datum keys of a drawer doc's
 //! descriptor, roster and entries, and the [`GroupKey`] a descriptor names a Keyhive group by.
 //!
-//! A doc, child or known entry key's id is its target's `DocId` text, so a roster read recovers
+//! A doc, child or known entry key's slot is its target's `DocId` text, so a roster read recovers
 //! the target from the key alone.
 
-use big_cabinet_core::FacetKey;
+use big_cabinet_core::DatumKey;
 use big_cabinet_core::dmeta::DocId;
-use big_cabinet_core::drawer::DRAWER_CHILD_ENTRY_FACET_TAG;
-use big_cabinet_core::drawer::DRAWER_DOC_ENTRY_FACET_TAG;
-use big_cabinet_core::drawer::DRAWER_FACET_TAG;
-use big_cabinet_core::drawer::DRAWER_KNOWN_ENTRY_FACET_TAG;
-use big_cabinet_core::drawer::DRAWER_ROSTER_FACET_TAG;
+use big_cabinet_core::drawer::DRAWER_CHILD_ENTRY_DATUM_TAG;
+use big_cabinet_core::drawer::DRAWER_DATUM_TAG;
+use big_cabinet_core::drawer::DRAWER_DOC_ENTRY_DATUM_TAG;
+use big_cabinet_core::drawer::DRAWER_KNOWN_ENTRY_DATUM_TAG;
+use big_cabinet_core::drawer::DRAWER_ROSTER_DATUM_TAG;
 use big_cabinet_core::drawer::GroupKey;
 use big_cabinet_core::drawer::protocol::DrawerId;
 use big_repo::BigKeyhiveGroup;
 
-pub(crate) fn drawer_key() -> FacetKey {
-    FacetKey::from_text(DRAWER_FACET_TAG, "main").expect("the drawer key is well formed")
+pub(crate) fn drawer_key() -> DatumKey {
+    DatumKey::from_text(DRAWER_DATUM_TAG, "main").expect("the drawer key is well formed")
 }
 
-pub(crate) fn known_entry_key(drawer_id: &DrawerId) -> FacetKey {
-    FacetKey::from_text(DRAWER_KNOWN_ENTRY_FACET_TAG, drawer_id.to_string())
+pub(crate) fn known_entry_key(drawer_id: &DrawerId) -> DatumKey {
+    DatumKey::from_text(DRAWER_KNOWN_ENTRY_DATUM_TAG, drawer_id.to_string())
         .expect("a known entry key is well formed")
 }
 
-pub(crate) fn roster_key() -> FacetKey {
-    FacetKey::from_text(DRAWER_ROSTER_FACET_TAG, "main").expect("the roster key is well formed")
+pub(crate) fn roster_key() -> DatumKey {
+    DatumKey::from_text(DRAWER_ROSTER_DATUM_TAG, "main").expect("the roster key is well formed")
 }
 
-pub(crate) fn doc_entry_key(doc: &DocId) -> FacetKey {
-    FacetKey::from_text(DRAWER_DOC_ENTRY_FACET_TAG, doc.to_string())
+pub(crate) fn doc_entry_key(doc: &DocId) -> DatumKey {
+    DatumKey::from_text(DRAWER_DOC_ENTRY_DATUM_TAG, doc.to_string())
         .expect("a doc entry key is well formed")
 }
 
-pub(crate) fn child_entry_key(child: &DrawerId) -> FacetKey {
-    FacetKey::from_text(DRAWER_CHILD_ENTRY_FACET_TAG, child.to_string())
+pub(crate) fn child_entry_key(child: &DrawerId) -> DatumKey {
+    DatumKey::from_text(DRAWER_CHILD_ENTRY_DATUM_TAG, child.to_string())
         .expect("a child entry key is well formed")
 }
 
-/// The target of an entry key: `docEntry/<id>` or `childEntry/<id>` names it in the key id.
-pub(crate) fn entry_target(key: &FacetKey) -> Option<DocId> {
-    std::str::from_utf8(key.id_bytes()).ok()?.parse().ok()
+/// The target of an entry key: `docEntry/<id>` or `childEntry/<id>` names it in the key slot.
+pub(crate) fn entry_target(key: &DatumKey) -> Option<DocId> {
+    std::str::from_utf8(key.slot_bytes()).ok()?.parse().ok()
 }
 
 pub(crate) fn group_key(group: &BigKeyhiveGroup) -> GroupKey {

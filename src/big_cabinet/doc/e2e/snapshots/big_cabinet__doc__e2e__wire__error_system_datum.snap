@@ -3,7 +3,7 @@ source: src/big_cabinet/document/e2e/wire.rs
 expression: error
 ---
 {
-  "SystemFacet": {
-    "facet_key": "org.example.note/main"
+  "SystemDatum": {
+    "datum_key": "org.example.note/main"
   }
 }
