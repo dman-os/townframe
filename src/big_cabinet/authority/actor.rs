@@ -8,44 +8,29 @@
 //! exists without its registry row, so there is nothing to reconcile after a
 //! crash.
 
-use super::cap::Chain;
-use super::store::{self, ActorRow, SealedKey};
+use super::cap::{Chain, State};
+use super::store::{ActorRow, SealedKey};
 use super::{Actor, CapId, Rights};
 use super::{ActorPublicKey, AuthorityError, NODE_SERVICE};
 use big_cabinet_core::dmeta::{Attribution, Bytes, MultibaseKey, SignatureBytes, Uuid7};
 use ed25519_dalek::{Signer, SigningKey};
 use rand::RngCore;
-use sqlx::SqliteConnection;
 use zeroize::Zeroizing;
 
 const ACTOR_URL_SCHEME: &str = "db+actor://";
 
-pub(super) async fn recognize(
-    conn: &mut SqliteConnection,
-    presented: &Chain,
+pub(super) fn recognize(
+    state: &State,
+    presented: &Chain<'_>,
     right: Rights,
 ) -> Result<Uuid7, AuthorityError> {
-    let actor = store::associated_actor(conn, presented.cap.id)
-        .await?
+    let actor = state
+        .actors
+        .get(&presented.cap.id)
+        .map(|binding| binding.actor_id)
         .ok_or(AuthorityError::UnrecognizedActor)?;
     presented.require(right)?;
     Ok(actor)
-}
-
-pub(super) async fn issue(
-    conn: &mut SqliteConnection,
-    parent: &Chain,
-    issuer: Uuid7,
-    row: &ActorRow,
-    rights: Rights,
-) -> Result<CapId, AuthorityError> {
-    if let Some(id) = store::actor_cap(conn, row.uuid, &parent.cap.id, rights).await? {
-        return Ok(id);
-    }
-    let issued = parent.child(format!("is actor {}", row.path), rights, issuer)?;
-    store::insert_cap(conn, &issued).await?;
-    store::associate_actor(conn, issued.id, row.uuid).await?;
-    Ok(issued.id)
 }
 
 pub(super) fn key_text(public_key: &ActorPublicKey) -> Result<MultibaseKey, AuthorityError> {
@@ -162,11 +147,11 @@ pub(super) fn public_actor(
     capability: CapId,
 ) -> Result<Actor, AuthorityError> {
     Ok(Actor {
-        uuid: row.uuid,
+        actor_id: row.actor_id,
         url: actor_url(node, &row.path)?,
         public_key: key_text(&row.public_key)?,
         certificate: Bytes::from(row.certificate.clone()),
-        parent_actor: row.parent,
+        parent_actor_id: row.parent,
         capability,
     })
 }

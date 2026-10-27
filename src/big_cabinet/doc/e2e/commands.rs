@@ -1,6 +1,6 @@
 //! The command ledger: replays, reuse, and what the boot pass settles after a crash.
 
-use super::super::commands::{Commands, Kind, State};
+use super::super::commands::{Commands, Detail, Kind, State};
 use super::*;
 use automerge::transaction::{CommitOptions, Transactable};
 
@@ -22,8 +22,18 @@ async fn a_replayed_command_returns_its_receipt_without_acting_again() {
             .unwrap(),
         created
     );
+    let capability = node
+        .capability(
+            &alice,
+            DocScope {
+                write: BTreeSet::from([created.doc_id.clone()]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
     let write = || WriteFacets {
-        capability: alice.capability,
+        capability,
         command: Some(command("write")),
         doc_id: created.doc_id.clone(),
         mode: WriteMode::AtCurrent,
@@ -67,8 +77,18 @@ async fn a_refused_write_releases_its_command() {
         .create(&alice, "create", [(key("main"), note("x"))])
         .await
         .unwrap();
+    let capability = node
+        .capability(
+            &alice,
+            DocScope {
+                write: BTreeSet::from([created.doc_id.clone()]),
+                ..DocScope::default()
+            },
+        )
+        .await
+        .unwrap();
     let write = |heads: Vec<ChangeHash>| WriteFacets {
-        capability: alice.capability,
+        capability,
         command: Some(command("write")),
         doc_id: created.doc_id.clone(),
         mode: WriteMode::IfDocUnchanged { heads },
@@ -104,7 +124,7 @@ async fn the_boot_pass_settles_interrupted_writes_from_their_commit_message() {
                 &command(name),
                 Kind::Write,
                 [0; 32],
-                alice.uuid,
+                alice.actor_id,
                 Some(document),
                 None,
                 None,
@@ -127,6 +147,52 @@ async fn the_boot_pass_settles_interrupted_writes_from_their_commit_message() {
 }
 
 #[tokio::test]
+async fn the_boot_pass_fails_on_a_repository_error_and_leaves_the_row_for_the_next_pass() {
+    let mut node = Node::boot().await;
+    let alice = node.writer("alice").await;
+    let created = node
+        .create(&alice, "create", [(key("main"), note("x"))])
+        .await
+        .unwrap();
+    let document = &created.doc_id;
+    let ledger = Commands::open(node.sql.clone()).await.unwrap();
+    ledger
+        .begin(
+            &command("committed"),
+            Kind::Write,
+            [0; 32],
+            alice.actor_id,
+            Some(document),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let heads = node
+        .sabotage(document, |doc| {
+            let mut tx = doc.transaction();
+            tx.put(automerge::ROOT, "touched", true).unwrap();
+            tx.commit_with(CommitOptions::default().with_message("committed"));
+        })
+        .await;
+    // A lookup the boot pass cannot classify (neither missing nor still materializing) is a
+    // repository failure: boot refuses rather than reporting a recovery it did not perform.
+    node.repo.fail_next_doc_lookup(document.clone());
+    let error = node.restart().await.unwrap_err();
+    assert!(
+        matches!(&error, DocsError::Repository(message) if message.contains("injected document lookup failure")),
+        "{error:?}"
+    );
+    let row = ledger.get(&command("committed")).await.unwrap().unwrap();
+    assert_eq!(row.state, State::Pending);
+    // The next pass, with the repository answering, settles it from the commit message.
+    node.start().await.unwrap();
+    let settled = ledger.get(&command("committed")).await.unwrap().unwrap();
+    assert_eq!((settled.state, settled.heads), (State::Done, heads));
+    node.stop().await;
+}
+
+#[tokio::test]
 async fn the_boot_pass_places_a_committed_create_and_abandons_an_uncommitted_one() {
     let mut node = Node::boot().await;
     let alice = node.writer("alice").await;
@@ -139,10 +205,12 @@ async fn the_boot_pass_places_a_committed_create_and_abandons_an_uncommitted_one
                 &command(name),
                 Kind::Create,
                 [0; 32],
-                alice.uuid,
+                alice.actor_id,
                 None,
                 Some(PLACEMENT),
-                None,
+                Some(&Detail::Create {
+                    owner_id: Some(alice.actor_id),
+                }),
             )
             .await
             .unwrap();

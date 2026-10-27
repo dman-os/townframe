@@ -72,12 +72,18 @@ impl<H: Send + Sync + 'static> Host<H> {
         let _tracked = self.spawner.track().ok_or(ContextError::Cancelled)?;
         request.context.validate()?;
         let context = request.context.clone();
+        // The handler's future is boxed here, at the one point every call passes through. Left
+        // inline, it would be a field of this future, of `invoke`'s, of `unary`'s and of the
+        // protocol's `route` block, and each of those poll frames would carry a temporary of its
+        // full size while constructing it. A handler that calls another service through a direct
+        // client nests that chain once per hop, and in a debug build three in-process hops were
+        // enough to overflow a 2 MiB test thread.
         tokio::select! {
             biased;
             _ = self.spawner.cancelled() => Err(ContextError::Cancelled.into()),
             _ = context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
             _ = context.expired() => Err(ContextError::DeadlineExceeded.into()),
-            result = self.handler.call(request) => result,
+            result = Box::pin(self.handler.call(request)) => result,
         }
     }
 
@@ -116,10 +122,10 @@ impl<H: Send + Sync + 'static> Host<H> {
             tx,
             ..
         } = message;
-        request.transport = match dispatch {
+        request.set_transport(match dispatch {
             Dispatch::Inline => TransportContext::Direct,
             Dispatch::Admitted { .. } => TransportContext::Irpc,
-        };
+        });
         async move {
             match dispatch {
                 Dispatch::Inline => { drop(tx.send(self.invoke(request).await).await); }
@@ -170,10 +176,10 @@ impl<H: Send + Sync + 'static> Host<H> {
             tx,
             ..
         } = message;
-        request.transport = match dispatch {
+        request.set_transport(match dispatch {
             Dispatch::Inline => TransportContext::Direct,
             Dispatch::Admitted { .. } => TransportContext::Irpc,
-        };
+        });
         async move {
             match dispatch {
                 Dispatch::Inline => {
@@ -295,11 +301,11 @@ macro_rules! service_protocol {
         unary { $( $variant:ident($params:ty) ),* $(,)? }
         stream { $( $stream_variant:ident($stream_params:ty) ),* $(,)? }
     }) => {
-        #[$crate::__irpc::rpc_requests(message = $message)]
-        #[derive(Debug, serde::Serialize, serde::Deserialize)]
-        $vis enum $protocol {
-            $( #[rpc(tx = $crate::Reply<$params>)] $variant($crate::Envelope<$params>), )*
-            $( #[rpc(tx = $crate::EventReply<$stream_params>)] $stream_variant($crate::Envelope<$stream_params>), )*
+        $crate::declare_service_protocol! {
+            $vis enum $protocol => $message {
+                unary { $( $variant($params) ),* }
+                stream { $( $stream_variant($stream_params) ),* }
+            }
         }
         impl<H> $crate::Route<H> for $protocol
         where H: Send + Sync + 'static $(+ $crate::Handler<$params>)* $(+ $crate::Handler<$stream_params>)* {
@@ -320,8 +326,77 @@ macro_rules! service_protocol {
     };
 }
 
-pub(crate) trait InlineRoute<Proto: Service>: Send + Sync {
-    fn route_inline(self: Arc<Self>, message: Proto::Message) -> BoxFuture<'static, ()>;
+pub use service_client_rs::InlineRoute;
+
+pub trait ServerBinding<Proto: Service>: InlineRoute<Proto> + 'static {
+    fn route(
+        self: Arc<Self>,
+        dispatch: Dispatch,
+        message: Proto::Message,
+    ) -> BoxFuture<'static, ()>;
+    fn mount(router: &mut XrpcRouter, binding: Arc<Self>) -> Result<(), XrpcRegistrationError>;
+}
+
+impl<H, Proto> ServerBinding<Proto> for Host<H>
+where
+    H: Send + Sync + 'static,
+    Proto: Route<H>,
+{
+    fn route(
+        self: Arc<Self>,
+        dispatch: Dispatch,
+        message: Proto::Message,
+    ) -> BoxFuture<'static, ()> {
+        Proto::route(self, dispatch, message)
+    }
+
+    fn mount(router: &mut XrpcRouter, binding: Arc<Self>) -> Result<(), XrpcRegistrationError> {
+        Proto::mount(router, binding)
+    }
+}
+
+#[macro_export]
+macro_rules! bind_service_protocol {
+    ($vis:vis struct $binding:ident for $protocol:path => $message:path {
+        unary { $( $variant:ident($params:ty) ),* $(,)? }
+        stream { $( $stream_variant:ident($stream_params:ty) ),* $(,)? }
+    }) => {
+        $vis struct $binding<H>(std::sync::Arc<$crate::Host<H>>);
+
+        impl<H> $binding<H> {
+            pub fn new(host: std::sync::Arc<$crate::Host<H>>) -> std::sync::Arc<Self> {
+                std::sync::Arc::new(Self(host))
+            }
+        }
+
+        impl<H> $crate::InlineRoute<$protocol> for $binding<H>
+        where H: Send + Sync + 'static $(+ $crate::Handler<$params>)* $(+ $crate::Handler<$stream_params>)* {
+            fn route_inline(self: std::sync::Arc<Self>, message: $message) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                <Self as $crate::ServerBinding<$protocol>>::route(self, $crate::Dispatch::Inline, message)
+            }
+        }
+
+        impl<H> $crate::ServerBinding<$protocol> for $binding<H>
+        where H: Send + Sync + 'static $(+ $crate::Handler<$params>)* $(+ $crate::Handler<$stream_params>)* {
+            fn route(self: std::sync::Arc<Self>, dispatch: $crate::Dispatch, message: $message) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+                use $message as Message;
+                Box::pin(async move {
+                    let host = std::sync::Arc::clone(&self.0);
+                    match message {
+                        $( Message::$variant(message) => host.unary(dispatch, message).await, )*
+                        $( Message::$stream_variant(message) => host.stream(dispatch, message).await, )*
+                    }
+                })
+            }
+
+            fn mount(router: &mut $crate::XrpcRouter, binding: std::sync::Arc<Self>) -> Result<(), $crate::xrpc::XrpcRegistrationError> {
+                let host = &binding.0;
+                $( router.mount::<$params, H>(std::sync::Arc::clone(host))?; )*
+                $( router.mount_subscription::<$stream_params, H>(std::sync::Arc::clone(host))?; )*
+                Ok(())
+            }
+        }
+    };
 }
 
 impl<H, Proto> InlineRoute<Proto> for Host<H>

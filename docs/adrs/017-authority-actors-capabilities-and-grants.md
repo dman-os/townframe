@@ -1,176 +1,235 @@
-# ADR 017: Authority actors, capabilities, and grants
+# ADR 017: Namespace capabilities, actor identities, and domain grants
 
-**Status:** Proposed
+**Status:** Accepted and implemented.
 
-Authority is a **service**, not a repository object. It is declared once as
-`AuthorityProtocol` and reached through `service_utils_rs::Client` over direct
-calls, IRPC, and XRPC — the same hosted handler on every transport. No consumer
-holds the state; a domain service holds a client and a capability.
+## Decision
 
-`AuthorityService` owns four parts that stay independent inside it, so each can
-be lifted out later without untangling the others: a capability table, an actor
-registry, a grant ledger, and a signer.
+The capability table provides handles, namespace provenance, attenuation, and
+revocation. Actors, signing, and standing grants are domains built on that
+mechanism, not prerequisites for generic capability minting. Co-hosting these
+services does not give the generic table knowledge of actors or drawer policy.
 
-## Capabilities
+Resource operations accept one domain capability. Identity proofs and a separate
+signer proof are inputs to minting, not an alternative authorization path on every
+read or write. The signer is bound when the domain capability is issued.
 
-There is one kind of ocap: an opaque random UUIDv4 handle to a table row. It is
-like a file descriptor, not a signed claim. The stored row is
-`{ id, object, rights, parent, issuer }`; the protocol exposes no `CapabilityKind`
-and the generic table has no actor binding. Inspection exposes only the presented
-id, object, rights, and issuer. It must not disclose parent handles: those are
-bearer authority, not harmless provenance. Issuer UUIDs are non-authorizing
-namespace identifiers, not handles.
+The protocols live in `big_cabinet_core` and `service_core_rs`; callers use
+`service_client_rs::Client`, and `service_utils_rs` hosts the handlers. Direct,
+IRPC, and XRPC calls enforce the same rules.
 
-Rights are `use`, `narrow`, `delegate`, and `mintChild`. Their domain meaning
-belongs to the service that issued the ocap. Generic attenuation preserves the
-object and issuer and only drops rights, regardless of the object's spelling.
-Only the trusted minter seam may name a new object. The seam recognizes the
-subsystem using AuthorityActors' exact issuance record, not its object's text or
-an ancestor's identity.
+## Capability mechanism
 
-Every child has a subset of its parent's rights. A handle is live while it and
-all its ancestors are unretracted; itself or an ancestor may retract it. The
-operator root cannot be retracted. Issuance refuses a child beyond the supported
-chain depth rather than returning an unusable handle.
+A capability is an opaque random UUIDv4 bearer handle into the owning authority's
+in-memory table. It is not a signed token, an actor UUID, a document ID, or a
+self-contained credential another authority can verify.
 
-Containment (`edit doc X` under `drawer D`) remains the minting domain's decision.
-An object named `is actor docs` by another subsystem is just that subsystem's
-object; names confer no authority in AuthorityActors' namespace.
+The table records a handle's namespace, opaque object data, rights, revocation
+state, and derivation dependencies. The object data belongs to its issuing domain:
+`DocsRepo/scope/v2/{JSON}` and drawer scopes are examples, not grammars understood
+by the generic table. Keeping data here avoids a second per-domain scope map; it
+does not move scope interpretation into the table. Domain-specific mutable state
+still belongs to the domain.
 
-## Actor registry
+The trusted embedder gives each domain a **namespace capability**, separately
+from its actor identity proof. Possession of the namespace capability authorizes
+minting under that namespace. Naming a namespace UUID does not. The table must
+distinguish this minting authority from an ordinary object whose text happens to
+name a namespace. Generic minting must not resolve an actor or consult grants.
+A stable namespace ID may be provisioned by the embedder; its handle is temporary.
 
-**AuthorityActors** is the subsystem that issues `is actor <path>` ocaps. It keeps
-an issuance index `(cap_id, actor_uuid)` beside the actors table. The operator's
-bootstrap handle is associated there too. Its issuer namespace is persisted at
-boot and is distinct from the operator and other actors' namespaces.
+Rights remain `use`, `narrow`, `delegate`, and `mintChild`. Generic attenuation
+copies the namespace and object and drops rights only. It cannot change scope,
+change the bound signer, or turn an ordinary cap into a namespace cap. A domain
+mints changed object data after checking that its meaning narrows the authority
+presented to that domain. Possessing a namespace minter is trusted authority to
+name objects; callers never receive the service's namespace minter.
 
-Resolving an actor, signing, opening a child, or entering a grant namespace first
-checks that the supplied handle is live, then looks up that **exact id** in this
-index and checks the required right. Neither matching text, matching issuer
-metadata, nor ancestry substitutes for this lookup. Generic attenuation can copy
-an `is actor` object's text and issuer, but does not copy its registry association.
-Only AuthorityActors issues recognized identity handles. This is subsystem policy,
-not a second capability type.
+Inspection returns descriptive metadata, not parent handles, namespace-minter
+handles, signer proofs, or other bearer authority. Debug output redacts handles.
 
-Here, “actor cap” is only shorthand for an ordinary ocap in that issuance index.
-AuthorityActors uses `use` for identification and signing, `mintChild` for child
-opening, `narrow` for the subsystem's minter seam, and `delegate` for namespace
-administration. Those bits on an unrecognized handle cannot invoke these powers.
+## Derivation and revocation
 
-An actor is a persistent identity: a `Uuid7`, an actor URL
-`db+actor://<node>/<path>`, an Ed25519 key, and a node-signed attribution
-certificate (ADR 015 §5) binding the three. One key per actor.
+There are two different facts in a domain mint:
 
-Paths are hierarchical and the operator is their root, at the empty path. A
-child's path is its parent's path plus exactly one segment, so a path names its
-parent and two parents never contend for a child. `openActor` creates the actor
-on first use and returns the same identity on every later open. The actor cap it
-returns is a handle on that identity: an open with the same parent cap and rights
-reuses a live one, otherwise it mints another. A parent rotates a child's cap by
-retracting it and opening again; the child's key, URL, and certificate do not
-change. A child's actor cap holds a subset of its parent's rights.
+- The namespace capability proves **who may issue this domain's objects**.
+- The source capability proves **which authority this particular mint narrows**.
 
-Actor and node seeds are sealed with ChaCha20-Poly1305 under one wrapping key in
-the OS keyring and stored in the registry's own rows, bound to their row by the
-AEAD's associated data. Creating an actor is therefore one SQLite transaction:
-no key exists without its registry row and there is no cross-store state to
-reconcile. A keyring that no longer holds the wrapping key is a boot failure, not
-a reason to mint fresh identities.
+Recording only the issuer as the parent loses the second fact. A resulting cap
+must stop working if either source or issuer is retracted. A bound signing proof
+and any grant-dependent authorization gate are additional dependencies when
+applicable. This is a dependency DAG, not necessarily a single-parent tree.
 
-## Grant ledger
+Dependencies are immutable and refer to already-live handles. Issuance rejects
+unsupported dependency depth before publishing a handle. Liveness traversal is
+bounded and deduplicates shared ancestors; diamonds must not cause exponential
+work. A cap is live only while it and every dependency remain live. A holder may
+retract its own handle or a handle derived from it. Retraction does not reveal
+broader handles to the holder and does not invalidate historical signatures.
 
-Caps say what; the ledger says **who**. A grant is a standing entitlement: actor
-`subject` may hold `rights` over `object` in the namespace of the actor that named
-the object. Rows are `(issuer, subject, object, rights, granted via)`; object
-strings carry the domain's verb (`write drawer D`), so the rights are the same
-generic vocabulary caps carry and attenuation stays mechanical.
+The optional `parent` is the authority being narrowed: it must have `narrow`, and
+the new rights must be a subset of its rights. Additional `dependencies` are
+liveness-only gates, with no `narrow` requirement or rights ceiling. A USE-only
+signer proof can therefore bind attribution without limiting domain rights.
 
-- **Writing.** `grantAccess` needs `delegate` on the presented cap.
-  - Through the issuer's own actor cap: any object it may name, with rights
-    inside its cap's rights. The grant stands until the issuer revokes it.
-  - Through an object cap: exactly that cap's object, with rights inside the
-    cap's. The grant records the cap it was written through and stands only
-    while that cap is live, so retracting a cap withdraws the grants it made.
-    This is how an issuer lets a user share what it gave them without the user
-    ever touching the issuer's namespace directly.
-  - Granting again through the same cap replaces the rights it recorded.
-- **Revoking.** `revokeAccess` needs `delegate`. The issuer's actor cap withdraws
-  every grant of the object to the subject; an object cap withdraws the grants
-  written through it or through anything derived from it.
-- **Reading.** `checkGrant` returns the union of the subject's standing grants
-  for the exact object, and only the issuer may ask, with its own actor cap and
-  `use`. No object implies another and grants do not pass from a parent actor to
-  its children; containment and inheritance are the issuer's to resolve, because
-  the issuer is the one that mints from the answer.
+Generic attenuation preserves these dependencies. Domain narrowing records the
+source even when crossing namespaces. This makes revocation cross-domain without
+requiring each domain to sweep its own scope map after an actor is retracted.
+Checking dependencies and publishing a new cap must be serialized against
+retraction; a concurrent mint cannot escape its source's withdrawal.
 
-Subjects are registered actors. Namespace ownership is resolved from the exact
-AuthorityActors issuance association, not from the issuer metadata of an identity
-ocap (all identity ocaps share AuthorityActors' issuer). Unrecognized derivatives
-of AuthorityActors' ocaps cannot write grants in its namespace. A domain's grant
-of an object spelled `is actor X` cannot create an AuthorityActors association.
+A domain grant revocation also withdraws the live authority derived from that
+grant, rather than relying on a grant lookup at every use. The grant-owning domain
+must track that relationship, for example with opaque revocable gate capabilities
+attached to its grants. A gate is a dependency, not a new identity or permission
+that the generic table interprets. Mint and revoke must be ordered so that a
+completed revocation cannot be followed by publication using the old grant.
+Alternative grant paths may allow a caller to reacquire a cap; they do not revive
+a retracted handle. Quiet streams must observe retraction and release their demand.
 
-Issuing or revoking a grant never mutates documents and never invalidates
-historical attribution (ADR 015 §3). Withdrawing a standing grant changes subsequent
-grant checks; already-issued ocaps remain live until explicitly retracted.
-Check-and-mint is the domain service's authorization workflow, not one atomic
-authority operation. A domain that needs immediate withdrawal must serialize that
-workflow against revocation and retract the ocaps it previously issued.
+## Actor registry and signing
 
-## Signer
+AuthorityActors is a domain with its own namespace capability. Its durable state
+contains actor UUIDs, hierarchical paths, Ed25519 keys sealed under the node's
+OS-keyring wrapping key, and node-signed attribution certificates. Opening the
+same actor after restart returns the same identity and key, with a new handle.
 
-`signFacetClaim` needs an actor cap with `use`, requires the claim's `actorUuid`
-to be that actor, opens that actor's sealed key for the one signature, and checks
-it against the registered public key. This is the only way an actor signature is
-produced.
+An identity proof is an ordinary capability that AuthorityActors associates with
+an actor in its instance-local issuance index. Recognition checks that exact live
+handle and the requested right. Matching object text, namespace metadata, or an
+ancestor's identity is not recognition. Generic attenuation does not copy the
+association; `OpenActor` is the domain operation for obtaining a recognized proof
+with reduced rights. This exact-issuance rule is actor-domain policy, not a special
+rule used by the generic table to authorize minting.
 
-## Composition
+The operator is the actor-path root. An actor proof with `mintChild` can open an
+immediate child with bounded rights; actor creation does not create any grants.
+An actor's UUID, key, certificate, and URL survive rotation of its proof. A missing
+wrapping key is a boot failure, never permission to silently replace identities.
 
-The embedder opens each subsystem — DocsRepo, DrawerRepo, the runtime — from
-the operator root and hands it its actor cap. A plug is an actor under the
-runtime (`rt/plugs/ocr`).
+At domain mint time the caller presents:
 
-To act on a domain, a caller presents its actor cap to the domain service. The
-service resolves it (proving the caller is that actor), asks the ledger what that
-actor holds on the object *the service* named, decides containment, and mints an
-object cap — `edit doc X` — from **its own** actor cap. Later it checks only that
-the cap it is shown is live and was issued by itself, and what rights it carries.
-The domain object grammar lives in exactly one place, the service that named it.
+```text
+MintDomainCapability {
+    authority: identity proof or an accepted source domain capability,
+    signer: identity proof,
+    scope,
+    rights,
+}
+```
 
-A facet write by a plug is signed as the plug. Guests never hold actor caps: the
-runtime holds the plug's actor cap and passes it with the dispatch, DocsRepo
-authorizes the write against the object cap the guest presented, and then signs
-with the plug's actor cap. The authority cannot tell DocsRepo from any other
-holder of an actor cap and does not need to: holding an actor's cap is being that
-actor, so actor caps stay inside trusted subsystems. A dispatch is an object cap
-derived for that dispatch, not an actor.
+The mint independently proves the source's authority and the signer's identity.
+A runtime may narrow the user's authority while binding attribution to a plug.
+The signer's grants never enlarge the requested scope. The bound signer is
+immutable under generic attenuation; rebinding requires another authorized domain
+mint and a fresh proof of the intended signer.
 
-## Transport and trust boundary
+The domain also records the originating actor of the authority independently from
+the bound signer and preserves that provenance through narrowing. Creation and
+recovery policy can use this stable actor ID without treating the signer as the
+source of entitlement. The generic table does not interpret actor provenance.
 
-The ocap format is settled: an opaque UUIDv4 handle. Direct, IRPC, and XRPC carry
-the same handle back to the authority that owns its table. It is not a
-self-contained credential another authority can verify. No signed-capability
-format or CWT/COSE wrapper is required or planned for PR4. Attribution certificates
-and signed facet claims are separate cryptographic artifacts.
+Resource calls then carry only the resulting capability. The domain validates its
+namespace, liveness, rights, and scope and uses the bound signer for attribution.
+An identity proof is rejected by resource operations, even when that identity has
+standing grants. There is no identity fallback after a scoped cap is refused.
 
-A handle is bearer authority, so its transport and storage must preserve
-confidentiality. Debug output redacts it, and inspection never returns ancestors'
-handles. The embedder remains responsible for transport admission and for handing
-out only intended handles. A URL, actor UUID, or issuer UUID is descriptive metadata
-and cannot substitute for an issued handle.
+Binding an actor UUID is not permission to expose the actor's signing proof. The
+signing path must verify the domain's authority to use that binding after the
+domain authorizes the operation. A guest holding a document cap must not acquire
+an unrestricted `SignFacetClaim` oracle or an actor proof it can exchange for
+broader authority. Identity signing remains an explicitly held actor-domain
+capability. Signatures on facet claims and attribution certificates remain
+cryptographic even though capability handles need no signatures.
 
-## What this replaces
+A bound signer records whose delegated signing authority is used; it does not
+prove which executable sent the request. Handing the cap to another holder also
+hands over its scoped attribution authority. Runtime isolation and handle custody
+must enforce any stronger claim about which plug executed.
 
-The v1 `CapabilityToken` — a node-signed, JSON-serialized bearer token naming
-its subject and carrying drawer `Grant`s — is deleted, together with its
-identity-based lateral-delegation rule and the imperative
-`AuthorityRepo::{delegate, authorize, revoke, sign_actor_claim}` surface.
-Keyring-held actor keys and their crash-reconciliation intents are replaced by
-sealed keys in the registry. There is no backward compatibility: the stack is
-unreleased.
+## Grants are domain policy
 
-## Boundaries
+A standing grant is durable entitlement to reacquire authority, not an additional
+kind of capability in the generic table. Grant administration is protected by
+ocaps like any other domain operation. The grant-owning domain interprets subjects,
+resources, access levels, and containment and may use reusable storage helpers;
+the generic table does not implement a global identity ACL.
 
-- Chain bookkeeping (which actor issued an object, which cap a grant came through)
-  is the service's; a holder sees only the cap id and what inspection reports.
-- BigRepo/Keyhive node authority is checked below Cabinet and is unaffected by
-  anything in this ADR.
+DrawerService owns local actor entitlements over drawers and creation rights.
+DocsRepo's standalone policy owns document and placement grants when no drawer
+policy is configured. The drawer projection and grant rows may be joined in SQL
+at mint time; a separate generic Authority grant RPC is not required. Grant checks
+must be batched, not one authority-service call per query result.
+
+**Not every actor needs a grant row on every drawer.** Only identities with an
+independent standing entitlement need rows. A plug may have a durable actor and
+key but no grants; its runtime supplies a scoped cap for each dispatch. Children
+do not automatically inherit their parent's grants. A principal can delegate an
+existing cap without writing a grant row at all.
+
+Issuer-authorized standing grants survive restart. Temporary delegations written
+through an object capability depend on that capability and disappear with it,
+including at restart. Promoting such a delegation to a durable entitlement is not
+implicit; no persistence-upgrade operation is part of this decision.
+
+Drawer membership, local actor grants, and Keyhive principal membership are
+separate facts. Local policy changes do not by themselves rotate remote keys or
+alter a Keyhive roster. The existing drawer membership workflow still owns those
+coordinated effects.
+
+## Use-time behavior
+
+Ordinary operations perform one capability resolution, not an unsuccessful domain
+lookup followed by an actor lookup and grant evaluation. Namespace provenance and
+scope identify the applicable domain. Multiple issuers are accepted only through
+an explicit trust/delegation policy, never by trying every authority until one
+accepts a string.
+
+Scope still needs domain interpretation: a drawer-scoped cap may require current
+membership SQL to determine whether a document is in that drawer. Removing
+identity-grant checks from the hot path does not remove membership checks or let
+an authorized origin reference authorize dereferencing its target. Composite
+operations must cover every resource they affect.
+
+## Lifetime and startup
+
+| State | Lifetime |
+| --- | --- |
+| Actor/node identity, sealed keys, certificates | Durable |
+| Issuer-authorized domain grant rows | Durable |
+| Capability handles, namespace handles, issuance associations, signer bindings | Authority-instance local |
+| Delegations dependent on a temporary object cap | At most that cap's lifetime |
+| Facet-set and facet-reference indexes and their progress cursors | Durable |
+
+Restart creates fresh handles and reacquires subsystem authority. Old handles
+must fail even when the same durable actor or namespace exists. Running another
+authority instance on the same durable actor store must not clear or adopt the
+first instance's handle table. Durable command ledgers store stable actors and
+operation intent, never a capability required for replay.
+
+Facet indexes are not rebuilt at boot: their workers resume from durable frontier
+cursors and idempotent settlement. Worker ownership and reverse-order shutdown are
+lifecycle concerns, not reasons to discard those indexes.
+
+## Implementation and evidence
+
+This decision removes three earlier mechanisms: per-call
+`Authorization { authority, signer }` with an identity-or-object fallback,
+actor-proof-authorized generic minting, and the central Authority grant ledger.
+`Authorization` remains only at domain mint seams; resource DTOs carry `capability`.
+
+- Authority keeps handles and exact issuance associations in memory and validates
+  the bounded dependency DAG atomically with publication and retraction.
+- `Grants` stores namespace-partitioned durable rows and tracks temporary support
+  and revocation gates. Each domain lifetime owns one shared helper per namespace;
+  service shutdown retires that namespace after its host and workers stop.
+- DocsRepo and DrawerService keep private signer bindings and carry scope and
+  originating-actor provenance as opaque capability data. Their resource handlers
+  reject identity proofs instead of consulting standing grants as a fallback.
+- Authority, grant-helper, Docs, Drawer, and wire tests cover independent instances,
+  restart/reacquisition, cross-domain retraction, stale grant proofs, withdrawal
+  racing publication, signer non-escalation, quiet-stream cancellation, and
+  delegated callers without independent grants.
+
+There is no compatibility shim for the unreleased wire APIs. Durable identities,
+keys, and issuer-authorized grants must not be silently discarded during storage
+migration. BigRepo/Keyhive node authority remains below Cabinet and unchanged.

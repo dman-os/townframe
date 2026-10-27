@@ -2,104 +2,6 @@
 
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum EvidenceScope {
-    UnsafeUnattributedSignatureEvidence,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VerifiedSignatureEvidence {
-    pub signature: FacetSignature,
-    pub actor_public_key: MultibaseKey,
-    pub claim: FacetClaim,
-    pub introduction_marker: String,
-    pub introduction_hash: ChangeHash,
-    pub parents: Vec<ChangeHash>,
-    pub resulting_heads: Vec<ChangeHash>,
-    pub automerge_actor: Bytes,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
-pub enum SignatureEvidence {
-    VerifiedSignature {
-        evidence: Box<VerifiedSignatureEvidence>,
-    },
-    Pending {
-        reason: String,
-    },
-    ResourceRefused {
-        reason: String,
-    },
-    Unsupported {
-        reason: String,
-    },
-    ProvenForgery {
-        reason: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FacetClaimEvidence {
-    pub marker: String,
-    pub result: SignatureEvidence,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FacetClaimsInspection {
-    pub doc_id: DocId,
-    pub facet_key: FacetKey,
-    pub heads: Vec<ChangeHash>,
-    pub scope: EvidenceScope,
-    pub evidence: Vec<FacetClaimEvidence>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnsafeFacetInspection {
-    pub native_value: Option<Bytes>,
-    pub schema_known: bool,
-    pub claims: FacetClaimsInspection,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnsafeInspectFacet {
-    pub capability: CapId,
-    pub doc_id: DocId,
-    pub facet_key: FacetKey,
-    pub heads: Vec<ChangeHash>,
-}
-
-impl Operation for UnsafeInspectFacet {
-    type Output = UnsafeFacetInspection;
-    type Error = DocsError;
-    const XRPC: XrpcOperation =
-        XrpcOperation::procedure("org.example.daybook.docs.unsafeInspectFacet")
-            .with_schemas("UnsafeFacetInspection", "DocsError");
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InspectFacetClaims {
-    pub capability: CapId,
-    pub doc_id: DocId,
-    pub facet_key: FacetKey,
-    pub heads: Vec<ChangeHash>,
-}
-
-impl Operation for InspectFacetClaims {
-    type Output = FacetClaimsInspection;
-    type Error = DocsError;
-    const XRPC: XrpcOperation =
-        XrpcOperation::procedure("org.example.daybook.docs.inspectFacetClaims")
-            .with_schemas("FacetClaimsInspection", "DocsError");
-}
-
 fn history_reason(error: ClaimHistoryError) -> String {
     match error {
         ClaimHistoryError::ResourceRefused(reason) => format!("resource limit: {reason}"),
@@ -180,14 +82,12 @@ impl DocsService {
         doc_id: &DocId,
         heads: &[ChangeHash],
     ) -> Result<BigDocHandle, DocsError> {
-        let held = self
-            .authority
-            .call(context.child(), InspectCapability { capability })
+        let caller = self
+            .inspection_capabilities
+            .resolve::<DocId>(context, capability)
             .await
             .map_err(authority_error)?;
-        if held.issuer != self.system_actor.uuid
-            || held.object != inspection_object(doc_id)
-            || !held.rights.contains(Rights::USE)
+        if !matches!(caller.authority, DomainAuthority::Scoped(ref inspected) if inspected == doc_id)
         {
             return Err(DocsError::Denied);
         }
@@ -319,7 +219,7 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use secrets_rs::SecretStore;
     use service_utils_rs::{
-        Admission, Client, ClientError, ContextError, IrpcAdapter, RequestContext, Route,
+        Admission, Client, ClientError, ContextError, IrpcAdapter, RequestContext, ServerBinding,
         StopToken, XrpcClient, XrpcRouter, xrpc,
     };
     use sqlx_utils_rs::SqlCtx;
@@ -332,6 +232,8 @@ mod tests {
         authority: Authority,
         authority_stop: StopToken,
         issuer: Actor,
+        namespace: Namespace,
+        access: Arc<LedgerAccess>,
         repo: SharedBigRepo,
         repo_stop: Option<BigRepoStopToken>,
         docs: DocsRepo,
@@ -362,6 +264,11 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            let namespace = authority
+                .service
+                .open_namespace(Uuid7::new())
+                .await
+                .unwrap();
             let (repo, repo_stop) = BigRepo::boot(Config {
                 node_identity_seed: [31; 32],
                 storage: StorageConfig::Memory,
@@ -374,10 +281,28 @@ mod tests {
             .await
             .unwrap();
             let schemas = Arc::new(SchemaRepo::open([]).unwrap());
-            let (docs, docs_stop) =
-                boot(config(&authority, &repo, schemas, issuer.capability).await)
-                    .await
-                    .unwrap();
+            let access = Arc::new(
+                LedgerAccess::open(
+                    SqlCtx::memory().await.unwrap(),
+                    authority.client.clone(),
+                    namespace,
+                )
+                .await
+                .unwrap(),
+            );
+            let (docs, docs_stop) = boot(
+                config(
+                    &authority,
+                    &repo,
+                    schemas,
+                    issuer.capability,
+                    namespace,
+                    Arc::clone(&access),
+                )
+                .await,
+            )
+            .await
+            .unwrap();
             let key = SigningKey::from_bytes(&[19; 32]);
             let alias = Uuid7::new();
             let actor = Uuid7::new();
@@ -454,7 +379,10 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let capability = docs.mint_inspection_handle(doc_id.clone()).await.unwrap();
+            let capability = docs
+                .mint_inspection_handle(doc_id.clone(), issuer.capability)
+                .await
+                .unwrap();
             let expected = UnsafeFacetInspection {
                 native_value: Some(encode_native(&native).into()),
                 schema_known: false,
@@ -490,6 +418,8 @@ mod tests {
                 authority,
                 authority_stop,
                 issuer,
+                namespace,
+                access,
                 repo,
                 repo_stop: Some(repo_stop),
                 docs,
@@ -502,7 +432,7 @@ mod tests {
 
         fn request(&self) -> UnsafeInspectFacet {
             UnsafeInspectFacet {
-                capability: self.capability.id,
+                capability: self.capability.capability_id,
                 doc_id: self.document.document_id(),
                 facet_key: FACET.parse().unwrap(),
                 heads: self.expected.claims.heads.clone(),
@@ -516,6 +446,8 @@ mod tests {
                     RequestContext::root(),
                     MintCapability {
                         issuer,
+                        parent: None,
+                        dependencies: Vec::new(),
                         object,
                         rights,
                     },
@@ -530,7 +462,7 @@ mod tests {
                 .call(
                     RequestContext::root(),
                     RetractCapability {
-                        via: self.authority.root,
+                        via: self.namespace.capability,
                         capability,
                     },
                 )
@@ -598,16 +530,20 @@ mod tests {
         repo: &SharedBigRepo,
         schemas: Arc<SchemaRepo>,
         issuer: CapId,
+        namespace: Namespace,
+        access: Arc<LedgerAccess>,
     ) -> DocsConfig {
         DocsConfig {
             big_repo: Arc::clone(repo),
             schema_repo: schemas,
             authority: authority.client.clone(),
             issuer,
+            namespace,
             node_issuer: authority.node_issuer.clone(),
-            access: Arc::new(LedgerAccess::new(authority.client.clone(), issuer)),
+            access,
             sql: SqlCtx::memory().await.unwrap(),
             facet_set: None,
+            facet_ref: None,
         }
     }
 
@@ -827,29 +763,35 @@ mod tests {
         let mut fixture = Fixture::new().await;
         let wrong_object = fixture
             .docs
-            .mint_inspection_handle(DocId::new([82; 32]))
+            .mint_inspection_handle(DocId::new([82; 32]), fixture.issuer.capability)
+            .await
+            .unwrap();
+        let other_namespace = fixture
+            .authority
+            .service
+            .open_namespace(fixture.issuer.actor_id)
             .await
             .unwrap();
         let wrong_issuer = fixture
             .mint(
-                fixture.authority.root,
+                other_namespace.capability,
                 fixture.capability.object.clone(),
                 Rights::USE,
             )
             .await;
         let no_use = fixture
             .mint(
-                fixture.issuer.capability,
+                fixture.namespace.capability,
                 fixture.capability.object.clone(),
                 Rights::empty(),
             )
             .await;
         let retracted = fixture
             .docs
-            .mint_inspection_handle(fixture.document.document_id())
+            .mint_inspection_handle(fixture.document.document_id(), fixture.issuer.capability)
             .await
             .unwrap();
-        fixture.retract(retracted.id).await;
+        fixture.retract(retracted.capability_id).await;
         let ancestor = fixture
             .authority
             .client
@@ -864,12 +806,12 @@ mod tests {
             .unwrap();
         fixture.repo_stop.take().unwrap().stop().await.unwrap();
         let denied = [
-            wrong_object.id,
-            wrong_issuer.id,
-            no_use.id,
-            retracted.id,
+            wrong_object.capability_id,
+            wrong_issuer.capability_id,
+            no_use.capability_id,
+            retracted.capability_id,
             fixture.issuer.capability,
-            ancestor.id,
+            ancestor.capability_id,
             CapId::default(),
         ];
         for capability in denied {
@@ -898,6 +840,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
+        let fixture = Fixture::new().await;
+        let signer = fixture
+            .authority
+            .client
+            .call(
+                RequestContext::root(),
+                OpenActor {
+                    parent: fixture.authority.root,
+                    path: "inspector".into(),
+                    rights: Rights::USE,
+                },
+            )
+            .await
+            .unwrap();
+        let document = fixture.document.document_id();
+        fixture
+            .access
+            .grants
+            .grant(
+                &RequestContext::root(),
+                fixture.issuer.actor_id,
+                LedgerAccess::object(AccessRequest::Read(&document)),
+                Rights::USE,
+                None,
+            )
+            .await
+            .unwrap();
+        let resource = fixture
+            .docs
+            .client
+            .call(
+                RequestContext::root(),
+                MintDocCapability {
+                    authorization: Authorization {
+                        authority: fixture.issuer.capability,
+                        signer: signer.capability,
+                    },
+                    scope: DocScope {
+                        read: BTreeSet::from([document.clone()]),
+                        ..DocScope::default()
+                    },
+                    rights: Rights::USE,
+                },
+            )
+            .await
+            .unwrap();
+        let inspection = fixture
+            .docs
+            .mint_inspection_handle(document.clone(), signer.capability)
+            .await
+            .unwrap();
+        let mut request = fixture.request();
+        request.capability = inspection.capability_id;
+        assert_eq!(
+            inspect(&fixture.docs.client, request.clone())
+                .await
+                .unwrap(),
+            fixture.expected
+        );
+        assert_eq!(
+            claims(&fixture.docs.client, request.clone()).await.unwrap(),
+            fixture.expected.claims
+        );
+        let read = ReadFacets {
+            capability: resource.capability_id,
+            doc_id: document.clone(),
+            at: At::Current,
+            facets: None,
+            optimistic: false,
+        };
+        fixture
+            .docs
+            .client
+            .call(RequestContext::root(), read.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .docs
+                .client
+                .call(
+                    RequestContext::root(),
+                    ReadFacets {
+                        capability: inspection.capability_id,
+                        ..read
+                    }
+                )
+                .await,
+            Err(ClientError::Operation(DocsError::Denied))
+        );
+        let mut wrong_scope = request.clone();
+        wrong_scope.capability = resource.capability_id;
+        assert_eq!(
+            inspect(&fixture.docs.client, wrong_scope.clone()).await,
+            Err(DocsError::Denied)
+        );
+        assert_eq!(
+            claims(&fixture.docs.client, wrong_scope).await,
+            Err(DocsError::Denied)
+        );
+        assert_eq!(
+            fixture
+                .docs
+                .mint_inspection_handle(document, resource.capability_id)
+                .await,
+            Err(DocsError::Denied)
+        );
+        fixture
+            .authority
+            .client
+            .call(
+                RequestContext::root(),
+                RetractCapability {
+                    via: signer.capability,
+                    capability: signer.capability,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            inspect(&fixture.docs.client, request.clone()).await,
+            Err(DocsError::Denied)
+        );
+        assert_eq!(
+            claims(&fixture.docs.client, request).await,
+            Err(DocsError::Denied)
+        );
+        assert_eq!(
+            inspect(&fixture.docs.client, fixture.request())
+                .await
+                .unwrap(),
+            fixture.expected
+        );
+        fixture.stop().await;
+    }
+
+    #[tokio::test]
     async fn boot_requires_exact_actor_association_and_shutdown_closes_inspection_and_minting() {
         let mut fixture = Fixture::new().await;
         let derived = fixture
@@ -912,13 +992,15 @@ mod tests {
             )
             .await
             .unwrap();
-        for capability in [fixture.capability.id, derived.id] {
+        for capability in [fixture.capability.capability_id, derived.capability_id] {
             let refused = boot(
                 config(
                     &fixture.authority,
                     &fixture.repo,
                     Arc::new(SchemaRepo::open([]).unwrap()),
                     capability,
+                    fixture.namespace,
+                    Arc::clone(&fixture.access),
                 )
                 .await,
             )
@@ -942,7 +1024,7 @@ mod tests {
         assert_eq!(
             fixture
                 .docs
-                .mint_inspection_handle(fixture.document.document_id())
+                .mint_inspection_handle(fixture.document.document_id(), fixture.issuer.capability)
                 .await
                 .unwrap_err(),
             expected
@@ -958,12 +1040,16 @@ mod tests {
             .unsigned_value(automerge::ScalarValue::Bytes(vec![9]))
             .await;
         let (irpc, irpc_stop) = IrpcAdapter::local::<_, DocsProtocol>(
-            Arc::clone(&fixture.docs.host),
+            DocsBinding::new(Arc::clone(&fixture.docs.host)),
             Admission::new(4, 1),
             8,
         );
         let mut router = XrpcRouter::new(BODY_LIMIT);
-        DocsProtocol::mount(&mut router, Arc::clone(&fixture.docs.host)).unwrap();
+        DocsBinding::mount(
+            &mut router,
+            DocsBinding::new(Arc::clone(&fixture.docs.host)),
+        )
+        .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (http_task, http_shutdown) = xrpc::serve(listener, router.into_router()).await.unwrap();

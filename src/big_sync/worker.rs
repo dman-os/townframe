@@ -19,6 +19,90 @@ use big_sync_core::TaskCounts;
 pub struct BigSyncWorkerHandle {
     host_tx: tokio::sync::mpsc::Sender<BigSyncWorkerMsg>,
     stats_tx: tokio::sync::broadcast::Sender<big_sync_core::SyncStatEvent>,
+    subscription_tx: tokio::sync::mpsc::UnboundedSender<SubscriptionMsg>,
+    subscription_events: tokio::sync::broadcast::Sender<SubscriptionEvent>,
+}
+
+#[derive(Clone)]
+pub struct SubscriptionSource(Arc<SubscriptionSourceInner>);
+
+struct SubscriptionSourceInner {
+    id: u64,
+    tx: tokio::sync::mpsc::UnboundedSender<SubscriptionMsg>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubscriptionUpdate {
+    pub parts: HashMap<PartKey, BackendId>,
+    pub objects: HashMap<ObjKey, BackendId>,
+    pub removed_parts: HashSet<PartKey>,
+    pub removed_objects: HashSet<ObjKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionEvent {
+    pub peer_id: PeerKey,
+    pub update: SubscriptionUpdate,
+}
+
+impl SubscriptionSource {
+    pub async fn update(&self, peer_id: PeerKey, update: SubscriptionUpdate) -> Res<()> {
+        let (resp, rx) = tokio::sync::oneshot::channel();
+        self.0
+            .tx
+            .send(SubscriptionMsg::Update {
+                id: self.0.id,
+                peer_id,
+                update,
+                resp,
+            })
+            .map_err(|_| ferr!(ERROR_CHANNEL))?;
+        rx.await.wrap_err(ERROR_CHANNEL)??;
+        Ok(())
+    }
+
+    pub async fn remove_peer(&self, peer_id: PeerKey) -> Res<()> {
+        let (resp, rx) = tokio::sync::oneshot::channel();
+        self.0
+            .tx
+            .send(SubscriptionMsg::RemovePeer {
+                id: self.0.id,
+                peer_id,
+                resp,
+            })
+            .map_err(|_| ferr!(ERROR_CHANNEL))?;
+        rx.await.wrap_err(ERROR_CHANNEL)?;
+        Ok(())
+    }
+}
+
+impl Drop for SubscriptionSourceInner {
+    fn drop(&mut self) {
+        let _closed = self.tx.send(SubscriptionMsg::RemoveSource { id: self.id });
+    }
+}
+
+enum SubscriptionMsg {
+    Update {
+        id: u64,
+        peer_id: PeerKey,
+        update: SubscriptionUpdate,
+        resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>,
+    },
+    RemovePeer {
+        id: u64,
+        peer_id: PeerKey,
+        resp: tokio::sync::oneshot::Sender<()>,
+    },
+    RemoveSource {
+        id: u64,
+    },
+}
+
+#[derive(Default)]
+struct PeerSubscriptions {
+    parts: HashMap<PartKey, BackendId>,
+    objects: HashMap<ObjKey, BackendId>,
 }
 
 type SharedPartitionStore = Arc<dyn crate::part_store::HostPartStore>;
@@ -107,6 +191,7 @@ pub struct StopToken {
 pub struct WorkerSnapshot {
     pub label: &'static str,
     pub peer_parts: HashMap<PeerKey, HashMap<PartKey, BackendId>>,
+    pub peer_objects: HashMap<PeerKey, HashMap<ObjKey, BackendId>>,
     pub full_sync_waiters: HashMap<u64, Vec<(PeerKey, PartKey)>>,
     pub last_object_syncs: Vec<(PeerKey, PartKey, big_sync_core::ObjKey, std::time::Instant)>,
     pub task_counts: TaskCounts,
@@ -133,6 +218,7 @@ impl WorkerSnapshot {
     pub fn convergence_eq(&self, other: &Self) -> bool {
         self.label == other.label
             && self.peer_parts == other.peer_parts
+            && self.peer_objects == other.peer_objects
             && self.full_sync_waiters == other.full_sync_waiters
             && self.last_object_syncs == other.last_object_syncs
             && self.task_counts == other.task_counts
@@ -175,6 +261,20 @@ impl StopToken {
 }
 
 impl BigSyncWorkerHandle {
+    pub fn subscription_source(&self) -> SubscriptionSource {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        SubscriptionSource(Arc::new(SubscriptionSourceInner {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            tx: self.subscription_tx.clone(),
+        }))
+    }
+
+    pub fn subscribe_subscription_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<SubscriptionEvent> {
+        self.subscription_events.subscribe()
+    }
+
     pub fn subscribe_stats(
         &self,
     ) -> tokio::sync::broadcast::Receiver<big_sync_core::SyncStatEvent> {
@@ -357,6 +457,7 @@ pub fn spawn_big_sync_worker_with_options(
     let cancel_token = CancellationToken::new();
     let task_set = utils_rs::AbortableJoinSet::new();
     let (stats_tx, _) = tokio::sync::broadcast::channel(1024);
+    let (subscription_events, _) = tokio::sync::broadcast::channel(1024);
 
     let mut machine = big_sync_core::BigSyncMachine::default();
     if let Some(backoff) = max_task_backoff {
@@ -366,6 +467,7 @@ pub fn spawn_big_sync_worker_with_options(
         machine.set_default_sync_mode(sync_mode);
     }
     let (host_tx, host_rx) = tokio::sync::mpsc::channel(64);
+    let (subscription_tx, subscription_rx) = tokio::sync::mpsc::unbounded_channel();
     let (sync_tx, sync_rx) = mpsc::bounded(64, "SyncWorkers".into(), "BigSyncMachine".into());
     let (task_tx, task_rx) = mpsc::bounded(64, "BigSync tasks".into(), "BigSyncMachine".into());
     let mut worker = BigSyncWorker {
@@ -381,11 +483,14 @@ pub fn spawn_big_sync_worker_with_options(
         sync_spawn_queue: default(),
 
         host_rx,
+        subscription_rx,
+        subscriptions: default(),
         sync_tx,
         sync_rx,
         task_tx,
         task_rx,
         stats_tx: stats_tx.clone(),
+        subscription_events: subscription_events.clone(),
         full_sync_waiters: default(),
 
         rpc_clients: default(),
@@ -455,7 +560,12 @@ pub fn spawn_big_sync_worker_with_options(
         tokio::task::spawn(async move { fut.await.unwrap() }.instrument(span.or_current()));
 
     Ok((
-        BigSyncWorkerHandle { host_tx, stats_tx },
+        BigSyncWorkerHandle {
+            host_tx,
+            stats_tx,
+            subscription_tx,
+            subscription_events,
+        },
         StopToken {
             cancel_token,
             join_handle,
@@ -498,6 +608,8 @@ struct BigSyncWorker {
     sync_backends: HashMap<BackendId, Arc<dyn SyncBackend>>,
 
     host_rx: tokio::sync::mpsc::Receiver<BigSyncWorkerMsg>,
+    subscription_rx: tokio::sync::mpsc::UnboundedReceiver<SubscriptionMsg>,
+    subscriptions: HashMap<u64, HashMap<PeerKey, PeerSubscriptions>>,
     machine: BigSyncMachine,
 
     machine_spawn_queue: VecDeque<MachineTask>,
@@ -508,6 +620,7 @@ struct BigSyncWorker {
     task_rx: mpsc::Receiver<MachineTaskMsg>,
     task_tx: mpsc::Sender<MachineTaskMsg>,
     stats_tx: tokio::sync::broadcast::Sender<big_sync_core::SyncStatEvent>,
+    subscription_events: tokio::sync::broadcast::Sender<SubscriptionEvent>,
     full_sync_waiters: HashMap<u64, tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>>,
 
     tasks: HashMap<TaskId, TaskDeets>,
@@ -519,7 +632,9 @@ struct BigSyncWorker {
 }
 
 struct PeerState {
+    configured_parts: HashMap<PartKey, BackendId>,
     parts: HashMap<PartKey, BackendId>,
+    configured_objects: HashMap<ObjKey, BackendId>,
     objects: HashMap<ObjKey, BackendId>,
 }
 
@@ -641,6 +756,9 @@ impl BigSyncWorker {
                     debug!(worker = %self.label, ?evt, "big_sync worker received sync event");
                     self.machine.handle_evt(evt);
                 }
+                Some(msg) = self.subscription_rx.recv() => {
+                    self.handle_subscription(msg);
+                }
                 msg = self.host_rx.recv() => {
                     let Some(msg) = msg else {
                         break;
@@ -714,6 +832,148 @@ impl BigSyncWorker {
         Ok(())
     }
 
+    fn refresh_peer_subscriptions(&mut self, peer_id: &PeerKey) -> bool {
+        let Some(peer) = self.peers.get_mut(peer_id) else {
+            return false;
+        };
+        let mut parts = peer.configured_parts.clone();
+        let mut objects = peer.configured_objects.clone();
+        for subscription in self
+            .subscriptions
+            .values()
+            .filter_map(|source| source.get(peer_id))
+        {
+            for (part, backend) in &subscription.parts {
+                if let Some(existing) = parts.insert(part.clone(), Arc::clone(backend)) {
+                    assert_eq!(existing, *backend, "part subscription backend conflict");
+                }
+            }
+            for (obj, backend) in &subscription.objects {
+                if let Some(existing) = objects.insert(obj.clone(), Arc::clone(backend)) {
+                    assert_eq!(existing, *backend, "object subscription backend conflict");
+                }
+            }
+        }
+        if peer.parts == parts && peer.objects == objects {
+            return false;
+        }
+        let previous = PeerSubscriptions {
+            parts: std::mem::replace(&mut peer.parts, parts),
+            objects: std::mem::replace(&mut peer.objects, objects),
+        };
+        self.publish_peer_subscriptions(peer_id, previous);
+        true
+    }
+
+    fn publish_peer_subscriptions(&mut self, peer_id: &PeerKey, previous: PeerSubscriptions) {
+        let peer = self.peers.get(peer_id).expect(ERROR_IMPOSSIBLE);
+        let event = (self.subscription_events.receiver_count() > 0
+            && (peer.parts != previous.parts || peer.objects != previous.objects))
+            .then(|| SubscriptionEvent {
+                peer_id: peer_id.clone(),
+                update: SubscriptionUpdate {
+                    parts: peer
+                        .parts
+                        .iter()
+                        .filter(|(part, backend)| previous.parts.get(*part) != Some(*backend))
+                        .map(|(part, backend)| (part.clone(), Arc::clone(backend)))
+                        .collect(),
+                    objects: peer
+                        .objects
+                        .iter()
+                        .filter(|(object, backend)| previous.objects.get(*object) != Some(*backend))
+                        .map(|(object, backend)| (object.clone(), Arc::clone(backend)))
+                        .collect(),
+                    removed_parts: previous
+                        .parts
+                        .keys()
+                        .filter(|part| !peer.parts.contains_key(*part))
+                        .cloned()
+                        .collect(),
+                    removed_objects: previous
+                        .objects
+                        .keys()
+                        .filter(|object| !peer.objects.contains_key(*object))
+                        .cloned()
+                        .collect(),
+                },
+            });
+        self.machine
+            .handle_evt(BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
+                peer_id: peer_id.clone(),
+                parts: peer.parts.keys().cloned().collect(),
+                objects: peer.objects.keys().cloned().collect(),
+            }));
+        if let Some(event) = event {
+            let _unobserved = self.subscription_events.send(event);
+        }
+    }
+
+    fn handle_subscription(&mut self, msg: SubscriptionMsg) {
+        match msg {
+            SubscriptionMsg::Update {
+                id,
+                peer_id,
+                update,
+                resp,
+            } => {
+                for (part_id, backend_id) in &update.parts {
+                    if !self.sync_backends.contains_key(backend_id) {
+                        let _cancelled = resp.send(Err(BigSyncWorkerError::UnknownBackend {
+                            backend_id: Arc::clone(backend_id),
+                            part_id: part_id.clone(),
+                        }));
+                        return;
+                    }
+                }
+                for (obj_id, backend_id) in &update.objects {
+                    if !self.sync_backends.contains_key(backend_id) {
+                        let _cancelled = resp.send(Err(BigSyncWorkerError::UnknownObjectBackend {
+                            backend_id: Arc::clone(backend_id),
+                            obj_id: obj_id.clone(),
+                        }));
+                        return;
+                    }
+                }
+                let source = self.subscriptions.entry(id).or_default();
+                let subscription = source.entry(peer_id.clone()).or_default();
+                for part in update.removed_parts {
+                    subscription.parts.remove(&part);
+                }
+                for object in update.removed_objects {
+                    subscription.objects.remove(&object);
+                }
+                subscription.parts.extend(update.parts);
+                subscription.objects.extend(update.objects);
+                if subscription.parts.is_empty() && subscription.objects.is_empty() {
+                    source.remove(&peer_id);
+                }
+                if source.is_empty() {
+                    self.subscriptions.remove(&id);
+                }
+                self.refresh_peer_subscriptions(&peer_id);
+                let _cancelled = resp.send(Ok(()));
+            }
+            SubscriptionMsg::RemovePeer { id, peer_id, resp } => {
+                if let Some(source) = self.subscriptions.get_mut(&id) {
+                    source.remove(&peer_id);
+                    if source.is_empty() {
+                        self.subscriptions.remove(&id);
+                    }
+                    self.refresh_peer_subscriptions(&peer_id);
+                }
+                let _cancelled = resp.send(());
+            }
+            SubscriptionMsg::RemoveSource { id } => {
+                if let Some(source) = self.subscriptions.remove(&id) {
+                    for peer_id in source.into_keys() {
+                        self.refresh_peer_subscriptions(&peer_id);
+                    }
+                }
+            }
+        }
+    }
+
     async fn handle_msg(&mut self, msg: BigSyncWorkerMsg) -> Res<()> {
         match msg {
             BigSyncWorkerMsg::SetPeer {
@@ -752,33 +1012,48 @@ impl BigSyncWorker {
                         inner: client,
                     }) as SharedPeerRpcClient,
                 );
-                self.peers.insert(
-                    peer_id.clone(),
-                    PeerState {
-                        parts: parts.clone(),
-                        objects: objects.clone(),
-                    },
-                );
+                let is_new = !self.peers.contains_key(&peer_id);
+                let peer = self
+                    .peers
+                    .entry(peer_id.clone())
+                    .or_insert_with(|| PeerState {
+                        configured_parts: HashMap::new(),
+                        configured_objects: HashMap::new(),
+                        parts: HashMap::new(),
+                        objects: HashMap::new(),
+                    });
                 let part_count = parts.len();
                 let object_count = objects.len();
-                let evt = BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
-                    peer_id: peer_id.clone(),
-                    parts: parts.into_keys().collect(),
-                    objects: objects.into_keys().collect(),
-                });
-                self.machine.handle_evt(evt);
+                peer.configured_parts = parts;
+                peer.configured_objects = objects;
+                if !self.refresh_peer_subscriptions(&peer_id) && is_new {
+                    self.publish_peer_subscriptions(&peer_id, PeerSubscriptions::default());
+                }
                 resp.send(Ok(()))
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
                 tracing::debug!(peer_id = %peer_id, part_count, object_count, "accept set peer");
             }
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
-                self.peers.remove(&peer_id);
+                let previous = self.peers.remove(&peer_id);
                 self.rpc_clients.lock().expect(ERROR_MUTEX).remove(&peer_id);
                 let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent {
                     peer_id: peer_id.clone(),
                 });
                 self.machine.handle_evt(evt);
+                if self.subscription_events.receiver_count() > 0
+                    && let Some(previous) = previous
+                    && (!previous.parts.is_empty() || !previous.objects.is_empty())
+                {
+                    let _unobserved = self.subscription_events.send(SubscriptionEvent {
+                        peer_id: peer_id.clone(),
+                        update: SubscriptionUpdate {
+                            removed_parts: previous.parts.into_keys().collect(),
+                            removed_objects: previous.objects.into_keys().collect(),
+                            ..Default::default()
+                        },
+                    });
+                }
                 resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
                 tracing::debug!(peer_id = %peer_id, "accept remove peer");
             }
@@ -842,6 +1117,11 @@ impl BigSyncWorker {
                         .peers
                         .iter()
                         .map(|(peer_id, peer_state)| (peer_id.clone(), peer_state.parts.clone()))
+                        .collect(),
+                    peer_objects: self
+                        .peers
+                        .iter()
+                        .map(|(id, peer)| (id.clone(), peer.objects.clone()))
                         .collect(),
                     full_sync_waiters: self.machine.debug_full_sync_waiters(),
                     last_object_syncs: self.machine.debug_last_object_syncs(),
@@ -1239,7 +1519,9 @@ mod tests {
         let peer_id = PeerKey::random();
         let obj_id = ObjKey::random();
         let peer = PeerState {
+            configured_parts: HashMap::new(),
             parts: [(PartKey::random(), Arc::from("backend"))].into(),
+            configured_objects: HashMap::new(),
             objects: HashMap::new(),
         };
         let task = SyncTask {
@@ -1265,6 +1547,7 @@ mod tests {
         WorkerSnapshot {
             label: "big_sync test",
             peer_parts: HashMap::new(),
+            peer_objects: HashMap::new(),
             full_sync_waiters: HashMap::new(),
             last_object_syncs: Vec::new(),
             task_counts,

@@ -5,7 +5,7 @@
 //! fetch, or compare schemas. Unknown facets remain readable as best-effort
 //! raw data, but writes require an explicitly configured known facet.
 //!
-//! The facets Cabinet itself maintains — dmeta — are always registered, before any embedder group,
+//! The facets Cabinet itself maintains — dmeta, branch, drawer — are always registered, before any embedder group,
 //! so an embedder cannot shadow them with its own definition. They are declared in Rust, so their
 //! sidecar is the codec's authority by construction, and the Lexicon published for a core facet is
 //! the projection of that same declaration. Core facets go through the same Lexicon admission path
@@ -15,6 +15,10 @@
 
 use big_cabinet_core::dmeta::BranchPath;
 use big_cabinet_core::dmeta::Dmeta;
+use big_cabinet_core::drawer::{
+    Drawer, DrawerChildEntry, DrawerDocEntry, DrawerRoster, KnownDrawerEntry, SelfDocLayout,
+    SingleGroupLayout,
+};
 use big_cabinet_core::facet::{
     Bundle, CompiledSchema, Declaration, LexiconAdmissionError, Universe, UniverseError,
 };
@@ -27,6 +31,21 @@ static CORE: LazyLock<Universe> = LazyLock::new(|| {
     Universe::collect([
         Declaration::of::<Dmeta>().expect("dmeta is a well-formed facet declaration"),
         Declaration::of::<BranchPath>().expect("branch is a well-formed facet declaration"),
+        Declaration::of::<Drawer>().expect("drawer is a well-formed facet declaration"),
+        // A published union's members are carried as their own lexicons at admission, whether or
+        // not the union is open.
+        Declaration::of::<SelfDocLayout>()
+            .expect("self-doc layout is a well-formed member declaration"),
+        Declaration::of::<SingleGroupLayout>()
+            .expect("single-group layout is a well-formed member declaration"),
+        Declaration::of::<DrawerRoster>()
+            .expect("drawer roster is a well-formed facet declaration"),
+        Declaration::of::<DrawerDocEntry>()
+            .expect("drawer doc entry is a well-formed facet declaration"),
+        Declaration::of::<DrawerChildEntry>()
+            .expect("drawer child entry is a well-formed facet declaration"),
+        Declaration::of::<KnownDrawerEntry>()
+            .expect("known drawer entry is a well-formed facet declaration"),
     ])
 });
 

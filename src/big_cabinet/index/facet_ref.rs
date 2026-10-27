@@ -8,9 +8,11 @@
 //! replay and re-settlement are idempotent.
 //!
 //! A route whose origin document is not yet local is parked and retried when the repository says
-//! the document materialized. Parked entries are in-memory: a restart loses them (their tag
-//! cursor has already moved past), and the edge is then rebuilt on the origin's next change.
-//! That is the same derived-state trade the whole index makes — nothing here is authoritative.
+//! the document materialized. A parked route is durable (`big_cabinet_facet_ref_parked`) because
+//! its tag cursor keeps moving for the other routes of the tag: a restart reloads the parked rows
+//! and retries them before consuming the frontier. One route holds at most one parked entry, the
+//! newest frontier revision seen for it; a retry of an older revision after a newer one settled or
+//! parked is dropped, so a late materialization never replaces newer edges with older ones.
 
 use automerge::{Automerge, ChangeHash, ObjType, PatchLog, ReadDoc, Value};
 use big_cabinet_core::FacetTag;
@@ -46,15 +48,24 @@ pub struct FacetRefEdge {
 pub enum FacetRefQuery {
     /// Every edge out of one facet route.
     Origin(FacetRoute),
+    /// Every edge out of any facet in one document.
+    OriginDoc(big_cabinet_core::DocId),
     /// Every edge pointing at one facet route.
     Target(FacetRoute),
+    /// Every edge pointing at any facet in one document.
+    TargetDoc(big_cabinet_core::DocId),
 }
 
 #[derive(Clone)]
 pub struct FacetRefStore {
     sql: SqlCtx,
+    /// Bumped after every committed settle, so a test can wait for the edge set it expects by
+    /// re-querying on each change instead of polling the table.
+    #[cfg(test)]
+    settled: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Parked {
     membership: FacetMembership,
     revision: u64,
@@ -80,10 +91,28 @@ impl FacetRefStore {
                 facet_tag TEXT PRIMARY KEY NOT NULL
                 , revision INTEGER NOT NULL
             ) STRICT"#,
+            r#"CREATE TABLE IF NOT EXISTS big_cabinet_facet_ref_parked (
+                origin_doc TEXT NOT NULL
+                , origin_facet TEXT NOT NULL
+                , revision INTEGER NOT NULL
+                , membership BLOB NOT NULL
+                , PRIMARY KEY (origin_doc, origin_facet)
+            ) STRICT"#,
         ] {
             sqlx::query(statement).execute(&sql.write_pool).await?;
         }
-        Ok(Self { sql })
+        Ok(Self {
+            sql,
+            #[cfg(test)]
+            settled: Arc::new(tokio::sync::watch::channel(0).0),
+        })
+    }
+
+    /// Changes after every committed settle. Subscribe before querying: a settle that lands
+    /// between the query and the wait is then still seen as a change.
+    #[cfg(test)]
+    pub(crate) fn subscribe_settled(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.settled.subscribe()
     }
 
     pub async fn query(&self, selector: FacetRefQuery) -> Res<Vec<FacetRefEdge>> {
@@ -105,12 +134,18 @@ impl FacetRefStore {
                     .push(" AND origin_facet = ")
                     .push_bind(route.facet_key.to_string());
             }
+            FacetRefQuery::OriginDoc(doc_id) => {
+                query.push("origin_doc = ").push_bind(doc_id.to_string());
+            }
             FacetRefQuery::Target(route) => {
                 query
                     .push("target_doc = ")
                     .push_bind(route.doc_id.to_string())
                     .push(" AND target_facet = ")
                     .push_bind(route.facet_key.to_string());
+            }
+            FacetRefQuery::TargetDoc(doc_id) => {
+                query.push("target_doc = ").push_bind(doc_id.to_string());
             }
         }
         query.push(" ORDER BY origin_doc, origin_facet, origin_path, target_doc, target_facet");
@@ -147,13 +182,93 @@ impl FacetRefStore {
             .collect()
     }
 
-    /// Replace one route's edges with the ones its current value states, and record that the
-    /// route's tag was processed up to `revision`. Both happen in one transaction; a late
-    /// settlement (a parked entry that caught up) never moves the cursor backwards.
-    async fn settle(&self, route: &FacetRoute, edges: &[FacetRefEdge], revision: u64) -> Res<()> {
+    /// The routes a previous run parked, newest revision per route.
+    async fn parked(&self) -> Res<BTreeMap<FacetRoute, Parked>> {
+        let rows = sqlx::query(
+            r#"SELECT origin_doc
+                 , origin_facet
+                 , revision
+                 , membership
+              FROM big_cabinet_facet_ref_parked"#,
+        )
+        .fetch_all(&self.sql.read_pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let route = FacetRoute {
+                    doc_id: row.get::<String, _>("origin_doc").parse()?,
+                    facet_key: row.get::<String, _>("origin_facet").parse()?,
+                };
+                let revision = u64::try_from(row.get::<i64, _>("revision"))
+                    .map_err(|_| ferr!("facet-ref parked revision is out of range"))?;
+                let membership = serde_json::from_slice(row.get("membership"))?;
+                Ok((
+                    route,
+                    Parked {
+                        membership,
+                        revision,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Hold `route` at `revision` until its origin document materializes. Durable, so a restart
+    /// retries it; the in-memory map is the working copy the run loop consults.
+    async fn park(
+        &self,
+        route: FacetRoute,
+        membership: FacetMembership,
+        revision: u64,
+        parked: &mut BTreeMap<FacetRoute, Parked>,
+    ) -> Res<()> {
+        sqlx::query(
+            r#"INSERT INTO big_cabinet_facet_ref_parked (
+                origin_doc
+                , origin_facet
+                , revision
+                , membership
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT (origin_doc, origin_facet) DO UPDATE
+               SET revision = excluded.revision
+                 , membership = excluded.membership"#,
+        )
+        .bind(route.doc_id.to_string())
+        .bind(route.facet_key.to_string())
+        .bind(i64::try_from(revision).map_err(|_| ferr!("facet-ref revision is out of range"))?)
+        .bind(serde_json::to_vec(&membership)?)
+        .execute(&self.sql.write_pool)
+        .await?;
+        parked.insert(
+            route,
+            Parked {
+                membership,
+                revision,
+            },
+        );
+        Ok(())
+    }
+
+    /// Replace one route's edges with the ones its current value states, record that the route's
+    /// tag was processed up to `revision`, and release any parked entry the route held. All of it
+    /// is one transaction; a late settlement never moves the cursor backwards.
+    async fn settle(
+        &self,
+        route: &FacetRoute,
+        edges: &[FacetRefEdge],
+        revision: u64,
+        parked: &mut BTreeMap<FacetRoute, Parked>,
+    ) -> Res<()> {
         let mut transaction = self.sql.write_pool.begin().await?;
         sqlx::query(
             "DELETE FROM big_cabinet_facet_ref_edges WHERE origin_doc = ? AND origin_facet = ?",
+        )
+        .bind(route.doc_id.to_string())
+        .bind(route.facet_key.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "DELETE FROM big_cabinet_facet_ref_parked WHERE origin_doc = ? AND origin_facet = ?",
         )
         .bind(route.doc_id.to_string())
         .bind(route.facet_key.to_string())
@@ -188,57 +303,57 @@ impl FacetRefStore {
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
+        #[cfg(test)]
+        self.settled.send_modify(|settles| *settles += 1);
+        parked.remove(route);
         Ok(())
     }
 
+    /// Process one frontier entry for `route`. `None` is the frontier's deletion tombstone.
+    ///
+    /// A parked entry for the same route at a newer revision wins: this call is then a replay or
+    /// a late retry of state the frontier has already moved past, and it is dropped.
     async fn process(
         &self,
         repo: &SharedBigRepo,
         schemas: &SchemaRepo,
         route: FacetRoute,
-        membership: FacetMembership,
+        membership: Option<FacetMembership>,
         revision: u64,
         parked: &mut BTreeMap<FacetRoute, Parked>,
     ) -> Res<()> {
-        let FacetMembership::Present { ref doc_heads, .. } = membership else {
-            return self.settle(&route, &[], revision).await;
+        if parked
+            .get(&route)
+            .is_some_and(|held| held.revision > revision)
+        {
+            return Ok(());
+        }
+        let Some(membership) = membership else {
+            return self.settle(&route, &[], revision, parked).await;
+        };
+        let FacetMembership::Present { doc_heads, .. } = &membership else {
+            return self.settle(&route, &[], revision, parked).await;
         };
         let tag = route.facet_key.tag().as_str();
         let Some(schema) = schemas.resolve_for_read(tag) else {
             // The subscription is the reference tags, so this is unreachable in the run loop;
             // an unknown tag has no declared references and settles empty either way.
-            return self.settle(&route, &[], revision).await;
+            return self.settle(&route, &[], revision, parked).await;
         };
-        let handle = match repo.get_doc(&route.doc_id).await? {
+        let handle = match repo.get_doc_for_projection(&route.doc_id).await? {
             DocLookup::Ready(handle) => handle,
-            DocLookup::Missing => return self.settle(&route, &[], revision).await,
+            DocLookup::Missing => return self.settle(&route, &[], revision, parked).await,
             DocLookup::PendingMaterialization => {
-                parked.insert(
-                    route,
-                    Parked {
-                        membership,
-                        revision,
-                    },
-                );
-                return Ok(());
+                return self.park(route, membership, revision, parked).await;
             }
         };
         let edges = handle
             .with_document(|doc| edges_from(doc, &route, doc_heads, schema.compiled()))
             .await?;
         match edges? {
-            Some(edges) => self.settle(&route, &edges, revision).await?,
-            None => {
-                parked.insert(
-                    route,
-                    Parked {
-                        membership,
-                        revision,
-                    },
-                );
-            }
+            Some(edges) => self.settle(&route, &edges, revision, parked).await,
+            None => self.park(route, membership, revision, parked).await,
         }
-        Ok(())
     }
 
     /// Consume the facet-set frontier for every reference-declaring tag, forever.
@@ -247,6 +362,18 @@ impl FacetRefStore {
         repo: SharedBigRepo,
         schemas: Arc<SchemaRepo>,
         facet_set: FacetSetStore,
+    ) -> Res<()> {
+        self.run_until(repo, schemas, facet_set, std::future::pending(), &mut None)
+            .await
+    }
+
+    pub(crate) async fn run_until(
+        &self,
+        repo: SharedBigRepo,
+        schemas: Arc<SchemaRepo>,
+        facet_set: FacetSetStore,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+        ready: &mut Option<tokio::sync::oneshot::Sender<Res<()>>>,
     ) -> Res<()> {
         let cursors = self.cursors().await?;
         let tags: Vec<(FacetTag, u64)> = schemas
@@ -261,16 +388,41 @@ impl FacetRefStore {
         let (_registration, mut wakes) = repo
             .subscribe_local_listener(BigRepoLocalFilter { doc_id: None })
             .await?;
-        let mut parked: BTreeMap<FacetRoute, Parked> = BTreeMap::new();
+        let mut parked = self.parked().await?;
+        if let Some(ready) = ready.take() {
+            ready.send(Ok(())).expect("index boot waits for readiness");
+        }
+        // The previous run's parked routes: their documents may have materialized while this
+        // index was down, and no notification will ever say so again.
+        for (
+            route,
+            Parked {
+                membership,
+                revision,
+            },
+        ) in std::mem::take(&mut parked)
+        {
+            self.process(
+                &repo,
+                &schemas,
+                route,
+                Some(membership),
+                revision,
+                &mut parked,
+            )
+            .await?;
+        }
+        tokio::pin!(shutdown);
         loop {
             tokio::select! {
+                biased;
+                () = &mut shutdown => return Ok(()),
                 read = reader.next(RevisionReadLimits::default()) => {
                     match read? {
                         RevisionRead::ReplayComplete { .. } => {}
                         RevisionRead::Entries { entries, .. } => {
                             for FrontierEntry { revision, key: route, value } in entries {
-                                let Some(membership) = value else { continue };
-                                self.process(&repo, &schemas, route, membership, revision, &mut parked).await?;
+                                self.process(&repo, &schemas, route, value, revision, &mut parked).await?;
                             }
                         }
                     }
@@ -291,7 +443,7 @@ impl FacetRefStore {
                             .collect();
                         for route in retry {
                             let Parked { membership, revision } = parked.remove(&route).expect("key was listed");
-                            self.process(&repo, &schemas, route, membership, revision, &mut parked).await?;
+                            self.process(&repo, &schemas, route, Some(membership), revision, &mut parked).await?;
                         }
                     }
                 }
@@ -385,6 +537,7 @@ mod tests {
     async fn settlement_replaces_edges_serves_both_directions_and_never_regresses() {
         let sql = SqlCtx::memory().await.unwrap();
         let store = FacetRefStore::new(sql.clone()).await.unwrap();
+        let mut parked = BTreeMap::new();
         let origin = route(1, "main");
         let first = route(2, "first");
         let second = route(3, "second");
@@ -397,6 +550,7 @@ mod tests {
                     edge(&origin, "/nested/inner", &second, &[]),
                 ],
                 1,
+                &mut parked,
             )
             .await
             .unwrap();
@@ -419,7 +573,12 @@ mod tests {
             vec![edge(&origin, "/link", &first, &[7; 2])]
         );
         store
-            .settle(&origin, &[edge(&origin, "/link", &third, &[])], 2)
+            .settle(
+                &origin,
+                &[edge(&origin, "/link", &third, &[])],
+                2,
+                &mut parked,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -437,7 +596,7 @@ mod tests {
                 .is_empty()
         );
         // A replayed or late settlement re-replaces idempotently and the cursor never moves back.
-        store.settle(&origin, &[], 1).await.unwrap();
+        store.settle(&origin, &[], 1, &mut parked).await.unwrap();
         assert!(
             store
                 .query(FacetRefQuery::Origin(origin.clone()))
@@ -448,6 +607,270 @@ mod tests {
         assert_eq!(progress(&store, "org.example.note").await, Some(2));
         let reopened = FacetRefStore::new(sql).await.unwrap();
         assert_eq!(progress(&reopened, "org.example.note").await, Some(2));
+    }
+
+    /// A document carrying one unsigned branch facet: a reference-declaring tag whose value the
+    /// gate refuses, so it settles with no edges and exercises the route plumbing alone.
+    fn branch_document() -> (Automerge, FacetKey) {
+        let facet_key =
+            FacetKey::from_text(big_cabinet_core::dmeta::BRANCH_FACET_TAG, "main").unwrap();
+        let mut document = Automerge::new();
+        let mut tx = document.transaction();
+        let facets = tx
+            .put_object(automerge::ROOT, "facets", ObjType::Map)
+            .unwrap();
+        let facet = tx
+            .put_object(&facets, facet_key.to_string(), ObjType::Map)
+            .unwrap();
+        tx.put(&facet, "from", "db+facet:/self/org.example.note/main")
+            .unwrap();
+        tx.commit();
+        (document, facet_key)
+    }
+
+    fn present(heads: Vec<ChangeHash>) -> FacetMembership {
+        FacetMembership::Present {
+            doc_heads: heads,
+            facet_heads: Vec::new(),
+            clock: 0,
+        }
+    }
+
+    async fn close(repo: SharedBigRepo, stop: big_repo::BigRepoStopToken, sql: SqlCtx) {
+        let repo_sql = repo.sql_ctx();
+        drop(repo);
+        stop.stop().await.unwrap();
+        repo_sql.read_pool.close().await;
+        repo_sql.write_pool.close().await;
+        sql.read_pool.close().await;
+        sql.write_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_newer_revision_releases_or_outranks_a_parked_route_and_parking_survives_reopen() {
+        let schemas = SchemaRepo::open(Vec::new()).unwrap();
+        let (document, facet_key) = branch_document();
+        let (_directory, repo, stop, doc_id) =
+            crate::index::test_support::reopen_document(document).await;
+        let sql = SqlCtx::memory().await.unwrap();
+        let store = FacetRefStore::new(sql.clone()).await.unwrap();
+        let target = route(2, "other");
+        let route = FacetRoute { doc_id, facet_key };
+        let unknown = present(vec![ChangeHash([9; 32])]);
+        let tag = big_cabinet_core::dmeta::BRANCH_FACET_TAG;
+        let mut parked = BTreeMap::new();
+
+        // Revision 1 parks (the heads are not local); revision 2 settles the route and releases
+        // the parked entry, so no later materialization can retry revision 1.
+        store
+            .process(
+                &repo,
+                &schemas,
+                route.clone(),
+                Some(unknown.clone()),
+                1,
+                &mut parked,
+            )
+            .await
+            .unwrap();
+        assert_eq!(parked[&route].revision, 1);
+        assert_eq!(store.parked().await.unwrap(), parked);
+        store
+            .settle(
+                &route,
+                &[edge(&route, "/link", &target, &[])],
+                2,
+                &mut parked,
+            )
+            .await
+            .unwrap();
+        assert!(parked.is_empty());
+        assert!(store.parked().await.unwrap().is_empty());
+        assert_eq!(progress(&store, tag).await, Some(2));
+
+        // Revision 3 parks; a replay of revision 2 (a removal) is outranked by it: the edges
+        // revision 2 settled stay and the parked entry is untouched.
+        store
+            .process(
+                &repo,
+                &schemas,
+                route.clone(),
+                Some(unknown.clone()),
+                3,
+                &mut parked,
+            )
+            .await
+            .unwrap();
+        store
+            .process(
+                &repo,
+                &schemas,
+                route.clone(),
+                Some(FacetMembership::Removed {
+                    doc_heads: None,
+                    facet_heads: Vec::new(),
+                    clock: 0,
+                }),
+                2,
+                &mut parked,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            parked,
+            BTreeMap::from([(
+                route.clone(),
+                Parked {
+                    membership: unknown.clone(),
+                    revision: 3,
+                }
+            )])
+        );
+        assert_eq!(
+            store
+                .query(FacetRefQuery::Origin(route.clone()))
+                .await
+                .unwrap(),
+            vec![edge(&route, "/link", &target, &[])]
+        );
+        assert_eq!(progress(&store, tag).await, Some(2));
+
+        // A tombstone for the route at revision 4 clears both the edges and the parked entry.
+        store
+            .process(&repo, &schemas, route.clone(), None, 4, &mut parked)
+            .await
+            .unwrap();
+        assert!(parked.is_empty());
+        assert!(
+            store
+                .query(FacetRefQuery::Origin(route.clone()))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // A parked route outlives the store: a reopened store sees it and retries it the way the
+        // run loop does at boot, and it stays parked while the heads are still not local.
+        store
+            .process(
+                &repo,
+                &schemas,
+                route.clone(),
+                Some(unknown.clone()),
+                5,
+                &mut parked,
+            )
+            .await
+            .unwrap();
+        drop(store);
+        let reopened = FacetRefStore::new(sql.clone()).await.unwrap();
+        let mut reloaded = reopened.parked().await.unwrap();
+        assert_eq!(reloaded, parked);
+        for (
+            route,
+            Parked {
+                membership,
+                revision,
+            },
+        ) in std::mem::take(&mut reloaded)
+        {
+            reopened
+                .process(
+                    &repo,
+                    &schemas,
+                    route,
+                    Some(membership),
+                    revision,
+                    &mut reloaded,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(reloaded, parked);
+        assert_eq!(progress(&reopened, tag).await, Some(4));
+        drop(reopened);
+        close(repo, stop, sql).await;
+    }
+
+    #[tokio::test]
+    async fn reference_lookup_does_not_acquire_sync_demand() {
+        let schemas = SchemaRepo::open(Vec::new()).unwrap();
+        let (document, facet_key) = branch_document();
+        let heads = document.get_heads();
+        let (_directory, repo, stop, doc_id) =
+            crate::index::test_support::reopen_document(document).await;
+        let mut demand = repo.sync_demand();
+        let sql = SqlCtx::memory().await.unwrap();
+        let store = FacetRefStore::new(sql.clone()).await.unwrap();
+        let route = FacetRoute {
+            doc_id: doc_id.clone(),
+            facet_key,
+        };
+        let mut parked = BTreeMap::new();
+        store
+            .process(
+                &repo,
+                &schemas,
+                route.clone(),
+                Some(FacetMembership::Present {
+                    doc_heads: heads,
+                    facet_heads: Vec::new(),
+                    clock: 0,
+                }),
+                1,
+                &mut parked,
+            )
+            .await
+            .unwrap();
+        assert!(parked.is_empty());
+        assert_eq!(
+            progress(&store, big_cabinet_core::dmeta::BRANCH_FACET_TAG).await,
+            Some(1)
+        );
+        assert!(
+            store
+                .query(FacetRefQuery::Origin(route.clone()))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(demand.documents().is_empty());
+        let pending = FacetMembership::Present {
+            doc_heads: vec![ChangeHash([9; 32])],
+            facet_heads: Vec::new(),
+            clock: 0,
+        };
+        store
+            .process(
+                &repo,
+                &schemas,
+                route.clone(),
+                Some(pending.clone()),
+                2,
+                &mut parked,
+            )
+            .await
+            .unwrap();
+        assert_eq!(parked.len(), 1);
+        assert_eq!(parked[&route].membership, pending);
+        assert_eq!(parked[&route].revision, 2);
+        assert!(demand.documents().is_empty());
+        let mut changed = Box::pin(demand.changed());
+        assert!(futures::poll!(&mut changed).is_pending());
+        drop(changed);
+        let caller = repo
+            .get_doc(&doc_id)
+            .await
+            .unwrap()
+            .into_ready(doc_id.clone())
+            .unwrap();
+        assert_eq!(
+            *demand.documents(),
+            std::collections::HashSet::from([doc_id])
+        );
+        drop(caller);
+        drop(store);
+        close(repo, stop, sql).await;
     }
 
     #[test]

@@ -6,7 +6,7 @@ expression: "ObserveFacets\n{\n    capability: capability(1), scope: ObserveScop
   "capability": "01010101-0101-0101-0101-010101010101",
   "scope": {
     "scope": "doc",
-    "doc_id": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
+    "docId": "z4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"
   },
   "after": 3
 }

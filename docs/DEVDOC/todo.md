@@ -26,6 +26,8 @@
 ## Stack
 
 - Top
+  - [x] Facet writing skill
+  - [ ] Operation::XRPC sucks
   - [ ] Built in updater
   - [x] Per sink switch/index rebuild
   - [ ] Some std::mem::take sites can be a drain()

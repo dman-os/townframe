@@ -1,6 +1,9 @@
+// FIXME: this dropped earlier design!
+
 # FDR 001: Drawers as Doc Collections
 
-**Status:** Draft — functional design
+**Status:** Accepted — functional design; self-doc and single-group drawers, child
+entries, actor grants and local drawers are implemented by `DrawerService` (ADR 014)
 
 ## Purpose
 
@@ -50,7 +53,7 @@ A doc may also be a drawer whose only entry is itself. It carries drawer metadat
 its ordinary content and requires no separate collection groups or roster entries. This
 is the inexpensive one-doc sharing case.
 
-A single-doc drawer cannot grow in place. If the user wants a collection around it,
+A self-doc drawer cannot grow in place. If the user wants a collection around it,
 Daybook creates a new single-group drawer with a new drawer ID and enters the original
 doc. The original retains its doc ID and may remain independently shareable.
 
@@ -120,20 +123,20 @@ several paths.
 
 ## Local system drawers
 
-DocumentsRepo requires two ordinary drawers supplied by the embedder:
+Every node has two ordinary drawers, created by the drawer service on its first boot:
 
 - docs physically present on this node;
 - docs originated by this node.
 
 They use the same model and remain local because they are not granted to other nodes.
-Creating a doc always names a target drawer and also enters it into the applicable local
-drawers. The authority service does not create or own these drawers.
+Creating a doc always names a target drawer and also enters it into both local drawers.
+The authority service does not create or own these drawers.
 
 ## Common operations
 
 | Intent | User-visible effect |
 | --- | --- |
-| Create single-doc drawer | Make one existing doc independently shareable under its own ID. |
+| Create self-doc drawer | Make one existing doc independently shareable under its own ID. |
 | Create collection | Create a new drawer metadata doc and stable drawer ID. |
 | Add or remove doc | Change this roster only; preserve doc identity and other drawer entries. |
 | Add child | Union the child into the collection at Relay, Read, Write, or Admin. |
@@ -149,9 +152,9 @@ interrupted work remains inspectable and retryable.
 
 Actors are persistent subsystem identities authorized through capabilities
 (ADR 017). The operator holds every right and opens the other actors. Delegation is
-not implicit in actor names or paths: an object capability is named by DrawerRepo from
+not implicit in actor names or paths: an object capability is named by DrawerService from
 its own actor capability, a holder can only drop rights from it, and a child's rights
-can only shrink. Durable drawer grants are rows in DrawerRepo's ledger namespace keyed
+can only shrink. Durable drawer grants are rows in DrawerService's ledger namespace keyed
 by subject actor and object (`write drawer D`), so revoking one never rewrites a
 document.
 

@@ -1,27 +1,28 @@
-//! MintCapability: mint an object capability in an actor's namespace.
-
-use super::operation;
 use super::*;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MintCapability {
-    pub issuer: CapId,
-    pub object: String,
-    pub rights: Rights,
-}
-
-operation!(MintCapability => Capability, procedure, "mintCapability", "Capability");
 
 impl AuthorityService {
     async fn mint(&self, request: MintCapability) -> Result<Capability, AuthorityError> {
-        let mut transaction = self.write().await?;
-        let issuer = cap::walk(&mut transaction, &request.issuer).await?;
-        let namespace = actor::recognize(&mut transaction, &issuer, Rights::NARROW).await?;
-        let child = issuer.child(request.object, request.rights, namespace)?;
-        store::insert_cap(&mut transaction, &child).await?;
-        transaction.commit().await?;
-        Ok(child.wire())
+        let mut state = self.state.lock().await;
+        let issuer = cap::walk(&state, &request.issuer)?;
+        let namespace = issuer.namespace(Rights::NARROW)?;
+        issuer.bound(request.rights)?;
+        if let Some(parent) = &request.parent {
+            let source = cap::walk(&state, parent)?;
+            source.require(Rights::NARROW)?;
+            source.bound(request.rights)?;
+        }
+        let child = state.child(
+            request.object,
+            request.rights,
+            namespace,
+            cap::Kind::Object,
+            std::iter::once(request.issuer)
+                .chain(request.parent)
+                .chain(request.dependencies),
+        )?;
+        let capability = child.wire();
+        state.insert(child);
+        Ok(capability)
     }
 }
 

@@ -11,11 +11,15 @@
 //! does not know about, and no serde attribute expresses that.
 
 use crate::facet::{Extra, FacetMember};
+#[cfg(feature = "schemars")]
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::de::Error as _;
 use serde::ser::{Error as _, SerializeMap};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_json::{Map, Value};
+#[cfg(feature = "schemars")]
+use serde_json::Map;
+use serde_json::Value;
+#[cfg(feature = "schemars")]
 use std::borrow::Cow;
 
 /// Where a union member's discriminant sits, as the macro writes it.
@@ -173,6 +177,7 @@ impl<'de> Deserialize<'de> for UnknownMember {
     }
 }
 
+#[cfg(feature = "schemars")]
 impl JsonSchema for UnknownMember {
     fn schema_name() -> Cow<'static, str> {
         "UnknownMember".into()
@@ -184,6 +189,7 @@ impl JsonSchema for UnknownMember {
 }
 
 /// One declared member: the id its branch is tagged with, and the schema of its payload.
+#[cfg(feature = "schemars")]
 pub struct MemberSchema {
     pub id: &'static str,
     pub schema: Schema,
@@ -196,6 +202,7 @@ pub struct MemberSchema {
 /// inlined beside `$type`, and a member `$ref` resolved first so that inlining does not hide the
 /// payload behind an `allOf` the codec refuses. Adjacent tagging keeps the payload under the pinned
 /// content key instead, which is the wrapper a payload that is not an object needs.
+#[cfg(feature = "schemars")]
 pub fn union_schema(
     layout: &UnionLayout,
     open: bool,
@@ -239,6 +246,7 @@ pub fn union_schema(
     Schema::try_from(Value::Object(root)).expect("a union schema is a valid JSON Schema")
 }
 
+#[cfg(feature = "schemars")]
 fn internal_branch(
     tag: &str,
     id: &str,
@@ -290,6 +298,7 @@ fn internal_branch(
     Value::Object(branch)
 }
 
+#[cfg(feature = "schemars")]
 fn internal_fallback(tag: &str, known: &[&str]) -> Value {
     serde_json::json!({
         "type": "object",
@@ -301,6 +310,7 @@ fn internal_fallback(tag: &str, known: &[&str]) -> Value {
     })
 }
 
+#[cfg(feature = "schemars")]
 fn resolve_def(schema: &Value, definitions: &Map<String, Value>) -> Value {
     let mut current = schema.clone();
     for _ in 0..8 {
@@ -318,6 +328,7 @@ fn resolve_def(schema: &Value, definitions: &Map<String, Value>) -> Value {
     current
 }
 
+#[cfg(feature = "schemars")]
 fn adjacent_branch(tag: &str, content: &str, discriminant: Value, payload: Value) -> Value {
     let mut properties = serde_json::Map::new();
     properties.insert(tag.to_owned(), discriminant);
@@ -329,6 +340,7 @@ fn adjacent_branch(tag: &str, content: &str, discriminant: Value, payload: Value
     Value::Object(branch)
 }
 
+#[cfg(feature = "schemars")]
 fn external_branch(id: &str, payload: Value) -> Value {
     let mut properties = Map::new();
     properties.insert(id.to_owned(), payload);
@@ -364,6 +376,7 @@ where
 
 /// The schema of an open string vocabulary: the known spellings are listed, and no other string is
 /// constrained.
+#[cfg(feature = "schemars")]
 pub fn open_string_schema(known: &'static [&'static str]) -> Schema {
     let mut root = serde_json::Map::new();
     root.insert("type".to_owned(), Value::from("string"));
@@ -371,7 +384,7 @@ pub fn open_string_schema(known: &'static [&'static str]) -> Schema {
     Schema::try_from(Value::Object(root)).expect("a string vocabulary is a valid JSON Schema")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "schemars"))]
 mod tests {
     use super::*;
     use serde_json::json;

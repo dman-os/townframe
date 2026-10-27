@@ -45,7 +45,7 @@ impl Failure {
     }
 }
 
-pub(super) fn digest(value: &impl serde::Serialize) -> [u8; 32] {
+pub(crate) fn digest(value: &impl serde::Serialize) -> [u8; 32] {
     *blake3::hash(&serde_json::to_vec(value).expect("a request serializes")).as_bytes()
 }
 
@@ -56,11 +56,12 @@ impl DocsService {
         &self,
         command: &CommandId,
         digest: [u8; 32],
+        signer: Uuid7,
     ) -> Result<Option<WriteReceipt>, DocsError> {
         let Some(row) = self.commands.get(command).await? else {
             return Ok(None);
         };
-        if row.digest != digest {
+        if row.digest != digest || row.actor != signer {
             return Err(DocsError::CommandReused {
                 command: command.clone(),
             });
@@ -191,7 +192,7 @@ impl DocsService {
                     origin_document: plan.document.clone(),
                     facet_key: key.clone(),
                     chosen_uuid: chosen,
-                    actor_uuid: plan.actor.uuid,
+                    actor_uuid: plan.actor.actor_id,
                     operation: if removed {
                         ClaimOperation::Remove
                     } else {
@@ -212,7 +213,7 @@ impl DocsService {
                     updated_at: vec![plan.now],
                     deleted_at: if removed { vec![plan.now] } else { Vec::new() },
                     signatures: vec![FacetSignature {
-                        actor_uuid: plan.actor.uuid,
+                        actor_uuid: plan.actor.actor_id,
                         signature,
                         doc_uuid,
                         message: None,
@@ -223,7 +224,7 @@ impl DocsService {
         }
         dmeta
             .actors
-            .entry(plan.actor.uuid)
+            .entry(plan.actor.actor_id)
             .or_insert_with(|| ActorMetadata {
                 pubkey: plan.actor.public_key.clone(),
                 actor_url: plan.actor.url.clone(),
@@ -379,11 +380,14 @@ impl DocsService {
                         self.handle(&document).await?
                     };
                     let heads = sorted(handle.with_document_read(|doc| doc.get_heads()).await);
+                    let Some(Detail::Create { owner_id }) = row.detail else {
+                        unreachable!("a create row records its placement authority");
+                    };
                     let placement = row.placement.expect("a create row names its placement");
                     self.settle_create(
                         &context,
                         &row.command,
-                        row.actor,
+                        owner_id,
                         &document,
                         &placement,
                         &heads,
@@ -391,9 +395,12 @@ impl DocsService {
                     .await?;
                 }
                 (Kind::Create, State::Committed, Some(document)) => {
+                    let Some(Detail::Create { owner_id }) = row.detail else {
+                        unreachable!("a create row records its placement authority");
+                    };
                     let placement = row.placement.expect("a create row names its placement");
                     self.access
-                        .place(&context, row.actor, &document, &placement)
+                        .place(&context, owner_id, &document, &placement)
                         .await
                         .map_err(access_error)?;
                     self.commands
@@ -407,7 +414,10 @@ impl DocsService {
                             self.commands.discard(&row.command).await?;
                             continue;
                         }
-                        Err(_) => continue,
+                        // The document is still materializing, so whether the write landed is
+                        // not yet knowable; the row stays in flight for the next boot pass.
+                        Err(DocsError::Pending { .. }) => continue,
+                        Err(error) => return Err(error),
                     };
                     let committed = handle
                         .with_document_read(|doc| committed_change(doc, &row.command))
@@ -475,7 +485,8 @@ impl DocsService {
                             self.commands.discard(&row.command).await?;
                             continue;
                         }
-                        Err(_) => continue,
+                        Err(DocsError::Pending { .. }) => continue,
+                        Err(error) => return Err(error),
                     };
                     let merged = handle
                         .with_document_read(|doc| {

@@ -27,6 +27,7 @@ pub struct SpawnedDocWorker<F: FutureForm> {
     pub run: F::Future<'static, eyre::Result<()>>,
 }
 
+#[expect(clippy::too_many_arguments)]
 pub fn spawn_doc_worker<F>(
     doc_id: DocumentId,
     io: Arc<dyn DocIo<F>>,
@@ -34,6 +35,7 @@ pub fn spawn_doc_worker<F>(
     runtime_cmd_tx: async_channel::Sender<crate::runtime2::Runtime2Cmd>,
     runtime_evt_tx: async_channel::Sender<Runtime2Evt>,
     generation: u64,
+    interests: Arc<crate::interest::SyncInterests>,
     parent_span: tracing::Span,
 ) -> Res<SpawnedDocWorker<F>>
 where
@@ -49,6 +51,8 @@ where
         sed_id,
         generation,
         state: DocState::Unloaded,
+        interests,
+        usable: tokio::sync::watch::channel(false).0,
         caller_handles: Vec::new(),
         partially_decrypted: false,
         causal_epoch: None,
@@ -122,6 +126,7 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                     async {
                         while let Ok(msg) = msg_rx.recv().await {
                             worker.handle_msg(msg).await?;
+                            worker.publish_usable();
                             worker.resolve_quiescence_waiters().await?;
                         }
                         eyre::Ok(())
@@ -141,6 +146,7 @@ impl<F: FutureForm> DocWorkerLoop<F> for F {
                     let _res = runtime_evt_tx
                         .send(Runtime2Evt::DocWorkerStopped {
                             doc_id,
+                            generation,
                             error: error.clone(),
                         })
                         .await;
@@ -175,6 +181,8 @@ struct DocWorker2<F: FutureForm> {
     generation: u64,
 
     state: DocState,
+    interests: Arc<crate::interest::SyncInterests>,
+    usable: tokio::sync::watch::Sender<bool>,
     /// Weak sentinels for *caller* handles (excluding internal workers such
     /// as the Automerge frontier publisher). Only a caller makes a document
     /// live: received content is applied for the caller's benefit, every
@@ -395,6 +403,7 @@ impl<F: FutureForm> DocWorker2<F> {
                 resp,
                 _lease: _,
             } => self.put_doc(initial_content, initial_keys, resp).await,
+            DocWorkerMsg::AcquireInterest { resp, _lease: _ } => self.acquire_interest(resp).await,
             DocWorkerMsg::AcquireHandle {
                 lease,
                 resp,
@@ -551,11 +560,7 @@ impl<F: FutureForm> DocWorker2<F> {
         bundle: Arc<LiveDocBundle>,
         lease_kind: crate::runtime2::DocLeaseKind,
     ) -> eyre::Result<LiveDocHandle> {
-        let lease = crate::runtime2::DocLease::new(
-            self.runtime_cmd_tx.clone(),
-            self.doc_id.clone(),
-            self.generation,
-        );
+        let lease = self.new_doc_lease(lease_kind);
         self.register_bundle_lease().await?;
         let handle = LiveDocHandle::new(bundle, lease);
         // Only caller leases make the document live: an internal acquisition
@@ -636,6 +641,56 @@ impl<F: FutureForm> DocWorker2<F> {
             .inspect_err(|_| warn_loc!(ERROR_CALLER))
             .ok();
         Ok(())
+    }
+
+    fn new_doc_lease(&self, kind: crate::runtime2::DocLeaseKind) -> crate::runtime2::DocLease {
+        let mut lease = crate::runtime2::DocLease::new(
+            self.runtime_cmd_tx.clone(),
+            self.doc_id.clone(),
+            self.generation,
+        );
+        if kind == crate::runtime2::DocLeaseKind::Caller {
+            lease.sync_interest = Some(self.interests.acquire(self.doc_id.clone()));
+        }
+        lease
+    }
+
+    async fn acquire_interest(
+        &mut self,
+        resp: futures::channel::oneshot::Sender<eyre::Result<crate::interest::PendingDocLease>>,
+    ) -> eyre::Result<()> {
+        let lease = self.new_doc_lease(crate::runtime2::DocLeaseKind::Caller);
+        self.register_bundle_lease().await?;
+        let presence = Arc::new(());
+        self.caller_handles
+            .retain(|presence| presence.strong_count() > 0);
+        self.caller_handles.push(Arc::downgrade(&presence));
+        if !matches!(self.state, DocState::Live(_) | DocState::Transient(_)) {
+            self.retry_materialization(BigRepoChangeOrigin::Local)
+                .await?;
+        }
+        self.publish_usable();
+        let _cancelled = resp.send(Ok(crate::interest::PendingDocLease {
+            lease: Arc::new(lease),
+            presence,
+            usable: self.usable.subscribe(),
+        }));
+        Ok(())
+    }
+
+    fn publish_usable(&self) {
+        let usable = match &self.state {
+            DocState::Live(_) | DocState::Transient(_) => true,
+            DocState::Unloaded | DocState::PendingMaterialization => false,
+        };
+        self.usable.send_if_modified(|previous| {
+            if *previous == usable {
+                false
+            } else {
+                *previous = usable;
+                true
+            }
+        });
     }
 
     async fn register_bundle_lease(&self) -> eyre::Result<()> {
@@ -1707,7 +1762,7 @@ impl<F: FutureForm> DocWorker2<F> {
         // runs the full walk here. A live doc's session path already applied
         // the received content incrementally and retried the held blocked
         // refs precisely, so the receipt is honest without a coarse rewalk.
-        let walk = pending;
+        let walk = pending || (has_caller && !matches!(self.state, DocState::Live(_)));
         let state_desc = match &self.state {
             DocState::Unloaded => "Unloaded",
             DocState::Transient(_) => "Transient",
@@ -2690,6 +2745,10 @@ mod tests {
             sed_id,
             generation: 0,
             state: DocState::Unloaded,
+            interests: crate::interest::SyncInterests::new(Arc::new(
+                subduction_ephemeral::clock::std_clock::StdClock,
+            )),
+            usable: tokio::sync::watch::channel(false).0,
             caller_handles: Vec::new(),
             partially_decrypted: false,
             causal_epoch: None,
@@ -2812,6 +2871,10 @@ mod tests {
             sed_id,
             generation: 0,
             state: DocState::Unloaded,
+            interests: crate::interest::SyncInterests::new(Arc::new(
+                subduction_ephemeral::clock::std_clock::StdClock,
+            )),
+            usable: tokio::sync::watch::channel(false).0,
             caller_handles: Vec::new(),
             partially_decrypted: false,
             causal_epoch: None,
@@ -2840,6 +2903,79 @@ mod tests {
             .map_err(|_| ferr!(ERROR_CHANNEL))??
             .into_ready(worker.doc_id.clone())
             .map_err(|err| ferr!("{err:?}"))
+    }
+
+    #[tokio::test]
+    async fn sync_interest_does_not_create_a_handle_and_internal_handles_do_not_demand() -> Res<()>
+    {
+        let (mut worker, hub_ack) = ready_recovery_worker();
+        let demand = worker.interests.subscribe();
+        let (resp, rx) = futures::channel::oneshot::channel();
+        worker
+            .acquire_handle(resp, crate::runtime2::DocLeaseKind::Internal)
+            .await?;
+        let internal = rx.await??.into_ready(worker.doc_id.clone())?;
+        assert!(demand.documents().is_empty());
+        drop(internal);
+        worker.state = DocState::Unloaded;
+        let (resp, rx) = futures::channel::oneshot::channel();
+        worker.acquire_interest(resp).await?;
+        let interest = rx.await??;
+        assert!(*interest.usable.borrow());
+        assert!(matches!(worker.state, DocState::Transient(_)));
+        assert_eq!(*demand.documents(), HashSet::from([worker.doc_id.clone()]));
+        let handle = acquire_ready(&mut worker).await?;
+        let clone = handle.clone();
+        drop(interest);
+        drop(handle);
+        assert!(worker.has_caller_handle());
+        drop(clone);
+        assert!(!worker.has_caller_handle());
+        assert_eq!(*demand.documents(), HashSet::from([worker.doc_id.clone()]));
+        hub_ack.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_interest_materializes_persisted_content_before_reporting_ready() -> Res<()> {
+        use automerge::ReadDoc;
+
+        for state in [
+            DocState::Unloaded,
+            DocState::Transient(Box::new(automerge::Automerge::new())),
+        ] {
+            let (mut worker, hub_ack) = ready_recovery_worker();
+            let (resp, rx) = futures::channel::oneshot::channel();
+            worker.acquire_interest(resp).await?;
+            let interest = rx.await??;
+            worker.state = state;
+            worker.publish_usable();
+            let (reply, receipt) = futures::channel::oneshot::channel();
+            let has_caller = worker.has_caller_handle();
+            worker
+                .report_sync_outcome(PeerKey::random(), has_caller, Some(reply))
+                .await?;
+            worker.publish_usable();
+            assert!(matches!(
+                receipt.await??.outcome,
+                crate::runtime2::types::SyncDocOutcome::Ready
+            ));
+            assert!(*interest.usable.borrow());
+            let handle = acquire_ready(&mut worker).await?;
+            surelock::key::lock_scope(|key| {
+                let (doc, _key) = key.lock(&handle.bundle.doc);
+                assert_eq!(
+                    doc.get(automerge::ROOT, "title")?
+                        .and_then(|(value, _)| value.to_str().map(str::to_owned)),
+                    Some("seed".to_owned())
+                );
+                eyre::Ok(())
+            })?;
+            drop(handle);
+            drop(interest);
+            hub_ack.abort();
+        }
+        Ok(())
     }
 
     #[tokio::test]

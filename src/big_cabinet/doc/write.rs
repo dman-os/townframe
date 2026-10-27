@@ -3,30 +3,6 @@
 use super::commands::{Kind, State};
 use super::pipeline::{Failure, Plan, digest};
 use super::*;
-use serde_json::Value;
-
-/// Set complete facet values and remove facets. Facets not named are unchanged; inside a set
-/// facet, a property the submitted value omits is removed at the base heads.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteFacets {
-    pub capability: CapId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<CommandId>,
-    pub doc_id: DocId,
-    pub mode: WriteMode,
-    #[serde(default)]
-    pub set: BTreeMap<FacetKey, Value>,
-    #[serde(default)]
-    pub remove: BTreeSet<FacetKey>,
-}
-
-impl Operation for WriteFacets {
-    type Output = WriteReceipt;
-    type Error = DocsError;
-    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.daybook.docs.writeFacets")
-        .with_schemas("WriteReceipt", "DocsError");
-}
 
 impl DocsService {
     async fn write(
@@ -34,19 +10,24 @@ impl DocsService {
         context: &RequestContext,
         params: WriteFacets,
     ) -> Result<WriteReceipt, DocsError> {
-        let actor = self.actor(context, params.capability).await?;
-        self.authorize(context, &actor, AccessRequest::Write(&params.doc_id))
-            .await?;
+        let caller = self.invocation(context, params.capability).await?;
+        let actor = &caller.signer;
+        self.authorize(
+            context,
+            &caller.authority,
+            AccessRequest::Write(&params.doc_id),
+        )
+        .await?;
         let request_digest = digest(&(
             "write",
-            actor.uuid,
+            actor.actor_id,
             &params.doc_id,
             &params.mode,
             &params.set,
             &params.remove,
         ));
         if let Some(command) = &params.command
-            && let Some(receipt) = self.replay(command, request_digest).await?
+            && let Some(receipt) = self.replay(command, request_digest, actor.actor_id).await?
         {
             return Ok(receipt);
         }
@@ -57,7 +38,7 @@ impl DocsService {
                     command,
                     Kind::Write,
                     request_digest,
-                    actor.uuid,
+                    actor.actor_id,
                     Some(&params.doc_id),
                     None,
                     None,
@@ -67,7 +48,7 @@ impl DocsService {
         let mut plan = Plan {
             document: &params.doc_id,
             doc_uuid: Uuid7::new(),
-            actor: &actor,
+            actor,
             set,
             remove: params.remove,
             now: jiff::Timestamp::now(),
@@ -77,7 +58,7 @@ impl DocsService {
         let result = self
             .commit_write(
                 context,
-                params.capability,
+                actor.capability,
                 &params.mode,
                 &mut plan,
                 params.command.as_ref(),

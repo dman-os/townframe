@@ -1,34 +1,24 @@
 //! OpenActor: open (or create) the child actor at a path and return its identity and capability.
 
-use super::operation;
 use super::store::ActorRow;
 use super::*;
 
-/// Open the child actor at `path`, creating it on first use. `parent` must be
-/// the parent actor's own capability with `mintChild`, and `path` must be the
-/// parent's path plus one segment, so the path alone names the parent and two
-/// parents never contend for one child.
-///
-/// The actor (UUID, key, URL, certificate) is created once and is the same on
-/// every later open. Its capability is a handle: an open reuses a live actor
-/// capability with the same parent and rights, and mints a new one otherwise,
-/// so a parent rotates a child's capability by retracting it and opening again.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenActor {
-    pub parent: CapId,
-    pub path: String,
-    pub rights: Rights,
-}
-
-operation!(OpenActor => Actor, procedure, "openActor", "Actor");
-
 impl AuthorityService {
     async fn open_actor(&self, request: OpenActor) -> Result<Actor, AuthorityError> {
-        let mut transaction = self.write().await?;
-        let parent = cap::walk(&mut transaction, &request.parent).await?;
-        let parent_actor = actor::recognize(&mut transaction, &parent, Rights::MINT_CHILD).await?;
+        let mut state = self.state.lock().await;
+        let parent = cap::walk(&state, &request.parent)?;
+        let parent_actor = actor::recognize(&state, &parent, Rights::MINT_CHILD)?;
+        let namespace = cap::walk(&state, &self.actors_namespace.capability)?;
+        namespace.bound(request.rights)?;
         parent.bound(request.rights)?;
+        let issued = state.child(
+            format!("is actor {}", request.path),
+            request.rights,
+            self.actors_namespace.namespace_id,
+            cap::Kind::Object,
+            [self.actors_namespace.capability, request.parent],
+        )?;
+        let mut transaction = self.write().await?;
         let parent_row = Self::actor_row(&mut transaction, parent_actor).await?;
         actor::check_child_path(&parent_row.path, &request.path)?;
 
@@ -45,7 +35,7 @@ impl AuthorityService {
                 let certificate =
                     actor::issue_certificate(&self.node_key, uuid, &public_key, &url)?;
                 let row = ActorRow {
-                    uuid,
+                    actor_id: uuid,
                     path: request.path.clone(),
                     parent: Some(parent_actor),
                     public_key,
@@ -56,16 +46,28 @@ impl AuthorityService {
                 row
             }
         };
-        let capability = actor::issue(
-            &mut transaction,
-            &parent,
-            self.actors_issuer,
-            &row,
-            request.rights,
-        )
-        .await?;
+        let key = (row.actor_id, request.parent, request.rights.bits_i64());
+        let existing = state.actor_caps.get(&key).copied();
+        let capability = existing.unwrap_or(issued.id);
+        let actor = actor::public_actor(&self.node_public_key(), &row, capability)?;
         transaction.commit().await?;
-        actor::public_actor(&self.node_public_key(), &row, capability)
+        if existing.is_none() {
+            state.insert(issued);
+            assert!(
+                state
+                    .actors
+                    .insert(
+                        capability,
+                        cap::ActorBinding {
+                            actor_id: row.actor_id,
+                            reuse_key: Some(key),
+                        },
+                    )
+                    .is_none()
+            );
+            assert!(state.actor_caps.insert(key, capability).is_none());
+        }
+        Ok(actor)
     }
 }
 

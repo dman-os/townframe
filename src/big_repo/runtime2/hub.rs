@@ -131,6 +131,7 @@ pub(crate) struct Runtime2Hub<F: FutureForm, R: TaskRuntime<F>> {
     next_quiescence_stall_report: Option<std::time::Instant>,
     // ── doc-worker registry ────────────────────────────────────────────────
     doc_workers: HashMap<DocumentId, DocWorkerEntry>,
+    interests: Arc<crate::interest::SyncInterests>,
     pending_materialization: HashSet<DocumentId>,
     /// Documents with a materialization retry in flight, mapped to the Keyhive
     /// state generation at retry start. A `Pending` completion whose walk ran
@@ -813,6 +814,12 @@ where
                         resp,
                     ),
                 )?;
+            }
+            Runtime2Cmd::AcquireDocInterest { doc_id, resp } => {
+                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
+                worker
+                    .send(DocWorkerMsg::AcquireInterest { resp, _lease })
+                    .wrap_err(ERROR_CHANNEL)?;
             }
             Runtime2Cmd::GetDocHandle {
                 doc_id,
@@ -2122,16 +2129,44 @@ where
                 self.keyhive_reconciliation_waiters = pending;
                 self.try_resolve_quiescence()?;
             }
-            Runtime2Evt::DocWorkerStopped { doc_id, error } => {
-                self.doc_workers.remove(&doc_id);
-                self.pending_materialization.remove(&doc_id);
-                self.materialization_retries_in_flight.remove(&doc_id);
-                self.materialization_retries_requested.remove(&doc_id);
-                if let Some(probe) = self.quiescence_probe.as_mut() {
-                    probe.pending_docs.remove(&doc_id);
+            Runtime2Evt::DocWorkerStopped {
+                doc_id,
+                generation,
+                error,
+            } => {
+                // A stop from a superseded incarnation names a worker the hub
+                // already replaced (the janitor evicted it and a later command
+                // spawned the replacement before this event landed). The entry
+                // and the per-doc materialization state belong to the worker
+                // that is alive now, so a stale stop must not touch them.
+                let current_generation =
+                    self.doc_workers.get(&doc_id).map(|entry| entry.generation);
+                match current_generation {
+                    Some(current_generation) if current_generation != generation => {
+                        debug!(
+                            %doc_id,
+                            stopped_generation = generation,
+                            current_generation,
+                            "ignoring stale doc worker stop for superseded worker incarnation"
+                        );
+                    }
+                    _ => {
+                        self.doc_workers.remove(&doc_id);
+                        self.pending_materialization.remove(&doc_id);
+                        self.materialization_retries_in_flight.remove(&doc_id);
+                        self.materialization_retries_requested.remove(&doc_id);
+                        if let Some(probe) = self.quiescence_probe.as_mut() {
+                            probe.pending_docs.remove(&doc_id);
+                        }
+                    }
                 }
                 if let Some(err) = error {
-                    tracing::error!(%doc_id, error = %err, "doc worker stopped with error");
+                    tracing::error!(
+                        %doc_id,
+                        generation,
+                        error = %err,
+                        "doc worker stopped with error"
+                    );
                 }
             }
             Runtime2Evt::DocWorkerMaterializationPending { doc_id } => {
@@ -3075,13 +3110,6 @@ where
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ─── Doc-worker lease and eviction decisions ────────────────────────────────
-//
-// These are free functions over a `doc_id → DocWorkerEntry` map rather than
-// methods on the hub. The refcount rules they encode are the whole contract
-// between the hub and its callers — a live handle keeps its worker alive, a
-// lease belongs to the incarnation that took it, a respawn inherits the handles
-// of the incarnation it replaces — and keeping them free makes each rule
-// checkable without standing up a hub.
 
 /// Which refcount a lease command moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3161,40 +3189,6 @@ fn arm_eviction_if_idle(
         return;
     }
     entry.eviction_deadline = Some(now + idle_ttl);
-}
-
-/// Install the entry that replaces a dead worker for `doc_id`, inheriting the
-/// lease counts of the incarnation it replaces.
-///
-/// Handles are owned by the hub, not by one worker incarnation: a caller's
-/// `LiveDocHandle` lease is keyed by `doc_id`. A replacement that started from
-/// zero would forget a handle that is still alive, so the new worker could be
-/// evicted under it — and that handle would go on pointing at the dead
-/// generation's bundle, which teardown already invalidated, yielding a refusal
-/// with no commit behind it. Inheriting the counts keeps such a handle tracked
-/// until it is released.
-fn install_replacement_entry(
-    doc_workers: &mut HashMap<DocumentId, DocWorkerEntry>,
-    doc_id: DocumentId,
-    mut replacement: DocWorkerEntry,
-    replaced: Option<&DocWorkerEntry>,
-) {
-    if let Some(stale) = replaced
-        && (stale.local_handles > 0 || stale.internal_leases > 0)
-    {
-        debug!(
-            %doc_id,
-            stale_generation = stale.generation,
-            replacement_generation = replacement.generation,
-            local_handles = stale.local_handles,
-            internal_leases = stale.internal_leases,
-            "replacing a doc worker that was still leased; carrying its counts over"
-        );
-        replacement.local_handles = stale.local_handles;
-        replacement.internal_leases = stale.internal_leases;
-        replacement.eviction_deadline = None;
-    }
-    doc_workers.insert(doc_id, replacement);
 }
 
 /// The expired doc-workers the janitor evicts now, disarming the deadline of
@@ -3306,11 +3300,7 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             }
             return Ok(());
         }
-        // Stale entry: remove before re-creating. Keep it in hand so the
-        // replacement can inherit the lease counts of the worker it replaces —
-        // the handles it was serving belong to the hub, not to that
-        // incarnation.
-        let replaced = self.doc_workers.remove(&doc_id);
+        self.doc_workers.remove(&doc_id);
 
         let generation = self.next_doc_worker_generation;
         self.next_doc_worker_generation += 1;
@@ -3322,17 +3312,14 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             self.cmd_tx.clone(),
             self.evt_tx.clone(),
             generation,
+            Arc::clone(&self.interests),
             self.span.clone(),
         )?;
         let handle = worker.handle;
         let stop = worker.stop;
         self.child_tasks.spawn(worker.run)?;
 
-        // A fresh entry starts unleased and armed for eviction; if it replaces
-        // a worker that died while a caller still held a handle, the counts are
-        // carried over and the deadline stays cleared.
-        install_replacement_entry(
-            &mut self.doc_workers,
+        self.doc_workers.insert(
             doc_id,
             DocWorkerEntry {
                 handle,
@@ -3344,7 +3331,6 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
                 ),
                 generation,
             },
-            replaced.as_ref(),
         );
         Ok(())
     }
@@ -3543,17 +3529,19 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
 
     fn janitor_tick(&mut self) {
         let now = self.clock.instant();
+        self.interests.expire();
         self.report_quiescence_stall(now);
         self.report_unresolved_keyhive_round(now);
         // Both lease counts must be zero for eviction, so an in-flight
         // operation is never cancelled underneath itself; an entry that expired
         // while still leased has its deadline disarmed instead of being evicted.
         for doc_id in sweep_idle_doc_workers(&mut self.doc_workers, now) {
-            // Remove the entry *before* cancelling: the abort path of the
-            // worker's mailbox loop does not emit `DocWorkerStopped` (that
-            // event is only sent on normal mailbox completion), so a cancelled
-            // worker would otherwise linger as a stale closed-sender entry —
-            // re-cancelled by the janitor every tick and fenced by quiescence.
+            // Remove the entry here rather than waiting for the worker's own
+            // `DocWorkerStopped`: the aborted mailbox loop does emit it, but
+            // only once its task is next polled, and a command that needs the
+            // doc in the meantime must find no entry so it spawns a fresh
+            // incarnation. When the late stop lands, its generation no longer
+            // matches the entry and the hub ignores it.
             let entry = self
                 .doc_workers
                 .remove(&doc_id)
@@ -3913,6 +3901,7 @@ where
         activity_generation: 0,
         tracked_in_flight: 0,
         doc_workers: HashMap::new(),
+        interests: crate::interest::SyncInterests::new(Arc::clone(&clock)),
         tracked_work: HashMap::new(),
         quiescence_stall_since: None,
         next_quiescence_stall_report: None,
@@ -3925,6 +3914,7 @@ where
     let handle = Runtime2Handle::<F>::new(
         cmd_tx.clone(),
         hub.sync_policy,
+        Arc::clone(&hub.interests),
         #[cfg(any(test, feature = "test-support"))]
         Arc::clone(&timer),
         doc_sync_waiter_ids,
@@ -4103,7 +4093,6 @@ mod tests {
     /// closed — the shape `spawn_doc_worker`'s stale-entry path is handed when a
     /// worker's loop is gone but a caller still holds a handle.
     fn leased_entry(
-        _doc_id: super::DocumentId,
         generation: u64,
         local_handles: usize,
         internal_leases: usize,
@@ -4120,58 +4109,6 @@ mod tests {
         }
     }
 
-    /// Handles are owned by the hub, not by one worker incarnation: a caller's
-    /// handle lease is keyed by `doc_id`, and it outlives the worker that first
-    /// served it. A respawn that started from zero would forget a handle that is
-    /// still alive, so the replacement could be evicted under it — leaving that
-    /// handle pointed at the dead generation's invalidated bundle, which then
-    /// refuses a write while claiming an earlier commit was rejected, of which
-    /// there was none.
-    #[test]
-    fn a_respawned_entry_inherits_the_outstanding_handle_count() {
-        let doc_id = super::DocumentId::new([0x11; 32]);
-        let replaced = leased_entry(doc_id.clone(), 1, 1, 0);
-        assert!(
-            replaced.handle.is_closed(),
-            "the replaced generation's mailbox is gone, so the stale path runs"
-        );
-
-        // `spawn_doc_worker` removes the stale entry and builds a replacement
-        // that starts unleased and armed for eviction. The counts of the
-        // incarnation being replaced must survive that.
-        let mut replacement = leased_entry(doc_id.clone(), 2, 0, 0);
-        let armed = std::time::Instant::now();
-        replacement.eviction_deadline = Some(armed);
-
-        let mut workers = std::collections::HashMap::new();
-        super::install_replacement_entry(
-            &mut workers,
-            doc_id.clone(),
-            replacement,
-            Some(&replaced),
-        );
-
-        let entry = workers.get(&doc_id).expect("replacement installed");
-        assert_eq!(entry.generation, 2, "a new incarnation is allocated");
-        assert_eq!(
-            entry.local_handles, 1,
-            "the live caller handle must stay tracked across the respawn"
-        );
-        assert_eq!(
-            entry.eviction_deadline, None,
-            "a still-leased replacement must not be evictable"
-        );
-
-        // An unleased respawn keeps the fresh, armed deadline.
-        let mut workers = std::collections::HashMap::new();
-        let mut unleased = leased_entry(doc_id.clone(), 3, 0, 0);
-        unleased.eviction_deadline = Some(armed);
-        super::install_replacement_entry(&mut workers, doc_id.clone(), unleased, None);
-        let entry = workers.get(&doc_id).expect("replacement installed");
-        assert_eq!(entry.local_handles, 0);
-        assert_eq!(entry.eviction_deadline, Some(armed));
-    }
-
     /// A caller holding a handle keeps its worker alive past the idle TTL: the
     /// deadline is disarmed, so the janitor cannot evict the worker out from
     /// under the handle.
@@ -4183,7 +4120,7 @@ mod tests {
         let later = armed + ttl;
 
         let mut workers = std::collections::HashMap::new();
-        let mut entry = leased_entry(doc_id.clone(), 1, 1, 0);
+        let mut entry = leased_entry(1, 1, 0);
         entry.eviction_deadline = Some(armed);
         workers.insert(doc_id.clone(), entry);
 
@@ -4212,7 +4149,7 @@ mod tests {
         ] {
             let doc_id = super::DocumentId::new([0x13; 32]);
             let mut workers = std::collections::HashMap::new();
-            let mut entry = leased_entry(doc_id.clone(), 1, local_handles, internal_leases);
+            let mut entry = leased_entry(1, local_handles, internal_leases);
             entry.eviction_deadline = Some(armed);
             workers.insert(doc_id.clone(), entry);
 
@@ -4240,7 +4177,7 @@ mod tests {
     /// entry's counters; the current incarnation's own release must apply.
     #[test]
     fn stale_generation_lease_release_is_ignored() {
-        let mut entry = leased_entry(super::DocumentId::new([0x14; 32]), 5, 2, 0);
+        let mut entry = leased_entry(5, 2, 0);
 
         assert_eq!(
             super::apply_lease_release(&mut entry, 3, super::LeaseRefcount::Caller),
@@ -4259,7 +4196,7 @@ mod tests {
     /// other, and each has its own generation guard.
     #[test]
     fn stale_generation_internal_lease_release_is_ignored() {
-        let mut entry = leased_entry(super::DocumentId::new([0x15; 32]), 5, 0, 2);
+        let mut entry = leased_entry(5, 0, 2);
 
         assert_eq!(
             super::apply_lease_release(&mut entry, 4, super::LeaseRefcount::Internal),
@@ -4284,7 +4221,7 @@ mod tests {
         let ttl = std::time::Duration::from_secs(60);
         let now = std::time::Instant::now();
 
-        let mut entry = leased_entry(super::DocumentId::new([0x16; 32]), 1, 0, 0);
+        let mut entry = leased_entry(1, 0, 0);
         super::arm_eviction_if_idle(&mut entry, now, ttl);
         assert_eq!(entry.eviction_deadline, Some(now + ttl));
 
@@ -4310,7 +4247,7 @@ mod tests {
     /// reach eviction — a worker that leaks for the life of the process.
     #[test]
     fn a_late_lease_registration_is_not_credited_to_a_later_generation() {
-        let mut entry = leased_entry(super::DocumentId::new([0x17; 32]), 5, 0, 0);
+        let mut entry = leased_entry(5, 0, 0);
         let armed = std::time::Instant::now();
         entry.eviction_deadline = Some(armed);
 

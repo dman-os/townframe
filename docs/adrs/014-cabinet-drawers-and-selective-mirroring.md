@@ -1,15 +1,15 @@
 # ADR 014: Cabinet Drawers
 
-**Status:** Proposed
+**Status:** Accepted — implemented by `DrawerService` (`src/big_cabinet/drawer.rs`)
+for the self-doc and single-group layouts; the deferred list at the end is unchanged.
 
 ## Scope
 
 [The drawer FDR](../fdrs/001-drawers-as-document-collections.md) defines the
-user-visible collection model. This ADR is the **target contract** for the
-drawer model Cabinet will implement: the drawer facets, roster, child entries,
-and required local drawers below are `DrawerRepo`'s contract, not delivered by
-any single PR. The authority slice that has landed — actor identities,
-capabilities, the grant ledger, and secret-backed signing — is specified in
+user-visible collection model. This ADR is the contract for the drawer model
+Cabinet implements: the drawer facets, roster, child entries, and required
+local drawers below are `DrawerService`'s contract. Namespace capabilities, actor identities,
+domain-owned grants, signing, and their implementation migration are specified in
 [ADR 017](017-authority-actors-capabilities-and-grants.md) and the
 [authority guide](../big-cabinet-authority.md). Subset drawers, managed-participant
 layouts, roster sharding, provider/home facets, and Panproto integration are
@@ -32,9 +32,9 @@ This PR supports two layouts:
 
 The self-group layout and managed-participant layout are not implemented.
 
-A single-doc drawer cannot grow in place. To create a collection around it, Cabinet
+A self-doc drawer cannot grow in place. To create a collection around it, Cabinet
 creates a new single-group drawer with a new `DrawerId` and adds the original doc as a
-`docEntry`. The original doc keeps its ID and may remain a single-doc drawer
+`docEntry`. The original doc keeps its ID and may remain a self-doc drawer
 independently. This avoids changing the meaning and disclosure boundary of an existing
 identity.
 
@@ -128,16 +128,21 @@ Facet tags are grouped by dotted names. Drawer values carry no ad-hoc version in
 compatible evolution occurs under the facet identity, while incompatible meanings need a
 new identity.
 
-A single-doc drawer is:
+The layout is an open union, internally tagged as every published union is (ADR 016 §5):
+the member object carries `$type` beside its own fields. Carrying is not operating — a
+node that does not know a layout still reads, stores and lists the drawer untouched; only
+an operation that must interpret the layout refuses. A Lexicon object states at least one
+property, so a member with nothing to say carries `empty: true` — the convention for an
+empty member, excluded from the wire by `skip_serializing_if` until a later field lands
+beside it. Adding a layout is a new member under the same facet id, not a new facet tag.
+
+A self-doc drawer is:
 
 ```jsonc
 // The hosting doc ID is the DrawerId.
 {
   "org.example.daybook.drawer/main": {
-    "layout": {
-      "$type": "org.example.daybook.drawer.singleDoc",
-      "value": {}
-    }
+    "layout": { "$type": "org.example.daybook.drawer.selfDoc" }
   },
 
   "org.example.daybook.note/main": {
@@ -154,14 +159,14 @@ A single-group drawer is:
   "org.example.daybook.drawer/main": {
     "layout": {
       "$type": "org.example.daybook.drawer.singleGroup",
-      "value": {
-        "metaGroup": "zGroupWorkMeta",
-        "docsGroup": "zGroupWorkDocs"
-      }
+      "metaGroup": "zGroupWorkMeta",
+      "docsGroup": "zGroupWorkDocs"
     }
   },
 
-  "org.example.daybook.drawer.roster/main": {},
+  "org.example.daybook.drawer.roster/main": {
+    "layout": { "$type": "org.example.daybook.drawer.roster.inline" }
+  },
 
   "org.example.daybook.drawer.docEntry/zDocA": {
     "access": "Write"
@@ -177,43 +182,85 @@ A single-group drawer is:
 }
 ```
 
-The conventional `drawer.roster/main` facet marks the inline canonical roster. In this PR
-all entries live in the drawer metadata doc. External roster docs, ranges, shard routing,
-and split records are deferred together.
+The `drawer.roster/main` facet marks the canonical roster and states where its entries
+live. A Lexicon object states at least one property, so the marker is not `{}`: it
+carries `empty: true`, the empty-member convention. Today every entry is a facet on the
+drawer doc itself, so the marker has nothing further to say; the fields an external
+roster layout needs (roster docs, ranges, shard routing) land beside `empty` as optional
+fields when the sharding design below is implemented.
+
+Group ids in the descriptor are the 32 identifier bytes as multibase base58btc, the text
+form every other 32-byte key in this tree has.
 
 ## Actors and node authority
 
-The authority service (ADR 017) manages actor identities, capabilities, and a
-grant ledger namespaced by issuing actor. Boot returns the operator root capability; the
-embedder opens DrawerRepo as an actor and hands it its actor capability. A caller presents
-its own actor capability here, and DrawerRepo checks its ledger namespace for that actor
-before minting a drawer capability from its own actor capability (ADR 017). Actor
-signing keys are sealed under a `secrets_rs` keyring key, and the service returns
-signatures rather than keys.
+ADR 017 separates DrawerService's namespace minting authority from its actor proof.
+The embedder provisions both. DrawerService owns durable standing grants, evaluated
+when a caller exchanges an identity proof for a scoped drawer cap; resource operations
+then accept that cap, with no identity fallback. Grant gates tie derived caps to
+their support, replacing central grant RPCs and two-slot resource requests.
 
-Actor capabilities authorize Cabinet operations. BigRepo/Keyhive separately gate what
-the node can do. If the node lacks authority, no actor capability bypasses it. Recovery
+Standing grants cover drawer levels and collection creation. A level covers the ones
+below it, and a grant on a parent drawer reaches a child at the weaker of the grant and
+the child entry, strongest path winning. Not every actor needs grant rows: a dispatch
+can receive a scoped cap narrowed from another principal's authority. Withdrawing a
+grant must retract the authority derived from it, including cross-domain derivations.
+A self-doc drawer needs Write on the doc instead of collection creation authority.
+Creation records the originating actor independently from the bound signer, and
+recovery preserves that provenance when applying creation grants. Actor signing keys
+remain sealed under a `secrets_rs` keyring key.
+
+Domain capabilities authorize Cabinet operations. BigRepo/Keyhive separately gate what
+the node can do. If the node lacks authority, no local capability bypasses it. Recovery
 principals are node-level work deferred to another PR.
 
 Drawer access uses Keyhive's `Relay`, `Read`, `Write`, and `Admin` vocabulary in
-roster entries. In capabilities and ledger rows the access level is part of the object
-string DrawerRepo names (`write drawer D`), and the rights are ADR 017's generic
-vocabulary; the drawer meaning of an object string belongs to DrawerRepo, not to the
-authority service. Removing a doc entry never means global
-doc deletion.
+roster entries. Standing grant objects name levels (`write drawer D`), while scoped
+capabilities encode levels, signer bindings, and originating-actor provenance under
+`DrawerService/scope/v2/`. Rights use ADR 017's generic vocabulary; the meaning of
+these objects belongs to DrawerService, not to the capability table. Removing a doc
+entry never means global doc deletion.
+
+## Listing a drawer's docs
+
+`listDocs` answers what a drawer holds as the caller may see it: one effective-access check
+on the drawer (Relay suffices, as for `getDrawer` — Relay exists to enumerate), then the
+scoped roster, not a per-doc check. The drawer's own entries come first (an entry caps what
+the drawer confers), then every child drawer reachable by links the level reaches, with the
+child's docs attenuated by the weakest link along the path and the strongest path winning —
+the same algebra child traversal applies, walked downward. `listDocs` reports what the
+*drawer* confers; a doc the caller can reach through another drawer or a Keyhive grant is
+that path's business, and DocsRepo checks doc operations against every path as before.
 
 ## Required local drawers
 
-DocumentsRepo is constructed with two ordinary drawers supplied and managed by the
-embedder:
+Every node has two ordinary single-group drawers that DrawerService creates on its first
+boot and records locally:
 
 - docs physically present on this node;
 - docs originated by this node.
 
-They use the same drawer model and remain local because the embedder does not grant them
-to other nodes. The authority service does not create them. Doc creation always specifies a
-target drawer and also enters the new doc in both applicable local drawers, so a doc is
-never created outside every drawer.
+Plus one registry drawer: the known-drawers list, a self-doc drawer holding
+`org.example.daybook.drawer.knownEntry/<drawerId>` facets (`{ mirror?: true }`). It is an
+explicitly managed list, not a collection and not a tag scan: remembering a drawer grants
+no access to it, mirroring intent certifies no fetched or retained bytes, forgetting edits
+nothing but the local registry, and child relationships or observed facets never write it.
+DrawerService's `rememberDrawer` / `forgetDrawer` / `listKnownDrawers` / `setDrawerPolicy`
+are the only writers. The registry doc is the durable home — the list survives a restart
+by being read back from the doc — and its id anchors in the same local record as the other
+two, because it cannot name itself inside itself.
+
+They use the same drawer model and remain local because nobody grants them to other
+nodes; the service itself administers them and the embedder reads their ids from the
+booted service. The authority service does not create them. Doc creation always names a
+target drawer (`placement: "drawer <id>"`, needing Write on it) and the placement also
+enters the new doc in both local drawers, at Admin in all three, so a doc is never created
+outside every drawer. A drawer's own metadata doc enters only the local drawers.
+
+The doc-access policy DocsRepo is booted with (`DrawerAccess`) answers from the same
+projection: an actor reaches a doc through any drawer listing it — the doc being a drawer
+itself, or a roster entry capping what the drawer confers — and through parent drawers as
+above.
 
 ## Boundaries
 
@@ -229,7 +276,8 @@ implementation details, not authoritative drawer state.
 
 - subset drawers and subset-intersection sync;
 - managed-participant and self-group layouts;
-- external roster docs and sharding;
+- external roster docs and sharding (design below — deferred means unimplemented, not
+  undesigned);
 - provider/home facets and node URL design;
 - public indices and XRPC;
 - sensitivity labels;
@@ -238,3 +286,72 @@ implementation details, not authoritative drawer state.
 
 A mirror is another node's copy of the same drawer, not another drawer identity. None of
 the deferred discovery or retention mechanisms changes roster authority.
+
+### Roster sharding (deferred design, restored)
+
+This design predates the authority redesign and was dropped from this ADR when sharding
+was deferred to a later PR. Deferring the implementation is not a reason to lose the
+design; it is recorded here again so the later PR starts from it, not from scratch.
+
+Cabinet uses a drawer-writer-controlled Automerge roster for official membership. A
+drawer has a roster registry document; it identifies the active roster-shard documents.
+Each shard holds one membership facet per admitted logical document ID (including an
+explicitly admitted branch ID), not one facet containing a giant set. The registry has
+one registration facet per shard. Only authorized edits to registered roster shards count
+as official entries; a Keyhive grant to the metadata group cannot register an arbitrary
+document as a shard. DocumentsRepo defines and enforces the write gate, including how an
+Automerge change's actor maps to an authorized writer. A group grant or unverified facet
+author is not curator approval.
+
+Every descriptor, roster registry, and registered roster shard grants Read to the
+drawer's metadata group M. M's group part is the narrow ongoing subscription through
+which readers discover metadata and roster changes, including new shards; it need not
+contain or download member-document bytes. Metadata owners may Edit the descriptor;
+roster writers may Edit the registry and shards without Edit on the descriptor. An
+optional roster-writer group R can carry those Edit grants across all roster documents;
+no separate R is needed where the same people edit everything. Simply granting an
+arbitrary document Read to M does not authenticate it as a roster shard: it must also
+have a valid registry entry. A registered shard may be visible through M before its
+registry entry or vice versa; neither order authorizes an unregistered shard, and Cabinet
+retries discovery after the missing half arrives.
+
+A self-drawer can keep its initial registry and member facet on the descriptor itself;
+there is no requirement to allocate multiple documents just to share one document.
+
+*Reconciliation with the settled self-doc rule:* the paragraph above is the pre-redesign
+text and it contradicts "a self-doc drawer cannot grow in place" (Identity and layouts,
+above), which is the later, settled position. The settled reading is: growth means a new
+single-group drawer with a new `DrawerId`, and the original doc is added as a `docEntry`;
+the registry/shard machinery here belongs to single-group drawers whose roster outgrows
+one doc, not to self-doc drawers changing layout in place. Further registered
+shards bound the size of any one roster document we must hydrate, not the total drawer
+history. When a shard's encoded Automerge document size approaches a measured hydration
+or sync-cost threshold, roster writers may create another shard; do not use current
+visible member count as the limit. Automerge retains historical changes, so ten thousand
+live entries can be much smaller or larger than a shard with a long add/remove history. A
+provisional 10,000-entry figure is a benchmark workload, **not** an enforced entry cap or
+final sharding threshold. Instrument serialized size, load time, and update cost before
+choosing a byte threshold; the measurement API may need to be added.
+
+Routing must be deterministic for a given layout: a member DocumentId has one logical
+shard, rather than writers arbitrarily choosing any shard with capacity. Splitting a
+shard records the predecessor's exact heads and successor ranges/IDs. A returning
+old-generation writer reconciles changes since that split frontier into the successors;
+chained splits must remain discoverable. Nodes may discard predecessor bytes after
+migration; universal indefinite retention is not required. Retain enough
+routing/checkpoint information to process late writers that still carry old history.
+
+A plain two-snapshot JSON diff is insufficient where an inherited admission and a
+concurrent remove/re-add have the same final value. Migration must preserve the relevant
+causal distinction, not turn a concurrent removal into a later sequential delete. The
+target is Automerge-style conflict semantics, but the cross-shard algorithm,
+claim-lineage transfer, and duplicate physical shard creation rule remain open.
+Deterministic routing alone does not solve these. One membership facet per document also
+provides authenticated who-added-what provenance; it is not merely a workaround for
+rewriting a large map.
+
+In today's facets this design is what `drawer.roster/main`'s `layout` vocabulary is for:
+`inline` is the one spelling implemented (the registry and the shard are the drawer doc
+itself); external registry/shard spellings arrive with this design. The vocabulary stays
+closed — a node that cannot read a drawer's roster layout cannot enumerate the drawer, so
+it refuses rather than guessing where entries live.

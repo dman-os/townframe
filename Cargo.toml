@@ -8,6 +8,7 @@ members = [
   "./src/big_sync/",
   "./src/big_sync_core/",
   "./src/big_repo/",
+  "./src/big_node/",
   "./src/btress_sysadmin/",
   "./src/daybook_cli",
   "./src/daybook_core",
@@ -18,6 +19,8 @@ members = [
   "./src/mltools/",
   "./src/plug_dayledger/",
   "./src/secrets_rs",
+  "./src/service_core_rs/",
+  "./src/service_client_rs/",
   "./src/service_utils_rs/",
   "./src/plug_plabels/",
   "./src/plug_test/",
@@ -51,6 +54,8 @@ am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
 daybook_core = { path = "./src/daybook_core", default-features = false }
 secrets_rs = { path = "./src/secrets_rs" }
+service_core_rs = { path = "./src/service_core_rs", default-features = false }
+service_client_rs = { path = "./src/service_client_rs", default-features = false }
 service_utils_rs = { path = "./src/service_utils_rs", default-features = false }
 # daybook_fuse = { path = "./src/daybook_fuse", default-features = false }
 daybook_types = { path = "./src/daybook_types", default-features = false }
@@ -65,6 +70,7 @@ wash_plugin_wflow = { path = "./src/wash_plugin_wflow", default-features = false
 big_sync_core = { path = "./src/big_sync_core/", default-features = false }
 big_sync = { path = "./src/big_sync/" }
 big_repo = { path = "./src/big_repo/" }
+big_node = { path = "./src/big_node/" }
 
 #
 # meta

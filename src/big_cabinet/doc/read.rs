@@ -2,27 +2,6 @@
 
 use super::*;
 
-/// Read facets at `at`. `facets: None` reads every slot present. An `optimistic` read also returns
-/// the value of a pending facet; a rejected facet's value is never returned.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadFacets {
-    pub capability: CapId,
-    pub doc_id: DocId,
-    pub at: At,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub facets: Option<BTreeSet<FacetKey>>,
-    #[serde(default)]
-    pub optimistic: bool,
-}
-
-impl Operation for ReadFacets {
-    type Output = FacetsRead;
-    type Error = DocsError;
-    const XRPC: XrpcOperation = XrpcOperation::procedure("org.example.daybook.docs.readFacets")
-        .with_schemas("FacetsRead", "DocsError");
-}
-
 impl DocsService {
     fn json<D: ReadDoc>(&self, doc: &D, facets: &ObjId, key: &FacetKey) -> Result<Json, String> {
         let handle = self.schema_repo.resolve_for_read(key.tag().as_str());
@@ -36,9 +15,13 @@ impl DocsService {
         context: &RequestContext,
         params: ReadFacets,
     ) -> Result<FacetsRead, DocsError> {
-        let actor = self.actor(context, params.capability).await?;
-        self.authorize(context, &actor, AccessRequest::Read(&params.doc_id))
-            .await?;
+        let caller = self.invocation(context, params.capability).await?;
+        self.authorize(
+            context,
+            &caller.authority,
+            AccessRequest::Read(&params.doc_id),
+        )
+        .await?;
         if let Some(key) = params
             .facets
             .iter()
