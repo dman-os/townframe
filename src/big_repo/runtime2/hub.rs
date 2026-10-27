@@ -793,15 +793,12 @@ where
                 initial_keys,
                 resp,
             } => {
-                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
-                worker
-                    .send(DocWorkerMsg::PutDoc {
-                        initial_content,
-                        initial_keys,
-                        resp,
-                        _lease,
-                    })
-                    .wrap_err(ERROR_CHANNEL)?;
+                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::PutDoc {
+                    initial_content,
+                    initial_keys,
+                    resp,
+                    _lease,
+                })?;
             }
             Runtime2Cmd::FinalizeAllocatedDoc {
                 doc_id,
@@ -824,24 +821,21 @@ where
                 )?;
             }
             Runtime2Cmd::AcquireDocInterest { doc_id, resp } => {
-                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
-                worker
-                    .send(DocWorkerMsg::AcquireInterest { resp, _lease })
-                    .wrap_err(ERROR_CHANNEL)?;
+                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::AcquireInterest {
+                    resp,
+                    _lease,
+                })?;
             }
             Runtime2Cmd::GetDocHandle {
                 doc_id,
                 lease,
                 resp,
             } => {
-                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
-                worker
-                    .send(DocWorkerMsg::AcquireHandle {
-                        lease,
-                        resp,
-                        _lease,
-                    })
-                    .wrap_err(ERROR_CHANNEL)?;
+                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::AcquireHandle {
+                    lease,
+                    resp,
+                    _lease,
+                })?;
             }
             Runtime2Cmd::CommitDelta {
                 doc_id,
@@ -852,32 +846,27 @@ where
                 origin,
                 resp,
             } => {
-                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
-                // The internal lease is bundled into the message so the worker
-                // stays alive for the duration of the operation.
-                worker
-                    .send(DocWorkerMsg::CommitDelta {
-                        bundle_id,
-                        commits,
-                        heads,
-                        patches,
-                        origin,
-                        resp,
-                        _lease,
-                    })
-                    .wrap_err(ERROR_CHANNEL)?;
+                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::CommitDelta {
+                    bundle_id,
+                    commits,
+                    heads,
+                    patches,
+                    origin,
+                    resp,
+                    _lease,
+                })?;
             }
             Runtime2Cmd::DocHeadState { doc_id, resp } => {
-                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
-                worker
-                    .send(DocWorkerMsg::QueryHeadState { resp, _lease })
-                    .wrap_err(ERROR_CHANNEL)?;
+                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::QueryHeadState {
+                    resp,
+                    _lease,
+                })?;
             }
             Runtime2Cmd::EnsureCausalCoverage { doc_id, resp } => {
-                let (worker, _lease) = self.doc_worker_handle(doc_id)?;
-                worker
-                    .send(DocWorkerMsg::ReconcileCausalCoverage { resp, _lease })
-                    .wrap_err(ERROR_CHANNEL)?;
+                self.route_to_doc_worker(doc_id, |_lease| DocWorkerMsg::ReconcileCausalCoverage {
+                    resp,
+                    _lease,
+                })?;
             }
             Runtime2Cmd::InspectDocHeadState { doc_id, resp } => {
                 if let Ok(Some((worker, _lease))) =
@@ -2141,42 +2130,7 @@ where
                 doc_id,
                 generation,
                 error,
-            } => {
-                // A stop from a superseded incarnation names a worker the hub
-                // already replaced (the janitor evicted it and a later command
-                // spawned the replacement before this event landed). The entry
-                // and the per-doc materialization state belong to the worker
-                // that is alive now, so a stale stop must not touch them.
-                let current_generation =
-                    self.doc_workers.get(&doc_id).map(|entry| entry.generation);
-                match current_generation {
-                    Some(current_generation) if current_generation != generation => {
-                        debug!(
-                            %doc_id,
-                            stopped_generation = generation,
-                            current_generation,
-                            "ignoring stale doc worker stop for superseded worker incarnation"
-                        );
-                    }
-                    _ => {
-                        self.doc_workers.remove(&doc_id);
-                        self.pending_materialization.remove(&doc_id);
-                        self.materialization_retries_in_flight.remove(&doc_id);
-                        self.materialization_retries_requested.remove(&doc_id);
-                        if let Some(probe) = self.quiescence_probe.as_mut() {
-                            probe.pending_docs.remove(&doc_id);
-                        }
-                    }
-                }
-                if let Some(err) = error {
-                    tracing::error!(
-                        %doc_id,
-                        generation,
-                        error = %err,
-                        "doc worker stopped with error"
-                    );
-                }
-            }
+            } => self.handle_doc_worker_stopped(doc_id, generation, error),
             Runtime2Evt::DocWorkerMaterializationPending { doc_id } => {
                 self.pending_materialization.insert(doc_id.clone());
                 debug!(
@@ -3266,6 +3220,20 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
         Ok((handle, lease))
     }
 
+    /// Route one message to `doc_id`'s worker, spawning the worker if needed.
+    ///
+    /// The internal lease from [`Self::doc_worker_handle`] is bundled into the
+    /// message, so the worker stays alive (un-evictable) until it has finished
+    /// the operation and dropped the message.
+    fn route_to_doc_worker(
+        &mut self,
+        doc_id: DocumentId,
+        msg: impl FnOnce(DocWorkerInternalLease) -> DocWorkerMsg,
+    ) -> eyre::Result<()> {
+        let (worker, lease) = self.doc_worker_handle(doc_id)?;
+        worker.send(msg(lease)).wrap_err(ERROR_CHANNEL)
+    }
+
     /// Acquire handle + internal lease for an existing doc-worker without spawning a new one.
     fn acquire_existing_doc_worker_handle(
         &mut self,
@@ -3386,6 +3354,50 @@ impl<F: FutureForm + HubBackgroundFuture<F> + DocWorkerLoop<F> + 'static, R: Tas
             return;
         }
         self.schedule_doc_worker_eviction_if_idle(doc_id);
+    }
+
+    /// Forget the stopped worker's entry and its per-doc materialization and
+    /// quiescence state, unless the stop names a superseded incarnation.
+    ///
+    /// A stop from a superseded incarnation names a worker the hub already
+    /// replaced (the janitor evicted it and a later command spawned the
+    /// replacement before this event landed). The entry and the per-doc
+    /// materialization state belong to the worker that is alive now, so a stale
+    /// stop must not touch them.
+    fn handle_doc_worker_stopped(
+        &mut self,
+        doc_id: DocumentId,
+        generation: u64,
+        error: Option<String>,
+    ) {
+        let current_generation = self.doc_workers.get(&doc_id).map(|entry| entry.generation);
+        match current_generation {
+            Some(current_generation) if current_generation != generation => {
+                debug!(
+                    %doc_id,
+                    stopped_generation = generation,
+                    current_generation,
+                    "ignoring stale doc worker stop for superseded worker incarnation"
+                );
+            }
+            _ => {
+                self.doc_workers.remove(&doc_id);
+                self.pending_materialization.remove(&doc_id);
+                self.materialization_retries_in_flight.remove(&doc_id);
+                self.materialization_retries_requested.remove(&doc_id);
+                if let Some(probe) = self.quiescence_probe.as_mut() {
+                    probe.pending_docs.remove(&doc_id);
+                }
+            }
+        }
+        if let Some(err) = error {
+            tracing::error!(
+                %doc_id,
+                generation,
+                error = %err,
+                "doc worker stopped with error"
+            );
+        }
     }
 
     /// Set or clear the eviction deadline based on refcounts.

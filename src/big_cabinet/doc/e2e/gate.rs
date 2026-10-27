@@ -1,7 +1,6 @@
-//! ADR 015 §7: the default read and the write base reject forged facet state.
+//! ADR 020 §7: the default read and the write base reject forged facet state.
 
 use super::*;
-use crate::authority::SignFacetClaim;
 use automerge::ActorId;
 use automerge::ObjId;
 use automerge::ObjType;
@@ -9,6 +8,7 @@ use automerge::PatchLog;
 use automerge::ROOT;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
+use big_cabinet_core::authority::SignFacetClaim;
 use big_cabinet_core::dmeta::ClaimOperation;
 use big_cabinet_core::dmeta::FacetClaim;
 use big_cabinet_core::dmeta::NativeValue;

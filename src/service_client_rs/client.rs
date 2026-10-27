@@ -1,11 +1,3 @@
-use crate::CancellationRequestGuard;
-use crate::ClientError;
-use crate::Envelope;
-use crate::EventReply;
-use crate::Reply;
-use crate::RequestContext;
-use crate::Subscription;
-use crate::Unary;
 #[cfg(feature = "http")]
 use crate::xrpc::XrpcClient;
 #[cfg(feature = "http")]
@@ -19,6 +11,17 @@ use irpc::WithChannels;
 use irpc::channel::mpsc;
 use irpc::channel::none::NoReceiver;
 use irpc::channel::oneshot;
+use service_core_rs::CancellationRequestGuard;
+use service_core_rs::ClientError;
+use service_core_rs::ContextError;
+use service_core_rs::Envelope;
+use service_core_rs::EventFrame;
+use service_core_rs::EventReply;
+use service_core_rs::Reply;
+use service_core_rs::RequestContext;
+use service_core_rs::ResponseEnvelope;
+use service_core_rs::Subscription;
+use service_core_rs::Unary;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -121,7 +124,7 @@ impl<Proto: Service> Client<Proto> {
     pub async fn call_with_metadata<P>(
         &self,
         request: Envelope<P>,
-    ) -> Result<crate::ResponseEnvelope<P::Output>, ClientError<P::Error>>
+    ) -> Result<ResponseEnvelope<P::Output>, ClientError<P::Error>>
     where
         P: Unary,
         Proto: From<Envelope<P>>,
@@ -173,8 +176,8 @@ impl<Proto: Service> Client<Proto> {
         };
         tokio::select! {
             biased;
-            _ = context.cancellation.cancelled() => Err(crate::ContextError::Cancelled.into()),
-            _ = context.expired() => Err(crate::ContextError::DeadlineExceeded.into()),
+            _ = context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
+            _ = context.expired() => Err(ContextError::DeadlineExceeded.into()),
             result = call => result,
         }
     }
@@ -198,7 +201,7 @@ impl<Proto: Service> Client<Proto> {
     pub async fn subscribe_with_metadata<P>(
         &self,
         request: Envelope<P>,
-    ) -> Result<crate::ResponseEnvelope<ClientStream<P>>, ClientError<P::Error>>
+    ) -> Result<ResponseEnvelope<ClientStream<P>>, ClientError<P::Error>>
     where
         P: Subscription,
         Proto: From<Envelope<P>>,
@@ -241,8 +244,8 @@ impl<Proto: Service> Client<Proto> {
         };
         tokio::select! {
             biased;
-            _ = context.cancellation.cancelled() => Err(crate::ContextError::Cancelled.into()),
-            _ = context.expired() => Err(crate::ContextError::DeadlineExceeded.into()),
+            _ = context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
+            _ = context.expired() => Err(ContextError::DeadlineExceeded.into()),
             result = call => result,
         }
     }
@@ -286,14 +289,14 @@ pub struct ClientStream<P: Subscription> {
 
 impl<P: Subscription> ClientStream<P> {
     async fn open(
-        mut receiver: mpsc::Receiver<Result<crate::EventFrame<P::Event>, P::Error>>,
+        mut receiver: mpsc::Receiver<Result<EventFrame<P::Event>, P::Error>>,
         scope: Option<CancellationRequestGuard>,
         context: RequestContext,
-    ) -> Result<crate::ResponseEnvelope<Self>, ClientError<P::Error>> {
+    ) -> Result<ResponseEnvelope<Self>, ClientError<P::Error>> {
         let metadata = match receiver.recv().await {
-            Ok(Some(Ok(crate::EventFrame::Open(metadata)))) => metadata,
+            Ok(Some(Ok(EventFrame::Open(metadata)))) => metadata,
             Ok(Some(Err(error))) => return Err(ClientError::Operation(error)),
-            Ok(Some(Ok(crate::EventFrame::Event(_) | crate::EventFrame::End))) => {
+            Ok(Some(Ok(EventFrame::Event(_) | EventFrame::End))) => {
                 return Err(ClientError::transport(
                     "subscription event preceded its response metadata",
                     false,
@@ -321,12 +324,12 @@ impl<P: Subscription> ClientStream<P> {
             let mut state = state?;
             let item = tokio::select! {
                 biased;
-                _ = state.context.cancellation.cancelled() => Err(crate::ContextError::Cancelled.into()),
-                _ = state.context.expired() => Err(crate::ContextError::DeadlineExceeded.into()),
+                _ = state.context.cancellation.cancelled() => Err(ContextError::Cancelled.into()),
+                _ = state.context.expired() => Err(ContextError::DeadlineExceeded.into()),
                 received = state.receiver.recv() => match received {
-                    Ok(Some(Ok(crate::EventFrame::Event(event)))) => Ok(event),
-                    Ok(Some(Ok(crate::EventFrame::Open(_)))) => Err(ClientError::transport("subscription sent response metadata twice", false)),
-                    Ok(Some(Ok(crate::EventFrame::End))) => return None,
+                    Ok(Some(Ok(EventFrame::Event(event)))) => Ok(event),
+                    Ok(Some(Ok(EventFrame::Open(_)))) => Err(ClientError::transport("subscription sent response metadata twice", false)),
+                    Ok(Some(Ok(EventFrame::End))) => return None,
                     Ok(Some(Err(error))) => Err(ClientError::Operation(error)),
                     Ok(None) => Err(ClientError::transport("subscription closed without an end marker", false)),
                     Err(error) => Err(ClientError::transport(error, false)),
@@ -335,7 +338,7 @@ impl<P: Subscription> ClientStream<P> {
             let next = item.is_ok().then_some(state);
             Some((item, next))
         });
-        Ok(crate::ResponseEnvelope {
+        Ok(ResponseEnvelope {
             output: Self {
                 inner: Box::pin(inner),
             },

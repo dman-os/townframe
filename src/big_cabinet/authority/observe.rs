@@ -3,16 +3,6 @@ use futures::StreamExt;
 use futures::stream;
 use service_utils_rs::EventStream;
 
-impl AuthorityService {
-    pub(super) fn publish_change(&self) {
-        self.changes.send_modify(|revision| {
-            *revision = revision
-                .checked_add(1)
-                .expect("authority revision overflow");
-        });
-    }
-}
-
 impl Handler<ObserveCapability> for AuthorityService {
     async fn call(
         &self,
@@ -23,26 +13,22 @@ impl Handler<ObserveCapability> for AuthorityService {
     > {
         let capability = request.params.capability;
         let revisions = self.changes.clone();
+        // Subscribed before the admission check, so a retraction the ledger runs after the
+        // check bumps a revision this stream has not seen yet.
         let changes = revisions.subscribe();
-        {
-            let state = self.state.lock().await;
-            cap::walk(&state, &capability)?.require(Rights::USE)?;
-        }
-        let state = Some((Arc::clone(&self.state), revisions, changes));
+        self.resolve(capability).await?.require(Rights::USE)?;
+        let state = Some((self.ledger.clone(), revisions, changes));
         let updates = stream::unfold(state, move |state| async move {
-            let (state, revisions, mut changes) = state?;
+            let (ledger, revisions, mut changes) = state?;
             changes
                 .changed()
                 .await
                 .expect("the stream retains its authority revision sender");
-            let status = {
-                let state = state.lock().await;
-                cap::walk(&state, &capability).map(|_| ())
-            };
+            let status = cap::ask(&ledger, |reply| cap::Command::Resolve(capability, reply)).await;
             match status {
-                Ok(()) => Some((
+                Ok(_) => Some((
                     Ok(CapabilityStatus::Live),
-                    Some((state, revisions, changes)),
+                    Some((ledger, revisions, changes)),
                 )),
                 Err(AuthorityError::InvalidCapability) => {
                     Some((Ok(CapabilityStatus::Retracted), None))

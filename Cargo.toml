@@ -25,7 +25,6 @@ members = [
   "./src/service_client_rs/",
   "./src/service_utils_rs/",
   "./src/sqlite_rs/",
-  "./src/sqlx_utils_rs/",
   "./src/utils_rs",
   "./src/wash_plugin_sqlite/",
   "./src/wash_plugin_wflow/",
@@ -79,7 +78,6 @@ getrandom03 = { package = "getrandom", version = "0.3" }
 utils_rs = { path = "./src/utils_rs", default-features = false }
 native_utils_rs = { path = "./src/native_utils_rs" }
 sqlite_rs = { path = "./src/sqlite_rs", default-features = false }
-sqlx_utils_rs = { path = "./src/sqlx_utils_rs", default-features = false }
 wasm_utils_rs = { path = "./src/wasm_utils_rs", default-features = false }
 am_utils_rs = { path = "./src/am_utils_rs", default-features = false  }
 # btress_api = { path = "./src/btress_api" }
@@ -237,15 +235,6 @@ loom = "0.7.2"
 #
 # db
 sqlite-vec = "0.1.6" # "0.2.4-alpha"
-sqlx = { version = "0.9.0", features = [
-  "runtime-tokio",
-  "time",
-  "uuid",
-  "macros",
-  "json",
-  "migrate",
-  "ipnetwork",
-] }
 
 #
 # ffi

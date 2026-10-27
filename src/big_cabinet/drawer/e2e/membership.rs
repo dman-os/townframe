@@ -701,7 +701,7 @@ async fn list_docs_is_one_check_then_the_scoped_roster() {
     node.drawers()
         .call(
             RequestContext::root(),
-            crate::drawer::RevokeDrawer {
+            big_cabinet_core::drawer::protocol::RevokeDrawer {
                 capability: node.drawer_capability(&alice, &[&home]).await.unwrap(),
                 drawer_id: home.clone(),
                 subject_id: bob.actor_id,

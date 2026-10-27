@@ -17,7 +17,7 @@ use crate::FacetReference;
 use automerge::ChangeHash;
 use serde_json::Value;
 
-/// The sibling member that pins the frontier a reference is read at (ADR 016).
+/// The sibling member that pins the frontier a reference is read at (ADR 021).
 const REF_HEADS: &str = "refHeads";
 
 /// How deep a value may nest before extraction stops looking. A value checked by [`Stored`](super::Stored)

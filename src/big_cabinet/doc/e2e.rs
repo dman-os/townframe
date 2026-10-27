@@ -1,4 +1,4 @@
-//! Repository conformance: the guarded read/write contract of ADR 015 §7, exercised end to end
+//! Repository conformance: the guarded read/write contract of ADR 020 §7, exercised end to end
 //! through the hosted client against a booted authority and BigRepo.
 //!
 //! Forgeries are planted with raw Automerge edits on documents the repository wrote correctly, so
@@ -15,10 +15,7 @@ mod wire;
 mod writes;
 
 use super::*;
-use crate::authority::Actor;
 use crate::authority::Authority;
-use crate::authority::OpenActor;
-use crate::authority::Rights;
 use crate::index::FacetSetStore;
 use crate::schema::SchemaRegistration;
 use crate::schema::SchemaRegistrationGroup;
@@ -26,6 +23,9 @@ use crate::schema::SchemaRepo;
 use automerge::Automerge;
 use automerge::ChangeHash;
 use big_cabinet_core::FacetKey;
+use big_cabinet_core::authority::Actor;
+use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::DocId;
 use big_repo::BigRepo;
 use big_repo::BigRepoStopToken;
@@ -182,19 +182,28 @@ impl Node {
     }
 
     async fn start(&mut self) -> Result<(), DocsError> {
-        let issuer = self.docs_actor.capability;
-        let access = Arc::clone(&self.access);
+        self.start_with(Arc::clone(&self.access) as Arc<dyn DocAccess>, None)
+            .await
+    }
+
+    /// Boot DocsRepo over this node's ledger and BigRepo with a substitute access policy and,
+    /// optionally, a declared-reference index.
+    async fn start_with(
+        &mut self,
+        access: Arc<dyn DocAccess>,
+        facet_ref: Option<Arc<crate::index::FacetRefStore>>,
+    ) -> Result<(), DocsError> {
         let (docs, stop) = boot(DocsConfig {
             big_repo: Arc::clone(&self.repo),
             schema_repo: schemas(),
             authority: self.authority.client.clone(),
-            issuer,
+            issuer: self.docs_actor.capability,
             namespace: self.docs_namespace,
             node_issuer: self.authority.node_issuer.clone(),
             access,
             sql: self.sql.clone(),
             facet_set: Some(Arc::clone(&self.facet_set)),
-            facet_ref: None,
+            facet_ref,
         })
         .await?;
         self.docs = Some(docs);
@@ -220,11 +229,16 @@ impl Node {
         );
     }
 
-    /// Stop and boot DocsRepo again over the same ledger and BigRepo, as after a crash.
-    async fn restart(&mut self) -> Result<(), DocsError> {
+    /// Stop DocsRepo and reopen its namespace, as after a crash, without booting it again.
+    async fn crash_docs(&mut self) {
         self.docs.take();
         self.docs_stop.take().unwrap().stop().await;
         self.reopen_namespace().await;
+    }
+
+    /// Stop and boot DocsRepo again over the same ledger and BigRepo, as after a crash.
+    async fn restart(&mut self) -> Result<(), DocsError> {
+        self.crash_docs().await;
         self.start().await
     }
 

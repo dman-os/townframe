@@ -10,8 +10,6 @@ use super::TRACEPARENT_HEADER;
 use super::XrpcErrorEnvelope;
 use super::XrpcHandlerError;
 use super::XrpcRequest;
-use super::ws::WsIo;
-use super::ws::accept_key;
 use crate::context::HttpMetadata;
 use crate::context::RequestContext;
 use crate::context::TraceContext;
@@ -43,6 +41,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use serde_json::json;
+use service_client_rs::xrpc::ws::WsIo;
+use service_client_rs::xrpc::ws::accept_key;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -561,28 +561,7 @@ async fn dispatch(
             output.metadata.write_headers(response.headers_mut());
             response
         }
-        Err(XrpcHandlerError::InvalidInput(message)) => error_response(
-            StatusCode::BAD_REQUEST,
-            request_id,
-            "InvalidRequest",
-            &message,
-        ),
-        Err(XrpcHandlerError::Domain { status, body }) => {
-            let (error, message, details) = body.into_parts();
-            error_response_with_details(status, request_id, &error, message.as_deref(), details)
-        }
-        Err(XrpcHandlerError::Unavailable(message)) => error_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            request_id,
-            "Unavailable",
-            &message,
-        ),
-        Err(XrpcHandlerError::Internal(message)) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            request_id,
-            "InternalError",
-            &message,
-        ),
+        Err(error) => handler_error_response(error, request_id),
     }
 }
 
@@ -675,40 +654,7 @@ async fn dispatch_subscription(
     .await
     {
         Ok(value) => value,
-        Err(XrpcHandlerError::InvalidInput(message)) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                request_id,
-                "InvalidRequest",
-                &message,
-            );
-        }
-        Err(XrpcHandlerError::Domain { status, body }) => {
-            let (error, message, details) = body.into_parts();
-            return error_response_with_details(
-                status,
-                request_id,
-                &error,
-                message.as_deref(),
-                details,
-            );
-        }
-        Err(XrpcHandlerError::Unavailable(message)) => {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                request_id,
-                "Unavailable",
-                &message,
-            );
-        }
-        Err(XrpcHandlerError::Internal(message)) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                request_id,
-                "InternalError",
-                &message,
-            );
-        }
+        Err(error) => return handler_error_response(error, request_id),
     };
     let accept = accept_key(&key);
     tokio::spawn(async move {
@@ -873,6 +819,33 @@ fn header_string(headers: &HeaderMap, name: &str) -> Result<Option<String>, Stri
                 .map_err(|_| format!("{name} must be valid UTF-8 HTTP text"))
         })
         .transpose()
+}
+
+fn handler_error_response(error: XrpcHandlerError, request_id: Option<uuid::Uuid>) -> Response {
+    match error {
+        XrpcHandlerError::InvalidInput(message) => error_response(
+            StatusCode::BAD_REQUEST,
+            request_id,
+            "InvalidRequest",
+            &message,
+        ),
+        XrpcHandlerError::Domain { status, body } => {
+            let (error, message, details) = body.into_parts();
+            error_response_with_details(status, request_id, &error, message.as_deref(), details)
+        }
+        XrpcHandlerError::Unavailable(message) => error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            request_id,
+            "Unavailable",
+            &message,
+        ),
+        XrpcHandlerError::Internal(message) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            request_id,
+            "InternalError",
+            &message,
+        ),
+    }
 }
 
 fn error_response(

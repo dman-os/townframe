@@ -2,9 +2,9 @@
 //! doc declared a self-doc drawer.
 
 use super::*;
-use crate::doc::CreateDoc;
-use crate::doc::WriteFacets;
 use crate::doc::pipeline::digest;
+use big_cabinet_core::doc::CreateDoc;
+use big_cabinet_core::doc::WriteFacets;
 use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::DrawerRoster;
 use ledger::Op;
@@ -130,10 +130,10 @@ impl Core {
                     self.docs()
                         .call(
                             context.child(),
-                            crate::doc::ReadFacets {
+                            big_cabinet_core::doc::ReadFacets {
                                 capability,
                                 doc_id: doc_id.clone(),
-                                at: crate::doc::At::Current,
+                                at: big_cabinet_core::doc::At::Current,
                                 facets: Some(std::collections::BTreeSet::from([drawer_key()])),
                                 optimistic: false,
                             },
@@ -144,7 +144,7 @@ impl Core {
             )
             .await?;
         match read.facets.get(&drawer_key()) {
-            Some(crate::doc::FacetRead::Accepted { value, .. }) => {
+            Some(big_cabinet_core::doc::FacetRead::Accepted { value, .. }) => {
                 let descriptor: Drawer =
                     serde_json::from_value(value.clone()).map_err(|error| {
                         DrawersError::RosterUnreadable(format!("{doc_id} descriptor: {error}"))

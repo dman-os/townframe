@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_caps() {
-    use crate::authority::InspectCapability;
+    use big_cabinet_core::authority::InspectCapability;
 
     let mut node = Node::boot().await;
     let alice = node.creator("alice").await;
@@ -250,8 +250,8 @@ async fn drawer_policy_shutdown_retires_shared_grants_and_downstream_document_ca
 
 #[tokio::test]
 async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
-    use crate::authority::AttenuateCapability;
-    use crate::authority::RetractCapability;
+    use big_cabinet_core::authority::AttenuateCapability;
+    use big_cabinet_core::authority::RetractCapability;
 
     let node = Node::boot().await;
     let alice = node.creator("alice").await;
@@ -449,8 +449,8 @@ async fn delegated_drawer_capabilities_bind_signers_without_standing_grants() {
 
 #[tokio::test]
 async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
-    use crate::authority::AttenuateCapability;
-    use crate::authority::RetractCapability;
+    use big_cabinet_core::authority::AttenuateCapability;
+    use big_cabinet_core::authority::RetractCapability;
 
     let mut node = Node::boot().await;
     let alice = node.creator("alice").await;
@@ -557,7 +557,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
             .client
             .call(
                 RequestContext::root(),
-                crate::authority::InspectCapability {
+                big_cabinet_core::authority::InspectCapability {
                     capability: *capability,
                 },
             )
@@ -595,7 +595,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
                 .client
                 .call(
                     RequestContext::root(),
-                    crate::authority::InspectCapability { capability }
+                    big_cabinet_core::authority::InspectCapability { capability }
                 )
                 .await
                 .unwrap_err(),
@@ -680,7 +680,7 @@ async fn drawer_grant_withdrawal_retracts_issued_drawer_and_document_caps() {
 
 #[tokio::test]
 async fn alternative_ancestor_grants_only_retract_caps_using_withdrawn_support() {
-    use crate::authority::InspectCapability;
+    use big_cabinet_core::authority::InspectCapability;
 
     let node = Node::boot().await;
     let alice = node.creator("alice").await;

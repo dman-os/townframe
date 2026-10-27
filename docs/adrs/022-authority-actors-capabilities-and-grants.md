@@ -1,4 +1,4 @@
-# ADR 017: Namespace capabilities, actor identities, and domain grants
+# ADR 022: Namespace capabilities, actor identities, and domain grants
 
 **Status:** Accepted and implemented.
 

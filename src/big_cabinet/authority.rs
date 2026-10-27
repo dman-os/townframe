@@ -20,6 +20,26 @@ mod tests;
 
 use self::store::ActorRow;
 use self::store::NodeRow;
+use big_cabinet_core::authority::Actor;
+use big_cabinet_core::authority::AttenuateCapability;
+use big_cabinet_core::authority::AuthorityMessage;
+use big_cabinet_core::authority::AuthorityProtocol;
+use big_cabinet_core::authority::AuthorityServiceError;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::Capability;
+use big_cabinet_core::authority::CapabilityStatus;
+use big_cabinet_core::authority::InspectCapability;
+use big_cabinet_core::authority::MintCapability;
+use big_cabinet_core::authority::Namespace;
+use big_cabinet_core::authority::OPERATOR_OBJECT;
+use big_cabinet_core::authority::ObserveCapability;
+use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::ResolveActor;
+use big_cabinet_core::authority::ResolveAuthority;
+use big_cabinet_core::authority::ResolvedAuthority;
+use big_cabinet_core::authority::RetractCapability;
+use big_cabinet_core::authority::Rights;
+use big_cabinet_core::authority::SignFacetClaim;
 use big_cabinet_core::dmeta::AttributionError;
 use big_cabinet_core::dmeta::DmetaError;
 use big_cabinet_core::dmeta::MultibaseKey;
@@ -50,8 +70,6 @@ pub type ActorPublicKey = [u8; 32];
 /// key is bound to.
 const NODE_SERVICE: &str = "big_cabinet.authority";
 const WRAPPING_KEY: &str = "wrapping";
-
-pub use big_cabinet_core::authority::*;
 
 pub(crate) enum DomainAuthority<S> {
     Identity(Uuid7),
@@ -116,7 +134,9 @@ pub struct AuthorityService {
     operator: Uuid7,
     root_cap: CapId,
     actors_namespace: Namespace,
-    state: Arc<tokio::sync::Mutex<cap::State>>,
+    /// The ledger task owning every live capability; see [`cap::Command`].
+    ledger: tokio::sync::mpsc::Sender<cap::Command>,
+    /// Bumped by the ledger after every retraction, so observers know to re-check.
     changes: tokio::sync::watch::Sender<u64>,
 }
 
@@ -125,14 +145,44 @@ impl AuthorityService {
     /// handles anyone can still present.
     #[cfg(test)]
     pub(crate) async fn live_capabilities(&self) -> usize {
-        self.state.lock().await.caps.len()
+        self.peek(|state| state.caps.len()).await
+    }
+
+    /// Run `peek` on the ledger's state between two commands.
+    #[cfg(test)]
+    async fn peek<T: Send + 'static>(
+        &self,
+        peek: impl FnOnce(&cap::State) -> T + Send + 'static,
+    ) -> T {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.ledger
+            .send(cap::Command::Peek(Box::new(move |state| {
+                reply
+                    .send(peek(state))
+                    .unwrap_or_else(|_| panic!("{}", utils_rs::expect_tags::ERROR_CHANNEL));
+            })))
+            .await
+            .expect(utils_rs::expect_tags::ERROR_ACTOR);
+        answer.await.expect(utils_rs::expect_tags::ERROR_CHANNEL)
+    }
+
+    /// Stall the ledger once it reaches this command, until the returned sender fires or
+    /// drops. Commands sent meanwhile queue behind it in send order.
+    #[cfg(test)]
+    async fn hold(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (release, held) = tokio::sync::oneshot::channel();
+        self.ledger
+            .send(cap::Command::Hold(held))
+            .await
+            .expect(utils_rs::expect_tags::ERROR_ACTOR);
+        release
     }
 
     pub async fn boot(
         secrets: &SecretStore,
         sql: Database,
     ) -> Result<(Arc<Self>, StopToken), AuthorityError> {
-        let (stop, _spawner) = StopToken::new();
+        let (stop, tasks) = StopToken::new();
         store::migrate(&sql).await?;
         // The keyring read happens under the write reservation so two first
         // boots cannot each create a wrapping key and a node.
@@ -187,6 +237,8 @@ impl AuthorityService {
                 )
                 .is_none()
         );
+        let changes = tokio::sync::watch::channel(0).0;
+        let ledger = cap::spawn(state, changes.clone(), &tasks);
         Ok((
             Arc::new(Self {
                 sql,
@@ -195,8 +247,8 @@ impl AuthorityService {
                 operator: node.operator,
                 root_cap,
                 actors_namespace,
-                state: Arc::new(tokio::sync::Mutex::new(state)),
-                changes: tokio::sync::watch::channel(0).0,
+                ledger,
+                changes,
             }),
             stop,
         ))
@@ -235,7 +287,18 @@ impl AuthorityService {
     }
 
     pub async fn open_namespace(&self, namespace_id: Uuid7) -> Result<Namespace, AuthorityError> {
-        Ok(self.state.lock().await.open_namespace(namespace_id))
+        Ok(cap::ask(&self.ledger, |reply| {
+            cap::Command::OpenNamespace(namespace_id, reply)
+        })
+        .await)
+    }
+
+    /// What the live capability `capability` says, and the actor it names, if any.
+    async fn resolve(&self, capability: CapId) -> Result<cap::Resolved, AuthorityError> {
+        cap::ask(&self.ledger, |reply| {
+            cap::Command::Resolve(capability, reply)
+        })
+        .await
     }
 
     pub fn root_cap(&self) -> CapId {

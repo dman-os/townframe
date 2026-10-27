@@ -9,7 +9,7 @@
 //! the local registry. Nothing scans tags into it — only these operations write it.
 
 use super::*;
-use crate::doc::At;
+use big_cabinet_core::doc::At;
 use big_cabinet_core::drawer::KnownDrawerEntry;
 
 impl Core {
@@ -31,7 +31,7 @@ impl Core {
                     self.docs()
                         .call(
                             context.child(),
-                            crate::doc::ReadFacets {
+                            big_cabinet_core::doc::ReadFacets {
                                 capability,
                                 doc_id: registry,
                                 at: At::Current,
@@ -50,8 +50,8 @@ impl Core {
                 continue;
             }
             let value = match facet {
-                crate::doc::FacetRead::Accepted { value, .. } => value,
-                crate::doc::FacetRead::Absent { .. } => continue,
+                big_cabinet_core::doc::FacetRead::Accepted { value, .. } => value,
+                big_cabinet_core::doc::FacetRead::Absent { .. } => continue,
                 other => {
                     return Err(DrawersError::RosterUnreadable(format!(
                         "{key} on the registry: {other:?}"

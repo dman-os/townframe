@@ -875,7 +875,7 @@ async fn affected_event(
             group_parts.insert(group_part_id(subject.to_bytes()));
             documents.extend(
                 keyhive
-                    .document_ids_containing_group(subject)
+                    .document_ids_containing_group(subject.into())
                     .await
                     .into_iter()
                     .map(|id| ObjKey::new(id.as_bytes())),
@@ -902,7 +902,7 @@ async fn affected_event(
             group_parts.insert(group_part_id(subject.to_bytes()));
             documents.extend(
                 keyhive
-                    .document_ids_containing_group(subject)
+                    .document_ids_containing_group(subject.into())
                     .await
                     .into_iter()
                     .map(|id| ObjKey::new(id.as_bytes())),

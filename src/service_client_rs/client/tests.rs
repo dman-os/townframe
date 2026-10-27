@@ -1,12 +1,9 @@
 use super::*;
-use crate::ContextError;
-use crate::EventFrame;
-use crate::HttpMetadata;
-use crate::Operation;
-use crate::ResponseEnvelope;
-use crate::ResponseMetadata;
 use serde::Deserialize;
 use serde::Serialize;
+use service_core_rs::HttpMetadata;
+use service_core_rs::Operation;
+use service_core_rs::ResponseMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SampleEvent {
@@ -20,10 +17,10 @@ struct Echo {
     value: String,
 }
 
-crate::service_operation!(SubscribeEvents => stream SampleEvent, ContextError, "org.example.client.subscribeEvents");
-crate::service_operation!(Echo => String, ContextError, query("org.example.client.echo"));
+service_core_rs::service_operation!(SubscribeEvents => stream SampleEvent, ContextError, "org.example.client.subscribeEvents");
+service_core_rs::service_operation!(Echo => String, ContextError, query("org.example.client.echo"));
 
-crate::declare_service_protocol! {
+service_core_rs::declare_service_protocol! {
     enum Protocol => Message {
         unary { Echo(Echo) }
         stream { SubscribeEvents(SubscribeEvents) }

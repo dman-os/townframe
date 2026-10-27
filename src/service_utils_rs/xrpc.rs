@@ -5,7 +5,15 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
-pub use service_core_rs::xrpc::*;
+pub use service_core_rs::xrpc::AUTHORIZATION_HEADER;
+pub use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
+pub use service_core_rs::xrpc::DOMAIN_ERROR_STATUS;
+pub use service_core_rs::xrpc::IDEMPOTENCY_KEY_HEADER;
+pub use service_core_rs::xrpc::REQUEST_ID_HEADER;
+pub use service_core_rs::xrpc::TIMEOUT_HEADER;
+pub use service_core_rs::xrpc::TRACEPARENT_HEADER;
+pub use service_core_rs::xrpc::XrpcDomainDetailsError;
+pub use service_core_rs::xrpc::XrpcErrorEnvelope;
 mod client;
 #[cfg(feature = "iroh-http")]
 mod iroh;
@@ -13,7 +21,6 @@ mod router;
 mod serve;
 #[cfg(test)]
 mod tests;
-mod ws;
 
 pub use client::XrpcClient;
 pub use client::XrpcClientError;

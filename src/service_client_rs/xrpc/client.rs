@@ -1,16 +1,5 @@
-use super::AUTHORIZATION_HEADER;
-use super::DOMAIN_ERROR_FIELD;
-use super::IDEMPOTENCY_KEY_HEADER;
-use super::REQUEST_ID_HEADER;
-use super::TIMEOUT_HEADER;
-use super::TRACEPARENT_HEADER;
-use super::XrpcErrorEnvelope;
-use crate::HttpInput;
-use crate::HttpMetadata;
-use crate::HttpMethod;
-use crate::RequestContext;
-use crate::XrpcKind;
-use crate::XrpcOperation;
+use super::ws::WsIo;
+use super::ws::WsMessage;
 use futures::StreamExt;
 use http::HeaderMap;
 use http::HeaderValue;
@@ -20,6 +9,23 @@ use reqwest::Url;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use service_core_rs::EventFrame;
+use service_core_rs::HttpInput;
+use service_core_rs::HttpMetadata;
+use service_core_rs::HttpMethod;
+use service_core_rs::RequestContext;
+use service_core_rs::ResponseEnvelope;
+use service_core_rs::ResponseMetadata;
+use service_core_rs::Subscription;
+use service_core_rs::XrpcKind;
+use service_core_rs::XrpcOperation;
+use service_core_rs::xrpc::AUTHORIZATION_HEADER;
+use service_core_rs::xrpc::DOMAIN_ERROR_FIELD;
+use service_core_rs::xrpc::IDEMPOTENCY_KEY_HEADER;
+use service_core_rs::xrpc::REQUEST_ID_HEADER;
+use service_core_rs::xrpc::TIMEOUT_HEADER;
+use service_core_rs::xrpc::TRACEPARENT_HEADER;
+use service_core_rs::xrpc::XrpcErrorEnvelope;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -197,7 +203,7 @@ impl XrpcClient {
         context: RequestContext,
         metadata: &HttpMetadata,
         params: &P,
-    ) -> Result<crate::ResponseEnvelope<O>, XrpcClientError<E>>
+    ) -> Result<ResponseEnvelope<O>, XrpcClientError<E>>
     where
         P: Serialize,
         O: DeserializeOwned,
@@ -255,11 +261,11 @@ impl XrpcClient {
         params: &P,
         buffer: usize,
     ) -> Result<
-        irpc::channel::mpsc::Receiver<Result<crate::EventFrame<P::Event>, P::Error>>,
+        irpc::channel::mpsc::Receiver<Result<EventFrame<P::Event>, P::Error>>,
         XrpcClientError<P::Error>,
     >
     where
-        P: crate::Subscription,
+        P: Subscription,
     {
         use tokio::io::AsyncReadExt;
         use tokio::io::AsyncWriteExt;
@@ -339,30 +345,26 @@ impl XrpcClient {
         }
         let (tx, rx) = irpc::channel::mpsc::channel(buffer.max(1));
         tokio::spawn(async move {
-            let mut socket = super::ws::WsIo::new(stream, true);
+            let mut socket = WsIo::new(stream, true);
             loop {
                 match socket.read_message().await {
-                    Ok(Some(super::ws::WsMessage::Text(text))) => {
+                    Ok(Some(WsMessage::Text(text))) => {
                         let Ok(value) = serde_json::from_str::<Value>(&text) else {
                             break;
                         };
                         if let Some(open) = value.get("open") {
-                            let metadata: crate::ResponseMetadata = open
+                            let metadata: ResponseMetadata = open
                                 .get("metadata")
                                 .cloned()
                                 .and_then(|metadata| serde_json::from_value(metadata).ok())
                                 .unwrap_or_default();
-                            if tx
-                                .send(Ok(crate::EventFrame::Open(metadata)))
-                                .await
-                                .is_err()
-                            {
+                            if tx.send(Ok(EventFrame::Open(metadata))).await.is_err() {
                                 break;
                             }
                         } else if let Some(event) = value.get("event") {
                             match serde_json::from_value::<P::Event>(event.clone()) {
                                 Ok(event) => {
-                                    if tx.send(Ok(crate::EventFrame::Event(event))).await.is_err() {
+                                    if tx.send(Ok(EventFrame::Event(event))).await.is_err() {
                                         break;
                                     }
                                 }
@@ -375,8 +377,8 @@ impl XrpcClient {
                             break;
                         }
                     }
-                    Ok(Some(super::ws::WsMessage::Close)) | Ok(None) | Err(_) => {
-                        drop(tx.send(Ok(crate::EventFrame::End)).await);
+                    Ok(Some(WsMessage::Close)) | Ok(None) | Err(_) => {
+                        drop(tx.send(Ok(EventFrame::End)).await);
                         break;
                     }
                 }
@@ -392,7 +394,7 @@ pub(super) fn decode_xrpc_response<O, E>(
     status: StatusCode,
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<crate::ResponseEnvelope<O>, XrpcClientError<E>>
+) -> Result<ResponseEnvelope<O>, XrpcClientError<E>>
 where
     O: DeserializeOwned,
     E: DeserializeOwned,
@@ -413,13 +415,13 @@ where
             message: format!("invalid XRPC success payload: {error}"),
             outcome_unknown: operation.kind == XrpcKind::Procedure,
         })?;
-        let metadata = crate::ResponseMetadata::read_headers(headers).map_err(|message| {
+        let metadata = ResponseMetadata::read_headers(headers).map_err(|message| {
             XrpcClientError::Protocol {
                 message,
                 outcome_unknown: operation.kind == XrpcKind::Procedure,
             }
         })?;
-        return Ok(crate::ResponseEnvelope { output, metadata });
+        return Ok(ResponseEnvelope { output, metadata });
     }
     let envelope = match serde_json::from_value::<XrpcErrorEnvelope>(value.clone()) {
         Ok(envelope) => envelope,

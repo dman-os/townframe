@@ -1,0 +1,919 @@
+use super::*;
+use crate::authority::Authority;
+use crate::schema::SchemaRepo;
+use automerge::Automerge;
+use automerge::ChangeHash;
+use automerge::ObjId;
+use automerge::ObjType;
+use automerge::ReadDoc;
+use automerge::transaction::Transactable;
+use big_cabinet_core::FacetKey;
+use big_cabinet_core::authority::Actor;
+use big_cabinet_core::authority::AttenuateCapability;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::Capability;
+use big_cabinet_core::authority::MintCapability;
+use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::RetractCapability;
+use big_cabinet_core::authority::Rights;
+use big_cabinet_core::dmeta::Bytes;
+use big_cabinet_core::dmeta::ClaimOperation;
+use big_cabinet_core::dmeta::DocId;
+use big_cabinet_core::dmeta::FacetClaim;
+use big_cabinet_core::dmeta::FacetSignature;
+use big_cabinet_core::dmeta::MultibaseKey;
+use big_cabinet_core::dmeta::NativeValue;
+use big_cabinet_core::dmeta::SignatureBytes;
+use big_cabinet_core::dmeta::SignedFacetClaim;
+use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::dmeta::cid_of;
+use big_cabinet_core::dmeta::encode_native;
+use big_repo::BigDocHandle;
+use big_repo::BigRepo;
+use big_repo::BigRepoStopToken;
+use big_repo::Config;
+use big_repo::SharedBigRepo;
+use big_repo::StorageConfig;
+use ed25519_dalek::Signer;
+use ed25519_dalek::SigningKey;
+use secrets_rs::SecretStore;
+use service_utils_rs::Admission;
+use service_utils_rs::Client;
+use service_utils_rs::ClientError;
+use service_utils_rs::ContextError;
+use service_utils_rs::IrpcAdapter;
+use service_utils_rs::RequestContext;
+use service_utils_rs::ServerBinding;
+use service_utils_rs::StopToken;
+use service_utils_rs::XrpcClient;
+use service_utils_rs::XrpcRouter;
+use service_utils_rs::xrpc;
+use std::sync::Arc;
+
+const FACET: &str = "org.example.note/main";
+const DMETA: &str = "org.example.daybook.dmeta/main";
+
+struct Fixture {
+    authority: Authority,
+    authority_stop: StopToken,
+    issuer: Actor,
+    namespace: Namespace,
+    access: Arc<LedgerAccess>,
+    repo: SharedBigRepo,
+    repo_stop: Option<BigRepoStopToken>,
+    docs: DocsRepo,
+    docs_stop: Option<StopToken>,
+    document: BigDocHandle,
+    capability: Capability,
+    expected: UnsafeFacetInspection,
+}
+
+impl Fixture {
+    async fn new() -> Self {
+        let keyring =
+            keyring_core::mock::Store::new().unwrap() as Arc<keyring_core::CredentialStore>;
+        let secrets = SecretStore::boot_with_store(keyring).await.unwrap();
+        let (authority, authority_stop) =
+            crate::authority::boot(&secrets, sqlite_rs::test_support::db(&[]).unwrap().clone())
+                .await
+                .unwrap();
+        let issuer = authority
+            .client
+            .call(
+                RequestContext::root(),
+                OpenActor {
+                    parent: authority.root,
+                    path: "documents".into(),
+                    rights: Rights::all(),
+                },
+            )
+            .await
+            .unwrap();
+        let namespace = authority
+            .service
+            .open_namespace(Uuid7::new())
+            .await
+            .unwrap();
+        let (repo, repo_stop) = BigRepo::boot(
+            Arc::new(sqlite_rs::SqliteRuntime::new(Default::default())),
+            Config {
+                node_identity_seed: [31; 32],
+                storage: StorageConfig::Memory,
+                scope_key: "document-service-tests".into(),
+                hidden_parts: Default::default(),
+                automerge_frontier_group_scope: Default::default(),
+                causal_checkpoint_group_scope: Default::default(),
+                group_part_group_scope: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let schemas = Arc::new(SchemaRepo::open([]).unwrap());
+        let access = Arc::new(
+            LedgerAccess::open(
+                sqlite_rs::test_support::db(&[]).unwrap().clone(),
+                authority.client.clone(),
+                namespace,
+            )
+            .await
+            .unwrap(),
+        );
+        let (docs, docs_stop) = boot(
+            config(
+                &authority,
+                &repo,
+                schemas,
+                issuer.capability,
+                namespace,
+                Arc::clone(&access),
+            )
+            .await,
+        )
+        .await
+        .unwrap();
+        let key = SigningKey::from_bytes(&[19; 32]);
+        let alias = Uuid7::new();
+        let actor = Uuid7::new();
+        let doc_uuid = Uuid7::new();
+        let public_key = MultibaseKey::try_from(key.verifying_key().as_bytes().as_slice()).unwrap();
+        let mut initial = Automerge::new();
+        let (facets, signatures, bindings) = {
+            let mut tx = initial.transaction();
+            let facets = tx
+                .put_object(automerge::ROOT, "facets", ObjType::Map)
+                .unwrap();
+            let dmeta = tx.put_object(&facets, DMETA, ObjType::Map).unwrap();
+            let aliases = tx.put_object(&dmeta, "facetUuids", ObjType::Map).unwrap();
+            tx.put(&aliases, alias.to_string(), FACET).unwrap();
+            let bindings = tx.put_object(&dmeta, "branchUuids", ObjType::Map).unwrap();
+            let actors = tx.put_object(&dmeta, "actors", ObjType::Map).unwrap();
+            let actor_meta = tx
+                .put_object(&actors, actor.to_string(), ObjType::Map)
+                .unwrap();
+            tx.put(&actor_meta, "pubkey", public_key.to_string())
+                .unwrap();
+            let metadata = tx.put_object(&dmeta, "facets", ObjType::Map).unwrap();
+            let facet_meta = tx.put_object(&metadata, FACET, ObjType::Map).unwrap();
+            let signatures = tx
+                .put_object(&facet_meta, "signatures", ObjType::List)
+                .unwrap();
+            tx.commit();
+            (facets, signatures, bindings)
+        };
+        let document = repo.create_doc(initial).await.unwrap();
+        let doc_id = document.document_id();
+        let facet_key: FacetKey = FACET.parse().unwrap();
+        let native = NativeValue::Bytes(vec![0, 255, 128]);
+        let signed = SignedFacetClaim {
+            actor_public_key: public_key.clone(),
+            claim: FacetClaim {
+                origin_document: doc_id.clone(),
+                facet_key: facet_key.clone(),
+                chosen_uuid: alias,
+                actor_uuid: actor,
+                operation: ClaimOperation::Set,
+                value_cid: Some(cid_of(&encode_native(&native))),
+                predecessors: Vec::new(),
+            },
+            signature: SignatureBytes::try_from([0_u8; 64].as_slice()).unwrap(),
+        };
+        let signature = SignatureBytes::try_from(
+            key.sign(&signed.claim.signing_bytes().unwrap())
+                .to_bytes()
+                .as_slice(),
+        )
+        .unwrap();
+        let signed = SignedFacetClaim {
+            signature,
+            ..signed
+        };
+        signed.verify().unwrap();
+        let (marker, introduction_hash, parents, automerge_actor) = document
+            .with_document(|doc| {
+                let parents = doc.get_heads();
+                let automerge_actor = Bytes::from(doc.get_actor().to_bytes().to_vec());
+                let mut tx = doc.transaction();
+                tx.put(&facets, FACET, vec![0_u8, 255, 128]).unwrap();
+                let marker = tx.insert_object(&signatures, 0, ObjType::Map).unwrap();
+                tx.put(&marker, "actorUuid", actor.to_string()).unwrap();
+                tx.put(&marker, "docUuid", doc_uuid.to_string()).unwrap();
+                tx.put(&marker, "signature", signed.signature.as_bytes().to_vec())
+                    .unwrap();
+                tx.put(&bindings, doc_uuid.to_string(), doc_id.to_string())
+                    .unwrap();
+                let hash = tx.commit().0.unwrap();
+                (marker, hash, parents, automerge_actor)
+            })
+            .await
+            .unwrap();
+        let capability = docs
+            .mint_inspection_handle(doc_id.clone(), issuer.capability)
+            .await
+            .unwrap();
+        let expected = UnsafeFacetInspection {
+            native_value: Some(encode_native(&native).into()),
+            schema_known: false,
+            claims: FacetClaimsInspection {
+                doc_id,
+                facet_key,
+                heads: vec![introduction_hash],
+                scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
+                evidence: vec![FacetClaimEvidence {
+                    marker: marker.to_string(),
+                    result: SignatureEvidence::VerifiedSignature {
+                        evidence: Box::new(VerifiedSignatureEvidence {
+                            signature: FacetSignature {
+                                actor_uuid: actor,
+                                doc_uuid,
+                                signature: signed.signature,
+                                message: None,
+                                inherited: None,
+                            },
+                            actor_public_key: public_key,
+                            claim: signed.claim,
+                            introduction_marker: marker.to_string(),
+                            introduction_hash,
+                            parents,
+                            resulting_heads: vec![introduction_hash],
+                            automerge_actor,
+                        }),
+                    },
+                }],
+            },
+        };
+        Self {
+            authority,
+            authority_stop,
+            issuer,
+            namespace,
+            access,
+            repo,
+            repo_stop: Some(repo_stop),
+            docs,
+            docs_stop: Some(docs_stop),
+            document,
+            capability,
+            expected,
+        }
+    }
+
+    fn request(&self) -> UnsafeInspectFacet {
+        UnsafeInspectFacet {
+            capability: self.capability.capability_id,
+            doc_id: self.document.document_id(),
+            facet_key: FACET.parse().unwrap(),
+            heads: self.expected.claims.heads.clone(),
+        }
+    }
+
+    async fn mint(&self, issuer: CapId, object: String, rights: Rights) -> Capability {
+        self.authority
+            .client
+            .call(
+                RequestContext::root(),
+                MintCapability {
+                    issuer,
+                    parent: None,
+                    dependencies: Vec::new(),
+                    object,
+                    rights,
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn retract(&self, capability: CapId) {
+        self.authority
+            .client
+            .call(
+                RequestContext::root(),
+                RetractCapability {
+                    via: self.namespace.capability,
+                    capability,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn unsigned_value(&self, value: automerge::ScalarValue) -> Vec<ChangeHash> {
+        self.document
+            .with_document(|doc| {
+                let (_, facets) = doc.get(automerge::ROOT, "facets").unwrap().unwrap();
+                let mut tx = doc.transaction();
+                tx.put(&facets, FACET, value).unwrap();
+                tx.commit();
+                doc.get_heads()
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn replace_signature(&self, bytes: Option<Vec<u8>>) -> (ObjId, Vec<ChangeHash>) {
+        self.document
+            .with_document(|doc| {
+                let (_, facets) = doc.get(automerge::ROOT, "facets").unwrap().unwrap();
+                let (_, dmeta) = doc.get(&facets, DMETA).unwrap().unwrap();
+                let (_, metadata) = doc.get(&dmeta, "facets").unwrap().unwrap();
+                let (_, metadata) = doc.get(&metadata, FACET).unwrap().unwrap();
+                let (_, signatures) = doc.get(&metadata, "signatures").unwrap().unwrap();
+                let (actor_uuid, doc_uuid) = match &self.expected.claims.evidence[0].result {
+                    SignatureEvidence::VerifiedSignature { evidence } => {
+                        (evidence.claim.actor_uuid, evidence.signature.doc_uuid)
+                    }
+                    _ => unreachable!(),
+                };
+                let mut tx = doc.transaction();
+                tx.delete(&signatures, 0).unwrap();
+                let marker = tx.insert_object(&signatures, 0, ObjType::Map).unwrap();
+                tx.put(&marker, "actorUuid", actor_uuid.to_string())
+                    .unwrap();
+                tx.put(&marker, "docUuid", doc_uuid.to_string()).unwrap();
+                if let Some(bytes) = bytes {
+                    tx.put(&marker, "signature", bytes).unwrap();
+                }
+                tx.commit();
+                (marker, doc.get_heads())
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn stop(mut self) {
+        if let Some(stop) = self.docs_stop.take() {
+            stop.stop().await;
+        }
+        drop(self.document);
+        if let Some(stop) = self.repo_stop.take() {
+            stop.stop().await.unwrap();
+        }
+        self.authority_stop.stop().await;
+    }
+}
+
+async fn config(
+    authority: &Authority,
+    repo: &SharedBigRepo,
+    schemas: Arc<SchemaRepo>,
+    issuer: CapId,
+    namespace: Namespace,
+    access: Arc<LedgerAccess>,
+) -> DocsConfig {
+    DocsConfig {
+        big_repo: Arc::clone(repo),
+        schema_repo: schemas,
+        authority: authority.client.clone(),
+        issuer,
+        namespace,
+        node_issuer: authority.node_issuer.clone(),
+        access,
+        sql: sqlite_rs::test_support::db(&[]).unwrap().clone(),
+        facet_set: None,
+        facet_ref: None,
+    }
+}
+
+async fn inspect(
+    client: &Client<DocsProtocol>,
+    request: UnsafeInspectFacet,
+) -> Result<UnsafeFacetInspection, DocsError> {
+    client
+        .call(RequestContext::root(), request)
+        .await
+        .map_err(|error| match error {
+            ClientError::Operation(error) => error,
+            ClientError::Transport { message, .. } => panic!("inspection transport: {message}"),
+        })
+}
+
+async fn claims(
+    client: &Client<DocsProtocol>,
+    request: UnsafeInspectFacet,
+) -> Result<FacetClaimsInspection, DocsError> {
+    client
+        .call(
+            RequestContext::root(),
+            InspectFacetClaims {
+                capability: request.capability,
+                doc_id: request.doc_id,
+                facet_key: request.facet_key,
+                heads: request.heads,
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            ClientError::Operation(error) => error,
+            ClientError::Transport { message, .. } => panic!("claims transport: {message}"),
+        })
+}
+
+#[tokio::test]
+async fn explicit_heads_preserve_native_bytes_and_do_not_authenticate_unsigned_edits() {
+    let fixture = Fixture::new().await;
+    let newer_heads = fixture
+        .unsigned_value(automerge::ScalarValue::Bytes(vec![1, 2, 3]))
+        .await;
+    let client = &fixture.docs.client;
+    assert_eq!(
+        inspect(client, fixture.request()).await.unwrap(),
+        fixture.expected
+    );
+    assert_eq!(
+        claims(client, fixture.request()).await.unwrap(),
+        fixture.expected.claims
+    );
+    let mut newer = fixture.request();
+    newer.heads = newer_heads.clone();
+    let mut expected = fixture.expected.clone();
+    expected.native_value = Some(encode_native(&NativeValue::Bytes(vec![1, 2, 3])).into());
+    expected.claims.heads = newer_heads;
+    assert_eq!(inspect(client, newer).await.unwrap(), expected);
+    let mut empty = fixture.request();
+    empty.heads.clear();
+    assert_eq!(
+        inspect(client, empty).await.unwrap(),
+        UnsafeFacetInspection {
+            native_value: None,
+            schema_known: false,
+            claims: FacetClaimsInspection {
+                doc_id: fixture.document.document_id(),
+                facet_key: FACET.parse().unwrap(),
+                heads: Vec::new(),
+                scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
+                evidence: Vec::new(),
+            },
+        }
+    );
+    let wire = serde_json::to_value(&fixture.expected).unwrap();
+    assert_eq!(
+        wire["claims"]["scope"],
+        "unsafeUnattributedSignatureEvidence"
+    );
+    assert_eq!(
+        wire["claims"]["evidence"][0]["result"]["status"],
+        "verifiedSignature"
+    );
+    assert!(wire["nativeValue"]["$bytes"].is_string());
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn unknown_heads_resource_refusal_and_unsupported_values_are_not_rejections() {
+    let fixture = Fixture::new().await;
+    let client = &fixture.docs.client;
+    let unknown = ChangeHash([91; 32]);
+    let mut request = fixture.request();
+    request.heads.push(unknown);
+    let expected = DocsError::UnknownHeads {
+        heads: vec![unknown],
+    };
+    assert_eq!(
+        inspect(client, request.clone()).await.unwrap_err(),
+        expected
+    );
+    assert_eq!(claims(client, request).await.unwrap_err(), expected);
+    let mut request = fixture.request();
+    request.heads = vec![request.heads[0]; HistoryBudget::default().max_entries_per_frontier + 1];
+    let expected = DocsError::ResourceRefused {
+        reason: "heads frontier".into(),
+    };
+    assert_eq!(
+        inspect(client, request.clone()).await.unwrap_err(),
+        expected
+    );
+    assert_eq!(claims(client, request).await.unwrap_err(), expected);
+    let heads = fixture
+        .unsigned_value(automerge::ScalarValue::Unknown {
+            type_code: 15,
+            bytes: vec![3],
+        })
+        .await;
+    let mut request = fixture.request();
+    request.heads = heads;
+    assert_eq!(
+        inspect(client, request.clone()).await.unwrap_err(),
+        DocsError::Unsupported {
+            reason: "unknown scalar kind".into()
+        }
+    );
+    let mut expected = fixture.expected.claims.clone();
+    expected.heads = request.heads.clone();
+    assert_eq!(claims(client, request).await.unwrap(), expected);
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn missing_signature_bytes_is_forgery_and_does_not_poison_descendants() {
+    let fixture = Fixture::new().await;
+    let (marker, heads) = fixture.replace_signature(None).await;
+    let mut request = fixture.request();
+    request.heads = heads.clone();
+    let expected = FacetClaimsInspection {
+        doc_id: request.doc_id.clone(),
+        facet_key: request.facet_key.clone(),
+        heads,
+        scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
+        evidence: vec![FacetClaimEvidence {
+            marker: marker.to_string(),
+            result: SignatureEvidence::ProvenForgery {
+                reason: "malformed witness: signature bytes".into(),
+            },
+        }],
+    };
+    assert_eq!(
+        claims(&fixture.docs.client, request.clone()).await.unwrap(),
+        expected
+    );
+    assert_eq!(
+        inspect(&fixture.docs.client, request).await.unwrap().claims,
+        expected
+    );
+    let (marker, heads) = fixture.replace_signature(Some(vec![0; 64])).await;
+    let mut request = fixture.request();
+    request.heads = heads.clone();
+    let expected = FacetClaimsInspection {
+        doc_id: request.doc_id.clone(),
+        facet_key: request.facet_key.clone(),
+        heads,
+        scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
+        evidence: vec![FacetClaimEvidence {
+            marker: marker.to_string(),
+            result: SignatureEvidence::ProvenForgery {
+                reason: "invalid signature".into(),
+            },
+        }],
+    };
+    assert_eq!(
+        claims(&fixture.docs.client, request.clone()).await.unwrap(),
+        expected
+    );
+    assert_eq!(
+        inspect(&fixture.docs.client, request).await.unwrap().claims,
+        expected
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn invalid_signature_with_available_context_is_proven_forgery() {
+    let fixture = Fixture::new().await;
+    let (marker, heads) = fixture.replace_signature(Some(vec![0; 64])).await;
+    let mut request = fixture.request();
+    request.heads = heads.clone();
+    let expected = FacetClaimsInspection {
+        doc_id: request.doc_id.clone(),
+        facet_key: request.facet_key.clone(),
+        heads,
+        scope: EvidenceScope::UnsafeUnattributedSignatureEvidence,
+        evidence: vec![FacetClaimEvidence {
+            marker: marker.to_string(),
+            result: SignatureEvidence::ProvenForgery {
+                reason: "invalid signature".into(),
+            },
+        }],
+    };
+    assert_eq!(
+        claims(&fixture.docs.client, request.clone()).await.unwrap(),
+        expected
+    );
+    assert_eq!(
+        inspect(&fixture.docs.client, request).await.unwrap().claims,
+        expected
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn capability_checks_precede_any_repository_lookup() {
+    let mut fixture = Fixture::new().await;
+    let wrong_object = fixture
+        .docs
+        .mint_inspection_handle(DocId::new([82; 32]), fixture.issuer.capability)
+        .await
+        .unwrap();
+    let other_namespace = fixture
+        .authority
+        .service
+        .open_namespace(fixture.issuer.actor_id)
+        .await
+        .unwrap();
+    let wrong_issuer = fixture
+        .mint(
+            other_namespace.capability,
+            fixture.capability.object.clone(),
+            Rights::USE,
+        )
+        .await;
+    let no_use = fixture
+        .mint(
+            fixture.namespace.capability,
+            fixture.capability.object.clone(),
+            Rights::empty(),
+        )
+        .await;
+    let retracted = fixture
+        .docs
+        .mint_inspection_handle(fixture.document.document_id(), fixture.issuer.capability)
+        .await
+        .unwrap();
+    fixture.retract(retracted.capability_id).await;
+    let ancestor = fixture
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            AttenuateCapability {
+                capability: fixture.issuer.capability,
+                rights: Rights::USE,
+            },
+        )
+        .await
+        .unwrap();
+    fixture.repo_stop.take().unwrap().stop().await.unwrap();
+    let denied = [
+        wrong_object.capability_id,
+        wrong_issuer.capability_id,
+        no_use.capability_id,
+        retracted.capability_id,
+        fixture.issuer.capability,
+        ancestor.capability_id,
+        CapId::default(),
+    ];
+    for capability in denied {
+        let mut request = fixture.request();
+        request.capability = capability;
+        assert_eq!(
+            inspect(&fixture.docs.client, request.clone())
+                .await
+                .unwrap_err(),
+            DocsError::Denied
+        );
+        assert_eq!(
+            claims(&fixture.docs.client, request).await.unwrap_err(),
+            DocsError::Denied
+        );
+    }
+    assert!(matches!(
+        inspect(&fixture.docs.client, fixture.request()).await,
+        Err(DocsError::Repository(_))
+    ));
+    assert!(matches!(
+        claims(&fixture.docs.client, fixture.request()).await,
+        Err(DocsError::Repository(_))
+    ));
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn inspection_scope_is_distinct_and_bound_signer_retraction_revokes_it() {
+    let fixture = Fixture::new().await;
+    let signer = fixture
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            OpenActor {
+                parent: fixture.authority.root,
+                path: "inspector".into(),
+                rights: Rights::USE,
+            },
+        )
+        .await
+        .unwrap();
+    let document = fixture.document.document_id();
+    fixture
+        .access
+        .grants
+        .grant(
+            &RequestContext::root(),
+            fixture.issuer.actor_id,
+            LedgerAccess::object(AccessRequest::Read(&document)),
+            Rights::USE,
+            None,
+        )
+        .await
+        .unwrap();
+    let resource = fixture
+        .docs
+        .client
+        .call(
+            RequestContext::root(),
+            MintDocCapability {
+                authorization: Authorization {
+                    authority: fixture.issuer.capability,
+                    signer: signer.capability,
+                },
+                scope: DocScope {
+                    read: BTreeSet::from([document.clone()]),
+                    ..DocScope::default()
+                },
+                rights: Rights::USE,
+            },
+        )
+        .await
+        .unwrap();
+    let inspection = fixture
+        .docs
+        .mint_inspection_handle(document.clone(), signer.capability)
+        .await
+        .unwrap();
+    let mut request = fixture.request();
+    request.capability = inspection.capability_id;
+    assert_eq!(
+        inspect(&fixture.docs.client, request.clone())
+            .await
+            .unwrap(),
+        fixture.expected
+    );
+    assert_eq!(
+        claims(&fixture.docs.client, request.clone()).await.unwrap(),
+        fixture.expected.claims
+    );
+    let read = ReadFacets {
+        capability: resource.capability_id,
+        doc_id: document.clone(),
+        at: At::Current,
+        facets: None,
+        optimistic: false,
+    };
+    fixture
+        .docs
+        .client
+        .call(RequestContext::root(), read.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture
+            .docs
+            .client
+            .call(
+                RequestContext::root(),
+                ReadFacets {
+                    capability: inspection.capability_id,
+                    ..read
+                }
+            )
+            .await,
+        Err(ClientError::Operation(DocsError::Denied))
+    );
+    let mut wrong_scope = request.clone();
+    wrong_scope.capability = resource.capability_id;
+    assert_eq!(
+        inspect(&fixture.docs.client, wrong_scope.clone()).await,
+        Err(DocsError::Denied)
+    );
+    assert_eq!(
+        claims(&fixture.docs.client, wrong_scope).await,
+        Err(DocsError::Denied)
+    );
+    assert_eq!(
+        fixture
+            .docs
+            .mint_inspection_handle(document, resource.capability_id)
+            .await,
+        Err(DocsError::Denied)
+    );
+    fixture
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            RetractCapability {
+                via: signer.capability,
+                capability: signer.capability,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inspect(&fixture.docs.client, request.clone()).await,
+        Err(DocsError::Denied)
+    );
+    assert_eq!(
+        claims(&fixture.docs.client, request).await,
+        Err(DocsError::Denied)
+    );
+    assert_eq!(
+        inspect(&fixture.docs.client, fixture.request())
+            .await
+            .unwrap(),
+        fixture.expected
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn boot_requires_exact_actor_association_and_shutdown_closes_inspection_and_minting() {
+    let mut fixture = Fixture::new().await;
+    let derived = fixture
+        .authority
+        .client
+        .call(
+            RequestContext::root(),
+            AttenuateCapability {
+                capability: fixture.issuer.capability,
+                rights: Rights::all(),
+            },
+        )
+        .await
+        .unwrap();
+    for capability in [fixture.capability.capability_id, derived.capability_id] {
+        let refused = boot(
+            config(
+                &fixture.authority,
+                &fixture.repo,
+                Arc::new(SchemaRepo::open([]).unwrap()),
+                capability,
+                fixture.namespace,
+                Arc::clone(&fixture.access),
+            )
+            .await,
+        )
+        .await;
+        assert!(matches!(refused, Err(DocsError::Denied)));
+    }
+    fixture.docs_stop.take().unwrap().stop().await;
+    let expected = DocsError::Context(ContextError::Cancelled);
+    assert_eq!(
+        inspect(&fixture.docs.client, fixture.request())
+            .await
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        claims(&fixture.docs.client, fixture.request())
+            .await
+            .unwrap_err(),
+        expected
+    );
+    assert_eq!(
+        fixture
+            .docs
+            .mint_inspection_handle(fixture.document.document_id(), fixture.issuer.capability)
+            .await
+            .unwrap_err(),
+        expected
+    );
+    fixture.stop().await;
+}
+
+#[tokio::test]
+async fn direct_irpc_and_xrpc_share_exact_heads_evidence_and_denials() {
+    const BODY_LIMIT: usize = 1024 * 1024;
+    let fixture = Fixture::new().await;
+    fixture
+        .unsigned_value(automerge::ScalarValue::Bytes(vec![9]))
+        .await;
+    let (irpc, irpc_stop) = IrpcAdapter::local::<_, DocsProtocol>(
+        DocsBinding::new(Arc::clone(&fixture.docs.host)),
+        Admission::new(4, 1),
+        8,
+    );
+    let mut router = XrpcRouter::new(BODY_LIMIT);
+    DocsBinding::mount(
+        &mut router,
+        DocsBinding::new(Arc::clone(&fixture.docs.host)),
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (http_task, http_shutdown) = xrpc::serve(listener, router.into_router()).await.unwrap();
+    let base = url::Url::parse(&format!("http://{address}/")).unwrap();
+    let transports = [
+        fixture.docs.client.clone(),
+        Client::irpc(irpc),
+        Client::xrpc(XrpcClient::new(base, BODY_LIMIT).unwrap()),
+    ];
+    for client in &transports {
+        assert_eq!(
+            inspect(client, fixture.request()).await.unwrap(),
+            fixture.expected
+        );
+        assert_eq!(
+            claims(client, fixture.request()).await.unwrap(),
+            fixture.expected.claims
+        );
+        let mut unknown = fixture.request();
+        unknown.heads = vec![ChangeHash([92; 32])];
+        let expected = DocsError::UnknownHeads {
+            heads: unknown.heads.clone(),
+        };
+        assert_eq!(
+            inspect(client, unknown.clone()).await.unwrap_err(),
+            expected
+        );
+        assert_eq!(claims(client, unknown).await.unwrap_err(), expected);
+        let mut denied = fixture.request();
+        denied.capability = fixture.issuer.capability;
+        assert_eq!(
+            inspect(client, denied.clone()).await.unwrap_err(),
+            DocsError::Denied
+        );
+        assert_eq!(claims(client, denied).await.unwrap_err(), DocsError::Denied);
+    }
+    http_shutdown.send(()).unwrap();
+    http_task.await.unwrap().unwrap();
+    irpc_stop.stop().await;
+    fixture.stop().await;
+}

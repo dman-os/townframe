@@ -34,15 +34,6 @@ reference = "docs/scratch/agent-guardrails-open-items.md"
 [[exemptions]]
 code = "ERROR_DOC_LINK"
 path = "docs/wiki/big_sync.md"
-symbol = "./big_repo.md"
-ceiling = 1
-class = "LEGACY_DEBT"
-reason = "initial guardrail baseline: relative link target does not exist; fix it or explicitly classify historical debt"
-reference = "docs/scratch/agent-guardrails-open-items.md"
-
-[[exemptions]]
-code = "ERROR_DOC_LINK"
-path = "docs/wiki/big_sync.md"
 symbol = "./subduction.md"
 ceiling = 1
 class = "LEGACY_DEBT"

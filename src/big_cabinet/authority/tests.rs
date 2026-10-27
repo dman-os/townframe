@@ -1,29 +1,29 @@
 //! Service-level tests: every assertion goes through `Client<AuthorityProtocol>`,
 //! so they exercise the same hosted path a real consumer uses.
 
-use super::Actor;
-use super::AttenuateCapability;
 use super::Authority;
 use super::AuthorityBinding;
 use super::AuthorityError;
-use super::AuthorityMessage;
-use super::AuthorityProtocol;
-use super::AuthorityServiceError;
-use super::CapId;
-use super::Capability;
-use super::InspectCapability;
-use super::MintCapability;
-use super::Namespace;
-use super::OPERATOR_OBJECT;
-use super::OpenActor;
-use super::ResolveActor;
-use super::ResolveAuthority;
-use super::ResolvedAuthority;
-use super::RetractCapability;
-use super::Rights;
-use super::SignFacetClaim;
 use super::boot;
 use big_cabinet_core::FacetKey;
+use big_cabinet_core::authority::Actor;
+use big_cabinet_core::authority::AttenuateCapability;
+use big_cabinet_core::authority::AuthorityMessage;
+use big_cabinet_core::authority::AuthorityProtocol;
+use big_cabinet_core::authority::AuthorityServiceError;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::Capability;
+use big_cabinet_core::authority::InspectCapability;
+use big_cabinet_core::authority::MintCapability;
+use big_cabinet_core::authority::Namespace;
+use big_cabinet_core::authority::OPERATOR_OBJECT;
+use big_cabinet_core::authority::OpenActor;
+use big_cabinet_core::authority::ResolveActor;
+use big_cabinet_core::authority::ResolveAuthority;
+use big_cabinet_core::authority::ResolvedAuthority;
+use big_cabinet_core::authority::RetractCapability;
+use big_cabinet_core::authority::Rights;
+use big_cabinet_core::authority::SignFacetClaim;
 use big_cabinet_core::dmeta::ActorMetadata;
 use big_cabinet_core::dmeta::Attribution;
 use big_cabinet_core::dmeta::Cid;
@@ -739,9 +739,9 @@ async fn reopening_a_retracted_namespace_rotates_only_its_handle() {
         .mint(other.capability, "unrelated", Rights::USE)
         .await
         .unwrap();
-    let before = test.authority.service.state.lock().await.caps.len();
+    let before = test.authority.service.live_capabilities().await;
     assert_eq!(test.namespace(namespace.namespace_id).await, namespace);
-    assert_eq!(test.authority.service.state.lock().await.caps.len(), before);
+    assert_eq!(test.authority.service.live_capabilities().await, before);
     assert_eq!(
         test.call(InspectCapability {
             capability: leaf.capability_id
@@ -759,10 +759,7 @@ async fn reopening_a_retracted_namespace_rotates_only_its_handle() {
     assert_eq!(test.namespace(reopened.namespace_id).await, reopened);
     // The namespace handle, the minter, the object, and the leaf are gone; the reopened
     // handle is the only new row, and the unrelated namespace kept its one capability.
-    assert_eq!(
-        test.authority.service.state.lock().await.caps.len(),
-        before - 3
-    );
+    assert_eq!(test.authority.service.live_capabilities().await, before - 3);
     for capability in [
         namespace.capability,
         minter.capability_id,
@@ -1219,7 +1216,7 @@ async fn invalid_gates_publish_nothing_and_cannot_replace_narrowing_authority() 
     test.retract(revoked.capability, revoked.capability)
         .await
         .unwrap();
-    let before = test.authority.service.state.lock().await.caps.len();
+    let before = test.authority.service.live_capabilities().await;
     let changes = test.authority.service.changes.subscribe();
     for dependency in [CapId::new_random(), revoked.capability, gate.capability_id] {
         assert_refused!(
@@ -1233,7 +1230,7 @@ async fn invalid_gates_publish_nothing_and_cannot_replace_narrowing_authority() 
             .await,
             AuthorityServiceError::InvalidCapability
         );
-        assert_eq!(test.authority.service.state.lock().await.caps.len(), before);
+        assert_eq!(test.authority.service.live_capabilities().await, before);
     }
     for (issuer, parent) in [
         (namespace.capability, Some(signer.capability)),
@@ -1250,7 +1247,7 @@ async fn invalid_gates_publish_nothing_and_cannot_replace_narrowing_authority() 
             .await,
             AuthorityServiceError::Unauthorized
         );
-        assert_eq!(test.authority.service.state.lock().await.caps.len(), before);
+        assert_eq!(test.authority.service.live_capabilities().await, before);
     }
     assert!(!changes.has_changed().unwrap());
     test.stop.stop().await;
@@ -1269,8 +1266,9 @@ async fn mint_publication_is_serialized_with_dependency_retraction() {
             .await
             .unwrap();
         let service = test.authority.service.as_ref();
-        let locked = service.state.lock().await;
-        let before = locked.caps.len();
+        let before = service.live_capabilities().await;
+        // The ledger stalls on the hold, so both calls queue behind it in poll order.
+        let release = service.hold().await;
         let mint = service.call(Envelope::new(
             RequestContext::root(),
             MintCapability {
@@ -1296,7 +1294,7 @@ async fn mint_publication_is_serialized_with_dependency_retraction() {
             assert!(futures::poll!(&mut mint).is_pending());
             assert!(futures::poll!(&mut retract).is_pending());
         }
-        drop(locked);
+        release.send(()).unwrap();
         let (minted, retracted) = tokio::join!(mint, retract);
         retracted.unwrap();
         // Retraction deletes the gate and whatever depends on it, so either order leaves the
@@ -1306,10 +1304,10 @@ async fn mint_publication_is_serialized_with_dependency_retraction() {
                 minted,
                 Err(AuthorityServiceError::InvalidCapability)
             ));
-            assert_eq!(service.state.lock().await.caps.len(), before - 1);
+            assert_eq!(service.live_capabilities().await, before - 1);
         } else {
             let minted = minted.unwrap().output;
-            assert_eq!(service.state.lock().await.caps.len(), before - 1);
+            assert_eq!(service.live_capabilities().await, before - 1);
             assert_refused!(
                 test.call(InspectCapability {
                     capability: minted.capability_id
@@ -1361,7 +1359,7 @@ async fn both_dependencies_bound_minting_and_failures_publish_no_capability() {
     test.retract(retracted.capability_id, retracted.capability_id)
         .await
         .unwrap();
-    let before = test.authority.service.state.lock().await.caps.len();
+    let before = test.authority.service.live_capabilities().await;
     for (issuer, parent, rights, error) in [
         (
             namespace.capability,
@@ -1412,7 +1410,7 @@ async fn both_dependencies_bound_minting_and_failures_publish_no_capability() {
             .unwrap_err(),
             error
         );
-        assert_eq!(test.authority.service.state.lock().await.caps.len(), before);
+        assert_eq!(test.authority.service.live_capabilities().await, before);
     }
     test.stop.stop().await;
 }
@@ -1440,7 +1438,7 @@ async fn diamond_dependencies_are_deduplicated_and_depth_is_bounded_before_inser
             .await
             .unwrap();
     }
-    let before = test.authority.service.state.lock().await.caps.len();
+    let before = test.authority.service.live_capabilities().await;
     for (parent, dependencies) in [
         (Some(held.capability_id), Vec::new()),
         (None, vec![held.capability_id]),
@@ -1456,7 +1454,7 @@ async fn diamond_dependencies_are_deduplicated_and_depth_is_bounded_before_inser
             .await,
             AuthorityServiceError::Escalation
         );
-        assert_eq!(test.authority.service.state.lock().await.caps.len(), before);
+        assert_eq!(test.authority.service.live_capabilities().await, before);
     }
     assert_eq!(
         test.call(InspectCapability {
@@ -1519,37 +1517,42 @@ async fn gate_graph_union_is_bounded_and_duplicate_roots_are_stored_once() {
         rights: Rights::USE | Rights::NARROW,
     };
     let accepted = test.call(request.clone()).await.unwrap();
-    {
-        let state = test.authority.service.state.lock().await;
-        let chain = super::cap::walk(&state, &accepted.capability_id).unwrap();
-        assert_eq!(chain.ancestors.len() + 1, super::cap::MAX_CHAIN_NODES);
-        assert_eq!(
-            chain.cap.dependencies,
-            [namespace.capability, branches[0], branches[1]]
-        );
-    }
+    let accepted_id = accepted.capability_id;
+    let (ancestors, dependencies) = test
+        .authority
+        .service
+        .peek(move |state| {
+            let chain = super::cap::walk(state, &accepted_id).unwrap();
+            (chain.ancestors.len(), chain.cap.dependencies.clone())
+        })
+        .await;
+    assert_eq!(ancestors + 1, super::cap::MAX_CHAIN_NODES);
+    assert_eq!(
+        dependencies,
+        [namespace.capability, branches[0], branches[1]]
+    );
     let extra = test
         .mint(namespace.capability, "extra gate", Rights::empty())
         .await
         .unwrap();
-    let before = test.authority.service.state.lock().await.caps.len();
+    let before = test.authority.service.live_capabilities().await;
     let mut too_wide = request;
     too_wide.dependencies.push(extra.capability_id);
     assert_refused!(
         test.call(too_wide.clone()).await,
         AuthorityServiceError::Escalation
     );
-    assert_eq!(test.authority.service.state.lock().await.caps.len(), before);
+    assert_eq!(test.authority.service.live_capabilities().await, before);
     too_wide.dependencies = gates.clone();
     too_wide.dependencies.extend(branches);
     too_wide.dependencies.push(extra.capability_id);
     assert_refused!(test.call(too_wide).await, AuthorityServiceError::Escalation);
-    assert_eq!(test.authority.service.state.lock().await.caps.len(), before);
+    assert_eq!(test.authority.service.live_capabilities().await, before);
     assert_refused!(
         test.attenuate(accepted.capability_id, Rights::USE).await,
         AuthorityServiceError::Escalation
     );
-    assert_eq!(test.authority.service.state.lock().await.caps.len(), before);
+    assert_eq!(test.authority.service.live_capabilities().await, before);
     assert_eq!(
         test.call(InspectCapability {
             capability: accepted.capability_id

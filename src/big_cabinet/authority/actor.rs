@@ -8,16 +8,16 @@
 //! exists without its registry row, so there is nothing to reconcile after a
 //! crash.
 
-use super::Actor;
 use super::ActorPublicKey;
 use super::AuthorityError;
-use super::CapId;
 use super::NODE_SERVICE;
-use super::Rights;
 use super::cap::Chain;
 use super::cap::State;
 use super::store::ActorRow;
 use super::store::SealedKey;
+use big_cabinet_core::authority::Actor;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Attribution;
 use big_cabinet_core::dmeta::Bytes;
 use big_cabinet_core::dmeta::MultibaseKey;
@@ -135,7 +135,7 @@ pub(super) fn signature(key: &SigningKey, message: &[u8]) -> SignatureBytes {
 
 /// Issue the node-signed attribution certificate for one actor binding. These
 /// are the exact bytes dmeta stores as `ActorMetadata.delegation`; the
-/// certificate describes the binding and grants nothing (ADR 015 §5).
+/// certificate describes the binding and grants nothing (ADR 020 §5).
 pub(super) fn issue_certificate(
     node: &SigningKey,
     actor_uuid: Uuid7,

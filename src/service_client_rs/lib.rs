@@ -1,5 +1,3 @@
-pub use service_core_rs::*;
-
 pub mod client;
 #[cfg(feature = "http")]
 pub mod xrpc;

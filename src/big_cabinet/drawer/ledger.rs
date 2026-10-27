@@ -11,15 +11,15 @@
 //! that left no side effect — denied, unknown drawer, not an entry — drops the row so the id is
 //! free again; a failure that may have left one — transport, Keyhive, storage — keeps it.
 
-use super::DrawerId;
-use super::DrawersError;
-use super::LedgerFailure;
 use super::sqlite;
-use crate::doc::CommandId;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::DocsError;
 use big_cabinet_core::drawer::DrawerAccess as Access;
 use big_cabinet_core::drawer::DrawerGroups;
+use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawersError;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -71,14 +71,66 @@ pub(crate) enum Op {
     /// adding a member that is already there is a no-op in Keyhive.
     Invite {
         drawer_id: DrawerId,
-        principal: super::Principal,
+        principal: big_cabinet_core::drawer::protocol::Principal,
         access: Access,
     },
     /// A principal removed from a drawer's groups.
     Revoke {
         drawer_id: DrawerId,
-        principal: super::Principal,
+        principal: big_cabinet_core::drawer::protocol::Principal,
     },
+}
+
+/// The boundaries inside a roster operation where a crash leaves one half done.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CrashPoint {
+    /// An entry's Keyhive grant landed; the roster never said so.
+    DocGranted,
+    /// An entry's roster write landed; the projection row never followed.
+    RosterWritten,
+    /// A removal's roster write landed; the Keyhive grant was never revoked.
+    RosterRemoved,
+    /// An invite's docs membership landed; the meta membership never did.
+    DocsMembershipAdded,
+}
+
+trait LedgerFailure {
+    fn keeps_ledger_row(&self) -> bool;
+}
+
+impl LedgerFailure for DrawersError {
+    /// Whether a failed op may have left a side effect behind, so its ledger row stays for a
+    /// retry or the next boot to finish; a refusal left nothing and frees its command id.
+    fn keeps_ledger_row(&self) -> bool {
+        match self {
+            Self::Context(_)
+            | Self::AuthorityUnavailable(_)
+            | Self::DocsUnavailable(_)
+            | Self::Keyhive(_)
+            | Self::Storage(_)
+            | Self::RosterUnreadable(_) => true,
+            Self::Docs(error) => matches!(
+                error,
+                DocsError::Context(_)
+                    | DocsError::AuthorityUnavailable(_)
+                    | DocsError::Access(_)
+                    | DocsError::Repository(_)
+                    | DocsError::Pending { .. }
+                    | DocsError::CommandInFlight { .. }
+            ),
+            Self::Denied
+            | Self::Authority(_)
+            | Self::UnknownDrawer(_)
+            | Self::ForeignLayout(_)
+            | Self::SelfDoc(_)
+            | Self::AlreadyDrawer(_)
+            | Self::SelfChild
+            | Self::NotAnEntry(_)
+            | Self::CommandInFlight { .. }
+            | Self::CommandReused { .. } => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

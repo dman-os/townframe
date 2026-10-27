@@ -1,17 +1,16 @@
 use super::*;
 
-impl AuthorityService {
-    async fn mint(&self, request: MintCapability) -> Result<Capability, AuthorityError> {
-        let mut state = self.state.lock().await;
-        let issuer = cap::walk(&state, &request.issuer)?;
+impl cap::State {
+    pub(super) fn mint(&mut self, request: MintCapability) -> Result<Capability, AuthorityError> {
+        let issuer = cap::walk(self, &request.issuer)?;
         let namespace = issuer.namespace(Rights::NARROW)?;
         issuer.bound(request.rights)?;
         if let Some(parent) = &request.parent {
-            let source = cap::walk(&state, parent)?;
+            let source = cap::walk(self, parent)?;
             source.require(Rights::NARROW)?;
             source.bound(request.rights)?;
         }
-        let child = state.child(
+        let child = self.child(
             request.object,
             request.rights,
             namespace,
@@ -21,7 +20,7 @@ impl AuthorityService {
                 .chain(request.dependencies),
         )?;
         let capability = child.wire();
-        state.insert(child);
+        self.insert(child);
         Ok(capability)
     }
 }
@@ -31,6 +30,10 @@ impl Handler<MintCapability> for AuthorityService {
         &self,
         request: Envelope<MintCapability>,
     ) -> Result<ResponseEnvelope<Capability>, AuthorityServiceError> {
-        Ok(self.mint(request.params).await?.into())
+        let minted = cap::ask(&self.ledger, |reply| {
+            cap::Command::Mint(request.params, reply)
+        })
+        .await?;
+        Ok(minted.into())
     }
 }

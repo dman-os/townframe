@@ -39,7 +39,7 @@ from the origin document at the requested heads, and a merge (`MergeDoc`) merges
 history-sharing document's Automerge changes into another (`doc.merge`). Because the
 Automerge changes themselves travel between origin and branch, facets are not copied by
 value and signatures authored on either document reconstruct at their introducing changes
-wherever those changes land (ADR 015 §5). History-truncating compaction is not a branch:
+wherever those changes land (ADR 020 §5). History-truncating compaction is not a branch:
 documents that do not share genesis changes cannot be merged (`UnrelatedHistory`).
 
 Creating branch B from doc A at path `/draft` writes B's identity facet on B and, unless

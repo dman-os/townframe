@@ -77,176 +77,225 @@ async fn wait_for_facet_ref(node: &Node, doc_id: &DocId, targets: &[&DocId]) {
     }
 }
 
-#[tokio::test]
-async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenuation() {
-    let node = Node::boot().await;
-    let alice = node.creator("alice").await;
-    let bob = node.actor("bob").await;
-    let carol = node.actor("carol").await;
+/// Alice's containment layout the scoped-query tests read through. `parent` holds `doc_direct`
+/// and `doc_relay_entry` (entered at `Relay`), and links `child_read` (holding
+/// `doc_in_child_read`) at `Read` and `child_relay` (holding `doc_in_child_relay`) at `Relay`;
+/// `other` holds `doc_relay_entry` and `doc_outside`. Bob holds `Read` on `parent` and on
+/// `other`, so he reads `doc_outside` and `doc_relay_entry` through `other` but NOT through
+/// `parent`; Carol holds only `Relay` on `parent`.
+struct Containment {
+    node: Node,
+    alice: Actor,
+    bob: Actor,
+    carol: Actor,
+    parent: DrawerId,
+    other: DrawerId,
+    doc_direct: DocId,
+    doc_relay_entry: DocId,
+    doc_in_child_read: DocId,
+    doc_outside: DocId,
+    note_key: FacetKey,
+    note_tag: FacetTag,
+}
 
-    let parent = node.collection(&alice, "parent").await;
-    let child_read = node.collection(&alice, "child-read").await;
-    let child_relay = node.collection(&alice, "child-relay").await;
-    let other = node.collection(&alice, "other").await;
+impl Containment {
+    /// Build the layout and wait until both indexes carry every doc's note at its current heads.
+    async fn boot() -> Self {
+        let node = Node::boot().await;
+        let alice = node.creator("alice").await;
+        let bob = node.actor("bob").await;
+        let carol = node.actor("carol").await;
 
-    let doc_direct = node.create_doc(&alice, &parent, "direct").await.unwrap();
-    let doc_relay_entry = node
-        .create_doc(&alice, &other, "relay-entry")
-        .await
-        .unwrap();
-    let doc_in_child_read = node
-        .create_doc(&alice, &child_read, "in-child-read")
-        .await
-        .unwrap();
-    let doc_in_child_relay = node
-        .create_doc(&alice, &child_relay, "in-child-relay")
-        .await
-        .unwrap();
-    let doc_outside = node.create_doc(&alice, &other, "outside").await.unwrap();
+        let parent = node.collection(&alice, "parent").await;
+        let child_read = node.collection(&alice, "child-read").await;
+        let child_relay = node.collection(&alice, "child-relay").await;
+        let other = node.collection(&alice, "other").await;
 
-    // Link `doc_direct -> doc_in_child_read` and `doc_outside -> doc_direct` so `facet_ref`
-    // records both an in-drawer edge and an incoming edge from outside `parent`.
-    let (note_key, linking_child) = note_linking("points to child", &doc_in_child_read);
-    node.docs()
-        .call(
-            RequestContext::root(),
-            WriteFacets {
-                capability: node
-                    .mint_doc(
-                        &alice,
-                        DocScope {
-                            write: [doc_direct.clone()].into(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap(),
-                command: None,
-                doc_id: doc_direct.clone(),
-                mode: WriteMode::AtCurrent,
-                set: BTreeMap::from([(note_key.clone(), linking_child)]),
-                remove: BTreeSet::new(),
-            },
+        let doc_direct = node.create_doc(&alice, &parent, "direct").await.unwrap();
+        let doc_relay_entry = node
+            .create_doc(&alice, &other, "relay-entry")
+            .await
+            .unwrap();
+        let doc_in_child_read = node
+            .create_doc(&alice, &child_read, "in-child-read")
+            .await
+            .unwrap();
+        let doc_in_child_relay = node
+            .create_doc(&alice, &child_relay, "in-child-relay")
+            .await
+            .unwrap();
+        let doc_outside = node.create_doc(&alice, &other, "outside").await.unwrap();
+
+        // Link `doc_direct -> doc_in_child_read` and `doc_outside -> doc_direct` so `facet_ref`
+        // records both an in-drawer edge and an incoming edge from outside `parent`.
+        let link = async |origin: &DocId, text: &str, target: &DocId| {
+            let (note_key, linking) = note_linking(text, target);
+            node.docs()
+                .call(
+                    RequestContext::root(),
+                    WriteFacets {
+                        capability: node
+                            .mint_doc(
+                                &alice,
+                                DocScope {
+                                    write: [origin.clone()].into(),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .unwrap(),
+                        command: None,
+                        doc_id: origin.clone(),
+                        mode: WriteMode::AtCurrent,
+                        set: BTreeMap::from([(note_key, linking)]),
+                        remove: BTreeSet::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        };
+        link(&doc_direct, "points to child", &doc_in_child_read).await;
+        link(&doc_outside, "outside points to direct", &doc_direct).await;
+
+        for doc in [
+            &doc_direct,
+            &doc_relay_entry,
+            &doc_in_child_read,
+            &doc_in_child_relay,
+            &doc_outside,
+        ] {
+            wait_for_facet_set(&node, &alice, doc).await;
+        }
+        wait_for_facet_ref(&node, &doc_direct, &[&doc_in_child_read]).await;
+        wait_for_facet_ref(&node, &doc_outside, &[&doc_direct]).await;
+
+        node.add_doc(
+            &alice,
+            "add-relay-doc",
+            &parent,
+            &doc_relay_entry,
+            Access::Relay,
         )
         .await
         .unwrap();
-    let (_, linking_direct) = note_linking("outside points to direct", &doc_direct);
-    node.docs()
-        .call(
-            RequestContext::root(),
-            WriteFacets {
-                capability: node
-                    .mint_doc(
-                        &alice,
-                        DocScope {
-                            write: [doc_outside.clone()].into(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap(),
-                command: None,
-                doc_id: doc_outside.clone(),
-                mode: WriteMode::AtCurrent,
-                set: BTreeMap::from([(note_key.clone(), linking_direct)]),
-                remove: BTreeSet::new(),
-            },
-        )
-        .await
-        .unwrap();
+        for (child, access, name) in [
+            (&child_read, Access::Read, "link-child-read"),
+            (&child_relay, Access::Relay, "link-child-relay"),
+        ] {
+            node.drawers()
+                .call(
+                    RequestContext::root(),
+                    AddChild {
+                        capability: node
+                            .drawer_capability(&alice, &[&parent, child])
+                            .await
+                            .unwrap(),
+                        command: command(name),
+                        parent_id: parent.clone(),
+                        child_id: child.clone(),
+                        access,
+                    },
+                )
+                .await
+                .unwrap();
+        }
 
-    for doc in [
-        &doc_direct,
-        &doc_relay_entry,
-        &doc_in_child_read,
-        &doc_in_child_relay,
-        &doc_outside,
-    ] {
-        wait_for_facet_set(&node, &alice, doc).await;
+        node.grant(&alice, &parent, &bob, Access::Read).await;
+        node.grant(&alice, &other, &bob, Access::Read).await;
+        node.grant(&alice, &parent, &carol, Access::Relay).await;
+
+        Self {
+            node,
+            alice,
+            bob,
+            carol,
+            parent,
+            other,
+            doc_direct,
+            doc_relay_entry,
+            doc_in_child_read,
+            doc_outside,
+            note_key: note("").0,
+            note_tag: FacetTag::new(NOTE).unwrap(),
+        }
     }
-    wait_for_facet_ref(&node, &doc_direct, &[&doc_in_child_read]).await;
-    wait_for_facet_ref(&node, &doc_outside, &[&doc_direct]).await;
 
-    // Enter `doc_relay_entry` into `parent` at `Relay`, and link `child_read` at `Read` and
-    // `child_relay` at `Relay`.
-    node.add_doc(
-        &alice,
-        "add-relay-doc",
-        &parent,
-        &doc_relay_entry,
-        Access::Relay,
-    )
-    .await
-    .unwrap();
-    node.drawers()
-        .call(
-            RequestContext::root(),
-            AddChild {
-                capability: node
-                    .drawer_capability(&alice, &[&parent, &child_read])
-                    .await
-                    .unwrap(),
-                command: command("link-child-read"),
-                parent_id: parent.clone(),
-                child_id: child_read.clone(),
-                access: Access::Read,
+    async fn capability(&self, actor: &Actor, scope: DocScope) -> CapId {
+        self.node.mint_doc(actor, scope).await.unwrap()
+    }
+
+    /// A doc-scope capability over `parent` alone at `access`.
+    async fn parent_capability(&self, actor: &Actor, access: Access) -> CapId {
+        self.capability(
+            actor,
+            DocScope {
+                drawers: [(self.parent.clone(), access)].into(),
+                ..Default::default()
             },
         )
         .await
-        .unwrap();
-    node.drawers()
-        .call(
-            RequestContext::root(),
-            AddChild {
-                capability: node
-                    .drawer_capability(&alice, &[&parent, &child_relay])
-                    .await
-                    .unwrap(),
-                command: command("link-child-relay"),
-                parent_id: parent.clone(),
-                child_id: child_relay.clone(),
-                access: Access::Relay,
+    }
+
+    /// Bob's doc-scope capability over both drawers he was granted.
+    async fn bob_both_drawers(&self) -> CapId {
+        self.capability(
+            &self.bob,
+            DocScope {
+                drawers: [
+                    (self.parent.clone(), Access::Read),
+                    (self.other.clone(), Access::Read),
+                ]
+                .into(),
+                ..Default::default()
             },
         )
         .await
-        .unwrap();
+    }
 
-    // Grant Bob `Read` on `parent`, and also `Read` on `other` (so Bob can read `doc_outside` and
-    // `doc_relay_entry` through `other`, but NOT through `parent`). Grant Carol only `Relay` on
-    // `parent`.
-    node.grant(&alice, &parent, &bob, Access::Read).await;
-    node.grant(&alice, &other, &bob, Access::Read).await;
-    node.grant(&alice, &parent, &carol, Access::Relay).await;
+    /// The `/link` edge from the note of `origin` to the note of `target`.
+    fn note_edge(&self, origin: &DocId, target: &DocId) -> QueriedFacetRef {
+        QueriedFacetRef {
+            origin_doc_id: origin.clone(),
+            origin_facet_key: self.note_key.clone(),
+            path: "/link".to_owned(),
+            target_doc_id: target.clone(),
+            target_facet_key: self.note_key.clone(),
+            ref_heads: Vec::new(),
+        }
+    }
 
-    let note_tag = big_cabinet_core::FacetTag::new(NOTE).unwrap();
+    fn backlinks_to(&self, doc_id: &DocId) -> FacetRefSelector {
+        FacetRefSelector::Target {
+            doc_id: doc_id.clone(),
+            facet_key: None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn relay_holder_lists_drawer_docs_but_is_denied_drawer_scoped_facet_queries() {
+    let fx = Containment::boot().await;
 
     // Carol holds only `Relay` on `parent`: she can `ListDocs`, but `QueryFacets` and
     // `QueryFacetRefs` on `parent` are refused (`Denied`).
     assert_eq!(
-        node.list_docs(&carol, &parent, 0, None)
+        fx.node
+            .list_docs(&fx.carol, &fx.parent, 0, None)
             .await
             .unwrap()
             .len(),
         4
     );
-    let carol_query = node
+    let carol_query = fx
+        .node
         .docs()
         .call(
             RequestContext::root(),
             QueryFacets {
-                capability: node
-                    .mint_doc(
-                        &carol,
-                        DocScope {
-                            drawers: [(parent.clone(), Access::Relay)].into(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap(),
-                drawer_id: Some(parent.clone()),
+                capability: fx.parent_capability(&fx.carol, Access::Relay).await,
+                drawer_id: Some(fx.parent.clone()),
                 selector: FacetSelector::Tag {
-                    tag: note_tag.clone(),
+                    tag: fx.note_tag.clone(),
                 },
             },
         )
@@ -256,27 +305,26 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         ClientError::Operation(DocsError::Denied)
     );
 
+    fx.node.stop().await;
+}
+
+#[tokio::test]
+async fn drawer_scoped_facet_queries_obey_containment_and_attenuation() {
+    let fx = Containment::boot().await;
+
     // Bob's drawer-scoped `QueryFacets` on `parent` returns ONLY `doc_direct` and
     // `doc_in_child_read`: `doc_relay_entry` and `doc_in_child_relay` are attenuated to `Relay` in
     // `parent`, and `doc_outside` is not in `parent` even though Bob can read it via `other`.
-    let bob_in_parent: BTreeSet<DocId> = node
+    let bob_in_parent: BTreeSet<DocId> = fx
+        .node
         .docs()
         .call(
             RequestContext::root(),
             QueryFacets {
-                capability: node
-                    .mint_doc(
-                        &bob,
-                        DocScope {
-                            drawers: [(parent.clone(), Access::Read)].into(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap(),
-                drawer_id: Some(parent.clone()),
+                capability: fx.parent_capability(&fx.bob, Access::Read).await,
+                drawer_id: Some(fx.parent.clone()),
                 selector: FacetSelector::Tag {
-                    tag: note_tag.clone(),
+                    tag: fx.note_tag.clone(),
                 },
             },
         )
@@ -287,33 +335,21 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         .collect();
     assert_eq!(
         bob_in_parent,
-        BTreeSet::from([doc_direct.clone(), doc_in_child_read.clone()])
+        BTreeSet::from([fx.doc_direct.clone(), fx.doc_in_child_read.clone()])
     );
 
     // Unscoped `QueryFacets` by tag for Bob includes `doc_outside` and `doc_relay_entry` too,
     // because Bob reaches them via `other`, while still hiding `doc_in_child_relay`.
-    let bob_unscoped: BTreeSet<DocId> = node
+    let bob_unscoped: BTreeSet<DocId> = fx
+        .node
         .docs()
         .call(
             RequestContext::root(),
             QueryFacets {
-                capability: node
-                    .mint_doc(
-                        &bob,
-                        DocScope {
-                            drawers: [
-                                (parent.clone(), Access::Read),
-                                (other.clone(), Access::Read),
-                            ]
-                            .into(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap(),
+                capability: fx.bob_both_drawers().await,
                 drawer_id: None,
                 selector: FacetSelector::Tag {
-                    tag: note_tag.clone(),
+                    tag: fx.note_tag.clone(),
                 },
             },
         )
@@ -325,36 +361,37 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
     assert_eq!(
         bob_unscoped,
         BTreeSet::from([
-            doc_direct.clone(),
-            doc_in_child_read.clone(),
-            doc_relay_entry.clone(),
-            doc_outside.clone(),
+            fx.doc_direct.clone(),
+            fx.doc_in_child_read.clone(),
+            fx.doc_relay_entry.clone(),
+            fx.doc_outside.clone(),
         ])
     );
 
-    let observation_capability = node
-        .mint_doc(
-            &bob,
+    // Observing the tag under the same reach replays exactly what the unscoped query returned.
+    let observation_capability = fx
+        .capability(
+            &fx.bob,
             DocScope {
-                read: [doc_outside.clone()].into(),
+                read: [fx.doc_outside.clone()].into(),
                 drawers: [
-                    (parent.clone(), Access::Read),
-                    (other.clone(), Access::Read),
+                    (fx.parent.clone(), Access::Read),
+                    (fx.other.clone(), Access::Read),
                 ]
                 .into(),
                 ..Default::default()
             },
         )
-        .await
-        .unwrap();
-    let mut events = node
+        .await;
+    let mut events = fx
+        .node
         .docs()
         .subscribe(
             RequestContext::root(),
             ObserveFacets {
                 capability: observation_capability,
                 scope: ObserveScope::Tag {
-                    tag: note_tag.clone(),
+                    tag: fx.note_tag.clone(),
                 },
                 after: 0,
             },
@@ -369,17 +406,18 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
     assert_eq!(observed, bob_unscoped);
     drop(events);
 
-    let parent_only = node
-        .mint_doc(
-            &bob,
-            DocScope {
-                drawers: [(parent.clone(), Access::Read)].into(),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let narrowed_records = node
+    fx.node.stop().await;
+}
+
+#[tokio::test]
+async fn unscoped_queries_are_narrowed_to_the_capability_scope() {
+    let fx = Containment::boot().await;
+
+    // A capability over `parent` alone narrows an unscoped key query to the docs `parent`
+    // reaches at `Read`, and hides the backlink from `doc_outside`.
+    let parent_only = fx.parent_capability(&fx.bob, Access::Read).await;
+    let narrowed_records = fx
+        .node
         .docs()
         .call(
             RequestContext::root(),
@@ -387,13 +425,13 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
                 capability: parent_only,
                 drawer_id: None,
                 selector: FacetSelector::Key {
-                    facet_key: note_key.clone(),
+                    facet_key: fx.note_key.clone(),
                 },
             },
         )
         .await
         .unwrap();
-    let mut expected_docs = vec![doc_direct.clone(), doc_in_child_read.clone()];
+    let mut expected_docs = vec![fx.doc_direct.clone(), fx.doc_in_child_read.clone()];
     expected_docs.sort();
     assert_eq!(
         narrowed_records
@@ -403,67 +441,59 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         expected_docs,
     );
     assert!(
-        node.docs()
+        fx.node
+            .docs()
             .call(
                 RequestContext::root(),
                 QueryFacetRefs {
                     capability: parent_only,
                     drawer_id: None,
-                    selector: FacetRefSelector::Target {
-                        doc_id: doc_direct.clone(),
-                        facet_key: None,
-                    },
+                    selector: fx.backlinks_to(&fx.doc_direct),
                 },
             )
             .await
             .unwrap()
             .is_empty()
     );
-    let origin_only = node
-        .mint_doc(
-            &bob,
+
+    // A capability reading only `doc_outside` sees that doc's outgoing edge, but may not ask
+    // for the backlinks of `doc_direct`, a doc it cannot read.
+    let origin_only = fx
+        .capability(
+            &fx.bob,
             DocScope {
-                read: [doc_outside.clone()].into(),
+                read: [fx.doc_outside.clone()].into(),
                 ..Default::default()
             },
         )
-        .await
-        .unwrap();
+        .await;
     assert_eq!(
-        node.docs()
+        fx.node
+            .docs()
             .call(
                 RequestContext::root(),
                 QueryFacetRefs {
                     capability: origin_only,
                     drawer_id: None,
                     selector: FacetRefSelector::Origin {
-                        doc_id: doc_outside.clone(),
+                        doc_id: fx.doc_outside.clone(),
                         facet_key: None,
                     },
                 },
             )
             .await
             .unwrap(),
-        vec![QueriedFacetRef {
-            origin_doc_id: doc_outside.clone(),
-            origin_facet_key: note_key.clone(),
-            path: "/link".to_owned(),
-            target_doc_id: doc_direct.clone(),
-            target_facet_key: note_key.clone(),
-            ref_heads: Vec::new(),
-        }],
+        vec![fx.note_edge(&fx.doc_outside, &fx.doc_direct)],
     );
     assert_eq!(
-        node.docs()
+        fx.node
+            .docs()
             .call(
                 RequestContext::root(),
                 QueryFacetRefs {
                     capability: origin_only,
                     drawer_id: None,
-                    selector: FacetRefSelector::Target {
-                        doc_id: doc_direct.clone(),
-                        facet_key: None,
-                    },
+                    selector: fx.backlinks_to(&fx.doc_direct),
                 },
             )
             .await
@@ -471,124 +501,83 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         ClientError::Operation(DocsError::Denied),
     );
 
+    fx.node.stop().await;
+}
+
+#[tokio::test]
+async fn reference_queries_do_not_leak_backlinks_from_unreachable_origins() {
+    let fx = Containment::boot().await;
+
     // Drawer-scoped `QueryFacetRefs` on `parent` for incoming edges to `doc_direct` omits the edge
     // from `doc_outside` (because `doc_outside` is not in `parent`), while unscoped
     // `QueryFacetRefs` for Bob includes it (because Bob can read `doc_outside`), and unscoped for
     // an actor who cannot read `other` omits it (no backlink leak from unreadable origin docs).
-    let dave = node.actor("dave").await;
-    node.grant(&alice, &parent, &dave, Access::Read).await;
+    let dave = fx.node.actor("dave").await;
+    fx.node
+        .grant(&fx.alice, &fx.parent, &dave, Access::Read)
+        .await;
 
-    let scoped_backlinks = node
+    let scoped_backlinks = fx
+        .node
         .docs()
         .call(
             RequestContext::root(),
             QueryFacetRefs {
-                capability: node
-                    .mint_doc(
-                        &bob,
-                        DocScope {
-                            drawers: [(parent.clone(), Access::Read)].into(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap(),
-                drawer_id: Some(parent.clone()),
-                selector: FacetRefSelector::Target {
-                    doc_id: doc_direct.clone(),
-                    facet_key: None,
-                },
+                capability: fx.parent_capability(&fx.bob, Access::Read).await,
+                drawer_id: Some(fx.parent.clone()),
+                selector: fx.backlinks_to(&fx.doc_direct),
             },
         )
         .await
         .unwrap();
     assert!(scoped_backlinks.is_empty());
 
-    let dave_unscoped_backlinks = node
+    let dave_unscoped_backlinks = fx
+        .node
         .docs()
         .call(
             RequestContext::root(),
             QueryFacetRefs {
-                capability: node
-                    .mint_doc(
-                        &dave,
-                        DocScope {
-                            drawers: [(parent.clone(), Access::Read)].into(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap(),
+                capability: fx.parent_capability(&dave, Access::Read).await,
                 drawer_id: None,
-                selector: FacetRefSelector::Target {
-                    doc_id: doc_direct.clone(),
-                    facet_key: None,
-                },
+                selector: fx.backlinks_to(&fx.doc_direct),
             },
         )
         .await
         .unwrap();
     assert!(dave_unscoped_backlinks.is_empty());
 
-    let bob_unscoped_backlinks = node
+    let bob_unscoped_backlinks = fx
+        .node
         .docs()
         .call(
             RequestContext::root(),
             QueryFacetRefs {
-                capability: node
-                    .mint_doc(
-                        &bob,
-                        DocScope {
-                            drawers: [
-                                (parent.clone(), Access::Read),
-                                (other.clone(), Access::Read),
-                            ]
-                            .into(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap(),
+                capability: fx.bob_both_drawers().await,
                 drawer_id: None,
-                selector: FacetRefSelector::Target {
-                    doc_id: doc_direct.clone(),
-                    facet_key: None,
-                },
+                selector: fx.backlinks_to(&fx.doc_direct),
             },
         )
         .await
         .unwrap();
     assert_eq!(
         bob_unscoped_backlinks,
-        vec![QueriedFacetRef {
-            origin_doc_id: doc_outside.clone(),
-            origin_facet_key: note_key.clone(),
-            path: "/link".to_owned(),
-            target_doc_id: doc_direct.clone(),
-            target_facet_key: note_key.clone(),
-            ref_heads: Vec::new(),
-        }]
+        vec![fx.note_edge(&fx.doc_outside, &fx.doc_direct)]
     );
 
-    let scoped_outgoing = node
+    // Outgoing edges stay visible inside the drawer: `doc_direct -> doc_in_child_read` is
+    // `parent`-internal.
+    let scoped_outgoing = fx
+        .node
         .docs()
         .call(
             RequestContext::root(),
             QueryFacetRefs {
-                capability: node
-                    .mint_doc(
-                        &dave,
-                        DocScope {
-                            drawers: [(parent.clone(), Access::Read)].into(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .unwrap(),
-                drawer_id: Some(parent.clone()),
+                capability: fx.parent_capability(&dave, Access::Read).await,
+                drawer_id: Some(fx.parent.clone()),
                 selector: FacetRefSelector::Origin {
-                    doc_id: doc_direct.clone(),
-                    facet_key: Some(note_key.clone()),
+                    doc_id: fx.doc_direct.clone(),
+                    facet_key: Some(fx.note_key.clone()),
                 },
             },
         )
@@ -596,17 +585,10 @@ async fn drawer_scoped_queries_and_reference_queries_obey_containment_and_attenu
         .unwrap();
     assert_eq!(
         scoped_outgoing,
-        vec![QueriedFacetRef {
-            origin_doc_id: doc_direct,
-            origin_facet_key: note_key.clone(),
-            path: "/link".to_owned(),
-            target_doc_id: doc_in_child_read,
-            target_facet_key: note_key,
-            ref_heads: Vec::new(),
-        }]
+        vec![fx.note_edge(&fx.doc_direct, &fx.doc_in_child_read)]
     );
 
-    node.stop().await;
+    fx.node.stop().await;
 }
 
 #[tokio::test]

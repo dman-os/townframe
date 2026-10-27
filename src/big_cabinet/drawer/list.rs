@@ -36,10 +36,10 @@ impl DrawerService {
                         .docs()
                         .call(
                             context.child(),
-                            crate::doc::ReadFacets {
+                            big_cabinet_core::doc::ReadFacets {
                                 capability,
                                 doc_id: record.drawer_id.clone(),
-                                at: crate::doc::At::Current,
+                                at: big_cabinet_core::doc::At::Current,
                                 facets: Some(std::collections::BTreeSet::from([drawer_key()])),
                                 optimistic: false,
                             },
@@ -47,7 +47,9 @@ impl DrawerService {
                         .await
                         .map_err(docs_error)?;
                     let value = match read.facets.into_iter().next() {
-                        Some((_, crate::doc::FacetRead::Accepted { value, .. })) => value,
+                        Some((_, big_cabinet_core::doc::FacetRead::Accepted { value, .. })) => {
+                            value
+                        }
                         _ => {
                             return Err(DrawersError::RosterUnreadable(format!(
                                 "{} carries no drawer descriptor",

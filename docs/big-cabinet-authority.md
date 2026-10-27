@@ -1,6 +1,6 @@
 # Big Cabinet Authority
 
-[ADR 017](adrs/017-authority-actors-capabilities-and-grants.md) specifies the
+[ADR 022](adrs/022-authority-actors-capabilities-and-grants.md) specifies the
 namespace-capability model implemented by Authority, DocsRepo, and DrawerService.
 Resource requests carry one scoped cap; identity and signer proofs belong at the
 mint seam, with no per-call identity fallback.

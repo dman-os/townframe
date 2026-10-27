@@ -673,10 +673,10 @@ impl BigKeyhiveHandle {
 
     pub(crate) async fn document_ids_containing_group(
         &self,
-        group_id: Identifier,
+        group_id: KhGroupId,
     ) -> BTreeSet<DocumentId> {
         self.keyhive
-            .document_ids_containing_group(KhGroupId::from(group_id))
+            .document_ids_containing_group(group_id)
             .await
             .into_iter()
             .map(|id| DocumentId::new(id.to_bytes()))
@@ -1131,15 +1131,6 @@ impl BigKeyhiveHandle {
             }
         }
         Ok((BigKeyhiveGroup { id, inner }, hashes))
-    }
-
-    pub(crate) async fn group_document_ids(&self, group: &BigKeyhiveGroup) -> BTreeSet<DocumentId> {
-        self.keyhive
-            .document_ids_containing_group(group.id())
-            .await
-            .into_iter()
-            .map(|doc_id| DocumentId::new(doc_id.as_bytes()))
-            .collect()
     }
 
     pub(crate) async fn add_member_to_group(

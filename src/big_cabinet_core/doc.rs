@@ -5,11 +5,7 @@ use crate::authority::Authorization;
 use crate::authority::CapId;
 use crate::authority::Capability;
 use crate::authority::Rights;
-use crate::dmeta::Bytes;
 use crate::dmeta::DocId;
-use crate::dmeta::FacetClaim;
-use crate::dmeta::FacetSignature;
-use crate::dmeta::MultibaseKey;
 use crate::drawer::DrawerAccess;
 use automerge::ChangeHash;
 use serde::Deserialize;
@@ -21,6 +17,22 @@ use service_core_rs::XrpcOperation;
 use service_core_rs::declare_service_protocol;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+
+mod availability;
+mod inspection;
+
+pub use availability::DocAvailability;
+pub use availability::GetDocAvailability;
+pub use availability::LocalDocUsability;
+pub use availability::ObserveDocAvailability;
+pub use inspection::EvidenceScope;
+pub use inspection::FacetClaimEvidence;
+pub use inspection::FacetClaimsInspection;
+pub use inspection::InspectFacetClaims;
+pub use inspection::SignatureEvidence;
+pub use inspection::UnsafeFacetInspection;
+pub use inspection::UnsafeInspectFacet;
+pub use inspection::VerifiedSignatureEvidence;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
@@ -265,38 +277,6 @@ pub struct ListFacets {
     pub at: At,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum LocalDocUsability {
-    NotObserved,
-    NoLocalContent,
-    PendingMaterialization,
-    Usable,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DocAvailability {
-    pub doc_id: DocId,
-    pub local_usability: LocalDocUsability,
-    pub sync_demand: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GetDocAvailability {
-    pub capability: CapId,
-    pub doc_id: DocId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ObserveDocAvailability {
-    pub capability: CapId,
-    pub doc_id: DocId,
-}
-service_core_rs::service_operation!(ObserveDocAvailability => stream DocAvailability, DocsError, "org.example.daybook.docs.observeDocAvailability");
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum FacetSelector {
@@ -418,109 +398,30 @@ pub struct ObserveFacets {
 }
 service_core_rs::service_operation!(ObserveFacets => stream FacetObserved, DocsError, "org.example.daybook.docs.observeFacets");
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum EvidenceScope {
-    UnsafeUnattributedSignatureEvidence,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VerifiedSignatureEvidence {
-    pub signature: FacetSignature,
-    pub actor_public_key: MultibaseKey,
-    pub claim: FacetClaim,
-    pub introduction_marker: String,
-    pub introduction_hash: ChangeHash,
-    pub parents: Vec<ChangeHash>,
-    pub resulting_heads: Vec<ChangeHash>,
-    pub automerge_actor: Bytes,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "camelCase")]
-pub enum SignatureEvidence {
-    VerifiedSignature {
-        evidence: Box<VerifiedSignatureEvidence>,
-    },
-    Pending {
-        reason: String,
-    },
-    ResourceRefused {
-        reason: String,
-    },
-    Unsupported {
-        reason: String,
-    },
-    ProvenForgery {
-        reason: String,
-    },
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FacetClaimEvidence {
-    pub marker: String,
-    pub result: SignatureEvidence,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FacetClaimsInspection {
-    pub doc_id: DocId,
-    pub facet_key: FacetKey,
-    pub heads: Vec<ChangeHash>,
-    pub scope: EvidenceScope,
-    pub evidence: Vec<FacetClaimEvidence>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnsafeFacetInspection {
-    pub native_value: Option<Bytes>,
-    pub schema_known: bool,
-    pub claims: FacetClaimsInspection,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnsafeInspectFacet {
-    pub capability: CapId,
-    pub doc_id: DocId,
-    pub facet_key: FacetKey,
-    pub heads: Vec<ChangeHash>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InspectFacetClaims {
-    pub capability: CapId,
-    pub doc_id: DocId,
-    pub facet_key: FacetKey,
-    pub heads: Vec<ChangeHash>,
-}
-
-macro_rules! operation {
-    ($request:ident => $output:ty, $nsid:literal) => {
+macro_rules! operations {
+    ($($request:ident => $output:ty, $kind:ident, $nsid:literal;)*) => {$(
         impl Operation for $request {
             type Output = $output;
             type Error = DocsError;
             const XRPC: XrpcOperation =
-                XrpcOperation::procedure(concat!("org.example.daybook.docs.", $nsid))
+                XrpcOperation::$kind(concat!("org.example.daybook.docs.", $nsid))
                     .with_schemas(stringify!($output), stringify!(DocsError));
         }
-    };
+    )*};
 }
-operation!(MintDocCapability => Capability, "mintDocCapability");
-operation!(CreateDoc => WriteReceipt, "createDoc");
-operation!(WriteFacets => WriteReceipt, "writeFacets");
-operation!(BranchDoc => WriteReceipt, "branchDoc");
-operation!(MergeDoc => WriteReceipt, "mergeDoc");
-operation!(ReadFacets => FacetsRead, "readFacets");
-operation!(ListFacets => FacetListing, "listFacets");
-operation!(QueryFacets => Vec<QueriedFacet>, "queryFacets");
-operation!(QueryFacetRefs => Vec<QueriedFacetRef>, "queryFacetRefs");
-operation!(UnsafeInspectFacet => UnsafeFacetInspection, "unsafeInspectFacet");
-operation!(InspectFacetClaims => FacetClaimsInspection, "inspectFacetClaims");
-
-impl Operation for GetDocAvailability {
-    type Output = DocAvailability;
-    type Error = DocsError;
-    const XRPC: XrpcOperation = XrpcOperation::query("org.example.daybook.docs.getDocAvailability")
-        .with_schemas("DocAvailability", "DocsError");
+operations! {
+    MintDocCapability => Capability, procedure, "mintDocCapability";
+    CreateDoc => WriteReceipt, procedure, "createDoc";
+    WriteFacets => WriteReceipt, procedure, "writeFacets";
+    BranchDoc => WriteReceipt, procedure, "branchDoc";
+    MergeDoc => WriteReceipt, procedure, "mergeDoc";
+    ReadFacets => FacetsRead, procedure, "readFacets";
+    ListFacets => FacetListing, procedure, "listFacets";
+    QueryFacets => Vec<QueriedFacet>, procedure, "queryFacets";
+    QueryFacetRefs => Vec<QueriedFacetRef>, procedure, "queryFacetRefs";
+    UnsafeInspectFacet => UnsafeFacetInspection, procedure, "unsafeInspectFacet";
+    InspectFacetClaims => FacetClaimsInspection, procedure, "inspectFacetClaims";
+    GetDocAvailability => DocAvailability, query, "getDocAvailability";
 }
 
 declare_service_protocol! {

@@ -5,12 +5,10 @@ impl AuthorityService {
         &self,
         request: ResolveAuthority,
     ) -> Result<ResolvedAuthority, AuthorityError> {
-        let state = self.state.lock().await;
-        let chain = cap::walk(&state, &request.capability)?;
-        chain.require(Rights::USE)?;
-        let actor = match state.actors.get(&chain.cap.id) {
-            Some(binding) => {
-                let actor_id = binding.actor_id;
+        let resolved = self.resolve(request.capability).await?;
+        resolved.require(Rights::USE)?;
+        let actor = match resolved.actor {
+            Some(actor_id) => {
                 let transaction = self.read().await?;
                 let row = Self::actor_row(&transaction, actor_id).await?;
                 Some(actor::public_actor(
@@ -22,7 +20,7 @@ impl AuthorityService {
             None => None,
         };
         Ok(ResolvedAuthority {
-            capability: chain.cap.wire(),
+            capability: resolved.capability,
             actor,
         })
     }

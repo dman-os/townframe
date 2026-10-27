@@ -2,14 +2,17 @@
 
 use super::*;
 
-impl AuthorityService {
-    async fn retract(&self, request: RetractCapability) -> Result<(), AuthorityError> {
-        let mut state = self.state.lock().await;
-        cap::walk(&state, &request.via)?;
-        let target = cap::walk(&state, &request.capability)?;
+impl cap::State {
+    /// Retract `request.capability` on the authority of `request.via`, which must be the
+    /// capability itself or one it descends from.
+    pub(super) fn retract_via(
+        &mut self,
+        request: &RetractCapability,
+    ) -> Result<(), AuthorityError> {
+        cap::walk(self, &request.via)?;
+        let target = cap::walk(self, &request.capability)?;
         cap::may_retract(&target, &request.via)?;
-        state.retract(request.capability);
-        self.publish_change();
+        self.retract(request.capability);
         Ok(())
     }
 }
@@ -19,6 +22,10 @@ impl Handler<RetractCapability> for AuthorityService {
         &self,
         request: Envelope<RetractCapability>,
     ) -> Result<ResponseEnvelope<()>, AuthorityServiceError> {
-        Ok(self.retract(request.params).await?.into())
+        cap::ask(&self.ledger, |reply| {
+            cap::Command::Retract(request.params, reply)
+        })
+        .await?;
+        Ok(().into())
     }
 }

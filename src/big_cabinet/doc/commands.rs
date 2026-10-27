@@ -18,12 +18,12 @@
 //! - a merge adds no change of its own, so it happened exactly when the target holds the source
 //!   heads the row recorded.
 
-use super::CommandId;
-use super::DocsError;
 use super::sqlite;
 use automerge::ChangeHash;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::DocsError;
 use serde::Deserialize;
 use serde::Serialize;
 use sqlite_rs::Database;
@@ -88,7 +88,7 @@ impl State {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Row {
     pub command: CommandId,
     pub kind: Kind,

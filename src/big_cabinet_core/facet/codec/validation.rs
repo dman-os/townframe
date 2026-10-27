@@ -370,181 +370,62 @@ fn normalize_authoring(
     value: &Value,
     budget: &mut NormalizationBudget,
 ) -> Result<Option<Value>, CodecError> {
-    let mut tasks = vec![NormalizationTask::Visit {
-        schema,
-        value: value.clone(),
-        hops: HOPS,
-        depth: 0,
-    }];
-    let mut results: Vec<Option<Value>> = Vec::new();
+    let mut normalization = Normalization {
+        document,
+        branch_validators,
+        budget,
+        tasks: vec![NormalizationTask::Visit {
+            schema,
+            value: value.clone(),
+            hops: HOPS,
+            depth: 0,
+        }],
+        results: Vec::new(),
+    };
+    while let Some(task) = normalization.tasks.pop() {
+        normalization.budget.consume(NORMALIZATION_STEPS)?;
+        normalization.step(task)?;
+    }
+    Ok(normalization.results.pop().flatten())
+}
 
-    while let Some(task) = tasks.pop() {
-        budget.consume(NORMALIZATION_STEPS)?;
+/// The explicit stack an authoring normalization runs on. A task either settles its result onto
+/// `results`, or pushes itself back (with the progress it made) beneath the child it needs
+/// normalized first, and picks that child's result up when it is popped again. A `None` result is
+/// an ambiguity the parent propagates rather than writes.
+struct Normalization<'a, 'r> {
+    document: &'a Value,
+    branch_validators: &'r BranchValidators,
+    budget: &'r mut NormalizationBudget,
+    tasks: Vec<NormalizationTask<'a>>,
+    results: Vec<Option<Value>>,
+}
+
+impl<'a> Normalization<'a, '_> {
+    fn step(&mut self, task: NormalizationTask<'a>) -> Result<(), CodecError> {
         match task {
             NormalizationTask::Visit {
                 schema,
                 value,
                 hops,
                 depth,
-            } => {
-                if depth > NORMALIZATION_DEPTH || hops == 0 {
-                    return Err(CodecError::NormalizationLimit {
-                        limit: NORMALIZATION_DEPTH,
-                    });
-                }
-                let schema = resolve_schema(document, schema, hops)?;
-                if let Some(branches) = schema
-                    .get("anyOf")
-                    .or_else(|| schema.get("oneOf"))
-                    .and_then(Value::as_array)
-                {
-                    tasks.push(NormalizationTask::Branch {
-                        branches,
-                        index: 0,
-                        value,
-                        selected: None,
-                        ambiguous: false,
-                        pending: None,
-                        hops,
-                        depth,
-                    });
-                    continue;
-                }
-                if schema.get(KEYWORD).and_then(Value::as_str) == Some("float")
-                    && let Some(number) = super::parse_float(&value)
-                {
-                    let at_f32 = schema.get("format").and_then(Value::as_str) == Some("float");
-                    results.push(Some(Value::String(super::float_string(number, at_f32))));
-                    continue;
-                }
-                if schema.get(KEYWORD).and_then(Value::as_str) == Some("uint")
-                    && let Some(number) = value
-                        .as_u64()
-                        .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()))
-                {
-                    results.push(Some(Value::String(number.to_string())));
-                    continue;
-                }
-                match value {
-                    Value::Object(members) => {
-                        tasks.push(NormalizationTask::Object {
-                            schema,
-                            entries: members.into_iter(),
-                            out: serde_json::Map::new(),
-                            pending: None,
-                            hops,
-                            depth: depth + 1,
-                        });
-                    }
-                    Value::Array(items) => {
-                        tasks.push(NormalizationTask::Array {
-                            schema,
-                            items: items.into_iter(),
-                            out: Vec::new(),
-                            pending: false,
-                            hops,
-                            depth: depth + 1,
-                        });
-                    }
-                    scalar => results.push(Some(scalar)),
-                }
-            }
+            } => self.visit(schema, value, hops, depth)?,
             NormalizationTask::Object {
                 schema,
-                mut entries,
-                mut out,
-                mut pending,
-                hops,
-                depth,
-            } => {
-                if let Some(key) = pending.take() {
-                    let child = results.pop().expect("child normalization result");
-                    let Some(child) = child else {
-                        results.push(None);
-                        continue;
-                    };
-                    out.insert(key, child);
-                }
-                if let Some((key, value)) = entries.next() {
-                    if let Some(member_schema) = declared_member(schema, &key) {
-                        pending = Some(key);
-                        tasks.push(NormalizationTask::Object {
-                            schema,
-                            entries,
-                            out,
-                            pending,
-                            hops,
-                            depth,
-                        });
-                        tasks.push(NormalizationTask::Visit {
-                            schema: member_schema,
-                            value,
-                            hops: HOPS,
-                            depth,
-                        });
-                    } else {
-                        out.insert(key, value);
-                        tasks.push(NormalizationTask::Object {
-                            schema,
-                            entries,
-                            out,
-                            pending,
-                            hops,
-                            depth,
-                        });
-                    }
-                } else {
-                    results.push(Some(Value::Object(out)));
-                }
-            }
-            NormalizationTask::Array {
-                schema,
-                mut items,
-                mut out,
+                entries,
+                out,
                 pending,
                 hops,
                 depth,
-            } => {
-                if pending {
-                    let child = results.pop().expect("child normalization result");
-                    let Some(child) = child else {
-                        results.push(None);
-                        continue;
-                    };
-                    out.push(child);
-                }
-                if let Some(value) = items.next() {
-                    let item_schema = schema.get("items");
-                    if let Some(item_schema) = item_schema {
-                        tasks.push(NormalizationTask::Array {
-                            schema,
-                            items,
-                            out,
-                            pending: true,
-                            hops,
-                            depth,
-                        });
-                        tasks.push(NormalizationTask::Visit {
-                            schema: item_schema,
-                            value,
-                            hops: HOPS,
-                            depth,
-                        });
-                    } else {
-                        out.push(value);
-                        tasks.push(NormalizationTask::Array {
-                            schema,
-                            items,
-                            out,
-                            pending: false,
-                            hops,
-                            depth,
-                        });
-                    }
-                } else {
-                    results.push(Some(Value::Array(out)));
-                }
-            }
+            } => self.object(schema, entries, out, pending, hops, depth),
+            NormalizationTask::Array {
+                schema,
+                items,
+                out,
+                pending,
+                hops,
+                depth,
+            } => self.array(schema, items, out, pending, hops, depth),
             NormalizationTask::Branch {
                 branches,
                 mut index,
@@ -556,10 +437,10 @@ fn normalize_authoring(
                 depth,
             } => {
                 if let Some(branch_index) = pending.take() {
-                    let candidate = results.pop().expect("branch normalization result");
+                    let candidate = self.results.pop().expect("branch normalization result");
                     let Some(candidate) = candidate else {
                         ambiguous = true;
-                        tasks.push(NormalizationTask::Branch {
+                        self.tasks.push(NormalizationTask::Branch {
                             branches,
                             index,
                             value,
@@ -569,14 +450,9 @@ fn normalize_authoring(
                             hops,
                             depth,
                         });
-                        continue;
+                        return Ok(());
                     };
-                    let branch = &branches[branch_index];
-                    let key = serde_json::to_string(branch).expect("a schema branch serializes");
-                    let validator = branch_validators
-                        .get(&key)
-                        .expect("compiled branch validator");
-                    if validator.is_valid(&candidate) {
+                    if self.accepts(&branches[branch_index], &candidate) {
                         if selected.is_some() {
                             ambiguous = true;
                         } else {
@@ -584,51 +460,225 @@ fn normalize_authoring(
                         }
                     }
                 }
-                if index < branches.len() {
-                    let branch_index = index;
-                    index += 1;
-                    let branch = &branches[branch_index];
-                    let resolved = resolve_schema(document, branch, hops)?;
-                    if !authoring_matches(resolved, &value) {
-                        tasks.push(NormalizationTask::Branch {
-                            branches,
-                            index,
-                            value,
-                            selected,
-                            ambiguous,
-                            pending,
-                            hops,
-                            depth,
-                        });
-                        continue;
-                    }
-                    budget.consume(NORMALIZATION_STEPS)?;
-                    tasks.push(NormalizationTask::Branch {
+                if index >= branches.len() {
+                    self.results.push(if ambiguous { None } else { selected });
+                    return Ok(());
+                }
+                let branch_index = index;
+                index += 1;
+                let resolved = resolve_schema(self.document, &branches[branch_index], hops)?;
+                if !authoring_matches(resolved, &value) {
+                    self.tasks.push(NormalizationTask::Branch {
                         branches,
                         index,
-                        value: value.clone(),
+                        value,
                         selected,
                         ambiguous,
-                        pending: Some(branch_index),
+                        pending,
                         hops,
                         depth,
                     });
-                    tasks.push(NormalizationTask::Visit {
-                        schema: resolved,
-                        value: value.clone(),
-                        hops: hops - 1,
-                        depth,
-                    });
-                } else {
-                    results.push(if ambiguous { None } else { selected });
+                    return Ok(());
                 }
+                self.budget.consume(NORMALIZATION_STEPS)?;
+                self.tasks.push(NormalizationTask::Branch {
+                    branches,
+                    index,
+                    value: value.clone(),
+                    selected,
+                    ambiguous,
+                    pending: Some(branch_index),
+                    hops,
+                    depth,
+                });
+                self.tasks.push(NormalizationTask::Visit {
+                    schema: resolved,
+                    value,
+                    hops: hops - 1,
+                    depth,
+                });
             }
         }
-        if tasks.is_empty() {
-            return Ok(results.pop().flatten());
-        }
+        Ok(())
     }
-    Ok(results.pop().flatten())
+
+    /// Resolve the position, then either settle a scalar spelling the declaration states, or
+    /// schedule the branches, members, or items the value is normalized through.
+    fn visit(
+        &mut self,
+        schema: &'a Value,
+        value: Value,
+        hops: usize,
+        depth: usize,
+    ) -> Result<(), CodecError> {
+        if depth > NORMALIZATION_DEPTH || hops == 0 {
+            return Err(CodecError::NormalizationLimit {
+                limit: NORMALIZATION_DEPTH,
+            });
+        }
+        let schema = resolve_schema(self.document, schema, hops)?;
+        if let Some(branches) = schema
+            .get("anyOf")
+            .or_else(|| schema.get("oneOf"))
+            .and_then(Value::as_array)
+        {
+            self.tasks.push(NormalizationTask::Branch {
+                branches,
+                index: 0,
+                value,
+                selected: None,
+                ambiguous: false,
+                pending: None,
+                hops,
+                depth,
+            });
+            return Ok(());
+        }
+        if schema.get(KEYWORD).and_then(Value::as_str) == Some("float")
+            && let Some(number) = super::parse_float(&value)
+        {
+            let at_f32 = schema.get("format").and_then(Value::as_str) == Some("float");
+            self.results
+                .push(Some(Value::String(super::float_string(number, at_f32))));
+            return Ok(());
+        }
+        if schema.get(KEYWORD).and_then(Value::as_str) == Some("uint")
+            && let Some(number) = value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|value| value.parse::<u64>().ok()))
+        {
+            self.results.push(Some(Value::String(number.to_string())));
+            return Ok(());
+        }
+        match value {
+            Value::Object(members) => {
+                self.tasks.push(NormalizationTask::Object {
+                    schema,
+                    entries: members.into_iter(),
+                    out: serde_json::Map::new(),
+                    pending: None,
+                    hops,
+                    depth: depth + 1,
+                });
+            }
+            Value::Array(items) => {
+                self.tasks.push(NormalizationTask::Array {
+                    schema,
+                    items: items.into_iter(),
+                    out: Vec::new(),
+                    pending: false,
+                    hops,
+                    depth: depth + 1,
+                });
+            }
+            scalar => self.results.push(Some(scalar)),
+        }
+        Ok(())
+    }
+
+    /// Take the member normalized last, then schedule the next declared member; an undeclared
+    /// member is carried as it was submitted.
+    fn object(
+        &mut self,
+        schema: &'a Value,
+        mut entries: serde_json::map::IntoIter,
+        mut out: serde_json::Map<String, Value>,
+        mut pending: Option<String>,
+        hops: usize,
+        depth: usize,
+    ) {
+        if let Some(key) = pending.take() {
+            let child = self.results.pop().expect("child normalization result");
+            let Some(child) = child else {
+                self.results.push(None);
+                return;
+            };
+            out.insert(key, child);
+        }
+        let Some((key, value)) = entries.next() else {
+            self.results.push(Some(Value::Object(out)));
+            return;
+        };
+        let child = match declared_member(schema, &key) {
+            Some(member_schema) => {
+                pending = Some(key);
+                Some(NormalizationTask::Visit {
+                    schema: member_schema,
+                    value,
+                    hops: HOPS,
+                    depth,
+                })
+            }
+            None => {
+                out.insert(key, value);
+                None
+            }
+        };
+        self.tasks.push(NormalizationTask::Object {
+            schema,
+            entries,
+            out,
+            pending,
+            hops,
+            depth,
+        });
+        self.tasks.extend(child);
+    }
+
+    /// Take the item normalized last, then schedule the next one; items of an array that declares
+    /// no `items` are carried as they were submitted.
+    fn array(
+        &mut self,
+        schema: &'a Value,
+        mut items: std::vec::IntoIter<Value>,
+        mut out: Vec<Value>,
+        pending: bool,
+        hops: usize,
+        depth: usize,
+    ) {
+        if pending {
+            let child = self.results.pop().expect("child normalization result");
+            let Some(child) = child else {
+                self.results.push(None);
+                return;
+            };
+            out.push(child);
+        }
+        let Some(value) = items.next() else {
+            self.results.push(Some(Value::Array(out)));
+            return;
+        };
+        let child = match schema.get("items") {
+            Some(item_schema) => Some(NormalizationTask::Visit {
+                schema: item_schema,
+                value,
+                hops: HOPS,
+                depth,
+            }),
+            None => {
+                out.push(value);
+                None
+            }
+        };
+        self.tasks.push(NormalizationTask::Array {
+            schema,
+            items,
+            out,
+            pending: child.is_some(),
+            hops,
+            depth,
+        });
+        self.tasks.extend(child);
+    }
+
+    /// Whether a branch's normalized candidate is one its compiled validator accepts.
+    fn accepts(&self, branch: &Value, candidate: &Value) -> bool {
+        let key = serde_json::to_string(branch).expect("a schema branch serializes");
+        self.branch_validators
+            .get(&key)
+            .expect("compiled branch validator")
+            .is_valid(candidate)
+    }
 }
 
 fn resolve_schema<'a>(

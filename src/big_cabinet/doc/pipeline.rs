@@ -359,28 +359,11 @@ impl DocsService {
                     self.commands.discard(&row.command).await?;
                 }
                 (Kind::Create, State::Pending, Some(document)) => {
-                    let exists = self
-                        .big_repo
-                        .has_keyhive_document(&document)
-                        .await
-                        .map_err(repository)?;
-                    if !exists {
-                        if reserved.contains(&document) {
-                            self.big_repo
-                                .abandon_allocation(document)
-                                .await
-                                .map_err(repository)?;
-                        }
-                        self.commands.discard(&row.command).await?;
+                    let Some(handle) = self
+                        .reserved_content(&row.command, &document, &reserved)
+                        .await?
+                    else {
                         continue;
-                    }
-                    let handle = if reserved.contains(&document) {
-                        self.big_repo
-                            .commit_reserved(document.clone(), &[])
-                            .await
-                            .map_err(repository)?
-                    } else {
-                        self.handle(&document).await?
                     };
                     let heads = sorted(handle.with_document_read(|doc| doc.get_heads()).await);
                     let Some(Detail::Create { owner_id }) = row.detail else {
@@ -411,16 +394,8 @@ impl DocsService {
                         .await?;
                 }
                 (Kind::Write, State::Pending, Some(document)) => {
-                    let handle = match self.handle(&document).await {
-                        Ok(handle) => handle,
-                        Err(DocsError::DocNotFound) => {
-                            self.commands.discard(&row.command).await?;
-                            continue;
-                        }
-                        // The document is still materializing, so whether the write landed is
-                        // not yet knowable; the row stays in flight for the next boot pass.
-                        Err(DocsError::Pending { .. }) => continue,
-                        Err(error) => return Err(error),
+                    let Some(handle) = self.target_handle(&row.command, &document).await? else {
+                        continue;
                     };
                     let committed = handle
                         .with_document_read(|doc| committed_change(doc, &row.command))
@@ -438,28 +413,11 @@ impl DocsService {
                     self.commands.discard(&row.command).await?;
                 }
                 (Kind::Branch, State::Pending, Some(branch)) => {
-                    let exists = self
-                        .big_repo
-                        .has_keyhive_document(&branch)
-                        .await
-                        .map_err(repository)?;
-                    if !exists {
-                        if reserved.contains(&branch) {
-                            self.big_repo
-                                .abandon_allocation(branch)
-                                .await
-                                .map_err(repository)?;
-                        }
-                        self.commands.discard(&row.command).await?;
+                    let Some(handle) = self
+                        .reserved_content(&row.command, &branch, &reserved)
+                        .await?
+                    else {
                         continue;
-                    }
-                    let handle = if reserved.contains(&branch) {
-                        self.big_repo
-                            .commit_reserved(branch.clone(), &[])
-                            .await
-                            .map_err(repository)?
-                    } else {
-                        self.handle(&branch).await?
                     };
                     let heads = sorted(handle.with_document_read(|doc| doc.get_heads()).await);
                     self.commands
@@ -482,14 +440,8 @@ impl DocsService {
                     let Some(Detail::Merge { heads, .. }) = &row.detail else {
                         unreachable!("a merge row records its source heads")
                     };
-                    let handle = match self.handle(&target).await {
-                        Ok(handle) => handle,
-                        Err(DocsError::DocNotFound) => {
-                            self.commands.discard(&row.command).await?;
-                            continue;
-                        }
-                        Err(DocsError::Pending { .. }) => continue,
-                        Err(error) => return Err(error),
+                    let Some(handle) = self.target_handle(&row.command, &target).await? else {
+                        continue;
                     };
                     let merged = handle
                         .with_document_read(|doc| {
@@ -514,6 +466,61 @@ impl DocsService {
             }
         }
         self.commands.purge_done().await
+    }
+
+    /// The document a pending create or branch reserved, once it holds content: the reservation
+    /// is committed if it is still open. `None` once the command is discarded because the
+    /// document never received content, abandoning a reservation still left open.
+    async fn reserved_content(
+        &self,
+        command: &CommandId,
+        document: &DocId,
+        reserved: &BTreeSet<DocId>,
+    ) -> Result<Option<BigDocHandle>, DocsError> {
+        let exists = self
+            .big_repo
+            .has_keyhive_document(document)
+            .await
+            .map_err(repository)?;
+        if !exists {
+            if reserved.contains(document) {
+                self.big_repo
+                    .abandon_allocation(document.clone())
+                    .await
+                    .map_err(repository)?;
+            }
+            self.commands.discard(command).await?;
+            return Ok(None);
+        }
+        if reserved.contains(document) {
+            return self
+                .big_repo
+                .commit_reserved(document.clone(), &[])
+                .await
+                .map(Some)
+                .map_err(repository);
+        }
+        self.handle(document).await.map(Some)
+    }
+
+    /// The existing document a pending write or merge targets. `None` once the command is
+    /// discarded because the document is gone, or while the document is still materializing:
+    /// whether the change landed is not yet knowable then, so the row stays in flight for the
+    /// next boot pass.
+    async fn target_handle(
+        &self,
+        command: &CommandId,
+        document: &DocId,
+    ) -> Result<Option<BigDocHandle>, DocsError> {
+        match self.handle(document).await {
+            Ok(handle) => Ok(Some(handle)),
+            Err(DocsError::DocNotFound) => {
+                self.commands.discard(command).await?;
+                Ok(None)
+            }
+            Err(DocsError::Pending { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Settle a committed branch from its row. A backlink the origin now refuses (its branch list

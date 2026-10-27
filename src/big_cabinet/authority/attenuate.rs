@@ -2,13 +2,15 @@
 
 use super::*;
 
-impl AuthorityService {
-    async fn attenuate(&self, request: AttenuateCapability) -> Result<Capability, AuthorityError> {
-        let mut state = self.state.lock().await;
-        let held = cap::walk(&state, &request.capability)?;
+impl cap::State {
+    pub(super) fn attenuate(
+        &mut self,
+        request: AttenuateCapability,
+    ) -> Result<Capability, AuthorityError> {
+        let held = cap::walk(self, &request.capability)?;
         held.require(Rights::NARROW)?;
         held.bound(request.rights)?;
-        let child = state.child(
+        let child = self.child(
             held.cap.object.clone(),
             request.rights,
             held.cap.issuer,
@@ -16,7 +18,7 @@ impl AuthorityService {
             [request.capability],
         )?;
         let capability = child.wire();
-        state.insert(child);
+        self.insert(child);
         Ok(capability)
     }
 }
@@ -26,6 +28,10 @@ impl Handler<AttenuateCapability> for AuthorityService {
         &self,
         request: Envelope<AttenuateCapability>,
     ) -> Result<ResponseEnvelope<Capability>, AuthorityServiceError> {
-        Ok(self.attenuate(request.params).await?.into())
+        let attenuated = cap::ask(&self.ledger, |reply| {
+            cap::Command::Attenuate(request.params, reply)
+        })
+        .await?;
+        Ok(attenuated.into())
     }
 }

@@ -2,27 +2,27 @@
 //! that list it, and a placement is a drawer.
 
 use super::Core;
-use super::DrawerId;
-use super::DrawersError;
 use super::METADATA_PLACEMENT;
 use super::Projection;
 use super::authority_error;
-use super::drawer_object;
 use super::ledger::Ledger;
 use super::parse_placement;
 use super::state::State;
-use crate::authority::AuthorityProtocol;
-use crate::authority::CapId;
-use crate::authority::Namespace;
-use crate::authority::ResolveActor;
 use crate::doc::AccessError;
 use crate::doc::AccessFuture;
 use crate::doc::AccessRequest;
 use crate::doc::DocAccess;
-use crate::doc::DocsProtocol;
+use big_cabinet_core::authority::AuthorityProtocol;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::Namespace;
+use big_cabinet_core::authority::ResolveActor;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::doc::DocsProtocol;
 use big_cabinet_core::drawer::DrawerAccess as Access;
+use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawersError;
+use big_cabinet_core::drawer::protocol::drawer_object;
 use big_repo::SharedBigRepo;
 use service_utils_rs::Client;
 use service_utils_rs::ContextError;
@@ -365,7 +365,7 @@ impl DocAccess for DrawerAccess {
         &'a self,
         context: &'a RequestContext,
         actor: Uuid7,
-        scope: &'a crate::doc::DocScope,
+        scope: &'a big_cabinet_core::doc::DocScope,
     ) -> AccessFuture<'a, Vec<CapId>> {
         Box::pin(async move {
             if actor == self.core.actor().actor_id {

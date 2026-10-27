@@ -173,7 +173,7 @@ pub enum Codec {
     Datetime,
     /// A facet reference: a string in the document and in JSON, which must parse as a
     /// [`crate::FacetReference`]. An optional `refHeads` sibling of the marked member pins the
-    /// referenced facet's frontier (ADR 016).
+    /// referenced facet's frontier (ADR 021).
     Reference,
 }
 

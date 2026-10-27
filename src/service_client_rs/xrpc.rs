@@ -1,5 +1,3 @@
-pub use service_core_rs::xrpc::*;
-
 mod client;
 #[cfg(feature = "iroh-http")]
 pub mod iroh;

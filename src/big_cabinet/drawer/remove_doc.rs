@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 impl Core {
     /// Take `doc` out of `drawer`, idempotently: the entry is deleted before the docs group is
-    /// revoked on the doc (ADR 014), and each half runs only if its state is still there, so a
+    /// revoked on the doc (ADR 019), and each half runs only if its state is still there, so a
     /// retry or a boot replay finishes an interrupted attempt. `None` when `doc` was neither
     /// listed nor granted — not an entry; otherwise the receipt of the roster write, or the
     /// drawer's current heads when only the grant was left to revoke.

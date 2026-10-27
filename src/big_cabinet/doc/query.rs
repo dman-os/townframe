@@ -1,5 +1,5 @@
 //! QueryFacets and QueryFacetRefs: authority-filtered queries over the `facet_set` and
-//! `facet_ref` projections (ADR 009, ADR 014).
+//! `facet_ref` projections (ADR 009, ADR 019).
 //!
 //! When `drawer_id` is given, membership is decided by the drawer policy's verified roster
 //! projection (`DocAccess::readable_in_drawer`), never by unverified `facet_set` tag presence:

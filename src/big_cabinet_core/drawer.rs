@@ -1,5 +1,5 @@
 //! The drawer facets: a drawer is a doc carrying `org.example.daybook.drawer/main`, and a
-//! single-group drawer lists what it holds as roster entries on that same doc (ADR 014).
+//! single-group drawer lists what it holds as roster entries on that same doc (ADR 019).
 //!
 //! These are core declarations like dmeta — Cabinet writes them, so their sidecar is the codec's
 //! authority by construction and an embedder cannot shadow them. The entry facets are keyed by the
@@ -67,7 +67,7 @@ impl Drawer {
     }
 }
 
-/// How the drawer is laid out. Internally tagged like every published union (ADR 016 §5): the
+/// How the drawer is laid out. Internally tagged like every published union (ADR 021 §5): the
 /// member object carries `$type` beside its own fields. Open (docs/wiki/docs.md §Evolvability):
 /// a layout this build does not know is carried untouched — reading, storing and listing a
 /// drawer never requires operating it. Only an operation that must interpret the layout
@@ -216,7 +216,7 @@ pub struct DrawerGroups {
 /// `org.example.daybook.drawer.roster/main`: marks the canonical roster on the drawer doc.
 /// Today every entry is a facet on the drawer doc itself, so the marker has nothing to say:
 /// it carries the `empty: true` convention, and the fields a future roster layout needs
-/// (external docs, ranges, shard routing — ADR 014 sharding design) land beside it as optional
+/// (external docs, ranges, shard routing — ADR 019 sharding design) land beside it as optional
 /// fields without a new facet tag. A separate one-member layout vocabulary would state no fact.
 #[macros::facet(id = "org.example.daybook.drawer.roster")]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

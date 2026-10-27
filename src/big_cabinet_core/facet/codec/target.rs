@@ -71,11 +71,10 @@ use std::collections::HashMap;
 ///   identity-safe, and a keyed correspondence for submitted lists is its own open question.
 /// - Content at a position nothing declares and no base holds writes plain JSON: what native
 ///   storage fresh unknown content should take is its own open question.
+///
+/// This is the test-only harness over any `Transactable` (an `AutoCommit` included); production
+/// writes go through [`reconcile_json_atomic`], which owns the transaction it rolls back.
 #[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "the legacy AutoCommit harness is test-only; production writes use reconcile_json_atomic"
-)]
 pub(crate) fn reconcile_json<D>(
     doc: &mut D,
     obj: &ObjId,

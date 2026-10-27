@@ -2,9 +2,9 @@
 
 use super::ledger::Op;
 use super::*;
-use crate::doc::At;
-use crate::doc::ReadFacets;
 use crate::doc::pipeline::digest;
+use big_cabinet_core::doc::At;
+use big_cabinet_core::doc::ReadFacets;
 use big_cabinet_core::drawer::DrawerDocEntry;
 use big_repo::keyhive_core::principal::identifier::Identifier;
 use std::collections::BTreeSet;
@@ -112,7 +112,7 @@ impl Core {
     /// Make `doc` an entry of `drawer` at `access`, idempotently: only what the Keyhive grant and
     /// the roster do not already say is done, so a retry or a boot replay finishes an interrupted
     /// attempt. Widening grants before it publishes, narrowing publishes before it re-grants
-    /// (ADR 014), so an interruption leaves the entry at or below the authority behind it. The
+    /// (ADR 019), so an interruption leaves the entry at or below the authority behind it. The
     /// receipt is the roster write's, or the drawer's current heads when nothing had to change.
     pub(crate) async fn enter(
         &self,

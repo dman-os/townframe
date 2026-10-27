@@ -3,7 +3,7 @@
 # FDR 001: Drawers as Doc Collections
 
 **Status:** Accepted — functional design; self-doc and single-group drawers, child
-entries, actor grants and local drawers are implemented by `DrawerService` (ADR 014)
+entries, actor grants and local drawers are implemented by `DrawerService` (ADR 019)
 
 ## Purpose
 
@@ -151,7 +151,7 @@ interrupted work remains inspectable and retryable.
 ## Actors and capabilities
 
 Actors are persistent subsystem identities authorized through capabilities
-(ADR 017). The operator holds every right and opens the other actors. Delegation is
+(ADR 022). The operator holds every right and opens the other actors. Delegation is
 not implicit in actor names or paths: an object capability is named by DrawerService from
 its own actor capability, a holder can only drop rights from it, and a child's rights
 can only shrink. Durable drawer grants are rows in DrawerService's ledger namespace keyed

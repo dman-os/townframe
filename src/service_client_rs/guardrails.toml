@@ -4,5 +4,10 @@ dependency_reason = "Service clients implement the service-core message contract
 allowed_dependencies = ["service_core_rs"]
 allow_external_api_types = false
 
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = ["http", "iroh-http"]
+
 [builds.native]
 features = ["http", "iroh-http"]

@@ -1,11 +1,6 @@
 use super::client::XrpcClientError;
 use super::client::decode_xrpc_response;
 use super::client::encode_xrpc_request;
-use crate::HttpMetadata;
-use crate::HttpMethod;
-use crate::RequestContext;
-use crate::XrpcKind;
-use crate::XrpcOperation;
 use http::HeaderValue;
 use http::Method;
 use http::header;
@@ -13,8 +8,15 @@ use http_body_util::BodyExt;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use service_core_rs::HttpMetadata;
+use service_core_rs::HttpMethod;
+use service_core_rs::RequestContext;
+use service_core_rs::ResponseEnvelope;
+use service_core_rs::XrpcKind;
+use service_core_rs::XrpcOperation;
 use std::pin::Pin;
-use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 pub const IROH_XRPC_HTTP_ALPN: &[u8] = b"townframe/xrpc-http/1";
 
@@ -66,17 +68,99 @@ impl tokio::io::AsyncWrite for IrohHttpStream {
     }
 }
 
+/// Handle to an XRPC peer reached over one retained Iroh connection.
+///
+/// Handles never touch the retained connection directly: a single
+/// `IrohConnectionActor` task owns it and handles send it commands. The
+/// actor owns the connection lifecycle (connect, reuse, replace), never the
+/// request I/O: it hands each request a clone of the connection, and the
+/// request opens its own bidirectional stream and drives its HTTP exchange
+/// on the caller's task, so concurrent requests multiplex over the
+/// connection instead of queueing behind the actor. The actor stops when the
+/// last handle is dropped and closes the command channel, dropping the
+/// retained connection.
 #[derive(Clone)]
 pub struct IrohXrpcClient {
-    endpoint: iroh::Endpoint,
     endpoint_addr: iroh::EndpointAddr,
     max_response_bytes: usize,
-    connection: Arc<tokio::sync::Mutex<IrohClientConnection>>,
+    // Unbounded so `Discard` stays synchronous and cannot be lost to a
+    // cancellation at an await point. The queue stays bounded in practice:
+    // a request has at most one reply-awaiting command outstanding plus one
+    // `Discard`.
+    connections: mpsc::UnboundedSender<IrohConnectionCommand>,
 }
 
-struct IrohClientConnection {
+#[derive(Debug)]
+enum IrohConnectionCommand {
+    /// Reply with the retained connection, connecting first when none is
+    /// retained or the retained one has closed.
+    Acquire(oneshot::Sender<Result<(iroh::endpoint::Connection, u64), String>>),
+    /// Reply with the retained connection as-is, without connecting.
+    Inspect(oneshot::Sender<Option<iroh::endpoint::Connection>>),
+    /// Forget the retained connection if it is still the given generation.
+    /// Generations tell successive connections apart, so a request that saw
+    /// an old connection die cannot discard its replacement.
+    Discard(u64),
+}
+
+struct IrohConnectionActor {
+    endpoint: iroh::Endpoint,
+    endpoint_addr: iroh::EndpointAddr,
     connection: Option<iroh::endpoint::Connection>,
     generation: u64,
+}
+
+impl IrohConnectionActor {
+    async fn run(mut self, mut commands: mpsc::UnboundedReceiver<IrohConnectionCommand>) {
+        while let Some(command) = commands.recv().await {
+            match command {
+                IrohConnectionCommand::Acquire(mut reply) => {
+                    // Connecting inline keeps a single connect in flight:
+                    // commands that arrive meanwhile wait and then reuse its
+                    // connection. The connect belongs to its requester, so a
+                    // requester cancelled mid-connect (dropped future or
+                    // exhausted time budget) closes its reply and abandons it.
+                    let acquired = tokio::select! {
+                        acquired = self.acquire() => acquired,
+                        () = reply.closed() => continue,
+                    };
+                    // A failed send means the requester was cancelled after the
+                    // connect resolved; the new connection stays retained.
+                    if let Err(unclaimed) = reply.send(acquired) {
+                        drop(unclaimed);
+                    }
+                }
+                IrohConnectionCommand::Inspect(reply) => {
+                    // A failed send means the requester was cancelled.
+                    if let Err(unclaimed) = reply.send(self.connection.clone()) {
+                        drop(unclaimed);
+                    }
+                }
+                IrohConnectionCommand::Discard(generation) => {
+                    if self.generation == generation {
+                        self.connection = None;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn acquire(&mut self) -> Result<(iroh::endpoint::Connection, u64), String> {
+        if let Some(connection) = &self.connection {
+            if connection.close_reason().is_none() {
+                return Ok((connection.clone(), self.generation));
+            }
+            self.connection = None;
+        }
+        let connection = self
+            .endpoint
+            .connect(self.endpoint_addr.clone(), IROH_XRPC_HTTP_ALPN)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.generation = self.generation.wrapping_add(1);
+        self.connection = Some(connection.clone());
+        Ok((connection, self.generation))
+    }
 }
 
 impl std::fmt::Debug for IrohXrpcClient {
@@ -148,45 +232,50 @@ impl IrohXrpcClient {
                 "response body limit must be positive".to_owned(),
             ));
         }
-        Ok(Self {
-            endpoint,
-            endpoint_addr,
-            max_response_bytes,
-            connection: Arc::new(tokio::sync::Mutex::new(IrohClientConnection {
+        let (connections, commands) = mpsc::unbounded_channel();
+        // Detached on purpose: the actor's only exit is the command channel
+        // closing when the last handle drops. It has no fallible paths of its
+        // own (connect failures are replies), so a panic is a bug that the
+        // process panic hook and the handles' `expect`s both surface.
+        tokio::spawn(
+            IrohConnectionActor {
+                endpoint,
+                endpoint_addr: endpoint_addr.clone(),
                 connection: None,
                 generation: 0,
-            })),
+            }
+            .run(commands),
+        );
+        Ok(Self {
+            endpoint_addr,
+            max_response_bytes,
+            connections,
         })
     }
 
     pub async fn active_connection(&self) -> Option<iroh::endpoint::Connection> {
-        self.connection.lock().await.connection.clone()
+        self.request(IrohConnectionCommand::Inspect).await
     }
 
-    async fn connection(&self) -> Result<(iroh::endpoint::Connection, u64), String> {
-        let mut state = self.connection.lock().await;
-        if let Some(connection) = &state.connection {
-            if connection.close_reason().is_none() {
-                return Ok((connection.clone(), state.generation));
-            }
-            state.connection = None;
-        }
-        let connection = self
-            .endpoint
-            .connect(self.endpoint_addr.clone(), IROH_XRPC_HTTP_ALPN)
+    async fn request<T>(
+        &self,
+        command: impl FnOnce(oneshot::Sender<T>) -> IrohConnectionCommand,
+    ) -> T {
+        let (reply, response) = oneshot::channel();
+        self.send(command(reply));
+        // Short of panicking, the actor drops a reply unanswered only once
+        // its receiver is gone, which cannot happen while this awaits it.
+        response
             .await
-            .map_err(|error| error.to_string())?;
-        state.generation = state.generation.wrapping_add(1);
-        let generation = state.generation;
-        state.connection = Some(connection.clone());
-        Ok((connection, generation))
+            .expect("Iroh connection actor answers every live request")
     }
 
-    async fn discard_connection(&self, generation: u64) {
-        let mut state = self.connection.lock().await;
-        if state.generation == generation {
-            state.connection = None;
-        }
+    fn send(&self, command: IrohConnectionCommand) {
+        // This handle keeps the command channel open, so the actor only goes
+        // away by panicking.
+        self.connections
+            .send(command)
+            .expect("Iroh connection actor outlives its client handles");
     }
 
     pub async fn execute<P, O, E>(
@@ -212,7 +301,7 @@ impl IrohXrpcClient {
         context: RequestContext,
         metadata: &HttpMetadata,
         params: &P,
-    ) -> Result<crate::ResponseEnvelope<O>, XrpcClientError<E>>
+    ) -> Result<ResponseEnvelope<O>, XrpcClientError<E>>
     where
         P: Serialize,
         O: DeserializeOwned,
@@ -244,7 +333,7 @@ impl IrohXrpcClient {
         context: RequestContext,
         metadata: &HttpMetadata,
         params: &P,
-    ) -> Result<crate::ResponseEnvelope<O>, XrpcClientError<E>>
+    ) -> Result<ResponseEnvelope<O>, XrpcClientError<E>>
     where
         P: Serialize,
         O: DeserializeOwned,
@@ -253,7 +342,7 @@ impl IrohXrpcClient {
         let encoded = encode_xrpc_request(operation, &context, metadata, params)
             .map_err(XrpcClientError::Encode)?;
         let (connection, generation) =
-            self.connection()
+            self.request(IrohConnectionCommand::Acquire)
                 .await
                 .map_err(|message| XrpcClientError::Transport {
                     message,
@@ -262,7 +351,7 @@ impl IrohXrpcClient {
         let (send, recv) = match connection.open_bi().await {
             Ok(stream) => stream,
             Err(error) => {
-                self.discard_connection(generation).await;
+                self.send(IrohConnectionCommand::Discard(generation));
                 return Err(XrpcClientError::Transport {
                     message: error.to_string(),
                     outcome_unknown: operation.kind == XrpcKind::Procedure,
@@ -316,8 +405,11 @@ impl IrohXrpcClient {
                 outcome_unknown: operation.kind == XrpcKind::Procedure,
             })?;
         if connection.close_reason().is_some() {
-            self.discard_connection(generation).await;
+            self.send(IrohConnectionCommand::Discard(generation));
         }
         decode_xrpc_response(operation, context.request_id, status, &headers, &body)
     }
 }
+
+#[cfg(test)]
+mod tests;

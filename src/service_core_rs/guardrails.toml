@@ -4,4 +4,9 @@ dependency_reason = "Service protocol, request context, and transport-neutral me
 allowed_dependencies = []
 allow_external_api_types = false
 
+[api]
+target = "x86_64-unknown-linux-gnu"
+default_features = true
+features = []
+
 [builds.native]

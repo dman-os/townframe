@@ -1647,9 +1647,12 @@ async fn tier6_prekey_janitor_survives_missed_add_window() -> crate::Res<()> {
         let storage_id = subduction_keyhive::storage::StorageHash::new(
             *joiner_signer.verifying_key().as_bytes(),
         );
+        // Compact through the repo's own keyhive sidecar storage (archives,
+        // WAL events, local secret material) so the durable state matches what
+        // a production shutdown would leave behind.
         subduction_keyhive::compact(
             pair.right().repo.keyhive().clone_keyhive().as_ref(),
-            &pair.right().repo.keyhive_storage(),
+            &pair.right().repo.keyhive_storage,
             storage_id,
         )
         .await?;

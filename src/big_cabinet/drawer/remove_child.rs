@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 impl Core {
     /// Take `child` out of `parent`, idempotently: the entry is deleted before the parent's
-    /// groups are withdrawn from the child's (ADR 014), and each half runs only if its state is
+    /// groups are withdrawn from the child's (ADR 019), and each half runs only if its state is
     /// still there, so a retry or a boot replay finishes an interrupted attempt. `None` when
     /// `child` was neither listed nor delegated to — not an entry; otherwise the receipt of the
     /// roster write, or the parent's current heads when only delegations were left to withdraw.

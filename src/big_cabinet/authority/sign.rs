@@ -4,9 +4,7 @@ use super::*;
 
 impl AuthorityService {
     async fn sign(&self, request: SignFacetClaim) -> Result<SignedFacetClaim, AuthorityError> {
-        let state = self.state.lock().await;
-        let chain = cap::walk(&state, &request.actor)?;
-        let uuid = actor::recognize(&state, &chain, Rights::USE)?;
+        let uuid = self.resolve(request.actor).await?.actor(Rights::USE)?;
         let transaction = self.read().await?;
         let row = Self::actor_row(&transaction, uuid).await?;
         drop(transaction);

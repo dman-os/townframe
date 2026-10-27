@@ -287,8 +287,8 @@ pub struct RevokePrincipal {
     pub principal: Principal,
 }
 
-macro_rules! operation {
-    ($request:ident => $output:ty, $kind:ident, $nsid:literal) => {
+macro_rules! operations {
+    ($($request:ident => $output:ty, $kind:ident, $nsid:literal;)*) => {$(
         impl Operation for $request {
             type Output = $output;
             type Error = DrawersError;
@@ -296,25 +296,27 @@ macro_rules! operation {
                 XrpcOperation::$kind(concat!("org.example.daybook.drawers.", $nsid))
                     .with_schemas(stringify!($output), stringify!(DrawersError));
         }
-    };
+    )*};
 }
-operation!(MintDrawerCapability => Capability, procedure, "mintDrawerCapability");
-operation!(CreateDrawer => DrawerCreated, procedure, "createDrawer");
-operation!(AddDoc => WriteReceipt, procedure, "addDoc");
-operation!(RemoveDoc => WriteReceipt, procedure, "removeDoc");
-operation!(AddChild => WriteReceipt, procedure, "addChild");
-operation!(RemoveChild => WriteReceipt, procedure, "removeChild");
-operation!(GetDrawer => DrawerView, query, "getDrawer");
-operation!(ListDocs => Vec<ListedDoc>, procedure, "listDocs");
-operation!(RememberDrawer => (), procedure, "rememberDrawer");
-operation!(ForgetDrawer => (), procedure, "forgetDrawer");
-operation!(ListKnownDrawers => Vec<KnownDrawer>, query, "listKnownDrawers");
-operation!(SetDrawerPolicy => (), procedure, "setDrawerPolicy");
-operation!(ListDrawers => Vec<ListedDrawer>, query, "listDrawers");
-operation!(GrantDrawer => (), procedure, "grantDrawer");
-operation!(RevokeDrawer => (), procedure, "revokeDrawer");
-operation!(InvitePrincipal => (), procedure, "invitePrincipal");
-operation!(RevokePrincipal => (), procedure, "revokePrincipal");
+operations! {
+    MintDrawerCapability => Capability, procedure, "mintDrawerCapability";
+    CreateDrawer => DrawerCreated, procedure, "createDrawer";
+    AddDoc => WriteReceipt, procedure, "addDoc";
+    RemoveDoc => WriteReceipt, procedure, "removeDoc";
+    AddChild => WriteReceipt, procedure, "addChild";
+    RemoveChild => WriteReceipt, procedure, "removeChild";
+    GetDrawer => DrawerView, query, "getDrawer";
+    ListDocs => Vec<ListedDoc>, procedure, "listDocs";
+    RememberDrawer => (), procedure, "rememberDrawer";
+    ForgetDrawer => (), procedure, "forgetDrawer";
+    ListKnownDrawers => Vec<KnownDrawer>, query, "listKnownDrawers";
+    SetDrawerPolicy => (), procedure, "setDrawerPolicy";
+    ListDrawers => Vec<ListedDrawer>, query, "listDrawers";
+    GrantDrawer => (), procedure, "grantDrawer";
+    RevokeDrawer => (), procedure, "revokeDrawer";
+    InvitePrincipal => (), procedure, "invitePrincipal";
+    RevokePrincipal => (), procedure, "revokePrincipal";
+}
 
 declare_service_protocol! {
     pub enum DrawersProtocol => DrawersMessage {

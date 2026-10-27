@@ -11,19 +11,19 @@
 //! `create document in <placement>`). It is a complete policy for an embedding without drawers and
 //! for tests, not a stand-in.
 
-use crate::authority::AuthorityProtocol;
-use crate::authority::CapId;
 use crate::authority::DomainAuthority;
-use crate::authority::Namespace;
-use crate::authority::Rights;
-use crate::doc::DocScope;
-use crate::doc::DocsError;
 use crate::doc::DocsService;
-use crate::doc::MintDocCapability;
 use crate::grants::GrantError;
 use crate::grants::Grants;
+use big_cabinet_core::authority::AuthorityProtocol;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::Namespace;
+use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::DocsError;
+use big_cabinet_core::doc::MintDocCapability;
 use service_utils_rs::Client;
 use service_utils_rs::ClientError;
 use service_utils_rs::RequestContext;
@@ -249,10 +249,10 @@ impl DocsService {
         &self,
         context: &RequestContext,
         request: MintDocCapability,
-    ) -> Result<crate::authority::Capability, DocsError> {
+    ) -> Result<big_cabinet_core::authority::Capability, DocsError> {
         let caller = self
             .capabilities
-            .source::<super::DocScope>(context, request.authorization)
+            .source::<big_cabinet_core::doc::DocScope>(context, request.authorization)
             .await
             .map_err(super::authority_error)?;
         if !caller.rights.contains(Rights::NARROW) || !request.rights.is_subset_of(caller.rights) {
@@ -307,7 +307,10 @@ impl service_utils_rs::Handler<MintDocCapability> for DocsService {
     async fn call(
         &self,
         request: service_utils_rs::Envelope<MintDocCapability>,
-    ) -> Result<service_utils_rs::ResponseEnvelope<crate::authority::Capability>, DocsError> {
+    ) -> Result<
+        service_utils_rs::ResponseEnvelope<big_cabinet_core::authority::Capability>,
+        DocsError,
+    > {
         Ok(self
             .mint_capability(&request.context, request.params)
             .await?

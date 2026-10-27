@@ -410,176 +410,201 @@ fn payload_type(variant: &syn::Variant) -> syn::Result<syn::Type> {
     Ok(field.ty.clone())
 }
 
-fn enum_shape(
-    item: &mut syn::ItemEnum,
-    args: &Args,
-    facet: &Path,
-) -> syn::Result<(syn::Ident, proc_macro2::TokenStream)> {
-    let name = item.ident.clone();
-    no_generics(&name, &item.generics)?;
-    let serde = scan_serde(&item.attrs)?;
-    serde.refuse_unexpected(&name, &["tag", "content"])?;
-    let layout = union_layout(&name, args, &serde)?;
-
-    let mut members: Vec<MemberVariant> = Vec::new();
-    let mut fallback: Option<(syn::Ident, syn::Type)> = None;
-    for variant in item.variants.iter_mut() {
-        let mut is_fallback = false;
-        for attr in &variant.attrs {
-            if !attr.path().is_ident("facet") {
-                continue;
-            }
-            let Meta::List(list) = &attr.meta else {
-                return Err(syn::Error::new_spanned(
-                    &attr.meta,
-                    "expected `#[facet(other)]`",
-                ));
-            };
-            if list.tokens.to_string().trim() == "other" {
-                is_fallback = true;
-            } else {
-                return Err(syn::Error::new_spanned(
-                    attr,
-                    "the only facet attribute a union variant takes is `#[facet(other)]`, marking \
-                     the fallback variant that keeps an unrecognized member",
-                ));
-            }
+/// Strips the variant's `#[facet(...)]` attributes and reports whether one of them is
+/// `#[facet(other)]`, the marker of the fallback variant. `not_a_list` is the error for a bare
+/// `#[facet]`, `not_other` the error for any other facet attribute.
+fn fallback_marker(
+    variant: &mut syn::Variant,
+    not_a_list: &str,
+    not_other: &str,
+) -> syn::Result<bool> {
+    let mut is_fallback = false;
+    for attr in &variant.attrs {
+        if !attr.path().is_ident("facet") {
+            continue;
         }
-        variant.attrs.retain(|attr| !attr.path().is_ident("facet"));
-        facet_fields::check_field_facets(&variant.fields)?;
-        let payload = payload_type(variant)?;
-        let variant_serde = scan_serde(&variant.attrs)?;
-        if is_fallback {
-            variant_serde.refuse_unexpected(variant, &[])?;
-            if fallback.is_some() {
-                return Err(syn::Error::new_spanned(
-                    variant,
-                    "a union has exactly one fallback variant",
-                ));
-            }
-            fallback = Some((variant.ident.clone(), payload));
+        let Meta::List(list) = &attr.meta else {
+            return Err(syn::Error::new_spanned(&attr.meta, not_a_list));
+        };
+        if list.tokens.to_string().trim() == "other" {
+            is_fallback = true;
         } else {
-            variant_serde.refuse_unexpected(variant, &["rename"])?;
-            members.push(MemberVariant {
-                ident: variant.ident.clone(),
-                payload,
-                rename: variant_serde.rename.clone(),
-            });
+            return Err(syn::Error::new_spanned(attr, not_other));
+        }
+    }
+    variant.attrs.retain(|attr| !attr.path().is_ident("facet"));
+    Ok(is_fallback)
+}
+
+/// A union declaration once its variants and openness have been checked.
+struct Union {
+    name: syn::Ident,
+    layout: Layout,
+    open: bool,
+    members: Vec<MemberVariant>,
+    /// The `#[facet(other)]` variant and its payload; present exactly when the union is open.
+    fallback: Option<(syn::Ident, syn::Type)>,
+}
+
+impl Union {
+    /// Reads every variant as a member or the fallback, stripping the `#[facet(other)]` marker, and
+    /// refuses a declaration whose openness, tagging and fallback disagree.
+    fn parse(item: &mut syn::ItemEnum, layout: Layout, open: bool) -> syn::Result<Self> {
+        let name = item.ident.clone();
+        let mut members: Vec<MemberVariant> = Vec::new();
+        let mut fallback: Option<(syn::Ident, syn::Type)> = None;
+        for variant in item.variants.iter_mut() {
+            let is_fallback = fallback_marker(
+                variant,
+                "expected `#[facet(other)]`",
+                "the only facet attribute a union variant takes is `#[facet(other)]`, marking the \
+                 fallback variant that keeps an unrecognized member",
+            )?;
+            facet_fields::check_field_facets(&variant.fields)?;
+            let payload = payload_type(variant)?;
+            let variant_serde = scan_serde(&variant.attrs)?;
+            if is_fallback {
+                variant_serde.refuse_unexpected(variant, &[])?;
+                if fallback.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        variant,
+                        "a union has exactly one fallback variant",
+                    ));
+                }
+                fallback = Some((variant.ident.clone(), payload));
+            } else {
+                variant_serde.refuse_unexpected(variant, &["rename"])?;
+                members.push(MemberVariant {
+                    ident: variant.ident.clone(),
+                    payload,
+                    rename: variant_serde.rename.clone(),
+                });
+            }
+        }
+
+        if open && matches!(layout, Layout::External) {
+            return Err(syn::Error::new_spanned(
+                &name,
+                "an open union is internally tagged: the codec dispatches on the discriminant key, \
+                 and external tagging has none",
+            ));
+        }
+        if open && fallback.is_none() {
+            return Err(syn::Error::new_spanned(
+                &name,
+                "an open union needs exactly one fallback variant marked `#[facet(other)]`, or \
+                 `#[facet(closed)]` to declare that an unrecognized member is an error",
+            ));
+        }
+        if !open && fallback.is_some() {
+            return Err(syn::Error::new_spanned(
+                &name,
+                "a variant is marked #[facet(other)] but the union is declared closed: a closed \
+                 union has no fallback",
+            ));
+        }
+        if let Some((_, payload)) = &fallback
+            && last_type_ident(payload).is_none_or(|ident| ident != "UnknownMember")
+        {
+            return Err(syn::Error::new_spanned(
+                &name,
+                "the fallback variant's last path segment is `UnknownMember`",
+            ));
+        }
+        Ok(Self {
+            name,
+            layout,
+            open,
+            members,
+            fallback,
+        })
+    }
+
+    fn openness(&self, facet: &Path) -> proc_macro2::TokenStream {
+        if self.open {
+            quote!(#facet::Openness::Open)
+        } else {
+            quote!(#facet::Openness::Closed)
         }
     }
 
-    let open = !args.closed;
-    if open && matches!(layout, Layout::External) {
-        return Err(syn::Error::new_spanned(
-            &name,
-            "an open union is internally tagged: the codec dispatches on the discriminant key, and \
-             external tagging has none",
-        ));
-    }
-    if open && fallback.is_none() {
-        return Err(syn::Error::new_spanned(
-            &name,
-            "an open union needs exactly one fallback variant marked `#[facet(other)]`, or \
-             `#[facet(closed)]` to declare that an unrecognized member is an error",
-        ));
-    }
-    if !open && fallback.is_some() {
-        return Err(syn::Error::new_spanned(
-            &name,
-            "a variant is marked #[facet(other)] but the union is declared closed: a closed union \
-             has no fallback",
-        ));
-    }
-    if let Some((_, payload)) = &fallback
-        && last_type_ident(payload).is_none_or(|ident| ident != "UnknownMember")
-    {
-        return Err(syn::Error::new_spanned(
-            &name,
-            "the fallback variant's last path segment is `UnknownMember`",
-        ));
-    }
-    if matches!(layout, Layout::Internal) && serde.tag.is_none() && !open {
-        item.attrs.push(syn::parse_quote!(#[serde(tag = "$type")]));
-    }
-
-    let tagging = match layout {
-        Layout::Internal => quote!(#facet::Tagging::Internally { tag: "$type" }),
-        Layout::Adjacent => {
-            quote!(#facet::Tagging::Adjacently { tag: "$type", content: "value" })
-        }
-        Layout::External => quote!(#facet::Tagging::Externally),
-    };
-    let layout_tokens = match layout {
-        Layout::Internal => quote!(#facet::UnionLayout::Internal { tag: "$type" }),
-        Layout::Adjacent => {
-            quote!(#facet::UnionLayout::Adjacent { tag: "$type", content: "value" })
-        }
-        Layout::External => quote!(#facet::UnionLayout::External),
-    };
-    let openness = if open {
-        quote!(#facet::Openness::Open)
-    } else {
-        quote!(#facet::Openness::Closed)
-    };
-    let shape = quote! {
-        impl #facet::FacetShape for #name {
-            const SHAPE: #facet::Shape = #facet::Shape::Union {
-                openness: #openness,
-                tagging: #tagging,
-            };
-        }
-    };
-    let schema_members = members.iter().map(|member| {
-        let payload = &member.payload;
+    fn shape_impl(&self, facet: &Path) -> proc_macro2::TokenStream {
+        let name = &self.name;
+        let openness = self.openness(facet);
+        let tagging = self.layout.tagging(facet);
         quote! {
-            #facet::MemberSchema {
-                id: <#payload as #facet::FacetMember>::ID,
-                schema: generator.subschema_for::<#payload>(),
-            },
-        }
-    });
-    let schema_impl = quote! {
-        #[cfg(feature = "schemars")]
-        impl ::schemars::JsonSchema for #name {
-            fn schema_name() -> ::std::borrow::Cow<'static, str> {
-                ::std::borrow::Cow::Borrowed(::core::stringify!(#name))
-            }
-
-            fn schema_id() -> ::std::borrow::Cow<'static, str> {
-                ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)).into()
-            }
-
-            /// A union is a position, never a named definition, so it is always inlined.
-            fn inline_schema() -> bool {
-                true
-            }
-
-            fn json_schema(generator: &mut ::schemars::SchemaGenerator) -> ::schemars::Schema {
-                let members = ::std::vec![#(#schema_members)*];
-                #facet::union_schema(&#layout_tokens, #open, members, generator.definitions())
+            impl #facet::FacetShape for #name {
+                const SHAPE: #facet::Shape = #facet::Shape::Union {
+                    openness: #openness,
+                    tagging: #tagging,
+                };
             }
         }
-    };
+    }
 
-    if !open {
+    fn schema_impl(&self, facet: &Path) -> proc_macro2::TokenStream {
+        let name = &self.name;
+        let open = self.open;
+        let layout_tokens = self.layout.tokens(facet);
+        let schema_members = self.members.iter().map(|member| {
+            let payload = &member.payload;
+            quote! {
+                #facet::MemberSchema {
+                    id: <#payload as #facet::FacetMember>::ID,
+                    schema: generator.subschema_for::<#payload>(),
+                },
+            }
+        });
+        quote! {
+            #[cfg(feature = "schemars")]
+            impl ::schemars::JsonSchema for #name {
+                fn schema_name() -> ::std::borrow::Cow<'static, str> {
+                    ::std::borrow::Cow::Borrowed(::core::stringify!(#name))
+                }
+
+                fn schema_id() -> ::std::borrow::Cow<'static, str> {
+                    ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)).into()
+                }
+
+                /// A union is a position, never a named definition, so it is always inlined.
+                fn inline_schema() -> bool {
+                    true
+                }
+
+                fn json_schema(generator: &mut ::schemars::SchemaGenerator) -> ::schemars::Schema {
+                    let members = ::std::vec![#(#schema_members)*];
+                    #facet::union_schema(&#layout_tokens, #open, members, generator.definitions())
+                }
+            }
+        }
+    }
+
+    /// A closed union keeps its serde derives, so each member's tag is its `#[serde(rename)]`, and
+    /// the emitted asserts check every tag against the payload's member id at compile time.
+    fn closed_tag_asserts(
+        &self,
+        item: &syn::ItemEnum,
+        facet: &Path,
+    ) -> syn::Result<proc_macro2::TokenStream> {
+        let name = &self.name;
         let derived = derived_traits(&item.attrs)?;
         for wanted in ["Serialize", "Deserialize"] {
             if !derived.iter().any(|name| name == wanted) {
                 return Err(syn::Error::new_spanned(
-                    &name,
+                    name,
                     format!("a closed union keeps its serde derives: derive {wanted} as well"),
                 ));
             }
         }
         if derived.iter().any(|name| name == "JsonSchema") {
             return Err(syn::Error::new_spanned(
-                &name,
+                name,
                 "a closed union's JsonSchema is emitted by the macro: remove it from \
                  #[derive(...)]",
             ));
         }
         let mut asserts = Vec::new();
-        for member in &members {
+        for member in &self.members {
             let (ident, payload) = (&member.ident, &member.payload);
             let Some(rename) = &member.rename else {
                 return Err(syn::Error::new_spanned(
@@ -597,50 +622,52 @@ fn enum_shape(
                 );
             });
         }
-        return Ok((name, quote! { #shape #schema_impl #(#asserts)* }));
+        Ok(quote! { #(#asserts)* })
     }
 
-    // An open union is the macro's to write: a fallback that keeps a member it does not know has no
-    // serde spelling, and `schemars` would emit a branch per declared variant and nothing else.
-    let derived = derived_traits(&item.attrs)?;
-    for replaced in ["Serialize", "Deserialize", "JsonSchema"] {
-        if derived.iter().any(|name| name == replaced) {
-            return Err(syn::Error::new_spanned(
-                &name,
-                format!(
-                    "an open union's {replaced} is emitted by the macro, because a fallback that \
-                     keeps an unrecognized member is not expressible in serde attributes: remove it \
-                     from #[derive(...)]"
-                ),
-            ));
+    /// An open union is the macro's to write: a fallback that keeps a member it does not know has
+    /// no serde spelling, and `schemars` would emit a branch per declared variant and nothing else.
+    fn open_codec(
+        &self,
+        item: &mut syn::ItemEnum,
+        facet: &Path,
+    ) -> syn::Result<proc_macro2::TokenStream> {
+        let name = &self.name;
+        let derived = derived_traits(&item.attrs)?;
+        for replaced in ["Serialize", "Deserialize", "JsonSchema"] {
+            if derived.iter().any(|name| name == replaced) {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    format!(
+                        "an open union's {replaced} is emitted by the macro, because a fallback \
+                         that keeps an unrecognized member is not expressible in serde attributes: \
+                         remove it from #[derive(...)]"
+                    ),
+                ));
+            }
         }
-    }
-    let (fallback_ident, fallback_payload) = fallback.expect("checked above");
-    // The keys have been read; leaving them would be an attribute nothing registers, and `schemars`
-    // registers `serde` on whatever it derives elsewhere.
-    item.attrs.retain(|attr| !attr.path().is_ident("serde"));
+        let (fallback_ident, fallback_payload) = self.fallback.as_ref().expect("checked in parse");
+        // The keys have been read; leaving them would be an attribute nothing registers, and
+        // `schemars` registers `serde` on whatever it derives elsewhere.
+        item.attrs.retain(|attr| !attr.path().is_ident("serde"));
 
-    let serialize_arms = members.iter().map(|member| {
-        let ident = &member.ident;
-        quote! {
-            Self::#ident(payload) => #facet::serialize_member(serializer, &#layout_tokens, payload),
-        }
-    });
-    let deserialize_members = members.iter().map(|member| {
-        let (ident, payload) = (&member.ident, &member.payload);
-        quote! {
-            #facet::Member {
-                id: <#payload as #facet::FacetMember>::ID,
-                read: |member| ::serde_json::from_value::<#payload>(member).map(Self::#ident),
-            },
-        }
-    });
-
-    Ok((
-        name.clone(),
-        quote! {
-            #shape
-
+        let layout_tokens = self.layout.tokens(facet);
+        let serialize_arms = self.members.iter().map(|member| {
+            let ident = &member.ident;
+            quote! {
+                Self::#ident(payload) => #facet::serialize_member(serializer, &#layout_tokens, payload),
+            }
+        });
+        let deserialize_members = self.members.iter().map(|member| {
+            let (ident, payload) = (&member.ident, &member.payload);
+            quote! {
+                #facet::Member {
+                    id: <#payload as #facet::FacetMember>::ID,
+                    read: |member| ::serde_json::from_value::<#payload>(member).map(Self::#ident),
+                },
+            }
+        });
+        Ok(quote! {
             impl ::serde::Serialize for #name {
                 fn serialize<S>(&self, serializer: S) -> ::core::result::Result<S::Ok, S::Error>
                 where
@@ -669,6 +696,38 @@ fn enum_shape(
                     )
                 }
             }
+        })
+    }
+}
+
+fn enum_shape(
+    item: &mut syn::ItemEnum,
+    args: &Args,
+    facet: &Path,
+) -> syn::Result<(syn::Ident, proc_macro2::TokenStream)> {
+    let name = item.ident.clone();
+    no_generics(&name, &item.generics)?;
+    let serde = scan_serde(&item.attrs)?;
+    serde.refuse_unexpected(&name, &["tag", "content"])?;
+    let layout = union_layout(&name, args, &serde)?;
+    let union = Union::parse(item, layout, !args.closed)?;
+    if matches!(union.layout, Layout::Internal) && serde.tag.is_none() && !union.open {
+        item.attrs.push(syn::parse_quote!(#[serde(tag = "$type")]));
+    }
+
+    let shape = union.shape_impl(facet);
+    let schema_impl = union.schema_impl(facet);
+    if !union.open {
+        let asserts = union.closed_tag_asserts(item, facet)?;
+        return Ok((name, quote! { #shape #schema_impl #asserts }));
+    }
+    let codec = union.open_codec(item, facet)?;
+    Ok((
+        name,
+        quote! {
+            #shape
+
+            #codec
 
             #schema_impl
         },
@@ -679,6 +738,30 @@ enum Layout {
     Internal,
     Adjacent,
     External,
+}
+
+impl Layout {
+    /// The `Tagging` the union's `FacetShape` states.
+    fn tagging(&self, facet: &Path) -> proc_macro2::TokenStream {
+        match self {
+            Layout::Internal => quote!(#facet::Tagging::Internally { tag: "$type" }),
+            Layout::Adjacent => {
+                quote!(#facet::Tagging::Adjacently { tag: "$type", content: "value" })
+            }
+            Layout::External => quote!(#facet::Tagging::Externally),
+        }
+    }
+
+    /// The `UnionLayout` the emitted codec and schema dispatch on.
+    fn tokens(&self, facet: &Path) -> proc_macro2::TokenStream {
+        match self {
+            Layout::Internal => quote!(#facet::UnionLayout::Internal { tag: "$type" }),
+            Layout::Adjacent => {
+                quote!(#facet::UnionLayout::Adjacent { tag: "$type", content: "value" })
+            }
+            Layout::External => quote!(#facet::UnionLayout::External),
+        }
+    }
 }
 
 fn union_layout(name: &syn::Ident, args: &Args, serde: &Serde) -> syn::Result<Layout> {
@@ -726,72 +809,19 @@ struct KnownVariant {
     spelling: String,
 }
 
-/// A vocabulary of strings rather than a set of named types, so the macro states the wire form and
-/// the schema, and a string nothing knows is kept as it was written.
-///
-/// A value's spelling is its variant's name in lowerCamel — `MyValue` is `"myValue"`. The macro
-/// derives that and refuses anything it cannot derive: a variant that is not PascalCase is rejected
-/// rather than mangled, because a macro here states a spelling or rejects one, it never rewrites
-/// what the author wrote. The only override is an explicit `#[serde(rename = "…")]`, which is a
-/// statement rather than a rule.
-fn string_enum_shape(
-    item: &mut syn::ItemEnum,
-    args: &Args,
-    facet: &Path,
-) -> syn::Result<(syn::Ident, proc_macro2::TokenStream)> {
-    let name = item.ident.clone();
-    no_generics(&name, &item.generics)?;
-    if args.closed {
-        return Err(syn::Error::new_spanned(
-            &name,
-            "a closed vocabulary needs nothing from the macro: drop `#[facet(open_string)]` and \
-             derive `Serialize`, `Deserialize` and `JsonSchema` on the enum instead",
-        ));
-    }
-    let serde = scan_serde(&item.attrs)?;
-    serde.refuse_unexpected(&name, &["rename_all"])?;
-    // Read, so it is consumed: nothing derives serde on this type, and an attribute nothing
-    // registers is a compile error rather than a silent no-op.
-    item.attrs.retain(|attr| !attr.path().is_ident("serde"));
-    if let Some(case) = &serde.rename_all
-        && case != "camelCase"
-    {
-        return Err(syn::Error::new_spanned(
-            &name,
-            format!(
-                "a vocabulary of strings is lowerCamel, so the only `rename_all` that agrees with it \
-                 is \"camelCase\", not \"{case}\": a value's spelling is derived from its variant's \
-                 name and never rewritten"
-            ),
-        ));
-    }
-
+/// Reads every variant as a known spelling or the fallback, stripping the `facet` and `serde`
+/// attributes it consumed: nothing derives serde on a vocabulary, so a leftover is a compile error.
+fn vocabulary_variants(item: &mut syn::ItemEnum) -> syn::Result<(Vec<KnownVariant>, syn::Ident)> {
     let mut known: Vec<KnownVariant> = Vec::new();
     let mut fallback: Option<syn::Ident> = None;
     for variant in item.variants.iter_mut() {
-        let mut is_fallback = false;
-        for attr in &variant.attrs {
-            if !attr.path().is_ident("facet") {
-                continue;
-            }
-            let Meta::List(list) = &attr.meta else {
-                return Err(syn::Error::new_spanned(
-                    &attr.meta,
-                    "expected `#[facet(other)]` on the variant that keeps an unrecognized string",
-                ));
-            };
-            if list.tokens.to_string().trim() == "other" {
-                is_fallback = true;
-            } else {
-                return Err(syn::Error::new_spanned(
-                    attr,
-                    "a value's spelling is its variant's name in lowerCamel, so there is nothing to \
-                     state here: name the variant `MyValue` for \"myValue\", or state it explicitly \
-                     with `#[serde(rename = \"…\")]`",
-                ));
-            }
-        }
-        variant.attrs.retain(|attr| !attr.path().is_ident("facet"));
+        let is_fallback = fallback_marker(
+            variant,
+            "expected `#[facet(other)]` on the variant that keeps an unrecognized string",
+            "a value's spelling is its variant's name in lowerCamel, so there is nothing to state \
+             here: name the variant `MyValue` for \"myValue\", or state it explicitly with \
+             `#[serde(rename = \"…\")]`",
+        )?;
         let variant_serde = scan_serde(&variant.attrs)?;
         variant_serde.refuse_unexpected(variant, &["rename"])?;
         variant.attrs.retain(|attr| !attr.path().is_ident("serde"));
@@ -852,12 +882,55 @@ fn string_enum_shape(
     }
     let Some(fallback) = fallback else {
         return Err(syn::Error::new_spanned(
-            &name,
+            &item.ident,
             "a vocabulary of strings needs exactly one fallback variant marked `#[facet(other)]`, \
              carrying a `String`: without one, a string nobody knows is an error",
         ));
     };
+    Ok((known, fallback))
+}
 
+/// A vocabulary of strings rather than a set of named types, so the macro states the wire form and
+/// the schema, and a string nothing knows is kept as it was written.
+///
+/// A value's spelling is its variant's name in lowerCamel — `MyValue` is `"myValue"`. The macro
+/// derives that and refuses anything it cannot derive: a variant that is not PascalCase is rejected
+/// rather than mangled, because a macro here states a spelling or rejects one, it never rewrites
+/// what the author wrote. The only override is an explicit `#[serde(rename = "…")]`, which is a
+/// statement rather than a rule.
+fn string_enum_shape(
+    item: &mut syn::ItemEnum,
+    args: &Args,
+    facet: &Path,
+) -> syn::Result<(syn::Ident, proc_macro2::TokenStream)> {
+    let name = item.ident.clone();
+    no_generics(&name, &item.generics)?;
+    if args.closed {
+        return Err(syn::Error::new_spanned(
+            &name,
+            "a closed vocabulary needs nothing from the macro: drop `#[facet(open_string)]` and \
+             derive `Serialize`, `Deserialize` and `JsonSchema` on the enum instead",
+        ));
+    }
+    let serde = scan_serde(&item.attrs)?;
+    serde.refuse_unexpected(&name, &["rename_all"])?;
+    // Read, so it is consumed: nothing derives serde on this type, and an attribute nothing
+    // registers is a compile error rather than a silent no-op.
+    item.attrs.retain(|attr| !attr.path().is_ident("serde"));
+    if let Some(case) = &serde.rename_all
+        && case != "camelCase"
+    {
+        return Err(syn::Error::new_spanned(
+            &name,
+            format!(
+                "a vocabulary of strings is lowerCamel, so the only `rename_all` that agrees with it \
+                 is \"camelCase\", not \"{case}\": a value's spelling is derived from its variant's \
+                 name and never rewritten"
+            ),
+        ));
+    }
+
+    let (known, fallback) = vocabulary_variants(item)?;
     let spellings: Vec<&String> = known.iter().map(|known| &known.spelling).collect();
     let known_idents: Vec<&syn::Ident> = known.iter().map(|known| &known.ident).collect();
     Ok((

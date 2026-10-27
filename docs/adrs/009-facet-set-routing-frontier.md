@@ -33,7 +33,7 @@ observes every locally applied change regardless of origin.
   `Removed { doc_heads, facet_heads, clock }` (a tombstone retaining the last
   signature-introduction heads).
 - **Clock:** the Lamport clock of `facet_heads`: the greatest Automerge
-  `max_op` among the introducing changes (see ADR 015 §2 `FacetVersion`).
+  `max_op` among the introducing changes (see ADR 020 §2 `FacetVersion`).
   A version written on top of another has a strictly greater clock; concurrent
   versions are incomparable and equal clock with different heads means the
   versions merged or diverged.
@@ -58,7 +58,7 @@ authority model downstream.
 
 The first derived index on this projection is implemented: `facet_ref`
 subscribes to the tags whose schema declares at least one `reference` storage
-position (ADR 016), gate-verifies each live route's value at the reported
+position (ADR 021), gate-verifies each live route's value at the reported
 document heads, and records one edge per declared reference — origin route and
 JSON pointer, target route with `self` resolved against the origin document,
 and the sibling `refHeads` pin. Edges are replaced per route in the same

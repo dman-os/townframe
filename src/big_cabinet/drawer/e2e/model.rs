@@ -159,6 +159,13 @@ impl DrawerModel {
         self.drawers.iter().position(|d| d == id)
     }
 
+    /// Drawer grants do not survive a boot, so the model drops Bob's with each restart.
+    fn rebooted(&mut self) {
+        for grants in &mut self.bob_grants {
+            grants.clear();
+        }
+    }
+
     fn held_bob(&self, drawer: usize) -> Option<Access> {
         self.bob_grants[drawer].iter().copied().max()
     }
@@ -385,154 +392,158 @@ impl DrawerModel {
     }
 }
 
-/// Alice's capability for a script step: Admin on every model drawer, the home, and the
-/// registry, minted afresh since a boot retires the previous one.
-async fn admin_capability(
-    node: &Node,
-    alice: &Actor,
-    model: &DrawerModel,
-    home: &DrawerId,
-) -> CapId {
-    node.mint_drawer(
-        alice,
-        DrawerScope {
-            drawers: model
-                .drawers
-                .iter()
-                .chain([home, &node.local().registry_id])
-                .map(|drawer| (drawer.clone(), Access::Admin))
-                .collect(),
-            create: false,
-        },
-    )
-    .await
-    .unwrap()
+/// One script's run against the node: Alice administers every drawer it touches, Bob is the
+/// subject whose reach `model` predicts, and `home` is the drawer the docs are created in.
+struct ScriptRun {
+    alice: Actor,
+    bob: Actor,
+    home: DrawerId,
+    model: DrawerModel,
 }
 
-/// Run `recorded` into an armed crash at `point`, check the ledger keeps exactly its row,
-/// finish it by `recover`, and answer with the receipt the command then settles on.
-#[allow(clippy::too_many_arguments)]
-async fn crash_through(
-    node: &mut Node,
-    alice: &Actor,
-    model: &DrawerModel,
-    home: &DrawerId,
-    point: CrashPoint,
-    recover: Recovery,
-    recorded: &RecordedCommand,
-    capability: CapId,
-    context: &str,
-) -> WriteReceipt {
-    node.arm_crash(point);
-    let crashed = recorded.replay(node, capability).await.unwrap_err();
-    assert!(
-        matches!(&crashed, DrawersError::Storage(message) if message.contains("injected crash")),
-        "{context}: {crashed:?}"
-    );
-    let unfinished = node.core().ledger.unfinished().await.unwrap();
-    assert_eq!(
-        unfinished
-            .iter()
-            .map(|row| &row.command)
-            .collect::<Vec<_>>(),
-        vec![recorded.command()],
-        "{context}: the crash left exactly its row unfinished"
-    );
-    let capability = match recover {
-        Recovery::Boot => {
-            node.restart().await.unwrap();
-            assert!(
-                node.core().ledger.unfinished().await.unwrap().is_empty(),
-                "{context}: boot finished the row"
-            );
-            admin_capability(node, alice, model, home).await
-        }
-        Recovery::Retry => capability,
-    };
-    let receipt = recorded.replay(node, capability).await.expect(context);
-    assert!(
-        node.core().ledger.unfinished().await.unwrap().is_empty(),
-        "{context}: the retry finished the row"
-    );
-    receipt
-}
+impl ScriptRun {
+    /// Open the actors, drawers and docs `case` runs over, and check the node against the
+    /// empty model.
+    async fn start(node: &Node, case: &str) -> Self {
+        let alice = node.creator(&format!("alice-{case}")).await;
+        let bob = node.actor(&format!("bob-{case}")).await;
+        node.core()
+            .grants
+            .grant(
+                &RequestContext::root(),
+                alice.actor_id,
+                drawer_object(Access::Admin, &node.local().registry_id),
+                Rights::USE,
+                None,
+            )
+            .await
+            .unwrap();
+        let home = node.collection(&alice, &format!("{case}/home")).await;
+        let drawers = [
+            node.collection(&alice, &format!("{case}/d0")).await,
+            node.collection(&alice, &format!("{case}/d1")).await,
+            node.collection(&alice, &format!("{case}/d2")).await,
+        ];
+        let docs = [
+            node.create_doc(&alice, &home, &format!("{case}/doc0"))
+                .await
+                .unwrap(),
+            node.create_doc(&alice, &home, &format!("{case}/doc1"))
+                .await
+                .unwrap(),
+        ];
+        let mut run = Self {
+            alice,
+            bob,
+            home,
+            model: DrawerModel::new(case, drawers, docs),
+        };
+        run.model
+            .check(node, &run.alice, &run.bob, &format!("{case}/init"))
+            .await;
+        run
+    }
 
-async fn run_script(node: &mut Node, case: &str, script: &[ModelOp]) {
-    let alice = node.creator(&format!("alice-{case}")).await;
-    let bob = node.actor(&format!("bob-{case}")).await;
-    node.core()
-        .grants
-        .grant(
-            &RequestContext::root(),
-            alice.actor_id,
-            drawer_object(Access::Admin, &node.local().registry_id),
-            Rights::USE,
-            None,
+    /// Alice's capability for a script step: Admin on every model drawer, the home, and the
+    /// registry, minted afresh since a boot retires the previous one.
+    async fn admin_capability(&self, node: &Node) -> CapId {
+        node.mint_drawer(
+            &self.alice,
+            DrawerScope {
+                drawers: self
+                    .model
+                    .drawers
+                    .iter()
+                    .chain([&self.home, &node.local().registry_id])
+                    .map(|drawer| (drawer.clone(), Access::Admin))
+                    .collect(),
+                create: false,
+            },
         )
         .await
-        .unwrap();
-    let home = node.collection(&alice, &format!("{case}/home")).await;
-    let drawers = [
-        node.collection(&alice, &format!("{case}/d0")).await,
-        node.collection(&alice, &format!("{case}/d1")).await,
-        node.collection(&alice, &format!("{case}/d2")).await,
-    ];
-    let docs = [
-        node.create_doc(&alice, &home, &format!("{case}/doc0"))
-            .await
-            .unwrap(),
-        node.create_doc(&alice, &home, &format!("{case}/doc1"))
-            .await
-            .unwrap(),
-    ];
-    let mut model = DrawerModel::new(case, drawers, docs);
-    model
-        .check(node, &alice, &bob, &format!("{case}/init"))
-        .await;
+        .unwrap()
+    }
 
-    for (step, &op_step) in script.iter().enumerate() {
-        let ctx = format!("{case}/{step}:{op_step:?}");
-        let cmd = command(&format!("{case}/{step}"));
-        let capability = admin_capability(node, &alice, &model, &home).await;
+    /// Run `recorded` into an armed crash at `point`, check the ledger keeps exactly its row,
+    /// finish it by `recover`, and answer with the receipt the command then settles on. A boot
+    /// recovery restarts the node, so the model drops Bob's grants as it does on any restart.
+    async fn crash_through(
+        &mut self,
+        node: &mut Node,
+        point: CrashPoint,
+        recover: Recovery,
+        recorded: &RecordedCommand,
+        capability: CapId,
+        context: &str,
+    ) -> WriteReceipt {
+        node.arm_crash(point);
+        let crashed = recorded.replay(node, capability).await.unwrap_err();
+        assert!(
+            matches!(&crashed, DrawersError::Storage(message) if message.contains("injected crash")),
+            "{context}: {crashed:?}"
+        );
+        let unfinished = node.core().ledger.unfinished().await.unwrap();
+        assert_eq!(
+            unfinished
+                .iter()
+                .map(|row| &row.command)
+                .collect::<Vec<_>>(),
+            vec![recorded.command()],
+            "{context}: the crash left exactly its row unfinished"
+        );
+        let capability = match recover {
+            Recovery::Boot => {
+                node.restart().await.unwrap();
+                self.model.rebooted();
+                assert!(
+                    node.core().ledger.unfinished().await.unwrap().is_empty(),
+                    "{context}: boot finished the row"
+                );
+                self.admin_capability(node).await
+            }
+            Recovery::Retry => capability,
+        };
+        let receipt = recorded.replay(node, capability).await.expect(context);
+        assert!(
+            node.core().ledger.unfinished().await.unwrap().is_empty(),
+            "{context}: the retry finished the row"
+        );
+        receipt
+    }
+
+    /// Issue `op_step` to the node as `command`, assert the outcome the model predicts, and fold
+    /// its effect into the model.
+    async fn apply(&mut self, node: &mut Node, command: CommandId, op_step: ModelOp, ctx: &str) {
+        let capability = self.admin_capability(node).await;
         match op_step {
             ModelOp::AddDoc {
                 drawer,
                 doc,
                 access,
             } => {
-                let req = AddDoc {
+                let recorded = RecordedCommand::AddDoc(AddDoc {
                     capability,
-                    command: cmd,
-                    drawer_id: model.drawers[drawer].clone(),
-                    doc_id: model.docs[doc].clone(),
+                    command,
+                    drawer_id: self.model.drawers[drawer].clone(),
+                    doc_id: self.model.docs[doc].clone(),
                     access,
-                };
-                let receipt = node
-                    .drawers()
-                    .call(RequestContext::root(), req.clone())
-                    .await
-                    .unwrap();
-                model.roster_docs[drawer].insert(model.docs[doc].clone(), access);
-                model.commands.push((RecordedCommand::AddDoc(req), receipt));
+                });
+                let receipt = recorded.replay(node, capability).await.unwrap();
+                self.model.roster_docs[drawer].insert(self.model.docs[doc].clone(), access);
+                self.model.commands.push((recorded, receipt));
             }
             ModelOp::RemoveDoc { drawer, doc } => {
-                let doc_id = model.docs[doc].clone();
-                let req = RemoveDoc {
+                let doc_id = self.model.docs[doc].clone();
+                let recorded = RecordedCommand::RemoveDoc(RemoveDoc {
                     capability,
-                    command: cmd,
-                    drawer_id: model.drawers[drawer].clone(),
+                    command,
+                    drawer_id: self.model.drawers[drawer].clone(),
                     doc_id: doc_id.clone(),
-                };
-                let res = node
-                    .drawers()
-                    .call(RequestContext::root(), req.clone())
-                    .await
-                    .map_err(op);
-                if model.roster_docs[drawer].remove(&doc_id).is_some() {
-                    let receipt = res.expect(&ctx);
-                    model
-                        .commands
-                        .push((RecordedCommand::RemoveDoc(req), receipt));
+                });
+                let res = recorded.replay(node, capability).await;
+                if self.model.roster_docs[drawer].remove(&doc_id).is_some() {
+                    let receipt = res.expect(ctx);
+                    self.model.commands.push((recorded, receipt));
                 } else {
                     assert_eq!(res.unwrap_err(), DrawersError::NotAnEntry(doc_id), "{ctx}");
                 }
@@ -544,74 +555,56 @@ async fn run_script(node: &mut Node, case: &str, script: &[ModelOp]) {
                 point,
                 recover,
             } => {
-                let entry = model.roster_docs[drawer].get(&model.docs[doc]).copied();
+                let entry = self.model.roster_docs[drawer]
+                    .get(&self.model.docs[doc])
+                    .copied();
                 let reached = match point {
                     CrashPoint::DocGranted => entry.is_none_or(|held| held < access),
                     CrashPoint::RosterWritten => entry != Some(access),
                     CrashPoint::RosterRemoved | CrashPoint::DocsMembershipAdded => false,
                 };
-                let req = AddDoc {
+                let recorded = RecordedCommand::AddDoc(AddDoc {
                     capability,
-                    command: cmd,
-                    drawer_id: model.drawers[drawer].clone(),
-                    doc_id: model.docs[doc].clone(),
+                    command,
+                    drawer_id: self.model.drawers[drawer].clone(),
+                    doc_id: self.model.docs[doc].clone(),
                     access,
-                };
-                let recorded = RecordedCommand::AddDoc(req);
+                });
                 let receipt = if reached {
-                    crash_through(
-                        node, &alice, &model, &home, point, recover, &recorded, capability, &ctx,
-                    )
-                    .await
+                    self.crash_through(node, point, recover, &recorded, capability, ctx)
+                        .await
                 } else {
-                    recorded.replay(node, capability).await.expect(&ctx)
+                    recorded.replay(node, capability).await.expect(ctx)
                 };
-                if matches!((reached, recover), (true, Recovery::Boot)) {
-                    for grants in &mut model.bob_grants {
-                        grants.clear();
-                    }
-                }
-                model.roster_docs[drawer].insert(model.docs[doc].clone(), access);
-                model.commands.push((recorded, receipt));
+                self.model.roster_docs[drawer].insert(self.model.docs[doc].clone(), access);
+                self.model.commands.push((recorded, receipt));
             }
             ModelOp::CrashedRemoveDoc {
                 drawer,
                 doc,
                 recover,
             } => {
-                let doc_id = model.docs[doc].clone();
-                let req = RemoveDoc {
+                let doc_id = self.model.docs[doc].clone();
+                let recorded = RecordedCommand::RemoveDoc(RemoveDoc {
                     capability,
-                    command: cmd,
-                    drawer_id: model.drawers[drawer].clone(),
+                    command,
+                    drawer_id: self.model.drawers[drawer].clone(),
                     doc_id: doc_id.clone(),
-                };
-                if model.roster_docs[drawer].remove(&doc_id).is_some() {
-                    let recorded = RecordedCommand::RemoveDoc(req);
-                    let receipt = crash_through(
-                        node,
-                        &alice,
-                        &model,
-                        &home,
-                        CrashPoint::RosterRemoved,
-                        recover,
-                        &recorded,
-                        capability,
-                        &ctx,
-                    )
-                    .await;
-                    if matches!(recover, Recovery::Boot) {
-                        for grants in &mut model.bob_grants {
-                            grants.clear();
-                        }
-                    }
-                    model.commands.push((recorded, receipt));
+                });
+                if self.model.roster_docs[drawer].remove(&doc_id).is_some() {
+                    let receipt = self
+                        .crash_through(
+                            node,
+                            CrashPoint::RosterRemoved,
+                            recover,
+                            &recorded,
+                            capability,
+                            ctx,
+                        )
+                        .await;
+                    self.model.commands.push((recorded, receipt));
                 } else {
-                    let res = node
-                        .drawers()
-                        .call(RequestContext::root(), req)
-                        .await
-                        .map_err(op);
+                    let res = recorded.replay(node, capability).await;
                     assert_eq!(res.unwrap_err(), DrawersError::NotAnEntry(doc_id), "{ctx}");
                 }
             }
@@ -620,46 +613,38 @@ async fn run_script(node: &mut Node, case: &str, script: &[ModelOp]) {
                 child,
                 access,
             } => {
-                let req = AddChild {
+                let recorded = RecordedCommand::AddChild(AddChild {
                     capability,
-                    command: cmd,
-                    parent_id: model.drawers[parent].clone(),
-                    child_id: model.drawers[child].clone(),
+                    command,
+                    parent_id: self.model.drawers[parent].clone(),
+                    child_id: self.model.drawers[child].clone(),
                     access,
-                };
-                let res = node
-                    .drawers()
-                    .call(RequestContext::root(), req.clone())
-                    .await
-                    .map_err(op);
+                });
+                let res = recorded.replay(node, capability).await;
                 if parent == child {
                     assert_eq!(res.unwrap_err(), DrawersError::SelfChild, "{ctx}");
                 } else {
-                    let receipt = res.expect(&ctx);
-                    model.roster_children[parent].insert(model.drawers[child].clone(), access);
-                    model
-                        .commands
-                        .push((RecordedCommand::AddChild(req), receipt));
+                    let receipt = res.expect(ctx);
+                    self.model.roster_children[parent]
+                        .insert(self.model.drawers[child].clone(), access);
+                    self.model.commands.push((recorded, receipt));
                 }
             }
             ModelOp::RemoveChild { parent, child } => {
-                let child_id = model.drawers[child].clone();
-                let req = RemoveChild {
+                let child_id = self.model.drawers[child].clone();
+                let recorded = RecordedCommand::RemoveChild(RemoveChild {
                     capability,
-                    command: cmd,
-                    parent_id: model.drawers[parent].clone(),
+                    command,
+                    parent_id: self.model.drawers[parent].clone(),
                     child_id: child_id.clone(),
-                };
-                let res = node
-                    .drawers()
-                    .call(RequestContext::root(), req.clone())
-                    .await
-                    .map_err(op);
-                if model.roster_children[parent].remove(&child_id).is_some() {
-                    let receipt = res.expect(&ctx);
-                    model
-                        .commands
-                        .push((RecordedCommand::RemoveChild(req), receipt));
+                });
+                let res = recorded.replay(node, capability).await;
+                if self.model.roster_children[parent]
+                    .remove(&child_id)
+                    .is_some()
+                {
+                    let receipt = res.expect(ctx);
+                    self.model.commands.push((recorded, receipt));
                 } else {
                     assert_eq!(
                         res.unwrap_err(),
@@ -669,9 +654,9 @@ async fn run_script(node: &mut Node, case: &str, script: &[ModelOp]) {
                 }
             }
             ModelOp::Grant { drawer, access } => {
-                node.grant(&alice, &model.drawers[drawer], &bob, access)
+                node.grant(&self.alice, &self.model.drawers[drawer], &self.bob, access)
                     .await;
-                model.bob_grants[drawer].insert(access);
+                self.model.bob_grants[drawer].insert(access);
             }
             ModelOp::Revoke { drawer } => {
                 node.drawers()
@@ -679,21 +664,21 @@ async fn run_script(node: &mut Node, case: &str, script: &[ModelOp]) {
                         RequestContext::root(),
                         RevokeDrawer {
                             capability,
-                            drawer_id: model.drawers[drawer].clone(),
-                            subject_id: bob.actor_id,
+                            drawer_id: self.model.drawers[drawer].clone(),
+                            subject_id: self.bob.actor_id,
                         },
                     )
                     .await
                     .unwrap();
-                model.bob_grants[drawer].clear();
+                self.model.bob_grants[drawer].clear();
             }
             ModelOp::Remember { drawer, mirror } => {
-                let drawer_id = model.drawers[drawer].clone();
-                node.remember(&alice, &drawer_id, mirror).await;
-                model.known.insert(drawer_id, mirror);
+                let drawer_id = self.model.drawers[drawer].clone();
+                node.remember(&self.alice, &drawer_id, mirror).await;
+                self.model.known.insert(drawer_id, mirror);
             }
             ModelOp::SetPolicy { drawer, mirror } => {
-                let drawer_id = model.drawers[drawer].clone();
+                let drawer_id = self.model.drawers[drawer].clone();
                 let res = node
                     .drawers()
                     .call(
@@ -706,8 +691,8 @@ async fn run_script(node: &mut Node, case: &str, script: &[ModelOp]) {
                     )
                     .await
                     .map_err(op);
-                if let Some(entry) = model.known.get_mut(&drawer_id) {
-                    res.expect(&ctx);
+                if let Some(entry) = self.model.known.get_mut(&drawer_id) {
+                    res.expect(ctx);
                     *entry = mirror;
                 } else {
                     assert_eq!(
@@ -718,13 +703,14 @@ async fn run_script(node: &mut Node, case: &str, script: &[ModelOp]) {
                 }
             }
             ModelOp::Forget { drawer } => {
-                let drawer_id = model.drawers[drawer].clone();
-                node.forget(&alice, &drawer_id).await;
-                model.known.remove(&drawer_id);
+                let drawer_id = self.model.drawers[drawer].clone();
+                node.forget(&self.alice, &drawer_id).await;
+                self.model.known.remove(&drawer_id);
             }
             ModelOp::Replay(seed) => {
-                if !model.commands.is_empty() {
-                    let (recorded, expected) = &model.commands[seed % model.commands.len()];
+                if !self.model.commands.is_empty() {
+                    let (recorded, expected) =
+                        &self.model.commands[seed % self.model.commands.len()];
                     assert_eq!(
                         &recorded.replay(node, capability).await.unwrap(),
                         expected,
@@ -734,12 +720,19 @@ async fn run_script(node: &mut Node, case: &str, script: &[ModelOp]) {
             }
             ModelOp::Restart => {
                 node.restart().await.unwrap();
-                for grants in &mut model.bob_grants {
-                    grants.clear();
-                }
+                self.model.rebooted();
             }
         }
-        model.check(node, &alice, &bob, &ctx).await;
+    }
+}
+
+async fn run_script(node: &mut Node, case: &str, script: &[ModelOp]) {
+    let mut run = ScriptRun::start(node, case).await;
+    for (step, &op_step) in script.iter().enumerate() {
+        let ctx = format!("{case}/{step}:{op_step:?}");
+        run.apply(node, command(&format!("{case}/{step}")), op_step, &ctx)
+            .await;
+        run.model.check(node, &run.alice, &run.bob, &ctx).await;
     }
 }
 

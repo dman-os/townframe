@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 /// The level a principal admitted to a drawer at `access` gets on its metadata group: the same
 /// level, except that `Relay` takes `Read` there — enumerating the canonical roster needs it,
-/// and metadata is not the ciphertext Relay exists to withhold (ADR 014 "Child entries").
+/// and metadata is not the ciphertext Relay exists to withhold (ADR 019 "Child entries").
 pub(super) fn meta_access(access: Access) -> Access {
     access.max(Access::Read)
 }
@@ -74,7 +74,7 @@ impl Core {
     /// Make `child` an entry of `parent` at `access`, idempotently: only what the Keyhive
     /// delegations and the roster do not already say is done, so a retry or a boot replay
     /// finishes an interrupted attempt. Widening delegates before it publishes, narrowing
-    /// publishes before it re-delegates (ADR 014), so an interruption leaves the entry at or
+    /// publishes before it re-delegates (ADR 019), so an interruption leaves the entry at or
     /// below the authority behind it. Keyhive revokes a member whole, so narrowing is a removal
     /// and a re-add at the wanted level. The receipt is the roster write's, or the parent's
     /// current heads when nothing had to change.

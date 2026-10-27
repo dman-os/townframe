@@ -1,4 +1,4 @@
-# ADR 014: Cabinet Drawers
+# ADR 019: Cabinet Drawers
 
 **Status:** Accepted — implemented by `DrawerService` (`src/big_cabinet/drawer.rs`)
 for the self-doc and single-group layouts; the deferred list at the end is unchanged.
@@ -10,7 +10,7 @@ user-visible collection model. This ADR is the contract for the drawer model
 Cabinet implements: the drawer facets, roster, child entries, and required
 local drawers below are `DrawerService`'s contract. Namespace capabilities, actor identities,
 domain-owned grants, signing, and their implementation migration are specified in
-[ADR 017](017-authority-actors-capabilities-and-grants.md) and the
+[ADR 022](022-authority-actors-capabilities-and-grants.md) and the
 [authority guide](../big-cabinet-authority.md). Subset drawers, managed-participant
 layouts, roster sharding, provider/home facets, and Panproto integration are
 later work.
@@ -128,7 +128,7 @@ Facet tags are grouped by dotted names. Drawer values carry no ad-hoc version in
 compatible evolution occurs under the facet identity, while incompatible meanings need a
 new identity.
 
-The layout is an open union, internally tagged as every published union is (ADR 016 §5):
+The layout is an open union, internally tagged as every published union is (ADR 021 §5):
 the member object carries `$type` beside its own fields. Carrying is not operating — a
 node that does not know a layout still reads, stores and lists the drawer untouched; only
 an operation that must interpret the layout refuses. A Lexicon object states at least one
@@ -194,7 +194,7 @@ form every other 32-byte key in this tree has.
 
 ## Actors and node authority
 
-ADR 017 separates DrawerService's namespace minting authority from its actor proof.
+ADR 022 separates DrawerService's namespace minting authority from its actor proof.
 The embedder provisions both. DrawerService owns durable standing grants, evaluated
 when a caller exchanges an identity proof for a scoped drawer cap; resource operations
 then accept that cap, with no identity fallback. Grant gates tie derived caps to
@@ -217,7 +217,7 @@ principals are node-level work deferred to another PR.
 Drawer access uses Keyhive's `Relay`, `Read`, `Write`, and `Admin` vocabulary in
 roster entries. Standing grant objects name levels (`write drawer D`), while scoped
 capabilities encode levels, signer bindings, and originating-actor provenance under
-`DrawerService/scope/v2/`. Rights use ADR 017's generic vocabulary; the meaning of
+`DrawerService/scope/v2/`. Rights use ADR 022's generic vocabulary; the meaning of
 these objects belongs to DrawerService, not to the capability table. Removing a doc
 entry never means global doc deletion.
 

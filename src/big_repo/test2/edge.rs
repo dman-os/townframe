@@ -568,7 +568,8 @@ async fn tier9_dropped_content_apply_fails_sync_receipt() -> crate::Res<()> {
     // sending" race, forced deterministically.
     pair.right()
         .repo
-        .fail_next_content_apply_route(doc_id.clone())
+        .runtime
+        .fail_next_content_apply_route_for_test(doc_id.clone())
         .await?;
 
     let receipt = pair
@@ -1404,9 +1405,11 @@ async fn tier9_replaced_closed_worker_does_not_inherit_stale_leases() -> crate::
 
     let hold = node.repo.hold_hub_events().await?;
     node.repo
-        .fail_next_content_apply_route(doc_id.clone())
+        .runtime
+        .fail_next_content_apply_route_for_test(doc_id.clone())
         .await?;
     node.repo
+        .runtime
         .inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::SyncSessionObserved {
             cause: tracing::Span::current(),
             session: subduction_core::sync_session::SyncSession {
@@ -1508,6 +1511,7 @@ async fn tier9_keyhive_completion_defers_until_admission_watermark() -> crate::R
     let admitted_seq = pair
         .left()
         .repo
+        .runtime
         .inject_keyhive_completion_for_test(peer.clone())
         .await?;
 
@@ -1517,6 +1521,7 @@ async fn tier9_keyhive_completion_defers_until_admission_watermark() -> crate::R
     // this is exactly where the defect surfaces.
     pair.left()
         .repo
+        .runtime
         .inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::GroupPartWorkerSettled {
             seq: admitted_seq,
         })
@@ -1543,6 +1548,7 @@ async fn tier9_keyhive_completion_defers_until_admission_watermark() -> crate::R
     // reconciliation then captures the ADVANCED head.
     pair.left()
         .repo
+        .runtime
         .inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::KeyhiveAdmissionAdvanced {
             seq: admitted_seq,
         })
@@ -1598,7 +1604,11 @@ async fn tier9_quiescence_probe_restarts_over_coverage_routed_behind_it() -> cra
         futures::poll!(wait.as_mut()).is_pending(),
         "quiescence wait must park on its probe"
     );
-    let barrier_before = node.repo.quiescence_probe_barrier_for_test().await?;
+    let barrier_before = node
+        .repo
+        .runtime
+        .quiescence_probe_barrier_for_test()
+        .await?;
     assert!(
         barrier_before.is_some(),
         "a probe must be active with a live doc worker and held fence acks"
@@ -1613,7 +1623,11 @@ async fn tier9_quiescence_probe_restarts_over_coverage_routed_behind_it() -> cra
         futures::poll!(coverage.as_mut()).is_pending(),
         "coverage must park on the worker's reconcile"
     );
-    let barrier_after = node.repo.quiescence_probe_barrier_for_test().await?;
+    let barrier_after = node
+        .repo
+        .runtime
+        .quiescence_probe_barrier_for_test()
+        .await?;
     assert_ne!(
         barrier_after, barrier_before,
         "routing work to a doc worker must restart the pending probe, got barrier {barrier_after:?}"
@@ -1668,10 +1682,11 @@ async fn tier9_quiescence_probe_fences_on_the_admission_head_captured_at_start()
     // runs `handle_evt` inline, so `admitted_head` is already raised when the
     // `WaitForQuiescence` command below is handled — no event-channel race.
     const UNREACHABLE_ADMISSION_SEQ: u64 = 1_000_000;
-    repo.inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::KeyhiveAdmissionAdvanced {
-        seq: UNREACHABLE_ADMISSION_SEQ,
-    })
-    .await?;
+    repo.runtime
+        .inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::KeyhiveAdmissionAdvanced {
+            seq: UNREACHABLE_ADMISSION_SEQ,
+        })
+        .await?;
 
     let wait = repo.wait_for_quiescence(Some(utils_rs::scale_timeout(
         std::time::Duration::from_secs(30),
@@ -1686,7 +1701,7 @@ async fn tier9_quiescence_probe_fences_on_the_admission_head_captured_at_start()
     // `WaitForQuiescence` command the poll above sent, so a `Some(barrier)`
     // answer proves the hub started a probe for this wait — and the wait is
     // still parked while that probe's captured head is unsettled.
-    let barrier = repo.quiescence_probe_barrier_for_test().await?;
+    let barrier = repo.runtime.quiescence_probe_barrier_for_test().await?;
     assert!(
         barrier.is_some(),
         "the wait must park on a live quiescence probe"
@@ -1699,10 +1714,11 @@ async fn tier9_quiescence_probe_fences_on_the_admission_head_captured_at_start()
     // The hub resolves the probe from its `GroupPartWorkerSettled` arm once the
     // projection covers the head the probe captured, so the wait completes with
     // no retry and no further event.
-    repo.inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::GroupPartWorkerSettled {
-        seq: UNREACHABLE_ADMISSION_SEQ,
-    })
-    .await?;
+    repo.runtime
+        .inject_runtime2_evt_for_test(crate::runtime2::Runtime2Evt::GroupPartWorkerSettled {
+            seq: UNREACHABLE_ADMISSION_SEQ,
+        })
+        .await?;
     wait.as_mut().await?;
 
     // The injected settlement equals the injected admission head, so the fence

@@ -1,5 +1,11 @@
 use crate::context::ContextError;
-pub use service_core_rs::cancellation::*;
+pub use service_core_rs::cancellation::CancellationKey;
+pub use service_core_rs::cancellation::CancellationReceiver;
+pub use service_core_rs::cancellation::CancellationRegistration;
+pub use service_core_rs::cancellation::CancellationRequestGuard;
+pub use service_core_rs::cancellation::CancellationSignal;
+pub use service_core_rs::cancellation::CancellationTransport;
+pub use service_core_rs::cancellation::cancellation_channel;
 use std::sync::Arc;
 
 #[derive(Default)]

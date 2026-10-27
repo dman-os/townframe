@@ -3,7 +3,7 @@
 use super::*;
 
 impl DrawerService {
-    /// Relay suffices: ADR 014 lets a relay enumerate the roster. The access check comes before
+    /// Relay suffices: ADR 019 lets a relay enumerate the roster. The access check comes before
     /// the record lookup so that an unauthorized caller cannot tell a drawer from any other doc.
     async fn get(
         &self,

@@ -1,7 +1,0 @@
-version = 1
-role = "foundation"
-dependency_reason = "Standalone SQLx connection utilities have no internal crate dependencies."
-allowed_dependencies = []
-allow_external_api_types = false
-
-[builds.native]

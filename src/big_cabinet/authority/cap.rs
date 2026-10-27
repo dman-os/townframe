@@ -1,11 +1,20 @@
 use super::AuthorityError;
-use super::CapId;
-use super::Capability;
-use super::Namespace;
-use super::Rights;
+use big_cabinet_core::authority::AttenuateCapability;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::Capability;
+use big_cabinet_core::authority::MintCapability;
+use big_cabinet_core::authority::Namespace;
+use big_cabinet_core::authority::RetractCapability;
+use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::Uuid7;
+use service_utils_rs::Spawner;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::sync::watch;
+use utils_rs::expect_tags::ERROR_ACTOR;
+use utils_rs::expect_tags::ERROR_CHANNEL;
 
 pub(super) const MAX_CHAIN_DEPTH: usize = 64;
 pub(super) const MAX_CHAIN_NODES: usize = 4096;
@@ -253,5 +262,165 @@ pub(super) fn may_retract(target: &Chain<'_>, via: &CapId) -> Result<(), Authori
         Ok(())
     } else {
         Err(AuthorityError::Unauthorized)
+    }
+}
+
+/// The answer to [`Command::Resolve`]: what a live capability says, and the actor it names
+/// if it is an actor capability.
+pub(super) struct Resolved {
+    pub(super) capability: Capability,
+    pub(super) actor: Option<Uuid7>,
+}
+
+impl Resolved {
+    pub(super) fn require(&self, right: Rights) -> Result<(), AuthorityError> {
+        if self.capability.rights.contains(right) {
+            Ok(())
+        } else {
+            Err(AuthorityError::Unauthorized)
+        }
+    }
+
+    /// The actor this capability presents, provided it carries `right`. Like
+    /// [`super::actor::recognize`], a capability that names no actor is refused as such
+    /// before its rights are looked at.
+    pub(super) fn actor(&self, right: Rights) -> Result<Uuid7, AuthorityError> {
+        let actor = self.actor.ok_or(AuthorityError::UnrecognizedActor)?;
+        self.require(right)?;
+        Ok(actor)
+    }
+}
+
+type Reply<T> = oneshot::Sender<Result<T, AuthorityError>>;
+
+/// A request to the ledger task, the single owner of [`State`]. The task runs one command
+/// at a time to completion, and no command awaits anything while it holds the state, so
+/// every command sees the ledger exactly as the previous one left it: a retraction either
+/// precedes a mint that depends on it (and the mint fails) or follows it (and deletes it).
+pub(super) enum Command {
+    OpenNamespace(Uuid7, oneshot::Sender<Namespace>),
+    Mint(MintCapability, Reply<Capability>),
+    Attenuate(AttenuateCapability, Reply<Capability>),
+    Retract(RetractCapability, Reply<()>),
+    Resolve(CapId, Reply<Resolved>),
+    /// The first half of `OpenActor`: authorize opening a child of `parent` and stage its
+    /// capability, before any registry row is written.
+    AdmitActor {
+        parent: CapId,
+        rights: Rights,
+        object: String,
+        namespace: Namespace,
+        reply: Reply<(Uuid7, CapRow)>,
+    },
+    /// The second half of `OpenActor`, once the registry row is committed: publish the
+    /// staged capability, or reuse the one already issued for the same grant.
+    BindActor {
+        issued: CapRow,
+        actor_id: Uuid7,
+        parent: CapId,
+        reply: Reply<CapId>,
+    },
+    #[cfg(test)]
+    Peek(Box<dyn FnOnce(&State) + Send>),
+    /// Stall the ledger until the sender is fired or dropped, so a test can queue commands
+    /// behind it in a chosen order.
+    #[cfg(test)]
+    Hold(oneshot::Receiver<()>),
+}
+
+/// Start the ledger task on `tasks`; it stops when the authority's stop token fires. It
+/// owns `state` outright and bumps `changes` after every retraction.
+pub(super) fn spawn(
+    mut state: State,
+    changes: watch::Sender<u64>,
+    tasks: &Spawner,
+) -> mpsc::Sender<Command> {
+    let (commands, mut inbox) = mpsc::channel(64);
+    let owner = tasks.clone();
+    tasks
+        .spawn(async move {
+            loop {
+                let command = tokio::select! {
+                    biased;
+                    _ = owner.cancelled() => break,
+                    command = inbox.recv() => match command {
+                        Some(command) => command,
+                        None => break,
+                    },
+                };
+                state.handle(command, &changes).await;
+            }
+        })
+        .expect("the ledger starts before its stop token exists outside boot");
+    commands
+}
+
+/// Send `command` to the ledger and wait for its answer. The authority stops its host,
+/// joining every call, before the ledger, so the ledger outlives every caller.
+pub(super) async fn ask<T>(
+    ledger: &mpsc::Sender<Command>,
+    command: impl FnOnce(oneshot::Sender<T>) -> Command,
+) -> T {
+    let (reply, answer) = oneshot::channel();
+    ledger.send(command(reply)).await.expect(ERROR_ACTOR);
+    answer.await.expect(ERROR_CHANNEL)
+}
+
+/// Run a command for a caller still waiting on `reply`. A caller that gave up before the
+/// command's turn gets nothing applied, as if it had been cancelled before calling; one that
+/// gives up while the command runs loses only the answer, as if cancelled after it returned.
+fn respond<T>(reply: oneshot::Sender<T>, run: impl FnOnce() -> T) {
+    if reply.is_closed() {
+        return;
+    }
+    drop(reply.send(run()));
+}
+
+impl State {
+    async fn handle(&mut self, command: Command, changes: &watch::Sender<u64>) {
+        match command {
+            Command::OpenNamespace(namespace_id, reply) => {
+                respond(reply, || self.open_namespace(namespace_id));
+            }
+            Command::Mint(request, reply) => respond(reply, || self.mint(request)),
+            Command::Attenuate(request, reply) => respond(reply, || self.attenuate(request)),
+            Command::Retract(request, reply) => respond(reply, || {
+                self.retract_via(&request)?;
+                changes.send_modify(|revision| {
+                    *revision = revision
+                        .checked_add(1)
+                        .expect("authority revision overflow");
+                });
+                Ok(())
+            }),
+            Command::Resolve(capability, reply) => respond(reply, || self.resolve(&capability)),
+            Command::AdmitActor {
+                parent,
+                rights,
+                object,
+                namespace,
+                reply,
+            } => respond(reply, || {
+                self.admit_actor(parent, rights, object, namespace)
+            }),
+            Command::BindActor {
+                issued,
+                actor_id,
+                parent,
+                reply,
+            } => respond(reply, || self.bind_actor(issued, actor_id, parent)),
+            #[cfg(test)]
+            Command::Peek(peek) => peek(self),
+            #[cfg(test)]
+            Command::Hold(release) => drop(release.await),
+        }
+    }
+
+    fn resolve(&self, capability: &CapId) -> Result<Resolved, AuthorityError> {
+        let chain = walk(self, capability)?;
+        Ok(Resolved {
+            capability: chain.cap.wire(),
+            actor: self.actors.get(capability).map(|binding| binding.actor_id),
+        })
     }
 }

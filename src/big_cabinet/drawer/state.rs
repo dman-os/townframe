@@ -6,12 +6,12 @@
 //! "which drawers hold doc X" — the question every DocsRepo access check asks — is one indexed
 //! query rather than a scan of every drawer doc on the node.
 
-use super::DrawerId;
-use super::DrawersError;
 use super::sqlite;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::drawer::Drawer;
 use big_cabinet_core::drawer::DrawerAccess as Access;
+use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawersError;
 use sqlite_rs::Database;
 use sqlite_rs::Sql;
 use sqlite_rs::SqlError;

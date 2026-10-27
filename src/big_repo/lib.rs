@@ -384,14 +384,6 @@ impl BigRepo {
         self.sqlite_store.clone()
     }
 
-    /// The keyhive sidecar storage (archives, WAL events, local secret
-    /// material). Test-only: lets tier tests trigger compaction and inspect
-    /// durable keyhive state exactly as a production shutdown would leave it.
-    #[cfg(test)]
-    pub(crate) fn keyhive_storage(&self) -> BigRepoKeyhiveStorage {
-        self.keyhive_storage.clone()
-    }
-
     async fn boot_inner(
         config: Config,
         store: SqliteBigRepoStore,
@@ -860,53 +852,11 @@ impl BigRepo {
         })
     }
 
-    /// Test-only seam: close the local doc-worker mailbox for `doc_id` on the
-    /// next content-carrying sync-session apply, so that apply route fails
-    /// while a later empty reconsider can still spawn a fresh worker. See
-    /// [`Runtime2Handle::fail_next_content_apply_route_for_test`].
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn fail_next_content_apply_route(&self, doc_id: DocumentId) -> Res<()> {
-        self.runtime
-            .fail_next_content_apply_route_for_test(doc_id)
-            .await?;
-        Ok(())
-    }
-
     /// Test-only seam: the next [`Self::get_doc`] for `doc_id` fails with a repository error
     /// instead of answering. One-shot; the lookup after it behaves normally.
     #[cfg(any(test, feature = "test-support"))]
     pub fn fail_next_doc_lookup(&self, doc_id: DocumentId) {
         self.doc_lookup_faults.lock().unwrap().insert(doc_id);
-    }
-
-    /// Test-only: whether `peer_id` currently has a registered connection in
-    /// this repo's hub. Connection-lifecycle tests assert the deregistration
-    /// invariant with this instead of inferring it from a sync failure.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn has_connected_peer(&self, peer_id: PeerKey) -> Res<bool> {
-        self.runtime.has_connected_peer_for_test(peer_id).await
-    }
-
-    /// Test-only: deliver a synthetic keyhive sync completion for `peer_id`'s
-    /// active round, stamped one seq ahead of the hub's admitted head. Returns
-    /// the seq so the test can inject the matching admission event.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn inject_keyhive_completion_for_test(&self, peer_id: PeerKey) -> Res<u64> {
-        self.runtime
-            .inject_keyhive_completion_for_test(peer_id)
-            .await
-    }
-
-    /// Test-only: hand an event directly to the hub's event handler.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn inject_runtime2_evt_for_test(&self, evt: runtime2::Runtime2Evt) -> Res<()> {
-        self.runtime.inject_runtime2_evt_for_test(evt).await
-    }
-
-    /// Test-only: the active quiescence probe's barrier id (`None` if resolved).
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn quiescence_probe_barrier_for_test(&self) -> Res<Option<u64>> {
-        self.runtime.quiescence_probe_barrier_for_test().await
     }
 
     /// Whether the repository currently stores a sedimentree with `doc_id`.
@@ -916,7 +866,7 @@ impl BigRepo {
 
     /// Return the documents currently administered by `group`.
     pub async fn documents_in_group(&self, group: &BigKeyhiveGroup) -> BTreeSet<DocumentId> {
-        self.keyhive.group_document_ids(group).await
+        self.keyhive.document_ids_containing_group(group.id()).await
     }
 
     /// List document IDs with a durable reservation. A reservation is the
@@ -1083,12 +1033,12 @@ impl BigRepo {
         group: &BigKeyhiveGroup,
     ) -> Res<BTreeMap<DocumentId, Vec<Vec<u8>>>> {
         let mut after_content = BTreeMap::new();
-        for doc_id in self.keyhive.group_document_ids(group).await {
+        for doc_id in self.keyhive.document_ids_containing_group(group.id()).await {
             // A document can be created concurrently with this grant - the encryption
             // worker creates key documents at runtime - and such a document is already in
-            // Keyhive's graph (`group_document_ids` sees it) while big_repo cannot hand out
-            // a handle for it yet. Both `GetDocError` variants mean only that, and neither
-            // is fatal: the document joins `affected_docs` below, where its checkpoint is
+            // Keyhive's graph (`document_ids_containing_group` sees it) while big_repo cannot
+            // hand out a handle for it yet. Both `GetDocError` variants mean only that, and
+            // neither is fatal: the document joins `affected_docs` below, where its checkpoint is
             // derived per document; it has no pre-grant history to record, because it did
             // not exist when the grant was conceived; and Keyhive accepts the delegation
             // without an entry for it (the raced-in shape this replaces proved as much by

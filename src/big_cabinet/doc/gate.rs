@@ -26,7 +26,6 @@
 //! arrive later. Missing document metadata or attribution certificates are malformed, not pending.
 //! Checks are facet-local: a forgery in another facet changes nothing here.
 
-use super::FacetVersion;
 use super::claim_history::ClaimHistoryError;
 use super::claim_history::ClaimHistoryResult;
 use super::claim_history::HistoryBudget;
@@ -55,6 +54,7 @@ use big_cabinet_core::dmeta::NativeReadBudget;
 use big_cabinet_core::dmeta::NativeValue;
 use big_cabinet_core::dmeta::cid_of;
 use big_cabinet_core::dmeta::encode_native;
+use big_cabinet_core::doc::FacetVersion;
 use std::cell::OnceCell;
 use std::collections::BTreeSet;
 use std::collections::HashMap;

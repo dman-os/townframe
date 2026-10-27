@@ -1,8 +1,8 @@
-# ADR 016: Facet schema language, conventions, and Automerge codecs
+# ADR 021: Facet schema language, conventions, and Automerge codecs
 
 **Status:** Accepted
 
-**Related:** ADR 007 (doc and branch identity), ADR 014 (drawers), ADR 015 (document format and facet
+**Related:** ADR 007 (doc and branch identity), ADR 019 (drawers), ADR 020 (document format and facet
 writes — §2 codec declarations, §4 claim canonicalization, §6 verification).
 
 ## 1. What a facet schema has to do, and the three layers it is made of
@@ -351,7 +351,7 @@ publishable declaration: it assembles for the walk and is refused by the Lexicon
 
 ## 9. How a value is stored is the field's type
 
-ADR 015 §2 requires each definition to declare its Automerge representation, and says new definitions
+ADR 020 §2 requires each definition to declare its Automerge representation, and says new definitions
 must declare rather than rely on field-name suffixes. The current implementation does the opposite:
 `am_utils_rs::codecs::json` chooses the representation from the field name — a name ending in
 `Base64` becomes a byte vector, one ending in `_at`, `_ts`, `At` or `Ts` becomes a `Timestamp`,
@@ -717,11 +717,11 @@ Cabinet codec: they cannot recover a complete schema, float width, declared JSON
 merge semantics. Known schemas and explicit adapters are the only authoring routes. Unknown facets
 may still be exposed as unresolved data without being silently treated as validated or writable.
 
-Full JSON round-tripping is chosen over hidden-field projection (ADR 015 §2); it is not proof of native preservation. Unchanged
+Full JSON round-tripping is chosen over hidden-field projection (ADR 020 §2); it is not proof of native preservation. Unchanged
 unknown Text, Counter, Bytes, objects, and union payloads must not be rewritten merely because the
 local schema does not describe them. Lists and changed union discriminants make correspondence a
 real design question. Schema-projected reads are not adopted; the base-relative reconciliation and
-copy contracts are to be designed with DocumentsRepo (ADR 015 §2).
+copy contracts are to be designed with DocumentsRepo (ADR 020 §2).
 
 A future facet-wide LWW JSON backend is separate work. Sharing a value model does not establish
 that a snapshot-only engine can reproduce Automerge's concurrent Counter/List semantics.
@@ -732,7 +732,7 @@ Not adopted here: record keys and TIDs, the ATProto repository/collection model,
 resolution, PDS publication, XRPC, CID/link adoption, and a global schema registry. Lexicon describes
 the canonical value while the sidecar JSON Schema carries supplementary constraints and storage
 annotations. Conflicting definitions for one tag are reported rather than selected by installation
-order (ADR 015 §2).
+order (ADR 020 §2).
 
 1. Whether `Blob.digest` stays a `Multihash` or migrates to a link, and whether a reference frontier
    becomes its own type or stays a sibling field.

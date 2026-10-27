@@ -318,7 +318,11 @@ async fn tier5_conn_sync_after_close_is_queued_not_failed() -> Res<()> {
     // The connection is established and registered.
     pair.left_conn().sync_keyhive_with_peer().await?;
     assert!(
-        pair.left().repo.has_connected_peer(peer.clone()).await?,
+        pair.left()
+            .repo
+            .runtime
+            .has_connected_peer_for_test(peer.clone())
+            .await?,
         "the established connection must be registered"
     );
 
@@ -330,7 +334,12 @@ async fn tier5_conn_sync_after_close_is_queued_not_failed() -> Res<()> {
     old_left.stop().await?;
 
     assert!(
-        !pair.left().repo.has_connected_peer(peer.clone()).await?,
+        !pair
+            .left()
+            .repo
+            .runtime
+            .has_connected_peer_for_test(peer.clone())
+            .await?,
         "the hub must be deregistered before close_connection returns"
     );
 
@@ -351,7 +360,12 @@ async fn tier5_conn_sync_after_close_is_queued_not_failed() -> Res<()> {
     // not a spurious failure of the parked waiter.
     hold.resume().await?;
     assert!(
-        !pair.left().repo.has_connected_peer(peer.clone()).await?,
+        !pair
+            .left()
+            .repo
+            .runtime
+            .has_connected_peer_for_test(peer.clone())
+            .await?,
         "a late ConnLost for the closed connection must not re-register it"
     );
 
@@ -396,14 +410,24 @@ async fn tier5_conn_sync_ignores_establish_after_end() -> Res<()> {
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
     assert!(
-        !pair.left().repo.has_connected_peer(peer.clone()).await?,
+        !pair
+            .left()
+            .repo
+            .runtime
+            .has_connected_peer_for_test(peer.clone())
+            .await?,
         "the peer cannot be registered while its establishment is still held"
     );
 
     // Release the establishment; the already-ended connection must be ignored.
     hold.resume().await?;
     assert!(
-        !pair.left().repo.has_connected_peer(peer.clone()).await?,
+        !pair
+            .left()
+            .repo
+            .runtime
+            .has_connected_peer_for_test(peer.clone())
+            .await?,
         "an establishment for an already-ended connection must not register it"
     );
     Ok(())

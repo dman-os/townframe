@@ -921,6 +921,32 @@ impl BigSyncWorker {
         }
     }
 
+    /// Every route must name a registered backend. The first part, then the first object,
+    /// naming an unknown backend is the error, and the caller applies nothing.
+    fn validate_routes(
+        &self,
+        parts: &HashMap<PartKey, BackendId>,
+        objects: &HashMap<ObjKey, BackendId>,
+    ) -> Result<(), BigSyncWorkerError> {
+        for (part_id, backend_id) in parts {
+            if !self.sync_backends.contains_key(backend_id) {
+                return Err(BigSyncWorkerError::UnknownBackend {
+                    backend_id: Arc::clone(backend_id),
+                    part_id: part_id.clone(),
+                });
+            }
+        }
+        for (obj_id, backend_id) in objects {
+            if !self.sync_backends.contains_key(backend_id) {
+                return Err(BigSyncWorkerError::UnknownObjectBackend {
+                    backend_id: Arc::clone(backend_id),
+                    obj_id: obj_id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn handle_subscription(&mut self, msg: SubscriptionMsg) {
         match msg {
             SubscriptionMsg::Update {
@@ -929,23 +955,9 @@ impl BigSyncWorker {
                 update,
                 resp,
             } => {
-                for (part_id, backend_id) in &update.parts {
-                    if !self.sync_backends.contains_key(backend_id) {
-                        let _cancelled = resp.send(Err(BigSyncWorkerError::UnknownBackend {
-                            backend_id: Arc::clone(backend_id),
-                            part_id: part_id.clone(),
-                        }));
-                        return;
-                    }
-                }
-                for (obj_id, backend_id) in &update.objects {
-                    if !self.sync_backends.contains_key(backend_id) {
-                        let _cancelled = resp.send(Err(BigSyncWorkerError::UnknownObjectBackend {
-                            backend_id: Arc::clone(backend_id),
-                            obj_id: obj_id.clone(),
-                        }));
-                        return;
-                    }
+                if let Err(err) = self.validate_routes(&update.parts, &update.objects) {
+                    let _cancelled = resp.send(Err(err));
+                    return;
                 }
                 let source = self.subscriptions.entry(id).or_default();
                 let subscription = source.entry(peer_id.clone()).or_default();
@@ -995,79 +1007,10 @@ impl BigSyncWorker {
                 objects,
                 resp,
             } => {
-                for (part_id, backend_id) in &parts {
-                    if !self.sync_backends.contains_key(backend_id) {
-                        resp.send(Err(BigSyncWorkerError::UnknownBackend {
-                            backend_id: Arc::clone(backend_id),
-                            part_id: part_id.clone(),
-                        }))
-                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                        .ok();
-                        return Ok(());
-                    }
-                }
-                for (obj_id, backend_id) in &objects {
-                    if !self.sync_backends.contains_key(backend_id) {
-                        resp.send(Err(BigSyncWorkerError::UnknownObjectBackend {
-                            backend_id: Arc::clone(backend_id),
-                            obj_id: obj_id.clone(),
-                        }))
-                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                        .ok();
-                        return Ok(());
-                    }
-                }
-                self.rpc_clients.lock().expect(ERROR_MUTEX).insert(
-                    peer_id.clone(),
-                    Arc::new(crate::rpc::ScopedRpcClient {
-                        scope_key: Arc::clone(&self.scope_key),
-                        inner: client,
-                    }) as SharedPeerRpcClient,
-                );
-                let is_new = !self.peers.contains_key(&peer_id);
-                let peer = self
-                    .peers
-                    .entry(peer_id.clone())
-                    .or_insert_with(|| PeerState {
-                        configured_parts: HashMap::new(),
-                        configured_objects: HashMap::new(),
-                        parts: HashMap::new(),
-                        objects: HashMap::new(),
-                    });
-                let part_count = parts.len();
-                let object_count = objects.len();
-                peer.configured_parts = parts;
-                peer.configured_objects = objects;
-                if !self.refresh_peer_subscriptions(&peer_id) && is_new {
-                    self.publish_peer_subscriptions(&peer_id, PeerSubscriptions::default());
-                }
-                resp.send(Ok(()))
-                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                    .ok();
-                tracing::debug!(peer_id = %peer_id, part_count, object_count, "accept set peer");
+                self.handle_set_peer(peer_id, client, parts, objects, resp);
             }
             BigSyncWorkerMsg::RemovePeer { peer_id, resp } => {
-                let previous = self.peers.remove(&peer_id);
-                self.rpc_clients.lock().expect(ERROR_MUTEX).remove(&peer_id);
-                let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent {
-                    peer_id: peer_id.clone(),
-                });
-                self.machine.handle_evt(evt);
-                if self.subscription_events.receiver_count() > 0
-                    && let Some(previous) = previous
-                    && (!previous.parts.is_empty() || !previous.objects.is_empty())
-                {
-                    let _unobserved = self.subscription_events.send(SubscriptionEvent {
-                        peer_id: peer_id.clone(),
-                        update: SubscriptionUpdate {
-                            removed_parts: previous.parts.into_keys().collect(),
-                            removed_objects: previous.objects.into_keys().collect(),
-                            ..Default::default()
-                        },
-                    });
-                }
-                resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
-                tracing::debug!(peer_id = %peer_id, "accept remove peer");
+                self.handle_remove_peer(peer_id, resp);
             }
             BigSyncWorkerMsg::SetReplayHoldMs { hold_ms, resp } => {
                 self.machine.set_replay_hold_ms(hold_ms);
@@ -1080,36 +1023,7 @@ impl BigSyncWorker {
                 part_ids,
                 resp,
             } => {
-                for peer_id in &peer_ids {
-                    let Some(peer_state) = self.peers.get(peer_id) else {
-                        resp.send(Err(BigSyncWorkerError::UnknownPeer {
-                            peer_id: peer_id.clone(),
-                        }))
-                        .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                        .ok();
-                        return Ok(());
-                    };
-                    for part_id in &part_ids {
-                        if !peer_state.parts.contains_key(part_id) {
-                            resp.send(Err(BigSyncWorkerError::UnknownPart {
-                                peer_id: peer_id.clone(),
-                                part_id: part_id.clone(),
-                            }))
-                            .inspect_err(|_| warn_loc!(ERROR_CALLER))
-                            .ok();
-                            return Ok(());
-                        }
-                    }
-                }
-                let old = self.full_sync_waiters.insert(waiter_id, resp);
-                assert!(old.is_none(), "fishy");
-                self.machine.handle_evt(BigSyncEvent::WaitForFullSync(
-                    big_sync_core::WaitForFullSyncEvent {
-                        waiter_id,
-                        peer_ids,
-                        part_ids,
-                    },
-                ));
+                self.handle_wait_for_full_sync(waiter_id, peer_ids, part_ids, resp);
             }
             #[cfg(any(test, feature = "test-support"))]
             BigSyncWorkerMsg::ReapZombieTasks { timeout, resp } => {
@@ -1123,28 +1037,7 @@ impl BigSyncWorker {
             }
             #[cfg(any(test, feature = "test-support"))]
             BigSyncWorkerMsg::Snapshot { resp } => {
-                let snapshot = WorkerSnapshot {
-                    label: self.label,
-                    peer_parts: self
-                        .peers
-                        .iter()
-                        .map(|(peer_id, peer_state)| (peer_id.clone(), peer_state.parts.clone()))
-                        .collect(),
-                    peer_objects: self
-                        .peers
-                        .iter()
-                        .map(|(id, peer)| (id.clone(), peer.objects.clone()))
-                        .collect(),
-                    full_sync_waiters: self.machine.debug_full_sync_waiters(),
-                    last_object_syncs: self.machine.debug_last_object_syncs(),
-                    task_counts: self.machine.task_counts(),
-                    active_machine_tasks: self.tasks.len(),
-                    active_sync_tasks: self.sync_tasks.len(),
-                    zombie_tasks: self.zombie_tasks.len(),
-                    peer_part_sync_flags: self.machine.debug_peer_part_sync_flags(),
-                    replay_pages: self.machine.debug_replay_pages(),
-                };
-                resp.send(snapshot)
+                resp.send(self.snapshot())
                     .inspect_err(|_| warn_loc!(ERROR_CALLER))
                     .ok();
             }
@@ -1159,6 +1052,140 @@ impl BigSyncWorker {
             }
         }
         Ok(())
+    }
+
+    fn handle_set_peer(
+        &mut self,
+        peer_id: PeerKey,
+        client: SharedWireRpcClient,
+        parts: HashMap<PartKey, BackendId>,
+        objects: HashMap<ObjKey, BackendId>,
+        resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>,
+    ) {
+        if let Err(err) = self.validate_routes(&parts, &objects) {
+            resp.send(Err(err))
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
+            return;
+        }
+        self.rpc_clients.lock().expect(ERROR_MUTEX).insert(
+            peer_id.clone(),
+            Arc::new(crate::rpc::ScopedRpcClient {
+                scope_key: Arc::clone(&self.scope_key),
+                inner: client,
+            }) as SharedPeerRpcClient,
+        );
+        let is_new = !self.peers.contains_key(&peer_id);
+        let peer = self
+            .peers
+            .entry(peer_id.clone())
+            .or_insert_with(|| PeerState {
+                configured_parts: HashMap::new(),
+                configured_objects: HashMap::new(),
+                parts: HashMap::new(),
+                objects: HashMap::new(),
+            });
+        let part_count = parts.len();
+        let object_count = objects.len();
+        peer.configured_parts = parts;
+        peer.configured_objects = objects;
+        if !self.refresh_peer_subscriptions(&peer_id) && is_new {
+            self.publish_peer_subscriptions(&peer_id, PeerSubscriptions::default());
+        }
+        resp.send(Ok(()))
+            .inspect_err(|_| warn_loc!(ERROR_CALLER))
+            .ok();
+        tracing::debug!(peer_id = %peer_id, part_count, object_count, "accept set peer");
+    }
+
+    fn handle_remove_peer(&mut self, peer_id: PeerKey, resp: tokio::sync::oneshot::Sender<()>) {
+        let previous = self.peers.remove(&peer_id);
+        self.rpc_clients.lock().expect(ERROR_MUTEX).remove(&peer_id);
+        let evt = BigSyncEvent::RemovePeer(big_sync_core::RemovePeerEvent {
+            peer_id: peer_id.clone(),
+        });
+        self.machine.handle_evt(evt);
+        if self.subscription_events.receiver_count() > 0
+            && let Some(previous) = previous
+            && (!previous.parts.is_empty() || !previous.objects.is_empty())
+        {
+            let _unobserved = self.subscription_events.send(SubscriptionEvent {
+                peer_id: peer_id.clone(),
+                update: SubscriptionUpdate {
+                    removed_parts: previous.parts.into_keys().collect(),
+                    removed_objects: previous.objects.into_keys().collect(),
+                    ..Default::default()
+                },
+            });
+        }
+        resp.send(()).inspect_err(|_| warn_loc!(ERROR_CALLER)).ok();
+        tracing::debug!(peer_id = %peer_id, "accept remove peer");
+    }
+
+    /// The waiter reaches the machine only if every requested peer is known and already
+    /// syncs every requested part; otherwise the first missing peer or part is the reply.
+    fn handle_wait_for_full_sync(
+        &mut self,
+        waiter_id: u64,
+        peer_ids: HashSet<PeerKey>,
+        part_ids: HashSet<PartKey>,
+        resp: tokio::sync::oneshot::Sender<Result<(), BigSyncWorkerError>>,
+    ) {
+        for peer_id in &peer_ids {
+            let Some(peer_state) = self.peers.get(peer_id) else {
+                resp.send(Err(BigSyncWorkerError::UnknownPeer {
+                    peer_id: peer_id.clone(),
+                }))
+                .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                .ok();
+                return;
+            };
+            for part_id in &part_ids {
+                if !peer_state.parts.contains_key(part_id) {
+                    resp.send(Err(BigSyncWorkerError::UnknownPart {
+                        peer_id: peer_id.clone(),
+                        part_id: part_id.clone(),
+                    }))
+                    .inspect_err(|_| warn_loc!(ERROR_CALLER))
+                    .ok();
+                    return;
+                }
+            }
+        }
+        let old = self.full_sync_waiters.insert(waiter_id, resp);
+        assert!(old.is_none(), "fishy");
+        self.machine.handle_evt(BigSyncEvent::WaitForFullSync(
+            big_sync_core::WaitForFullSyncEvent {
+                waiter_id,
+                peer_ids,
+                part_ids,
+            },
+        ));
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn snapshot(&self) -> WorkerSnapshot {
+        WorkerSnapshot {
+            label: self.label,
+            peer_parts: self
+                .peers
+                .iter()
+                .map(|(peer_id, peer_state)| (peer_id.clone(), peer_state.parts.clone()))
+                .collect(),
+            peer_objects: self
+                .peers
+                .iter()
+                .map(|(id, peer)| (id.clone(), peer.objects.clone()))
+                .collect(),
+            full_sync_waiters: self.machine.debug_full_sync_waiters(),
+            last_object_syncs: self.machine.debug_last_object_syncs(),
+            task_counts: self.machine.task_counts(),
+            active_machine_tasks: self.tasks.len(),
+            active_sync_tasks: self.sync_tasks.len(),
+            zombie_tasks: self.zombie_tasks.len(),
+            peer_part_sync_flags: self.machine.debug_peer_part_sync_flags(),
+            replay_pages: self.machine.debug_replay_pages(),
+        }
     }
 
     async fn batch_stop_tasks(&mut self) -> Res<()> {

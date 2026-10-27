@@ -1,4 +1,4 @@
-//! DrawerService: drawers as document collections (ADR 014, FDR 001).
+//! DrawerService: drawers as document collections (ADR 019, FDR 001).
 //!
 //! - `<op>.rs`: one file per operation — its wire types, its implementation, and its tests.
 //! - [`access`]: the [`DocAccess`] policy DocsRepo is booted with when drawers are in play — "may
@@ -7,6 +7,8 @@
 //!   two local drawers — in SQLite, fed by this service's own writes and by boot rescans.
 //! - `ledger`: the durable op ledger a roster-and-Keyhive operation steps through, so a crash
 //!   between the two halves resumes rather than leaving a grant without an entry or vice versa.
+//! - `keys`: the facet keys of a drawer doc's descriptor, roster and entries, and the group keys
+//!   a descriptor names its Keyhive groups by.
 //!
 //! A `DrawerId` is the `DocId` of the doc carrying `org.example.daybook.drawer/main`. The roster
 //! (facets on that doc, written through DocsRepo) is what makes inclusion official; the Keyhive
@@ -18,7 +20,7 @@
 //! The drawer facets are ordinary signed facets, so an actor holding Write on a drawer doc could
 //! publish an entry directly through DocsRepo. That is not a bypass: an entry grants nothing by
 //! itself (the Keyhive grant is what the node enforces), it is exactly the "official but
-//! unavailable" state ADR 014 names, and the roster's authority is the drawer doc's write
+//! unavailable" state ADR 019 names, and the roster's authority is the drawer doc's write
 //! authority — which is what that actor held.
 
 pub mod access;
@@ -27,6 +29,7 @@ mod add_doc;
 mod create;
 mod get;
 mod grant;
+mod keys;
 mod known;
 mod ledger;
 mod list;
@@ -50,38 +53,81 @@ pub use big_cabinet_core::drawer::Drawer;
 pub use big_cabinet_core::drawer::DrawerLayout;
 pub use big_cabinet_core::drawer::LayoutKind;
 
+use self::keys::child_entry_key;
+use self::keys::doc_entry_key;
+use self::keys::drawer_key;
+use self::keys::entry_target;
+use self::keys::group_key;
+use self::keys::known_entry_key;
+use self::keys::roster_key;
+#[cfg(test)]
+use self::ledger::CrashPoint;
 use self::ledger::Ledger;
 use self::state::State;
-use crate::authority::Actor;
-use crate::authority::AuthorityServiceError;
-use crate::authority::Authorization;
-use crate::authority::CapId;
-use crate::authority::Capability;
 use crate::authority::DomainAuthority;
-use crate::authority::Namespace;
-use crate::authority::Rights;
 use crate::capability::DomainCapabilities;
 use crate::capability::Invocation;
-use crate::doc::CommandId;
-use crate::doc::DocScope;
-use crate::doc::DocsError;
-use crate::doc::DocsProtocol;
-use crate::doc::MintDocCapability;
-use crate::doc::WriteMode;
-use crate::doc::WriteReceipt;
 use crate::grants::GrantError;
 use crate::grants::Grants;
 use big_cabinet_core::FacetKey;
+use big_cabinet_core::authority::Actor;
+use big_cabinet_core::authority::AuthorityServiceError;
+use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::CapId;
+use big_cabinet_core::authority::Capability;
+use big_cabinet_core::authority::Namespace;
+use big_cabinet_core::authority::Rights;
 use big_cabinet_core::dmeta::DocId;
 use big_cabinet_core::dmeta::Uuid7;
+use big_cabinet_core::doc::CommandId;
+use big_cabinet_core::doc::DocScope;
+use big_cabinet_core::doc::DocsError;
+use big_cabinet_core::doc::DocsProtocol;
+use big_cabinet_core::doc::MintDocCapability;
+use big_cabinet_core::doc::WriteMode;
+use big_cabinet_core::doc::WriteReceipt;
 use big_cabinet_core::drawer::DRAWER_CHILD_ENTRY_FACET_TAG;
 use big_cabinet_core::drawer::DRAWER_DOC_ENTRY_FACET_TAG;
 use big_cabinet_core::drawer::DRAWER_FACET_TAG;
 use big_cabinet_core::drawer::DRAWER_KNOWN_ENTRY_FACET_TAG;
-use big_cabinet_core::drawer::DRAWER_ROSTER_FACET_TAG;
 use big_cabinet_core::drawer::DrawerAccess as Access;
 use big_cabinet_core::drawer::DrawerGroups;
 use big_cabinet_core::drawer::GroupKey;
+use big_cabinet_core::drawer::protocol::AddChild;
+use big_cabinet_core::drawer::protocol::AddDoc;
+use big_cabinet_core::drawer::protocol::CREATE_DRAWER_OBJECT;
+use big_cabinet_core::drawer::protocol::CreateDrawer;
+use big_cabinet_core::drawer::protocol::CreateLayout;
+use big_cabinet_core::drawer::protocol::DrawerCreated;
+use big_cabinet_core::drawer::protocol::DrawerId;
+use big_cabinet_core::drawer::protocol::DrawerRecord;
+use big_cabinet_core::drawer::protocol::DrawerScope;
+use big_cabinet_core::drawer::protocol::DrawerView;
+use big_cabinet_core::drawer::protocol::DrawersError;
+use big_cabinet_core::drawer::protocol::DrawersMessage;
+use big_cabinet_core::drawer::protocol::DrawersProtocol;
+use big_cabinet_core::drawer::protocol::ForgetDrawer;
+use big_cabinet_core::drawer::protocol::GetDrawer;
+use big_cabinet_core::drawer::protocol::GrantDrawer;
+use big_cabinet_core::drawer::protocol::InvitePrincipal;
+use big_cabinet_core::drawer::protocol::KnownDrawer;
+use big_cabinet_core::drawer::protocol::ListDocs;
+use big_cabinet_core::drawer::protocol::ListDrawers;
+use big_cabinet_core::drawer::protocol::ListKnownDrawers;
+use big_cabinet_core::drawer::protocol::ListedDoc;
+use big_cabinet_core::drawer::protocol::ListedDrawer;
+use big_cabinet_core::drawer::protocol::LocalDrawers;
+use big_cabinet_core::drawer::protocol::MintDrawerCapability;
+use big_cabinet_core::drawer::protocol::Principal;
+use big_cabinet_core::drawer::protocol::RememberDrawer;
+use big_cabinet_core::drawer::protocol::RemoveChild;
+use big_cabinet_core::drawer::protocol::RemoveDoc;
+use big_cabinet_core::drawer::protocol::RevokeDrawer;
+use big_cabinet_core::drawer::protocol::RevokePrincipal;
+use big_cabinet_core::drawer::protocol::SetDrawerPolicy;
+use big_cabinet_core::drawer::protocol::drawer_object;
+#[cfg(test)]
+use big_cabinet_core::drawer::protocol::drawer_placement;
 use big_repo::BigKeyhiveGroup;
 use big_repo::SharedBigRepo;
 use big_repo::keyhive_core::access::Access as KeyhiveAccess;
@@ -96,46 +142,6 @@ use service_utils_rs::ResponseEnvelope;
 use service_utils_rs::StopToken;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-
-pub use big_cabinet_core::drawer::protocol::*;
-
-trait LedgerFailure {
-    fn keeps_ledger_row(&self) -> bool;
-}
-
-impl LedgerFailure for DrawersError {
-    /// Whether a failed op may have left a side effect behind, so its ledger row stays for a
-    /// retry or the next boot to finish; a refusal left nothing and frees its command id.
-    fn keeps_ledger_row(&self) -> bool {
-        match self {
-            Self::Context(_)
-            | Self::AuthorityUnavailable(_)
-            | Self::DocsUnavailable(_)
-            | Self::Keyhive(_)
-            | Self::Storage(_)
-            | Self::RosterUnreadable(_) => true,
-            Self::Docs(error) => matches!(
-                error,
-                DocsError::Context(_)
-                    | DocsError::AuthorityUnavailable(_)
-                    | DocsError::Access(_)
-                    | DocsError::Repository(_)
-                    | DocsError::Pending { .. }
-                    | DocsError::CommandInFlight { .. }
-            ),
-            Self::Denied
-            | Self::Authority(_)
-            | Self::UnknownDrawer(_)
-            | Self::ForeignLayout(_)
-            | Self::SelfDoc(_)
-            | Self::AlreadyDrawer(_)
-            | Self::SelfChild
-            | Self::NotAnEntry(_)
-            | Self::CommandInFlight { .. }
-            | Self::CommandReused { .. } => false,
-        }
-    }
-}
 
 pub struct DrawerConfig<'a> {
     pub worker: &'a DrawerWorker,
@@ -169,20 +175,6 @@ pub(crate) struct Core {
     pub(crate) crash: std::sync::Mutex<Option<CrashPoint>>,
 }
 
-/// The boundaries inside a roster operation where a crash leaves one half done.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CrashPoint {
-    /// An entry's Keyhive grant landed; the roster never said so.
-    DocGranted,
-    /// An entry's roster write landed; the projection row never followed.
-    RosterWritten,
-    /// A removal's roster write landed; the Keyhive grant was never revoked.
-    RosterRemoved,
-    /// An invite's docs membership landed; the meta membership never did.
-    DocsMembershipAdded,
-}
-
 impl Core {
     /// Fail here if a crash is armed at `point`, consuming it.
     #[cfg(test)]
@@ -214,14 +206,14 @@ pub struct Drawers {
 }
 
 impl Drawers {
-    /// The two drawers every doc on this node is entered into (ADR 014 "required local drawers").
+    /// The two drawers every doc on this node is entered into (ADR 019 "required local drawers").
     pub fn local(&self) -> LocalDrawers {
         self.core.state.local()
     }
 
     /// Mint an object capability for `drawer_id` at `access` with `rights` in DrawerService's
     /// namespace after verifying that `capability` resolves to an actor holding at least `access`
-    /// on `drawer_id` (ADR 017).
+    /// on `drawer_id` (ADR 022).
     pub async fn mint_drawer_capability(
         &self,
         context: &RequestContext,
@@ -347,34 +339,6 @@ pub(crate) fn parse_placement(placement: &str) -> Option<DrawerId> {
     placement.strip_prefix("drawer ")?.parse().ok()
 }
 
-pub(crate) fn drawer_key() -> FacetKey {
-    FacetKey::from_text(DRAWER_FACET_TAG, "main").expect("the drawer key is well formed")
-}
-
-pub(crate) fn known_entry_key(drawer_id: &DrawerId) -> FacetKey {
-    FacetKey::from_text(DRAWER_KNOWN_ENTRY_FACET_TAG, drawer_id.to_string())
-        .expect("a known entry key is well formed")
-}
-
-pub(crate) fn roster_key() -> FacetKey {
-    FacetKey::from_text(DRAWER_ROSTER_FACET_TAG, "main").expect("the roster key is well formed")
-}
-
-pub(crate) fn doc_entry_key(doc: &DocId) -> FacetKey {
-    FacetKey::from_text(DRAWER_DOC_ENTRY_FACET_TAG, doc.to_string())
-        .expect("a doc entry key is well formed")
-}
-
-pub(crate) fn child_entry_key(child: &DrawerId) -> FacetKey {
-    FacetKey::from_text(DRAWER_CHILD_ENTRY_FACET_TAG, child.to_string())
-        .expect("a child entry key is well formed")
-}
-
-/// The target of an entry key: `docEntry/<id>` or `childEntry/<id>` names it in the key id.
-pub(crate) fn entry_target(key: &FacetKey) -> Option<DocId> {
-    std::str::from_utf8(key.id_bytes()).ok()?.parse().ok()
-}
-
 pub(crate) fn keyhive_access(access: Access) -> KeyhiveAccess {
     match access {
         Access::Relay => KeyhiveAccess::Relay,
@@ -382,10 +346,6 @@ pub(crate) fn keyhive_access(access: Access) -> KeyhiveAccess {
         Access::Write => KeyhiveAccess::Edit,
         Access::Admin => KeyhiveAccess::Admin,
     }
-}
-
-pub(crate) fn group_key(group: &BigKeyhiveGroup) -> GroupKey {
-    GroupKey(group.id().to_bytes())
 }
 
 pub(crate) fn authority_error(error: ClientError<AuthorityServiceError>) -> DrawersError {
@@ -700,7 +660,7 @@ impl Core {
                 self.docs()
                     .call(
                         context.child(),
-                        crate::doc::WriteFacets {
+                        big_cabinet_core::doc::WriteFacets {
                             capability,
                             command,
                             doc_id: drawer.clone(),
@@ -737,10 +697,10 @@ impl Core {
                     self.docs()
                         .call(
                             context.child(),
-                            crate::doc::ReadFacets {
+                            big_cabinet_core::doc::ReadFacets {
                                 capability,
                                 doc_id: record.drawer_id.clone(),
-                                at: crate::doc::At::Current,
+                                at: big_cabinet_core::doc::At::Current,
                                 facets: None,
                                 optimistic: false,
                             },
@@ -754,8 +714,8 @@ impl Core {
         // another known layout, or into one this build does not know — replaces the stored rows
         // with what the facet now states.
         let descriptor_value = match read.facets.get(&drawer_key()) {
-            Some(crate::doc::FacetRead::Accepted { value, .. }) => value.clone(),
-            Some(crate::doc::FacetRead::Absent { .. }) => {
+            Some(big_cabinet_core::doc::FacetRead::Accepted { value, .. }) => value.clone(),
+            Some(big_cabinet_core::doc::FacetRead::Absent { .. }) => {
                 return Err(DrawersError::RosterUnreadable(format!(
                     "{} carries no drawer descriptor",
                     record.drawer_id
@@ -787,8 +747,8 @@ impl Core {
                 continue;
             }
             let value = match facet {
-                crate::doc::FacetRead::Accepted { value, .. } => value,
-                crate::doc::FacetRead::Absent { .. } => continue,
+                big_cabinet_core::doc::FacetRead::Accepted { value, .. } => value,
+                big_cabinet_core::doc::FacetRead::Absent { .. } => continue,
                 other => {
                     return Err(DrawersError::RosterUnreadable(format!(
                         "{key} on {}: {other:?}",
@@ -880,10 +840,10 @@ impl Core {
                                 .docs()
                                 .call(
                                     context.child(),
-                                    crate::doc::ReadFacets {
+                                    big_cabinet_core::doc::ReadFacets {
                                         capability,
                                         doc_id: drawer_id.clone(),
-                                        at: crate::doc::At::Current,
+                                        at: big_cabinet_core::doc::At::Current,
                                         facets: Some(std::collections::BTreeSet::from([
                                             drawer_key(),
                                         ])),
@@ -905,7 +865,7 @@ impl Core {
             let Some(read) = read else {
                 continue;
             };
-            let Some(crate::doc::FacetRead::Accepted { value, .. }) =
+            let Some(big_cabinet_core::doc::FacetRead::Accepted { value, .. }) =
                 read.facets.get(&drawer_key())
             else {
                 continue;
@@ -939,7 +899,7 @@ impl Core {
         let announced = self
             .facet_set
             .query(crate::index::FacetSetQuery::Tag(
-                big_cabinet_core::FacetTag::new(big_cabinet_core::drawer::DRAWER_FACET_TAG)
+                big_cabinet_core::FacetTag::new(DRAWER_FACET_TAG)
                     .expect("the drawer facet tag is a valid tag"),
             ))
             .await
@@ -1051,14 +1011,6 @@ mod tests {
         assert_eq!(parse_placement(&drawer_placement(&drawer)), Some(drawer));
         assert_eq!(parse_placement(METADATA_PLACEMENT), None);
         assert_eq!(parse_placement("drawer not-a-key"), None);
-    }
-
-    #[test]
-    fn entry_keys_name_their_target() {
-        let doc = DocId::new([9; 32]);
-        assert_eq!(entry_target(&doc_entry_key(&doc)), Some(doc.clone()));
-        assert_eq!(entry_target(&child_entry_key(&doc)), Some(doc));
-        assert_eq!(entry_target(&drawer_key()), None);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use super::*;
-use crate::authority::AttenuateCapability;
-use crate::authority::InspectCapability;
-use crate::authority::MintCapability;
-use crate::authority::RetractCapability;
+use big_cabinet_core::authority::AttenuateCapability;
+use big_cabinet_core::authority::InspectCapability;
+use big_cabinet_core::authority::MintCapability;
+use big_cabinet_core::authority::RetractCapability;
 use futures::StreamExt;
 
 async fn actor(node: &Node, path: &str, rights: Rights) -> Actor {
@@ -494,52 +494,79 @@ async fn resource_requests_refuse_identity_unbound_and_wrong_namespace_without_f
     node.stop().await;
 }
 
+/// Delegates to the ledger, but parks every placement forever after reporting it, so a create or
+/// branch stops between committing its document and granting its owner access.
+struct InterruptedPlacement {
+    ledger: Arc<LedgerAccess>,
+    entered: tokio::sync::mpsc::UnboundedSender<(Option<Uuid7>, DocId, String)>,
+}
+
+impl DocAccess for InterruptedPlacement {
+    fn prove<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        actor: Uuid7,
+        scope: &'a DocScope,
+    ) -> AccessFuture<'a, Vec<CapId>> {
+        self.ledger.prove(context, actor, scope)
+    }
+
+    fn check<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        actor: Uuid7,
+        request: AccessRequest<'a>,
+    ) -> AccessFuture<'a, bool> {
+        self.ledger.check(context, actor, request)
+    }
+
+    fn place<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+        actor: Option<Uuid7>,
+        document: &'a DocId,
+        placement: &'a str,
+    ) -> AccessFuture<'a, ()> {
+        Box::pin(async move {
+            self.entered
+                .send((actor, document.clone(), placement.to_owned()))
+                .unwrap();
+            std::future::pending().await
+        })
+    }
+}
+
+/// Asserts, for every subject, whether `access` grants it both read and write on each receipt.
+async fn assert_doc_access(
+    access: &LedgerAccess,
+    receipts: &[WriteReceipt],
+    subjects: &[(&Actor, bool)],
+) {
+    for receipt in receipts {
+        for request in [
+            AccessRequest::Read(&receipt.doc_id),
+            AccessRequest::Write(&receipt.doc_id),
+        ] {
+            for &(subject, expected) in subjects {
+                assert_eq!(
+                    access
+                        .check(&RequestContext::root(), subject.actor_id, request)
+                        .await
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
     use super::super::commands::Commands;
     use super::super::commands::Detail;
     use super::super::commands::Kind;
+    use super::super::commands::Row;
     use super::super::commands::State;
-
-    struct InterruptedPlacement {
-        ledger: Arc<LedgerAccess>,
-        entered: tokio::sync::mpsc::UnboundedSender<(Option<Uuid7>, DocId, String)>,
-    }
-
-    impl DocAccess for InterruptedPlacement {
-        fn prove<'a>(
-            &'a self,
-            context: &'a RequestContext,
-            actor: Uuid7,
-            scope: &'a DocScope,
-        ) -> AccessFuture<'a, Vec<CapId>> {
-            self.ledger.prove(context, actor, scope)
-        }
-
-        fn check<'a>(
-            &'a self,
-            context: &'a RequestContext,
-            actor: Uuid7,
-            request: AccessRequest<'a>,
-        ) -> AccessFuture<'a, bool> {
-            self.ledger.check(context, actor, request)
-        }
-
-        fn place<'a>(
-            &'a self,
-            _context: &'a RequestContext,
-            actor: Option<Uuid7>,
-            document: &'a DocId,
-            placement: &'a str,
-        ) -> AccessFuture<'a, ()> {
-            Box::pin(async move {
-                self.entered
-                    .send((actor, document.clone(), placement.to_owned()))
-                    .unwrap();
-                std::future::pending().await
-            })
-        }
-    }
 
     let mut node = Node::boot().await;
     let owner = node.writer("owner").await;
@@ -548,37 +575,21 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
         .create(&owner, "origin", [(key("main"), note("content"))])
         .await
         .unwrap();
-    node.docs.take();
-    node.docs_stop.take().unwrap().stop().await;
-    node.reopen_namespace().await;
+    node.crash_docs().await;
     let (entered, mut placements) = tokio::sync::mpsc::unbounded_channel();
     let access = Arc::new(InterruptedPlacement {
         ledger: Arc::clone(&node.access),
         entered,
     });
-    let (docs, stop) = boot(DocsConfig {
-        big_repo: Arc::clone(&node.repo),
-        schema_repo: schemas(),
-        authority: node.authority.client.clone(),
-        issuer: node.docs_actor.capability,
-        namespace: node.docs_namespace,
-        node_issuer: node.authority.node_issuer.clone(),
-        access,
-        sql: node.sql.clone(),
-        facet_set: Some(Arc::clone(&node.facet_set)),
-        facet_ref: None,
-    })
-    .await
-    .unwrap();
-    node.docs = Some(docs);
-    node.docs_stop = Some(stop);
+    node.start_with(access, None).await.unwrap();
+    let create_scope = DocScope {
+        create: BTreeSet::from([PLACEMENT.into()]),
+        ..DocScope::default()
+    };
     let source = mint(
         &node,
         Authorization::identity(owner.capability),
-        DocScope {
-            create: BTreeSet::from([PLACEMENT.into()]),
-            ..DocScope::default()
-        },
+        create_scope.clone(),
         Rights::USE | Rights::NARROW,
     )
     .await;
@@ -588,10 +599,7 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
             authority: source.capability_id,
             signer: signer.capability,
         },
-        DocScope {
-            create: BTreeSet::from([PLACEMENT.into()]),
-            ..DocScope::default()
-        },
+        create_scope.clone(),
         Rights::USE | Rights::NARROW,
     )
     .await;
@@ -615,8 +623,7 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
     };
     let branch_scope = DocScope {
         write: BTreeSet::from([origin.doc_id.clone()]),
-        create: BTreeSet::from([PLACEMENT.into()]),
-        ..DocScope::default()
+        ..create_scope.clone()
     };
     let branch_cap = mint(
         &node,
@@ -700,22 +707,12 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
             })
             .collect::<BTreeSet<_>>()
     );
-    for receipt in &receipts {
-        for request in [
-            AccessRequest::Read(&receipt.doc_id),
-            AccessRequest::Write(&receipt.doc_id),
-        ] {
-            for subject in [&owner, &signer] {
-                assert!(
-                    !node
-                        .access
-                        .check(&RequestContext::root(), subject.actor_id, request)
-                        .await
-                        .unwrap()
-                );
-            }
-        }
-    }
+    assert_doc_access(
+        &node.access,
+        &receipts,
+        &[(&owner, false), (&signer, false)],
+    )
+    .await;
     assert_eq!(
         op(node
             .client()
@@ -742,16 +739,7 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
             signer: signer.capability,
         },
     ] {
-        let different = mint(
-            &node,
-            authorization,
-            DocScope {
-                create: BTreeSet::from([PLACEMENT.into()]),
-                ..DocScope::default()
-            },
-            Rights::USE,
-        )
-        .await;
+        let different = mint(&node, authorization, create_scope.clone(), Rights::USE).await;
         assert_eq!(
             op(node
                 .client()
@@ -777,28 +765,12 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
     assert_eq!(placements.recv().await, None);
     assert!(ledger.unresolved().await.unwrap().is_empty());
     for row in &rows {
-        let recovered = ledger.get(&row.command).await.unwrap().unwrap();
         assert_eq!(
-            (
-                recovered.kind,
-                recovered.digest,
-                recovered.actor,
-                recovered.document,
-                recovered.placement,
-                recovered.detail,
-                recovered.state,
-                recovered.heads,
-            ),
-            (
-                row.kind,
-                row.digest,
-                signer.actor_id,
-                row.document.clone(),
-                row.placement.clone(),
-                row.detail.clone(),
-                State::Done,
-                row.heads.clone(),
-            )
+            ledger.get(&row.command).await.unwrap().unwrap(),
+            Row {
+                state: State::Done,
+                ..row.clone()
+            }
         );
     }
     let refreshed = mint(
@@ -838,21 +810,13 @@ async fn creation_and_recovery_grant_originating_actor_not_bound_signer() {
         assert!(
             matches!(node.read_one(&owner, &receipt.doc_id, At::Current, &key("main")).await, FacetRead::Accepted { value, .. } if value == note("content"))
         );
-        for request in [
-            AccessRequest::Read(&receipt.doc_id),
-            AccessRequest::Write(&receipt.doc_id),
-        ] {
-            for (subject, expected) in [(&owner, true), (&signer, false), (&other_owner, false)] {
-                assert_eq!(
-                    reopened
-                        .check(&RequestContext::root(), subject.actor_id, request)
-                        .await
-                        .unwrap(),
-                    expected
-                );
-            }
-        }
     }
+    assert_doc_access(
+        &reopened,
+        &receipts,
+        &[(&owner, true), (&signer, false), (&other_owner, false)],
+    )
+    .await;
     node.stop().await;
 }
 
@@ -969,25 +933,10 @@ async fn facet_ref_selector_is_authorized_before_lookup_and_origins_are_batched(
         origins: BTreeSet::from([first_origin.clone(), second_origin]),
         calls: Mutex::new(Vec::new()),
     });
-    node.docs.take();
-    node.docs_stop.take().unwrap().stop().await;
-    node.reopen_namespace().await;
-    let (docs, stop) = boot(DocsConfig {
-        big_repo: Arc::clone(&node.repo),
-        schema_repo: schemas(),
-        authority: node.authority.client.clone(),
-        issuer: node.docs_actor.capability,
-        namespace: node.docs_namespace,
-        node_issuer: node.authority.node_issuer.clone(),
-        access: Arc::<Policy>::clone(&policy),
-        sql: node.sql.clone(),
-        facet_set: Some(Arc::clone(&node.facet_set)),
-        facet_ref: Some(facet_ref),
-    })
-    .await
-    .unwrap();
-    node.docs = Some(docs);
-    node.docs_stop = Some(stop);
+    node.crash_docs().await;
+    node.start_with(Arc::<Policy>::clone(&policy), Some(facet_ref))
+        .await
+        .unwrap();
     let capability = node
         .capability(
             &owner,
@@ -1136,9 +1085,7 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
     for object in &objects {
         node.grant(&owner, object.clone()).await;
     }
-    node.docs.take();
-    node.docs_stop.take().unwrap().stop().await;
-    node.reopen_namespace().await;
+    node.crash_docs().await;
     let context = RequestContext::root();
     let mut dependencies: Vec<_> = node
         .access
@@ -1172,22 +1119,9 @@ async fn identity_mint_proves_the_whole_scope_once_and_retains_every_grant_depen
         ledger: Arc::clone(&node.access),
         proofs: Default::default(),
     });
-    let (docs, stop) = boot(DocsConfig {
-        big_repo: Arc::clone(&node.repo),
-        schema_repo: schemas(),
-        authority: node.authority.client.clone(),
-        issuer: node.docs_actor.capability,
-        namespace: node.docs_namespace,
-        node_issuer: node.authority.node_issuer.clone(),
-        access: Arc::<Policy>::clone(&policy),
-        sql: node.sql.clone(),
-        facet_set: Some(Arc::clone(&node.facet_set)),
-        facet_ref: None,
-    })
-    .await
-    .unwrap();
-    node.docs = Some(docs);
-    node.docs_stop = Some(stop);
+    node.start_with(Arc::<Policy>::clone(&policy), None)
+        .await
+        .unwrap();
     let authorization = Authorization {
         authority: owner.capability,
         signer: signer.capability,

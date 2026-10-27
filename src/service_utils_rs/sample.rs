@@ -22,7 +22,18 @@ mod service;
 #[cfg(test)]
 mod tests;
 
-pub use protocol::*;
+pub use protocol::GetValue;
+pub use protocol::GetValueOutput;
+pub use protocol::PutValue;
+pub use protocol::PutValueOutput;
+pub use protocol::ReadState;
+pub use protocol::SampleError;
+pub use protocol::SampleEvent;
+pub use protocol::SampleMessage;
+pub use protocol::SampleProtocol;
+pub use protocol::StatePage;
+pub use protocol::SubscribeEvents;
+pub use protocol::ValueSnapshot;
 pub use service::CallLog;
 pub use service::Log;
 pub use service::Logged;

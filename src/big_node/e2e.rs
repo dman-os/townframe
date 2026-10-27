@@ -1,14 +1,14 @@
 use super::*;
 use big_cabinet::SchemaRegistration;
 use big_cabinet::SchemaRegistrationGroup;
-use big_cabinet::authority::Authorization;
-use big_cabinet::authority::CapId;
 use big_cabinet::index::FacetMembership;
 use big_cabinet::index::FacetRoute;
 use big_cabinet::index::FacetSetQuery;
 use big_cabinet::index::FacetSetStore;
 use big_cabinet_core::DocId;
 use big_cabinet_core::FacetKey;
+use big_cabinet_core::authority::Authorization;
+use big_cabinet_core::authority::CapId;
 use big_cabinet_core::doc::At;
 use big_cabinet_core::doc::CommandId;
 use big_cabinet_core::doc::CreateDoc;
