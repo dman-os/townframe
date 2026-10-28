@@ -6,7 +6,7 @@ Drawers are the primary collection primitive for [documents](./docs.md).
 
 ## Why
 
-Keyhive and big_repo support group-based and document-granular access control; drawers are the user-facing primitives built on top of them.
+Keyhive and [big_repo](./big_repo.md) support group-based and document-granular access control; drawers are the user-facing primitives built on top of them.
 Drawers will be the unit for access control and syncing.
 
 Our primary use cases for drawers include:
@@ -45,9 +45,7 @@ Our primary use cases for drawers include:
 ## How
 
 We use two primitives to store a drawer's data.
-First of all, a roster is used to list the member documents and child drawers.
-In the layouts implemented today the roster is not a separate document: the roster marker and its entries are datums on the same document as the drawer descriptor (see Datums below).
-External roster documents are a deferred design (ADR 019, roster sharding).
+First of all, a roster document is used to list the member documents and child drawers.
 Access permissions on the drawer document define who can add or remove a document from a drawer.
 We then use keyhive/keyline primitives to enable the transitive access properties desired.
 
@@ -68,6 +66,7 @@ Agents being given permissions to the drawer are then given delegations over thi
 
 Note that this allows anyone with access to a document to view what groups have mentioned it.
 This is a necessary exposure, because it ensures that drawer participants can present their standing with the collection group to request access to the document at any node.
+
 Note that this doesn't allow document holders to enumerate other documents in the collection group that they don't have pre-existing grants for.
 Unfortunately, though, it allows these non-participant nodes to write delegations, to a document that they control, to the collection group.
 That's why we use the separate Automerge roster as the only authority over what document is included in a drawer.
