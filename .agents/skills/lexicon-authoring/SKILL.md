@@ -15,15 +15,29 @@ never at decode, storage, or projection.
 - **Objects are open.** `#[serde(flatten)] extra: crate::datum::Extra` on every datum and
   member. Never `#[serde(deny_unknown_fields)]` on a type that also flattens `Extra` — the
   macro refuses that combination because it would reject what it claims to preserve.
+- **Field shapes are recursive.** Every field in a `#[macros::datum]` object or union must
+  implement `DatumShape`, including nested metadata records, container elements, map keys
+  and values, and tuple members. Apply the macro to owned nested records too: an outer
+  `Extra` cannot preserve unknown members inside an undeclared inner record. Primitives,
+  lossless JSON values, Cabinet wire leaves (including `jiff::Timestamp`, `ObjKey` and
+  `automerge::ChangeHash`) and standard containers have built-in impls; containers require
+  their contents to implement the same contract. A closed owned record
+  needs `#[macros::datum(closed)]` and `#[serde(deny_unknown_fields)]`. Openness and the wire
+  form always belong to the type's own declaration: a field takes no `#[datum]`, because a
+  marker there would be a second, invisible declaration of a property the nested type owns.
+  A foreign type that is not declared here must carry its own `DatumShape` impl (in the core
+  for a shared wire leaf); `serde(with)` and `schemars(with)` alone never waive the bound.
 - **Unions are open.** `#[macros::datum]` (not `closed`) on enums, with exactly one
   `#[datum(other)] Unknown(crate::datum::UnknownMember)` variant. The macro writes serde and
   the schema; do not derive `Serialize`/`Deserialize`/`JsonSchema` on an open union.
   Closed is the exception and needs a stated reason at the site (e.g. a vocabulary that is
   another system's closed enum, mirrored — not extended — here).
 - **String vocabularies are open** when a peer may extend them: `#[macros::datum(open_string)]`
-  with an `#[datum(other)] Unknown(String)`. A closed vocabulary (plain enum + serde/schemars
-  derives, no macro) is for values this node itself grants/interprets; an unknown one is a
-  refusal at the point of use, and its admission path needs the `enum` supplement support.
+  with an `#[datum(other)] Unknown(String)`. Declare a closed vocabulary with
+  `#[macros::datum(closed_string)]` (known-unit variants only, no fallback): it publishes the
+  same list as `enum` and rejects an unknown string, so it is for values this node itself
+  grants/interprets. Either form derives the spelling from the variant name; do not derive
+  serde or `schemars` on it.
 - **A member with nothing to say carries `empty: true`.** A Lexicon object states at least
   one property, so a property-less member cannot publish. Convention: an optional
   `empty: Option<bool>` field, emitted as `Some(true)` by the type's constructors and

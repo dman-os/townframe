@@ -273,6 +273,8 @@ async fn an_opened_actor_carries_a_verifiable_attribution_certificate() {
     // The certificate is exactly what dmeta stores, and it verifies against the
     // issuer a verifier is told to expect — not against its own `iss`.
     let metadata = ActorMetadata {
+        extra: Default::default(),
+        created_at: Vec::new(),
         pubkey: actor.public_key.clone(),
         actor_url: actor.url.clone(),
         delegation: Some(actor.certificate.clone()),

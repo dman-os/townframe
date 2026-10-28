@@ -27,6 +27,8 @@ const MAX_COLLECTION_ITEMS: u64 = 16;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribution {
     pub issuer: MultibaseKey,
+    // FIXME: actor uuid in attribution makes no fuckin sense. actor uuids are doc specific
+    // and not global
     pub actor_uuid: Uuid7,
     pub pubkey: MultibaseKey,
     pub actor_url: String,

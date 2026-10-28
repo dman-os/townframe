@@ -431,13 +431,13 @@ async fn unscoped_queries_are_narrowed_to_the_capability_scope() {
         )
         .await
         .unwrap();
-    let mut expected_docs = vec![fx.doc_direct.clone(), fx.doc_in_child_read.clone()];
-    expected_docs.sort();
+    // The query returns the matching set; result order is not part of the contract.
+    let expected_docs = BTreeSet::from([fx.doc_direct.clone(), fx.doc_in_child_read.clone()]);
     assert_eq!(
         narrowed_records
             .into_iter()
             .map(|record| record.doc_id)
-            .collect::<Vec<_>>(),
+            .collect::<BTreeSet<_>>(),
         expected_docs,
     );
     assert!(

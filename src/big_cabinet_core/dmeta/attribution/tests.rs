@@ -25,6 +25,8 @@ fn fixture() -> (Attribution, ActorMetadata, SigningKey) {
         actor_url: "db+actor://node/process".into(),
     };
     let actor = ActorMetadata {
+        extra: Default::default(),
+        created_at: Vec::new(),
         pubkey,
         actor_url: attribution.actor_url.clone(),
         delegation: None,
@@ -271,6 +273,8 @@ fn checks_issuer_and_each_binding_component_without_consulting_delegation() {
         ),
     ] {
         let other = ActorMetadata {
+            extra: Default::default(),
+            created_at: Vec::new(),
             pubkey,
             actor_url: url,
             delegation: None,

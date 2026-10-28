@@ -1,6 +1,6 @@
 # Keyhive
 
-Status: stub. Only points at where things live; expand before relying on it.
+Status: stub; machine generated. Only points at where things live; expand before relying on it.
 
 Keyhive is the membership and access control layer for documents.
 We consume the [dman-os/keyhive](https://github.com/dman-os/keyhive) fork (`keyhive_core`, `keyhive_crypto`, `beekem`), pinned by rev in the root `Cargo.toml`.

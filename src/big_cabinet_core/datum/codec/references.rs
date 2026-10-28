@@ -192,6 +192,7 @@ mod tests {
         maybe: Option<DatumReference>,
     }
 
+    #[macros::datum(closed)]
     #[derive(Debug, Serialize, Deserialize, JsonSchema)]
     #[serde(deny_unknown_fields)]
     struct Nested {

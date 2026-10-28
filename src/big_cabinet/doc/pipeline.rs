@@ -16,7 +16,7 @@ pub(super) struct Plan<'a> {
     pub(super) set: BTreeMap<DatumKey, (SchemaHandle, Json)>,
     pub(super) remove: BTreeSet<DatumKey>,
     pub(super) now: jiff::Timestamp,
-    pub(super) predecessors: BTreeMap<DatumKey, Vec<Cid>>,
+    pub(super) predecessors: BTreeMap<DatumKey, Vec<SignatureId>>,
     /// Aliases minted for slots that had none when the plan was first staged.
     pub(super) aliases: BTreeMap<DatumKey, Uuid7>,
 }
@@ -154,11 +154,8 @@ impl DocsService {
         }
         let mut dmeta = match tx.get(&datums, DMETA_KEY).map_err(repository)? {
             None => Dmeta::new(plan.now),
-            Some(_) => {
-                let json = hydrate_value(&tx, &datums, DMETA_KEY.into(), self.dmeta.compiled())
-                    .map_err(repository)?;
-                serde_json::from_value::<Dmeta>(json).map_err(repository)?
-            }
+            Some(_) => Dmeta::hydrate(&tx, &datums, DMETA_KEY.into(), self.dmeta.compiled())
+                .map_err(repository)?,
         };
         let doc_uuid = dmeta
             .doc_uuid(plan.document, plan.doc_uuid)
@@ -210,12 +207,19 @@ impl DocsService {
                 None => SignatureBytes::try_from([0_u8; 64].as_slice())
                     .expect("64 bytes are a signature"),
             };
+            let extra = dmeta
+                .datums
+                .get(&key)
+                .map(|metadata| metadata.extra.clone())
+                .unwrap_or_default();
             dmeta.datums.insert(
                 key,
                 DatumMetadata {
+                    extra,
                     updated_at: vec![plan.now],
                     deleted_at: if removed { vec![plan.now] } else { Vec::new() },
                     signatures: vec![DatumSignature {
+                        extra: Default::default(),
                         actor_uuid: plan.actor.actor_id,
                         signature,
                         doc_uuid,
@@ -229,6 +233,8 @@ impl DocsService {
             .actors
             .entry(plan.actor.actor_id)
             .or_insert_with(|| ActorMetadata {
+                extra: Default::default(),
+                created_at: vec![plan.now],
                 pubkey: plan.actor.public_key.clone(),
                 actor_url: plan.actor.url.clone(),
                 delegation: Some(plan.actor.certificate.clone()),

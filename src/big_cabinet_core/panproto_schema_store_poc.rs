@@ -1,5 +1,8 @@
 //! POC: PlugsRepo writes Panproto revisions; DocsRepo resolves them read-only.
 
+// FIXME: let's remove this module if not used
+// why are we not using panproto to VCS schemas again?
+// does it's schema validation prove no value over teh schemars one?
 use std::path::Path;
 
 use panproto_mig::Migration;

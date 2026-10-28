@@ -7,7 +7,6 @@ use automerge::ScalarValue;
 use automerge::Value;
 use big_cabinet_core::DatumKey;
 use big_cabinet_core::dmeta::Bytes;
-use big_cabinet_core::dmeta::Cid;
 use big_cabinet_core::dmeta::ClaimOperation;
 use big_cabinet_core::dmeta::DatumClaim;
 use big_cabinet_core::dmeta::DatumSignature;
@@ -18,6 +17,7 @@ use big_cabinet_core::dmeta::NativeReadBudget;
 use big_cabinet_core::dmeta::NativeReadError;
 use big_cabinet_core::dmeta::NativeValue;
 use big_cabinet_core::dmeta::SignatureBytes;
+use big_cabinet_core::dmeta::SignatureId;
 use big_cabinet_core::dmeta::SignedDatumClaim;
 use big_cabinet_core::dmeta::Uuid7;
 use big_cabinet_core::dmeta::cid_of;
@@ -121,7 +121,7 @@ pub fn predecessor_ids(
     datum_key: &DatumKey,
     heads: &[ChangeHash],
     budget: HistoryBudget,
-) -> Result<Vec<Cid>, ClaimHistoryError> {
+) -> Result<Vec<SignatureId>, ClaimHistoryError> {
     Reconstruction::new(doc, datum_key, budget).predecessor_ids(heads)
 }
 
@@ -423,7 +423,10 @@ impl Reconstruction<'_> {
         })
     }
 
-    fn predecessor_ids(&mut self, heads: &[ChangeHash]) -> Result<Vec<Cid>, ClaimHistoryError> {
+    fn predecessor_ids(
+        &mut self,
+        heads: &[ChangeHash],
+    ) -> Result<Vec<SignatureId>, ClaimHistoryError> {
         let mut ids = Vec::new();
         for entry in self.entries(heads)? {
             if !entry.is_map {
@@ -635,6 +638,7 @@ impl Reconstruction<'_> {
         let inherited = match inherited.as_slice() {
             [] => None,
             [witness] => Some(InheritedWitness {
+                extra: Default::default(),
                 origin_doc: self
                     .text(witness, "originDoc", heads)?
                     .parse()
@@ -652,6 +656,7 @@ impl Reconstruction<'_> {
         };
         let doc_uuid = Self::uuid(&self.text(marker, "docUuid", heads)?)?;
         Ok(DatumSignature {
+            extra: Default::default(),
             actor_uuid,
             signature,
             doc_uuid,

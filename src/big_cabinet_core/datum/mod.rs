@@ -44,6 +44,7 @@ pub use wire::KnownString;
 pub use wire::Member;
 pub use wire::UnionLayout;
 pub use wire::UnknownMember;
+pub use wire::deserialize_closed_str;
 pub use wire::deserialize_known_str;
 pub use wire::deserialize_union;
 pub use wire::serialize_member;
@@ -103,6 +104,6 @@ pub use universe::UniverseError;
 #[cfg(feature = "schemars")]
 pub use wire::MemberSchema;
 #[cfg(feature = "schemars")]
-pub use wire::open_string_schema;
+pub use wire::string_schema;
 #[cfg(feature = "schemars")]
 pub use wire::union_schema;

@@ -56,8 +56,8 @@ pub use verification::signature_id;
 
 use crate::reference::DatumKey;
 
-const CLAIM_DOMAIN: &[u8] = b"daybook.datum-claim.v2\0";
-const CLAIM_ID_DOMAIN: &[u8] = b"daybook.datum-claim-id.v2\0";
+const CLAIM_DOMAIN: &[u8] = b"daybook.datum-claim.v1\0";
+const CLAIM_ID_DOMAIN: &[u8] = b"daybook.datum-claim-id.v1\0";
 const CID_VERSION_RAW_BLAKE3: [u8; 4] = [0x01, 0x55, 0x1e, 0x20];
 const CID_LENGTH: usize = 36;
 
@@ -144,16 +144,22 @@ impl schemars::JsonSchema for Uuid7 {
     }
 }
 
+#[macros::datum]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ActorMetadata {
+    /// Every timestamp at which a concurrent write first introduced this binding. These are
+    /// unsigned display metadata: neither the earliest value nor the set's size establishes which
+    /// binding is authoritative. The UUID, key, URL, and certificate are the binding.
+    #[serde(default)]
+    pub created_at: Vec<Timestamp>,
     pub pubkey: MultibaseKey,
     pub actor_url: String,
-    // FIXME: I don't like that this is an opaque bytes. can't we have some kind of standard
-    // json object thing around delegations that ucans or whatever use?
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<Bytes>,
+    #[serde(flatten)]
+    pub extra: crate::datum::Extra,
 }
 
 /// The compact provenance datum. Maps are ordered so snapshots and derived evidence are stable.
@@ -259,6 +265,7 @@ impl Dmeta {
 /// entries a write replaces is decided by the repository against the heads it wrote from; this type
 /// only holds the result. Timestamps help display history. They are not signed, and they establish
 /// neither identity nor authorization.
+#[macros::datum]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -268,6 +275,8 @@ pub struct DatumMetadata {
     pub deleted_at: Vec<Timestamp>,
     #[serde(default)]
     pub signatures: Vec<DatumSignature>,
+    #[serde(flatten)]
+    pub extra: crate::datum::Extra,
 }
 
 /// A signature a compaction retained from history it dropped, where that history is no longer
@@ -286,12 +295,7 @@ pub struct DatumMetadata {
 /// What the witness cannot prove on its own is that the actor was authorized on the origin at the
 /// frontier where the signature was made. That frontier lives on the origin document, and an origin
 /// that is unavailable leaves the witness pending rather than forged.
-/// FIXME: making "origin must be avail" as pending is
-/// a bad ddesign because that prevents us from delting
-/// the origin document for the compaction usecase.
-/// well, techicnally, even if we do'nt hve the original
-/// document, we'd have the keyhive entry for it but still
-/// i think this might be a bit much
+#[macros::datum]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -301,6 +305,8 @@ pub struct InheritedWitness {
     pub message: Bytes,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<Bytes>,
+    #[serde(flatten)]
+    pub extra: crate::datum::Extra,
 }
 
 /// The branch side of a branch: `org.example.daybook.branch/<docid>` on the branch document,
@@ -321,13 +327,7 @@ pub struct BranchPath {
     pub extra: crate::datum::Extra,
 }
 
-// FIXME: this isn't an open struct and yet i'm seeing
-// no requirements by the datum macro to declare it closed
-// this is an issue. first of all, this should be open
-// and second of all, for it to be closed, there should have been
-// an explicit closed marker on here
-// for third party types, the embedding site can declare it
-// as "i know this is closed"
+#[macros::datum]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -335,6 +335,8 @@ pub struct BranchOrigin {
     pub datum_ref: crate::DatumReference,
     #[cfg_attr(feature = "schemars", schemars(with = "Vec<String>"))]
     pub ref_heads: Vec<automerge::ChangeHash>,
+    #[serde(flatten)]
+    pub extra: crate::datum::Extra,
 }
 
 /// One entry in a datum's competing set of signatures.
@@ -342,6 +344,7 @@ pub struct BranchOrigin {
 /// `inherited` is set only for a signature carried over a compaction, where the history its
 /// message would be reconstructed from is gone. Every other signature, including one that arrived
 /// with a branch's or a merge's changes, has none.
+#[macros::datum]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -352,16 +355,13 @@ pub struct DatumSignature {
     // introduction. A branch or a merge moves the entry to another document unchanged, so the
     // entry cannot assume the document holding it is the one its claim names. (A plain comment: a
     // doc comment would become a description beside the UUID's `$ref`, which Lexicon cannot state.)
-    // FIXME: why is this present on every signature?
-    // this is not needed since either it's the currrent
-    // document or the inherited witness would indicate the
-    // origin doc. though I think I remember authorizing
-    // this chagne for some reason, do the ADRs say why?
     pub doc_uuid: Uuid7,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<Bytes>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherited: Option<InheritedWitness>,
+    #[serde(flatten)]
+    pub extra: crate::datum::Extra,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,14 +388,12 @@ pub struct DatumClaim {
     pub actor_uuid: Uuid7,
     pub operation: ClaimOperation,
     pub value_cid: Option<Cid>,
-    // FIXME: are predecessor CIDs or signatures??
     #[serde(default)]
-    pub predecessors: Vec<Cid>,
+    pub predecessors: Vec<SignatureId>,
 }
 
-// FIXME: calling them CID might be misleading since I don't think the official
-// CID spec supports blake3
 /// A CIDv1 with the `raw` codec and a BLAKE3-256 multihash: four header bytes and the 32-byte digest.
+/// Value CIDs hash private-tag CBOR, not DRISL or DAG-CBOR; `raw` makes no encoding claim.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Cid([u8; CID_LENGTH]);
 
@@ -464,6 +462,24 @@ impl TryFrom<&[u8]> for Cid {
         let mut cid = [0; CID_LENGTH];
         cid.copy_from_slice(bytes);
         Ok(Self(cid))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SignatureId(Cid);
+
+impl SignatureId {
+    pub fn as_bytes(&self) -> &[u8; CID_LENGTH] {
+        self.0.as_bytes()
+    }
+}
+
+impl TryFrom<&[u8]> for SignatureId {
+    type Error = DmetaError;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Cid::try_from(bytes).map(Self)
     }
 }
 
@@ -781,7 +797,7 @@ impl DatumClaim {
         let mut predecessors = Vec::with_capacity(predecessor_count as usize);
         for _ in 0..predecessor_count {
             let predecessor =
-                Cid::try_from(read_cbor_bytes_strict(bytes, &mut cursor)?.as_slice())?;
+                SignatureId::try_from(read_cbor_bytes_strict(bytes, &mut cursor)?.as_slice())?;
             if predecessors.last().is_some_and(|last| last >= &predecessor) {
                 return Err(DmetaError::MalformedClaim(
                     "predecessors must be sorted and unique",

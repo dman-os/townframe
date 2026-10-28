@@ -12,6 +12,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 
+mod string_vocabulary;
+
 #[macros::datum(authority = "org.example.daybook")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 struct Note {
@@ -46,17 +48,6 @@ enum ClosedAttachment {
     Photo(Photo),
 }
 
-/// A vocabulary rather than a set of named types: the values are strings a peer may extend, so the
-/// spelling is stated on the variant and an unknown one is kept.
-#[macros::datum(open_string)]
-#[derive(Debug, Clone, PartialEq)]
-enum OpenColor {
-    Red,
-    Blue,
-    #[datum(other)]
-    Unknown(String),
-}
-
 /// Never declared, never seen by the macro: the case the publish-time check exists for.
 #[derive(JsonSchema)]
 #[expect(dead_code, reason = "the point of this type is the schema it emits")]
@@ -83,12 +74,6 @@ fn the_macro_reports_what_it_saw() {
         Shape::Union {
             openness: Openness::Open,
             tagging: Tagging::Internally { tag: "$type" },
-        }
-    );
-    assert_eq!(
-        OpenColor::SHAPE,
-        Shape::Str {
-            known: &["red", "blue"]
         }
     );
     assert_eq!(
@@ -171,6 +156,36 @@ fn an_open_object_keeps_the_members_it_does_not_name() {
     let decoded = serde_json::from_value::<Note>(wire.clone()).unwrap();
     assert_eq!(decoded.extra.get("future"), Some(&json!(1)));
     assert_eq!(serde_json::to_value(&decoded).unwrap(), wire);
+}
+
+#[test]
+fn nested_open_and_closed_records_keep_their_contracts() {
+    #[macros::datum]
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct Nested {
+        open: Vec<Note>,
+        closed: Photo,
+        #[schemars(with = "String")]
+        foreign: jiff::Timestamp,
+        #[serde(flatten)]
+        extra: Extra,
+    }
+
+    let wire = json!({
+        "open": [{"content": "hello", "future": {"nested": [1, true]}}],
+        "closed": {"url": "photo"},
+        "foreign": "1970-01-01T00:00:00Z",
+        "future": "kept"
+    });
+    let schema = serde_json::to_value(schema_for!(Nested)).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&wire));
+    let value: Nested = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(value).unwrap(), wire);
+    let mut invalid = wire;
+    invalid["closed"]["future"] = json!(true);
+    assert!(!validator.is_valid(&invalid));
+    assert!(serde_json::from_value::<Nested>(invalid).is_err());
 }
 
 #[test]
@@ -267,46 +282,6 @@ fn an_object_whose_openness_disagrees_with_its_schema_is_refused() {
                 ..
             }
         ),
-        "{err}"
-    );
-}
-
-#[test]
-fn a_string_vocabulary_keeps_the_strings_it_does_not_know() {
-    assert_eq!(serde_json::to_value(OpenColor::Red).unwrap(), json!("red"));
-    let unknown = serde_json::from_value::<OpenColor>(json!("violet")).unwrap();
-    assert_eq!(unknown, OpenColor::Unknown("violet".into()));
-    assert_eq!(
-        serde_json::to_value(&unknown).unwrap(),
-        json!("violet"),
-        "an unrecognized string is written back as it arrived"
-    );
-}
-
-#[test]
-fn the_schema_of_a_string_vocabulary_agrees_with_its_declaration() {
-    let schema = schema_for!(OpenColor);
-    let flags = check_shape("OpenColor", &schema, OpenColor::SHAPE).unwrap();
-    assert!(flags.is_empty(), "{flags:?}");
-    let document = serde_json::to_value(&schema).unwrap();
-    assert_eq!(document["type"], "string");
-    assert_eq!(document["knownValues"], json!(["red", "blue"]));
-}
-
-/// The check has something to catch here too: a vocabulary whose schema lists values the type does
-/// not know, or a different set of them, is a declaration and a schema disagreeing.
-#[test]
-fn a_string_vocabulary_whose_values_disagree_is_refused() {
-    let err = check_shape(
-        "OpenColor",
-        &schema_for!(OpenColor),
-        Shape::Str {
-            known: &["red", "green"],
-        },
-    )
-    .unwrap_err();
-    assert!(
-        matches!(err, ShapeError::KnownValuesDisagree { .. }),
         "{err}"
     );
 }
@@ -487,7 +462,8 @@ fn a_spelling_is_derived_or_stated_and_never_rewritten() {
     assert_eq!(
         Derived::SHAPE,
         Shape::Str {
-            known: &["org.example.custom", "myValue"]
+            openness: Openness::Open,
+            known: &["org.example.custom", "myValue"],
         },
         "an explicit rename is honoured and a variant name is derived"
     );

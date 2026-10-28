@@ -18,6 +18,7 @@ const PORTABLE_PROOF: &str = r#"{
         "updatedAt": [],
         "actors": {
             "01890f3e-1234-7000-8000-000000000002": {
+                "createdAt": [],
                 "pubkey": "zGmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
                 "actorUrl": "did:key:test",
                 "delegation": {"$bytes": "AQID/w=="}
@@ -36,8 +37,8 @@ const PORTABLE_PROOF: &str = r#"{
                 "signatures": [{
                     "actorUuid": "01890f3e-1234-7000-8000-000000000002",
                     "docUuid": "01890f3e-1234-7000-8000-000000000009",
-                    "signature": {"$bytes": "0OfFbepD8pkizr9CzZzifZowUUEIgKyjSsnE/TrBs+sjFi+2cozVHjaf6O/w/6mPoZ4+phKLY+MzNbo6/vv6AQ=="},
-                    "message": {"$bytes": "ZGF5Ym9vay5kYXR1bS1jbGFpbS52MgCHZXphamRrdW9yZy5leGFtcGxlLm5vdGUvbWFpblABiQ8+EjRwAIAAAAAAAAABUAGJDz4SNHAAgAAAAAAAAAIAWCQBVR4gLWvLu8YEORo43f1WfOLngEcapPP3vFmdHGSY17U+tsaA"}
+                    "signature": {"$bytes": "WcRo341SfYfbRz3RbTApheh3pF4FJ5a/oPkpOo6Z0JCw0lDy2Y4hDR75u7+VwKIqHx4vN6TqjCvFN102EWEOCQ=="},
+                    "message": {"$bytes": "ZGF5Ym9vay5kYXR1bS1jbGFpbS52MQCHZXphamRrdW9yZy5leGFtcGxlLm5vdGUvbWFpblABiQ8+EjRwAIAAAAAAAAABUAGJDz4SNHAAgAAAAAAAAAIAWCQBVR4gLWvLu8YEORo43f1WfOLngEcapPP3vFmdHGSY17U+tsaA"}
                 }]
             }
         }
@@ -73,11 +74,14 @@ fn signed_entry(claim: &DatumClaim) -> (ActorMetadata, DatumSignature) {
     let key = SigningKey::from_bytes(&[7; 32]);
     (
         ActorMetadata {
+            extra: Default::default(),
+            created_at: Vec::new(),
             pubkey: MultibaseKey::try_from(key.verifying_key().to_bytes().as_slice()).unwrap(),
             actor_url: "did:key:test".into(),
             delegation: None,
         },
         DatumSignature {
+            extra: Default::default(),
             actor_uuid: claim.actor_uuid,
             doc_uuid: uuid7(9),
             signature: SignatureBytes::try_from(
@@ -92,8 +96,10 @@ fn signed_entry(claim: &DatumClaim) -> (ActorMetadata, DatumSignature) {
     )
 }
 
-fn cid_with(byte: u8) -> Cid {
-    cid_of(&[byte; 32])
+fn signature_id_with(byte: u8) -> SignatureId {
+    let key = MultibaseKey::try_from([byte; 32].as_slice()).unwrap();
+    let signature = SignatureBytes::try_from([byte; 64].as_slice()).unwrap();
+    signature_id(&key, &signature)
 }
 
 #[test]
@@ -118,6 +124,50 @@ fn aliases_retain_concurrency_without_a_reverse_index() {
         serde_json::from_value::<Dmeta>(serde_json::to_value(&dmeta).unwrap()).unwrap(),
         dmeta
     );
+}
+
+#[test]
+fn nested_metadata_and_branch_origins_preserve_unknown_members() {
+    use serde_json::json;
+
+    let mut wire: serde_json::Value = serde_json::from_str(PORTABLE_PROOF).unwrap();
+    let actor = uuid7(2).to_string();
+    let key = "org.example.note/main";
+    wire["actors"][&actor]["future"] = json!({"actor": [1, true]});
+    wire["datums"][key]["future"] = json!({"datum": "kept"});
+    let entry = &mut wire["datums"][key]["signatures"][0];
+    entry["future"] = json!({"signature": [null]});
+    entry["inherited"] = json!({
+        "originDoc": "zajdk",
+        "message": entry["message"],
+        "future": {"witness": "kept"}
+    });
+    let decoded: Dmeta = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+    #[cfg(feature = "schemars")]
+    {
+        let schema = serde_json::to_value(schemars::schema_for!(Dmeta)).unwrap();
+        assert!(jsonschema::validator_for(&schema).unwrap().is_valid(&wire));
+    }
+
+    let reference =
+        DatumReference::new(ReferenceDocId::SelfDoc, datum_key("org.example.note/main")).unwrap();
+    let branch = json!({
+        "path": "work",
+        "from": {"datumRef": reference, "refHeads": [], "future": {"origin": true}},
+        "future": {"branch": true}
+    });
+    let decoded: BranchPath = serde_json::from_value(branch.clone()).unwrap();
+    assert_eq!(serde_json::to_value(decoded).unwrap(), branch);
+    #[cfg(feature = "schemars")]
+    {
+        let schema = serde_json::to_value(schemars::schema_for!(BranchPath)).unwrap();
+        assert!(
+            jsonschema::validator_for(&schema)
+                .unwrap()
+                .is_valid(&branch)
+        );
+    }
 }
 
 #[test]
@@ -178,6 +228,7 @@ fn uuid7_is_validated_in_values_and_metadata_map_keys() {
 #[test]
 fn deleted_at_is_a_required_list_even_when_empty() {
     let metadata = DatumMetadata {
+        extra: Default::default(),
         updated_at: Vec::new(),
         deleted_at: Vec::new(),
         signatures: Vec::new(),
@@ -356,7 +407,7 @@ fn real_ed25519_vector_rejects_tampering_with_every_signed_field() {
     wrong.value_cid = Some(cid_of(&encode_native(&NativeValue::Null)));
     altered.push(wrong);
     let mut wrong = claim;
-    wrong.predecessors.push(cid_with(1));
+    wrong.predecessors.push(signature_id_with(1));
     altered.push(wrong);
     for wrong in altered {
         let forged = SignedDatumClaim {
@@ -399,6 +450,7 @@ fn an_inherited_historical_witness_does_not_cover_changed_current_content() {
     let claim = claim_for(&value);
     let (actor, mut entry) = signed_entry(&claim);
     let witness = InheritedWitness {
+        extra: Default::default(),
         origin_doc: claim.origin_document.clone(),
         message: Bytes::from(claim.signing_bytes().unwrap()),
         value: None,
@@ -448,6 +500,7 @@ fn an_inherited_historical_witness_does_not_cover_changed_current_content() {
     };
     let (_, mut remove_entry) = signed_entry(&remove);
     remove_entry.inherited = Some(InheritedWitness {
+        extra: Default::default(),
         origin_doc: remove.origin_document.clone(),
         message: Bytes::from(remove.signing_bytes().unwrap()),
         value: Some(Bytes::from(encode_native(&value))),
@@ -573,7 +626,7 @@ fn a_static_openssl_proof_round_trips_and_verifies_without_document_history() {
     assert_eq!(signed.claim, claim);
     signed.verify().unwrap();
     let expected_id = data_encoding::HEXLOWER
-        .decode(b"01551e20a6f76489de0820e0e659c1249d704303090a83a6375c272eccac2eeb1bda4bfa")
+        .decode(b"01551e20e91b996b9e55cbfd85d8d510396bc82dccee1401e6c7f6d409dd6e633cb6d856")
         .unwrap();
     assert_eq!(
         signed.signature_id().unwrap().as_bytes().as_slice(),
@@ -740,6 +793,7 @@ fn a_corrupted_other_datum_does_not_poison_a_valid_datum() {
                 .insert(
                     datum_claim.datum_key.clone(),
                     DatumMetadata {
+                        extra: Default::default(),
                         updated_at: Vec::new(),
                         deleted_at: Vec::new(),
                         signatures: vec![entry],
@@ -826,7 +880,7 @@ fn the_decoder_rejects_malformed_noncanonical_and_trailing_bytes() {
     let mut invalid_utf8 = fields.clone();
     invalid_utf8[2] = 0xff;
     assert!(DatumClaim::from_cbor_fields(&invalid_utf8).is_err());
-    let mut old_domain = b"daybook.datum-claim.v1\0".to_vec();
+    let mut old_domain = b"daybook.datum-claim.v2\0".to_vec();
     old_domain.extend(&fields);
     assert!(DatumClaim::from_signing_bytes(&old_domain).is_err());
     assert!(DatumClaim::from_signing_bytes(&fields).is_err());
@@ -882,8 +936,8 @@ fn the_decoder_rejects_malformed_noncanonical_and_trailing_bytes() {
 
 #[test]
 fn an_inherited_claim_binds_the_source_context_not_the_branch() {
-    let predecessor_a = cid_with(1);
-    let predecessor_b = cid_with(2);
+    let predecessor_a = signature_id_with(1);
+    let predecessor_b = signature_id_with(2);
     let value = native_value();
     let source_claim = DatumClaim {
         origin_document: DocId::new(b"origin-a"),
@@ -896,6 +950,7 @@ fn an_inherited_claim_binds_the_source_context_not_the_branch() {
     };
     let (actor, mut witness) = signed_entry(&source_claim);
     witness.inherited = Some(InheritedWitness {
+        extra: Default::default(),
         origin_doc: source_claim.origin_document.clone(),
         message: Bytes::from(source_claim.signing_bytes().unwrap()),
         value: Some(Bytes::from(encode_native(&value))),
@@ -1030,10 +1085,61 @@ fn a_datum_key_with_slashes_and_non_utf8_survives_the_claim_and_the_uri() {
 }
 
 #[test]
+fn signature_ids_preserve_the_cid_wire_encoding() {
+    let claim = claim_for(&native_value());
+    let (actor, entry) = signed_entry(&claim);
+    let id = signature_id(&actor.pubkey, &entry.signature);
+    let cid = Cid::try_from(id.as_bytes().as_slice()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&id).unwrap(),
+        serde_json::to_value(&cid).unwrap()
+    );
+    assert_eq!(
+        serde_json::from_value::<SignatureId>(serde_json::to_value(&id).unwrap()).unwrap(),
+        id
+    );
+    let mut previous_wire = Vec::new();
+    ciborium::into_writer(&cid, &mut previous_wire).unwrap();
+    let mut wire = Vec::new();
+    ciborium::into_writer(&id, &mut wire).unwrap();
+    assert_eq!(wire, previous_wire);
+    assert_eq!(
+        ciborium::from_reader::<SignatureId, _>(wire.as_slice()).unwrap(),
+        id
+    );
+    assert_eq!(SignatureId::try_from(id.as_bytes().as_slice()).unwrap(), id);
+    for invalid in [
+        vec![],
+        vec![0; CID_LENGTH],
+        id.as_bytes()[..CID_LENGTH - 1].to_vec(),
+    ] {
+        assert!(SignatureId::try_from(invalid.as_slice()).is_err());
+        assert!(serde_json::from_value::<SignatureId>(serde_json::json!(invalid)).is_err());
+    }
+    let claim = DatumClaim {
+        predecessors: vec![id.clone()],
+        ..claim
+    };
+    let fields = claim.cbor_fields().unwrap();
+    let ciborium::Value::Array(mut old_fields) = ciborium::from_reader(fields.as_slice()).unwrap()
+    else {
+        panic!("claim is an array");
+    };
+    old_fields[6] = ciborium::Value::Array(vec![ciborium::Value::Bytes(cid.as_bytes().to_vec())]);
+    let mut old_claim_wire = Vec::new();
+    ciborium::into_writer(&ciborium::Value::Array(old_fields), &mut old_claim_wire).unwrap();
+    assert_eq!(fields, old_claim_wire);
+    assert_eq!(
+        DatumClaim::from_cbor_fields(&old_claim_wire).unwrap(),
+        claim
+    );
+}
+
+#[test]
 fn predecessors_are_sorted_and_deduplicated_before_signing() {
     use ciborium::Value as Cbor;
 
-    let mut predecessors = [cid_with(1), cid_with(2)];
+    let mut predecessors = [signature_id_with(1), signature_id_with(2)];
     predecessors.sort();
     let [first, second] = predecessors;
     let claim = DatumClaim {

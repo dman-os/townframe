@@ -1,6 +1,5 @@
 use super::ActorMetadata;
 use super::Attribution;
-use super::Cid;
 use super::ClaimOperation;
 use super::DatumClaim;
 use super::DatumMetadata;
@@ -13,6 +12,7 @@ use super::Evidence;
 use super::MultibaseKey;
 use super::NativeValue;
 use super::SignatureBytes;
+use super::SignatureId;
 use super::SignedDatumClaim;
 use super::Uuid7;
 use super::VerificationState;
@@ -43,7 +43,7 @@ fn current_value(doc: &impl ReadDoc) -> NativeValue {
     NativeValue::read_at(doc, &ROOT, DATUM).unwrap().unwrap()
 }
 
-fn signed_claim(doc: &impl ReadDoc, actor: u8, predecessors: Vec<Cid>) -> SignedDatumClaim {
+fn signed_claim(doc: &impl ReadDoc, actor: u8, predecessors: Vec<SignatureId>) -> SignedDatumClaim {
     let value = current_value(doc);
     let claim = DatumClaim {
         origin_document: DocId::new(b"datum-verification-e2e"),
@@ -117,6 +117,8 @@ fn verify_current(doc: &Automerge, claims: &[&SignedDatumClaim]) -> Verification
             )
             .unwrap();
         let actor = ActorMetadata {
+            extra: Default::default(),
+            created_at: Vec::new(),
             pubkey: attribution.pubkey.clone(),
             actor_url: attribution.actor_url.clone(),
             delegation: Some(certificate),
@@ -146,6 +148,7 @@ fn verify_current(doc: &Automerge, claims: &[&SignedDatumClaim]) -> Verification
             .record_datum_alias(signed.claim.chosen_uuid, signed.claim.datum_key.clone())
             .unwrap();
         let mut entry = DatumSignature {
+            extra: Default::default(),
             actor_uuid: signed.claim.actor_uuid,
             doc_uuid,
             signature: signed.signature.clone(),
@@ -161,6 +164,7 @@ fn verify_current(doc: &Automerge, claims: &[&SignedDatumClaim]) -> Verification
             .insert(
                 DATUM.parse().unwrap(),
                 DatumMetadata {
+                    extra: Default::default(),
                     updated_at: Vec::new(),
                     deleted_at: Vec::new(),
                     signatures,

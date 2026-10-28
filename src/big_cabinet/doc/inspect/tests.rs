@@ -223,6 +223,7 @@ impl Fixture {
                     result: SignatureEvidence::VerifiedSignature {
                         evidence: Box::new(VerifiedSignatureEvidence {
                             signature: DatumSignature {
+                                extra: Default::default(),
                                 actor_uuid: actor,
                                 doc_uuid,
                                 signature: signed.signature,

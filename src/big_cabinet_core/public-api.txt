@@ -38,6 +38,7 @@ impl Serialize for big_cabinet_core::reference::ReferenceDocId
 impl TryFrom < & [u8] > for big_cabinet_core::dmeta::Cid
 impl TryFrom < & [u8] > for big_cabinet_core::dmeta::MultibaseKey
 impl TryFrom < & [u8] > for big_cabinet_core::dmeta::SignatureBytes
+impl TryFrom < & [u8] > for big_cabinet_core::dmeta::SignatureId
 impl TryFrom < String > for big_cabinet_core::doc::CommandId
 impl TryFrom < Uuid > for big_cabinet_core::dmeta::Uuid7
 impl fmt :: Debug for big_cabinet_core::drawer::GroupKey
@@ -119,6 +120,7 @@ pub impl big_cabinet_core::dmeta::Dmeta::fn new (created_at : Timestamp) -> Self
 pub impl big_cabinet_core::dmeta::Dmeta::fn record_datum_alias (& mut self , uuid : Uuid7 , key : DatumKey) -> Result < () , DmetaError >
 pub impl big_cabinet_core::dmeta::MultibaseKey::fn as_bytes (& self) -> & [u8 ; 32]
 pub impl big_cabinet_core::dmeta::SignatureBytes::fn as_bytes (& self) -> & [u8 ; 64]
+pub impl big_cabinet_core::dmeta::SignatureId::fn as_bytes (& self) -> & [u8 ; CID_LENGTH]
 pub impl big_cabinet_core::dmeta::Uuid7::fn as_uuid (& self) -> & Uuid
 pub impl big_cabinet_core::dmeta::Uuid7::fn new () -> Self
 pub impl big_cabinet_core::dmeta::Uuid7::fn unix_millis (& self) -> u64
@@ -180,19 +182,20 @@ pub struct big_cabinet_core::authority::ResolvedAuthority  { capability: Capabil
 pub struct big_cabinet_core::authority::RetractCapability  { via: CapId, capability: CapId }
 pub struct big_cabinet_core::authority::Rights  {  }
 pub struct big_cabinet_core::authority::SignDatumClaim  { actor: CapId, claim: DatumClaim }
-pub struct big_cabinet_core::dmeta::ActorMetadata  { pubkey: MultibaseKey, actor_url: String, delegation: Option < Bytes > }
-pub struct big_cabinet_core::dmeta::BranchOrigin  { datum_ref: crate :: DatumReference, ref_heads: Vec < automerge :: ChangeHash > }
+pub struct big_cabinet_core::dmeta::ActorMetadata  { created_at: Vec < Timestamp >, pubkey: MultibaseKey, actor_url: String, delegation: Option < Bytes >, extra: crate :: datum :: Extra }
+pub struct big_cabinet_core::dmeta::BranchOrigin  { datum_ref: crate :: DatumReference, ref_heads: Vec < automerge :: ChangeHash >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::BranchPath  { path: String, from: Option < BranchOrigin >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::Bytes  {  }
 pub struct big_cabinet_core::dmeta::Cid  {  }
-pub struct big_cabinet_core::dmeta::DatumClaim  { origin_document: DocId, datum_key: DatumKey, chosen_uuid: Uuid7, actor_uuid: Uuid7, operation: ClaimOperation, value_cid: Option < Cid >, predecessors: Vec < Cid > }
-pub struct big_cabinet_core::dmeta::DatumMetadata  { updated_at: Vec < Timestamp >, deleted_at: Vec < Timestamp >, signatures: Vec < DatumSignature > }
-pub struct big_cabinet_core::dmeta::DatumSignature  { actor_uuid: Uuid7, signature: SignatureBytes, doc_uuid: Uuid7, message: Option < Bytes >, inherited: Option < InheritedWitness > }
+pub struct big_cabinet_core::dmeta::DatumClaim  { origin_document: DocId, datum_key: DatumKey, chosen_uuid: Uuid7, actor_uuid: Uuid7, operation: ClaimOperation, value_cid: Option < Cid >, predecessors: Vec < SignatureId > }
+pub struct big_cabinet_core::dmeta::DatumMetadata  { updated_at: Vec < Timestamp >, deleted_at: Vec < Timestamp >, signatures: Vec < DatumSignature >, extra: crate :: datum :: Extra }
+pub struct big_cabinet_core::dmeta::DatumSignature  { actor_uuid: Uuid7, signature: SignatureBytes, doc_uuid: Uuid7, message: Option < Bytes >, inherited: Option < InheritedWitness >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::Dmeta  { created_at: Timestamp, updated_at: Vec < Timestamp >, actors: BTreeMap < Uuid7 , ActorMetadata >, branch_uuids: BTreeMap < Uuid7 , DocId >, datum_uuids: BTreeMap < Uuid7 , DatumKey >, datums: BTreeMap < DatumKey , DatumMetadata >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::DocIdentity  { id: DocId, created_at: Timestamp }
-pub struct big_cabinet_core::dmeta::InheritedWitness  { origin_doc: DocId, message: Bytes, value: Option < Bytes > }
+pub struct big_cabinet_core::dmeta::InheritedWitness  { origin_doc: DocId, message: Bytes, value: Option < Bytes >, extra: crate :: datum :: Extra }
 pub struct big_cabinet_core::dmeta::MultibaseKey  {  }
 pub struct big_cabinet_core::dmeta::SignatureBytes  {  }
+pub struct big_cabinet_core::dmeta::SignatureId  {  }
 pub struct big_cabinet_core::dmeta::Uuid7  {  }
 pub struct big_cabinet_core::doc::BranchDoc  { capability: CapId, command: CommandId, doc_id: DocId, at: At, path: String, stealth: bool, placement: String }
 pub struct big_cabinet_core::doc::CommandId  {  }
@@ -299,10 +302,11 @@ pub use big_cabinet_core::datum::wire :: Member
 pub use big_cabinet_core::datum::wire :: MemberSchema
 pub use big_cabinet_core::datum::wire :: UnionLayout
 pub use big_cabinet_core::datum::wire :: UnknownMember
+pub use big_cabinet_core::datum::wire :: deserialize_closed_str
 pub use big_cabinet_core::datum::wire :: deserialize_known_str
 pub use big_cabinet_core::datum::wire :: deserialize_union
-pub use big_cabinet_core::datum::wire :: open_string_schema
 pub use big_cabinet_core::datum::wire :: serialize_member
+pub use big_cabinet_core::datum::wire :: string_schema
 pub use big_cabinet_core::datum::wire :: union_schema
 pub use big_cabinet_core::dmeta::attribution :: Attribution
 pub use big_cabinet_core::dmeta::attribution :: AttributionError

@@ -41,11 +41,12 @@ fn datum_path() -> Path {
 /// `JsonSchema`, because the enum encoding is not the contract.
 ///
 /// A vocabulary of *strings* rather than of named types is a different shape, so it is declared
-/// differently: `#[datum(open_string)]`, with `#[datum(other)]` on the one variant that carries a
-/// `String`. Each known value's spelling is its variant's name in lowerCamel — `MyValue` is
-/// `"myValue"` — or an explicit `#[serde(rename = "…")]`. The macro writes the wire form and the
-/// schema, and a string nobody declared survives as it was written. A *closed* vocabulary of strings
-/// needs none of this — derive serde and `schemars` and drop the macro.
+/// differently. `#[datum(open_string)]` keeps a string nobody declared: exactly one variant says
+/// `#[datum(other)]` and carries it. `#[datum(closed_string)]` states the list is the whole
+/// vocabulary, so an unrecognized string is an error and there is no fallback. In both forms each
+/// known value's spelling is its variant's name in lowerCamel — `MyValue` is `"myValue"` — or an
+/// explicit `#[serde(rename = "…")]`. The macro writes the wire form and the schema for both, and
+/// an open vocabulary's `SHAPE` reports that a peer may still send a string it does not know.
 ///
 /// A union member is a declared type whose id is its tag, so a variant names a payload and nothing
 /// else. The id is an AT Proto NSID, stated as its two parts: `authority`, the reversed domain, and
@@ -76,6 +77,7 @@ pub fn datum(args: TokenStream, item: TokenStream) -> TokenStream {
 struct Args {
     closed: bool,
     open_string: bool,
+    closed_string: bool,
     tagging: Option<String>,
     authority: Option<Authority>,
     name: Option<syn::LitStr>,
@@ -101,6 +103,8 @@ impl Args {
                 args.closed = true;
             } else if meta.path().is_ident("open_string") {
                 args.open_string = true;
+            } else if meta.path().is_ident("closed_string") {
+                args.closed_string = true;
             } else if meta.path().is_ident("tagging") {
                 let value = meta_string(&meta)?;
                 if value != "adjacent" && value != "external" && value != "internal" {
@@ -148,10 +152,31 @@ impl Args {
             } else {
                 return Err(syn::Error::new_spanned(
                     &meta,
-                    "unknown datum argument: expected `closed`, `open_string`, `tagging = \
-                     \"…\"`, `authority = …` or `name = \"…\"`",
+                    "unknown datum argument: expected `closed`, `open_string`, `closed_string`, \
+                     `tagging = \"…\"`, `authority = …` or `name = \"…\"`",
                 ));
             }
+        }
+        if args.open_string && args.closed_string {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "a string vocabulary is either open or closed: `open_string` and `closed_string` \
+                 cannot be stated together",
+            ));
+        }
+        if args.closed && args.closed_string {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "a closed string vocabulary is declared with `closed_string` alone: `closed` is \
+                 the keyword of a record or union",
+            ));
+        }
+        if args.closed && args.open_string {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "an open string vocabulary is declared with `open_string` alone: `closed` is the \
+                 keyword of a record or union",
+            ));
         }
         if let (None, Some(name)) = (&args.authority, &args.name) {
             return Err(syn::Error::new_spanned(
@@ -350,23 +375,34 @@ fn expand(
     let datum = datum_path();
     let (name, shape) = match &mut item {
         Item::Struct(item) => struct_shape(item, &args, &datum)?,
-        Item::Enum(item) if args.open_string => string_enum_shape(item, &args, &datum)?,
+        Item::Enum(item) if args.open_string || args.closed_string => {
+            string_enum_shape(item, &args, &datum)?
+        }
         Item::Enum(item) => enum_shape(item, &args, &datum)?,
         other => {
-            let what = if args.open_string {
-                "#[datum(open_string)] applies to an enum, and its variants are unit variants plus \
-                 one `#[datum(other)]` carrying the unrecognized string"
-            } else {
-                "#[datum] applies to a struct or an enum"
-            };
-            return Err(syn::Error::new_spanned(other.to_token_stream(), what));
+            return Err(syn::Error::new_spanned(
+                other.to_token_stream(),
+                "a datum declaration applies to a struct, a union enum, or a string vocabulary",
+            ));
         }
+    };
+    let checks = match &mut item {
+        Item::Struct(item) => datum_fields::shape_checks(&item.fields, &datum)?,
+        Item::Enum(item) => {
+            let mut checks = proc_macro2::TokenStream::new();
+            for variant in &item.variants {
+                checks.extend(datum_fields::shape_checks(&variant.fields, &datum)?);
+            }
+            checks
+        }
+        _ => unreachable!("checked above"),
     };
     let member = member_impl(&name, &args);
     Ok(quote! {
         #item
         #member
         #shape
+        #checks
     })
 }
 
@@ -869,9 +905,13 @@ struct KnownVariant {
     spelling: String,
 }
 
-/// Reads every variant as a known spelling or the fallback, stripping the `datum` and `serde`
-/// attributes it consumed: nothing derives serde on a vocabulary, so a leftover is a compile error.
-fn vocabulary_variants(item: &mut syn::ItemEnum) -> syn::Result<(Vec<KnownVariant>, syn::Ident)> {
+/// Reads every variant as a known spelling or, in an open vocabulary, the fallback. Strips the
+/// `datum` and `serde` attributes it consumed: nothing derives serde on a vocabulary, so a leftover
+/// is a compile error.
+fn vocabulary_variants(
+    item: &mut syn::ItemEnum,
+    open: bool,
+) -> syn::Result<(Vec<KnownVariant>, Option<syn::Ident>)> {
     let mut known: Vec<KnownVariant> = Vec::new();
     let mut fallback: Option<syn::Ident> = None;
     for variant in item.variants.iter_mut() {
@@ -887,6 +927,13 @@ fn vocabulary_variants(item: &mut syn::ItemEnum) -> syn::Result<(Vec<KnownVarian
         variant.attrs.retain(|attr| !attr.path().is_ident("serde"));
 
         if is_fallback {
+            if !open {
+                return Err(syn::Error::new_spanned(
+                    variant,
+                    "a variant is marked #[datum(other)] but the vocabulary is declared closed: a \
+                     closed vocabulary has no fallback",
+                ));
+            }
             if variant_serde.rename.is_some() {
                 return Err(syn::Error::new_spanned(
                     variant,
@@ -940,18 +987,25 @@ fn vocabulary_variants(item: &mut syn::ItemEnum) -> syn::Result<(Vec<KnownVarian
             spelling,
         });
     }
-    let Some(fallback) = fallback else {
+    if open && fallback.is_none() {
         return Err(syn::Error::new_spanned(
             &item.ident,
-            "a vocabulary of strings needs exactly one fallback variant marked `#[datum(other)]`, \
-             carrying a `String`: without one, a string nobody knows is an error",
+            "an open vocabulary of strings needs exactly one fallback variant marked \
+             `#[datum(other)]`, carrying a `String`: without one, a string nobody knows is an error",
         ));
-    };
+    }
+    if !open && known.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &item.ident,
+            "a closed vocabulary of strings states at least one known value",
+        ));
+    }
     Ok((known, fallback))
 }
 
 /// A vocabulary of strings rather than a set of named types, so the macro states the wire form and
-/// the schema, and a string nothing knows is kept as it was written.
+/// the schema. An open vocabulary keeps a string nothing knows as it was written; a closed one
+/// rejects it, because the declaration says the list is the whole vocabulary.
 ///
 /// A value's spelling is its variant's name in lowerCamel — `MyValue` is `"myValue"`. The macro
 /// derives that and refuses anything it cannot derive: a variant that is not PascalCase is rejected
@@ -965,13 +1019,9 @@ fn string_enum_shape(
 ) -> syn::Result<(syn::Ident, proc_macro2::TokenStream)> {
     let name = item.ident.clone();
     no_generics(&name, &item.generics)?;
-    if args.closed {
-        return Err(syn::Error::new_spanned(
-            &name,
-            "a closed vocabulary needs nothing from the macro: drop `#[datum(open_string)]` and \
-             derive `Serialize`, `Deserialize` and `JsonSchema` on the enum instead",
-        ));
-    }
+    // Dispatch only reaches here for `open_string` or `closed_string`: `closed` is refused while the
+    // arguments are parsed, because it names a record or a union rather than a vocabulary.
+    let open = args.open_string;
     let serde = scan_serde(&item.attrs)?;
     serde.refuse_unexpected(&name, &["rename_all"])?;
     // Read, so it is consumed: nothing derives serde on this type, and an attribute nothing
@@ -990,14 +1040,40 @@ fn string_enum_shape(
         ));
     }
 
-    let (known, fallback) = vocabulary_variants(item)?;
+    let (known, fallback) = vocabulary_variants(item, open)?;
     let spellings: Vec<&String> = known.iter().map(|known| &known.spelling).collect();
     let known_idents: Vec<&syn::Ident> = known.iter().map(|known| &known.ident).collect();
+    let openness = if open {
+        quote!(#datum::Openness::Open)
+    } else {
+        quote!(#datum::Openness::Closed)
+    };
+    let serialize_unknown = fallback
+        .as_ref()
+        .map(|fallback| quote!( Self::#fallback(value) => serializer.serialize_str(value), ));
+    let deserialize = match &fallback {
+        Some(fallback) => quote! {
+            #datum::deserialize_known_str(
+                deserializer,
+                &[#( (#spellings, || Self::#known_idents), )*],
+                Self::#fallback,
+            )
+        },
+        None => quote! {
+            #datum::deserialize_closed_str(
+                deserializer,
+                &[#( (#spellings, || Self::#known_idents), )*],
+            )
+        },
+    };
     Ok((
         name.clone(),
         quote! {
             impl #datum::DatumShape for #name {
-                const SHAPE: #datum::Shape = #datum::Shape::Str { known: &[#(#spellings),*] };
+                const SHAPE: #datum::Shape = #datum::Shape::Str {
+                    openness: #openness,
+                    known: &[#(#spellings),*],
+                };
             }
 
             impl ::serde::Serialize for #name {
@@ -1007,7 +1083,7 @@ fn string_enum_shape(
                 {
                     match self {
                         #( Self::#known_idents => serializer.serialize_str(#spellings), )*
-                        Self::#fallback(value) => serializer.serialize_str(value),
+                        #serialize_unknown
                     }
                 }
             }
@@ -1017,11 +1093,7 @@ fn string_enum_shape(
                 where
                     D: ::serde::Deserializer<'de>,
                 {
-                    #datum::deserialize_known_str(
-                        deserializer,
-                        &[#( (#spellings, || Self::#known_idents), )*],
-                        Self::#fallback,
-                    )
+                    #deserialize
                 }
             }
 
@@ -1043,7 +1115,7 @@ fn string_enum_shape(
                 fn json_schema(
                     _generator: &mut ::schemars::SchemaGenerator,
                 ) -> ::schemars::Schema {
-                    #datum::open_string_schema(&[#(#spellings),*])
+                    #datum::string_schema(&[#(#spellings),*], #openness)
                 }
             }
         },
@@ -1096,6 +1168,59 @@ mod tests {
     }
 
     #[test]
+    fn every_object_field_and_union_payload_gets_a_shape_bound() {
+        for (args, item, expected) in [
+            (
+                "closed",
+                quote::quote! {
+                    #[serde(deny_unknown_fields)]
+                    struct Object {
+                        nested: Vec<Undeclared>,
+                        foreign: Foreign,
+                    }
+                },
+                vec![quote::quote!(Vec<Undeclared>), quote::quote!(Foreign)],
+            ),
+            (
+                "",
+                quote::quote! {
+                    enum Union {
+                        Nested(Undeclared),
+                        #[datum(other)]
+                        Other(UnknownMember),
+                    }
+                },
+                vec![quote::quote!(Undeclared), quote::quote!(UnknownMember)],
+            ),
+        ] {
+            let expanded = super::expand(args.parse().unwrap(), item)
+                .unwrap()
+                .to_string();
+            for ty in expected {
+                let assertion = quote::quote!(assert_shape::<#ty>).to_string();
+                assert!(expanded.contains(&assertion), "{expanded}");
+            }
+        }
+    }
+
+    /// A field states nothing about its own shape: whether a nested record is open or closed belongs
+    /// to that record's declaration, so the macro refuses a field-level `#[datum]`.
+    #[test]
+    fn a_field_level_datum_marker_is_refused() {
+        let item = quote::quote! {
+            #[serde(deny_unknown_fields)]
+            struct Object {
+                #[datum(closed)]
+                foreign: Foreign,
+            }
+        };
+        let error = super::expand("closed".parse().unwrap(), item)
+            .expect_err("refused")
+            .to_string();
+        assert!(error.contains("a field takes no `#[datum]`"), "{error}");
+    }
+
+    #[test]
     fn a_type_without_an_authority_is_no_member() {
         let args = Args::parse("closed".parse().expect("tokens")).expect("accepted");
         assert!(member_id(&syn::parse_str("Note").expect("ident"), &args).is_none());
@@ -1117,5 +1242,18 @@ mod tests {
             "stated once",
         );
         refused("id = \"org.example.note\"", "unknown datum argument");
+    }
+
+    #[test]
+    fn the_string_vocabulary_keywords_are_exclusive() {
+        refused("open_string, closed_string", "either open or closed");
+        refused(
+            "closed, closed_string",
+            "`closed` is the keyword of a record or union",
+        );
+        refused(
+            "closed, open_string",
+            "`closed` is the keyword of a record or union",
+        );
     }
 }

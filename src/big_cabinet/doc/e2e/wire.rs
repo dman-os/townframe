@@ -62,7 +62,12 @@ fn claim() -> DatumClaim {
         actor_uuid: uuid7(2),
         operation: ClaimOperation::Set,
         value_cid: Some(cid_of(b"value")),
-        predecessors: vec![cid_of(b"predecessor")],
+        predecessors: vec![
+            big_cabinet_core::dmeta::SignatureId::try_from(
+                cid_of(b"predecessor").as_bytes().as_slice(),
+            )
+            .unwrap(),
+        ],
     }
 }
 
@@ -70,6 +75,7 @@ fn verified_evidence() -> SignatureEvidence {
     SignatureEvidence::VerifiedSignature {
         evidence: Box::new(VerifiedSignatureEvidence {
             signature: DatumSignature {
+                extra: Default::default(),
                 actor_uuid: uuid7(2),
                 doc_uuid: uuid7(3),
                 signature: SignatureBytes::try_from(&[7u8; 64][..]).unwrap(),

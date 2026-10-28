@@ -24,6 +24,8 @@ pub enum StorageError {
     Hydrate(#[from] autosurgeon::HydrateError),
     #[error(transparent)]
     Automerge(#[from] automerge::AutomergeError),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
     #[error("immutable {index} binding {uuid} was changed or removed")]
     ReboundBinding { index: &'static str, uuid: String },
     #[error("expected {expected:?} at {object}/{prop:?}")]
@@ -41,6 +43,39 @@ impl From<CodecError> for StorageError {
 }
 
 impl Dmeta {
+    /// Hydrate dmeta, including actor creation timestamps held by non-winning concurrent maps.
+    /// Ordinary map hydration selects one actor binding; `createdAt` is instead a union across every
+    /// copy because each independent introduction contributed one timestamp to that binding.
+    pub fn hydrate<D: ReadDoc>(
+        doc: &D,
+        object: &ObjId,
+        prop: autosurgeon::Prop<'_>,
+        schema: &CompiledSchema,
+    ) -> Result<Self, StorageError> {
+        let mut json = hydrate_value(doc, object, prop.clone(), schema)?;
+        for (uuid, timestamps) in actor_created_at(doc, object, prop)? {
+            let Some(created_at) = json
+                .get_mut("actors")
+                .and_then(|actors| actors.get_mut(&uuid))
+                .and_then(|actor| actor.get_mut("createdAt"))
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            *created_at = timestamps
+                .into_iter()
+                .map(|millis| {
+                    Value::String(
+                        jiff::Timestamp::from_millisecond(millis)
+                            .expect("a timestamp that a document holds is in range")
+                            .to_string(),
+                    )
+                })
+                .collect();
+        }
+        Ok(serde_json::from_value(json)?)
+    }
+
     /// Write this dmeta over the one stored at `object`/`prop`, preserving the identity of every
     /// signature entry it retains.
     ///
@@ -77,6 +112,7 @@ impl Dmeta {
                 }
                 check_bindings(&tx, &id, &submitted)?;
             }
+            merge_actor_created_at(&mut tx, object, prop.clone())?;
             let base = hydrate_value(&tx, object, prop.clone(), schema)?;
             let map = ensure_object(&mut tx, object, native_prop, ObjType::Map)?;
             reconcile_set(
@@ -86,6 +122,22 @@ impl Dmeta {
                 &mut submitted["updatedAt"],
                 base.get("updatedAt"),
             )?;
+            let actors = ensure_object(&mut tx, &map, "actors".into(), ObjType::Map)?;
+            for (uuid, metadata) in submitted["actors"]
+                .as_object_mut()
+                .expect("dmeta actors are a map")
+            {
+                let actor = ensure_object(&mut tx, &actors, uuid.as_str().into(), ObjType::Map)?;
+                reconcile_set(
+                    &mut tx,
+                    &actor,
+                    "createdAt",
+                    &mut metadata["createdAt"],
+                    base.get("actors")
+                        .and_then(|actors| actors.get(uuid))
+                        .and_then(|metadata| metadata.get("createdAt")),
+                )?;
+            }
             let datums = ensure_object(&mut tx, &map, "datums".into(), ObjType::Map)?;
             for (key, metadata) in submitted["datums"]
                 .as_object_mut()
@@ -118,6 +170,95 @@ impl Dmeta {
             }
         }
     }
+}
+
+fn native_prop(prop: &autosurgeon::Prop<'_>) -> automerge::Prop {
+    match prop {
+        autosurgeon::Prop::Key(key) => automerge::Prop::Map(key.to_string()),
+        autosurgeon::Prop::Index(index) => automerge::Prop::Seq(*index as usize),
+    }
+}
+
+fn actor_created_at<D: ReadDoc>(
+    doc: &D,
+    object: &ObjId,
+    prop: autosurgeon::Prop<'_>,
+) -> Result<BTreeMap<String, BTreeSet<i64>>, StorageError> {
+    let native = native_prop(&prop);
+    let mut created_at = BTreeMap::new();
+    for (value, map) in doc.get_all(object, native.clone())? {
+        if value != automerge::Value::Object(ObjType::Map) {
+            return Err(StorageError::UnexpectedStorage {
+                object: object.clone(),
+                prop: native,
+                expected: ObjType::Map,
+            });
+        }
+        for (value, actors) in doc.get_all(&map, "actors")? {
+            if value != automerge::Value::Object(ObjType::Map) {
+                return Err(StorageError::UnexpectedStorage {
+                    object: map.clone(),
+                    prop: "actors".into(),
+                    expected: ObjType::Map,
+                });
+            }
+            for binding in doc.map_range(&actors, ..) {
+                let uuid = binding.key.to_string();
+                let timestamps = created_at.entry(uuid.clone()).or_insert_with(BTreeSet::new);
+                for (value, actor) in doc.get_all(&actors, binding.key.as_ref())? {
+                    if value != automerge::Value::Object(ObjType::Map) {
+                        return Err(StorageError::UnexpectedStorage {
+                            object: actors.clone(),
+                            prop: binding.key.as_ref().into(),
+                            expected: ObjType::Map,
+                        });
+                    }
+                    for (value, list) in doc.get_all(&actor, "createdAt")? {
+                        if value != automerge::Value::Object(ObjType::List) {
+                            return Err(StorageError::UnexpectedStorage {
+                                object: actor.clone(),
+                                prop: "createdAt".into(),
+                                expected: ObjType::List,
+                            });
+                        }
+                        for index in 0..doc.length(&list) {
+                            for (value, _) in doc.get_all(&list, index)? {
+                                if let Some(ScalarValue::Timestamp(millis)) = value.to_scalar() {
+                                    timestamps.insert(*millis);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(created_at)
+}
+
+fn merge_actor_created_at(
+    tx: &mut Transaction<'_>,
+    object: &ObjId,
+    prop: autosurgeon::Prop<'_>,
+) -> Result<(), StorageError> {
+    for (uuid, timestamps) in actor_created_at(tx, object, prop.clone())? {
+        let map = ensure_object(tx, object, native_prop(&prop), ObjType::Map)?;
+        let actors = ensure_object(tx, &map, "actors".into(), ObjType::Map)?;
+        let actor = ensure_object(tx, &actors, uuid.as_str().into(), ObjType::Map)?;
+        let list = ensure_object(tx, &actor, "createdAt".into(), ObjType::List)?;
+        let mut winning = BTreeSet::new();
+        for index in 0..tx.length(&list) {
+            for (value, _) in tx.get_all(&list, index)? {
+                if let Some(ScalarValue::Timestamp(millis)) = value.to_scalar() {
+                    winning.insert(*millis);
+                }
+            }
+        }
+        for millis in timestamps.difference(&winning) {
+            tx.insert(&list, tx.length(&list), ScalarValue::Timestamp(*millis))?;
+        }
+    }
+    Ok(())
 }
 
 /// Empty every signature list under `key` other than the winning list of the winning metadata map.
@@ -196,21 +337,25 @@ fn check_bindings(
                         continue;
                     }
                     let fields = wanted.as_object().expect("an actor binding is an object");
-                    if value != automerge::Value::Object(ObjType::Map)
-                        || tx.length(&id) != fields.len()
-                    {
+                    if value != automerge::Value::Object(ObjType::Map) {
                         return Err(rebound());
                     }
-                    for (key, expected) in fields {
+                    for key in ["pubkey", "actorUrl", "delegation"] {
+                        let held = tx.get_all(&id, key)?;
+                        let Some(expected) = fields.get(key) else {
+                            if !held.is_empty() {
+                                return Err(rebound());
+                            }
+                            continue;
+                        };
                         let expected = match expected {
                             Value::String(text) => ScalarValue::Str(text.as_str().into()),
                             _ => {
                                 let Bytes(bytes) = serde_json::from_value(expected.clone())
-                                    .expect("an actor's non-string field is bytes");
+                                    .expect("an actor's non-string binding field is bytes");
                                 ScalarValue::Bytes(bytes)
                             }
                         };
-                        let held = tx.get_all(&id, key.as_str())?;
                         if held.is_empty()
                             || held
                                 .iter()

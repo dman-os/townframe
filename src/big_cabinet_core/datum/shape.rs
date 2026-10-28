@@ -36,6 +36,7 @@ pub enum Tagging {
 /// What a datum declaration is, on the Rust side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
+    Value,
     Object {
         openness: Openness,
     },
@@ -43,15 +44,17 @@ pub enum Shape {
         openness: Openness,
         tagging: Tagging,
     },
-    /// A string vocabulary: every known spelling, and no constraint on any other string. A *closed*
-    /// vocabulary is a plain derived enum and declares nothing here — serde and `schemars` cannot
-    /// disagree about the values of an enum whose variants both of them read.
+    /// A string vocabulary: the spellings it knows, and whether any other string is still a value.
+    /// The open form publishes `knownValues`; the closed form spells the same list as `enum`.
     Str {
+        openness: Openness,
         known: &'static [&'static str],
     },
 }
 
-/// Emitted by the `datum` macro for a declared type; not written by hand.
+/// Emitted by the `datum` macro for declared records and vocabularies, with built-in impls for
+/// lossless wire leaves and containers. A container requires this contract from every nested type,
+/// so a datum field can only hold a type whose own declaration says how it round-trips.
 pub trait DatumShape {
     const SHAPE: Shape;
 }
@@ -64,6 +67,8 @@ pub enum ShapeFlag {
     ClosedObject,
     /// an unrecognized member key is an error at every reader, including a newer one
     ClosedUnion,
+    /// an unrecognized string is an error at every reader, including a newer one
+    ClosedString,
     /// the union departs from internal `$type` tagging, so a consumer has to be told how to read it
     NonInternalTagging,
 }
@@ -98,7 +103,7 @@ pub enum ShapeError {
     },
     /// {name}: the schema is not a string
     NotAString { name: String },
-    /// {name}: the schema lists {schema:?} as known but the declaration lists {declared:?}
+    /// {name}: the schema lists {schema:?} but the declaration lists {declared:?}
     KnownValuesDisagree {
         name: String,
         declared: Vec<String>,
@@ -118,9 +123,10 @@ pub fn check_shape(
 ) -> Result<Vec<ShapeFlag>, ShapeError> {
     let document = serde_json::to_value(schema).expect("a schema serializes to a JSON document");
     match declared {
+        Shape::Value => Ok(Vec::new()),
         Shape::Object { openness } => check_object(name, &document, openness),
         Shape::Union { openness, tagging } => check_union(name, &document, openness, tagging),
-        Shape::Str { known } => check_str(name, &document, known),
+        Shape::Str { openness, known } => check_str(name, &document, openness, known),
     }
 }
 
@@ -128,6 +134,7 @@ pub fn check_shape(
 fn check_str(
     name: &str,
     document: &serde_json::Value,
+    openness: Openness,
     known: &'static [&'static str],
 ) -> Result<Vec<ShapeFlag>, ShapeError> {
     let object = document
@@ -136,8 +143,14 @@ fn check_str(
     if object.get("type").and_then(serde_json::Value::as_str) != Some("string") {
         return Err(ShapeError::NotAString { name: name.into() });
     }
+    // An open vocabulary lists what a reader knows in `knownValues`; a closed one spells the same
+    // list as `enum`, because every other string is not a value.
+    let key = match openness {
+        Openness::Open => "knownValues",
+        Openness::Closed => "enum",
+    };
     let mut schema: Vec<String> = object
-        .get("knownValues")
+        .get(key)
         .and_then(serde_json::Value::as_array)
         .map(|values| {
             values
@@ -157,7 +170,10 @@ fn check_str(
             schema,
         });
     }
-    Ok(Vec::new())
+    Ok(match openness {
+        Openness::Open => Vec::new(),
+        Openness::Closed => vec![ShapeFlag::ClosedString],
+    })
 }
 
 /// `additionalProperties` cannot see properties contributed by `allOf` or a `$ref` sibling, so a

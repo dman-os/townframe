@@ -45,6 +45,46 @@ pub fn check_field_datums(fields: &syn::Fields) -> syn::Result<()> {
     Ok(())
 }
 
+/// Requires every field type, at any depth, to implement the shape contract.
+///
+/// A field states nothing about its own shape: whether a nested record is open or closed belongs to
+/// that record's declaration, and a foreign wire type has to implement `DatumShape` itself (the core
+/// carries the built-in leaves and containers). The check is emitted at the field's type span and
+/// keeps a direct `#[cfg]`, so a field compiled out does not demand an impl for a type that is not
+/// compiled in.
+pub fn shape_checks(
+    fields: &syn::Fields,
+    datum: &syn::Path,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let mut checks = proc_macro2::TokenStream::new();
+    for field in fields.iter() {
+        if let Some(attr) = field
+            .attrs
+            .iter()
+            .find(|attr| attr.path().is_ident("datum"))
+        {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "a field takes no `#[datum]`: openness and the wire form belong to the nested type's \
+                 own declaration, so a field can only require its type to implement `DatumShape`",
+            ));
+        }
+        let ty = &field.ty;
+        let cfg = field
+            .attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("cfg"));
+        checks.extend(quote::quote_spanned! {syn::spanned::Spanned::span(ty)=>
+            #(#cfg)*
+            const _: () = {
+                fn assert_shape<T: #datum::DatumShape + ?Sized>() {}
+                let _ = assert_shape::<#ty>;
+            };
+        });
+    }
+    Ok(checks)
+}
+
 enum Bare {
     Float,
     Bytes,
@@ -203,6 +243,95 @@ mod tests {
 
     fn accepted(declaration: &str) {
         check(declaration).unwrap_or_else(|error| panic!("{declaration}: {error}"));
+    }
+
+    fn compile_shape_check(declaration: &str) -> std::process::Output {
+        use std::io::Write;
+        use std::process::Command;
+        use std::process::Stdio;
+
+        let item: syn::ItemStruct =
+            syn::parse_str(&format!("struct Test {{ {declaration} }}")).unwrap();
+        let checks = super::shape_checks(&item.fields, &syn::parse_quote!(contract)).unwrap();
+        assert!(item.fields.iter().all(|field| {
+            field
+                .attrs
+                .iter()
+                .all(|attr| !attr.path().is_ident("datum"))
+        }));
+        let mut rustc = Command::new("rustc")
+            .args([
+                "--edition=2024",
+                "--crate-type=lib",
+                "--emit=metadata",
+                "-o",
+                "-",
+                "-",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        write!(
+            rustc.stdin.take().unwrap(),
+            "
+            mod contract {{
+                pub trait DatumShape {{}}
+                impl DatumShape for String {{}}
+                impl<T: DatumShape> DatumShape for Vec<T> {{}}
+                impl<T: DatumShape> DatumShape for Option<T> {{}}
+            }}
+            struct Undeclared;
+            {checks}
+        "
+        )
+        .unwrap();
+        rustc.wait_with_output().unwrap()
+    }
+
+    #[test]
+    fn field_shape_assertions_are_checked_by_the_compiler() {
+        for declaration in [
+            "value: Undeclared",
+            "value: Option<Vec<Undeclared>>",
+            "#[serde(with = \"adapter\")] value: Undeclared",
+            "#[schemars(with = \"String\")] value: Undeclared",
+        ] {
+            let output = compile_shape_check(declaration);
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(!output.status.success(), "{declaration}");
+            assert!(error.contains("Undeclared: DatumShape"), "{error}");
+        }
+        for declaration in [
+            "value: Option<Vec<String>>",
+            "#[cfg(any())] value: MissingType",
+        ] {
+            let output = compile_shape_check(declaration);
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8(output.stderr).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn field_shape_assertions_reject_malformed_markers() {
+        for marker in [
+            "datum",
+            "datum()",
+            "datum(open)",
+            "datum(closed, closed)",
+            "datum(closed = true)",
+        ] {
+            let item: syn::ItemStruct =
+                syn::parse_str(&format!("struct Test {{ #[{marker}] value: String }}")).unwrap();
+            assert!(
+                super::shape_checks(&item.fields, &syn::parse_quote!(contract)).is_err(),
+                "{marker}"
+            );
+        }
     }
 
     #[test]

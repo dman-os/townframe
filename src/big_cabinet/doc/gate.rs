@@ -464,6 +464,8 @@ fn attribution(claim: &ReconstructedClaim) -> Status {
         );
     };
     let actor = ActorMetadata {
+        extra: Default::default(),
+        created_at: Vec::new(),
         pubkey: claim.actor_public_key.clone(),
         actor_url: actor_url.clone(),
         delegation: Some(certificate.clone()),

@@ -12,6 +12,7 @@ use super::DmetaError;
 use super::MultibaseKey;
 use super::NativeValue;
 use super::SignatureBytes;
+use super::SignatureId;
 use super::Uuid7;
 use super::cid_of;
 use super::encode_native;
@@ -55,17 +56,17 @@ impl SignedDatumClaim {
         .map_err(|_| DmetaError::InvalidSignature)
     }
 
-    pub fn signature_id(&self) -> Result<Cid, DmetaError> {
+    pub fn signature_id(&self) -> Result<SignatureId, DmetaError> {
         Ok(signature_id(&self.actor_public_key, &self.signature))
     }
 }
 
-pub fn signature_id(actor_public_key: &MultibaseKey, signature: &SignatureBytes) -> Cid {
+pub fn signature_id(actor_public_key: &MultibaseKey, signature: &SignatureBytes) -> SignatureId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(CLAIM_ID_DOMAIN);
     hasher.update(actor_public_key.as_bytes());
     hasher.update(signature.as_bytes());
-    Cid::from_digest(*hasher.finalize().as_bytes())
+    SignatureId(Cid::from_digest(*hasher.finalize().as_bytes()))
 }
 
 impl SignedDatumClaim {

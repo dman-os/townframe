@@ -1,6 +1,6 @@
 # `big_repo`
 
-Status: stub. Only points at where things live; expand before relying on it.
+Status: stub and machine generated. Only points at where things live; expand before relying on it.
 
 big_repo (`src/big_repo/`) is our automerge-repo alternative that supports [Keyhive](./keyhive.md) and [big_sync](./big_sync.md).
 

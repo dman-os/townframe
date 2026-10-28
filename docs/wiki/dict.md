@@ -1,5 +1,7 @@
 # Dictionary
 
+Status: human written; out of date.
+
 FIXME: the design in here is stale
 
 Here lies a roughly ordered description of the various concepts in daybook.

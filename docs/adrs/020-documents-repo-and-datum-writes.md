@@ -103,7 +103,7 @@ The canonical encoding is CBOR of the materialized subtree, one application-priv
 
 Only plain Automerge text is covered. Marks, embedded blocks, tables, and unknown scalar representations are unsupported until their encoding is specified. An unsupported representation or traversal resource limit is not evidence of forgery. The value encoding covers a visible materialized value, **not hidden Automerge conflicts or a proof of all operations that produced it**.
 
-V2 signs `UTF8("daybook.datum-claim.v2") || 0x00 || CBOR(fields)` with Ed25519 and strict signature verification. `CBOR(fields)` is a deterministic definite-length array in this order:
+V1 signs `UTF8("daybook.datum-claim.v1") || 0x00 || CBOR(fields)` with Ed25519 and strict signature verification. `CBOR(fields)` is a deterministic definite-length array in this order:
 
 1. Origin document ID as canonical UTF-8 text.
 2. Datum key as UTF-8 text.
@@ -113,11 +113,11 @@ V2 signs `UTF8("daybook.datum-claim.v2") || 0x00 || CBOR(fields)` with Ed25519 a
 6. Value CID as binary bytes, or null for Remove.
 7. Predecessor IDs as an array of binary CIDs, sorted lexicographically without duplicates.
 
-The signature covers the whole message, not merely the value CID. Its ID is a CIDv1 `raw`/BLAKE3-256 multihash of `UTF8("daybook.datum-claim-id.v2") || 0x00 || actor-public-key-bytes || signature-bytes`. Both domains are v2 because the signed field layout changed. The ID does not hash `signed-message-bytes` directly (which is omitted in Automerge storage and contains `predecessors`, so hashing it would make computing a parent signature's ID recursively reconstruct the entire ancestor chain back to genesis; Ed25519 `signature-bytes` already commits to `signed-message-bytes`) and does not refer to its containing Automerge change hash, which would be circular. Actor public keys use canonical base58btc multibase `z…` text in metadata; signatures are native 64-byte `SignatureBytes`, rendered in JSON as `{ "$bytes": "<base64>" }`. Messages and retained native-value witnesses also use the bytes object, not multibase text.
+The signature covers the whole message, not merely the value CID. Its ID is a CIDv1 `raw`/BLAKE3-256 multihash of `UTF8("daybook.datum-claim-id.v1") || 0x00 || actor-public-key-bytes || signature-bytes`. The ID does not hash `signed-message-bytes` directly (which is omitted in Automerge storage and contains `predecessors`, so hashing it would make computing a parent signature's ID recursively reconstruct the entire ancestor chain back to genesis; Ed25519 `signature-bytes` already commits to `signed-message-bytes`) and does not refer to its containing Automerge change hash, which would be circular. Actor public keys use canonical base58btc multibase `z…` text in metadata; signatures are native 64-byte `SignatureBytes`, rendered in JSON as `{ "$bytes": "<base64>" }`. Messages and retained native-value witnesses also use the bytes object, not multibase text.
 
 ## 5. Actors, attribution, and dmeta
 
-An actor's cryptographic identity is its public key. `actors` assigns a UUIDv7 to a binding of that key and an exact actor URL. The same key may have several UUID bindings, each with its own attribution certificate. The URL is descriptive metadata, not an authority namespace; the certificate authenticates the description without proving a plug binary executed. The Automerge change actor remains the node, while the actor key signs the datum claim.
+An actor's cryptographic identity is its public key. `actors` assigns a globally unique UUIDv7 to a binding of that key and an exact actor URL, so branches and merges cannot reinterpret a local alias as a different actor. The same key may have several UUID bindings, each with its own attribution certificate. Each binding's `createdAt` is a competing set of the timestamps at which concurrent writes first introduced it; the set is unsigned display metadata, not trusted chronology or a rule for choosing a binding. The URL is descriptive metadata, not an authority namespace; the certificate authenticates the description without proving a plug binary executed. The Automerge change actor remains the node, while the actor key signs the datum claim.
 
 ### Attribution certificate profile
 
@@ -156,7 +156,7 @@ The standards define the envelope and signature processing, not Daybook authorit
 Dmeta {
   createdAt: Timestamp
   updatedAt: [Timestamp]
-  actors: Uuid7 -> { pubkey, actorUrl, delegation?: Bytes }
+  actors: Uuid7 -> { createdAt: [Timestamp], pubkey, actorUrl, delegation?: Bytes }
   branchUuids: Uuid7 -> DocumentId
   datumUuids: Uuid7 -> DatumKey
   datums: DatumKey -> {
@@ -188,6 +188,8 @@ For an ordinary Automerge write, a signature entry carries `actorUuid`, `docUuid
 Because a normal branch is forked from its origin's Automerge history and a merge combines history-sharing Automerge documents, signatures travel with their introducing changes and reconstruct through `docUuid` and `branchUuids` without `inherited` witnesses. By contrast, a history-truncating compaction or history-free import discards the Automerge changes a signature's claim would be reconstructed from; a signature retained across compaction therefore carries an `inherited` witness: origin document, the exact domain-prefixed signed message, and, when the compacted value differs from the signed one, the canonical native bytes of the historical signed value. Keep these witnesses even when they do not cover the current value. They authenticate only their own claim; an authentic historical value is not a signature on a differing merged value. A signature authored on a branch or after compaction names its own document through `docUuid` and uses its own reconstructible history or optional `message`, not `inherited`.
 
 A carried message allows cryptographic verification without the source's Automerge history. It does not by itself prove node admission on the origin or establish the expected attribution issuer. If required authority evidence is missing, that check remains pending rather than forged. Export or compaction must preserve the complete messages and native-value evidence needed for the claims it retains; **omitting carried evidence is an Automerge-history-specific optimization**. Neither copying values nor preserving messages recreates discarded operations or hidden conflicts.
+
+**Deferred — compaction authority retention.** Compaction is not implemented. Before it can permit deletion of the origin document, it must preserve the origin-authority evidence and authenticated expected attribution issuer needed to verify retained claims, independently of the origin's Automerge history. Retaining the relevant Keyhive evidence is a candidate; the portable proof format and retention policy are not selected. Missing authority evidence remains Pending, but keeping the origin document available forever is not the compaction design.
 
 For example, node N certifies actor binding A, whose key signs datums X and Y in D. On a normal branch B forked from D, X and Y keep their ordinary signature entries whose `docUuid` resolves to D in `branchUuids`; when A replaces X on B, B's first write has bound a `docUuid` to B, so the new claim names B as `origin_document` and names D's signature ID on X as predecessor context, and merging B back into D preserves both B's signature on X and D's signature on Y. Under a history-truncating compaction, the retained signatures carry `inherited` witnesses naming D instead; reconstructing or accepting a derived merge after compaction remains unresolved (§6).
 
@@ -237,7 +239,7 @@ The evidence a history-free or compacted branch must retain remains open. Messag
 
 ## 7. Conformance work and measurement
 
-Conformance and performance are separate work. Before treating the wire format as stable, publish cross-implementation byte vectors for native encoding, value CIDs, v2 claim messages and signature IDs, the v1 attribution CWT/COSE profile, and strict Ed25519 signatures. Verify canonical textual IDs and keys, native-kind distinctions, binary64 NaNs/infinities/signed zeros, encoded-key ordering, received-byte COSE verification, issuer isolation, duplicate/trailing-data rejection, and resource bounds.
+Conformance and performance are separate work. Before treating the wire format as stable, publish cross-implementation byte vectors for native encoding, value CIDs, v1 claim messages and signature IDs, the v1 attribution CWT/COSE profile, and strict Ed25519 signatures. Verify canonical textual IDs and keys, native-kind distinctions, binary64 NaNs/infinities/signed zeros, encoded-key ordering, received-byte COSE verification, issuer isolation, duplicate/trailing-data rejection, and resource bounds.
 
 Repository conformance must cover transaction-view values; writes at old heads; concurrent creators and UUIDv7 aliases; immutable competing signature entries; initialized timestamp sets; concurrent Set/Remove and resurrection; inherited and newly authored branch claims; full-message export and compaction; faithfully typed JSON reconstruction; unknown schemas and unsupported native kinds; pending and invalid evidence; uncovered current values; and recovery by a fresh valid replacement without recursive predecessor acceptance. Inspect the signed Automerge change-label payload and its handoff through Subduction separately from the datum claim protocol.
 

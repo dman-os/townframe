@@ -13,6 +13,8 @@
 use crate::datum::DatumMember;
 use crate::datum::Extra;
 #[cfg(feature = "schemars")]
+use crate::datum::Openness;
+#[cfg(feature = "schemars")]
 use schemars::JsonSchema;
 #[cfg(feature = "schemars")]
 use schemars::Schema;
@@ -364,8 +366,8 @@ fn external_branch(id: &str, payload: Value) -> Value {
 /// A known spelling of a string vocabulary, and how to build the variant it selects.
 pub type KnownString<T> = (&'static str, fn() -> T);
 
-/// Reads a string vocabulary: a known spelling picks its variant, and any other string is handed to
-/// `unknown` as it was written, so nothing a peer invents is lost or an error.
+/// Reads an open string vocabulary: a known spelling picks its variant, and any other string is
+/// handed to `unknown` as it was written, so nothing a peer invents is lost or an error.
 pub fn deserialize_known_str<'de, D, T>(
     deserializer: D,
     known: &[KnownString<T>],
@@ -383,13 +385,42 @@ where
     )
 }
 
-/// The schema of an open string vocabulary: the known spellings are listed, and no other string is
-/// constrained.
+/// Reads a closed string vocabulary: a known spelling picks its variant, and any other string is an
+/// error, because the declaration states that the list is the whole vocabulary.
+pub fn deserialize_closed_str<'de, D, T>(
+    deserializer: D,
+    known: &[KnownString<T>],
+) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    match known.iter().find(|(spelling, _)| *spelling == value) {
+        Some((_, make)) => Ok(make()),
+        None => {
+            let expected = known
+                .iter()
+                .map(|(spelling, _)| format!("`{spelling}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(serde::de::Error::custom(format!(
+                "unknown variant `{value}`, expected one of {expected}"
+            )))
+        }
+    }
+}
+
+/// The schema of a string vocabulary: an open one lists the known spellings in `knownValues` and
+/// constrains nothing else; a closed one spells the same list as `enum`.
 #[cfg(feature = "schemars")]
-pub fn open_string_schema(known: &'static [&'static str]) -> Schema {
+pub fn string_schema(known: &'static [&'static str], openness: Openness) -> Schema {
     let mut root = serde_json::Map::new();
     root.insert("type".to_owned(), Value::from("string"));
-    root.insert("knownValues".to_owned(), serde_json::json!(known));
+    let key = match openness {
+        Openness::Open => "knownValues",
+        Openness::Closed => "enum",
+    };
+    root.insert(key.to_owned(), serde_json::json!(known));
     Schema::try_from(Value::Object(root)).expect("a string vocabulary is a valid JSON Schema")
 }
 

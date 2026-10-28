@@ -132,6 +132,7 @@ impl Fixture {
         self.install_entry(
             value,
             &DatumSignature {
+                extra: Default::default(),
                 actor_uuid: signed.claim.actor_uuid,
                 doc_uuid: self.doc_uuid,
                 signature: signed.signature.clone(),
@@ -512,6 +513,7 @@ fn carried_message_must_agree_with_reconstructible_context() {
     let value = NativeValue::Str("value".into());
     let signed = fixture.signed(Some(&value));
     let mut entry = DatumSignature {
+        extra: Default::default(),
         actor_uuid: fixture.actor,
         doc_uuid: fixture.doc_uuid,
         signature: signed.signature.clone(),
@@ -564,6 +566,7 @@ utils_rs::table_tests! {
         };
         let signed = fixture.signed(Some(&value));
         let entry = DatumSignature {
+            extra: Default::default(),
             actor_uuid: fixture.actor,
             doc_uuid,
             signature: signed.signature.clone(),
@@ -607,11 +610,13 @@ fn inherited_message_keeps_origin_authorship_distinct_from_the_compacted_value()
     let mut branch = Fixture::new();
     branch.document = DocId::new([8; 32]);
     let entry = DatumSignature {
+        extra: Default::default(),
         actor_uuid: origin.actor,
         doc_uuid: branch.doc_uuid,
         signature: signed.signature.clone(),
         message: None,
         inherited: Some(InheritedWitness {
+            extra: Default::default(),
             origin_doc: origin.document,
             message: Bytes::from(signed.claim.signing_bytes().unwrap()),
             value: Some(Bytes::from(encode_native(&value))),

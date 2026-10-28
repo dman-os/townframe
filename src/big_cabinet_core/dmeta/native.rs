@@ -4,9 +4,8 @@
 //! storage kind, map keys sorted by their encoded bytes, and no object, actor, or operation ids.
 //! `Text` is its current string and `Counter` is its current sum, each still distinct from `Str`
 //! and `Int`. A float is always binary64 with canonical NaN bits. The repository reads this tree
-//! back out of the transaction and passes the bytes to [`super::cid_of`].
-// FIXME: so we get a CBOR from the automerge values here, does that mean it's not a drisl
-// anymore? more hints we should drop the CID naming which has canonical meaning?
+//! back out of the transaction and passes the bytes to [`super::cid_of`]. The result is a CIDv1
+//! raw/BLAKE3 over private-tag CBOR, not DRISL or DAG-CBOR.
 
 use automerge::ChangeHash;
 use automerge::ObjId;

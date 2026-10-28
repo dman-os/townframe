@@ -222,19 +222,24 @@ Rust, and it is why the two need separate flags rather than one rule.
 
 Objects and unions are both sets of *named types*. A string vocabulary is not: its values are
 strings, so there is nothing for a peer to point at and no type behind a value whose name could be
-the value. It is declared `#[datum(open_string)]`, with `#[datum(other)]` on the one variant carrying
-a `String`, and the macro writes the wire form and the schema the same way it does for an open union —
-for the same reason: a fallback that keeps an unrecognized value is not expressible as a serde
-attribute.
+the value. An **open** vocabulary is declared `#[datum(open_string)]`, with `#[datum(other)]` on the
+one variant carrying a `String`, and the macro writes the wire form and the schema the same way it
+does for an open union — for the same reason: a fallback that keeps an unrecognized value is not
+expressible as a serde attribute. A **closed** vocabulary is declared `#[datum(closed_string)]` with
+known unit variants and no fallback; the macro writes the same three impls, so the spelling rule and
+the schema are not supplied by two mechanisms that could drift.
 
 A known value's spelling is its **variant name in lowerCamel**, derived rather than written, with an
 explicit `#[serde(rename = "…")]` as the only override (§3a).
 
-Its schema is `{"type": "string", "knownValues": [ … ]}` rather than an `enum`, which is the point:
-`knownValues` lists what a reader knows and constrains nothing else, while `enum` would make every
-future value an error. A *closed* vocabulary of strings declares nothing at all — it is a plain
-derived enum, and serde and `schemars` cannot disagree about the values of an enum whose variants
-both of them read, so there is no shape for the macro to check.
+The schema depends on the declared openness. An open vocabulary publishes `{"type": "string",
+"knownValues": [ ... ]}`: `knownValues` lists what a reader knows and constrains nothing else, so a
+read this build does not recognize still round-trips as the `Extra`-style fallback variant. A closed
+vocabulary publishes `{"type": "string", "enum": [ ... ]}`, which makes every value outside the list
+invalid. `SHAPE` records which one was declared, so the publish-time check compares the key the
+declaration named — `knownValues` or `enum` — rather than assuming a string field is open. A closed
+vocabulary also carries `ShapeFlag::ClosedString`, so a consumer that needs to know whether a peer
+may invent a value can see it.
 
 ## 6. What serde can and cannot express, measured
 
