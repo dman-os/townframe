@@ -6,7 +6,8 @@ Drawers are the primary collection primitive for [documents](./docs.md).
 
 ## Why
 
-Keyhive and [big_repo](./big_repo.md) support group-based and document-granular access control; drawers are the user-facing primitives built on top of them.
+Keyhive and [big_repo](./big_repo.md) support group-based and document-granular access control.
+Drawers are the user-facing primitives built on top of them.
 Drawers will be the unit for access control and syncing.
 
 Our primary use cases for drawers include:
@@ -44,16 +45,21 @@ Our primary use cases for drawers include:
 
 ## How
 
-We use two primitives to store a drawer's data.
-First of all, a roster document is used to list the member documents and child drawers.
-Access permissions on the drawer document define who can add or remove a document from a drawer.
-We then use keyhive/keyline primitives to enable the transitive access properties desired.
+We use two kinds of data structures to store a drawer's data in the following general shape:
+- Documents
+  - A roster document lists the member documents and child drawers.
+- Keyline/Kehive
+  - Delgations store and enable the transitive access to the member documents for participants
+  - Delegations to the drawer store participants: which agents may access/modify the drawer
+  - Delegations on the roster document define which participants can add or remove a document from a drawer
 
 Keyline is a graph made up of principal nodes and certificate edges.
 A principal can be a document, an agent, or a group, and is identified by a public key.
 The certificates delegate access from one principal to another and are signed by the principals authoring the delegation.
+
 In keyline, a membership set can be represented by all delegations from/to the principal, so while there are dedicated group nodes, any node can conceptually be a group.
 A principal may only sign delegations over another principal at an access level it has been granted itself.
+
 Four levels of access exist in keyline:
 - Relay: hold document ciphertext
 - Read: decrypt and read documents
@@ -62,12 +68,12 @@ Four levels of access exist in keyline:
 
 For drawers, we first set up a collection group, which must be given delegations over documents in the drawer.
 Only someone who has access to the document can sign this delegation, and this delegation defines what kind of access the drawer has over the document.
-Agents being given permissions to the drawer are then given delegations over this collection group, giving them transitive access to docs that have been added to the collection group.
+Participants being given permissions to the drawer are then given delegations over this collection group, giving them transitive access to docs that have been added to the collection group.
 
 Note that this allows anyone with access to a document to view what groups have mentioned it.
-This is a necessary exposure, because it ensures that drawer participants can present their standing with the collection group to request access to the document at any node.
+This is a necessary exposure, because it ensures that drawer participants can present their standing with the collection group to request access to the document at any other node.
 
-Note that this doesn't allow document holders to enumerate other documents in the collection group that they don't have pre-existing grants for.
+On the otherhand, this doesn't allow document holders to enumerate other documents in the collection group that they don't have pre-existing grants for.
 Unfortunately, though, it allows these non-participant nodes to write delegations, to a document that they control, to the collection group.
 That's why we use the separate Automerge roster as the only authority over what document is included in a drawer.
 The delegation set to the collection group is not authoritative.
@@ -76,11 +82,11 @@ Additionally, drawers will contain other resources like blobs and other drawers,
 Note that documents can exist in multiple drawers at once.
 
 A drawer is represented first as a metadata bundle that exists in a document.
-It'll be identified by the id of this metadata document.
+The drawer itself will be identified by the id of this metadata document.
 Metadata is represented using a number of datums that contain information such as:
 - The keyhive groups used to list the documents of the drawer
 - The roster that lists all the member docs of a drawer
-  - Today this is contained inline in the same document; a separate roster document is deferred (see Datums)
+  - Today this is contained inline in the same document; a separate roster document is deferred
 - Nodes upon which a drawer might be found
 - Relationships with other drawers
   - A drawer might contain other drawers
@@ -94,8 +100,6 @@ While keyhive sync is the primary means of syncing drawer metadata, supplemental
 
 While the Automerge roster datums are used to manage document membership in a drawer, keyhive groups are used as the primitive to enable the mass authority physics.
 Keyhive design allows us to be a bit more flexible and offer multiple types of drawer architectures, but it still all depends on document-to-drawer grants in the hive.
-
-Only the first and third of these are implemented today (ADR 019); the self-group and agent-groups layouts are not.
 
 - **Single-document drawer**: a normal document that's also a drawer.
    - It's just the drawer metadata datums in the document.
@@ -226,9 +230,6 @@ For example, a node adding a third-party document into its sponsorship set must 
 If the relay already has the bytes from someone else, all well and good, but it's not expected to automatically fetch the bytes.
 
 ### Datums
-
-These are the shapes declared in `src/big_cabinet_core/drawer.rs` today (ADR 019 and ADR 021).
-A drawer is identified by the document carrying the descriptor; there is no separate roster document to look up.
 
 ```js
 // Doc ID: zDrawerWork 

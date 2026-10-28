@@ -1,3 +1,12 @@
+// The `Send` auto-trait proof for the keyhive maintenance loop's future
+// (runtime2/native.rs) unfolds subduction_keyhive's deeply generic async chain
+// (compact -> replay_local_secret -> import_*), where every opaque `impl Future`
+// adds several trait-selection frames. That overflows rustc's default 128-step
+// recursion budget, which nightly reports as the crate-wide
+// `recursion_depth_exceeding_limit` lint (rust-lang/rust#159228); raising the
+// limit lets the proof complete.
+#![recursion_limit = "256"]
+
 mod interlude {
     pub use big_sync_core::ObjKey;
     pub use big_sync_core::PartKey;

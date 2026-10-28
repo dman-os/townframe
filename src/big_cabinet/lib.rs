@@ -1,3 +1,12 @@
+// The `Send` auto-trait proof for the drawer `AddChild` handler's future
+// (drawer/add_child.rs) unfolds subduction_keyhive's deeply generic async
+// chain reached via BigRepo::remove_member_from_group, where every opaque
+// `impl Future` adds several trait-selection frames. That overflows rustc's
+// default 128-step recursion budget, which nightly reports as the crate-wide
+// `recursion_depth_exceeding_limit` lint (rust-lang/rust#159228); raising the
+// limit lets the proof complete.
+#![recursion_limit = "256"]
+
 use sqlite_rs as sqlite_rs_alias;
 
 pub mod authority;

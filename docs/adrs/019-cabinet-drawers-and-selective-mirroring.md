@@ -10,8 +10,7 @@ user-visible collection model. This ADR is the contract for the drawer model
 Cabinet implements: the drawer datums, roster, child entries, and required
 local drawers below are `DrawerService`'s contract. Namespace capabilities, actor identities,
 domain-owned grants, signing, and their implementation migration are specified in
-[ADR 022](022-authority-actors-capabilities-and-grants.md) and the
-[authority guide](../big-cabinet-authority.md). Subset drawers, managed-participant
+[ADR 022](022-authority-actors-capabilities-and-grants.md). Subset drawers, managed-participant
 layouts, roster sharding, provider/home datums, and Panproto integration are
 later work.
 

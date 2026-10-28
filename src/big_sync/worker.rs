@@ -117,6 +117,33 @@ struct PeerSubscriptions {
     objects: HashMap<ObjKey, BackendId>,
 }
 
+/// The change to one peer's effective (configured ∪ subscribed) routes caused by a
+/// single subscription or configuration delta. Only keys the delta named are ever
+/// recomputed, so a one-object interest change costs O(1) routes, not a rebuild and
+/// re-clone of the peer's whole route set.
+#[derive(Default)]
+struct SubscriptionDelta {
+    /// Routes that became effective, or whose effective backend changed.
+    parts: HashMap<PartKey, BackendId>,
+    objects: HashMap<ObjKey, BackendId>,
+    /// Routes that stopped being effective.
+    removed_parts: HashSet<PartKey>,
+    removed_objects: HashSet<ObjKey>,
+    /// Routes that became effective and were not effective before: the machine's
+    /// additions. A backend change to an already-effective route is not one.
+    added_parts: HashSet<PartKey>,
+    added_objects: HashSet<ObjKey>,
+}
+
+impl SubscriptionDelta {
+    fn is_empty(&self) -> bool {
+        self.parts.is_empty()
+            && self.objects.is_empty()
+            && self.removed_parts.is_empty()
+            && self.removed_objects.is_empty()
+    }
+}
+
 type SharedPartitionStore = Arc<dyn crate::part_store::HostPartStore>;
 type SharedPeerRpcClient = Arc<dyn crate::rpc::HostBigRpcClient>;
 type SharedWireRpcClient = Arc<dyn crate::rpc::WireBigSyncRpcClient>;
@@ -844,77 +871,145 @@ impl BigSyncWorker {
         Ok(())
     }
 
-    fn refresh_peer_subscriptions(&mut self, peer_id: &PeerKey) -> bool {
-        let Some(peer) = self.peers.get_mut(peer_id) else {
-            return false;
-        };
-        let mut parts = peer.configured_parts.clone();
-        let mut objects = peer.configured_objects.clone();
+    /// The backend a part route for `peer_id` resolves to across the peer's configured
+    /// routes and every subscription source, or `None` when no route covers it. All
+    /// covering routes must agree on the backend.
+    fn covered_part(&self, peer_id: &PeerKey, part: &PartKey) -> Option<BackendId> {
+        let mut covered = self
+            .peers
+            .get(peer_id)
+            .and_then(|peer| peer.configured_parts.get(part))
+            .cloned();
         for subscription in self
             .subscriptions
             .values()
             .filter_map(|source| source.get(peer_id))
         {
-            for (part, backend) in &subscription.parts {
-                if let Some(existing) = parts.insert(part.clone(), Arc::clone(backend)) {
-                    assert_eq!(existing, *backend, "part subscription backend conflict");
-                }
-            }
-            for (obj, backend) in &subscription.objects {
-                if let Some(existing) = objects.insert(obj.clone(), Arc::clone(backend)) {
-                    assert_eq!(existing, *backend, "object subscription backend conflict");
+            if let Some(backend) = subscription.parts.get(part) {
+                match &covered {
+                    Some(existing) => {
+                        assert_eq!(existing, backend, "part subscription backend conflict")
+                    }
+                    None => covered = Some(Arc::clone(backend)),
                 }
             }
         }
-        if peer.parts == parts && peer.objects == objects {
-            return false;
-        }
-        let previous = PeerSubscriptions {
-            parts: std::mem::replace(&mut peer.parts, parts),
-            objects: std::mem::replace(&mut peer.objects, objects),
-        };
-        self.publish_peer_subscriptions(peer_id, previous);
-        true
+        covered
     }
 
-    fn publish_peer_subscriptions(&mut self, peer_id: &PeerKey, previous: PeerSubscriptions) {
-        let peer = self.peers.get(peer_id).expect(ERROR_IMPOSSIBLE);
-        let event = (self.subscription_events.receiver_count() > 0
-            && (peer.parts != previous.parts || peer.objects != previous.objects))
-            .then(|| SubscriptionEvent {
-                peer_id: peer_id.clone(),
-                update: SubscriptionUpdate {
-                    parts: peer
-                        .parts
-                        .iter()
-                        .filter(|(part, backend)| previous.parts.get(*part) != Some(*backend))
-                        .map(|(part, backend)| (part.clone(), Arc::clone(backend)))
-                        .collect(),
-                    objects: peer
-                        .objects
-                        .iter()
-                        .filter(|(object, backend)| previous.objects.get(*object) != Some(*backend))
-                        .map(|(object, backend)| (object.clone(), Arc::clone(backend)))
-                        .collect(),
-                    removed_parts: previous
-                        .parts
-                        .keys()
-                        .filter(|part| !peer.parts.contains_key(*part))
-                        .cloned()
-                        .collect(),
-                    removed_objects: previous
-                        .objects
-                        .keys()
-                        .filter(|object| !peer.objects.contains_key(*object))
-                        .cloned()
-                        .collect(),
-                },
+    /// The backend an object route for `peer_id` resolves to, as in [`Self::covered_part`].
+    fn covered_object(&self, peer_id: &PeerKey, object: &ObjKey) -> Option<BackendId> {
+        let mut covered = self
+            .peers
+            .get(peer_id)
+            .and_then(|peer| peer.configured_objects.get(object))
+            .cloned();
+        for subscription in self
+            .subscriptions
+            .values()
+            .filter_map(|source| source.get(peer_id))
+        {
+            if let Some(backend) = subscription.objects.get(object) {
+                match &covered {
+                    Some(existing) => {
+                        assert_eq!(existing, backend, "object subscription backend conflict")
+                    }
+                    None => covered = Some(Arc::clone(backend)),
+                }
+            }
+        }
+        covered
+    }
+
+    /// Recomputes the peer's effective routes for exactly the touched keys, applying
+    /// any change to the stored effective set, and returns what changed. `None` when
+    /// the peer is not registered: subscriptions for unknown peers are stored and
+    /// take effect when the peer is set.
+    fn recompute_effective_routes(
+        &mut self,
+        peer_id: &PeerKey,
+        touched_parts: HashSet<PartKey>,
+        touched_objects: HashSet<ObjKey>,
+    ) -> Option<SubscriptionDelta> {
+        self.peers.get(peer_id)?;
+        let mut delta = SubscriptionDelta::default();
+        for part in touched_parts {
+            let covered = self.covered_part(peer_id, &part);
+            let peer = self.peers.get_mut(peer_id).expect(ERROR_IMPOSSIBLE);
+            match (peer.parts.get(&part).cloned(), covered) {
+                (Some(existing), Some(backend)) if existing == backend => {}
+                (Some(_), Some(backend)) => {
+                    peer.parts.insert(part.clone(), Arc::clone(&backend));
+                    delta.parts.insert(part, backend);
+                }
+                (None, Some(backend)) => {
+                    peer.parts.insert(part.clone(), Arc::clone(&backend));
+                    delta.parts.insert(part.clone(), backend);
+                    delta.added_parts.insert(part);
+                }
+                (Some(_), None) => {
+                    peer.parts.remove(&part);
+                    delta.removed_parts.insert(part);
+                }
+                (None, None) => {}
+            }
+        }
+        for object in touched_objects {
+            let covered = self.covered_object(peer_id, &object);
+            let peer = self.peers.get_mut(peer_id).expect(ERROR_IMPOSSIBLE);
+            match (peer.objects.get(&object).cloned(), covered) {
+                (Some(existing), Some(backend)) if existing == backend => {}
+                (Some(_), Some(backend)) => {
+                    peer.objects.insert(object.clone(), Arc::clone(&backend));
+                    delta.objects.insert(object, backend);
+                }
+                (None, Some(backend)) => {
+                    peer.objects.insert(object.clone(), Arc::clone(&backend));
+                    delta.objects.insert(object.clone(), backend);
+                    delta.added_objects.insert(object);
+                }
+                (Some(_), None) => {
+                    peer.objects.remove(&object);
+                    delta.removed_objects.insert(object);
+                }
+                (None, None) => {}
+            }
+        }
+        Some(delta)
+    }
+
+    /// Hands one effective-route delta to the machine as an incremental `UpdatePeer`
+    /// and, when anyone observes subscription events, as a `SubscriptionEvent` carrying
+    /// the same delta. `create_peer` forces the machine event for a newly set peer
+    /// whose effective set is still empty, so the machine learns the peer exists.
+    fn publish_subscription_delta(
+        &mut self,
+        peer_id: &PeerKey,
+        delta: SubscriptionDelta,
+        create_peer: bool,
+    ) {
+        if delta.is_empty() && !create_peer {
+            return;
+        }
+        let event =
+            (self.subscription_events.receiver_count() > 0 && !delta.is_empty()).then(|| {
+                SubscriptionEvent {
+                    peer_id: peer_id.clone(),
+                    update: SubscriptionUpdate {
+                        parts: delta.parts,
+                        objects: delta.objects,
+                        removed_parts: delta.removed_parts.clone(),
+                        removed_objects: delta.removed_objects.clone(),
+                    },
+                }
             });
         self.machine
-            .handle_evt(BigSyncEvent::SetPeer(big_sync_core::SetPeerEvent {
+            .handle_evt(BigSyncEvent::UpdatePeer(big_sync_core::UpdatePeerEvent {
                 peer_id: peer_id.clone(),
-                parts: peer.parts.keys().cloned().collect(),
-                objects: peer.objects.keys().cloned().collect(),
+                added_parts: delta.added_parts,
+                removed_parts: delta.removed_parts,
+                added_objects: delta.added_objects,
+                removed_objects: delta.removed_objects,
             }));
         if let Some(event) = event {
             let _unobserved = self.subscription_events.send(event);
@@ -959,6 +1054,18 @@ impl BigSyncWorker {
                     let _cancelled = resp.send(Err(err));
                     return;
                 }
+                let touched_parts: HashSet<_> = update
+                    .parts
+                    .keys()
+                    .chain(update.removed_parts.iter())
+                    .cloned()
+                    .collect();
+                let touched_objects: HashSet<_> = update
+                    .objects
+                    .keys()
+                    .chain(update.removed_objects.iter())
+                    .cloned()
+                    .collect();
                 let source = self.subscriptions.entry(id).or_default();
                 let subscription = source.entry(peer_id.clone()).or_default();
                 for part in update.removed_parts {
@@ -975,23 +1082,46 @@ impl BigSyncWorker {
                 if source.is_empty() {
                     self.subscriptions.remove(&id);
                 }
-                self.refresh_peer_subscriptions(&peer_id);
+                if let Some(delta) =
+                    self.recompute_effective_routes(&peer_id, touched_parts, touched_objects)
+                {
+                    self.publish_subscription_delta(&peer_id, delta, false);
+                }
                 let _cancelled = resp.send(Ok(()));
             }
             SubscriptionMsg::RemovePeer { id, peer_id, resp } => {
-                if let Some(source) = self.subscriptions.get_mut(&id) {
-                    source.remove(&peer_id);
-                    if source.is_empty() {
+                let removed = self
+                    .subscriptions
+                    .get_mut(&id)
+                    .and_then(|source| source.remove(&peer_id));
+                if let Some(removed) = removed {
+                    if self
+                        .subscriptions
+                        .get(&id)
+                        .is_some_and(|source| source.is_empty())
+                    {
                         self.subscriptions.remove(&id);
                     }
-                    self.refresh_peer_subscriptions(&peer_id);
+                    if let Some(delta) = self.recompute_effective_routes(
+                        &peer_id,
+                        removed.parts.into_keys().collect(),
+                        removed.objects.into_keys().collect(),
+                    ) {
+                        self.publish_subscription_delta(&peer_id, delta, false);
+                    }
                 }
                 let _cancelled = resp.send(());
             }
             SubscriptionMsg::RemoveSource { id } => {
                 if let Some(source) = self.subscriptions.remove(&id) {
-                    for peer_id in source.into_keys() {
-                        self.refresh_peer_subscriptions(&peer_id);
+                    for (peer_id, removed) in source {
+                        if let Some(delta) = self.recompute_effective_routes(
+                            &peer_id,
+                            removed.parts.into_keys().collect(),
+                            removed.objects.into_keys().collect(),
+                        ) {
+                            self.publish_subscription_delta(&peer_id, delta, false);
+                        }
                     }
                 }
             }
@@ -1076,6 +1206,20 @@ impl BigSyncWorker {
             }) as SharedPeerRpcClient,
         );
         let is_new = !self.peers.contains_key(&peer_id);
+        // A newly set peer starts with no effective routes, so routes a subscription
+        // registered for it before it was set can only become effective now.
+        let mut subscription_parts = HashSet::new();
+        let mut subscription_objects = HashSet::new();
+        if is_new {
+            for subscription in self
+                .subscriptions
+                .values()
+                .filter_map(|source| source.get(&peer_id))
+            {
+                subscription_parts.extend(subscription.parts.keys().cloned());
+                subscription_objects.extend(subscription.objects.keys().cloned());
+            }
+        }
         let peer = self
             .peers
             .entry(peer_id.clone())
@@ -1087,11 +1231,29 @@ impl BigSyncWorker {
             });
         let part_count = parts.len();
         let object_count = objects.len();
+        // Only routes the configuration change names can change effectiveness:
+        // subscription coverage of every other route is untouched by it, except on a
+        // newly set peer, whose pre-registered subscription routes take effect here.
+        let mut touched_parts: HashSet<_> = peer
+            .configured_parts
+            .keys()
+            .chain(parts.keys())
+            .cloned()
+            .collect();
+        touched_parts.extend(subscription_parts);
+        let mut touched_objects: HashSet<_> = peer
+            .configured_objects
+            .keys()
+            .chain(objects.keys())
+            .cloned()
+            .collect();
+        touched_objects.extend(subscription_objects);
         peer.configured_parts = parts;
         peer.configured_objects = objects;
-        if !self.refresh_peer_subscriptions(&peer_id) && is_new {
-            self.publish_peer_subscriptions(&peer_id, PeerSubscriptions::default());
-        }
+        let delta = self
+            .recompute_effective_routes(&peer_id, touched_parts, touched_objects)
+            .expect(ERROR_IMPOSSIBLE);
+        self.publish_subscription_delta(&peer_id, delta, is_new);
         resp.send(Ok(()))
             .inspect_err(|_| warn_loc!(ERROR_CALLER))
             .ok();

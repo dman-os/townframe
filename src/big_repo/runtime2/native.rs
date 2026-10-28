@@ -184,17 +184,12 @@ impl<S: BigRepoSubductionStorage> NativeCiphertextStore<S> {
                 commit_id,
             )
         );
-        if frag_res
+        Ok(frag_res
             .wrap_err("failed loading fragment for ciphertext")?
             .is_some()
             || loose_res
                 .wrap_err("failed loading loose commit for ciphertext")?
-                .is_some()
-        {
-            return Ok(true);
-        }
-
-        Ok(false)
+                .is_some())
     }
 
     async fn load_and_cache(

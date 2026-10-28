@@ -3,7 +3,7 @@
 # `nix build .#daybook-cli` compiles with the exact rustc the CI shells use.
 { pkgs }:
 let
-  rustVersion = "2026-08-16";
+  rustVersion = "2026-09-17";
 in
 {
   inherit rustVersion;
